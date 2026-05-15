@@ -1025,6 +1025,9 @@ cancel 取消
 - 新会话基于记忆和索引开始。
 - 新会话启动时必须构造稳定启动上下文包：`LINGHUN.md` / 项目规则、阶段状态、最近 handoff packet、未完成 Todo、最近验证结果、索引状态。
 - 禁止把完整历史聊天直接塞入新会话上下文。
+- handoff packet 必须是成品级结构化交接包，至少包含：当前阶段、下一阶段、目标、已完成、待处理、禁止事项、Todo、关键文件、变更文件、证据引用、验证结果、风险、索引状态、权限模式、模型/provider、最近提交和预算使用。
+- `/resume`、`/branch`、自动新会话和后续 `/fork` 都必须消费结构化 handoff packet，而不是自由文本复制粘贴。
+- 新会话启动前必须校验 handoff packet；缺少验证结果、证据引用、禁止事项或索引状态时，降级为只读恢复并提示用户补齐。
 - `LINGHUN.md` 只保存长期稳定事实和工程规则；临时想法、阶段进度和短期计划写入 handoff packet。
 - 首次进入项目如果缺少 `LINGHUN.md`，必须轻提示建议 `/init linghun-md` 或等价向导生成基础模板。
 - AI 可以建议更新 `LINGHUN.md`，但默认需要用户确认；不得无限追加流水账。
@@ -1057,6 +1060,8 @@ cancel 取消
 - 新会话能基于 `LINGHUN.md`、handoff packet、Todo、验证结果和索引状态启动，不需要用户重复解释。
 - `/resume` 能恢复最近会话，并只注入必要摘要和证据。
 - `/branch` 能创建独立分支会话，保留父会话引用。
+- handoff packet 缺少关键字段时不会自动继续执行，只读恢复并给出补齐建议。
+- handoff packet 中的 `mustNotDo` 能阻止新会话越界进入后续阶段或执行未授权高风险操作。
 - 缺少 `LINGHUN.md` 时出现 CCB 风格轻提示，用户确认后生成基础模板。
 - 长任务中使用 `/btw` 后，主任务能继续。
 - 能把项目级记忆写入项目内 `.linghun/memory/`。
@@ -1440,6 +1445,9 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 自动工作默认一次只推进一个阶段；完成阶段后必须停止并输出交付文档、验证结果和 handoff packet。
 - 连续阶段模式必须由用户明确开启，且每个阶段之间仍要生成独立交付文档和确认点。
 - 自动新会话必须读取 `LINGHUN.md`、阶段状态、最近 handoff packet、Todo、验证结果和索引状态，不得塞入完整历史聊天。
+- 自动新会话启动前必须校验 handoff packet 的 `nextPhase`、`mustNotDo`、`permissionMode`、`verification`、`evidenceRefs`、`indexStatus`、`model/provider` 和 `budgetUsed`。
+- handoff packet 不完整时，job 必须暂停为 `needs_handoff_repair` 或等价状态，并输出需要补齐的字段，不能继续自动执行。
+- job 报告必须记录读取的 handoff id、新建 session id、模型/provider、预算使用、验证结果、风险暂停原因和下一步建议。
 - Remote Channels 支持微信、飞书、QQ、钉钉、Telegram/Discord 等通道方向，但默认关闭。
 - 手机/IM 通道只发送命令、摘要、审批和结果报告，不推送完整上下文。
 - 高风险操作必须暂停等待用户明确审批。
@@ -1486,6 +1494,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 到时间自动创建会话。
 - 自动读取项目记忆和索引状态。
 - 自动会话使用 handoff packet 交接，不重复塞完整历史。
+- handoff packet 不完整时自动任务暂停，不继续烧 token。
 - 必要时开 explorer / verifier。
 - 生成报告。
 - 不进行未授权写入。

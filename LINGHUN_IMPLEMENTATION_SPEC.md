@@ -1328,16 +1328,27 @@ export type MemoryItem = {
 export type HandoffPacket = {
   id: string
   sessionId: string
+  parentSessionId?: string
   projectPath: string
   phase?: string
+  nextPhase?: string
   objective: string
   completed: string[]
   pending: string[]
+  mustNotDo: string[]
   todoIds: string[]
   keyFiles: string[]
+  changedFiles: string[]
+  evidenceRefs: string[]
   verification: VerificationReport[]
   risks: string[]
   indexStatus: IndexHealth
+  permissionMode: PermissionMode
+  model: string
+  provider: string
+  lastCommit?: string
+  budgetUsed?: CostSummary
+  generatedBy: 'manual' | 'phase-delivery' | 'job' | 'resume' | 'branch' | 'agent'
   createdAt: string
 }
 ```
@@ -1356,6 +1367,11 @@ export type HandoffPacket = {
 - 迁移项目时，项目级记忆必须能随项目目录一起迁移。
 - `LINGHUN.md` 只保存长期稳定事实、工程规则、常用命令和禁止事项。
 - 临时想法、阶段进度、短期计划必须写入 `HandoffPacket`，不得无限追加到 `LINGHUN.md`。
+- `HandoffPacket` 是新会话、自动任务、`/resume`、`/branch` 和 `/fork` 的结构化交接契约，不是自由文本摘要。
+- `HandoffPacket` 必须至少包含当前阶段、下一阶段、已完成、待处理、禁止事项、Todo、关键文件、变更文件、证据引用、验证结果、风险、索引状态、权限模式、模型/provider、最近提交和预算使用情况。
+- `evidenceRefs` 必须引用 transcript 事件、文件路径、验证报告、索引查询或命令输出摘要；不得用“感觉已经看过”作为证据。
+- `mustNotDo` 必须写明下一会话禁止越界的内容，例如“不要进入下一阶段”“不要复制完整历史”“不要执行高风险 Bash”。
+- 新会话启动时必须先校验 `HandoffPacket` 是否完整；关键字段缺失时降级为只读恢复，并提示用户补齐或重新生成 handoff。
 - 首次进入项目缺少 `LINGHUN.md` 时，用轻提示建议 `/init linghun-md`。
 - AI 更新 `LINGHUN.md` 默认需要用户确认。
 - 新会话启动上下文必须优先使用 `LINGHUN.md`、最近 `HandoffPacket`、Todo、验证结果和索引状态，禁止直接塞完整历史聊天。
@@ -1422,6 +1438,9 @@ export type JobDefinition = {
 - 连续阶段模式必须由用户明确开启，每阶段之间仍必须有交付文档、验证结果和确认点。
 - 自动新会话只能读取 `LINGHUN.md`、阶段状态、最近 handoff、Todo、验证结果和索引状态。
 - 禁止把完整历史聊天直接塞入 job 新会话。
+- job 创建自动新会话前必须校验 `HandoffPacket` 的 `nextPhase`、`mustNotDo`、`permissionMode`、`verification`、`evidenceRefs`、`indexStatus` 和 `budgetUsed`。
+- 如果 `HandoffPacket` 缺少验证结果、证据引用或禁止事项，job 必须暂停并生成修复建议，不能继续自动执行。
+- job 报告必须记录本次读取的 handoff id、新建 session id、模型/provider、预算使用、验证结果和下一步建议，方便用户审计。
 - 超预算停止。
 - 高风险暂停。
 - 生成报告。
