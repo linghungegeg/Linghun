@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -10,8 +10,20 @@ import {
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { getSessionRootDir, loadConfig } from "@linghun/config";
-import { SessionStore, type TranscriptEvent } from "@linghun/core";
-import { DeepSeekProvider, ModelGateway, type ModelMessage } from "@linghun/providers";
+import {
+  type CacheFreshness,
+  type CacheTurnStats,
+  type CacheWriteTokensSource,
+  SessionStore,
+  type TranscriptEvent,
+  computePromptCacheHitRate,
+} from "@linghun/core";
+import {
+  DeepSeekProvider,
+  ModelGateway,
+  type ModelMessage,
+  type ModelUsage,
+} from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
   type DiffSummary,
@@ -143,6 +155,32 @@ export type VerificationReport = {
   nextAction: string;
 };
 
+export type CacheHistoryConfig = {
+  maxTurns: number;
+  warnBelowHitRate: number;
+  persistPath: string;
+  hintsMuted: boolean;
+};
+
+export type LightHint = {
+  id: string;
+  severity: "info" | "warning";
+  message: string;
+  suggestedCommand: string;
+  dedupeKey: string;
+  cooldownMs: number;
+};
+
+export type CacheState = {
+  config: CacheHistoryConfig;
+  history: CacheTurnStats[];
+  nextTurn: number;
+  lastFreshness?: CacheFreshness;
+  hintLastShownAt: Record<string, number>;
+  compacted: boolean;
+  startedAt: number;
+};
+
 type MessageKey =
   | "appTitle"
   | "intro"
@@ -182,11 +220,47 @@ export type TuiContext = {
   backgroundTasks: BackgroundTaskState[];
   checkpoints: CheckpointState[];
   evidence: EvidenceRecord[];
+  cache: CacheState;
   lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
 };
+
+const DEFAULT_CACHE_HISTORY_SIZE = 20;
+const MIN_CACHE_HISTORY_SIZE = 1;
+const MAX_CACHE_HISTORY_SIZE = 200;
+const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
+const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
+const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
+
+export function createCacheState(projectPath: string, model = "deepseek-v4-flash"): CacheState {
+  const freshness = createCacheFreshness({
+    systemPrompt: "Linghun Phase 09 engineering assistant",
+    toolSchema: builtInTools,
+    mcpToolList: [],
+    model,
+    provider: "deepseek",
+    projectRules: "local CLAUDE.md rules loaded by harness",
+    memory: "session-local memory not implemented until Phase 11",
+    compact: "not compacted",
+    plugins: [],
+  });
+  return {
+    config: {
+      maxTurns: DEFAULT_CACHE_HISTORY_SIZE,
+      warnBelowHitRate: DEFAULT_CACHE_WARN_BELOW_HIT_RATE,
+      persistPath: join(projectPath, ".linghun", "cache-log.json"),
+      hintsMuted: false,
+    },
+    history: [],
+    nextTurn: 1,
+    lastFreshness: freshness,
+    hintLastShownAt: {},
+    compacted: false,
+    startedAt: Date.now(),
+  };
+}
 
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const input = options.stdin ?? defaultStdin;
@@ -206,6 +280,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
+    cache: createCacheState(projectPath, config.providers.deepseek.model),
     interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
@@ -309,6 +384,26 @@ export async function handleSlashCommand(
   }
   if (command === "/review") {
     await handleReviewCommand(context, output);
+    return "handled";
+  }
+  if (command === "/cache-log") {
+    await handleCacheLogCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/cache") {
+    await handleCacheCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/break-cache") {
+    await handleBreakCacheCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/usage") {
+    writeLine(output, formatUsage(context));
+    return "handled";
+  }
+  if (command === "/stats") {
+    writeLine(output, formatStats(rest, context));
     return "handled";
   }
   if (command === "/status") {
@@ -722,6 +817,452 @@ async function handleClaimCheckCommand(
     createdAt: new Date().toISOString(),
   });
   writeLine(output, formatClaimCheck(result, context.language));
+}
+
+async function handleCacheLogCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (args[0] === "config" && args[1] === "size") {
+    const size = Number.parseInt(args[2] ?? "", 10);
+    if (!Number.isFinite(size) || size < MIN_CACHE_HISTORY_SIZE) {
+      writeLine(output, `用法：/cache-log config size <n>，n >= ${MIN_CACHE_HISTORY_SIZE}`);
+      return;
+    }
+    context.cache.config.maxTurns = Math.min(size, MAX_CACHE_HISTORY_SIZE);
+    trimCacheHistory(context.cache);
+    writeLine(
+      output,
+      `cache history size：${context.cache.config.maxTurns}，超过上限的旧记录已淘汰。`,
+    );
+    return;
+  }
+  if (args[0] === "export") {
+    const path = args[1] ? resolve(context.projectPath, args[1]) : context.cache.config.persistPath;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify(context.cache.history, null, 2)}\n`, "utf8");
+    writeLine(
+      output,
+      `已导出最近缓存日志：${path}。用于和 provider usage 或账号账单对账，金额仍以账单为准。`,
+    );
+    return;
+  }
+  if (args.length > 0) {
+    writeLine(output, "用法：/cache-log | /cache-log config size <n> | /cache-log export [path]");
+    return;
+  }
+  writeLine(output, formatCacheLog(context));
+}
+
+async function handleCacheCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (!action || action === "status") {
+    writeLine(output, formatCacheStatus(context));
+    return;
+  }
+  if (action === "warmup" || action === "refresh") {
+    const freshness = getCurrentFreshness(context);
+    const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
+    context.cache.lastFreshness = { ...freshness, changedKeys };
+    writeLine(
+      output,
+      action === "warmup"
+        ? "已尝试预热 cache。该最小路径不保证 provider 一定写入缓存；请用 /cache status 或 provider usage 对账。"
+        : "已尝试刷新 cache。该最小路径不保证 provider 一定写入缓存；请用 /cache status 或 provider usage 对账。",
+    );
+    return;
+  }
+  writeLine(output, "用法：/cache status | /cache warmup | /cache refresh");
+}
+
+async function handleBreakCacheCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (args[0] !== "status") {
+    writeLine(output, "用法：/break-cache status");
+    return;
+  }
+  writeLine(output, formatBreakCacheStatus(context));
+}
+
+export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
+  const freshness = getCurrentFreshness(context);
+  const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheWriteTokensSource = classifyCacheWriteTokensSource(usage);
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const stats: CacheTurnStats = {
+    turn: context.cache.nextTurn,
+    timestamp: Date.now(),
+    hitRate: computePromptCacheHitRate({
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      provider: "deepseek",
+      model: context.model,
+    }),
+    cacheReadTokens,
+    cacheWriteTokens,
+    cacheWriteTokensSource,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    model: context.model,
+    provider: "deepseek",
+    endpoint: usage.endpoint ?? CHAT_COMPLETIONS_ENDPOINT,
+    source:
+      usage.cacheReadTokens === undefined && usage.cacheWriteTokensRaw === undefined
+        ? "estimated"
+        : "api_usage",
+    compacted: context.cache.compacted,
+    freshness: { ...freshness, changedKeys },
+    rawUsage: usage.rawUsage,
+  };
+  context.cache.nextTurn += 1;
+  context.cache.lastFreshness = stats.freshness;
+  context.cache.history.push(stats);
+  trimCacheHistory(context.cache);
+  return stats;
+}
+
+async function appendUsageEvents(
+  context: TuiContext,
+  sessionId: string,
+  stats: CacheTurnStats,
+): Promise<void> {
+  const createdAt = new Date().toISOString();
+  await context.store.appendEvent(sessionId, { type: "usage", usage: stats, createdAt });
+  await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
+}
+
+function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSource {
+  if (usage.cacheWriteTokensRaw === null) {
+    return "missing";
+  }
+  if (typeof usage.cacheWriteTokensRaw === "number") {
+    return usage.cacheWriteTokensRaw === 0 ? "zero_reported" : "reported";
+  }
+  if (usage.cacheWriteTokensEstimated && typeof usage.cacheWriteTokens === "number") {
+    return "estimated";
+  }
+  if (typeof usage.cacheWriteTokens === "number") {
+    return usage.cacheWriteTokens === 0 ? "zero_reported" : "reported";
+  }
+  return "missing";
+}
+
+function trimCacheHistory(cache: CacheState): void {
+  while (cache.history.length > cache.config.maxTurns) {
+    cache.history.shift();
+  }
+}
+
+function getCurrentFreshness(context: TuiContext): CacheFreshness {
+  return createCacheFreshness({
+    systemPrompt:
+      context.language === "en-US"
+        ? "Linghun Phase 09 EN system prompt"
+        : "Linghun Phase 09 ZH system prompt",
+    toolSchema: builtInTools,
+    mcpToolList: [],
+    model: context.model,
+    provider: "deepseek",
+    reasoningEffort: "default",
+    projectRules: "CLAUDE.md project rules",
+    memory: "no Phase 11 memory injection",
+    compact: context.cache.compacted ? "compacted" : "not compacted",
+    plugins: [],
+  });
+}
+
+function createCacheFreshness(input: {
+  systemPrompt: unknown;
+  toolSchema: unknown;
+  mcpToolList: unknown;
+  model: string;
+  provider: string;
+  reasoningEffort?: unknown;
+  projectRules?: unknown;
+  memory?: unknown;
+  compact?: unknown;
+  plugins?: unknown;
+}): CacheFreshness {
+  return {
+    systemPromptHash: stableHash(input.systemPrompt),
+    toolSchemaHash: stableHash(input.toolSchema),
+    mcpToolListHash: stableHash(input.mcpToolList),
+    modelProviderHash: stableHash(`${input.provider}:${input.model}`),
+    reasoningEffortHash: stableHash(input.reasoningEffort ?? "default"),
+    projectRulesHash: stableHash(input.projectRules ?? "none"),
+    memoryHash: stableHash(input.memory ?? "none"),
+    compactHash: stableHash(input.compact ?? "none"),
+    pluginListHash: stableHash(input.plugins ?? []),
+    changedKeys: [],
+  };
+}
+
+function diffFreshness(previous: CacheFreshness | undefined, current: CacheFreshness): string[] {
+  if (!previous) {
+    return [];
+  }
+  const keys: (keyof CacheFreshness)[] = [
+    "systemPromptHash",
+    "toolSchemaHash",
+    "mcpToolListHash",
+    "modelProviderHash",
+    "reasoningEffortHash",
+    "projectRulesHash",
+    "memoryHash",
+    "compactHash",
+    "pluginListHash",
+  ];
+  return keys.filter((key) => previous[key] !== current[key]);
+}
+
+function stableHash(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 12);
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${key}:${stableStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function formatCacheLog(context: TuiContext): string {
+  if (context.cache.history.length === 0) {
+    return "最近缓存日志为空。真实 usage 需要 provider 返回 token/cache 字段；可用 /cache warmup 尝试预热。";
+  }
+  return [
+    `Cache log 最近 ${context.cache.history.length}/${context.cache.config.maxTurns} 轮：`,
+    ...context.cache.history.map(
+      (item) =>
+        `#${item.turn} hit=${formatPercent(item.hitRate)} input=${item.inputTokens} output=${item.outputTokens} cache_read=${item.cacheReadTokens} cache_write=${item.cacheWriteTokens} write_source=${item.cacheWriteTokensSource} model=${item.model} provider=${item.provider} endpoint=${item.endpoint ?? "-"} compact=${item.compacted ? "yes" : "no"}`,
+    ),
+  ].join("\n");
+}
+
+function formatCacheStatus(context: TuiContext): string {
+  const latest = context.cache.history.at(-1);
+  const freshness = latest?.freshness ?? getCurrentFreshness(context);
+  const changed =
+    latest?.freshness.changedKeys ?? diffFreshness(context.cache.lastFreshness, freshness);
+  const source = latest?.cacheWriteTokensSource ?? "missing";
+  const zeroNote =
+    source === "zero_reported"
+      ? "provider 当前返回 cache_creation/cache write 为 0；这只是字段口径，不代表零写入成本。"
+      : source === "missing"
+        ? "provider 未返回 cache_creation/cache write 字段；不支持真实缓存写入统计。"
+        : "cache write/create 字段来自 provider/API usage。";
+  return [
+    "Cache status",
+    `- history: ${context.cache.history.length}/${context.cache.config.maxTurns}`,
+    `- latest hitRate: ${formatPercent(latest?.hitRate ?? null)}（公式：cacheRead / (input + cacheWrite + cacheRead)，output 不进分母）`,
+    `- read/write tokens: ${latest?.cacheReadTokens ?? 0}/${latest?.cacheWriteTokens ?? 0}`,
+    `- cache write source: ${source}`,
+    `- compact: ${context.cache.compacted ? "yes" : "no"}`,
+    `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
+    `- note: ${zeroNote}`,
+  ].join("\n");
+}
+
+function formatBreakCacheStatus(context: TuiContext): string {
+  const current = getCurrentFreshness(context);
+  const changed = diffFreshness(context.cache.lastFreshness, current);
+  const keys =
+    changed.length > 0 ? changed : (context.cache.history.at(-1)?.freshness.changedKeys ?? []);
+  return [
+    "Break-cache status",
+    `- systemPromptHash: ${current.systemPromptHash}`,
+    `- toolSchemaHash: ${current.toolSchemaHash}`,
+    `- mcpToolListHash: ${current.mcpToolListHash}`,
+    `- modelProviderHash: ${current.modelProviderHash}`,
+    `- reasoningEffortHash: ${current.reasoningEffortHash ?? "-"}`,
+    `- projectRulesHash: ${current.projectRulesHash ?? "-"}`,
+    `- memoryHash: ${current.memoryHash ?? "-"}`,
+    `- compactHash: ${current.compactHash ?? "-"}`,
+    `- pluginListHash: ${current.pluginListHash ?? "-"}`,
+    `- changedKeys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
+    "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
+  ].join("\n");
+}
+
+function formatUsage(context: TuiContext): string {
+  const totals = sumCacheHistory(context.cache.history);
+  const latest = context.cache.history.at(-1);
+  return [
+    "Usage（本会话原始 token/cache usage）",
+    `- input tokens: ${totals.inputTokens}`,
+    `- output tokens: ${totals.outputTokens}`,
+    `- cache read tokens: ${totals.cacheReadTokens}`,
+    `- cache write/create tokens: ${totals.cacheWriteTokens}`,
+    `- model: ${latest?.model ?? context.model}`,
+    `- provider: ${latest?.provider ?? "deepseek"}`,
+    `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
+    `- compact: ${context.cache.compacted ? "yes" : "no"}`,
+    `- rawUsage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
+    "- billing: 未记录真实账单字段；任何金额只能标记 estimated。",
+  ].join("\n");
+}
+
+function formatStats(args: string[], context: TuiContext): string {
+  if (args[0] === "endpoints") {
+    return formatEndpointStats(context.cache.history);
+  }
+  const totals = sumCacheHistory(context.cache.history);
+  const hitRate = computePromptCacheHitRate({
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    cacheReadTokens: totals.cacheReadTokens,
+    cacheWriteTokens: totals.cacheWriteTokens,
+    provider: "deepseek",
+    model: context.model,
+  });
+  return [
+    "Stats",
+    `- samples: ${context.cache.history.length}`,
+    `- elapsedMs: ${Date.now() - context.cache.startedAt}`,
+    `- model: ${context.model}`,
+    "- provider: deepseek",
+    `- hitRate: ${formatPercent(hitRate)}`,
+    `- tokens: input=${totals.inputTokens}, output=${totals.outputTokens}, cache_read=${totals.cacheReadTokens}, cache_write=${totals.cacheWriteTokens}`,
+    "- cost: estimated unavailable（未配置价格；不伪装成真实账单）",
+  ].join("\n");
+}
+
+function formatEndpointStats(history: CacheTurnStats[]): string {
+  if (history.length === 0) {
+    return "Endpoint stats：暂无样本。";
+  }
+  const groups = new Map<string, CacheTurnStats[]>();
+  for (const item of history) {
+    const key = item.endpoint ?? "unknown";
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+  return [
+    "Endpoint stats",
+    ...[...groups.entries()].map(([endpoint, items]) => {
+      const totals = sumCacheHistory(items);
+      const hitRate = computePromptCacheHitRate({
+        inputTokens: totals.inputTokens,
+        outputTokens: totals.outputTokens,
+        cacheReadTokens: totals.cacheReadTokens,
+        cacheWriteTokens: totals.cacheWriteTokens,
+        provider: items[0]?.provider ?? "unknown",
+        model: items[0]?.model ?? "unknown",
+      });
+      return `- ${endpoint}: samples=${items.length} hitRate=${formatPercent(hitRate)} input=${totals.inputTokens} output=${totals.outputTokens} cache_read=${totals.cacheReadTokens} cache_write=${totals.cacheWriteTokens}`;
+    }),
+  ].join("\n");
+}
+
+function sumCacheHistory(history: CacheTurnStats[]): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+} {
+  return history.reduce(
+    (total, item) => ({
+      inputTokens: total.inputTokens + item.inputTokens,
+      outputTokens: total.outputTokens + item.outputTokens,
+      cacheReadTokens: total.cacheReadTokens + item.cacheReadTokens,
+      cacheWriteTokens: total.cacheWriteTokens + item.cacheWriteTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  );
+}
+
+function formatPercent(value: number | null): string {
+  return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
+}
+
+function collectLightHints(context: TuiContext): LightHint[] {
+  const latest = context.cache.history.at(-1);
+  const hints: LightHint[] = [];
+  if (
+    latest?.hitRate !== null &&
+    latest?.hitRate !== undefined &&
+    latest.hitRate < context.cache.config.warnBelowHitRate
+  ) {
+    hints.push(
+      createLightHint("cache-hit-low", "warning", "cache 命中率下降", "/break-cache status"),
+    );
+  }
+  if ((latest?.inputTokens ?? 0) > 96_000) {
+    hints.push(createLightHint("context-long", "info", "context 较长，建议按需压缩", "/compact"));
+  }
+  if (latest?.cacheWriteTokensSource === "zero_reported" && latest.cacheReadTokens > 0) {
+    hints.push(
+      createLightHint(
+        "cache-zero-create-with-read",
+        "info",
+        "cache_creation 长期为 0 但 cache_read 很高时通常是 provider 字段口径，不代表零写入成本",
+        "/usage",
+      ),
+    );
+  }
+  const changedKeys = latest?.freshness.changedKeys ?? [];
+  if (
+    changedKeys.some((key) =>
+      ["systemPromptHash", "toolSchemaHash", "mcpToolListHash"].includes(key),
+    )
+  ) {
+    hints.push(
+      createLightHint(
+        "freshness-changed",
+        "warning",
+        "缓存 freshness 关键 hash 已变化",
+        "/cache warmup",
+      ),
+    );
+  }
+  return hints;
+}
+
+function createLightHint(
+  dedupeKey: string,
+  severity: "info" | "warning",
+  message: string,
+  suggestedCommand: string,
+): LightHint {
+  return {
+    id: randomUUID(),
+    severity,
+    message,
+    suggestedCommand,
+    dedupeKey,
+    cooldownMs: DEFAULT_LIGHT_HINT_COOLDOWN_MS,
+  };
+}
+
+function writeLightHints(output: Writable, context: TuiContext): void {
+  if (context.cache.config.hintsMuted) {
+    return;
+  }
+  const now = Date.now();
+  for (const hint of collectLightHints(context)) {
+    const lastShown = context.cache.hintLastShownAt[hint.dedupeKey] ?? 0;
+    if (now - lastShown < hint.cooldownMs) {
+      continue;
+    }
+    context.cache.hintLastShownAt[hint.dedupeKey] = now;
+    writeLine(output, `[hint:${hint.severity}] ${hint.message}；建议：${hint.suggestedCommand}`);
+  }
 }
 
 async function handleVerifyCommand(
@@ -1149,8 +1690,8 @@ async function sendMessage(
       role: "system",
       content:
         context.language === "en-US"
-          ? "You are Linghun Phase 07 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 07 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 09 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 09 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
@@ -1163,6 +1704,11 @@ async function sendMessage(
     if (event.type === "assistant_text_delta") {
       assistantText += event.text;
       output.write(event.text);
+      continue;
+    }
+    if (event.type === "usage") {
+      const stats = recordModelUsage(context, event.usage);
+      await appendUsageEvents(context, sessionId, stats);
       continue;
     }
     if (event.type === "error") {
@@ -1180,6 +1726,7 @@ async function sendMessage(
       createdAt: new Date().toISOString(),
     });
   }
+  writeLightHints(output, context);
   writeStatus(output, context);
 }
 
@@ -1252,6 +1799,15 @@ function formatHelp(language: Language): string {
   /claim-check <claim>  Downgrade unsupported final claims
   /verify [plan|last|smoke] Generate or run verification
   /review               Review diff, risks, and verification evidence
+  /cache-log            Show recent cache usage records
+  /cache-log config size <n>  Set cache history size
+  /cache-log export [path]  Export recent cache usage records
+  /cache status         Show cache status and freshness
+  /cache warmup|refresh Attempt cache warmup or refresh
+  /break-cache status   Show cache freshness changes
+  /usage                Show token/cache usage summary
+  /stats                Show local cache/cost statistics
+  /stats endpoints      Group usage by endpoint
   /read <path>          Read file
   /write <path> <text>  Write file
   /edit <path> <old> => <new>  Unique replacement
@@ -1290,6 +1846,15 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /claim-check <claim>  降级缺少证据的最终结论
   /verify [plan|last|smoke] 生成或运行验证
   /review               按代码审查口径输出风险与建议
+  /cache-log            查看最近 cache usage 记录
+  /cache-log config size <n>  设置 cache 历史容量
+  /cache-log export [path]  导出最近 cache usage 记录
+  /cache status         查看 cache 状态与 freshness
+  /cache warmup|refresh 尝试预热或刷新 cache
+  /break-cache status   查看 cache freshness 变化
+  /usage                查看 token/cache usage 汇总
+  /stats                查看本地 cache/cost 统计
+  /stats endpoints      按 endpoint 聚合 usage
   /read <path>          读取文件
   /write <path> <text>  写入文件
   /edit <path> <old> => <new>  唯一替换
@@ -2017,6 +2582,7 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 
 function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter((task) => task.status === "running").length;
+  const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
   const status = t(context, "status", {
     session: truncateDisplay(
       context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
@@ -2025,6 +2591,7 @@ function writeStatus(output: Writable, context: TuiContext): void {
     model: truncateDisplay(context.model, 18),
     mode: context.permissionMode,
     background: String(background),
+    cache: formatPercent(latestHitRate),
   });
   writeLine(output, truncateDisplay(status, 96));
 }
@@ -2039,13 +2606,13 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 08 TUI / REPL",
+    appTitle: "{name} Phase 09 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
     exit: "已退出 Linghun。",
     status:
-      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache -- · index --",
+      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index --",
     statusShort: "状态栏：{mode} · bg {background}",
     help: "帮助",
     inputPrompt: "你> ",
@@ -2067,13 +2634,13 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 08 TUI / REPL",
+    appTitle: "{name} Phase 09 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",
     exit: "Exited Linghun.",
     status:
-      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache -- · index --",
+      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index --",
     statusShort: "Status: {mode} · bg {background}",
     help: "Help",
     inputPrompt: "you> ",

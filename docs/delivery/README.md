@@ -13,7 +13,7 @@
 | Phase 06 | done | [phase-06-permissions-plan.md](./phase-06-permissions-plan.md) | 权限与 Plan 闭环 |
 | Phase 07 | done | [phase-07-behavior-guardrail.md](./phase-07-behavior-guardrail.md) | 工程行为控制闭环 |
 | Phase 08 | done | [phase-08-verification.md](./phase-08-verification.md) | 代码自检与验证增强闭环 |
-| Phase 09 | pending | phase-09-cache-cost.md | 缓存与成本闭环 |
+| Phase 09 | done | [phase-09-cache-cost.md](./phase-09-cache-cost.md) | 缓存与成本闭环 |
 | Phase 10 | pending | phase-10-mcp-index.md | MCP 与 codebase-memory 闭环 |
 | Phase 11 | pending | phase-11-sessions-memory.md | 会话交接与记忆闭环 |
 | Phase 12 | pending | phase-12-agents.md | Agent 闭环 |

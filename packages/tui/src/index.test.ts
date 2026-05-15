@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
+import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
-import { type TuiContext, handleSlashCommand } from "./index.js";
+import {
+  type TuiContext,
+  createCacheState,
+  handleSlashCommand,
+  recordModelUsage,
+} from "./index.js";
 
 class MemoryOutput extends Writable {
   text = "";
@@ -34,6 +40,7 @@ function createTestContext(
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
+    cache: createCacheState(project),
     interrupt: { type: "idle" },
   };
 }
@@ -51,8 +58,15 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/sessions", context, output);
 
     expect(output.text).toContain("/sessions resume <id>");
+    expect(output.text).toContain("/cache-log config size <n>");
+    expect(output.text).toContain("/cache-log export [path]");
+    expect(output.text).toContain("/cache status");
+    expect(output.text).toContain("/cache warmup|refresh");
+    expect(output.text).toContain("/break-cache status");
+    expect(output.text).toContain("/usage");
+    expect(output.text).toContain("/stats endpoints");
     expect(output.text).toContain("当前模型：deepseek-v4-flash");
-    expect(output.text).toContain("cache -- · index --");
+    expect(output.text).toContain("cache n/a · index");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
   });
@@ -399,5 +413,158 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("[后台]");
     expect(output.text).not.toContain("你> [后台]");
     expect(output.text).not.toContain("you> [background]");
+  });
+
+  it("computes cache hit rate without output tokens in denominator", () => {
+    expect(
+      computePromptCacheHitRate({
+        inputTokens: 100,
+        outputTokens: 900,
+        cacheReadTokens: 50,
+        cacheWriteTokens: 50,
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+      }),
+    ).toBe(0.25);
+    expect(
+      computePromptCacheHitRate({
+        inputTokens: 0,
+        outputTokens: 100,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+      }),
+    ).toBeNull();
+  });
+
+  it("records cache usage, classifies write sources, and trims cache history", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    const reported = recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 900,
+      totalTokens: 1000,
+      cacheReadTokens: 50,
+      cacheWriteTokens: 50,
+      cacheWriteTokensRaw: 50,
+      endpoint: "/v1/messages",
+    });
+    const zeroReported = recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 0,
+      cacheWriteTokensRaw: 0,
+      endpoint: "/v1/responses",
+    });
+    const missing = recordModelUsage(context, {
+      inputTokens: 10,
+      outputTokens: 1,
+      totalTokens: 11,
+      endpoint: "/v1/chat/completions",
+    });
+    const estimated = recordModelUsage(context, {
+      inputTokens: 10,
+      outputTokens: 1,
+      totalTokens: 11,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 3,
+      cacheWriteTokensEstimated: true,
+      endpoint: "/v1/chat/completions",
+    });
+
+    expect(reported.cacheWriteTokensSource).toBe("reported");
+    expect(zeroReported.cacheWriteTokensSource).toBe("zero_reported");
+    expect(missing.cacheWriteTokensSource).toBe("missing");
+    expect(estimated.cacheWriteTokensSource).toBe("estimated");
+    expect(reported.hitRate).toBe(0.25);
+
+    await handleSlashCommand("/cache-log", context, output);
+    await handleSlashCommand("/cache-log config size 2", context, output);
+    await handleSlashCommand("/cache-log", context, output);
+
+    expect(context.cache.history).toHaveLength(2);
+    expect(context.cache.history[0]?.turn).toBe(3);
+    expect(output.text).toContain("Cache log 最近");
+    expect(output.text).toContain("write_source=zero_reported");
+    expect(output.text).toContain("cache history size：2");
+  });
+
+  it("shows cache status, break-cache status, usage, and endpoint stats conservatively", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 0,
+      cacheWriteTokensRaw: 0,
+      endpoint: "/v1/responses",
+      rawUsage: { prompt_tokens: 100, cache_creation_tokens: 0 },
+    });
+
+    await handleSlashCommand("/cache status", context, output);
+    context.model = "deepseek-v4-pro";
+    recordModelUsage(context, {
+      inputTokens: 20,
+      outputTokens: 5,
+      totalTokens: 25,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 5,
+      cacheWriteTokensRaw: 5,
+      endpoint: "/v1/messages",
+    });
+    await handleSlashCommand("/break-cache status", context, output);
+    await handleSlashCommand("/usage", context, output);
+    await handleSlashCommand("/stats", context, output);
+    await handleSlashCommand("/stats endpoints", context, output);
+    await handleSlashCommand("/status", context, output);
+
+    expect(output.text).toContain("cache write source");
+    expect(output.text).toContain("freshness changedKeys");
+    expect(output.text).toContain("modelProviderHash");
+    expect(output.text).toContain("/cache warmup");
+    expect(output.text).toContain("cache_creation/cache write 为 0");
+    expect(output.text).toContain("不代表零写入成本");
+    expect(output.text).toContain("任何金额只能标记 estimated");
+    expect(output.text).toContain("cost: estimated unavailable");
+    expect(output.text).toContain("/v1/responses: samples=1");
+    expect(output.text).toContain("/v1/messages: samples=1");
+    expect(output.text).not.toContain("零成本");
+    expect(output.text).not.toContain("¥");
+  });
+
+  it("keeps light hints out of the prompt/input area", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 0,
+      cacheWriteTokensRaw: 0,
+    });
+    await handleSlashCommand("/cache status", context, output);
+    await handleSlashCommand("/status", context, output);
+
+    expect(output.text).not.toContain("你> [hint");
+    expect(output.text).not.toContain("you> [hint");
+    expect(output.text).not.toContain("¥");
   });
 });

@@ -1,5 +1,47 @@
 import type { Language, PermissionMode } from "@linghun/shared";
 
+export type CacheWriteTokensSource = "reported" | "zero_reported" | "missing" | "estimated";
+
+export type CacheFreshness = {
+  systemPromptHash: string;
+  toolSchemaHash: string;
+  mcpToolListHash: string;
+  modelProviderHash: string;
+  reasoningEffortHash?: string;
+  projectRulesHash?: string;
+  memoryHash?: string;
+  compactHash?: string;
+  pluginListHash?: string;
+  changedKeys: string[];
+};
+
+export type CacheTurnStats = {
+  turn: number;
+  timestamp: number;
+  hitRate: number | null;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheWriteTokensSource: CacheWriteTokensSource;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  provider: string;
+  endpoint?: string;
+  source: "api_usage" | "provider_usage" | "estimated";
+  compacted: boolean;
+  freshness: CacheFreshness;
+  rawUsage?: unknown;
+};
+
+export type CacheUsageRaw = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  provider: string;
+  model: string;
+};
+
 export type CostSummary = {
   inputTokens: number;
   outputTokens: number;
@@ -7,12 +49,20 @@ export type CostSummary = {
   cacheWriteTokens: number;
   estimatedUsd: number;
   estimatedCny: number;
+  estimatedSavedCny?: number;
+  billingReconciled?: boolean;
+  billingSource?: string;
+  endpoint?: string;
+  providerReported?: boolean;
 };
 
 export type CacheSummary = {
   hitRate: number | null;
   readTokens: number;
   writeTokens: number;
+  historySize: number;
+  lastWriteTokensSource?: CacheWriteTokensSource;
+  lastFreshness?: CacheFreshness;
 };
 
 export type Session = {
@@ -78,6 +128,8 @@ export type TranscriptEvent =
       createdAt: string;
     }
   | { type: "checkpoint_restored"; checkpointId: string; createdAt: string }
+  | { type: "usage"; usage: CacheTurnStats; createdAt: string }
+  | { type: "cache_update"; stats: CacheTurnStats; createdAt: string }
   | {
       type: "verification_start";
       run: {
@@ -236,5 +288,14 @@ export function createEmptyCacheSummary(): CacheSummary {
     hitRate: null,
     readTokens: 0,
     writeTokens: 0,
+    historySize: 0,
   };
+}
+
+export function computePromptCacheHitRate(usage: CacheUsageRaw): number | null {
+  const denominator = usage.inputTokens + usage.cacheWriteTokens + usage.cacheReadTokens;
+  if (denominator <= 0) {
+    return null;
+  }
+  return usage.cacheReadTokens / denominator;
 }

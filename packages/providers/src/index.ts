@@ -4,6 +4,12 @@ export type ModelUsage = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  cacheWriteTokensRaw?: number | null;
+  cacheWriteTokensEstimated?: boolean;
+  rawUsage?: unknown;
+  endpoint?: string;
 };
 
 export type LinghunEvent =
@@ -289,7 +295,18 @@ function parseOpenAiStreamLine(line: string): LinghunEvent[] {
   const parsed = JSON.parse(payload) as {
     id?: string;
     choices?: { delta?: { content?: string } }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+      prompt_tokens_details?: {
+        cached_tokens?: number;
+        cache_creation_tokens?: number;
+      };
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+      cache_creation_tokens?: number;
+    };
   };
   const events: LinghunEvent[] = [];
   const text = parsed.choices?.[0]?.delta?.content;
@@ -297,16 +314,40 @@ function parseOpenAiStreamLine(line: string): LinghunEvent[] {
     events.push({ type: "assistant_text_delta", id: parsed.id ?? "assistant", text });
   }
   if (parsed.usage) {
+    const cacheWriteTokensRaw = readCacheWriteTokens(parsed.usage);
     events.push({
       type: "usage",
       usage: {
         inputTokens: parsed.usage.prompt_tokens ?? 0,
         outputTokens: parsed.usage.completion_tokens ?? 0,
         totalTokens: parsed.usage.total_tokens ?? 0,
+        cacheReadTokens:
+          parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
+        cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
+        cacheWriteTokensRaw,
+        rawUsage: parsed.usage,
+        endpoint: "/v1/chat/completions",
       },
     });
   }
   return events;
+}
+
+function readCacheWriteTokens(usage: {
+  prompt_tokens_details?: { cache_creation_tokens?: number };
+  cache_creation_input_tokens?: number;
+  cache_creation_tokens?: number;
+}): number | null {
+  if (typeof usage.prompt_tokens_details?.cache_creation_tokens === "number") {
+    return usage.prompt_tokens_details.cache_creation_tokens;
+  }
+  if (typeof usage.cache_creation_input_tokens === "number") {
+    return usage.cache_creation_input_tokens;
+  }
+  if (typeof usage.cache_creation_tokens === "number") {
+    return usage.cache_creation_tokens;
+  }
+  return null;
 }
 
 export class DeepSeekProvider extends OpenAiCompatibleProvider {

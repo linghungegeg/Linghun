@@ -85,7 +85,19 @@ describe("OpenAI stream parser", () => {
     expect(events).toEqual([
       { type: "assistant_text_delta", id: "chatcmpl-1", text: "你" },
       { type: "assistant_text_delta", id: "assistant", text: "好" },
-      { type: "usage", usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 } },
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 4,
+          outputTokens: 2,
+          totalTokens: 6,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+          cacheWriteTokensRaw: null,
+          rawUsage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+          endpoint: "/v1/chat/completions",
+        },
+      },
     ]);
   });
 });
