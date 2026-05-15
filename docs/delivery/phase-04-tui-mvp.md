@@ -4,7 +4,7 @@
 
 实现 Linghun 的最小可用交互式终端闭环：用户运行 `linghun` 后进入 REPL，能查看当前模型和会话，能通过 Phase 03 `ModelGateway` 调用当前 DeepSeek provider/model，并把对话写入 Phase 02 JSONL transcript。
 
-本阶段只做 Phase 04，不实现 MCP、工具系统、Agent、多模型协作、长期任务、真实 cache/cost 统计或桌面端。
+本阶段只做 Phase 04，不实现 MCP、工具系统、Agent、多模型协作、长期任务、真实 cache/usage/stats 统计或桌面端。
 
 ## 已完成功能
 
@@ -16,7 +16,7 @@
 - 状态栏显示：
   - 当前模型
   - 权限模式
-  - cache / cost / index 占位状态
+  - cache / index 占位状态
 - 普通输入会：
   - 写入当前 session 的 JSONL transcript；
   - 通过 Phase 03 `ModelGateway` 调用 DeepSeek provider；
@@ -78,7 +78,8 @@ corepack pnpm exec linghun
   - `SessionStore` 管理会话和 JSONL transcript；
   - `loadConfig()` 读取当前模型配置；
   - `ModelGateway` + `DeepSeekProvider` 调用模型。
-- 状态栏先显示占位：`cache -- · ¥-- · index --`，不提前实现 Phase 09/10。
+- 状态栏先显示占位：`cache -- · index --`，不提前实现 Phase 09/10。
+- 费用、成本和节省估算不进入默认状态栏；后续统一通过 `/usage`、`/stats` 展示，并在非真实账单字段时标记 `estimated`。
 - 当前只接入 DeepSeek provider，不扩展 OpenAI-compatible TUI 配置面板或多模型路由。
 - 错误不吞掉：provider 错误会以中文提示和建议显示给用户。
 - `/exit` 会写入 `session_end` 事件。
@@ -190,7 +191,7 @@ printf '/help\n/model\n/sessions\n/exit\n' | corepack pnpm exec linghun
 - DeepSeek 常见 endpoint 探测：`/chat/completions` 返回 HTTP 200，`/v1/chat/completions` 返回 HTTP 200，`/anthropic/messages` 返回 HTTP 200。
 - 当前 Phase 04 代码实际走 Phase 03 `DeepSeekProvider` 的 OpenAI-compatible `/chat/completions` 风格路径；本阶段未新增 Anthropic 协议分支。
 - OpenAI-compatible endpoint：通过现有 Phase 03 OpenAI-compatible provider/HTTP 路径补测，确认 `/models` 和 `/chat/completions` 返回 HTTP 200，返回文本包含 `ok`，usage 返回正常；同一 provider/gateway 事件流与 Phase 02 `SessionStore` transcript 写入链路验证通过。
-- 本次补测未写入、展示或保存 API key，未修改源码，未进入 Phase 05；cache/cost/index 仍为 Phase 04 占位。
+- 本次补测未写入、展示或保存 API key，未修改源码，未进入 Phase 05；cache/index 仍为 Phase 04 占位，usage/stats 未实现。
 
 ## 性能结果
 
@@ -204,7 +205,7 @@ printf '/help\n/model\n/sessions\n/exit\n' | corepack pnpm exec linghun
 - 当前 REPL 是最小 `readline` 闭环，不是完整 Ink UI；消息列表、输入框美化、resize 处理、命令面板视觉样式会在后续阶段继续完善。
 - Ctrl+C / Esc 的流式中断控制尚未作为独立交互状态实现；当前可通过终端中断进程或 `/exit` 正常退出。完整中断队列属于后续 TUI 增强。
 - 多行粘贴在 `readline` 下按终端输入行为处理；本阶段未实现专门的粘贴队列。
-- 未实现真实 cache/cost/index 统计，只显示占位。
+- 未实现真实 cache/index 统计，只显示占位；未实现 `/usage`、`/stats`。
 - 未实现工具调用、权限审批、MCP 或 Agent。
 
 ## 不在本阶段处理的内容
@@ -213,7 +214,7 @@ printf '/help\n/model\n/sessions\n/exit\n' | corepack pnpm exec linghun
 - 不实现 Agent 多开。
 - 不实现插件系统。
 - 不实现长期任务。
-- 不实现真实 cache/cost 统计。
+- 不实现真实 cache/usage/stats 统计。
 - 不做桌面端。
 - 不做大规模 UI 美化。
 - 不改变 Phase 03 已验证 provider 行为。

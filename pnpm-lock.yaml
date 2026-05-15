@@ -82,6 +82,9 @@ importers:
       '@linghun/shared':
         specifier: workspace:*
         version: link:../shared
+      '@linghun/tools':
+        specifier: workspace:*
+        version: link:../tools
 
 packages:
 

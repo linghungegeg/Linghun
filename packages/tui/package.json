@@ -18,6 +18,7 @@
     "@linghun/config": "workspace:*",
     "@linghun/core": "workspace:*",
     "@linghun/providers": "workspace:*",
-    "@linghun/shared": "workspace:*"
+    "@linghun/shared": "workspace:*",
+    "@linghun/tools": "workspace:*"
   }
 }

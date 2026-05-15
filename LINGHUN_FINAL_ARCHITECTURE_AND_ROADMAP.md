@@ -595,14 +595,15 @@ cache read：45231 -> 2108
 第一版状态栏必须显示：
 
 ```text
-项目 | 模型 | 模式 | 命中率 | 本轮费用 | 累计费用 | agent 数 | 索引状态
+项目 | 模型 | 模式 | 命中率 | agent 数 | 索引状态
 ```
 
 进阶面板：
 
 - `/cache-log`
 - `/break-cache status`
-- `/cost`
+- `/usage`
+- `/stats`
 - `/index status`
 
 ## 11. 记忆、索引、会话交接
@@ -801,7 +802,7 @@ LINGHUN_FEATURE_LAN_PIPES=0
 1. 选择语言：中文 / English
 2. 选择模型：DeepSeek / Claude / OpenAI compatible / Ollama
 3. 配置 API Key 或 base_url
-4. 是否启用状态栏成本显示
+4. 是否启用 usage / stats 估算详情
 5. 是否启用代码索引
 6. 是否启用 MCP 推荐组件
 7. 是否启用跨会话读取
@@ -887,224 +888,35 @@ F:\LinghunProject 或新仓库根目录
 
 ## 17. 开发路线
 
-### Phase 0：终版设计冻结
-
-产物：
-
-- 本文档确认。
-- MVP 范围确认。
-- 模块边界确认。
-- 技术选型确认。
-
-验收：
-
-- 不再边写边改大方向。
-- 明确哪些进 MVP，哪些后置。
-
-### Phase 1：工程骨架
-
-目标：
-
-- pnpm monorepo。
-- TypeScript strict。
-- Biome。
-- Vitest。
-- CLI 入口。
-- 配置加载。
-- 日志与错误体系。
-
-验收：
-
-- Windows 下 `pnpm install`、`pnpm test`、`pnpm build` 通过。
-- `linghun --version` 快速返回。
-
-### Phase 2：Session 与事件流
-
-目标：
-
-- Session 类。
-- JSONL transcript。
-- LinghunEvent。
-- 基础对话循环。
-- 单模型 OpenAI compatible。
-
-验收：
-
-- 能在项目目录启动对话。
-- 会话能保存和恢复。
-- 不依赖全局可变单例。
-
-### Phase 3：TUI MVP
-
-目标：
-
-- Ink 主界面。
-- 消息列表。
-- 输入框。
-- 状态栏。
-- `/help`、`/config`、`/model`。
-
-验收：
-
-- 中文路径可用。
-- 状态栏显示项目名、模型、模式。
-- 体验接近 Claude 风格。
-
-### Phase 4：核心工具
-
-目标：
-
-- Read / Edit / Write / Grep / Glob / Bash。
-- 工具 schema。
-- 工具结果结构化。
-- 并发调度。
-
-验收：
-
-- 能完成真实项目单文件和多文件修改。
-- Edit 保留换行风格。
-- Bash 输出截断和完整日志路径可用。
-
-### Phase 5：权限与 Plan
-
-目标：
-
-- default / plan / acceptEdits / dontAsk / bypass。
-- 不可绕过规则。
-- 权限对话。
-- Shift+Tab 或快捷键切换。
-
-验收：
-
-- plan 模式不能写文件。
-- acceptEdits 自动允许低风险编辑。
-- 高危操作始终询问。
-
-### Phase 6：Behavior Guardrail
-
-目标：
-
-- strict 模式默认启用。
-- 能力边界检查。
-- 反幻觉协议。
-- 最小改动协议。
-- 验证闭环。
-
-验收：
-
-- 模型不会未读代码就改。
-- 不支持视觉/联网时会明确说明。
-- 修改后会运行或建议验证。
-
-### Phase 7：模型网关
-
-目标：
-
-- DeepSeek。
-- Claude。
-- Gemini。
-- Ollama。
-- 模型能力表。
-- 统一事件适配。
-
-验收：
-
-- `/model` 可切换。
-- DeepSeek 1M 显示正确。
-- tool calling 转换稳定。
-- thinking 白名单明确。
-
-### Phase 8：缓存与成本系统
-
-目标：
-
-- prompt 分层。
-- cache guard。
-- cache history。
-- cost tracker。
-- `/cache-log`。
-- `/break-cache`。
-
-验收：
-
-- 状态栏显示命中率和费用。
-- 能解释缓存破坏原因。
-- MCP 工具列表变化不会无意义破坏缓存。
-
-### Phase 9：MCP 与索引
-
-目标：
-
-- MCP 客户端。
-- `/mcp` 面板。
-- codebase-memory-mcp 推荐接入。
-- 大文件保护。
-- 索引过期提醒。
-
-验收：
-
-- 可为项目建立索引。
-- 可查调用链和架构。
-- MCP 挂掉不影响主对话。
-
-### Phase 10：会话交接与记忆
-
-目标：
-
-- `/sessions`。
-- AI sessions MCP。
-- MEMORY / LINGHUN.md。
-- 会话摘要。
-
-验收：
-
-- 可从最近 Claude/Codex 会话继续工作。
-- 新对话可基于项目记忆和索引开始。
-
-### Phase 11：Agent
-
-目标：
-
-- explorer。
-- worker。
-- verifier。
-- agent 状态栏。
-- 成本按 agent 统计。
-
-验收：
-
-- 用户明确要求时多开 agent。
-- explorer 只读。
-- verifier 能独立复核。
-- agent 清理稳定。
-
-### Phase 12：Skills 与工作流
-
-目标：
-
-- skill 加载。
-- workflow 模板。
-- bug-fix / review / doc-to-code。
-
-验收：
-
-- 新手可直接运行工作流。
-- 不影响普通对话启动速度。
-
-### Phase 13：桌面端准备
-
-目标：
-
-- core API。
-- 本地 WebSocket / IPC。
-- Tauri 原型。
-- 会话列表 GUI。
-- 配置 GUI。
-
-验收：
-
-- TUI 和桌面端共用 core。
-- 桌面端不是重写一套逻辑。
+具体阶段范围、产物和验收以 `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md` 为准。本节只保留架构路线索引，避免出现两套阶段编号。
+
+| 阶段 | 名称 | 目标 |
+| --- | --- | --- |
+| Phase 00 | 设计冻结与基线确认 | 冻结产品方向、参考来源、阶段边界和开发准则 |
+| Phase 01 | 工程骨架闭环 | pnpm monorepo、CLI 入口、基础包、测试/构建/typecheck |
+| Phase 02 | Session 与会话持久化闭环 | 项目识别、JSONL transcript、会话创建/列出/恢复/摘要 |
+| Phase 03 | 模型网关最小闭环 | Provider、ModelGateway、DeepSeek/OpenAI-compatible、模型能力表、usage 事件 |
+| Phase 04 | TUI / REPL 最小闭环 | 无参数进入 REPL、状态栏、slash 命令、对话写入 transcript |
+| Phase 05 | 核心工具闭环 | Read / Write / Edit / MultiEdit / Grep / Glob / Bash / Todo / Diff |
+| Phase 06 | 权限与 Plan 闭环 | 权限规则、Plan 方案选择、acceptEdits、模式切换 |
+| Phase 07 | 工程行为控制闭环 | 反幻觉、最小改动、基础 i18n、TUI 渲染稳定性、后台状态反馈、checkpoint/rewind、输入队列与中断 |
+| Phase 08 | 代码自检与验证增强闭环 | verifier、验证计划、验证进度、PASS/FAIL/PARTIAL 结果归档、review |
+| Phase 09 | 缓存与成本闭环 | cache history、cache break、`/usage`、`/stats`、轻提示 |
+| Phase 10 | MCP 与 codebase-memory 闭环 | MCP 面板、索引、索引过期提醒、大文件保护 |
+| Phase 11 | 会话交接与记忆闭环 | `/resume`、`/branch`、`LINGHUN.md`、handoff packet、跨会话导入 |
+| Phase 12 | Agent 闭环 | explorer、worker、verifier、planner、`/fork`、agent transcript |
+| Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
+| Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、Plugin 底座 |
+| Phase 15 | 真实项目测试版 | 用真实老项目验证完整开发闭环 |
+| Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
+| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Remote Channels、单阶段自动工作 |
+| Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界 |
+
+当前进度：
+
+- Phase 00-06 已完成。
+- 下一阶段是 Phase 07：工程行为控制闭环。
+- 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 
 ## 18. MVP 定义
 

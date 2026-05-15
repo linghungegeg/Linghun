@@ -9,6 +9,7 @@
     { "path": "../shared" },
     { "path": "../core" },
     { "path": "../config" },
-    { "path": "../providers" }
+    { "path": "../providers" },
+    { "path": "../tools" }
   ]
 }

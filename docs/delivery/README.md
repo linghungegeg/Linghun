@@ -9,8 +9,8 @@
 | Phase 02 | done | [phase-02-session-transcript.md](./phase-02-session-transcript.md) | Session 与会话持久化闭环 |
 | Phase 03 | done | [phase-03-model-gateway.md](./phase-03-model-gateway.md) | 模型网关最小闭环 |
 | Phase 04 | done | [phase-04-tui-mvp.md](./phase-04-tui-mvp.md) | TUI / REPL 最小闭环 |
-| Phase 05 | pending | phase-05-core-tools.md | 核心工具闭环 |
-| Phase 06 | pending | phase-06-permissions-plan.md | 权限与 Plan 闭环 |
+| Phase 05 | done | [phase-05-core-tools.md](./phase-05-core-tools.md) | 核心工具闭环 |
+| Phase 06 | done | [phase-06-permissions-plan.md](./phase-06-permissions-plan.md) | 权限与 Plan 闭环 |
 | Phase 07 | pending | phase-07-behavior-guardrail.md | 工程行为控制闭环 |
 | Phase 08 | pending | phase-08-verification.md | 代码自检与验证增强闭环 |
 | Phase 09 | pending | phase-09-cache-cost.md | 缓存与成本闭环 |

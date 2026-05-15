@@ -138,21 +138,42 @@ export type LinghunEvent =
 ```ts
 export type BackgroundTask = {
   id: string
-  kind: 'bash' | 'agent' | 'job' | 'mcp'
+  kind: 'bash' | 'agent' | 'job' | 'mcp' | 'verification' | 'compact'
   title: string
   status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+  currentStep?: string
+  progress?: {
+    completed: number
+    total?: number
+    label?: string
+  }
   startedAt: string
   updatedAt: string
+  lastOutputAt?: string
+  estimatedRemainingMs?: number
+  heartbeatIntervalMs: number
+  staleAfterMs: number
   cost?: CostSummary
   logPath?: string
+  outputPath?: string
+  result?: 'pass' | 'fail' | 'partial'
+  userVisibleSummary: string
+  nextAction?: string
 }
 ```
 
 要求：
 
-- 长 Bash、agent、job 都进入统一后台任务表。
+- 长 Bash、agent、job、verification、compact 都进入统一后台任务表。
 - TUI 状态栏只显示摘要，详情通过 `/background` 打开。
 - 后台任务必须可取消；可恢复能力按 kind 声明。
+- 后台任务启动后必须立即产生一条用户可见摘要，说明任务名称、当前步骤、预计范围和查看详情命令。
+- 后台任务运行期间必须定期 heartbeat。超过 `heartbeatIntervalMs` 没有输出时，TUI 应提示“仍在运行”和当前步骤；超过 `staleAfterMs` 时提示可能较慢，并提供查看日志、后台运行或取消入口。
+- 如果 `outputPath` 存在但尚无有效内容，状态必须显示“尚未产生有效输出”，不能让用户自己判断空文件。
+- 完成后必须主动产生结果摘要：`pass` / `fail` / `partial` / `cancelled`，并给出下一步建议。
+- 主任务不得在必要 verification / verifier task 未结束前宣称阶段完成。
+- 用户询问“现在在干嘛 / 还要多久 / 卡住了吗”时，必须读取 `BackgroundTask` 状态表回答，不得靠猜。
+- 后台任务状态事件必须进入 transcript 或等价任务日志，便于新会话 handoff。
 
 ## 3. Session 规格
 
@@ -252,7 +273,19 @@ export type LinghunConfig = {
 }
 ```
 
-### 4.3 数据存储路径规格
+### 4.3 语言与 i18n 规格
+
+`language` 控制所有用户可见终端文案：
+
+- `zh-CN`：状态栏、权限提示、错误信息、帮助说明、轻提示、工具结果摘要默认输出中文。
+- `en-US`：状态栏、权限提示、错误信息、帮助说明、轻提示、工具结果摘要默认输出英文。
+- Slash 命令、配置键、环境变量、transcript 结构化事件字段保持英文，不随语言变化。
+- 模型回复语言默认跟随 `language`；用户当前请求明确指定回复语言时，以用户请求为准。
+- Phase 07 开始，新增用户可见文案必须通过统一 i18n helper 或等价字典输出。
+- Phase 06 已落地的中文权限文案可在 Phase 07 统一接入 i18n，不应打断 Phase 06 权限闭环。
+- 测试至少覆盖一个中文输出和一个英文输出路径。
+
+### 4.4 数据存储路径规格
 
 ```ts
 export type StorageScope = 'project' | 'user' | 'custom'
@@ -366,9 +399,12 @@ CLI 参数指定的路径
 | `/index status` | 查看索引状态 |
 | `/index init fast` | 建立 fast 索引 |
 | `/sessions` | 会话列表 |
+| `/resume` | 恢复最近或指定会话 |
+| `/branch` | 从当前任务创建分支会话 |
 | `/memory` | 记忆查看 |
 | `/memory storage` | 查看记忆、会话、索引数据存储位置 |
-| `/stats` | token/费用统计 |
+| `/usage` | 原始 token/cache usage |
+| `/stats` | 会话、缓存、模型、耗时等综合统计 |
 | `/cache-log` | 最近 20 轮缓存日志 |
 | `/break-cache status` | 缓存破坏原因 |
 | `/verify` | 运行验证 |
@@ -378,13 +414,16 @@ CLI 参数指定的路径
 | `/job` | 长期任务，默认 feature 关闭 |
 | `/todo` | 查看当前任务列表 |
 | `/diff` | 查看本轮改动摘要 |
+| `/review` | 基于 diff / 关键文件做只读审查 |
 | `/rewind` | 查看并回退检查点 |
 | `/btw` | 临时插问，不打断主任务 |
 | `/background` | 查看后台任务和 agent |
-| `/workflow` | 查看/运行工作流 |
+| `/workflows` | 查看/运行工作流 |
+| `/fork` | 派生子会话或 agent |
 | `/skills` | Skills 管理 |
 | `/plugins` | Plugins 管理 |
 | `/plugins doctor` | 插件诊断 |
+| `/doctor hooks` | Hooks 诊断 |
 
 命令要求：
 
@@ -404,7 +443,7 @@ CLI 参数指定的路径
 ├──────────────── input ───────────────────┤
 │ > 输入框                                 │
 ├──────────────── status ──────────────────┤
-│ project · model · mode · cache · cost    │
+│ project · model · mode · cache · index   │
 └──────────────── hints ───────────────────┘
 ```
 
@@ -416,7 +455,6 @@ CLI 参数指定的路径
 | model | ModelGateway.currentModel |
 | mode | PermissionMode |
 | cache | CacheSummary.hitRate |
-| cost | CostSummary.sessionCny |
 | index | IndexHealth.status |
 | agents | AgentManager.runningCount |
 | job | JobManager.currentJob 可选 |
@@ -424,8 +462,52 @@ CLI 参数指定的路径
 示例：
 
 ```text
-main · DeepSeek V4 Pro · strict · cache 94% · ¥0.12 · index ready · 1 agent
+main · DeepSeek V4 Pro · strict · cache 94% · index ready · 1 agent
 ```
+
+状态栏要求：
+
+- 默认不显示金额，避免多模型、多 provider 和第三方中转价格不准造成误导。
+- 费用、节省金额和账单对账只在 `/usage`、`/stats` 或详情面板中显示。
+- 费用必须标记 `estimated`，除非 provider 明确返回可直接计费的真实账单字段。
+- 状态栏轻提示只显示建议命令，不自动执行。
+
+### 6.3 TUI 渲染稳定性规格
+
+Phase 07 开始，TUI 必须建立稳定渲染模型：
+
+- 渲染区域必须分层：`messages`、`background summary`、`system events`、`input`、`status`、`hints`。
+- 主消息流不得直接混入后台任务长输出、compact 进度、agent 原始日志或 verification 原始日志。
+- 输入区必须由单一组件或单一渲染路径控制，不允许系统事件插入输入框内部，不允许出现多个 prompt 光标残留。
+- 后台任务、agent、verification、compact 默认只显示一行摘要；详情通过 `/background`、任务详情或展开操作查看。
+- 状态栏字段必须短、稳定、可截断；宽度不足时按优先级降级显示，不允许撑爆终端宽度。
+- ANSI 样式必须在宽度计算前剥离或正确处理；中文、全角字符和 emoji 宽度必须按终端显示宽度计算。
+- Windows Terminal resize、长中文路径、多行粘贴、连续工具输出必须有回归测试。
+- 工具、agent、provider、background task 不得直接写 UI stdout；必须产生结构化事件，由 TUI 统一消费。
+- 长输出必须截断展示并保存完整日志路径。
+- 轻提示只能进入 `hints` 或 `system events` 区域，不得打断当前输入。
+- 渲染失败必须降级为普通文本日志，不得导致主进程崩溃。
+- 复查、验证、compact、agent 等长任务不能只显示“still running”；必须显示当前步骤、进度、耗时、预计范围、日志路径和可用操作。
+
+推荐显示优先级：
+
+1. 当前输入和正在执行的关键确认。
+2. 当前任务/工具的一行状态。
+3. 状态栏短字段。
+4. 轻提示。
+5. 可展开后台详情。
+
+渲染回归至少覆盖：
+
+- 连续 20 轮普通对话。
+- 连续 10 个工具事件。
+- 一个后台任务运行并刷新状态。
+- 一个 verifier/verification 任务运行、heartbeat、完成结果上报。
+- 一个 compact/system event 插入。
+- 中文路径和全角文本。
+- 多行粘贴。
+- 终端宽度变窄。
+- 长状态栏字段截断。
 
 ## 7. Provider 规格
 
@@ -543,6 +625,31 @@ export type RoleHandoff = {
 - 是否存在会导致高成本的配置。
 
 ## 8. Tool 规格
+
+### 8.0 任务启动确认 / Start Gate
+
+```ts
+export type StartGateDecision =
+  | { status: 'discussion_only'; reason: string }
+  | { status: 'needs_confirmation'; taskSummary: string; risk: 'low' | 'medium' | 'high' }
+  | { status: 'confirmed'; taskSummary: string }
+```
+
+要求：
+
+- 用户只是咨询、评估、提想法、问“要不要做”、要求设计方案时，默认 `discussion_only` 或 `needs_confirmation`。
+- 进入写文件、多文件修改、阶段开发、agent、job、workflow、联网安装、依赖变更、构建发布、数据迁移前必须确认。
+- 只读定位、少量文件读取、`rg`、`git status`、解释报错可以不弹确认，但必须保持范围收敛。
+- Start Gate 不替代权限审批；确认开始任务后，具体工具仍走权限管道。
+- TUI 确认文案必须轻量：`开始` / `先不要，只继续讨论`。
+
+示例：
+
+```text
+我理解这是一个新增任务。是否现在开始执行？
+1. 开始
+2. 先不要，只继续讨论
+```
 
 ```ts
 export type ToolDefinition<Input, Output> = {
@@ -834,6 +941,19 @@ export type VerificationReport = {
 
 ### 10.3 Verifier Agent
 
+Verifier / verification 运行状态必须复用 `BackgroundTask`：
+
+- 启动后立即显示摘要：验证目标、验证命令数量、预计耗时范围、日志入口。
+- 每个验证步骤更新 `currentStep` 和 `progress`，例如 `typecheck 2/5`。
+- 长时间无输出时主动 heartbeat，不需要用户追问。
+- 输出文件为空时显示“复查尚未产生有效输出”，不得误报 PASS / FAIL。
+- 完成后统一给出 `pass` / `fail` / `partial`：
+  - `pass`：验证命令通过，复查未发现阻塞问题。
+  - `fail`：验证失败或发现必须修复的问题。
+  - `partial`：本地验证通过但关键外部条件缺失，或只完成部分检查。
+- verifier 未完成时，主会话只能说“等待复查结果”，不能宣布阶段完成。
+- `/background` 和 `/verify last` 必须能看到最近一次 verifier 的命令、状态、日志、结果和下一步建议。
+
 输入：
 
 - diff。
@@ -1043,13 +1163,29 @@ export type CacheTurnStats = {
   compacted: boolean
   rawUsage?: unknown
 }
+
+export type CacheHistoryConfig = {
+  maxTurns: number
+  warnBelowHitRate: number
+  persistPath: string
+}
+
+export type LightHint = {
+  id: string
+  severity: 'info' | 'warning'
+  message: string
+  suggestedCommand: string
+  dedupeKey: string
+  cooldownMs: number
+}
 ```
 
 要求：
 
-- 最近 20 轮环形缓冲。
+- 最近 20 轮环形缓冲，默认 `maxTurns=20`。
+- `maxTurns` 可通过配置或 `/cache-log config size <n>` 修改，超过上限自动淘汰旧记录。
 - `/cache-log` 可查看。
-- 低于阈值状态栏警告。
+- 低于阈值使用 CCB 风格轻提示，不弹窗打断。
 - cache break 必须记录原因。
 - 命中率优先基于 provider/API 返回的真实 usage 字段计算。
 - 如果 provider 不返回 cache read/write usage，`source` 必须标记为 `estimated`，UI 必须显示“不支持真实缓存统计”。
@@ -1057,6 +1193,9 @@ export type CacheTurnStats = {
 - `/cache-log` 必须显示每轮 input/output/cache read/cache write tokens、model、provider、compact 状态。
 - 支持导出最近 20 轮缓存日志，用于和账号账单交叉验证。
 - cache break 诊断必须覆盖 system prompt、tool schema、MCP tool list、model changed、compact、memory changed。
+- 轻提示必须本地规则触发，不额外调用模型。
+- 轻提示必须限频、可关闭、可静默。
+- 轻提示只建议命令，不替用户执行。
 
 Cost：
 
@@ -1073,6 +1212,13 @@ export type CostSummary = {
   billingSource?: string
 }
 ```
+
+要求：
+
+- Cost 默认不进入状态栏。
+- `/usage` 展示原始 token/cache usage。
+- `/stats` 展示综合统计、耗时、模型和可选费用估算。
+- 金额必须标记 `estimated`，不得伪装成真实账单。
 
 ### 12.1 缓存命中率计算口径
 
@@ -1178,6 +1324,22 @@ export type MemoryItem = {
   updatedAt: string
   status: 'active' | 'disabled' | 'candidate'
 }
+
+export type HandoffPacket = {
+  id: string
+  sessionId: string
+  projectPath: string
+  phase?: string
+  objective: string
+  completed: string[]
+  pending: string[]
+  todoIds: string[]
+  keyFiles: string[]
+  verification: VerificationReport[]
+  risks: string[]
+  indexStatus: IndexHealth
+  createdAt: string
+}
 ```
 
 要求：
@@ -1192,6 +1354,14 @@ export type MemoryItem = {
 - 记忆写入前必须明确 scope 和 storagePath。
 - `/memory storage` 必须能解释每类记忆当前写在哪里。
 - 迁移项目时，项目级记忆必须能随项目目录一起迁移。
+- `LINGHUN.md` 只保存长期稳定事实、工程规则、常用命令和禁止事项。
+- 临时想法、阶段进度、短期计划必须写入 `HandoffPacket`，不得无限追加到 `LINGHUN.md`。
+- 首次进入项目缺少 `LINGHUN.md` 时，用轻提示建议 `/init linghun-md`。
+- AI 更新 `LINGHUN.md` 默认需要用户确认。
+- 新会话启动上下文必须优先使用 `LINGHUN.md`、最近 `HandoffPacket`、Todo、验证结果和索引状态，禁止直接塞完整历史聊天。
+- `/resume` 只注入必要摘要、证据和关键文件列表。
+- `/branch` 创建独立分支会话并记录父会话 id。
+- `/fork` 派生子会话或 agent 时，只传任务摘要、证据、必要文件列表和权限范围。
 
 ## 16. Agent 规格
 
@@ -1199,6 +1369,8 @@ export type MemoryItem = {
 export type AgentRun = {
   id: string
   type: 'explorer' | 'worker' | 'verifier' | 'planner'
+  parentSessionId?: string
+  forkedFrom?: string
   model: string
   permissionMode: PermissionMode
   status: 'running' | 'completed' | 'failed' | 'cancelled'
@@ -1214,6 +1386,8 @@ Agent 限制：
 - worker 可编辑但受权限。
 - planner 只规划。
 - 默认最多 3 个并发 agent。
+- `/fork` 必须记录父会话和派生原因。
+- `/fork` 不允许复制完整历史，只允许结构化 handoff、证据、必要文件列表和权限范围。
 
 ## 17. Jobs 长期托管规格
 
@@ -1225,6 +1399,7 @@ export type JobDefinition = {
   name: string
   projectPath: string
   prompt: string
+  targetPhase?: string
   schedule: string
   enabled: boolean
   maxRuntimeMinutes: number
@@ -1234,17 +1409,45 @@ export type JobDefinition = {
   allowBash: boolean
   allowAgents: boolean
   requirePlanBeforeWrite: boolean
+  continuousPhases: boolean
+  remoteChannels?: string[]
 }
 ```
 
 要求：
 
 - 每次 job 创建独立 session。
+- 每次 job 必须创建 `HandoffPacket`，用于新会话接续。
+- 默认一次只推进一个阶段；`continuousPhases=false`。
+- 连续阶段模式必须由用户明确开启，每阶段之间仍必须有交付文档、验证结果和确认点。
+- 自动新会话只能读取 `LINGHUN.md`、阶段状态、最近 handoff、Todo、验证结果和索引状态。
+- 禁止把完整历史聊天直接塞入 job 新会话。
 - 超预算停止。
 - 高风险暂停。
 - 生成报告。
 - 可手动 run-now。
 - 可 pause/resume。
+
+Remote Channel：
+
+```ts
+export type RemoteChannelConfig = {
+  id: string
+  type: 'wechat' | 'feishu' | 'qq' | 'dingtalk' | 'telegram' | 'discord' | 'webhook'
+  enabled: boolean
+  allowedCommands: string[]
+  requireApprovalFor: PermissionMode[]
+  summaryOnly: boolean
+}
+```
+
+要求：
+
+- 默认关闭。
+- 只发送命令、摘要、审批和结果报告，不推送完整上下文。
+- 必须有来源校验、用户绑定、命令白名单和审批记录。
+- 通道失败不影响本地 TUI 和当前任务。
+- 高风险操作必须暂停等待明确审批。
 
 ## 18. Skills / Workflow 规格
 
@@ -1273,8 +1476,59 @@ export type Skill = {
 - 不把所有 skill 全文塞进 prompt。
 - 先检索摘要，再加载必要 skill。
 - 成功任务可生成候选 skill，用户确认后写入。
+- `/workflows` 必须列出工作流模板、用途、风险和是否会写文件。
+- 工作流启动前走 Start Gate；写入和命令仍走权限管道。
 
-## 18.1 Plugin 规格
+## 18.1 Hooks 规格
+
+Hooks 是高级自动化能力，默认关闭，新手模式隐藏。
+
+```ts
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'Stop'
+  | 'Notification'
+  | 'Workflow'
+  | 'Plugin'
+  | 'SessionStart'
+  | 'SessionEnd'
+  | 'HandoffCreated'
+
+export type HookConfig = {
+  id: string
+  event: HookEvent
+  source: 'user' | 'project' | 'plugin'
+  command?: string
+  url?: string
+  timeoutMs: number
+  enabled: boolean
+  requiresTrust: boolean
+}
+
+export type HookRunResult = {
+  id: string
+  hookId: string
+  status: 'passed' | 'blocked' | 'failed' | 'timed_out'
+  message?: string
+  logPath?: string
+}
+```
+
+要求：
+
+- 项目 Hook 必须在项目信任后才执行。
+- Hook 不能绕过权限系统。
+- Hook 失败不能拖垮主对话。
+- Hook 输出必须截断，大输出写日志路径。
+- Hook 必须有超时，默认超时有限制。
+- PreToolUse 可阻止高风险工具。
+- PostToolUse 可触发最小验证或检查。
+- Stop 可阻止阶段任务在未验证、未写交付文档、未生成 handoff 时结束。
+- Notification 只发送摘要，不发送完整上下文。
+- `/doctor hooks` 和 `/plugins doctor` 必须显示来源、路径、触发事件、最近运行结果、错误原因和是否被禁用。
+
+## 18.2 Plugin 规格
 
 Plugin 是系统扩展包，和 Skill 分开。Skill 影响模型怎么做事，Plugin 影响 Linghun 能接入什么外部能力。
 
