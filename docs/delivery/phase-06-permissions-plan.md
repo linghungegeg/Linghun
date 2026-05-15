@@ -436,11 +436,12 @@ commands:
 validation:
   - corepack pnpm test
   - corepack pnpm typecheck
-pending_final_validation:
   - corepack pnpm build
   - corepack pnpm check
   - CLI smoke
   - REPL smoke transcript inspection
+  - independent verifier spot-check PASS
+  - allowed.txt cleanup confirmed
 next_phase:
   - Phase 07 behavior guardrail/checkpoint/rewind
 must_not_start_without_user_confirmation:
