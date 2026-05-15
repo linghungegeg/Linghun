@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
   stdin as defaultStdin,
@@ -11,7 +11,7 @@ import type { Readable, Writable } from "node:stream";
 import { getSessionRootDir, loadConfig } from "@linghun/config";
 import { SessionStore, type TranscriptEvent } from "@linghun/core";
 import { DeepSeekProvider, ModelGateway, type ModelMessage } from "@linghun/providers";
-import { LINGHUN_NAME, type PermissionMode } from "@linghun/shared";
+import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
   type DiffSummary,
   type TodoItem,
@@ -60,6 +60,81 @@ export type PlanProposal = {
   options: { id: string; title: string; steps: string[]; risks: string[] }[];
 };
 
+export type BackgroundTaskStatus = "running" | "paused" | "completed" | "failed" | "cancelled";
+
+export type BackgroundTaskState = {
+  id: string;
+  kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp";
+  title: string;
+  status: BackgroundTaskStatus;
+  currentStep?: string;
+  progress?: { completed: number; total?: number; label?: string };
+  startedAt: string;
+  updatedAt: string;
+  lastOutputAt?: string;
+  estimatedRemainingMs?: number;
+  heartbeatIntervalMs: number;
+  staleAfterMs: number;
+  logPath?: string;
+  outputPath?: string;
+  hasOutput: boolean;
+  result?: "pass" | "fail" | "partial" | "cancelled";
+  userVisibleSummary: string;
+  nextAction?: string;
+};
+
+export type CheckpointState = {
+  id: string;
+  sessionId: string;
+  createdAt: string;
+  reason: string;
+  changedFiles: string[];
+  restoreKind: "git" | "snapshot";
+  files: { path: string; existed: boolean; content?: string }[];
+};
+
+export type EvidenceRecord = {
+  id: string;
+  kind:
+    | "file_read"
+    | "grep_result"
+    | "index_query"
+    | "command_output"
+    | "test_result"
+    | "web_source"
+    | "user_provided";
+  summary: string;
+  source: string;
+  supportsClaims: string[];
+  createdAt: string;
+};
+
+type MessageKey =
+  | "appTitle"
+  | "intro"
+  | "currentModel"
+  | "unknownCommand"
+  | "exit"
+  | "status"
+  | "statusShort"
+  | "help"
+  | "inputPrompt"
+  | "noSessions"
+  | "sessionHeader"
+  | "noSummary"
+  | "checkpointCreated"
+  | "checkpointNone"
+  | "checkpointRestored"
+  | "checkpointMissing"
+  | "backgroundNone"
+  | "backgroundEmptyOutput"
+  | "backgroundRunning"
+  | "interruptIdle"
+  | "interruptCancelled"
+  | "btwPrefix"
+  | "evidenceBlocked"
+  | "claimNeedsDisclaimer";
+
 export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
@@ -69,8 +144,13 @@ export type TuiContext = {
   projectPath: string;
   tools: ToolContext;
   permissions: PermissionState;
+  language: Language;
+  backgroundTasks: BackgroundTaskState[];
+  checkpoints: CheckpointState[];
+  evidence: EvidenceRecord[];
   activePlan?: PlanProposal;
   planAccepted?: boolean;
+  interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
 };
 
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
@@ -87,6 +167,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     projectPath,
     tools: createToolContext(projectPath),
     permissions: await loadPermissionState(projectPath),
+    language: config.language,
+    backgroundTasks: [],
+    checkpoints: [],
+    evidence: [],
+    interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
     new DeepSeekProvider({
@@ -96,9 +181,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     }),
   ]);
 
-  writeLine(output, `${LINGHUN_NAME} Phase 06 TUI / REPL`);
+  writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
   writeStatus(output, context);
-  writeLine(output, "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。\n");
+  writeLine(output, `${t(context, "intro")}\n`);
 
   try {
     for await (const line of readInputLines(input, output)) {
@@ -113,7 +198,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
           context.sessionEnded = true;
         }
-        writeLine(output, "已退出 Linghun。");
+        writeLine(output, t(context, "exit"));
         return 0;
       }
       if (commandResult === "message") {
@@ -139,12 +224,16 @@ export async function handleSlashCommand(
 
   const [command, ...rest] = text.split(/\s+/);
   if (command === "/help") {
-    writeLine(output, formatHelp());
+    writeLine(output, formatHelp(context.language));
     return "handled";
   }
   if (command === "/model") {
-    writeLine(output, `当前模型：${context.model}`);
+    writeLine(output, `${t(context, "currentModel")}：${context.model}`);
     writeStatus(output, context);
+    return "handled";
+  }
+  if (command === "/language") {
+    await handleLanguageCommand(rest, context, output);
     return "handled";
   }
   if (command === "/mode") {
@@ -157,6 +246,30 @@ export async function handleSlashCommand(
   }
   if (command === "/permissions") {
     await handlePermissionsCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/background") {
+    await handleBackgroundCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/rewind") {
+    await handleRewindCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/btw") {
+    await handleBtwCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/interrupt") {
+    await handleInterruptCommand(context, output);
+    return "handled";
+  }
+  if (command === "/claim-check") {
+    await handleClaimCheckCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/status") {
+    writeStatus(output, context);
     return "handled";
   }
   if (command === "/tab") {
@@ -186,15 +299,15 @@ export async function handleSlashCommand(
 
     const sessions = await context.store.list();
     if (sessions.length === 0) {
-      writeLine(output, "当前项目还没有会话。");
+      writeLine(output, t(context, "noSessions"));
       return "handled";
     }
-    writeLine(output, "会话ID  更新时间  摘要");
+    writeLine(output, t(context, "sessionHeader"));
     for (const session of sessions) {
       const marker = session.id === context.sessionId ? "*" : " ";
       writeLine(
         output,
-        `${marker} ${session.id}  ${session.updatedAt}  ${session.summary ?? "（无摘要）"}`,
+        `${marker} ${session.id}  ${session.updatedAt}  ${session.summary ?? t(context, "noSummary")}`,
       );
     }
     return "handled";
@@ -322,6 +435,25 @@ async function handlePlanCommand(
   writeStatus(output, context);
 }
 
+async function handleLanguageCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const language = args[0] as Language | undefined;
+  if (!language) {
+    writeLine(output, `language: ${context.language}`);
+    return;
+  }
+  if (language !== "zh-CN" && language !== "en-US") {
+    writeLine(output, "usage: /language zh-CN|en-US");
+    return;
+  }
+  context.language = language;
+  writeLine(output, language === "zh-CN" ? "语言已切换为中文。" : "Language switched to English.");
+  writeStatus(output, context);
+}
+
 async function handlePermissionsCommand(
   args: string[],
   context: TuiContext,
@@ -400,6 +532,155 @@ async function handlePermissionsCommand(
   );
 }
 
+async function handleBackgroundCommand(
+  _args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (context.backgroundTasks.length === 0) {
+    writeLine(output, t(context, "backgroundNone"));
+    return;
+  }
+  for (const task of context.backgroundTasks) {
+    writeLine(output, formatBackgroundTask(task, context.language));
+  }
+}
+
+async function handleRewindCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (!action || action === "list") {
+    if (context.checkpoints.length === 0) {
+      writeLine(output, t(context, "checkpointNone"));
+      return;
+    }
+    writeLine(
+      output,
+      context.checkpoints
+        .map(
+          (checkpoint) =>
+            `${checkpoint.id}  ${checkpoint.createdAt}  ${checkpoint.changedFiles.join(", ")}`,
+        )
+        .join("\n"),
+    );
+    return;
+  }
+  if (action !== "restore") {
+    writeLine(output, "用法：/rewind | /rewind restore <checkpointId>");
+    return;
+  }
+  const checkpointId = args[1] ?? context.checkpoints[0]?.id;
+  if (!checkpointId) {
+    writeLine(output, t(context, "checkpointNone"));
+    return;
+  }
+  const checkpoint = context.checkpoints.find((item) => item.id === checkpointId);
+  if (!checkpoint) {
+    writeLine(output, `${t(context, "checkpointMissing")}：${checkpointId}`);
+    return;
+  }
+  for (const file of checkpoint.files) {
+    const target = resolve(context.projectPath, file.path);
+    if (!file.existed) {
+      await rm(target, { force: true });
+      continue;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.content ?? "", "utf8");
+  }
+  context.tools.changedFiles = uniqueStrings([
+    ...context.tools.changedFiles,
+    ...checkpoint.changedFiles,
+  ]);
+  const sessionId = await ensureSession(context);
+  await context.store.appendEvent(sessionId, {
+    type: "checkpoint_restored",
+    checkpointId: checkpoint.id,
+    createdAt: new Date().toISOString(),
+  });
+  writeLine(output, `${t(context, "checkpointRestored")}：${checkpoint.id}`);
+  writeStatus(output, context);
+}
+
+async function handleBtwCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const question = args.join(" ").trim();
+  if (!question) {
+    writeLine(output, "用法：/btw <临时小问题>");
+    return;
+  }
+  const answer = `${t(context, "btwPrefix")}：${question}\n${context.language === "en-US" ? "This temporary answer does not change Todo, plan, or checkpoints." : "这次临时回答不会修改 Todo、Plan 或 checkpoint。"}`;
+  const sessionId = await ensureSession(context);
+  await context.store.appendEvent(sessionId, {
+    type: "btw_question",
+    id: randomUUID(),
+    text: question,
+    answer,
+    createdAt: new Date().toISOString(),
+  });
+  writeLine(output, answer);
+}
+
+async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
+  const running = context.backgroundTasks.find((task) => task.status === "running");
+  const sessionId = await ensureSession(context);
+  if (!running) {
+    await context.store.appendEvent(sessionId, {
+      type: "interrupt",
+      id: randomUUID(),
+      status: "cancelled",
+      message: t(context, "interruptIdle"),
+      createdAt: new Date().toISOString(),
+    });
+    writeLine(output, t(context, "interruptIdle"));
+    return;
+  }
+  running.status = "cancelled";
+  running.result = "cancelled";
+  running.updatedAt = new Date().toISOString();
+  running.nextAction =
+    context.language === "en-US"
+      ? "Review /background before continuing."
+      : "继续前可先查看 /background。";
+  await appendBackgroundTaskEvent(context, sessionId, running);
+  await context.store.appendEvent(sessionId, {
+    type: "interrupt",
+    id: randomUUID(),
+    status: "cancelled",
+    message: t(context, "interruptCancelled"),
+    createdAt: new Date().toISOString(),
+  });
+  writeLine(output, t(context, "interruptCancelled"));
+}
+
+async function handleClaimCheckCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const claim = args.join(" ").trim();
+  if (!claim) {
+    writeLine(output, "用法：/claim-check <claim>");
+    return;
+  }
+  const result = checkClaimSupport(claim, context);
+  const sessionId = await ensureSession(context);
+  await context.store.appendEvent(sessionId, {
+    type: "claim_check",
+    id: randomUUID(),
+    status: result.status,
+    unsupportedClaims: result.unsupportedClaims,
+    createdAt: new Date().toISOString(),
+  });
+  writeLine(output, formatClaimCheck(result, context.language));
+}
+
 async function sendMessage(
   text: string,
   context: TuiContext,
@@ -409,7 +690,17 @@ async function sendMessage(
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
-  writeLine(output, "状态：正在请求模型...");
+  const gate = checkEvidenceGate(text, context);
+  if (gate) {
+    await appendSystemEvent(context, sessionId, gate, "warning");
+    writeLine(output, gate);
+    writeStatus(output, context);
+    return;
+  }
+  writeLine(
+    output,
+    context.language === "en-US" ? "Status: requesting model..." : "状态：正在请求模型...",
+  );
 
   const assistantEventId = randomUUID();
   let assistantText = "";
@@ -418,7 +709,9 @@ async function sendMessage(
     {
       role: "system",
       content:
-        "你是 Linghun Phase 06 的工程型中文助手。回答要简洁、明确；只能声称具备当前阶段已实现的核心工具、权限与 Plan 能力。",
+        context.language === "en-US"
+          ? "You are Linghun Phase 07 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 07 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
@@ -498,9 +791,42 @@ function decodeInput(bytes: Buffer): string {
   return new TextDecoder("gb18030", { fatal: false }).decode(bytes);
 }
 
-function formatHelp(): string {
+function formatHelp(language: Language): string {
+  if (language === "en-US") {
+    return `Available commands:
+  /help                 Show help
+  /language zh-CN|en-US Switch UI language
+  /model                Show current model
+  /sessions             List sessions
+  /sessions resume <id> Resume a session
+  /mode                 Show permission mode
+  /mode plan|acceptEdits|dontAsk|auto|bypass|default  Switch mode
+  /tab                  Shift+Tab equivalent: cycle common modes
+  /plan                 Show structured plan options
+  /plan accept [id]     Accept a plan and return to default
+  /permissions          Show permission rules
+  /background           Show collapsed background task summaries
+  /rewind               List checkpoints
+  /rewind restore <id>  Restore a checkpoint
+  /btw <question>       Answer a temporary question without changing Todo/Plan/checkpoints
+  /interrupt            Mark current running background task as cancelled
+  /claim-check <claim>  Downgrade unsupported final claims
+  /read <path>          Read file
+  /write <path> <text>  Write file
+  /edit <path> <old> => <new>  Unique replacement
+  /multiedit <path> <old> => <new>  Minimal multi-edit entry
+  /grep <pattern> [path] Search text
+  /glob <pattern> [path] Match files
+  /bash <command>       Run command with collapsed task status and full log
+  /todo                 Show tasks
+  /diff                 Show changed file summary
+  /exit                 Exit
+
+Slash commands, config keys, and transcript event fields stay in English.`;
+  }
   return `可用命令：
   /help                 显示帮助
+  /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
   /sessions             列出当前项目会话
   /sessions resume <id> 恢复历史会话
@@ -515,6 +841,12 @@ function formatHelp(): string {
   /permissions recent   查看最近拒绝
   /permissions recent delete <id> 删除单条最近拒绝
   /permissions recent clear  清空最近拒绝
+  /background           查看后台任务一行摘要
+  /rewind               列出 checkpoint
+  /rewind restore <id>  恢复 checkpoint
+  /btw <question>       临时插问，不修改 Todo/Plan/checkpoint
+  /interrupt            标记当前长任务已取消
+  /claim-check <claim>  降级缺少证据的最终结论
   /read <path>          读取文件
   /write <path> <text>  写入文件
   /edit <path> <old> => <new>  唯一替换
@@ -579,6 +911,17 @@ async function handleToolCommand(
       writeLine(output, permission.preflight);
     }
 
+    const checkpoint = await maybeCreateCheckpoint(name, input, context, sessionId);
+    if (checkpoint) {
+      writeLine(output, `${t(context, "checkpointCreated")}：${checkpoint.id}`);
+    }
+    const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;
+    if (task) {
+      context.backgroundTasks.unshift(task);
+      await appendBackgroundTaskEvent(context, sessionId, task);
+      writeLine(output, formatBackgroundTask(task, context.language));
+    }
+
     const callId = randomUUID();
     await context.store.appendEvent(sessionId, {
       type: "tool_call_start",
@@ -588,9 +931,24 @@ async function handleToolCommand(
       createdAt: new Date().toISOString(),
     });
     const result = await runTool(name, input, context.tools);
+    if (task) {
+      task.status = "completed";
+      task.result = "pass";
+      task.updatedAt = new Date().toISOString();
+      task.lastOutputAt = task.updatedAt;
+      task.hasOutput = Boolean(result.output.text.trim());
+      task.logPath = result.output.fullOutputPath;
+      task.outputPath = result.output.fullOutputPath;
+      task.nextAction =
+        context.language === "en-US"
+          ? "Review the summarized output or open the log."
+          : "可查看摘要输出或打开完整日志。";
+      await appendBackgroundTaskEvent(context, sessionId, task);
+    }
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
     await appendDerivedToolEvents(context, sessionId, name, result.output);
-    writeLine(output, formatToolOutput(name, result.output));
+    await recordToolEvidence(context, sessionId, name, result.output);
+    writeLine(output, formatToolOutput(name, result.output, context.language));
     writeStatus(output, context);
   } catch (error) {
     writeLine(output, formatError(error));
@@ -949,6 +1307,206 @@ function formatPlanProposal(proposal: PlanProposal): string {
   return lines.join("\n");
 }
 
+async function maybeCreateCheckpoint(
+  name: ToolName,
+  input: unknown,
+  context: TuiContext,
+  sessionId: string,
+): Promise<CheckpointState | null> {
+  const files = collectInputFiles(input);
+  const needsCheckpoint = !builtInTools[name].isReadOnly && files.length > 0;
+  if (!needsCheckpoint) {
+    return null;
+  }
+  const checkpoint: CheckpointState = {
+    id: randomUUID(),
+    sessionId,
+    createdAt: new Date().toISOString(),
+    reason: `before ${name}`,
+    changedFiles: files,
+    restoreKind: "snapshot",
+    files: [],
+  };
+  for (const file of files) {
+    const target = resolve(context.projectPath, file);
+    try {
+      checkpoint.files.push({ path: file, existed: true, content: await readFile(target, "utf8") });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        checkpoint.files.push({ path: file, existed: false });
+        continue;
+      }
+      throw error;
+    }
+  }
+  context.checkpoints.unshift(checkpoint);
+  await context.store.appendEvent(sessionId, {
+    type: "checkpoint_created",
+    checkpoint: {
+      id: checkpoint.id,
+      sessionId: checkpoint.sessionId,
+      createdAt: checkpoint.createdAt,
+      reason: checkpoint.reason,
+      changedFiles: checkpoint.changedFiles,
+      restoreKind: checkpoint.restoreKind,
+    },
+    createdAt: checkpoint.createdAt,
+  });
+  return checkpoint;
+}
+
+function createBackgroundTask(
+  name: ToolName,
+  input: unknown,
+  context: TuiContext,
+): BackgroundTaskState {
+  const now = new Date().toISOString();
+  const command =
+    typeof input === "object" && input !== null ? (input as { command?: unknown }).command : "";
+  const title =
+    name === "Bash" && typeof command === "string" ? `Bash: ${truncateDisplay(command, 40)}` : name;
+  return {
+    id: randomUUID(),
+    kind: "bash",
+    title,
+    status: "running",
+    currentStep: context.language === "en-US" ? "running command" : "正在执行命令",
+    progress: { completed: 0, total: 1, label: "Bash" },
+    startedAt: now,
+    updatedAt: now,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    userVisibleSummary:
+      context.language === "en-US"
+        ? "Started long task. Use /background for details."
+        : "长任务已启动。可用 /background 查看详情。",
+    nextAction:
+      context.language === "en-US"
+        ? "Wait for completion or use /interrupt."
+        : "等待完成，或用 /interrupt 中断。",
+  };
+}
+
+async function appendBackgroundTaskEvent(
+  context: TuiContext,
+  sessionId: string,
+  task: BackgroundTaskState,
+): Promise<void> {
+  await context.store.appendEvent(sessionId, {
+    type: "background_task_update",
+    task,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function recordToolEvidence(
+  context: TuiContext,
+  sessionId: string,
+  name: ToolName,
+  output: ToolOutput,
+): Promise<void> {
+  const kind =
+    name === "Read"
+      ? "file_read"
+      : name === "Grep" || name === "Glob"
+        ? "grep_result"
+        : name === "Bash"
+          ? "command_output"
+          : null;
+  if (!kind) {
+    return;
+  }
+  const evidence: EvidenceRecord = {
+    id: randomUUID(),
+    kind,
+    summary: `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
+    source: output.fullOutputPath ?? name,
+    supportsClaims: [name],
+    createdAt: new Date().toISOString(),
+  };
+  context.evidence.unshift(evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+}
+
+async function appendSystemEvent(
+  context: TuiContext,
+  sessionId: string,
+  message: string,
+  level: "info" | "warning",
+): Promise<void> {
+  await context.store.appendEvent(sessionId, {
+    type: "system_event",
+    id: randomUUID(),
+    level,
+    message,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function checkEvidenceGate(text: string, context: TuiContext): string | null {
+  const lower = text.toLowerCase();
+  const asksCodeFact =
+    /代码|函数|调用链|实现|修复|验证|code|function|call chain|fixed|verified/.test(lower);
+  if (!asksCodeFact) {
+    return null;
+  }
+  if (context.evidence.length > 0) {
+    return null;
+  }
+  return t(context, "evidenceBlocked");
+}
+
+type ClaimCheck = {
+  status: "passed" | "needs_disclaimer" | "blocked";
+  unsupportedClaims: string[];
+};
+
+function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
+  const highRisk = [
+    "已修复",
+    "已验证",
+    "测试通过",
+    "代码里",
+    "调用链是",
+    "不会影响",
+    "fixed",
+    "verified",
+    "tests passed",
+    "in the code",
+  ];
+  const unsupportedClaims = highRisk.filter((item) => claim.includes(item));
+  if (unsupportedClaims.length === 0 || context.evidence.length > 0) {
+    return { status: "passed", unsupportedClaims: [] };
+  }
+  return { status: "needs_disclaimer", unsupportedClaims };
+}
+
+function formatClaimCheck(result: ClaimCheck, language: Language): string {
+  if (result.status === "passed") {
+    return language === "en-US" ? "Claim check passed." : "Claim Checker：通过。";
+  }
+  const claims = result.unsupportedClaims.join(", ");
+  return language === "en-US"
+    ? `Claim needs disclaimer: ${claims}. Use unverified / pending confirmation wording.`
+    : `Claim Checker：缺少证据，需降级表述：${claims}。请改写为“未验证 / 待确认”。`;
+}
+
+function formatBackgroundTask(task: BackgroundTaskState, language: Language): string {
+  const progress = task.progress ? ` ${task.progress.completed}/${task.progress.total ?? "?"}` : "";
+  const output = task.hasOutput
+    ? (task.logPath ?? "-")
+    : language === "en-US"
+      ? "no valid output yet"
+      : "尚未产生有效输出";
+  return language === "en-US"
+    ? `[background] ${task.title} · ${task.status} · ${task.currentStep ?? "-"}${progress} · log: ${output} · next: ${task.nextAction ?? "-"}`
+    : `[后台] ${task.title} · ${task.status} · ${task.currentStep ?? "-"}${progress} · 日志：${output} · 下一步：${task.nextAction ?? "-"}`;
+}
+
 function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
   return {
     type: "tool_call_end",
@@ -984,10 +1542,17 @@ function isDiffSummary(value: unknown): value is DiffSummary {
   return typeof value === "object" && value !== null && "changedFiles" in value;
 }
 
-function formatToolOutput(name: ToolName, output: ToolOutput): string {
-  const lines = [`工具 ${name} 结果：`, output.text];
+function formatToolOutput(name: ToolName, output: ToolOutput, language: Language): string {
+  const lines = [
+    language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
+    output.text,
+  ];
   if (output.truncated && output.fullOutputPath) {
-    lines.push(`完整日志：${output.fullOutputPath}`);
+    lines.push(
+      language === "en-US"
+        ? `Full log: ${output.fullOutputPath}`
+        : `完整日志：${output.fullOutputPath}`,
+    );
   }
   return lines.join("\n");
 }
@@ -1008,10 +1573,108 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 }
 
 function writeStatus(output: Writable, context: TuiContext): void {
-  writeLine(
-    output,
-    `状态栏：session ${context.sessionId ?? "未创建"} · model ${context.model} · mode ${context.permissionMode} · cache -- · index --`,
-  );
+  const background = context.backgroundTasks.filter((task) => task.status === "running").length;
+  const status = t(context, "status", {
+    session: truncateDisplay(
+      context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
+      8,
+    ),
+    model: truncateDisplay(context.model, 18),
+    mode: context.permissionMode,
+    background: String(background),
+  });
+  writeLine(output, truncateDisplay(status, 96));
+}
+
+function t(context: TuiContext, key: MessageKey, values: Record<string, string> = {}): string {
+  let template = messages[context.language][key];
+  for (const [name, value] of Object.entries(values)) {
+    template = template.replaceAll(`{${name}}`, value);
+  }
+  return template;
+}
+
+const messages: Record<Language, Record<MessageKey, string>> = {
+  "zh-CN": {
+    appTitle: "{name} Phase 07 TUI / REPL",
+    intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
+    currentModel: "当前模型",
+    unknownCommand: "未知命令",
+    exit: "已退出 Linghun。",
+    status:
+      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache -- · index --",
+    statusShort: "状态栏：{mode} · bg {background}",
+    help: "帮助",
+    inputPrompt: "你> ",
+    noSessions: "当前项目还没有会话。",
+    sessionHeader: "会话ID  更新时间  摘要",
+    noSummary: "（无摘要）",
+    checkpointCreated: "已创建 checkpoint",
+    checkpointNone: "当前没有 checkpoint。",
+    checkpointRestored: "已恢复 checkpoint",
+    checkpointMissing: "未找到 checkpoint",
+    backgroundNone: "当前没有后台任务。",
+    backgroundEmptyOutput: "尚未产生有效输出",
+    backgroundRunning: "仍在运行",
+    interruptIdle: "当前没有正在运行的长任务；状态为 idle。",
+    interruptCancelled: "已标记当前长任务为 cancelled。",
+    btwPrefix: "临时插问",
+    evidenceBlocked:
+      "尚未确认，需要先检查。涉及代码事实的结论必须先通过 /read、/grep、索引查询或命令输出获得证据。",
+    claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
+  },
+  "en-US": {
+    appTitle: "{name} Phase 07 TUI / REPL",
+    intro: "Type a message to chat; use /help for commands; use /exit to quit.",
+    currentModel: "Current model",
+    unknownCommand: "Unknown command",
+    exit: "Exited Linghun.",
+    status:
+      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache -- · index --",
+    statusShort: "Status: {mode} · bg {background}",
+    help: "Help",
+    inputPrompt: "you> ",
+    noSessions: "No sessions for this project yet.",
+    sessionHeader: "Session ID  Updated At  Summary",
+    noSummary: "(no summary)",
+    checkpointCreated: "Checkpoint created",
+    checkpointNone: "No checkpoints yet.",
+    checkpointRestored: "Checkpoint restored",
+    checkpointMissing: "Checkpoint not found",
+    backgroundNone: "No background tasks.",
+    backgroundEmptyOutput: "no valid output yet",
+    backgroundRunning: "still running",
+    interruptIdle: "No long task is running; state is idle.",
+    interruptCancelled: "Current long task marked as cancelled.",
+    btwPrefix: "Temporary question",
+    evidenceBlocked:
+      "Not confirmed yet; evidence is required first. Use /read, /grep, index query, or command output before code-fact claims.",
+    claimNeedsDisclaimer:
+      "Evidence is missing; downgrade to unverified or pending confirmation wording.",
+  },
+};
+
+function truncateDisplay(text: string, maxWidth: number): string {
+  let width = 0;
+  let result = "";
+  for (const char of stripAnsi(text)) {
+    const charWidth = char.charCodeAt(0) > 0xff ? 2 : 1;
+    if (width + charWidth > maxWidth) {
+      return `${result}…`;
+    }
+    width += charWidth;
+    result += char;
+  }
+  return result;
+}
+
+function stripAnsi(text: string): string {
+  const escapeChar = String.fromCharCode(27);
+  return text.replace(new RegExp(`${escapeChar}\\[[0-9;]*m`, "g"), "");
+}
+
+function uniqueStrings(items: string[]): string[] {
+  return [...new Set(items)];
 }
 
 function createUserMessageEvent(text: string): TranscriptEvent {

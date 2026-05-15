@@ -34,6 +34,81 @@ export type TranscriptEvent =
   | { type: "session_start"; sessionId: string; projectPath: string; createdAt: string }
   | { type: "user_message"; id: string; text: string; createdAt: string }
   | { type: "assistant_text_delta"; id: string; text: string; createdAt: string }
+  | {
+      type: "system_event";
+      id: string;
+      level: "info" | "warning";
+      message: string;
+      createdAt: string;
+    }
+  | {
+      type: "background_task_update";
+      task: {
+        id: string;
+        kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp";
+        title: string;
+        status: "running" | "paused" | "completed" | "failed" | "cancelled";
+        currentStep?: string;
+        progress?: { completed: number; total?: number; label?: string };
+        startedAt: string;
+        updatedAt: string;
+        lastOutputAt?: string;
+        estimatedRemainingMs?: number;
+        heartbeatIntervalMs: number;
+        staleAfterMs: number;
+        logPath?: string;
+        outputPath?: string;
+        hasOutput: boolean;
+        result?: "pass" | "fail" | "partial" | "cancelled";
+        userVisibleSummary: string;
+        nextAction?: string;
+      };
+      createdAt: string;
+    }
+  | {
+      type: "checkpoint_created";
+      checkpoint: {
+        id: string;
+        sessionId: string;
+        createdAt: string;
+        reason: string;
+        changedFiles: string[];
+        restoreKind: "git" | "snapshot";
+      };
+      createdAt: string;
+    }
+  | { type: "checkpoint_restored"; checkpointId: string; createdAt: string }
+  | { type: "btw_question"; id: string; text: string; answer: string; createdAt: string }
+  | {
+      type: "interrupt";
+      id: string;
+      status: "cancelled" | "paused" | "background";
+      message: string;
+      createdAt: string;
+    }
+  | {
+      type: "evidence_record";
+      id: string;
+      kind:
+        | "file_read"
+        | "grep_result"
+        | "index_query"
+        | "command_output"
+        | "test_result"
+        | "web_source"
+        | "user_provided";
+      summary: string;
+      source: string;
+      supportsClaims: string[];
+      createdAt: string;
+    }
+  | {
+      type: "claim_check";
+      id: string;
+      status: "passed" | "needs_disclaimer" | "blocked";
+      unsupportedClaims: string[];
+      createdAt: string;
+    }
   | { type: "tool_call_start"; id: string; name: string; input: unknown; createdAt: string }
   | {
       type: "tool_call_end";

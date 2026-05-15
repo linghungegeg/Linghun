@@ -30,6 +30,11 @@ function createTestContext(
     projectPath: project,
     tools: createToolContext(project),
     permissions: { rules: [], recentDenied: [] },
+    language: "zh-CN",
+    backgroundTasks: [],
+    checkpoints: [],
+    evidence: [],
+    interrupt: { type: "idle" },
   };
 }
 
@@ -160,5 +165,100 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已删除最近拒绝");
     expect(context.permissions.recentDenied).toHaveLength(0);
     await expect(readFile(join(project, "ask.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("switches i18n output between zh-CN and en-US", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/help", context, output);
+    await handleSlashCommand("/language en-US", context, output);
+    await handleSlashCommand("/help", context, output);
+
+    expect(output.text).toContain("可用命令");
+    expect(output.text).toContain("Language switched to English.");
+    expect(output.text).toContain("Available commands");
+    expect(output.text).toContain("Status: session");
+  });
+
+  it("creates checkpoints and restores them with rewind", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "sample.txt"), "alpha", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/write sample.txt beta", context, output);
+    const checkpointId = context.checkpoints[0]?.id;
+    await handleSlashCommand("/rewind", context, output);
+    await handleSlashCommand(`/rewind restore ${checkpointId}`, context, output);
+
+    expect(output.text).toContain("已创建 checkpoint");
+    expect(output.text).toContain("已恢复 checkpoint");
+    expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
+  });
+
+  it("tracks background task status and empty output state", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/bash node --version", context, output);
+    await handleSlashCommand("/background", context, output);
+
+    expect(output.text).toContain("[后台]");
+    expect(output.text).toContain("Bash:");
+    expect(context.backgroundTasks[0]?.status).toBe("completed");
+    expect(context.backgroundTasks[0]?.logPath).toBeTruthy();
+  });
+
+  it("blocks code-fact answers without evidence and downgrades unsupported claims", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check", context, output);
+    await handleSlashCommand("/claim-check 已修复并已验证", context, output);
+
+    expect(output.text).toContain("用法：/claim-check <claim>");
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("未验证 / 待确认");
+  });
+
+  it("keeps /btw isolated from todo, plan, and checkpoints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/plan", context, output);
+    await handleSlashCommand("/todo add 主任务", context, output);
+    await handleSlashCommand("/btw 现在是什么阶段？", context, output);
+
+    expect(output.text).toContain("临时插问");
+    expect(context.activePlan).toBeTruthy();
+    expect(context.tools.todos).toHaveLength(1);
+    expect(context.checkpoints).toHaveLength(0);
+  });
+
+  it("records interrupt state clearly", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    expect(output.text).toContain("状态为 idle");
   });
 });
