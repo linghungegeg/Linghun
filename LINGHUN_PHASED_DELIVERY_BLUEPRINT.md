@@ -285,8 +285,17 @@ main · DeepSeek V4 Pro · strict · cache 94% · index ready · 1 agent
 
 ```text
 当前模型不支持图片理解。
-可以切换到支持视觉的模型提取图片内容，再继续交给当前模型写代码。
+可以配置 vision provider 临时提取图片内容，再继续交给当前主模型写代码。
 ```
+
+成品行为：
+
+- 不要求主力 coding 模型本身支持多模态。
+- 当用户输入图片、截图、设计图或 UI 错位图时，Linghun 应按需调用已配置的 vision provider。
+- vision provider 只负责 OCR、截图理解、UI 区域识别和结构化观察，不负责写代码。
+- 视觉结果必须写入 evidence / transcript，并交回当前 executor 模型继续开发。
+- 当前主模式不被永久切换；例如 deep 模式下仍由 DeepSeek V4 Pro 执行代码，vision provider 只是临时能力补充。
+- 未配置 vision provider 时，必须提示用户配置或切换支持视觉的模型，不能假装看懂图片。
 
 ### 4.5 新手模式
 
@@ -846,6 +855,7 @@ cancel 取消
 - 用户不需要反复追问复查状态；超过 30 秒无输出时应主动轻提示当前步骤仍在运行。
 - 检查是否违反用户要求、是否过度改动、是否缺少测试。
 - 验证失败时回到修复循环，最多重试有限次数。
+- 必须区分验证命令失败和验证器/运行时自身异常。若测试日志显示用例已全部通过，但 Node/Vitest/pnpm 在退出清理阶段抛出异常，应记录为 `PARTIAL` 或 runner error 风险，保留日志路径和 Node 版本，不得误判为业务测试失败。
 
 ### 交互
 
@@ -897,8 +907,12 @@ cancel 取消
 - `/break-cache status`。
 - `/usage`。
 - `/stats`。
-- 状态栏命中率。
+- 状态栏可选短命中率。
 - CCB 风格轻提示。
+- cache freshness。
+- cache warmup / refresh。
+- endpoint-level cache stats。
+- public claim guard。
 
 ### 必做
 
@@ -912,10 +926,15 @@ cancel 取消
 - model changed 检测。
 - usage 原始字段记录：input tokens、output tokens、cache read tokens、cache write/create tokens。
 - 命中率必须基于 provider/API 返回的 usage 字段计算，不能用 UI 估算值代替。
+- cache creation/write 字段必须记录来源：reported、zero_reported、missing、estimated。`cache_creation_tokens=0` 不能直接解释为“无写入成本”或“缓存一定新鲜”，只能表示 provider 当前返回为 0。
+- 缓存新鲜度不得依赖 cache creation token 判断，必须基于 system prompt、tool schema、MCP 工具列表、model/provider、reasoning effort、project rules、memory、compact、plugin list 等 hash 判断。
+- 需要提供 `/cache status`、`/cache warmup`、`/cache refresh`；warmup/refresh 只做用户可控的最小请求，不保证所有 provider 一定写入缓存。
+- `/stats endpoints` 或等价入口必须按 endpoint 展示命中率，例如 `/v1/messages` 与 `/v1/responses` 分开统计。
 - 支持导出最近缓存日志，便于和账号账单交叉验证。
 - 明确区分“模型自身能力”和“Linghun 稳定上下文带来的命中提升”。
+- 对外宣传必须使用真实 usage / 账单对账口径，不能承诺固定 98% 命中、25 倍省钱或所有模型必然达到同等效果。
 - 轻提示采用 CCB 风格，不弹窗打断，只在状态栏或底部提示建议命令。
-- 轻提示覆盖：上下文过长建议 `/compact`、缓存命中下降建议 `/break-cache status`、大文件建议 `.linghunignore`、高风险修改建议 `/plan`。
+- 轻提示覆盖：上下文过长建议 `/compact`、缓存命中下降建议 `/break-cache status`、cache creation 长期为 0 但 cache read 很高时提示字段口径、system prompt / tool schema / MCP 列表 hash 变化建议 `/cache warmup`、大文件建议 `.linghunignore`、高风险修改建议 `/plan`。
 - 同类轻提示必须限频，可关闭，可静默；新手模式提示更多，高级模式提示更少。
 
 ### 性能要求
@@ -932,10 +951,14 @@ cancel 取消
 - MCP 工具变化能显示原因。
 - `/cache-log` 必须显示每轮 cache read/write/input/output tokens 和模型。
 - `/usage` 能显示本会话原始 usage；`/stats` 能显示综合统计。
+- `/stats endpoints` 能显示不同 endpoint 的 cache 命中率和样本数。
+- 长期 `cache_creation_tokens=0` 时，UI 能解释字段来源为 `zero_reported` 或 provider 未报告，不夸大为零成本。
+- system prompt / tool schema / MCP 工具列表变化后，`/break-cache status` 能指出 freshness 变化并建议 `/cache warmup`。
 - 状态栏不默认显示金额。
 - 上下文过长、cache 命中下降、大文件读取等场景能出现非打断轻提示。
 - 抽样对比 transcript/API usage 与 `/cache-log`，命中率计算一致。
 - 至少提供一次账号账单或 provider usage 对账流程说明，证明成本估算不是纯 UI 推测。
+- 文档示例必须使用“特定 provider + 特定工作流实测”口径，不得写成任意模型天然保证。
 
 ## 15. 阶段 10：MCP 与 codebase-memory 闭环
 
@@ -1138,6 +1161,10 @@ cancel 取消
 - role context handoff。
 - fallback policy。
 - per-role budget。
+- vision provider。
+- image provider。
+- vision observation evidence。
+- image generation evidence。
 
 ### 必做
 
@@ -1145,15 +1172,24 @@ cancel 取消
 - 执行模型。
 - 审查模型。
 - 视觉模型。
+- 生图模型。
 - 成本显示。
-- 角色路由必须明确：planner / executor / reviewer / verifier / summarizer / vision。
+- 角色路由必须明确：planner / executor / reviewer / verifier / summarizer / vision / image。
 - planner 输出 PlanProposal，不直接写文件。
 - executor 只能执行已批准计划或明确任务。
 - reviewer/verifier 默认只读，必须基于 diff、关键文件和验证结果复核。
+- vision 只处理图片、截图、OCR、UI 理解，输出结构化 observation 和 evidence，不写代码、不执行 Bash。
+- image 只处理异步生图/改图，输出本地图片资产和 evidence，默认不改代码、不覆盖原图。
 - 角色之间只传递结构化摘要、证据、diff 和必要文件列表，不无脑复制完整上下文。
 - 每个角色可配置模型、最大 token、最大费用、是否允许工具、是否允许写入。
 - 模型不可用、能力不足或超预算时，必须降级到备用模型或暂停让用户选择。
 - 多模型协作必须显示每个角色的成本和贡献。
+- 主 executor 不支持视觉时，不能要求用户手动永久切换主模型；应按需调用 vision provider，然后把结构化视觉结果交回当前 executor。
+- 生图必须作为后台任务运行，显示任务 id、模型、耗时、保存路径和日志路径。
+- image provider 默认不固定尺寸，不传 size/quality/format；只有用户明确指定或项目资产场景需要时才传。
+- image prompt 默认轻量增强，不生成大段提示词；保留用户原始需求，只补透明背景、无文字、资产用途等必要工程约束。
+- 同一图片的视觉/生图结果必须可复用为 evidence，避免重复调用多模态或生图模型烧钱。
+- 未配置 vision/image provider 时，遇到对应输入必须明确提示配置，不得假装识图或生图。
 
 ### 交互
 
@@ -1162,6 +1198,9 @@ cancel 取消
 /model route doctor
 /model route set planner gpt-5.5
 /model route set executor deepseek-v4-pro
+/model route set vision qwen-vl
+/model route set image gpt-image-2
+/image generate "H5 游戏金色按钮背景"
 /agents run verifier --model gpt-5.5
 /plan --model claude
 ```
@@ -1172,6 +1211,10 @@ cancel 取消
 - GPT/Claude 做复核。
 - 成本按模型显示。
 - 能力不足时建议切换。
+- DeepSeek V4 Pro 作为 executor 时，截图任务能临时调用 vision provider，再回到 DeepSeek 执行代码。
+- `/image generate` 能通过 OpenAI-compatible image2 接口异步生图并保存到本地资产目录。
+- 不指定尺寸时 image provider 使用模型/provider 默认能力；指定尺寸时才传参数。
+- vision/image 结果写入 evidence，后续步骤不重复识别或生成同一素材。
 - planner 只产出计划，不写文件。
 - executor 按批准计划完成修改。
 - reviewer/verifier 能独立指出 diff 风险。

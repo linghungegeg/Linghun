@@ -462,14 +462,22 @@ unregister agent
 | 日常代码执行 | DeepSeek V4 Pro / Claude Sonnet |
 | 复杂规划 | Claude / GPT-5.5 |
 | 审查复核 | GPT-5.5 / Claude |
-| 视觉理解 | 支持视觉的 Claude / GPT |
+| 视觉理解 | Qwen-VL / GLM Vision / Kimi Vision / Claude Vision / GPT Vision |
+| 图片生成 | GPT Image / OpenAI-compatible image2 / 本地 ComfyUI |
 | 低成本搜索总结 | DeepSeek / 本地模型 |
+
+主力 coding 模型不必同时具备多模态能力。Linghun 应把 vision provider 设计成按需能力补充：检测到图片、截图、设计图或 UI 错位图时，临时调用支持视觉的模型生成结构化观察和 evidence，然后交回当前 executor 继续写代码。当前主模式不被永久切换，例如 DeepSeek V4 Pro 仍负责高频编码，vision provider 只负责“看图”。
+
+图片生成单独走 image provider。它默认是异步后台任务，支持 OpenAI Images / Responses、OpenAI-compatible image2 中转、自定义 HTTP 和本地生图服务。默认不固定尺寸、不长篇扩写提示词，只传用户 prompt 和必要工程约束；生成结果保存到本地资产目录并写入 evidence。
 
 第一版只做手动路由：
 
 ```text
 /agent run explorer --model deepseek-v4-pro
 /agent run reviewer --model gpt-5.5
+/model route set vision qwen-vl
+/model route set image gpt-image-2
+/image generate "H5 游戏金色按钮背景"
 ```
 
 后续再做自动路由。
@@ -539,10 +547,12 @@ DeepSeek V4 / V4 Pro：
 
 真实项目长期开发目标：
 
-- 常态缓存命中率：92% - 96%。
-- 理想峰值：98%。
+- 特定稳定工作流下，目标常态缓存命中率：92% - 96%。
+- 理想峰值：98%，只作为特定样本峰值，不作为普遍承诺。
 - 缓存破坏可定位。
 - 成本实时可见。
+
+公开口径必须保守：高命中率是 provider、模型、稳定上下文、工具列表、MCP 稳定化、索引和阶段化工作流共同作用的实测结果，不是任意模型天然保证。账单截图和 CSV usage 可以作为对账证据，但不能宣传固定 25 倍省钱或所有项目必达 98%。
 
 ### 10.2 Cache Guard
 
@@ -556,6 +566,11 @@ DeepSeek V4 / V4 Pro：
 - cache_control changed。
 - compact changed。
 - beta/header changed。
+- project rules hash changed。
+- memory hash changed。
+- plugin list changed。
+- endpoint changed。
+- cache write source changed。
 
 展示：
 
@@ -565,6 +580,19 @@ DeepSeek V4 / V4 Pro：
 新增：mcp__x__search
 cache read：45231 -> 2108
 ```
+
+如果 provider 长期返回 `cache_creation_tokens=0`，Linghun 只记录为字段口径：可能是 provider 不计费、不返回或只读已有缓存。缓存是否需要刷新必须看 system prompt / tool schema / MCP tool list / project rules / memory 等 hash 是否变化，而不是看 creation token 是否为 0。
+
+新增命令：
+
+```text
+/cache status
+/cache warmup
+/cache refresh
+/stats endpoints
+```
+
+`/cache warmup` 和 `/cache refresh` 只表示发起用户可控的最小预热请求，不保证所有 provider 一定写入缓存。
 
 ### 10.3 MCP 稳定化
 
@@ -604,6 +632,7 @@ cache read：45231 -> 2108
 - `/break-cache status`
 - `/usage`
 - `/stats`
+- `/stats endpoints`
 - `/index status`
 
 ## 11. 记忆、索引、会话交接
@@ -916,8 +945,8 @@ F:\LinghunProject 或新仓库根目录
 
 当前进度：
 
-- Phase 00-06 已完成。
-- 下一阶段是 Phase 07：工程行为控制闭环。
+- Phase 00-08 已完成。
+- 下一阶段是 Phase 09：缓存与成本闭环。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
 

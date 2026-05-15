@@ -78,6 +78,40 @@ export type TranscriptEvent =
       createdAt: string;
     }
   | { type: "checkpoint_restored"; checkpointId: string; createdAt: string }
+  | {
+      type: "verification_start";
+      run: {
+        id: string;
+        plan: { kind: string; command: string; reason: string }[];
+        startedAt: string;
+      };
+      createdAt: string;
+    }
+  | {
+      type: "verification_end";
+      report: {
+        id: string;
+        status: "pass" | "fail" | "partial";
+        summary: string;
+        commands: {
+          kind: string;
+          command: string;
+          status: "pass" | "fail" | "partial" | "skipped";
+          exitCode?: number;
+          durationMs: number;
+          logPath?: string;
+          summary: string;
+        }[];
+        unverified: string[];
+        risk: string[];
+        logPath?: string;
+        startedAt: string;
+        endedAt: string;
+        durationMs: number;
+        nextAction: string;
+      };
+      createdAt: string;
+    }
   | { type: "btw_question"; id: string; text: string; answer: string; createdAt: string }
   | {
       type: "interrupt";

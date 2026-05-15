@@ -556,11 +556,13 @@ export type ModelRole =
   | 'verifier'
   | 'summarizer'
   | 'vision'
+  | 'image'
 
 export type RoleModelRoute = {
   role: ModelRole
   primaryModel: string
   fallbackModels: string[]
+  requiredCapabilities?: ModelCapability[]
   maxInputTokens?: number
   maxOutputTokens?: number
   maxCostCny?: number
@@ -584,6 +586,63 @@ export type RoleHandoff = {
   diffSummary?: DiffSummary
   verificationReport?: VerificationReport
 }
+
+export type VisionObservation = {
+  id: string
+  source: 'image' | 'screenshot' | 'design' | 'browser-capture'
+  model: string
+  provider: string
+  summary: string
+  extractedText: string[]
+  uiRegions: string[]
+  suspectedFiles: string[]
+  confidence: number
+  evidenceRefs: EvidenceRef[]
+  createdAt: string
+}
+
+export type ImageProviderKind =
+  | 'openai-images'
+  | 'openai-responses'
+  | 'openai-compatible-images'
+  | 'openai-compatible-responses'
+  | 'custom-http'
+  | 'local'
+
+export type ImagePromptPolicy = {
+  mode: 'raw' | 'light-enhance' | 'project-style'
+  maxPromptChars: number
+  preserveUserPrompt: boolean
+}
+
+export type ImageGenerationRequest = {
+  prompt: string
+  size?: string
+  quality?: string
+  outputFormat?: 'png' | 'jpg' | 'webp' | string
+  background?: 'transparent' | 'opaque' | 'auto'
+  count?: number
+  referenceImages?: string[]
+  maskImage?: string
+  outputDir: string
+  fileNameHint?: string
+  promptPolicy: ImagePromptPolicy
+}
+
+export type ImageGenerationResult = {
+  id: string
+  provider: string
+  model: string
+  images: Array<{
+    path: string
+    mimeType: string
+    revisedPrompt?: string
+    seed?: number
+  }>
+  usage?: CostSummary
+  evidenceRefs: EvidenceRef[]
+  createdAt: string
+}
 ```
 
 默认角色约束：
@@ -593,7 +652,8 @@ export type RoleHandoff = {
 - `reviewer`：只读审查，基于 diff、证据和关键文件给风险。
 - `verifier`：只读复核，可运行验证命令。
 - `summarizer`：低成本摘要，不允许写入。
-- `vision`：处理图片/截图，只输出结构化观察。
+- `vision`：处理图片/截图/OCR/UI 视觉理解，只输出 `VisionObservation` 和 evidence，不允许写文件或执行 Bash。
+- `image`：异步生图/改图，只生成或编辑图片资产，默认不改代码、不覆盖原图。
 
 路由规则：
 
@@ -605,6 +665,16 @@ export type RoleHandoff = {
 - 不允许为了多模型协作把完整 transcript 无差别发送给每个模型。
 - 角色交接只传 `RoleHandoff`、必要文件片段和证据引用。
 - 每个角色的 usage、cache、cost 必须单独统计。
+- 当前主模式或 executor 不支持图片时，不永久切换主模型；只临时调用 `vision` provider，把图片理解结果结构化为 `VisionObservation` / evidence，再交回当前 executor。
+- `vision` provider 只能接收图片、必要用户问题和最小项目上下文；不得接收完整 transcript、完整 diff 或无关源码。
+- 同一图片或截图的 `VisionObservation` 可复用；后续步骤优先引用 evidence id，避免重复调用多模态模型。
+- 如果没有配置 vision provider，遇到图片输入时必须提示配置或切换支持视觉的模型，不能声称已经看懂图片。
+- image provider 必须支持异步后台任务语义；生图可能排队或耗时，TUI 只显示任务摘要、耗时、保存路径和日志路径。
+- image provider 默认走极简请求：只传 `model`、用户 prompt 和必要输出目录；不固定 size/quality/format/background，用户明确指定或项目资产场景需要时才传。
+- image prompt 默认使用 `light-enhance`：保留用户原始需求，只补尺寸、透明背景、无文字、资产用途等必要工程约束；不得生成大段提示词。
+- image provider 不接收完整项目代码，只接收生图需求、必要风格/尺寸约束和可选参考图。
+- image 结果必须保存到本地资产目录，写入 transcript/evidence；不得默认覆盖原图。
+- 支持 OpenAI Images / Responses、OpenAI-compatible Images / Responses、custom-http 和 local adapter，兼容国内第三方 image2 中转接口。
 
 命令：
 
@@ -614,6 +684,8 @@ export type RoleHandoff = {
 /model route set planner gpt-5.5
 /model route set executor deepseek-v4-pro
 /model route set reviewer claude
+/model route set vision qwen-vl
+/model route set image gpt-image-2
 ```
 
 `/model route doctor` 必须检查：
@@ -623,6 +695,27 @@ export type RoleHandoff = {
 - 角色模型是否满足能力要求。
 - 价格和上下文信息是否完整。
 - 是否存在会导致高成本的配置。
+- vision route 是否具备图片输入/OCR/UI 理解能力。
+- executor 缺少视觉能力时，是否存在可用 vision provider 作为临时能力补充。
+- image route 是否支持 generate/edit、返回 b64_json 或 URL、是否能落盘保存。
+
+image provider 命令方向：
+
+```text
+/image provider list
+/image provider set <id>
+/image provider doctor
+/image generate <prompt>
+/image edit <path> <prompt>
+/image variants <path> --count <n>
+```
+
+默认体验：
+
+- `/image generate "金色按钮背景"` 不传固定尺寸，优先使用 provider/model 默认能力。
+- 用户指定 `--size`、`--quality`、`--format`、`--transparent` 时才传对应参数。
+- 生成前显示模型、数量、保存路径和是否覆盖；默认生成新文件。
+- provider 返回 `usage` 时记录真实 usage；没有价格或账单字段时标记 `unknown` / `estimated`，不得瞎算费用。
 
 ## 8. Tool 规格
 
@@ -951,6 +1044,8 @@ Verifier / verification 运行状态必须复用 `BackgroundTask`：
   - `pass`：验证命令通过，复查未发现阻塞问题。
   - `fail`：验证失败或发现必须修复的问题。
   - `partial`：本地验证通过但关键外部条件缺失，或只完成部分检查。
+- runner 必须区分被验证命令失败和验证器自身异常。若日志显示测试/构建步骤已经全部通过，但 Node、Vitest、pnpm 或子进程清理阶段抛出 runner error，应记录为 `partial` 或 `runner_error` 风险，不得误写成代码测试失败。
+- Node 24 等新版本工具链出现 `emitter.removeListener is not a function`、退出阶段异常或生命周期异常时，报告必须保留原始日志路径、Node 版本、命令和建议动作，例如用 Node 22 LTS 复核。
 - verifier 未完成时，主会话只能说“等待复查结果”，不能宣布阶段完成。
 - `/background` 和 `/verify last` 必须能看到最近一次 verifier 的命令、状态、日志、结果和下一步建议。
 
@@ -1155,13 +1250,29 @@ export type CacheTurnStats = {
   hitRate: number | null
   cacheReadTokens: number
   cacheWriteTokens: number
+  cacheWriteTokensSource: 'reported' | 'zero_reported' | 'missing' | 'estimated'
   inputTokens: number
   outputTokens: number
   model: string
   provider: string
+  endpoint?: string
   source: 'api_usage' | 'provider_usage' | 'estimated'
   compacted: boolean
+  freshness: CacheFreshness
   rawUsage?: unknown
+}
+
+export type CacheFreshness = {
+  systemPromptHash: string
+  toolSchemaHash: string
+  mcpToolListHash: string
+  modelProviderHash: string
+  reasoningEffortHash?: string
+  projectRulesHash?: string
+  memoryHash?: string
+  compactHash?: string
+  pluginListHash?: string
+  changedKeys: string[]
 }
 
 export type CacheHistoryConfig = {
@@ -1190,12 +1301,19 @@ export type LightHint = {
 - 命中率优先基于 provider/API 返回的真实 usage 字段计算。
 - 如果 provider 不返回 cache read/write usage，`source` 必须标记为 `estimated`，UI 必须显示“不支持真实缓存统计”。
 - GPT-5.5 等模型的高命中率只能记录为特定 provider + 工作流实测结果，不能写成模型天然保证。
+- `cache_creation_tokens=0` 或 cache write 为 0 时，必须区分 provider 明确返回 0、字段缺失和估算值；不得宣传为“零写入成本”。
+- 缓存是否新鲜必须根据 `CacheFreshness` 的 hash 变化判断，不得根据 cache write/create token 是否为 0 判断。
+- 当 system prompt、tool schema、MCP 工具列表、model/provider、project rules、memory、compact 或 plugin list hash 变化时，`/break-cache status` 必须显示变化项，并建议 `/cache warmup` 或 `/cache refresh`。
+- `/cache warmup` / `/cache refresh` 是用户可控最小请求，只能声明“已尝试刷新/预热”，不得保证 provider 一定写入缓存。
 - `/cache-log` 必须显示每轮 input/output/cache read/cache write tokens、model、provider、compact 状态。
+- `/cache-log` 必须显示 endpoint 与 cache write source。
 - 支持导出最近 20 轮缓存日志，用于和账号账单交叉验证。
 - cache break 诊断必须覆盖 system prompt、tool schema、MCP tool list、model changed、compact、memory changed。
+- cache 诊断必须按 endpoint 分组展示命中率，避免把 `/v1/messages`、`/v1/responses`、`/v1/chat/completions` 的行为混成一个结论。
 - 轻提示必须本地规则触发，不额外调用模型。
 - 轻提示必须限频、可关闭、可静默。
 - 轻提示只建议命令，不替用户执行。
+- 对外数据展示必须标注样本来源、provider、模型、endpoint、时间范围和计算公式；不得承诺任意模型都能稳定 98% 或固定 25 倍省钱。
 
 Cost：
 
@@ -1210,6 +1328,8 @@ export type CostSummary = {
   estimatedSavedCny?: number
   billingReconciled?: boolean
   billingSource?: string
+  endpoint?: string
+  providerReported?: boolean
 }
 ```
 
@@ -1250,6 +1370,29 @@ hitRate = cacheReadTokens / denominator
 - cache write/create 字段按 provider 适配到统一 `cacheWriteTokens`。
 - 任何“省钱比例”必须和输出 tokens、cache write 成本、模型单价分开说明。
 - 账单对账只能作为验证来源，不得覆盖原始 usage 记录。
+
+### 12.2 公开数据口径
+
+允许写：
+
+- “在特定大型项目、特定 provider、中转站 GPT-5.5、稳定 CCB Dev Boost 工作流下，CSV usage 与账单页对账显示 prompt cache 命中率约 96%。”
+- “Linghun 的目标是通过稳定 system prompt、tool schema、MCP 列表、索引和 handoff 提高可复现命中率。”
+
+禁止写：
+
+- “所有模型都能稳定 96%/98%。”
+- “固定节省 25 倍。”
+- “cache_creation_tokens=0 等于零写入成本。”
+- “某个模型天然保证高命中。”
+
+真实样本展示必须同时给出：
+
+- 时间范围。
+- provider / model / endpoint。
+- 请求数。
+- input / output / cache read / cache write tokens。
+- 公式：`cacheRead / (input + cacheWrite + cacheRead)`。
+- 是否有账单页或 provider usage 对账。
 
 ## 13. MCP 规格
 

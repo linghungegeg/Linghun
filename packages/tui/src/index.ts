@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
@@ -109,6 +110,39 @@ export type EvidenceRecord = {
   createdAt: string;
 };
 
+export type VerificationStepKind = "test" | "typecheck" | "build" | "lint" | "smoke";
+
+export type VerificationStep = {
+  kind: VerificationStepKind;
+  command: string;
+  reason: string;
+};
+
+const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+
+export type VerificationCommandResult = VerificationStep & {
+  status: "pass" | "fail" | "partial" | "skipped";
+  exitCode?: number;
+  durationMs: number;
+  logPath?: string;
+  summary: string;
+  runnerError?: string;
+};
+
+export type VerificationReport = {
+  id: string;
+  status: "pass" | "fail" | "partial";
+  summary: string;
+  commands: VerificationCommandResult[];
+  unverified: string[];
+  risk: string[];
+  logPath?: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  nextAction: string;
+};
+
 type MessageKey =
   | "appTitle"
   | "intro"
@@ -148,6 +182,7 @@ export type TuiContext = {
   backgroundTasks: BackgroundTaskState[];
   checkpoints: CheckpointState[];
   evidence: EvidenceRecord[];
+  lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
@@ -266,6 +301,14 @@ export async function handleSlashCommand(
   }
   if (command === "/claim-check") {
     await handleClaimCheckCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/verify") {
+    await handleVerifyCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/review") {
+    await handleReviewCommand(context, output);
     return "handled";
   }
   if (command === "/status") {
@@ -681,6 +724,402 @@ async function handleClaimCheckCommand(
   writeLine(output, formatClaimCheck(result, context.language));
 }
 
+async function handleVerifyCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (action === "last") {
+    writeLine(output, formatVerificationLast(context.lastVerification, context.language));
+    return;
+  }
+
+  const plan = await createVerificationPlan(
+    context.projectPath,
+    action === "smoke" ? "smoke" : "default",
+  );
+  if (action === "plan") {
+    writeLine(output, formatVerificationPlan(plan, context.language));
+    return;
+  }
+  if (action && action !== "smoke") {
+    writeLine(output, "用法：/verify | /verify plan | /verify last | /verify smoke");
+    return;
+  }
+
+  const sessionId = await ensureSession(context);
+  const report = await runVerificationPlan(plan, context, sessionId, output);
+  context.lastVerification = report;
+  await recordVerificationEvidence(context, sessionId, report);
+  writeLine(output, formatVerificationReport(report, context.language));
+  writeStatus(output, context);
+}
+
+async function handleReviewCommand(context: TuiContext, output: Writable): Promise<void> {
+  const report = createReviewReport(context);
+  const sessionId = await ensureSession(context);
+  await appendSystemEvent(context, sessionId, `review: ${report.replace(/\s+/g, " ")}`, "info");
+  writeLine(output, report);
+}
+
+async function createVerificationPlan(
+  projectPath: string,
+  mode: "default" | "smoke",
+): Promise<VerificationStep[]> {
+  if (mode === "smoke") {
+    return [
+      {
+        kind: "smoke",
+        command: "node -e \"console.log('linghun verify smoke')\"",
+        reason: "最小 smoke 验证，确认 Verification Runner 可执行命令并归档 evidence。",
+      },
+    ];
+  }
+
+  const packageJson = await safeReadJson(join(projectPath, "package.json"));
+  const scripts = isRecord(packageJson?.scripts) ? packageJson.scripts : {};
+  const steps: VerificationStep[] = [];
+  addPackageStep(steps, scripts, "typecheck", "typecheck", "TypeScript 类型检查。 ");
+  addPackageStep(steps, scripts, "test", "test", "项目测试套件。 ");
+  addPackageStep(steps, scripts, "lint", "lint", "lint 静态检查。 ");
+  addPackageStep(steps, scripts, "build", "build", "构建验证。 ");
+  addPackageStep(steps, scripts, "smoke", "smoke", "项目自定义 smoke 验证。 ");
+
+  if (steps.length > 0) {
+    return steps;
+  }
+  return [
+    {
+      kind: "smoke",
+      command: "node --version",
+      reason: "未发现项目验证脚本，降级为 Node 运行环境 smoke 检查。",
+    },
+  ];
+}
+
+function addPackageStep(
+  steps: VerificationStep[],
+  scripts: Record<string, unknown>,
+  scriptName: string,
+  kind: VerificationStepKind,
+  reason: string,
+): void {
+  if (typeof scripts[scriptName] !== "string") {
+    return;
+  }
+  steps.push({ kind, command: `corepack pnpm ${scriptName}`, reason });
+}
+
+async function runVerificationPlan(
+  plan: VerificationStep[],
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<VerificationReport> {
+  const runId = randomUUID();
+  const startedAt = new Date().toISOString();
+  const logRoot = join(context.projectPath, ".linghun", "logs", "verification");
+  await mkdir(logRoot, { recursive: true });
+  const task: BackgroundTaskState = {
+    id: runId,
+    kind: "verification",
+    title: "Verification Runner",
+    status: "running",
+    currentStep: "preparing verification",
+    progress: { completed: 0, total: plan.length, label: "verify" },
+    startedAt,
+    updatedAt: startedAt,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    logPath: logRoot,
+    hasOutput: false,
+    userVisibleSummary: `验证已启动：${plan.length} 个步骤。可用 /background 查看详情。`,
+    nextAction: "等待 PASS / FAIL / PARTIAL 结果，失败后按建议修复并复跑 /verify。",
+  };
+  context.backgroundTasks.unshift(task);
+  await context.store.appendEvent(sessionId, {
+    type: "verification_start",
+    run: { id: runId, plan, startedAt },
+    createdAt: startedAt,
+  });
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  writeLine(output, formatBackgroundTask(task, context.language));
+
+  const results: VerificationCommandResult[] = [];
+  const unverified: string[] = [];
+  const risk: string[] = [];
+  for (const [index, step] of plan.entries()) {
+    const stepStarted = Date.now();
+    task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
+    task.progress = { completed: index, total: plan.length, label: step.kind };
+    task.updatedAt = new Date().toISOString();
+    await appendBackgroundTaskEvent(context, sessionId, task);
+    writeLine(output, `验证步骤：${task.currentStep} · ${step.command}`);
+
+    const logPath = join(logRoot, `${runId}-${index + 1}-${step.kind}.log`);
+    const result = await runVerificationCommand(step.command, context.projectPath);
+    const durationMs = Date.now() - stepStarted;
+    const runnerErrorLine = result.runnerError ? `runnerError=${result.runnerError}\n` : "";
+    const fullLog = `$ ${step.command}\nexitCode=${result.exitCode}\n${runnerErrorLine}durationMs=${durationMs}\n\n${result.output}`;
+    await writeFile(logPath, fullLog, "utf8");
+    const summary = summarizeVerificationOutput(result.output, result.exitCode, result.runnerError);
+    const commandStatus = result.runnerError ? "partial" : result.exitCode === 0 ? "pass" : "fail";
+    if (commandStatus === "fail") {
+      risk.push(`${step.kind} 失败：${summary}`);
+    }
+    if (commandStatus === "partial") {
+      unverified.push(`${step.kind} runner error：${summary}`);
+      risk.push(`${step.kind} runner/toolchain 兼容风险：${summary}`);
+    }
+    results.push({
+      ...step,
+      status: commandStatus,
+      exitCode: result.exitCode,
+      durationMs,
+      logPath,
+      summary,
+      runnerError: result.runnerError,
+    });
+    task.lastOutputAt = new Date().toISOString();
+    task.hasOutput = Boolean(result.output.trim());
+  }
+
+  const endedAt = new Date().toISOString();
+  const failed = results.filter((item) => item.status === "fail");
+  const partial = results.filter((item) => item.status === "partial");
+  const hasRunnerError = partial.some((item) => item.runnerError);
+  const status: VerificationReport["status"] =
+    failed.length > 0 ? "fail" : partial.length > 0 || unverified.length > 0 ? "partial" : "pass";
+  const report: VerificationReport = {
+    id: runId,
+    status,
+    summary:
+      status === "pass"
+        ? `PASS：${results.length} 个验证步骤通过。`
+        : status === "fail"
+          ? `FAIL：${failed.length}/${results.length} 个验证步骤失败。`
+          : hasRunnerError
+            ? "PARTIAL：验证命令已运行，但 runner/toolchain 退出清理异常。"
+            : `PARTIAL：${unverified.length} 项未验证。`,
+    commands: results,
+    unverified,
+    risk,
+    logPath: logRoot,
+    startedAt,
+    endedAt,
+    durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+    nextAction:
+      status === "pass"
+        ? "可继续审查结果或进入交付总结。"
+        : hasRunnerError
+          ? "查看 runner error 日志，记录 Node 版本，并建议用 Node 22 LTS 复核。"
+          : "先查看失败命令与日志，修复后复跑 /verify。",
+  };
+  task.status = status === "fail" ? "failed" : "completed";
+  task.result = status;
+  task.currentStep = "verification finished";
+  task.progress = { completed: plan.length, total: plan.length, label: "verify" };
+  task.updatedAt = endedAt;
+  task.nextAction = report.nextAction;
+  task.userVisibleSummary = report.summary;
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  await context.store.appendEvent(sessionId, {
+    type: "verification_end",
+    report,
+    createdAt: endedAt,
+  });
+  return report;
+}
+
+async function runVerificationCommand(
+  command: string,
+  cwd: string,
+): Promise<{ exitCode: number; output: string; runnerError?: string }> {
+  return new Promise((resolveCommand) => {
+    const child = spawn(command, { cwd, shell: true });
+    let output = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      const runnerError = `runner timeout after ${VERIFICATION_COMMAND_TIMEOUT_MS}ms`;
+      child.kill("SIGTERM");
+      settle({
+        exitCode: 1,
+        output: output ? `${output}\n${runnerError}` : runnerError,
+        runnerError,
+      });
+    }, VERIFICATION_COMMAND_TIMEOUT_MS);
+    const settle = (result: { exitCode: number; output: string; runnerError?: string }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolveCommand(result);
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      const runnerError = `runner error: ${error.message}`;
+      settle({
+        exitCode: 1,
+        output: output ? `${output}\n${runnerError}` : runnerError,
+        runnerError,
+      });
+    });
+    child.on("close", (code, signal) => {
+      const exitCode = code ?? 1;
+      const runnerError = detectRunnerCompatibilityError(output, exitCode, signal);
+      settle({ exitCode, output, runnerError });
+    });
+  });
+}
+
+function detectRunnerCompatibilityError(
+  output: string,
+  exitCode: number,
+  signal: NodeJS.Signals | null,
+): string | undefined {
+  if (signal) {
+    return `runner stopped by signal ${signal}`;
+  }
+  if (exitCode === 0) {
+    return undefined;
+  }
+  const ansiPattern = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+  const normalized = output.replace(ansiPattern, "");
+  const vitestPassed =
+    /Test Files\s+\d+\s+passed/i.test(normalized) && /Tests\s+\d+\s+passed/i.test(normalized);
+  const nodeCleanupError =
+    normalized.includes("TypeError: emitter.removeListener is not a function") ||
+    normalized.includes("emitter.removeListener is not a function");
+  if (vitestPassed && nodeCleanupError) {
+    return "runner/toolchain cleanup error after tests passed; verify again with Node 22 LTS";
+  }
+  const childSignal = normalized.match(/\bSIG(?:TERM|KILL|INT|HUP|ABRT)\b/);
+  if (childSignal) {
+    return `runner/child stopped by signal ${childSignal[0]}`;
+  }
+  return undefined;
+}
+
+async function recordVerificationEvidence(
+  context: TuiContext,
+  sessionId: string,
+  report: VerificationReport,
+): Promise<void> {
+  const evidence: EvidenceRecord = {
+    id: randomUUID(),
+    kind: "test_result",
+    summary: `${report.summary} 日志：${report.logPath ?? "无日志"}`,
+    source: report.logPath ?? "Verification Runner",
+    supportsClaims: ["已验证", "验证通过", "测试通过", "verified", "tests passed"],
+    createdAt: new Date().toISOString(),
+  };
+  context.evidence.unshift(evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+}
+
+function createReviewReport(context: TuiContext): string {
+  const changedFiles =
+    context.tools.changedFiles.length > 0 ? context.tools.changedFiles : ["未记录改动"];
+  const verification = context.lastVerification;
+  const priority = verification?.status === "fail" ? "P0" : verification ? "P2" : "P1";
+  const risk = verification
+    ? verification.risk.length > 0
+      ? verification.risk.join("; ")
+      : `最近验证为 ${verification.status.toUpperCase()}`
+    : "尚未运行 /verify，不能声称已验证。";
+  const suggestion =
+    verification?.status === "fail"
+      ? "先按失败命令日志修复，再复跑 /verify。"
+      : verification?.status === "partial"
+        ? "先查看 runner error 日志；如为 Node/工具链退出清理异常，建议用 Node 22 LTS 复核。"
+        : verification
+          ? "结合 diff 人工确认需求覆盖；如有新改动请复跑 /verify。"
+          : "先运行 /verify 或 /verify plan，形成 test_result evidence。";
+  return [
+    "Review Report",
+    `- Priority: ${priority}`,
+    `- Files: ${changedFiles.join(", ")}`,
+    `- Risk: ${risk}`,
+    `- Suggestion: ${suggestion}`,
+  ].join("\n");
+}
+
+function formatVerificationPlan(plan: VerificationStep[], language: Language): string {
+  const header = language === "en-US" ? "Verification plan:" : "验证计划：";
+  return [
+    header,
+    ...plan.map((step, index) => `${index + 1}. [${step.kind}] ${step.command} — ${step.reason}`),
+  ].join("\n");
+}
+
+function formatVerificationReport(report: VerificationReport, language: Language): string {
+  const lines = [
+    `${report.status.toUpperCase()} ${report.summary}`,
+    language === "en-US" ? `Duration: ${report.durationMs}ms` : `耗时：${report.durationMs}ms`,
+  ];
+  for (const command of report.commands) {
+    lines.push(
+      `- [${command.status.toUpperCase()}] ${command.command} (${command.durationMs}ms) log: ${command.logPath ?? "无日志"}`,
+    );
+    if (command.status !== "pass") {
+      lines.push(`  摘要：${command.summary}`);
+    }
+  }
+  if (report.unverified.length > 0) {
+    lines.push(`未验证：${report.unverified.join("; ")}`);
+  }
+  lines.push(`下一步：${report.nextAction}`);
+  return lines.join("\n");
+}
+
+function formatVerificationLast(
+  report: VerificationReport | undefined,
+  language: Language,
+): string {
+  if (!report) {
+    return language === "en-US" ? "No verification has run yet." : "还没有最近验证结果。";
+  }
+  return formatVerificationReport(report, language);
+}
+
+function summarizeVerificationOutput(
+  output: string,
+  exitCode: number,
+  runnerError?: string,
+): string {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tail = lines.slice(-6).join(" | ");
+  const summary = tail ? truncateDisplay(tail, 240) : "无输出";
+  return runnerError
+    ? `exitCode=${exitCode}; runner error=${runnerError}; ${summary}`
+    : `exitCode=${exitCode}; ${summary}`;
+}
+
+async function safeReadJson(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function sendMessage(
   text: string,
   context: TuiContext,
@@ -811,6 +1250,8 @@ function formatHelp(language: Language): string {
   /btw <question>       Answer a temporary question without changing Todo/Plan/checkpoints
   /interrupt            Mark current running background task as cancelled
   /claim-check <claim>  Downgrade unsupported final claims
+  /verify [plan|last|smoke] Generate or run verification
+  /review               Review diff, risks, and verification evidence
   /read <path>          Read file
   /write <path> <text>  Write file
   /edit <path> <old> => <new>  Unique replacement
@@ -847,6 +1288,8 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /btw <question>       临时插问，不修改 Todo/Plan/checkpoint
   /interrupt            标记当前长任务已取消
   /claim-check <claim>  降级缺少证据的最终结论
+  /verify [plan|last|smoke] 生成或运行验证
+  /review               按代码审查口径输出风险与建议
   /read <path>          读取文件
   /write <path> <text>  写入文件
   /edit <path> <old> => <new>  唯一替换
@@ -1596,7 +2039,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 07 TUI / REPL",
+    appTitle: "{name} Phase 08 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -1624,7 +2067,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 07 TUI / REPL",
+    appTitle: "{name} Phase 08 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",

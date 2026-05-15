@@ -13,9 +13,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 当前进度
 
-- Phase 00-06 已完成。
-- 下一阶段是 Phase 07：工程行为控制闭环。
-- Phase 07 将在 Phase 06 权限与 Plan 闭环基础上补齐反幻觉、最小改动、基础 i18n、TUI 渲染稳定性、checkpoint/rewind、输入队列与中断，不提前做 Phase 08+ 功能。
+- Phase 00-08 已完成。
+- 下一阶段是 Phase 09：缓存与成本闭环。
+- Phase 09 将在 Phase 08 代码自检与验证增强闭环基础上补齐 cache history、cache freshness、cache warmup、cache break detector、endpoint-level stats、usage/stats、账单对账和 CCB 风格轻提示，不提前做 Phase 10+ 功能。
 - 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
 - 用户未明确开始执行时，必须先通过 Start Gate 确认，不得擅自进入写文件、agent、job、workflow 或依赖安装。
 

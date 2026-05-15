@@ -261,4 +261,143 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("状态为 idle");
   });
+
+  it("generates and runs verification plans with transcript evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { smoke: "node -e \"console.log('ok')\"" } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/verify plan", context, output);
+    await handleSlashCommand("/verify", context, output);
+    await handleSlashCommand("/verify last", context, output);
+
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(output.text).toContain("验证计划");
+    expect(output.text).toContain("PASS");
+    expect(output.text).toContain("日志：");
+    expect(context.lastVerification?.status).toBe("pass");
+    expect(context.backgroundTasks[0]?.kind).toBe("verification");
+    expect(context.backgroundTasks[0]?.result).toBe("pass");
+    expect(transcript.some((event) => event.type === "verification_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "verification_end")).toBe(true);
+    expect(
+      transcript.some((event) => event.type === "evidence_record" && event.kind === "test_result"),
+    ).toBe(true);
+  });
+
+  it("reports failed verification with log path and next action", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { smoke: 'node -e "process.exit(3)"' } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/verify", context, output);
+
+    expect(context.lastVerification?.status).toBe("fail");
+    expect(output.text).toContain("FAIL");
+    expect(output.text).toContain("复跑 /verify");
+    expect(output.text).toContain("log:");
+    expect(context.lastVerification?.commands[0]?.logPath).toBeTruthy();
+  });
+
+  it("classifies Vitest cleanup crashes after passing tests as runner partial", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        scripts: {
+          smoke:
+            "node -e \"console.log('Test Files  10 passed'); console.log('Tests  48 passed'); console.error('TypeError: emitter.removeListener is not a function'); process.exit(1)\"",
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/verify", context, output);
+    await handleSlashCommand("/verify last", context, output);
+    await handleSlashCommand("/review", context, output);
+
+    expect(context.lastVerification?.status).toBe("partial");
+    expect(context.lastVerification?.commands[0]?.status).toBe("partial");
+    expect(output.text).toContain("PARTIAL");
+    expect(output.text).toContain("runner error");
+    expect(output.text).toContain("Node 22 LTS");
+    expect(output.text).toContain("log:");
+    expect(context.backgroundTasks[0]?.result).toBe("partial");
+  });
+
+  it("classifies masked child signals as runner partial", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        scripts: {
+          smoke:
+            "node -e \"console.log('before signal'); console.error('SIGTERM'); process.exit(1)\"",
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/verify", context, output);
+
+    expect(context.lastVerification?.status).toBe("partial");
+    expect(context.lastVerification?.commands[0]?.runnerError).toContain("SIGTERM");
+    expect(output.text).toContain("runner error");
+  });
+
+  it("supports smoke verification, review output, and claim evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 已验证", context, output);
+    await handleSlashCommand("/verify smoke", context, output);
+    await handleSlashCommand("/review", context, output);
+    await handleSlashCommand("/claim-check 已验证", context, output);
+
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("Review Report");
+    expect(output.text).toContain("Priority");
+    expect(output.text).toContain("Suggestion");
+    expect(output.text).toContain("Claim Checker：通过");
+  });
+
+  it("keeps verification background summaries out of the input area", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/verify smoke", context, output);
+    await handleSlashCommand("/background", context, output);
+
+    expect(output.text).toContain("[后台]");
+    expect(output.text).not.toContain("你> [后台]");
+    expect(output.text).not.toContain("you> [background]");
+  });
 });
