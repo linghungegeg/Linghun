@@ -1,0 +1,33 @@
+{
+  "name": "linghun-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "linghun": "./apps/cli/dist/main.js",
+    "Linghun": "./apps/cli/dist/main.js"
+  },
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r build",
+    "check": "biome check .",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "test": "vitest run",
+    "typecheck": "tsc -b tsconfig.json"
+  },
+  "dependencies": {
+    "@linghun/cli": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.15.19",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}
