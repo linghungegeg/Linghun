@@ -1,12 +1,15 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ensureConfigDirs,
   getProjectConfigDir,
+  getProjectSettingsPath,
   getSessionRootDir,
   getUserDataDir,
+  loadConfig,
+  saveDefaultModel,
 } from "./index.js";
 
 describe("config directories", () => {
@@ -26,5 +29,16 @@ describe("config directories", () => {
     expect(getSessionRootDir("/tmp/home").replaceAll("\\", "/")).toBe(
       "/tmp/home/.linghun/data/sessions",
     );
+  });
+
+  it("saves and loads the Phase 03 default model in project settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const config = await saveDefaultModel("deepseek-v4-pro", project);
+    const loaded = await loadConfig(project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(config.defaultModel).toBe("deepseek-v4-pro");
+    expect(loaded.providers.deepseek.model).toBe("deepseek-v4-pro");
+    expect(raw).toContain("deepseek-v4-pro");
   });
 });

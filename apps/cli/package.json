@@ -14,6 +14,8 @@
   "dependencies": {
     "@linghun/config": "workspace:*",
     "@linghun/core": "workspace:*",
-    "@linghun/shared": "workspace:*"
+    "@linghun/providers": "workspace:*",
+    "@linghun/shared": "workspace:*",
+    "@linghun/tui": "workspace:*"
   }
 }

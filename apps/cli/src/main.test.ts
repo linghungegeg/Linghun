@@ -13,13 +13,14 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("prints help for the Phase 02 CLI", async () => {
+  it("prints help for the Phase 04 CLI", async () => {
     const result = await runCli(["--help"]);
 
-    expect(result.stdout).toContain("Phase 02");
+    expect(result.stdout).toContain("Phase 04");
     expect(result.stdout).toContain("linghun --version");
     expect(result.stdout).toContain("Linghun --version");
     expect(result.stdout).toContain("sessions list");
+    expect(result.stdout).toContain("model doctor");
     expect(result.exitCode).toBe(0);
   });
 
@@ -33,6 +34,29 @@ describe("CLI", () => {
 
       expect(result.stdout).toContain("当前项目还没有会话");
       expect(result.exitCode).toBe(0);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("shows and diagnoses the current model through slash commands", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
+    const previousCwd = process.cwd();
+
+    try {
+      process.chdir(project);
+      const shown = await runCli(["/model"]);
+      const switched = await runCli(["/model", "set", "deepseek-v4-pro"]);
+      const doctor = await runCli(["/model", "doctor"]);
+
+      expect(shown.stdout).toContain("DeepSeek V4 Flash");
+      expect(shown.stdout).toContain("上下文窗口：128000");
+      expect(switched.stdout).toContain("deepseek-v4-pro");
+      expect(switched.stdout).toContain("上下文窗口：1048576");
+      expect(switched.stdout).toContain("最大输出：16384");
+      expect(doctor.stdout).toContain("缺少 api_key");
+      expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
+      expect(doctor.exitCode).toBe(0);
     } finally {
       process.chdir(previousCwd);
     }

@@ -8,6 +8,8 @@
   "references": [
     { "path": "../../packages/shared" },
     { "path": "../../packages/core" },
-    { "path": "../../packages/config" }
+    { "path": "../../packages/config" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/tui" }
   ]
 }

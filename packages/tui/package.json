@@ -13,5 +13,11 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@linghun/config": "workspace:*",
+    "@linghun/core": "workspace:*",
+    "@linghun/providers": "workspace:*",
+    "@linghun/shared": "workspace:*"
   }
 }

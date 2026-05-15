@@ -17,9 +17,22 @@
   1. `F:\Linghun\LINGHUN_PHASED_DELIVERY_BLUEPRINT.md`
   2. `F:\Linghun\LINGHUN_IMPLEMENTATION_SPEC.md`
   3. `F:\Linghun\LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md`
+  4. `F:\Linghun\docs\delivery\README.md`
+  5. 已完成阶段的 `F:\Linghun\docs\delivery\phase-XX-*.md`
 - 蓝图负责阶段范围和验收，规格书负责接口、数据结构、命令、配置和测试。
 - 若用户要求与文档冲突，先指出冲突和影响，再按用户最新明确要求执行。
 - 若发现文档缺失，不要直接扩大实现范围；先补文档或向用户确认。
+
+## 参考核对要求
+- 每个阶段必须根据蓝图中的“参考”部分，按需查看本地 `F:\ccb-source`、CCB Dev Boost 文档、CCB 审计报告或成熟社区方案。
+- 允许参考产品行为、交互体验、命令习惯、风险边界、验收思路、已知 bug 和修复方向。
+- 禁止复制可疑源码实现、反编译痕迹、内部 API、专有遥测或内部服务逻辑。
+- 不能为了贴近 CCB 而破坏 Linghun 的蓝图、规格书和 clean rewrite 原则。
+- 每个阶段交付文档必须新增或保留“参考核对”小节，写明：
+  - 本阶段实际读取了哪些 Linghun 文档。
+  - 本阶段实际参考了哪些本地 CCB / CCB Dev Boost / 社区项目文件或文档。
+  - 哪些内容只是行为参考，哪些内容进入 Linghun 自研实现。
+  - 明确说明未复制可疑源码实现。
 
 ## 阶段开发规则
 - 只做当前阶段要求的内容，不提前实现后续阶段功能。

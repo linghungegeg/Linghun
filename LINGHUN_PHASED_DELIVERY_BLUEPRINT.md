@@ -84,6 +84,8 @@
 - 每阶段必须说明对缓存、成本、权限和会话的影响。
 - 每阶段必须跑最小回归，确认前一阶段核心能力未破坏。
 - 阶段产物如果只是内部 API、没有交互路径或验证路径，不算完成。
+- 阶段内承诺的用户能力必须在本阶段闭环；允许保留的“后续能力”必须是蓝图中单独列出的后续阶段目标，不能作为当前阶段验收成立的前置条件。
+- 阶段交付文档中的“已知限制”只能描述当前阶段边界，不得把当前阶段必做能力推迟到后续补丁。
 
 ## 3. 外部竞品与防跑偏原则
 
@@ -159,6 +161,13 @@ Linghun 的机会不是“别人没有 AI 编程工具”，而是：
 - AI sessions 减少重复解释上下文。
 - 大文件保护。
 - 状态栏显示费用。
+
+实测口径：
+
+- CCB 增强工作流 + GPT-5.5 + 稳定项目上下文下，已在 Linghun/老项目开发中观测到长期 90%+ prompt cache 命中，部分阶段汇总可达 97% 左右。
+- 该结果不是“GPT-5.5 天然保证高命中”，而是模型缓存能力、稳定 system prompt、稳定 tool schema、MCP 稳定化、阶段化开发、项目索引和记忆共同作用。
+- 后续文档和宣传只能表述为“组合工作流实测”，不得表述为任意模型、任意项目都能固定达到该命中率。
+- 成本结论必须同时参考本地 usage/cache read-write tokens 与账号账单，不能只看 UI 百分比。
 
 效率靠：
 
@@ -421,7 +430,8 @@ Linghun --version
 - 会话可恢复。
 - 会话可列出。
 - 会话存储路径必须通过配置 helper 获取，不允许业务代码硬编码 C 盘。
-- Phase 02 可先使用 `~/.linghun/data/sessions` 作为默认路径，但后续必须接入完整 StorageConfig，支持项目内或自定义磁盘路径。
+- Phase 02 必须完整落地默认用户数据目录：`~/.linghun/data/sessions`。
+- Phase 02 不要求暴露用户可配置数据目录；完整 StorageConfig、`LINGHUN_DATA_DIR`、项目内/自定义磁盘路径切换属于 Phase 11 的成品验收，不能影响 Phase 02 的会话创建、列出、恢复闭环。
 
 ### 交互
 
@@ -824,6 +834,10 @@ cancel 取消
 - tool schema diff。
 - MCP tool list diff。
 - model changed 检测。
+- usage 原始字段记录：input tokens、output tokens、cache read tokens、cache write/create tokens。
+- 命中率必须基于 provider/API 返回的 usage 字段计算，不能用 UI 估算值代替。
+- 支持导出最近缓存日志，便于和账号账单交叉验证。
+- 明确区分“模型自身能力”和“Linghun 稳定上下文带来的命中提升”。
 
 ### 性能要求
 
@@ -835,6 +849,9 @@ cancel 取消
 - 连续 20 轮对话后 `/cache-log` 有数据。
 - 切换模型后能显示缓存破坏原因。
 - MCP 工具变化能显示原因。
+- `/cache-log` 必须显示每轮 cache read/write/input/output tokens 和模型。
+- 抽样对比 transcript/API usage 与 `/cache-log`，命中率计算一致。
+- 至少提供一次账号账单或 provider usage 对账流程说明，证明成本估算不是纯 UI 推测。
 
 ## 15. 阶段 10：MCP 与 codebase-memory 闭环
 
@@ -922,6 +939,8 @@ cancel 取消
 - 项目级记忆默认支持写入项目内 `.linghun/memory/`。
 - 用户级记忆与项目级记忆必须分层，不能混写。
 - 记忆和会话数据目录必须可通过配置切换到其他磁盘。
+- 必须支持 `LINGHUN_DATA_DIR` 作为统一用户数据根目录，覆盖 sessions、user memory、logs、jobs、cache history 等用户级数据的默认根路径。
+- 必须支持配置项 `storage.userData`、`storage.sessions`、`storage.memory.user`、`storage.logs`、`storage.jobs`、`storage.cache`；未单独配置时继承 `LINGHUN_DATA_DIR` 或默认 `~/.linghun/data`。
 - 不允许硬编码 `C:` 或固定用户目录。
 - 必须提供 `/memory storage` 或等价诊断，显示当前记忆/会话/索引存储位置。
 
@@ -940,7 +959,8 @@ cancel 取消
 - 结合当前代码继续工作。
 - 长任务中使用 `/btw` 后，主任务能继续。
 - 能把项目级记忆写入项目内 `.linghun/memory/`。
-- 能把会话或记忆数据路径配置到非 C 盘目录。
+- 能通过 `LINGHUN_DATA_DIR` 把用户级会话、记忆、日志、任务、缓存历史迁移到非 C 盘目录。
+- 能通过 `storage.*` 配置覆盖单项数据路径，例如只把 sessions 放到指定目录。
 - `/memory storage` 能显示项目级、用户级、会话、索引的实际路径。
 
 ## 17. 阶段 12：Agent 闭环
@@ -1186,6 +1206,8 @@ cancel 取消
 - 能完成真实 bug 修复。
 - 命中率长期稳定 92% - 96%。
 - 峰值可接近 98%。
+- 高命中率必须来自真实 usage/cache read-write tokens，并尽量用账号账单抽样交叉确认。
+- 对外表述必须写清楚：这是特定模型、稳定上下文、索引和缓存保护组合下的实测，不是任意模型天然保证。
 - 成本可见。
 - MCP 崩溃不影响主程序。
 - plan 不写文件。

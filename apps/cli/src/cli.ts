@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptEvent } from "@linghun/core";
+import type { ModelInfo } from "@linghun/providers";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
+  ${LINGHUN_CLI_NAME}                                   进入 Phase 04 交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -12,15 +14,21 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   ${LINGHUN_CLI_NAME} sessions append <id> --message 文本  追加一条用户消息
   ${LINGHUN_CLI_NAME} sessions resume <id> [--json]     恢复并读取会话 transcript
   ${LINGHUN_CLI_NAME} sessions summary <id> [--text 文本]  查看或更新会话摘要
+  ${LINGHUN_CLI_NAME} model                         查看当前模型配置
+  ${LINGHUN_CLI_NAME} model set deepseek-v4-pro      切换当前 headless 模型
+  ${LINGHUN_CLI_NAME} model doctor                   诊断模型配置
 
 Slash 兼容：
   ${LINGHUN_CLI_NAME} /sessions
   ${LINGHUN_CLI_NAME} /sessions resume <id>
   ${LINGHUN_CLI_NAME} /sessions summary <id>
+  ${LINGHUN_CLI_NAME} /model
+  ${LINGHUN_CLI_NAME} /model set deepseek-v4-pro
+  ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  Phase 02 提供 Session 与 JSONL transcript 闭环。
-  当前命令不会加载模型、MCP 或 TUI。
+  Phase 04 提供最小可用 TUI / REPL 闭环。
+  当前命令不会加载 MCP、Agent、工具系统或长期任务。
 
 Windows 兼容：
   Linghun --version 与 linghun --version 行为一致。`;
@@ -34,7 +42,13 @@ export type CliResult = {
 export async function runCli(argv: string[]): Promise<CliResult> {
   const [command] = argv;
 
-  if (!command || command === "--help" || command === "-h") {
+  if (!command) {
+    const { runTui } = await import("@linghun/tui");
+    const exitCode = await runTui();
+    return { stdout: "", stderr: "", exitCode };
+  }
+
+  if (command === "--help" || command === "-h") {
     return { stdout: `${helpText}\n`, stderr: "", exitCode: 0 };
   }
 
@@ -46,12 +60,88 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   if (normalized[0] === "sessions") {
     return runSessionsCommand(normalized.slice(1));
   }
+  if (normalized[0] === "model") {
+    return runModelCommand(normalized.slice(1));
+  }
 
   return {
     stdout: "",
     stderr: `未知命令：${command}\n运行 ${LINGHUN_CLI_NAME} --help 查看可用命令。\n`,
     exitCode: 2,
   };
+}
+
+async function runModelCommand(argv: string[]): Promise<CliResult> {
+  const [subcommand, ...rest] = argv;
+  const [{ loadConfig, saveDefaultModel }, { deepSeekModels }] = await Promise.all([
+    import("@linghun/config"),
+    import("@linghun/providers"),
+  ]);
+  const config = await loadConfig();
+  const provider = config.providers.deepseek;
+  const modelId = provider.model;
+  const model = deepSeekModels.find((item) => item.id === modelId) ?? deepSeekModels[0];
+
+  if (!subcommand) {
+    return {
+      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl, provider.maxOutputTokens),
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  if (subcommand === "set") {
+    const [nextModel] = rest;
+    const target = deepSeekModels.find((item) => item.id === nextModel);
+    if (!target) {
+      return usageError(`未知模型：${nextModel ?? "（空）"}`);
+    }
+    const nextConfig = await saveDefaultModel(target.id, process.cwd(), target.maxOutputTokens);
+    const nextProvider = nextConfig.providers.deepseek;
+    return {
+      stdout: `当前 headless 模型已切换为：${target.id}\n${formatModelInfo(
+        deepSeekModels,
+        target.id,
+        nextProvider.baseUrl,
+        nextProvider.maxOutputTokens,
+      )}`,
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  if (subcommand === "doctor") {
+    const problems: string[] = [];
+    if (!provider.baseUrl) {
+      problems.push("- 缺少 base_url：请设置 LINGHUN_DEEPSEEK_BASE_URL 或配置 provider.baseUrl。");
+    }
+    if (!provider.apiKey) {
+      problems.push(
+        "- 缺少 api_key：请设置 LINGHUN_DEEPSEEK_API_KEY，或在本地配置中填写 api_key。",
+      );
+    }
+    const header = `模型诊断：${model.id}\nbase_url：${provider.baseUrl ?? "未配置"}\n`;
+    if (problems.length === 0) {
+      return { stdout: `${header}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
+    }
+    return {
+      stdout: `${header}状态：发现 ${problems.length} 个问题。\n${problems.join("\n")}\n建议：修复后重新运行 /model doctor。\n`,
+      stderr: "",
+      exitCode: 0,
+    };
+  }
+
+  return usageError(`未知 model 子命令：${subcommand}`);
+}
+
+function formatModelInfo(
+  models: ModelInfo[],
+  modelId: string,
+  baseUrl: string | undefined,
+  maxOutputTokens: number | undefined,
+): string {
+  const model = models.find((item) => item.id === modelId) ?? models[0];
+  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ?? "未配置"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
 }
 
 async function runSessionsCommand(argv: string[]): Promise<CliResult> {
@@ -145,18 +235,21 @@ async function runSessionsCommand(argv: string[]): Promise<CliResult> {
 
 function normalizeSlashCommand(argv: string[]): string[] {
   const [command, ...rest] = argv;
-  if (isSessionsSlashCommand(command)) {
+  if (isSlashCommand(command, "sessions")) {
     return ["sessions", ...rest];
+  }
+  if (isSlashCommand(command, "model")) {
+    return ["model", ...rest];
   }
   return argv;
 }
 
-function isSessionsSlashCommand(command: string | undefined): boolean {
+function isSlashCommand(command: string | undefined, name: string): boolean {
   if (!command) {
     return false;
   }
   const normalized = command.replaceAll("\\", "/");
-  return normalized === "/sessions" || normalized.endsWith("/sessions");
+  return normalized === `/${name}` || normalized.endsWith(`/${name}`);
 }
 
 function readOption(argv: string[], name: string): string | undefined {

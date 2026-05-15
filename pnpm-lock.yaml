@@ -36,9 +36,15 @@ importers:
       '@linghun/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@linghun/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@linghun/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@linghun/tui':
+        specifier: workspace:*
+        version: link:../../packages/tui
 
   packages/config:
     dependencies:
@@ -52,13 +58,30 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/providers: {}
+  packages/providers:
+    dependencies:
+      '@linghun/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/shared: {}
 
   packages/tools: {}
 
-  packages/tui: {}
+  packages/tui:
+    dependencies:
+      '@linghun/config':
+        specifier: workspace:*
+        version: link:../config
+      '@linghun/core':
+        specifier: workspace:*
+        version: link:../core
+      '@linghun/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@linghun/shared':
+        specifier: workspace:*
+        version: link:../shared
 
 packages:
 

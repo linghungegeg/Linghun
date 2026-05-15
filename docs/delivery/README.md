@@ -7,8 +7,8 @@
 | Phase 00 | done | [phase-00-design-freeze.md](./phase-00-design-freeze.md) | 设计冻结与基线确认 |
 | Phase 01 | done | [phase-01-project-skeleton.md](./phase-01-project-skeleton.md) | 工程骨架闭环 |
 | Phase 02 | done | [phase-02-session-transcript.md](./phase-02-session-transcript.md) | Session 与会话持久化闭环 |
-| Phase 03 | pending | phase-03-model-gateway.md | 模型网关最小闭环 |
-| Phase 04 | pending | phase-04-tui-mvp.md | TUI 成品骨架闭环 |
+| Phase 03 | done | [phase-03-model-gateway.md](./phase-03-model-gateway.md) | 模型网关最小闭环 |
+| Phase 04 | done | [phase-04-tui-mvp.md](./phase-04-tui-mvp.md) | TUI / REPL 最小闭环 |
 | Phase 05 | pending | phase-05-core-tools.md | 核心工具闭环 |
 | Phase 06 | pending | phase-06-permissions-plan.md | 权限与 Plan 闭环 |
 | Phase 07 | pending | phase-07-behavior-guardrail.md | 工程行为控制闭环 |

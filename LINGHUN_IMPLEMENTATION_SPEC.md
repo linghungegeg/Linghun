@@ -274,6 +274,7 @@ export type StorageConfig = {
   index: StorageLocation
   logs: StorageLocation
   jobs: StorageLocation
+  cache: StorageLocation
   plugins: {
     project: StorageLocation
     user: StorageLocation
@@ -293,10 +294,37 @@ project memory: <project>/.linghun/memory/
 session memory: <project>/.linghun/memory/session/
 index metadata: <project>/.linghun/index/
 codebase-memory artifact: <project>/.codebase-memory/
-userData: ~/.linghun/
-user memory: ~/.linghun/memory/
-logs: ~/.linghun/logs/
-jobs: ~/.linghun/jobs/
+userData: ~/.linghun/data/
+sessions: ~/.linghun/data/sessions/
+user memory: ~/.linghun/data/memory/
+logs: ~/.linghun/data/logs/
+jobs: ~/.linghun/data/jobs/
+cache history: ~/.linghun/data/cache/
+```
+
+环境变量：
+
+```text
+LINGHUN_DATA_DIR=<absolute path>
+```
+
+`LINGHUN_DATA_DIR` 是统一用户数据根目录。设置后，未被 `storage.*` 单项覆盖的用户级数据默认写入：
+
+```text
+sessions: <LINGHUN_DATA_DIR>/sessions/
+user memory: <LINGHUN_DATA_DIR>/memory/
+logs: <LINGHUN_DATA_DIR>/logs/
+jobs: <LINGHUN_DATA_DIR>/jobs/
+cache history: <LINGHUN_DATA_DIR>/cache/
+```
+
+路径解析优先级：
+
+```text
+CLI 参数指定的路径
+> storage.* 单项配置
+> LINGHUN_DATA_DIR
+> 默认 ~/.linghun/data/
 ```
 
 要求：
@@ -304,12 +332,14 @@ jobs: ~/.linghun/jobs/
 - 不允许硬编码 `C:`、`C:\Users\...` 或固定用户名。
 - 所有路径必须通过配置解析函数获得，不能散落在业务代码中拼接。
 - 项目级记忆优先支持项目内 `.linghun/memory/`，便于迁移和备份。
-- 用户级记忆默认在 `~/.linghun/memory/`，但可配置到任意磁盘。
-- 会话数据默认可使用用户目录，但必须支持切换到项目内或自定义路径。
+- 用户级记忆默认在 `~/.linghun/data/memory/`，但可通过 `LINGHUN_DATA_DIR` 或 `storage.memory.user` 配置到任意磁盘。
+- 会话数据 Phase 02 默认使用 `~/.linghun/data/sessions/`；Phase 11 必须支持通过 `LINGHUN_DATA_DIR` 或 `storage.sessions` 切换到项目内或自定义路径。
+- 用户级记忆、日志、长期任务和缓存历史必须支持跟随 `LINGHUN_DATA_DIR` 迁移。
 - 索引产物默认项目内存储，避免与其他项目混用。
 - 写入项目内 `.linghun/` 的文件必须有 gitignore 建议，避免误提交敏感内容。
 - `/memory storage` 或等价命令必须显示当前项目记忆、用户记忆、会话、索引、日志的实际路径。
 - 路径迁移必须可诊断：旧路径不存在时给出可操作错误，而不是静默新建错误目录。
+- Windows 示例必须使用非固定盘符写法说明，例如 `LINGHUN_DATA_DIR=F:\LinghunData` 只是示例，不能写死到代码或默认配置。
 
 ## 5. 命令规格
 
@@ -1008,7 +1038,10 @@ export type CacheTurnStats = {
   inputTokens: number
   outputTokens: number
   model: string
+  provider: string
+  source: 'api_usage' | 'provider_usage' | 'estimated'
   compacted: boolean
+  rawUsage?: unknown
 }
 ```
 
@@ -1018,6 +1051,12 @@ export type CacheTurnStats = {
 - `/cache-log` 可查看。
 - 低于阈值状态栏警告。
 - cache break 必须记录原因。
+- 命中率优先基于 provider/API 返回的真实 usage 字段计算。
+- 如果 provider 不返回 cache read/write usage，`source` 必须标记为 `estimated`，UI 必须显示“不支持真实缓存统计”。
+- GPT-5.5 等模型的高命中率只能记录为特定 provider + 工作流实测结果，不能写成模型天然保证。
+- `/cache-log` 必须显示每轮 input/output/cache read/cache write tokens、model、provider、compact 状态。
+- 支持导出最近 20 轮缓存日志，用于和账号账单交叉验证。
+- cache break 诊断必须覆盖 system prompt、tool schema、MCP tool list、model changed、compact、memory changed。
 
 Cost：
 
@@ -1030,8 +1069,41 @@ export type CostSummary = {
   estimatedUsd: number
   estimatedCny: number
   estimatedSavedCny?: number
+  billingReconciled?: boolean
+  billingSource?: string
 }
 ```
+
+### 12.1 缓存命中率计算口径
+
+```ts
+export type CacheUsageRaw = {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  provider: string
+  model: string
+}
+
+export function computePromptCacheHitRate(usage: CacheUsageRaw): number | null
+```
+
+计算规则：
+
+```text
+denominator = inputTokens + cacheWriteTokens + cacheReadTokens
+hitRate = cacheReadTokens / denominator
+```
+
+要求：
+
+- `denominator <= 0` 时返回 `null`。
+- 命中率展示为 0-100 的百分比。
+- 不把 output tokens 放入命中率分母。
+- cache write/create 字段按 provider 适配到统一 `cacheWriteTokens`。
+- 任何“省钱比例”必须和输出 tokens、cache write 成本、模型单价分开说明。
+- 账单对账只能作为验证来源，不得覆盖原始 usage 记录。
 
 ## 13. MCP 规格
 
@@ -1115,7 +1187,7 @@ export type MemoryItem = {
 - 不存大段原始对话。
 - 不让错误记忆不可逆。
 - 项目级记忆默认写入 `<project>/.linghun/memory/`。
-- 用户级记忆默认写入 `~/.linghun/memory/`，但必须可配置到其他磁盘。
+- 用户级记忆默认写入 `~/.linghun/data/memory/`，但必须可通过 `LINGHUN_DATA_DIR` 或 `storage.memory.user` 配置到其他磁盘。
 - 会话级临时记忆默认跟随 session 存储位置。
 - 记忆写入前必须明确 scope 和 storagePath。
 - `/memory storage` 必须能解释每类记忆当前写在哪里。
