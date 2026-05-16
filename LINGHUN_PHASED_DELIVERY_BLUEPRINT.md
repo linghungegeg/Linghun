@@ -1156,6 +1156,7 @@ cancel 取消
 ### 参考
 
 - OpenCode 多模型方向。
+- oh-my-openagent 的 team / category routing 方向，只参考角色分工、状态可见和验收边界，不复制实现。
 - 用户需求：一个 AI 写方案，一个 AI 指挥，一个 AI 执行。
 
 ### 产物
@@ -1181,6 +1182,7 @@ cancel 取消
 - 生图模型。
 - 成本显示。
 - 角色路由必须明确：planner / executor / reviewer / verifier / summarizer / vision / image。
+- 每次角色路由必须产生可审计记录：触发原因、选择角色、选择模型、fallback 候选、能力要求、预算上限和停止条件。
 - planner 输出 PlanProposal，不直接写文件。
 - executor 只能执行已批准计划或明确任务。
 - reviewer/verifier 默认只读，必须基于 diff、关键文件和验证结果复核。
@@ -1189,7 +1191,9 @@ cancel 取消
 - 角色之间只传递结构化摘要、证据、diff 和必要文件列表，不无脑复制完整上下文。
 - 每个角色可配置模型、最大 token、最大费用、是否允许工具、是否允许写入。
 - 模型不可用、能力不足或超预算时，必须降级到备用模型或暂停让用户选择。
-- 多模型协作必须显示每个角色的成本和贡献。
+- 多模型协作必须显示每个角色的成本、耗时、贡献摘要和是否影响最终结论。
+- `/model route doctor` 必须能诊断角色模型缺失、能力不匹配、fallback 不可用、预算不足、vision/image provider 未配置和路由配置冲突。
+- role context handoff 必须使用结构化 `RoleHandoff`，只包含任务摘要、证据、diff、验证结果、必要文件列表和风险，不允许复制完整 transcript。
 - 主 executor 不支持视觉时，不能要求用户手动永久切换主模型；应按需调用 vision provider，然后把结构化视觉结果交回当前 executor。
 - 生图必须作为后台任务运行，显示任务 id、模型、耗时、保存路径和日志路径。
 - image provider 默认不固定尺寸，不传 size/quality/format；只有用户明确指定或项目资产场景需要时才传。
@@ -1227,6 +1231,8 @@ cancel 取消
 - 一个模型失败时能切到 fallback 或暂停选择。
 - 超过角色预算时停止继续烧 token。
 - 多模型上下文交接不会把全量会话重复塞给每个模型。
+- `/model route doctor` 能解释至少一个能力不足或 fallback 缺失问题，并给出中文修复建议。
+- 多模型运行后能在 `/stats` 或等价视图看到按角色拆分的 token、成本、耗时和贡献摘要。
 
 ## 19. 阶段 14：Skills 与工作流闭环
 
@@ -1242,6 +1248,7 @@ cancel 取消
 - CCB Skills / workflow 工具方向。
 - 当前 Codex skill 生态经验。
 - OpenCode 插件化和配置化方向。
+- oh-my-openagent 的 skills / hooks / lifecycle 方向，只参考加载边界、诊断面板和失败隔离，不复制实现。
 
 ### 产物
 
@@ -1252,6 +1259,7 @@ cancel 取消
 - Workflow templates。
 - Hooks runtime。
 - Plugin doctor。
+- Skill / Plugin / Hook trust report。
 
 ### 必做工作流
 
@@ -1273,6 +1281,16 @@ cancel 取消
 
 Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook 必须在项目信任后才允许执行，不能绕过权限系统。
 
+### 成品级加载边界
+
+- Skill 默认只加载稳定 metadata 和短摘要；只有触发命中且用户任务需要时，才加载对应 `SKILL.md` 或工作流正文。
+- 第三方 skill / plugin / hook 必须显示来源、路径、版本、权限、信任级别和是否会联网或执行命令。
+- 项目级 skill / plugin / hook 首次启用前必须经过项目信任确认。
+- workflow 启动前必须走 Start Gate；工作流内部写文件、运行 Bash、联网、安装依赖仍必须走权限管道。
+- skill / plugin / hook 的列表、摘要、贡献点和 schema 必须稳定排序，动态字段不得进入 prompt 稳定层。
+- 加载失败必须失败隔离：禁用失败项、记录 doctor 信息、主会话继续可用。
+- hook、plugin、workflow 的长输出必须截断展示并写入日志路径，不得混入主消息流或污染输入区。
+
 ### 交互
 
 ```text
@@ -1289,9 +1307,11 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 
 - 不加载无关 skill 全量内容进 prompt。
 - skill 摘要稳定，避免破坏缓存。
+- skill 命中机制必须 summary-first、load-on-demand，不能把所有 skill 全文塞进 prompt。
 - plugin 清单稳定排序，失败隔离。
 - plugin 贡献的命令、MCP、provider、hook 必须可见。
 - hook 输出必须截断，大输出写日志路径；hook 超时必须有限制。
+- `/skills`、`/plugins doctor`、`/doctor hooks` 必须显示来源、信任级别、启用状态、最近错误、权限和缓存影响摘要。
 
 ### 验收
 
@@ -1305,6 +1325,9 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - PostToolUse 能触发最小验证或检查。
 - Stop hook 能阻止未完成交付文档/未验证的阶段任务直接结束。
 - Notification hook 能发送任务完成摘要，但默认不推送完整上下文。
+- 第三方 skill/plugin/hook 未信任时不会执行命令、联网或写文件。
+- 禁用某个 skill/plugin/hook 后，重启仍保持禁用，且不会继续进入 prompt 稳定层。
+- workflow 验收必须包含启动前 Start Gate、执行中权限审批、结束时验证/交付检查。
 
 ### 成品级 Plugin System
 
@@ -1394,6 +1417,70 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 
 本阶段完成后，Linghun 才算真正进入可用测试。
 
+## 20.5 阶段 15.5：双模型交叉审查与开源前 hardening
+
+### 目标
+
+Phase 15 真实项目测试完成后，增加一次只读优先的双模型交叉审查，降低漏 bug、漏安全问题、漏产品体验问题和阶段边界偏移的概率。本阶段不新增产品功能，不提前进入 Phase 16。
+
+### 审查输入
+
+- Phase 00-15 交付文档。
+- 当前 git diff 或 Phase 15 完成提交。
+- Phase 15 真实项目测试报告。
+- 测试命令和结果。
+- 已知风险和不在本阶段处理的内容。
+- CCB Dev Boost 对照清单。
+- 当前缓存、索引、记忆、agent、多模型、权限和存储设计证据。
+
+### 模型分工
+
+- 模型 A：GPT-5.5 / Claude 或同级强推理模型，做产品与架构审查。
+- 模型 B：DeepSeek V4 Pro 或同级强代码模型，做代码与安全审查。
+
+### 审查范围
+
+模型 A 重点检查：
+
+- 是否偏离 Linghun 蓝图。
+- 是否阶段边界混乱。
+- 是否复制可疑实现或引入 clean rewrite 风险。
+- 是否过度复杂化。
+- 是否用户交互不清楚。
+- 是否新手可用。
+- 缓存、索引、记忆、agent、多模型是否冲突。
+- 是否有隐藏长期维护风险。
+
+模型 B 重点检查：
+
+- 代码正确性和边界条件。
+- 文件写入安全、路径穿越、权限绕过。
+- 并发状态污染。
+- 大文件、大输出、大日志处理。
+- Windows 兼容。
+- 测试覆盖缺口。
+- 真实项目回归风险。
+
+### 必做
+
+- 两个模型都必须只读审查，不自动改代码。
+- 两份报告都按 P0 / P1 / P2 输出，必须给文件证据、风险说明、最小修复建议和是否阻塞。
+- 模型 A 复核模型 B 报告中哪些代码问题影响产品方向或阶段边界。
+- 模型 B 复核模型 A 报告中哪些问题真实、哪些缺证据、哪些需要最小测试。
+- 主模型或人工最终裁决，形成统一问题表：问题、来源模型、严重级别、是否确认、是否阻塞、修复阶段、最小修复方式、验证命令。
+- 只修 P0 和确认后的 P1；P2 记录到后续，不在 hardening 中无限扩范围。
+- 修复后必须重新运行 Phase 15 关键验证命令，并更新本阶段交付文档。
+
+### 验收
+
+- 有两份独立审查报告。
+- 有交叉复核记录。
+- 有最终裁决表。
+- P0 全部修复或明确说明无法发布。
+- 确认阻塞的 P1 已修复或降级并说明风险。
+- P2 已记录到后续阶段，不阻塞 Phase 16。
+- 本阶段不新增 Phase 16+ 功能，不改变既定阶段边界。
+
 ## 21. 阶段 16：可控学习闭环
 
 ### 目标
@@ -1461,6 +1548,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - CCB Agent 生命周期。
 - CCB Cron / job 类能力。
 - 当前蓝图的 Session、Agent、权限、缓存、会话恢复能力。
+- oh-my-openagent 的 team mode / background lifecycle 方向，只参考任务编排、成员状态和报告形态，不复制实现。
 
 ### 产物
 
@@ -1475,6 +1563,8 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 任务日志。
 - 结果报告。
 - 后台任务折叠、恢复和中断入口。
+- Team / job 状态表。
+- Agent assignment report。
 
 ### 必做
 
@@ -1491,16 +1581,21 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 是否允许多 agent。
 - 是否需要先输出 plan。
 - 是否需要用户审批后写入。
+- 每个长期任务必须有结构化任务图：目标、阶段、子任务、agent 分工、依赖关系、验收标准、预算、超时和停止条件。
+- team mode 只能作为 job / agent 状态表呈现，不允许把多个 agent 的原始聊天长流直接混进主消息区。
+- agent 分工必须显式：role、模型、权限、允许工具、输入摘要、输出格式和预算。
 - 自动工作默认一次只推进一个阶段；完成阶段后必须停止并输出交付文档、验证结果和 handoff packet。
 - 连续阶段模式必须由用户明确开启，且每个阶段之间仍要生成独立交付文档和确认点。
 - 自动新会话必须读取 `LINGHUN.md`、阶段状态、最近 handoff packet、Todo、验证结果和索引状态，不得塞入完整历史聊天。
 - 自动新会话启动前必须校验 handoff packet 的 `nextPhase`、`mustNotDo`、`permissionMode`、`verification`、`evidenceRefs`、`indexStatus`、`model/provider` 和 `budgetUsed`。
 - handoff packet 不完整时，job 必须暂停为 `needs_handoff_repair` 或等价状态，并输出需要补齐的字段，不能继续自动执行。
 - job 报告必须记录读取的 handoff id、新建 session id、模型/provider、预算使用、验证结果、风险暂停原因和下一步建议。
+- job 报告必须记录 agent assignment、每个 agent 的输入摘要、输出摘要、证据引用、验证结果和是否被采纳。
 - Remote Channels 支持微信、飞书、QQ、钉钉、Telegram/Discord 等通道方向，但默认关闭。
 - 手机/IM 通道只发送命令、摘要、审批和结果报告，不推送完整上下文。
 - 高风险操作必须暂停等待用户明确审批。
 - 后台任务在 TUI 状态栏显示数量和最近状态；费用详情放 `/usage` 或 `/stats`，不默认挤进状态栏。
+- `/background` 和 `/job report` 必须以状态表、任务图和结构化报告为主，原始日志只能通过日志路径查看。
 - 后台任务日志可随时打开，不需要等任务结束。
 
 ### 交互
@@ -1545,6 +1640,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 自动会话使用 handoff packet 交接，不重复塞完整历史。
 - handoff packet 不完整时自动任务暂停，不继续烧 token。
 - 必要时开 explorer / verifier。
+- `/job report` 能显示任务图、agent 分工、预算使用、验证结果、被采纳结论和暂停原因。
 - 生成报告。
 - 不进行未授权写入。
 - 超预算能停止。
@@ -1600,6 +1696,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 13 多模型
 14 Skills/Workflow
 15 真实项目测试版
+15.5 双模型交叉审查与开源前 hardening
 16 可控学习闭环
 17 长期托管任务与自动会话
 18 桌面端预留验证
@@ -1613,6 +1710,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - 没有阶段 9，不谈省钱。
 - 没有阶段 10，不谈索引增强。
 - 没有阶段 15，不宣称可用。
+- 没有阶段 15.5，不宣称开源前 hardening 已完成。
 - 没有阶段 16，不宣称越用越聪明。
 - 没有阶段 17，不宣称全托管。
 
@@ -1624,6 +1722,7 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 - CCB Dev Boost 缓存、索引、MCP 稳定、成本观测、中文增强。
 - OpenCode 的多模型开放和 provider 抽象。
 - Hermes 的记忆、用户偏好、技能固化。
+- oh-my-openagent 的 team mode、角色路由、skills/hooks/lifecycle 方向已作为行为和验收参考覆盖到 Phase 13、14、17；只参考公开交互与边界，不复制实现。
 - MCP 生态和 codebase-memory。
 - AI sessions 跨 Claude / Codex 会话交接。
 - 严格工程行为，减少幻觉和绕路。

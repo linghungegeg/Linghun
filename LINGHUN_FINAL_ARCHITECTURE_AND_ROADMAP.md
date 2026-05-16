@@ -470,6 +470,8 @@ unregister agent
 
 图片生成单独走 image provider。它默认是异步后台任务，支持 OpenAI Images / Responses、OpenAI-compatible image2 中转、自定义 HTTP 和本地生图服务。默认不固定尺寸、不长篇扩写提示词，只传用户 prompt 和必要工程约束；生成结果保存到本地资产目录并写入 evidence。
 
+oh-my-openagent 的 team / category routing 可以作为公开交互和验收边界参考：Linghun 吸收“按角色选模型、显示成员贡献、能诊断路由失败”的产品思路，但不复制实现。每次角色路由都必须可审计，记录触发原因、选用模型、fallback、预算和停止条件；角色之间只传结构化摘要、证据、diff、验证结果和必要文件列表，不传完整历史。
+
 第一版只做手动路由：
 
 ```text
@@ -749,6 +751,16 @@ Skill 和 Plugin 的边界：
 - 第一版 Plugin 不做市场，只做本地清单、启停、诊断和安全隔离。
 - Plugin 不能绕过权限管道，不能静默新增高风险工具。
 
+Skills / Hooks / Plugins 的成品级边界：
+
+- Skill 默认 summary-first、load-on-demand，不把所有 skill 全文塞进 prompt。
+- 第三方 skill / plugin / hook 必须显示来源、版本、路径、权限、信任级别和是否会联网或执行命令。
+- 项目级 hook 和 plugin 首次启用前必须经过项目信任确认。
+- hook 默认关闭，新手隐藏，不能绕过权限管道。
+- workflow 启动前走 Start Gate，内部写入、Bash、联网仍走权限审批。
+- plugin / skill / hook 列表和贡献点必须稳定排序，避免破坏 prompt cache。
+- 加载失败必须失败隔离，诊断进入 `/plugins doctor` 或 `/doctor hooks`，主会话继续可用。
+
 OpenCode 值得吸收：
 
 - provider 抽象和模型能力表。
@@ -939,8 +951,9 @@ F:\LinghunProject 或新仓库根目录
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、Plugin 底座 |
 | Phase 15 | 真实项目测试版 | 用真实老项目验证完整开发闭环 |
+| Phase 15.5 | 双模型交叉审查与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1 |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
-| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Remote Channels、单阶段自动工作 |
+| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels、单阶段自动工作 |
 | Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界 |
 
 当前进度：
@@ -1054,6 +1067,8 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 5. 模型事件适配。
 
 在这五个底座稳定之前，桌面端、技能市场、远程控制、自动自治都应该后置。
+
+社区项目如 oh-my-openagent 证明 team mode、skills、hooks、角色路由和后台生命周期是有价值的方向，但 Linghun 只吸收公开行为和验收边界：角色可审计、状态表可见、预算可控、失败可诊断、输出摘要化。它们不能替代 Linghun 的 clean rewrite 原则，也不能成为提前堆功能、绕过权限或复制实现的理由。
 
 如果按本文路线执行，Linghun 的第一阶段目标不是立刻超越 CCB，而是达到：
 

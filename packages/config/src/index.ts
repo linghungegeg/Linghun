@@ -11,6 +11,37 @@ export type ProviderConfig = {
   maxOutputTokens?: number;
 };
 
+export type ModelRole =
+  | "planner"
+  | "executor"
+  | "reviewer"
+  | "verifier"
+  | "summarizer"
+  | "vision"
+  | "image";
+
+export type ModelCapability = "text" | "tools" | "vision" | "image" | "thinking" | "promptCache";
+
+export type RoleModelRoute = {
+  role: ModelRole;
+  provider: string;
+  primaryModel: string;
+  fallbackModels: string[];
+  requiredCapabilities: ModelCapability[];
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxCostCny?: number;
+  allowTools: boolean;
+  allowWrite: boolean;
+  allowBash: boolean;
+  requireApprovalBeforeRun: boolean;
+};
+
+export type ModelRouteConfig = {
+  defaultModel: string;
+  routes: RoleModelRoute[];
+};
+
 export type McpServerConfig = {
   command: string;
   args?: string[];
@@ -44,6 +75,7 @@ export type LinghunConfig = {
   language: Language;
   defaultModel: string;
   providers: Record<string, ProviderConfig>;
+  modelRoutes: ModelRouteConfig;
   permission: {
     defaultMode: PermissionMode;
   };
@@ -57,6 +89,96 @@ export type LinghunConfig = {
     mode: "fast" | "moderate" | "full";
     ignoreFile: ".linghunignore" | ".cbmignore";
   };
+};
+
+export const defaultModelRoutes: ModelRouteConfig = {
+  defaultModel: "deepseek-v4-flash",
+  routes: [
+    {
+      role: "planner",
+      provider: "deepseek",
+      primaryModel: "deepseek-v4-flash",
+      fallbackModels: ["deepseek-v4-pro"],
+      requiredCapabilities: ["text"],
+      maxOutputTokens: 8_192,
+      maxCostCny: 0,
+      allowTools: false,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: true,
+    },
+    {
+      role: "executor",
+      provider: "deepseek",
+      primaryModel: "deepseek-v4-flash",
+      fallbackModels: ["deepseek-v4-pro"],
+      requiredCapabilities: ["text"],
+      maxOutputTokens: 8_192,
+      allowTools: true,
+      allowWrite: true,
+      allowBash: true,
+      requireApprovalBeforeRun: true,
+    },
+    {
+      role: "reviewer",
+      provider: "deepseek",
+      primaryModel: "deepseek-v4-flash",
+      fallbackModels: ["deepseek-v4-pro"],
+      requiredCapabilities: ["text"],
+      maxOutputTokens: 8_192,
+      allowTools: true,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: false,
+    },
+    {
+      role: "verifier",
+      provider: "deepseek",
+      primaryModel: "deepseek-v4-flash",
+      fallbackModels: ["deepseek-v4-pro"],
+      requiredCapabilities: ["text"],
+      maxOutputTokens: 8_192,
+      allowTools: true,
+      allowWrite: false,
+      allowBash: true,
+      requireApprovalBeforeRun: false,
+    },
+    {
+      role: "summarizer",
+      provider: "deepseek",
+      primaryModel: "deepseek-v4-flash",
+      fallbackModels: [],
+      requiredCapabilities: ["text"],
+      maxOutputTokens: 2_048,
+      maxCostCny: 0,
+      allowTools: false,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: false,
+    },
+    {
+      role: "vision",
+      provider: "",
+      primaryModel: "",
+      fallbackModels: [],
+      requiredCapabilities: ["vision"],
+      allowTools: false,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: true,
+    },
+    {
+      role: "image",
+      provider: "",
+      primaryModel: "",
+      fallbackModels: [],
+      requiredCapabilities: ["image"],
+      allowTools: false,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: true,
+    },
+  ],
 };
 
 export const defaultConfig: LinghunConfig = {
@@ -78,6 +200,7 @@ export const defaultConfig: LinghunConfig = {
       maxOutputTokens: 4_096,
     },
   },
+  modelRoutes: defaultModelRoutes,
   permission: {
     defaultMode: "default",
   },
@@ -221,19 +344,62 @@ export async function saveDefaultModel(
       },
     },
   };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+export async function saveModelRoute(
+  role: ModelRole,
+  model: string,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const provider = inferProviderForModel(model, current.providers);
+  const next: LinghunConfig = {
+    ...current,
+    modelRoutes: {
+      ...current.modelRoutes,
+      routes: current.modelRoutes.routes.map((route) =>
+        route.role === role ? { ...route, provider, primaryModel: model } : route,
+      ),
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+async function writeConfig(projectPath: string, config: LinghunConfig): Promise<void> {
   await mkdir(getProjectConfigDir(projectPath), { recursive: true });
   await writeFile(
     getProjectSettingsPath(projectPath),
-    `${JSON.stringify(next, null, 2)}\n`,
+    `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
   );
-  return next;
+}
+
+function inferProviderForModel(model: string, providers: Record<string, ProviderConfig>): string {
+  for (const [providerId, provider] of Object.entries(providers)) {
+    if (provider.model === model) {
+      return providerId;
+    }
+  }
+  return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
 }
 
 export async function ensureConfigDirs(projectPath = process.cwd()): Promise<string[]> {
   const dirs = [getUserConfigDir(), getProjectConfigDir(projectPath)];
   await Promise.all(dirs.map((dir) => mkdir(dir, { recursive: true })));
   return dirs;
+}
+
+function mergeModelRoutes(inputRoutes: RoleModelRoute[] | undefined): RoleModelRoute[] {
+  if (!inputRoutes) {
+    return defaultConfig.modelRoutes.routes;
+  }
+  return defaultConfig.modelRoutes.routes.map((route) => {
+    const override = inputRoutes.find((item) => item.role === route.role);
+    return override ? { ...route, ...override } : route;
+  });
 }
 
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
@@ -251,6 +417,11 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
         ...defaultConfig.providers["openai-compatible"],
         ...input.providers?.["openai-compatible"],
       },
+    },
+    modelRoutes: {
+      ...defaultConfig.modelRoutes,
+      ...input.modelRoutes,
+      routes: mergeModelRoutes(input.modelRoutes?.routes),
     },
     permission: {
       ...defaultConfig.permission,

@@ -6,7 +6,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
-  ${LINGHUN_CLI_NAME}                                   进入 Phase 12 交互式终端
+  ${LINGHUN_CLI_NAME}                                   进入 Phase 13 交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -17,6 +17,11 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   ${LINGHUN_CLI_NAME} model                         查看当前模型配置
   ${LINGHUN_CLI_NAME} model set deepseek-v4-pro      切换当前 headless 模型
   ${LINGHUN_CLI_NAME} model doctor                   诊断模型配置
+  TUI /model route                                  查看 Phase 13 角色模型路由
+  TUI /model route doctor                           诊断角色 provider/model/capability/budget
+  TUI /model route set <role> <model>               设置 planner/executor/reviewer/verifier/summarizer/vision/image
+  TUI /vision <path>                                记录 VisionObservation evidence
+  TUI /image generate <prompt>                      生成 image role 本地资产 metadata
 
 Slash 兼容：
   ${LINGHUN_CLI_NAME} /sessions
@@ -27,7 +32,7 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  Phase 12 提供 Agent 闭环、/agents、/fork、独立 transcript、状态查看与中断。
+  Phase 13 提供多模型角色路由、/model route、vision/image 最小闭环与按 role/model/provider 的 estimated usage。
   --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器或 cache 统计系统。
 
 Windows 兼容：

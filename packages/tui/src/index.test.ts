@@ -117,6 +117,10 @@ function createTestContext(
       accepted: [],
     },
     agents: [],
+    roleUsage: [],
+    roleHandoffs: [],
+    visionObservations: [],
+    imageResults: [],
     interrupt: { type: "idle" },
   };
 }
@@ -139,6 +143,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
+    expect(output.text).toContain("/model route");
+    expect(output.text).toContain("/model route doctor");
+    expect(output.text).toContain("/model route set <role> <model>");
+    expect(output.text).toContain("/vision <path>");
+    expect(output.text).toContain("/image generate <prompt>");
     expect(output.text).toContain("/agents");
     expect(output.text).toContain("/fork <类型> <任务>");
     expect(output.text).toContain("/cache-log config size <n>");
@@ -323,6 +332,53 @@ describe("Phase 06 TUI slash commands", () => {
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
     expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
     expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
+  });
+
+  it("routes Phase 13 roles, handoffs, vision, image, and usage", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/model route", context, output);
+    await handleSlashCommand("/model route doctor", context, output);
+    await handleSlashCommand("/model route set planner deepseek-v4-pro", context, output);
+    await handleSlashCommand("/model route set verifier deepseek-v4-pro", context, output);
+    await handleSlashCommand("/fork planner plan route loop", context, output);
+    await handleSlashCommand("/fork verifier verify route loop", context, output);
+    await handleSlashCommand("/agents", context, output);
+    await handleSlashCommand("/review", context, output);
+    await handleSlashCommand("/vision screenshot.png", context, output);
+    await handleSlashCommand("/model route set vision gpt-4o", context, output);
+    await handleSlashCommand("/vision screenshot.png", context, output);
+    await handleSlashCommand("/image generate logo concept", context, output);
+    await handleSlashCommand("/model route set image gpt-image-2", context, output);
+    await handleSlashCommand("/image generate logo concept", context, output);
+    await handleSlashCommand("/usage", context, output);
+    await handleSlashCommand("/stats", context, output);
+
+    expect(output.text).toContain("Model routes（Phase 13");
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("已设置 planner role");
+    expect(output.text).toContain("已设置 verifier role");
+    expect(output.text).toContain("role=planner");
+    expect(output.text).toContain("role=verifier");
+    expect(output.text).toContain("Role handoff: executor -> reviewer");
+    expect(output.text).toContain("vision role 未就绪");
+    expect(output.text).toContain("VisionObservation:");
+    expect(output.text).toContain("image role 未就绪");
+    expect(output.text).toContain("ImageGenerationResult:");
+    expect(output.text).toContain("role usage (estimated)");
+    expect(output.text).toContain("role/model/provider usage (estimated)");
+    expect(context.roleHandoffs.some((handoff) => handoff.to === "reviewer")).toBe(true);
+    expect(context.visionObservations).toHaveLength(1);
+    expect(context.imageResults).toHaveLength(1);
+    expect(context.roleUsage.some((usage) => usage.role === "planner")).toBe(true);
+    expect(context.roleUsage.some((usage) => usage.role === "verifier")).toBe(true);
+    expect(context.roleUsage.some((usage) => usage.role === "vision")).toBe(true);
+    expect(context.roleUsage.some((usage) => usage.role === "image")).toBe(true);
+    expect(output.text).not.toContain("¥--");
   });
 
   it("keeps worker writes behind the permission pipeline", async () => {

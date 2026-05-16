@@ -29,7 +29,7 @@
 
 - Phase 09 已落地 cache / cost / usage / stats / freshness / light hint 的最小闭环。
 - Phase 10 已落地 MCP / codebase-memory / index evidence / MCP tool list 稳定摘要的最小闭环。
-- Phase 11-18 已设计覆盖 session handoff、memory、agent、多模型、skills/workflows/hooks、真实项目对账、长期任务和桌面端预留。
+- Phase 11-18 已设计覆盖 session handoff、memory、agent、多模型、skills/workflows/hooks、真实项目对账、双模型交叉审查、长期任务和桌面端预留。
 - 当前主要风险不是“规划遗漏”，而是后续实现时可能偷懒导致：复制完整历史、绕过 Start Gate/权限、过度宣传成本收益、或把大输出塞回上下文。
 
 ## 对照清单
@@ -58,6 +58,7 @@
 | 20. 子 agent 上下文裁剪和结果压缩 | CCB Agent 成本控制；避免完整历史复制；agent 输出摘要回主线程 | 已设计待开发 | Phase 11 handoff；Phase 12 agent；Phase 13 多模型 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1044-1053,1120-1134,1183-1186`；`LINGHUN_IMPLEMENTATION_SPEC.md:1513-1524,1547-1550,665-667` | Phase 00-10 还没有子 agent，因此未实际验证裁剪与压缩 | Phase 11 先固化 HandoffPacket；Phase 12 `/fork` 作为硬验收，禁止传完整 transcript |
 | 21. cache freshness：system prompt / tool schema / MCP list / memory / compact / plugins hash | CCB 12 维缓存破坏诊断；system prompt、tool schema、model、tool 增删、betas、effort、cache control 等 | 已实现核心字段，部分真实源待后续 | Phase 09 / 10；Phase 11 memory；Phase 14 plugins | `ccb-optimizations.md:211-236,259-309`；`LINGHUN_IMPLEMENTATION_SPEC.md:1265-1276,1305-1311`；`phase-09-cache-cost.md:30-32,126`；`phase-10-mcp-index.md:17-20,116-118` | memory/plugin hash 字段已预留，但真实 Memory Store / Plugin List 尚未落地 | 保持；Phase 11/14 落地时只接稳定摘要，不塞完整 memory/plugin 内容 |
 | 22. 大输出保护：不把完整索引、完整 rawUsage、大日志、大源码塞回上下文 | CCB 防止大日志、大索引、大文件拖垮系统；cache-log 面板只展示摘要 | 已实现基础，后续新模块需继承 | Phase 05 / 07 / 08 / 09 / 10；Phase 12/14/17 待继承 | `ccb-optimizations.md:355-419,422-473`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:642-654,769-770,873-875`；`LINGHUN_IMPLEMENTATION_SPEC.md:775-786,475-489,1028-1049`；`phase-10-mcp-index.md:27-28,118-120,237-244` | 当前覆盖内置工具、verification、index 摘要；agent/hook/job 大输出保护待对应阶段 | 保持；Phase 12/14/17 必须统一 `truncated/fullOutputPath/logPath` 语义，禁止裸 stdout 污染 UI |
+| 23. 开源前交叉审查 | CCB Dev Boost 能力落地后需要真实项目和多视角复核，避免缓存/索引/agent/多模型组合产生隐性回归 | 已设计待开发 | Phase 15.5 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md` Phase 15.5；`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md` 开发路线；`docs/delivery/README.md` Phase 15.5 | Phase 15 前不会执行；如果 Phase 15 后直接进入 Phase 16，可能漏掉产品/架构/安全/Windows 兼容问题 | 保持；Phase 15 完成后用 GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续 |
 
 ## Phase 09 已落地能力
 
@@ -87,6 +88,7 @@
 - Phase 13：多模型角色路由、per-role budget、vision/image provider、角色间结构化 handoff。
 - Phase 14：Skills、Workflows、Hooks、本地 Plugin 底座、plugin/skill 稳定排序。
 - Phase 15：真实项目测试与 provider usage / 账单抽样对账。
+- Phase 15.5：双模型交叉审查与开源前 hardening。
 - Phase 16：可控学习、候选 memory / skill、审查与回滚。
 - Phase 17：长期任务、定时任务、自动会话、remote channels、预算停止。
 - Phase 18：桌面端预留验证。

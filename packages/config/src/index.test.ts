@@ -11,6 +11,7 @@ import {
   loadConfig,
   resolveStoragePaths,
   saveDefaultModel,
+  saveModelRoute,
 } from "./index.js";
 
 describe("config directories", () => {
@@ -43,7 +44,7 @@ describe("config directories", () => {
     expect(raw).toContain("deepseek-v4-pro");
   });
 
-  it("loads Phase 11 storage, MCP, and index defaults", async () => {
+  it("loads Phase 13 storage, MCP, index, and model route defaults", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     const config = await loadConfig(project);
     const paths = resolveStoragePaths(config, project, "/tmp/home");
@@ -57,5 +58,44 @@ describe("config directories", () => {
     expect(config.index.enabled).toBe(true);
     expect(config.index.mode).toBe("fast");
     expect(config.index.ignoreFile).toBe(".linghunignore");
+    expect(config.modelRoutes.routes.map((route) => route.role)).toEqual([
+      "planner",
+      "executor",
+      "reviewer",
+      "verifier",
+      "summarizer",
+      "vision",
+      "image",
+    ]);
+    expect(config.modelRoutes.routes.find((route) => route.role === "planner")?.allowWrite).toBe(
+      false,
+    );
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.allowWrite).toBe(
+      true,
+    );
+    expect(config.modelRoutes.routes.find((route) => route.role === "verifier")?.allowBash).toBe(
+      true,
+    );
+    expect(config.modelRoutes.routes.find((route) => route.role === "vision")?.provider).toBe("");
+    expect(
+      config.modelRoutes.routes.find((route) => route.role === "image")?.requiredCapabilities,
+    ).toEqual(["image"]);
+  });
+
+  it("saves and loads a Phase 13 role route", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const saved = await saveModelRoute("planner", "deepseek-v4-pro", project);
+    const loaded = await loadConfig(project);
+
+    expect(saved.modelRoutes.routes.find((route) => route.role === "planner")?.primaryModel).toBe(
+      "deepseek-v4-pro",
+    );
+    expect(loaded.modelRoutes.routes.find((route) => route.role === "planner")?.provider).toBe(
+      "deepseek",
+    );
+    expect(loaded.modelRoutes.routes.find((route) => route.role === "vision")?.primaryModel).toBe(
+      "",
+    );
   });
 });

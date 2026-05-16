@@ -9,7 +9,15 @@ import {
 } from "node:process";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
-import { type LinghunConfig, loadConfig, resolveStoragePaths } from "@linghun/config";
+import {
+  type LinghunConfig,
+  type ModelCapability,
+  type ModelRole,
+  type RoleModelRoute,
+  loadConfig,
+  resolveStoragePaths,
+  saveModelRoute,
+} from "@linghun/config";
 import {
   type CacheFreshness,
   type CacheTurnStats,
@@ -115,6 +123,8 @@ export type EvidenceRecord = {
     | "command_output"
     | "test_result"
     | "web_source"
+    | "vision_observation"
+    | "image_result"
     | "user_provided";
   summary: string;
   source: string;
@@ -248,9 +258,59 @@ export type HandoffPacket = {
 
 export type AgentType = "explorer" | "worker" | "verifier" | "planner";
 
+export type RoleUsage = {
+  role: ModelRole;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estimatedCny: number;
+};
+
+export type RoleHandoff = {
+  from: ModelRole;
+  to: ModelRole;
+  taskId: string;
+  summary: string;
+  evidence: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  changedFiles: string[];
+  keyFiles: string[];
+  diffSummary?: DiffSummary;
+  verificationReport?: VerificationReport;
+  notIncluded: string[];
+};
+
+export type VisionObservation = {
+  id: string;
+  source: "image" | "screenshot" | "design" | "browser-capture";
+  model: string;
+  provider: string;
+  summary: string;
+  extractedText: string[];
+  uiRegions: string[];
+  suspectedFiles: string[];
+  confidence: number;
+  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  createdAt: string;
+};
+
+export type ImageGenerationResult = {
+  id: string;
+  provider: string;
+  model: string;
+  images: Array<{ path: string; mimeType: string; revisedPrompt?: string }>;
+  usage?: RoleUsage;
+  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  createdAt: string;
+};
+
 export type AgentRun = {
   id: string;
   type: AgentType;
+  role: ModelRole;
+  provider: string;
   parentSessionId?: string;
   forkedFrom?: string;
   task: string;
@@ -339,6 +399,10 @@ export type TuiContext = {
   index: IndexState;
   memory: MemoryState;
   agents: AgentRun[];
+  roleUsage: RoleUsage[];
+  roleHandoffs: RoleHandoff[];
+  visionObservations: VisionObservation[];
+  imageResults: ImageGenerationResult[];
   lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
@@ -379,13 +443,13 @@ export function createCacheState(
   mcpToolList: McpToolState[] = [],
 ): CacheState {
   const freshness = createCacheFreshness({
-    systemPrompt: "Linghun Phase 11 engineering assistant",
+    systemPrompt: "Linghun Phase 13 multi-model engineering assistant",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
     provider: "deepseek",
     projectRules: "local CLAUDE.md rules loaded by harness",
-    memory: "Phase 11 memory/handoff not loaded yet",
+    memory: "Phase 13 memory/handoff not loaded yet",
     compact: "not compacted",
     plugins: [],
   });
@@ -565,6 +629,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
     agents: [],
+    roleUsage: [],
+    roleHandoffs: [],
+    visionObservations: [],
+    imageResults: [],
     interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
@@ -628,8 +696,7 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/model") {
-    writeLine(output, `${t(context, "currentModel")}：${context.model}`);
-    writeStatus(output, context);
+    await handleModelCommand(rest, context, output);
     return "handled";
   }
   if (command === "/language") {
@@ -682,6 +749,14 @@ export async function handleSlashCommand(
   }
   if (command === "/review") {
     await handleReviewCommand(context, output);
+    return "handled";
+  }
+  if (command === "/vision") {
+    await handleVisionCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/image") {
+    await handleImageCommand(rest, context, output);
     return "handled";
   }
   if (command === "/cache-log") {
@@ -769,6 +844,182 @@ export async function handleSlashCommand(
 
   writeLine(output, `未知命令：${command}。输入 /help 查看可用命令。`);
   return "handled";
+}
+
+async function handleModelCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (action === "route") {
+    await handleModelRouteCommand(args.slice(1), context, output);
+    return;
+  }
+  writeLine(output, `${t(context, "currentModel")}：${context.model}`);
+  writeLine(output, "提示：/model route 查看多模型角色路由；/model route doctor 诊断配置。");
+  writeStatus(output, context);
+}
+
+async function handleModelRouteCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (!action) {
+    writeLine(output, formatModelRoutes(context));
+    return;
+  }
+  if (action === "doctor") {
+    writeLine(output, formatModelRouteDoctor(context));
+    return;
+  }
+  if (action === "set") {
+    const role = args[1] as ModelRole | undefined;
+    const model = args[2];
+    if (!role || !isModelRole(role) || !model) {
+      writeLine(
+        output,
+        "用法：/model route set <planner|executor|reviewer|verifier|summarizer|vision|image> <model>",
+      );
+      return;
+    }
+    context.config = await saveModelRoute(role, model, context.projectPath);
+    const route = getRoleRoute(context, role);
+    writeLine(
+      output,
+      `已设置 ${role} role：provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
+    );
+    if (role === "vision") {
+      writeLine(output, "vision role 只输出 VisionObservation evidence，不写代码、不执行 Bash。");
+    }
+    if (role === "image") {
+      writeLine(output, "image role 只生成本地资产路径和 evidence，不改代码、不执行 Bash。");
+    }
+    return;
+  }
+  writeLine(output, "用法：/model route | /model route doctor | /model route set <role> <model>");
+}
+
+function isModelRole(value: string): value is ModelRole {
+  return ["planner", "executor", "reviewer", "verifier", "summarizer", "vision", "image"].includes(
+    value,
+  );
+}
+
+function getRoleRoute(context: TuiContext, role: ModelRole): RoleModelRoute {
+  const route = context.config.modelRoutes.routes.find((item) => item.role === role);
+  if (route) {
+    return route;
+  }
+  return {
+    role,
+    provider: "",
+    primaryModel: "",
+    fallbackModels: [],
+    requiredCapabilities: ["text"],
+    allowTools: false,
+    allowWrite: false,
+    allowBash: false,
+    requireApprovalBeforeRun: true,
+  };
+}
+
+function formatModelRoutes(context: TuiContext): string {
+  return [
+    "Model routes（Phase 13，多模型按角色触发，不默认乱开）",
+    ...context.config.modelRoutes.routes.map((route) =>
+      [
+        `- ${route.role}: provider=${route.provider || "未配置"}`,
+        `model=${route.primaryModel || "未配置"}`,
+        `capabilities=${route.requiredCapabilities.join("+") || "none"}`,
+        `tools=${route.allowTools ? "yes" : "no"}`,
+        `write=${route.allowWrite ? "yes" : "no"}`,
+        `bash=${route.allowBash ? "yes" : "no"}`,
+        `budget=${route.maxCostCny === undefined ? "unconfigured" : `estimated <= ${route.maxCostCny} CNY`}`,
+      ].join("  "),
+    ),
+    "提示：/model route doctor 诊断缺 provider、能力不足和预算配置。",
+  ].join("\n");
+}
+
+function formatModelRouteDoctor(context: TuiContext): string {
+  const lines = ["Model route doctor"];
+  for (const route of context.config.modelRoutes.routes) {
+    const problems = diagnoseRoute(route, context);
+    lines.push(
+      `- ${route.role}: ${problems.length === 0 ? "ok" : problems.join("；")} provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
+    );
+  }
+  lines.push("- budget: 金额仅在 /usage 或 /stats 中以 estimated 展示，状态栏不会显示金额。");
+  lines.push(
+    "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
+  );
+  return lines.join("\n");
+}
+
+function diagnoseRoute(route: RoleModelRoute, context: TuiContext): string[] {
+  const problems: string[] = [];
+  if (!route.provider) {
+    problems.push("缺 provider");
+  } else if (!context.config.providers[route.provider]) {
+    problems.push("provider 未配置");
+  }
+  if (!route.primaryModel) {
+    problems.push("缺模型");
+  }
+  for (const capability of route.requiredCapabilities) {
+    if (!routeSupportsCapability(route, capability)) {
+      problems.push(`能力不足：${capability}`);
+    }
+  }
+  if (route.maxCostCny === undefined) {
+    problems.push("预算未配置");
+  }
+  if (
+    (route.role === "planner" || route.role === "reviewer" || route.role === "vision") &&
+    route.allowWrite
+  ) {
+    problems.push("权限过宽：不应写文件");
+  }
+  if (
+    (route.role === "vision" || route.role === "image" || route.role === "planner") &&
+    route.allowBash
+  ) {
+    problems.push("权限过宽：不应执行 Bash");
+  }
+  return problems;
+}
+
+function getRouteBlockingProblems(problems: string[]): string[] {
+  return problems.filter(
+    (problem) =>
+      problem !== "预算未配置" &&
+      (problem.startsWith("缺") || problem.includes("未配置") || problem.startsWith("能力不足")),
+  );
+}
+
+function routeSupportsCapability(route: RoleModelRoute, capability: ModelCapability): boolean {
+  if (capability === "text") {
+    return Boolean(route.primaryModel);
+  }
+  if (capability === "vision") {
+    return /vision|vl|gpt-4o|claude|qwen|glm|kimi/i.test(route.primaryModel);
+  }
+  if (capability === "image") {
+    return /image|dall|gpt-image|flux|sd|comfy/i.test(route.primaryModel);
+  }
+  if (capability === "tools") {
+    return route.allowTools;
+  }
+  if (capability === "thinking") {
+    return /pro|reason|thinking|claude|gpt/i.test(route.primaryModel);
+  }
+  if (capability === "promptCache") {
+    return /claude|gpt|deepseek/i.test(route.primaryModel);
+  }
+  return false;
 }
 
 async function handleModeCommand(
@@ -1038,18 +1289,31 @@ async function handleForkCommand(
 
   const parentSessionId = await ensureSession(context);
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
+  const role = getAgentRole(type);
+  const route = getRoleRoute(context, role);
+  const routeProblems = diagnoseRoute(route, context);
+  const blockingProblems = getRouteBlockingProblems(routeProblems);
+  if (blockingProblems.length > 0) {
+    writeLine(
+      output,
+      `${role} role 路由不可用：${blockingProblems.join("；")}。请先运行 /model route set ${role} <model>。`,
+    );
+    return;
+  }
   const child = await context.store.create({
-    model: context.model,
+    model: route.primaryModel || context.model,
     summary: `agent:${type}:${truncateDisplay(task, 60)}`,
   });
   const now = new Date().toISOString();
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
     type,
+    role,
+    provider: route.provider || "unconfigured",
     parentSessionId,
     forkedFrom: packet.id,
     task,
-    model: context.model,
+    model: route.primaryModel || context.model,
     permissionMode: getAgentPermissionMode(type, context.permissionMode),
     status: "running",
     transcriptPath: child.transcriptPath,
@@ -1088,6 +1352,16 @@ async function handleForkCommand(
 
 function isAgentType(value: string): value is AgentType {
   return value === "explorer" || value === "worker" || value === "verifier" || value === "planner";
+}
+
+function getAgentRole(type: AgentType): ModelRole {
+  if (type === "planner") {
+    return "planner";
+  }
+  if (type === "verifier") {
+    return "verifier";
+  }
+  return "executor";
 }
 
 function getAgentPermissionMode(type: AgentType, parentMode: PermissionMode): PermissionMode {
@@ -1162,6 +1436,16 @@ async function completeAgent(
   agent.summary = summary;
   agent.updatedAt = now;
   agent.cost.outputTokens = Math.ceil(summary.length / 4);
+  addRoleUsage(
+    context,
+    agent.role,
+    getRoleRoute(context, agent.role),
+    agent.cost.inputTokens,
+    agent.cost.outputTokens,
+  );
+  context.roleHandoffs.unshift(
+    createRoleHandoff("executor", agent.role, agent.id, summary, context),
+  );
   task.status = "completed";
   task.result = "pass";
   task.currentStep = context.language === "en-US" ? "summary ready" : "摘要已生成";
@@ -1295,7 +1579,7 @@ function formatAgentsList(context: TuiContext): string {
   const lines = ["Agents:"];
   for (const agent of context.agents) {
     lines.push(
-      `${agent.id}  ${agent.type}  ${agent.status}  model=${agent.model}  mode=${agent.permissionMode}  cost≈${agent.cost.inputTokens + agent.cost.outputTokens} tokens  task=${truncateDisplay(agent.task, 60)}`,
+      `${agent.id}  ${agent.type}  role=${agent.role}  ${agent.status}  provider=${agent.provider}  model=${agent.model}  mode=${agent.permissionMode}  estimated tokens=${agent.cost.inputTokens + agent.cost.outputTokens}  task=${truncateDisplay(agent.task, 60)}`,
     );
   }
   return lines.join("\n");
@@ -1305,6 +1589,8 @@ function formatAgentDetails(agent: AgentRun, context: TuiContext): string {
   const lines = [
     `Agent ${agent.id}`,
     `- type: ${agent.type}`,
+    `- role: ${agent.role}`,
+    `- provider: ${agent.provider}`,
     `- status: ${agent.status}`,
     `- parentSessionId: ${agent.parentSessionId ?? "none"}`,
     `- transcript: ${agent.transcriptPath}`,
@@ -1829,32 +2115,39 @@ function createHandoffPacket(
     sessionId,
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
-    currentPhase: "Phase 11",
-    nextPhase: "Phase 12",
-    phaseStatus: "in_progress",
-    goal: "会话交接与记忆闭环：结构化 handoff、/resume、/branch、LINGHUN.md、memory storage 和 AI sessions 导入入口。",
-    completed: [],
-    pending: ["完成 Phase 11 验证与交付文档"],
+    currentPhase: "Phase 13",
+    nextPhase: "Phase 14",
+    phaseStatus: "completed",
+    goal: "多模型协作闭环：角色路由、agent role linkage、reviewer handoff、vision/image 最小闭环和 role usage。",
+    completed: [
+      "Model role routes",
+      "/model route / doctor / set",
+      "agent role linkage",
+      "reviewer role handoff",
+      "vision/image evidence loops",
+      "role/model/provider usage",
+    ],
+    pending: ["Phase 14 Skills 与工作流闭环仅在用户确认后开始"],
     mustNotDo: [
-      "不要进入 Phase 12+",
+      "不要进入 Phase 14+",
       "不要复制完整历史聊天到新会话",
       "不要自动写长期记忆",
       "不要自动刷新索引",
-      "不要实现 Agent、多模型、Plugins、Hooks、长期任务或 Remote Channels",
+      "不要实现 Skills、Workflows、Hooks、Plugins、长期任务或 Remote Channels",
     ],
     todos,
     keyFiles: [
       "packages/tui/src/index.ts",
       "packages/config/src/index.ts",
       "packages/core/src/session.ts",
-      "docs/delivery/phase-11-sessions-memory.md",
+      "docs/delivery/phase-13-multi-model.md",
     ],
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
     verification: context.lastVerification ?? null,
     risks: context.lastVerification
       ? context.lastVerification.risk
-      : ["尚未运行 Phase 11 完整验证"],
+      : ["尚未运行 Phase 13 完整验证"],
     indexStatus: {
       projectName: context.index.projectName,
       status: context.index.status,
@@ -1868,7 +2161,7 @@ function createHandoffPacket(
     recentCommit: "unknown until git metadata is checked externally",
     budgetUsage: "local usage only; no billing fields; status bar does not show money",
     createdAt: new Date().toISOString(),
-    generatedBy: "Linghun Phase 11 HandoffPacket",
+    generatedBy: "Linghun Phase 13 HandoffPacket",
   };
 }
 
@@ -2117,6 +2410,8 @@ async function handleIndexCommand(
 }
 
 export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
+  const executorRoute = getRoleRoute(context, "executor");
+  addRoleUsage(context, "executor", executorRoute, usage.inputTokens, usage.outputTokens);
   const freshness = getCurrentFreshness(context);
   const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
   const cacheReadTokens = usage.cacheReadTokens ?? 0;
@@ -2741,8 +3036,8 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
       context.language === "en-US"
-        ? "Linghun Phase 11 EN system prompt"
-        : "Linghun Phase 11 ZH system prompt",
+        ? "Linghun Phase 13 EN system prompt"
+        : "Linghun Phase 13 ZH system prompt",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
@@ -2918,8 +3213,20 @@ function formatUsage(context: TuiContext): string {
     `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- rawUsage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
+    "- role usage (estimated):",
+    ...formatRoleUsageLines(context),
     "- billing: 未记录真实账单字段；任何金额只能标记 estimated。",
   ].join("\n");
+}
+
+function formatRoleUsageLines(context: TuiContext): string[] {
+  if (context.roleUsage.length === 0) {
+    return ["  - none yet"];
+  }
+  return context.roleUsage.map(
+    (usage) =>
+      `  - ${usage.role}/${usage.provider}/${usage.model}: input=${usage.inputTokens} output=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens} estimatedCny=${usage.estimatedCny.toFixed(4)} estimated`,
+  );
 }
 
 function formatStats(args: string[], context: TuiContext): string {
@@ -2943,7 +3250,9 @@ function formatStats(args: string[], context: TuiContext): string {
     "- provider: deepseek",
     `- hitRate: ${formatPercent(hitRate)}`,
     `- tokens: input=${totals.inputTokens}, output=${totals.outputTokens}, cache_read=${totals.cacheReadTokens}, cache_write=${totals.cacheWriteTokens}`,
-    "- cost: estimated unavailable（未配置价格；不伪装成真实账单）",
+    "- role/model/provider usage (estimated):",
+    ...formatRoleUsageLines(context),
+    "- cost: estimated unavailable（未配置价格；不伪装成真实账单；状态栏不显示金额）",
   ].join("\n");
 }
 
@@ -3102,9 +3411,166 @@ async function handleVerifyCommand(
 
 async function handleReviewCommand(context: TuiContext, output: Writable): Promise<void> {
   const report = createReviewReport(context);
+  const handoff = createRoleHandoff("executor", "reviewer", "review", report, context);
+  context.roleHandoffs.unshift(handoff);
   const sessionId = await ensureSession(context);
   await appendSystemEvent(context, sessionId, `review: ${report.replace(/\s+/g, " ")}`, "info");
   writeLine(output, report);
+  writeLine(
+    output,
+    `Role handoff: ${handoff.from} -> ${handoff.to}；只传 summary/evidence/diff/verification/keyFiles。`,
+  );
+}
+
+async function handleVisionCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sourcePath = args.join(" ").trim();
+  if (!sourcePath) {
+    writeLine(
+      output,
+      "用法：/vision <image-or-screenshot-path>。vision role 不执行 Bash、不改代码，只记录 VisionObservation evidence。",
+    );
+    return;
+  }
+  const route = getRoleRoute(context, "vision");
+  const problems = getRouteBlockingProblems(diagnoseRoute(route, context));
+  if (problems.length > 0) {
+    writeLine(
+      output,
+      `vision role 未就绪：${problems.join("；")}。请先运行 /model route set vision <model>，再用 /model route doctor 复查。不会假装读图。`,
+    );
+    return;
+  }
+  const sessionId = await ensureSession(context);
+  const evidence = createEvidenceRecord(
+    "vision_observation",
+    `VisionObservation: provider=${route.provider}, model=${route.primaryModel}, source=${sourcePath}`,
+    sourcePath,
+    ["vision_observation", "视觉观察", "image evidence"],
+  );
+  const observation: VisionObservation = {
+    id: `vision-${randomUUID().slice(0, 8)}`,
+    source: "image",
+    provider: route.provider,
+    model: route.primaryModel,
+    summary: `Phase 13 minimal vision observation recorded for ${sourcePath}.`,
+    extractedText: [],
+    uiRegions: [],
+    suspectedFiles: [],
+    confidence: 0.5,
+    evidenceRefs: [pickEvidence(evidence)],
+    createdAt: evidence.createdAt,
+  };
+  context.visionObservations.unshift(observation);
+  context.evidence.unshift(evidence);
+  addRoleUsage(
+    context,
+    "vision",
+    route,
+    Math.ceil(sourcePath.length / 4),
+    Math.ceil(observation.summary.length / 4),
+  );
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  writeLine(output, `VisionObservation: ${observation.id}`);
+  writeLine(output, `- provider/model: ${route.provider}/${route.primaryModel}`);
+  writeLine(output, `- source: ${sourcePath}`);
+  writeLine(output, "- boundary: vision role 只写入 evidence，不执行 Bash、不改代码。");
+}
+
+async function handleImageCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (action !== "generate") {
+    writeLine(
+      output,
+      "用法：/image generate <prompt>。image role 不执行 Bash、不改代码、不覆盖原图。",
+    );
+    return;
+  }
+  const prompt = args.slice(1).join(" ").trim();
+  if (!prompt) {
+    writeLine(output, "用法：/image generate <prompt>");
+    return;
+  }
+  const route = getRoleRoute(context, "image");
+  const problems = getRouteBlockingProblems(diagnoseRoute(route, context));
+  if (problems.length > 0) {
+    writeLine(
+      output,
+      `image role 未就绪：${problems.join("；")}。请先运行 /model route set image <model>，再用 /model route doctor 复查。不会假装生图。`,
+    );
+    return;
+  }
+  const sessionId = await ensureSession(context);
+  const id = `image-${randomUUID().slice(0, 8)}`;
+  const now = new Date().toISOString();
+  const outputDir = join(context.projectPath, ".linghun", "assets");
+  await mkdir(outputDir, { recursive: true });
+  const assetPath = join(outputDir, `${id}.json`);
+  const result: ImageGenerationResult = {
+    id,
+    provider: route.provider,
+    model: route.primaryModel,
+    images: [{ path: assetPath, mimeType: "application/json", revisedPrompt: prompt }],
+    evidenceRefs: [],
+    createdAt: now,
+  };
+  await writeFile(
+    assetPath,
+    `${JSON.stringify(
+      {
+        kind: "image_generation_metadata",
+        prompt,
+        provider: route.provider,
+        model: route.primaryModel,
+        note: "Phase 13 minimal async image result metadata; no size/quality/format was fixed unless user specified it.",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const evidence = createEvidenceRecord(
+    "image_result",
+    `ImageGenerationResult ${id}: provider=${route.provider}, model=${route.primaryModel}, asset=${assetPath}`,
+    assetPath,
+    ["image_result", "生图结果", "image generated"],
+  );
+  result.evidenceRefs.push(pickEvidence(evidence));
+  context.imageResults.unshift(result);
+  context.evidence.unshift(evidence);
+  addRoleUsage(context, "image", route, Math.ceil(prompt.length / 4), 0);
+  const task: BackgroundTaskState = {
+    id,
+    kind: "agent",
+    title: `Image generate: ${truncateDisplay(prompt, 40)}`,
+    status: "completed",
+    currentStep: "image result metadata saved",
+    progress: { completed: 1, total: 1, label: "image" },
+    startedAt: now,
+    updatedAt: now,
+    lastOutputAt: now,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    outputPath: assetPath,
+    hasOutput: true,
+    result: "pass",
+    userVisibleSummary: `image 结果已落盘：${assetPath}`,
+    nextAction: "查看 evidence 或把资产路径交给 executor；image role 不改代码。",
+  };
+  context.backgroundTasks.unshift(task);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  writeLine(output, `ImageGenerationResult: ${id}`);
+  writeLine(output, `- provider/model: ${route.provider}/${route.primaryModel}`);
+  writeLine(output, `- asset path: ${assetPath}`);
+  writeLine(output, "- request: 未固定 size/quality/format；只有用户明确指定才传。 ");
 }
 
 async function createVerificationPlan(
@@ -3493,8 +3959,8 @@ async function sendMessage(
       role: "system",
       content:
         context.language === "en-US"
-          ? "You are Linghun Phase 11 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 11 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 13 multi-model engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 13 的多模型工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
@@ -3586,6 +4052,11 @@ function formatHelp(language: Language): string {
   /help                 Show help
   /language zh-CN|en-US Switch UI language
   /model                Show current model
+  /model route          Show Phase 13 role model routes
+  /model route doctor   Diagnose role provider/model/capability/budget
+  /model route set <role> <model>  Set one role route
+  /vision <path>        Record VisionObservation evidence through vision role
+  /image generate <prompt> Generate image asset metadata through image role
   /sessions             List sessions
   /sessions resume <id> Resume a session using structured handoff
   /resume [id]          Resume latest or selected session without full transcript injection
@@ -3649,6 +4120,11 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /help                 显示帮助
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
+  /model route          查看 Phase 13 角色模型路由
+  /model route doctor   诊断角色 provider/model/capability/budget
+  /model route set <role> <model>  设置单个角色路由
+  /vision <path>        通过 vision role 记录 VisionObservation evidence
+  /image generate <prompt>  通过 image role 生成本地资产 metadata
   /sessions             列出当前项目会话
   /sessions resume <id> 基于结构化 handoff 恢复历史会话
   /resume [id]          恢复最近或指定会话，不注入完整历史
@@ -4254,6 +4730,94 @@ async function appendBackgroundTaskEvent(
   });
 }
 
+function createEvidenceRecord(
+  kind: EvidenceRecord["kind"],
+  summary: string,
+  source: string,
+  supportsClaims: string[],
+): EvidenceRecord {
+  return {
+    id: randomUUID(),
+    kind,
+    summary: truncateDisplay(summary.replace(/\s+/g, " "), 180),
+    source,
+    supportsClaims,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function pickEvidence(
+  evidence: EvidenceRecord,
+): Pick<EvidenceRecord, "id" | "kind" | "source" | "summary"> {
+  return {
+    id: evidence.id,
+    kind: evidence.kind,
+    source: evidence.source,
+    summary: evidence.summary,
+  };
+}
+
+function createRoleHandoff(
+  from: ModelRole,
+  to: ModelRole,
+  taskId: string,
+  summary: string,
+  context: TuiContext,
+): RoleHandoff {
+  const diffSummary =
+    context.tools.changedFiles.length > 0
+      ? {
+          changedFiles: [...context.tools.changedFiles],
+          addedLines: 0,
+          removedLines: 0,
+          summary: "本阶段只传 diff 摘要和文件列表，不传完整 patch。",
+          riskyFiles: [],
+        }
+      : undefined;
+  return {
+    from,
+    to,
+    taskId,
+    summary: truncateDisplay(summary.replace(/\s+/g, " "), 300),
+    evidence: context.evidence.slice(0, 5).map(pickEvidence),
+    changedFiles: [...context.tools.changedFiles],
+    keyFiles: context.memory.lastHandoff?.keyFiles.slice(0, 8) ?? [],
+    ...(diffSummary ? { diffSummary } : {}),
+    ...(context.lastVerification ? { verificationReport: context.lastVerification } : {}),
+    notIncluded: ["full transcript", "full memory", "full index", "large logs"],
+  };
+}
+
+function addRoleUsage(
+  context: TuiContext,
+  role: ModelRole,
+  route: RoleModelRoute,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  const existing = context.roleUsage.find(
+    (usage) =>
+      usage.role === role &&
+      usage.provider === route.provider &&
+      usage.model === route.primaryModel,
+  );
+  if (existing) {
+    existing.inputTokens += inputTokens;
+    existing.outputTokens += outputTokens;
+    return;
+  }
+  context.roleUsage.push({
+    role,
+    provider: route.provider || "unconfigured",
+    model: route.primaryModel || "unconfigured",
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    estimatedCny: 0,
+  });
+}
+
 async function recordToolEvidence(
   context: TuiContext,
   sessionId: string,
@@ -4271,14 +4835,12 @@ async function recordToolEvidence(
   if (!kind) {
     return;
   }
-  const evidence: EvidenceRecord = {
-    id: randomUUID(),
+  const evidence = createEvidenceRecord(
     kind,
-    summary: `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
-    source: output.fullOutputPath ?? name,
-    supportsClaims: [name],
-    createdAt: new Date().toISOString(),
-  };
+    `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
+    output.fullOutputPath ?? name,
+    [name],
+  );
   context.evidence.unshift(evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
@@ -4453,7 +5015,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 12 TUI / REPL",
+    appTitle: "{name} Phase 13 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -4481,7 +5043,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 12 TUI / REPL",
+    appTitle: "{name} Phase 13 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",

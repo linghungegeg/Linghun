@@ -182,6 +182,8 @@ export type TranscriptEvent =
         | "command_output"
         | "test_result"
         | "web_source"
+        | "vision_observation"
+        | "image_result"
         | "user_provided";
       summary: string;
       source: string;

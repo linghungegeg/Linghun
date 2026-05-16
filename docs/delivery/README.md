@@ -17,9 +17,10 @@
 | Phase 10 | done | [phase-10-mcp-index.md](./phase-10-mcp-index.md) | MCP 与 codebase-memory 闭环 |
 | Phase 11 | done | [phase-11-sessions-memory.md](./phase-11-sessions-memory.md) | 会话交接与记忆闭环 |
 | Phase 12 | done | [phase-12-agents.md](./phase-12-agents.md) | Agent 闭环 |
-| Phase 13 | pending | phase-13-multi-model.md | 多模型协作闭环 |
+| Phase 13 | done | [phase-13-multi-model.md](./phase-13-multi-model.md) | 多模型协作闭环 |
 | Phase 14 | pending | phase-14-skills-workflow.md | Skills 与工作流闭环 |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版 |
+| Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查与开源前 hardening |
 | Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |
 | Phase 17 | pending | phase-17-jobs-autonomous-sessions.md | 长期托管任务与自动会话 |
 | Phase 18 | pending | phase-18-desktop-ready.md | 桌面端预留验证 |

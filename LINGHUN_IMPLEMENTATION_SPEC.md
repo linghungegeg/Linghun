@@ -587,6 +587,24 @@ export type RoleHandoff = {
   verificationReport?: VerificationReport
 }
 
+export type RoleRouteDecision = {
+  id: string
+  role: ModelRole
+  taskId: string
+  reason: string
+  selectedModel: string
+  selectedProvider: string
+  fallbackModels: string[]
+  requiredCapabilities: ModelCapability[]
+  budget: {
+    maxInputTokens?: number
+    maxOutputTokens?: number
+    maxCostCny?: number
+  }
+  stopConditions: string[]
+  createdAt: string
+}
+
 export type VisionObservation = {
   id: string
   source: 'image' | 'screenshot' | 'design' | 'browser-capture'
@@ -664,7 +682,10 @@ export type ImageGenerationResult = {
 - fallback 仍失败时暂停，提示用户选择模型或降低任务范围。
 - 不允许为了多模型协作把完整 transcript 无差别发送给每个模型。
 - 角色交接只传 `RoleHandoff`、必要文件片段和证据引用。
+- 每次自动或半自动路由必须记录 `RoleRouteDecision`，用于 `/model route doctor`、`/stats` 和 transcript evidence。
+- `RoleHandoff.summary` 必须是短摘要；`evidence` 必须引用 transcript、文件、diff、验证报告或 vision/image evidence，不允许把原始长聊天、完整索引、大日志塞入 handoff。
 - 每个角色的 usage、cache、cost 必须单独统计。
+- 每个角色的耗时、token、费用、是否命中 fallback、是否超预算停止，都必须进入 role usage summary。
 - 当前主模式或 executor 不支持图片时，不永久切换主模型；只临时调用 `vision` provider，把图片理解结果结构化为 `VisionObservation` / evidence，再交回当前 executor。
 - `vision` provider 只能接收图片、必要用户问题和最小项目上下文；不得接收完整 transcript、完整 diff 或无关源码。
 - 同一图片或截图的 `VisionObservation` 可复用；后续步骤优先引用 evidence id，避免重复调用多模态模型。
@@ -695,6 +716,7 @@ export type ImageGenerationResult = {
 - 角色模型是否满足能力要求。
 - 价格和上下文信息是否完整。
 - 是否存在会导致高成本的配置。
+- 最近 `RoleRouteDecision` 是否存在能力不匹配、预算缺失、fallback 不可用或跨角色写入权限过宽。
 - vision route 是否具备图片输入/OCR/UI 理解能力。
 - executor 缺少视觉能力时，是否存在可用 vision provider 作为临时能力补充。
 - image route 是否支持 generate/edit、返回 b64_json 或 URL、是否能落盘保存。
@@ -1577,12 +1599,63 @@ export type JobDefinition = {
   continuousPhases: boolean
   remoteChannels?: string[]
 }
+
+export type JobTaskGraph = {
+  jobId: string
+  objective: string
+  targetPhase?: string
+  nodes: Array<{
+    id: string
+    title: string
+    status: 'pending' | 'running' | 'blocked' | 'completed' | 'failed' | 'cancelled'
+    assignedAgentId?: string
+    dependsOn: string[]
+    acceptance: string[]
+  }>
+  budget: {
+    maxRuntimeMinutes: number
+    maxTokens: number
+    maxCostCny: number
+  }
+  stopConditions: string[]
+}
+
+export type AgentAssignment = {
+  jobId: string
+  agentId: string
+  role: 'explorer' | 'worker' | 'verifier' | 'planner'
+  model: string
+  permissionMode: PermissionMode
+  allowedTools: string[]
+  inputSummary: string
+  expectedOutput: string
+  budget: {
+    maxTokens?: number
+    maxCostCny?: number
+    maxRuntimeMinutes?: number
+  }
+}
+
+export type JobReport = {
+  jobId: string
+  taskGraph: JobTaskGraph
+  handoffId: string
+  sessionId: string
+  assignments: AgentAssignment[]
+  acceptedResults: string[]
+  rejectedResults: string[]
+  verification: VerificationReport[]
+  budgetUsed: CostSummary
+  pauseReason?: string
+  nextAction: string
+}
 ```
 
 要求：
 
 - 每次 job 创建独立 session。
 - 每次 job 必须创建 `HandoffPacket`，用于新会话接续。
+- 每次 job 必须创建 `JobTaskGraph`，记录目标、阶段、子任务、依赖、agent 分工、验收标准、预算和停止条件。
 - 默认一次只推进一个阶段；`continuousPhases=false`。
 - 连续阶段模式必须由用户明确开启，每阶段之间仍必须有交付文档、验证结果和确认点。
 - 自动新会话只能读取 `LINGHUN.md`、阶段状态、最近 handoff、Todo、验证结果和索引状态。
@@ -1590,11 +1663,14 @@ export type JobDefinition = {
 - job 创建自动新会话前必须校验 `HandoffPacket` 的 `nextPhase`、`mustNotDo`、`permissionMode`、`verification`、`evidenceRefs`、`indexStatus` 和 `budgetUsed`。
 - 如果 `HandoffPacket` 缺少验证结果、证据引用或禁止事项，job 必须暂停并生成修复建议，不能继续自动执行。
 - job 报告必须记录本次读取的 handoff id、新建 session id、模型/provider、预算使用、验证结果和下一步建议，方便用户审计。
+- job 报告必须记录 `AgentAssignment`、每个 agent 的输入摘要、输出摘要、证据引用、验证结果和最终是否采纳。
+- team mode 只能进入 `/background`、`/agents`、`/job report` 的状态表和结构化报告；原始 agent 长输出只能写日志路径，不得混入主消息流。
 - 超预算停止。
 - 高风险暂停。
 - 生成报告。
 - 可手动 run-now。
 - 可 pause/resume。
+- `/job report` 必须能显示任务图、agent 分工、预算使用、验证结果、被采纳结论和暂停原因。
 
 Remote Channel：
 
@@ -1643,9 +1719,12 @@ export type Skill = {
 
 - 不把所有 skill 全文塞进 prompt。
 - 先检索摘要，再加载必要 skill。
+- Skill 加载必须 summary-first、load-on-demand；metadata、description、triggers 必须稳定排序，命中后才读取 `file` 指向的正文。
+- 第三方 skill 必须显示来源、路径、启用状态、信任级别和是否可能触发工具或 workflow。
 - 成功任务可生成候选 skill，用户确认后写入。
 - `/workflows` 必须列出工作流模板、用途、风险和是否会写文件。
 - 工作流启动前走 Start Gate；写入和命令仍走权限管道。
+- workflow 必须有验收定义：输入、步骤、是否允许写入、建议验证命令、完成条件和失败降级。
 
 ## 18.1 Hooks 规格
 
@@ -1695,6 +1774,8 @@ export type HookRunResult = {
 - Stop 可阻止阶段任务在未验证、未写交付文档、未生成 handoff 时结束。
 - Notification 只发送摘要，不发送完整上下文。
 - `/doctor hooks` 和 `/plugins doctor` 必须显示来源、路径、触发事件、最近运行结果、错误原因和是否被禁用。
+- Hook 配置、来源、事件名和贡献点必须稳定排序；动态运行时间、随机 id、完整日志不得进入 prompt 稳定层。
+- 第三方 Hook 未信任时不得执行 command/url。
 
 ## 18.2 Plugin 规格
 
@@ -1748,6 +1829,8 @@ export type PluginTrustLevel = 'local' | 'official' | 'third-party'
 - Plugin 贡献的工具仍走统一权限管道。
 - Plugin 加载失败不能影响主会话。
 - Plugin 清单排序稳定，避免破坏 prompt cache。
+- Plugin 的 manifest、贡献点、权限摘要和 doctor 摘要必须稳定排序；动态字段只能进入日志或 doctor 详情，不进入 prompt 稳定层。
+- 第三方 Plugin 首次启用前必须展示来源、路径、版本、commit、权限差异和信任级别。
 - Plugin 必须声明 Linghun 最低版本和 Plugin API 版本。
 - Plugin 来源必须分级为 local / official / third-party。
 - Plugin 贡献内容必须带来源，方便 `/plugins doctor` 和 UI 展示。
@@ -1885,6 +1968,7 @@ export type LinghunError = {
 13. 多模型。
 14. Skills。
 15. 真实项目测试。
+15.5. 双模型交叉审查与开源前 hardening。
 16. 可控学习。
 17. 长期托管。
 18. 桌面端预留。
