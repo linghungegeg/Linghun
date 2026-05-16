@@ -1951,6 +1951,15 @@ function inferProviderForRouteModel(model: string, context: TuiContext): string 
   return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
 }
 
+function getRuntimeStatusProvider(context: TuiContext): string {
+  for (const [providerId, provider] of Object.entries(context.config.providers)) {
+    if (provider.model === context.model) {
+      return providerId;
+    }
+  }
+  return "unknown";
+}
+
 function resolveRoleRoute(
   context: TuiContext,
   role: ModelRole,
@@ -4228,36 +4237,44 @@ function createMemoryFreshnessSummary(context: TuiContext): string {
 
 function createExtensionFreshnessSummary(context: TuiContext): unknown {
   return {
-    skills: context.skills.skills.map((skill) => ({
-      id: skill.id,
-      enabled: skill.enabled,
-      source: skill.source,
-      trusted: skill.trusted,
-      triggers: skill.triggers,
-      summary: skill.summary,
-      permissions: skill.permissions,
-    })),
-    workflows: context.workflows.templates.map((workflow) => ({
-      id: workflow.id,
-      risk: workflow.risk,
-      writesFiles: workflow.writesFiles,
-      validation: workflow.recommendedValidation,
-    })),
-    hooks: context.hooks.hooks.map((hook) => ({
-      id: hook.id,
-      event: hook.event,
-      enabled: hook.enabled,
-      trusted: hook.trusted,
-      permissions: hook.permissions,
-    })),
-    plugins: context.plugins.plugins.map((plugin) => ({
-      id: plugin.id,
-      enabled: plugin.enabled,
-      source: plugin.source,
-      trusted: plugin.trusted,
-      permissions: plugin.permissions,
-      contributions: plugin.contributions,
-    })),
+    skills: context.skills.skills
+      .map((skill) => ({
+        id: skill.id,
+        enabled: skill.enabled,
+        source: skill.source,
+        trusted: skill.trusted,
+        triggers: skill.triggers,
+        summary: skill.summary,
+        permissions: skill.permissions,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    workflows: context.workflows.templates
+      .map((workflow) => ({
+        id: workflow.id,
+        risk: workflow.risk,
+        writesFiles: workflow.writesFiles,
+        validation: workflow.recommendedValidation,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    hooks: context.hooks.hooks
+      .map((hook) => ({
+        id: hook.id,
+        event: hook.event,
+        enabled: hook.enabled,
+        trusted: hook.trusted,
+        permissions: hook.permissions,
+      }))
+      .sort((a, b) => `${a.event}:${a.id}`.localeCompare(`${b.event}:${b.id}`)),
+    plugins: context.plugins.plugins
+      .map((plugin) => ({
+        id: plugin.id,
+        enabled: plugin.enabled,
+        source: plugin.source,
+        trusted: plugin.trusted,
+        permissions: plugin.permissions,
+        contributions: plugin.contributions,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
 
@@ -5241,7 +5258,10 @@ async function sendMessage(
   const assistantEventId = randomUUID();
   let assistantText = "";
   const controller = new AbortController();
-  const runtimeStatus = buildRuntimeStatusForModel(context);
+  const runtimeStatus = buildRuntimeStatusForModel({
+    ...context,
+    provider: getRuntimeStatusProvider(context),
+  });
   const messages: ModelMessage[] = [
     {
       role: "system",
@@ -6375,7 +6395,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 14 TUI / REPL",
+    appTitle: "{name} TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -6403,7 +6423,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 14 TUI / REPL",
+    appTitle: "{name} TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",

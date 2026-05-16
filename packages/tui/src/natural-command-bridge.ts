@@ -762,7 +762,7 @@ export function buildRuntimeStatusForModel(context: RuntimeStatusSource): Runtim
       latestHitRate: latest?.hitRate ?? null,
       changedKeys: (freshness?.changedKeys ?? []).slice(0, 8),
     },
-    model: { provider: context.provider ?? "deepseek", name: context.model },
+    model: { provider: context.provider ?? "unknown", name: context.model },
     permissionMode: context.permissionMode,
     extensions: {
       skills: { enabled: context.skills.enabled, count: context.skills.skills.length },

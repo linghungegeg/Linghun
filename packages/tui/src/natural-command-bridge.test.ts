@@ -234,7 +234,8 @@ describe("Phase 15 pending natural gate hardening", () => {
 describe("Phase 15 RuntimeStatusForModel", () => {
   it("uses real short source fields without dumping memory/transcript/index/log", () => {
     const source: RuntimeStatusSource = {
-      model: "deepseek-v4-flash",
+      model: "claude-sonnet-4-6",
+      provider: "anthropic",
       permissionMode: "default",
       projectPath: "/tmp/project",
       language: "zh-CN",
@@ -258,9 +259,30 @@ describe("Phase 15 RuntimeStatusForModel", () => {
     });
     expect(status.index).toEqual({ status: "ready", changedFiles: 2 });
     expect(status.cache.latestHitRate).toBe(0.92);
+    expect(status.model).toEqual({ provider: "anthropic", name: "claude-sonnet-4-6" });
     const serialized = JSON.stringify(status);
     expect(serialized.length).toBeLessThan(500);
     expect(serialized).not.toContain("long text");
     expect(serialized).not.toContain("full memory");
+  });
+
+  it("falls back to unknown provider when source has no provider", () => {
+    const source: RuntimeStatusSource = {
+      model: "custom-model",
+      permissionMode: "default",
+      projectPath: "/tmp/project",
+      language: "zh-CN",
+      memory: { projectRulesExists: false, candidates: [], accepted: [] },
+      index: { status: "unknown" },
+      cache: { history: [] },
+      skills: { enabled: false, skills: [] },
+      plugins: { enabled: false, plugins: [] },
+      hooks: { enabled: false, hooks: [] },
+    };
+
+    expect(buildRuntimeStatusForModel(source).model).toEqual({
+      provider: "unknown",
+      name: "custom-model",
+    });
   });
 });

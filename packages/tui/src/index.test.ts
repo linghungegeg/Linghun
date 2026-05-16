@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Writable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
@@ -20,6 +20,7 @@ import {
   createWorkflowState,
   handleSlashCommand,
   recordModelUsage,
+  runTui,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 
@@ -149,6 +150,21 @@ describe("Phase 06 TUI slash commands", () => {
     ).toContain("dispatch missing registry /missing-command");
   });
 
+  it("shows a non-misleading TUI title on startup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Linghun TUI / REPL");
+    expect(output.text).not.toContain("Phase 14 TUI / REPL");
+  });
+
   it("shows help, model, and session list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -156,6 +172,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
+    await handleSlashCommand("/status", context, output);
     await handleSlashCommand("/help", context, output);
     await handleSlashCommand("/model", context, output);
     await handleSlashCommand("/sessions", context, output);
@@ -1180,6 +1197,116 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("你> [hint");
     expect(output.text).not.toContain("you> [hint");
     expect(output.text).not.toContain("¥");
+  });
+
+  it("keeps extension freshness hash stable across manifest and contribution order", async () => {
+    async function writeExtensionFixtures(project: string, reversed: boolean): Promise<void> {
+      await mkdir(join(project, ".linghun", "skills"), { recursive: true });
+      await mkdir(join(project, ".linghun", "plugins"), { recursive: true });
+      const skills = [
+        ["a-skill.json", { id: "a-skill", triggers: ["z", "a"], permissions: ["write", "bash"] }],
+        [
+          "b-skill.json",
+          { id: "b-skill", triggers: ["review", "bug"], permissions: ["network", "read"] },
+        ],
+      ] as const;
+      const plugins = [
+        [
+          "a-plugin.json",
+          {
+            id: "a-plugin",
+            source: "local",
+            permissions: ["network", "bash"],
+            contributions: {
+              commands: ["/z", "/a"],
+              hooks: ["PostToolUse", "PreToolUse"],
+              workflows: ["review", "bug-fix"],
+              skills: ["b-skill", "a-skill"],
+              providers: ["z-provider", "a-provider"],
+              mcpServers: ["z-mcp", "a-mcp"],
+            },
+          },
+        ],
+        [
+          "b-plugin.json",
+          {
+            id: "b-plugin",
+            source: "local",
+            permissions: ["write", "read"],
+            contributions: {
+              commands: ["/b", "/a"],
+              hooks: ["Workflow", "Notification"],
+              workflows: ["refactor-plan", "doc-to-code"],
+              skills: ["z-skill", "a-skill"],
+              providers: ["b-provider", "a-provider"],
+              mcpServers: ["b-mcp", "a-mcp"],
+            },
+          },
+        ],
+      ] as const;
+      const orderedSkills = reversed ? [...skills].reverse() : skills;
+      const orderedPlugins = reversed ? [...plugins].reverse() : plugins;
+      for (const [file, value] of orderedSkills) {
+        await writeFile(
+          join(project, ".linghun", "skills", file),
+          JSON.stringify({
+            name: value.id,
+            description: value.id,
+            summary: value.id,
+            source: "local",
+            version: "1.0.0",
+            ...value,
+            triggers: reversed ? [...value.triggers].reverse() : value.triggers,
+            permissions: reversed ? [...value.permissions].reverse() : value.permissions,
+          }),
+          "utf8",
+        );
+      }
+      for (const [file, value] of orderedPlugins) {
+        await writeFile(
+          join(project, ".linghun", "plugins", file),
+          JSON.stringify({
+            name: value.id,
+            version: "1.0.0",
+            description: value.id,
+            ...value,
+            permissions: reversed ? [...value.permissions].reverse() : value.permissions,
+            contributions: Object.fromEntries(
+              Object.entries(value.contributions).map(([key, items]) => [
+                key,
+                reversed ? [...items].reverse() : items,
+              ]),
+            ),
+          }),
+          "utf8",
+        );
+      }
+    }
+
+    async function pluginListHashFor(project: string, reverseTopLevel = false): Promise<string> {
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session);
+      if (reverseTopLevel) {
+        context.skills.skills.reverse();
+        context.workflows.templates.reverse();
+        context.hooks.hooks.reverse();
+        context.plugins.plugins.reverse();
+      }
+      await handleSlashCommand("/break-cache status", context, output);
+      const match = output.text.match(/pluginListHash: ([a-f0-9]+)/);
+      expect(match).toBeTruthy();
+      return match?.[1] ?? "";
+    }
+
+    const firstProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const secondProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeExtensionFixtures(firstProject, false);
+    await writeExtensionFixtures(secondProject, true);
+    const expectedHash = await pluginListHashFor(firstProject);
+
+    await expect(pluginListHashFor(secondProject, true)).resolves.toBe(expectedHash);
   });
 
   it("handles Phase 14 skills, workflows, plugins, hooks, and freshness", async () => {

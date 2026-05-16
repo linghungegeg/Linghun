@@ -26,7 +26,9 @@
 19. F:\Linghun\docs\delivery\phase-13-multi-model.md
 20. F:\Linghun\docs\delivery\phase-14-skills-workflow.md
 21. F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md
-22. F:\Linghun\docs\audit\reference-map.md
+22. F:\Linghun\docs\audit\PHASE_15_PREFLIGHT_INTERACTION_REVIEW_REPORT.md
+23. F:\Linghun\docs\audit\phase-15-pre-beta-cross-review-report.md
+24. F:\Linghun\docs\audit\reference-map.md
 
 这是 Linghun 项目的阶段开发仓库。请严格按阶段蓝图推进，不要跳阶段，不要提前实现后续功能。
 
@@ -51,8 +53,9 @@
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性与安全边界已加固。
 - Phase 15 preflight hardening 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel、高风险自然语言阻断、Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认、bypass/auto/Plan 边界。
 - Phase 15 preflight hardening follow-up 已完成：`/memory init` 的默认 `LINGHUN.md` 已从简单占位升级为中文“项目规则”模板；已有 `LINGHUN.md` 继续不静默覆盖；本 follow-up 只做模板 cleanup，不进入 Phase 15 Beta / Phase 15.5 / Phase 16+。
+- Phase 15 pre-Beta cleanup 已完成：根据 `docs/audit/phase-15-pre-beta-cross-review-report.md` 做最小修复，RuntimeStatus provider 不再 fallback 为 deepseek，缺失时为 unknown；TUI 标题去掉 Phase 14；pluginListHash / extension freshness 增加顺序稳定性补测；DeepSeek V4 Pro 报告中的 catalog/dispatch registry-map 重构不在本轮执行，只保留 drift detection + coverage test。
 
-当前任务：Phase 15 preflight hardening 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
+当前任务：Phase 15 preflight / pre-Beta cleanup 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。

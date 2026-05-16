@@ -219,11 +219,51 @@ corepack pnpm exec linghun --help
 - `corepack pnpm build`：通过，workspace 7 个包构建通过。
 - 临时空项目 TUI smoke：通过；`/memory init` 生成中文“项目规则”模板，再次运行 `/memory init` 只提示 `LINGHUN.md 已存在`，`/memory` 显示截断摘要而非全文 dump。
 
+本次 Phase 15 pre-Beta cleanup 已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、157 个测试通过。
+- 其余验证命令见本节下方“Phase 15 pre-Beta cleanup 验证结果”。
+
+### Phase 15 pre-Beta cleanup 验证结果
+
+已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、157 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm check`：通过，43 个文件检查通过。首次运行发现 `packages/tui/src/index.test.ts` 格式问题，按 formatter 建议做最小格式修正后通过。
+- `corepack pnpm build`：通过，workspace 7 个包构建通过。
+- `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help。
+- TUI stdin smoke：通过，覆盖 `/cache status`、`/break-cache status`、`/index status`、`/memory`、`/memory storage`、`/mode`、`/plugins doctor`、`/doctor hooks`、`/model route doctor`、`/exit`；输出标题为 `Linghun TUI / REPL`，未显示 Phase 14 标题。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。
 - `createModelCapabilitySummary(8)` 单元测试要求摘要小于 1200 字符，并确认不包含 transcript/full log 等大上下文内容。
 - Catalog 稳定排序，model-visible summary 可按 limit 截断。
+
+## Phase 15 pre-Beta cleanup 记录
+
+本轮性质：Phase 15 pre-Beta cleanup，只做进入真实项目 Beta 前的小范围修复和补测；未进入 Phase 15 真实项目 Beta、Phase 15.5 或 Phase 16+。
+
+修复项：
+
+- RuntimeStatus provider：`buildRuntimeStatusForModel()` 不再把缺失 provider fallback 为 `deepseek`；调用方传入当前配置可解析出的真实 provider，无法解析时显示 `unknown`。
+- TUI 标题：中英文 `appTitle` 从 `Phase 14 TUI / REPL` 改为 `Linghun TUI / REPL` 口径，避免误导当前阶段；CLI 名称和启动命令未改。
+- Extension freshness：补充 focused test，证明 skill/plugin/hook/workflow/contribution 输入顺序变化不会导致 `pluginListHash` 无意义变化；未把完整 skill/plugin manifest/hook log 塞入 prompt、状态栏或 freshness。
+- 审计文档：pre-Beta cross-review 报告已纳入 `docs/audit/phase-15-pre-beta-cross-review-report.md`，并加入下一轮启动必读清单。
+
+DeepSeek V4 Pro 报告裁决：
+
+- RuntimeStatus provider fallback：已修。
+- TUI appTitle Phase 14 文案：已修。
+- pluginListHash / extension freshness 稳定性：已补测；当前实现已有稳定排序，无需重构。
+- START_NEXT_CHAT 与交付文档未同步 cross-review 报告：已修。
+- Catalog/dispatch registry-map 重构：不在本轮做；当前只保留 drift detection + coverage test。完整同源 registry/dispatch 重构属于 Phase 15.5 或后续架构 cleanup，不能混入 pre-Beta 小修。
+- command-level permission framework、permission modal、allow once/always、插件市场、远程安装、完整 hook 执行、长期任务、Remote Channels、桌面端：不在本轮做，也不阻塞 Phase 15 Beta；当前安全边界仍由 Start Gate、exact command、drift detection、权限管道和 focused tests 兜底。
+
+Phase 15 Beta 仍需用户明确确认后才能开始。
 
 ## 已知问题
 
