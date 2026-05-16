@@ -1,0 +1,1238 @@
+import { join } from "node:path";
+import type { Language, PermissionMode } from "@linghun/shared";
+
+export type CommandRisk =
+  | "readonly"
+  | "start_gate"
+  | "config_write"
+  | "tool_permission"
+  | "dangerous";
+
+export type CommandCapability = {
+  id: string;
+  slash: string;
+  aliases: string[];
+  titleZh: string;
+  titleEn: string;
+  descriptionZh: string;
+  descriptionEn: string;
+  whenToUseZh: string;
+  whenToUseEn: string;
+  risk: CommandRisk;
+  readonly: boolean;
+  modelInvocable: boolean;
+  userInvocable: boolean;
+  requiresStartGate: boolean;
+  writesConfig: boolean;
+  entersPermissionPipeline: boolean;
+  bridgeSafe: boolean;
+  hiddenReason?: string;
+};
+
+export type NaturalIntentAction =
+  | "answer"
+  | "execute_readonly"
+  | "start_gate"
+  | "permission_pipeline"
+  | "ask_clarify"
+  | "model";
+
+export type NaturalIntent = {
+  action: NaturalIntentAction;
+  capability?: CommandCapability;
+  confidence: number;
+  command?: string;
+  reason: string;
+  candidates: CommandCapability[];
+  language: Language;
+  inquiry: "status" | "usage" | "risk" | "howto" | "execute";
+  riskHandler: CommandRisk | "model" | "clarify";
+};
+
+export type RuntimeStatusForModel = {
+  memory: {
+    linghunMd: "found" | "missing" | "unreadable";
+    candidates: number;
+    accepted: number;
+    autoAccept: boolean;
+  };
+  index: { status: string; changedFiles: number | null };
+  cache: { latestHitRate: number | null; changedKeys: string[] };
+  model: { provider: string; name: string };
+  permissionMode: PermissionMode;
+  extensions: {
+    skills: { enabled: boolean; count: number };
+    plugins: { enabled: boolean; count: number };
+    hooks: { enabled: boolean; count: number };
+  };
+};
+
+export type RuntimeStatusSource = {
+  model: string;
+  permissionMode: PermissionMode;
+  projectPath: string;
+  language: Language;
+  memory: {
+    projectRulesExists: boolean;
+    projectRulesError?: string;
+    candidates: unknown[];
+    accepted: unknown[];
+  };
+  index: { status: string; changedFiles?: number };
+  cache: {
+    history: { hitRate: number | null; freshness?: { changedKeys?: string[] } }[];
+    lastFreshness?: { changedKeys?: string[] };
+  };
+  skills: { enabled: boolean; skills: unknown[] };
+  plugins: { enabled: boolean; plugins: unknown[] };
+  hooks: { enabled: boolean; hooks: unknown[] };
+};
+
+export type PendingNaturalCommand = {
+  command: string;
+  capabilityId: string;
+  createdAt: string;
+};
+
+const USER_VISIBLE_SLASH_COMMANDS = [
+  "/help",
+  "/language",
+  "/model",
+  "/vision",
+  "/image",
+  "/skills",
+  "/workflows",
+  "/plugins",
+  "/doctor",
+  "/sessions",
+  "/resume",
+  "/branch",
+  "/memory",
+  "/mode",
+  "/tab",
+  "/plan",
+  "/permissions",
+  "/background",
+  "/agents",
+  "/fork",
+  "/rewind",
+  "/btw",
+  "/interrupt",
+  "/claim-check",
+  "/verify",
+  "/review",
+  "/cache-log",
+  "/cache",
+  "/break-cache",
+  "/mcp",
+  "/index",
+  "/usage",
+  "/stats",
+  "/read",
+  "/write",
+  "/edit",
+  "/multiedit",
+  "/grep",
+  "/glob",
+  "/bash",
+  "/todo",
+  "/diff",
+  "/exit",
+] as const;
+
+const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
+  cap(
+    "help",
+    "/help",
+    ["help", "帮助", "commands"],
+    "帮助",
+    "Help",
+    "显示命令清单。",
+    "Shows the command list.",
+    "了解可用命令或自然语言桥能力。",
+    "Use for available commands or bridge capabilities.",
+    "readonly",
+  ),
+  cap(
+    "language",
+    "/language",
+    ["语言", "language"],
+    "语言",
+    "Language",
+    "查看或切换界面语言。",
+    "Shows or switches UI language.",
+    "需要中英文体验跟随偏好时使用。",
+    "Use when changing Chinese/English UI preference.",
+    "config_write",
+    { writesConfig: true },
+  ),
+  cap(
+    "model",
+    "/model",
+    ["模型", "provider", "route", "what model", "current model"],
+    "模型",
+    "Model",
+    "查看当前模型与角色路由；切换路由需要确认。",
+    "Shows current model and role routes; route changes need confirmation.",
+    "询问当前模型、provider、模型风险或路由。",
+    "Use for current model, provider, or model routing questions.",
+    "start_gate",
+  ),
+  cap(
+    "vision",
+    "/vision",
+    ["vision", "图片", "image input"],
+    "视觉输入",
+    "Vision",
+    "记录图片观察证据，不直接写代码。",
+    "Records vision evidence without direct code writes.",
+    "需要基于图片路径生成 evidence。",
+    "Use for image-path evidence capture.",
+    "start_gate",
+  ),
+  cap(
+    "image",
+    "/image",
+    ["generate image", "生成图片"],
+    "图片生成",
+    "Image",
+    "生成本地图片资产 metadata。",
+    "Generates local image asset metadata.",
+    "需要图片角色生成资产。",
+    "Use for image-role asset generation.",
+    "start_gate",
+  ),
+  cap(
+    "skills",
+    "/skills",
+    ["skill", "skills", "技能", "能力"],
+    "技能",
+    "Skills",
+    "列出本地 skill 摘要；启用第三方 skill 不直通。",
+    "Lists local skill summaries; enabling third-party skills is not direct.",
+    "查看技能是否启用、有什么技能、如何注册技能。",
+    "Use to inspect skills or local registration paths.",
+    "start_gate",
+  ),
+  cap(
+    "workflows",
+    "/workflows",
+    ["workflow", "workflows", "工作流", "bug-fix", "bug fix"],
+    "工作流",
+    "Workflows",
+    "列出工作流模板；启动模板只展示 Start Gate。",
+    "Lists workflow templates; starting one only shows a Start Gate.",
+    "想知道有哪些工作流或启动 bug-fix/review 模板。",
+    "Use to discover or start bug-fix/review workflows.",
+    "start_gate",
+  ),
+  cap(
+    "plugins",
+    "/plugins",
+    ["plugin", "plugins", "插件"],
+    "插件",
+    "Plugins",
+    "列出本地 plugin manifest 与诊断；启用第三方 plugin 不直通。",
+    "Lists local plugin manifests and doctor output; third-party enable is not direct.",
+    "查看插件状态、贡献项、加载错误和信任边界。",
+    "Use for plugin state, contributions, load errors, and trust boundaries.",
+    "start_gate",
+  ),
+  cap(
+    "hooks",
+    "/doctor",
+    ["hook", "hooks", "钩子", "doctor hooks"],
+    "Hooks 诊断",
+    "Hooks doctor",
+    "诊断 hooks 是否开启、来源、timeout、日志和权限边界；启用或执行 hook 不直通。",
+    "Diagnoses hook enablement, sources, timeout, logs, and permission boundary; hook enable/run is not direct.",
+    "询问 hook 开没开或 hook 风险。",
+    "Use when asking whether hooks are enabled or risky.",
+    "start_gate",
+  ),
+  cap(
+    "sessions",
+    "/sessions",
+    ["sessions", "session list", "会话", "历史会话"],
+    "会话列表",
+    "Sessions",
+    "列出当前项目会话。",
+    "Lists project sessions.",
+    "查看历史会话或恢复入口。",
+    "Use to inspect session history and resume options.",
+    "readonly",
+  ),
+  cap(
+    "resume",
+    "/resume",
+    ["resume", "恢复", "continue", "last session"],
+    "恢复会话",
+    "Resume",
+    "从结构化 handoff 恢复会话，不注入完整 transcript。",
+    "Resumes from structured handoff without full transcript injection.",
+    "想恢复上次会话。",
+    "Use to resume a prior session after a Start Gate.",
+    "start_gate",
+  ),
+  cap(
+    "branch",
+    "/branch",
+    ["branch", "分支", "branch session"],
+    "分支会话",
+    "Branch session",
+    "基于 handoff 创建分支会话。",
+    "Creates a branch session from handoff.",
+    "想试验另一条思路。",
+    "Use to try an alternate path after a Start Gate.",
+    "start_gate",
+  ),
+  cap(
+    "memory",
+    "/memory",
+    ["memory", "记忆", "自动记忆", "linghun.md"],
+    "记忆",
+    "Memory",
+    "查看 LINGHUN.md、候选记忆、已接受记忆和存储路径。",
+    "Shows LINGHUN.md, candidate/accepted memories, and storage paths.",
+    "询问记忆是否开启、记忆数量、审查或存储。",
+    "Use for memory status, review, and storage questions.",
+    "start_gate",
+  ),
+  cap(
+    "mode",
+    "/mode",
+    ["mode", "权限模式", "permission mode", "bypass"],
+    "权限模式",
+    "Permission mode",
+    "查看或切换权限模式；bypass 不能自然语言直通。",
+    "Shows or switches permission mode; bypass is never natural-language direct.",
+    "询问当前权限模式或想切换模式。",
+    "Use for current permission mode or switching mode.",
+    "start_gate",
+  ),
+  cap(
+    "tab",
+    "/tab",
+    ["shift tab", "tab", "切模式"],
+    "模式循环",
+    "Mode cycle",
+    "循环常用权限模式。",
+    "Cycles common permission modes.",
+    "只在用户明确要切换常用模式时使用。",
+    "Use only when explicitly cycling common modes.",
+    "start_gate",
+  ),
+  cap(
+    "plan",
+    "/plan",
+    ["plan", "计划", "方案"],
+    "计划模式",
+    "Plan",
+    "生成或确认结构化方案。",
+    "Generates or accepts structured plans.",
+    "需要先规划再执行。",
+    "Use when planning before execution.",
+    "start_gate",
+  ),
+  cap(
+    "permissions",
+    "/permissions",
+    ["permission", "permissions", "权限", "allow", "deny"],
+    "权限规则",
+    "Permissions",
+    "查看权限规则；增删规则必须走配置写入/审批边界。",
+    "Shows permission rules; add/remove follows config-write/approval boundary.",
+    "查看权限、最近拒绝或规则风险。",
+    "Use for permissions, recent denials, and rule risks.",
+    "dangerous",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "background",
+    "/background",
+    ["background", "后台", "long task", "长任务"],
+    "后台任务",
+    "Background",
+    "查看后台任务摘要、输出路径和取消入口。",
+    "Shows background task summaries, output paths, and cancellation entry.",
+    "询问长任务状态、日志、取消方式。",
+    "Use for long-task state, logs, and cancel hints.",
+    "readonly",
+  ),
+  cap(
+    "agents",
+    "/agents",
+    ["agent", "agents", "智能体", "subagent"],
+    "Agent",
+    "Agents",
+    "查看 agent 状态、transcript、usage 和取消入口。",
+    "Lists agent state, transcript, usage, and cancel entry.",
+    "查看或解释 agent 状态。",
+    "Use to inspect or explain agent state.",
+    "readonly",
+  ),
+  cap(
+    "fork",
+    "/fork",
+    ["fork", "开 agent", "start agent", "verifier agent", "planner agent"],
+    "派生 Agent",
+    "Fork agent",
+    "从裁剪 handoff 派生 agent；长任务必须 Start Gate。",
+    "Forks an agent from trimmed handoff; long tasks require Start Gate.",
+    "想开 explorer/planner/verifier/worker agent。",
+    "Use to start explorer/planner/verifier/worker agents.",
+    "start_gate",
+  ),
+  cap(
+    "rewind",
+    "/rewind",
+    ["rewind", "restore", "回滚", "恢复检查点"],
+    "回滚",
+    "Rewind",
+    "列出或恢复 checkpoint；restore 不自然语言直通。",
+    "Lists or restores checkpoints; restore is never direct through natural language.",
+    "查看 checkpoint 或理解恢复风险。",
+    "Use for checkpoints and restore risk explanation.",
+    "dangerous",
+  ),
+  cap(
+    "btw",
+    "/btw",
+    ["btw", "临时插问", "side question"],
+    "临时插问",
+    "Temporary question",
+    "回答临时问题，不改 Todo/Plan/checkpoint。",
+    "Answers a side question without changing Todo/Plan/checkpoints.",
+    "长任务中临时问一个不改变状态的问题。",
+    "Use for a side question that should not alter state.",
+    "readonly",
+  ),
+  cap(
+    "interrupt",
+    "/interrupt",
+    ["interrupt", "cancel", "中断", "停止"],
+    "中断",
+    "Interrupt",
+    "标记当前长任务取消。",
+    "Marks the current long task cancelled.",
+    "要中断正在运行的长任务。",
+    "Use to cancel a running long task.",
+    "start_gate",
+  ),
+  cap(
+    "claim-check",
+    "/claim-check",
+    ["claim", "核查", "证据"],
+    "结论核查",
+    "Claim check",
+    "降级缺证据结论。",
+    "Downgrades unsupported claims.",
+    "需要核查回答是否有证据。",
+    "Use to check whether a claim has evidence.",
+    "readonly",
+  ),
+  cap(
+    "verify",
+    "/verify",
+    ["verify", "验证", "test", "typecheck"],
+    "验证",
+    "Verify",
+    "生成或运行验证计划。",
+    "Generates or runs verification.",
+    "想跑测试、typecheck、build 或 verifier。",
+    "Use for tests, typecheck, build, or verifier checks.",
+    "start_gate",
+  ),
+  cap(
+    "review",
+    "/review",
+    ["review", "代码审查", "审查"],
+    "审查",
+    "Review",
+    "审查 diff、风险和验证证据。",
+    "Reviews diff, risks, and verification evidence.",
+    "想做一次 review 或看风险。",
+    "Use for review or risk inspection.",
+    "start_gate",
+  ),
+  cap(
+    "cache-log",
+    "/cache-log",
+    ["cache log", "缓存日志"],
+    "缓存日志",
+    "Cache log",
+    "查看或导出最近 cache usage 记录。",
+    "Shows or exports recent cache usage records.",
+    "需要对账 cache usage 或导出日志。",
+    "Use for cache usage reconciliation or export.",
+    "config_write",
+    { writesConfig: true },
+  ),
+  cap(
+    "cache",
+    "/cache",
+    ["cache", "缓存", "hit rate", "cache hit rate", "命中率"],
+    "缓存",
+    "Cache",
+    "查看 cache 命中率与 freshness；refresh 需确认。",
+    "Shows cache hit rate and freshness; refresh needs confirmation.",
+    "询问缓存命中率、预热或刷新。",
+    "Use for cache hit rate, warmup, or refresh.",
+    "start_gate",
+  ),
+  cap(
+    "break-cache",
+    "/break-cache",
+    ["break cache", "freshness", "缓存破坏"],
+    "缓存破坏诊断",
+    "Break-cache",
+    "查看 cache freshness hash 变化。",
+    "Shows cache freshness hash changes.",
+    "排查为什么缓存命中下降。",
+    "Use to diagnose cache hit-rate drops.",
+    "readonly",
+  ),
+  cap(
+    "mcp",
+    "/mcp",
+    ["mcp", "server", "tools"],
+    "MCP",
+    "MCP",
+    "查看 MCP server 状态和稳定工具摘要。",
+    "Shows MCP server status and stable tool summaries.",
+    "询问 MCP 是否可用或有哪些工具。",
+    "Use for MCP availability and tool summaries.",
+    "readonly",
+  ),
+  cap(
+    "index",
+    "/index",
+    ["index", "索引", "codebase", "architecture", "search code", "build index"],
+    "代码索引",
+    "Index",
+    "查看、建立、刷新或查询 codebase-memory 索引。",
+    "Shows, builds, refreshes, or queries the codebase-memory index.",
+    "询问索引状态、建立索引、搜索代码、架构摘要。",
+    "Use for index status, build, refresh, code search, or architecture summary.",
+    "start_gate",
+  ),
+  cap(
+    "usage",
+    "/usage",
+    ["usage", "token", "tokens", "用量"],
+    "用量",
+    "Usage",
+    "查看 token/cache usage 摘要。",
+    "Shows token/cache usage summary.",
+    "询问 token、usage 或账单口径。",
+    "Use for token/cache usage questions.",
+    "readonly",
+  ),
+  cap(
+    "stats",
+    "/stats",
+    ["stats", "statistics", "统计"],
+    "统计",
+    "Stats",
+    "查看本地 cache/cost 统计。",
+    "Shows local cache/cost statistics.",
+    "查看总体统计或 endpoint 聚合。",
+    "Use for overall stats or endpoint grouping.",
+    "readonly",
+  ),
+  cap(
+    "read",
+    "/read",
+    ["read", "读取", "看文件", "open file"],
+    "读取文件",
+    "Read file",
+    "读取文件内容。",
+    "Reads file content.",
+    "自然语言询问怎么看文件时解释；执行走只读/确认路径。",
+    "Explain file reading; execution follows read-only/confirmation path.",
+    "tool_permission",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "write",
+    "/write",
+    ["write", "写文件", "create file"],
+    "写文件",
+    "Write file",
+    "写入文件，必须走权限管道。",
+    "Writes files through the permission pipeline.",
+    "只用于解释风险或显式 slash 命令；自然语言不能直通。",
+    "Use only for risk explanation or explicit slash commands; no natural direct execution.",
+    "dangerous",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "edit",
+    "/edit",
+    ["edit", "修改", "replace"],
+    "编辑",
+    "Edit",
+    "唯一替换编辑，必须走权限管道。",
+    "Performs unique replacement edits through the permission pipeline.",
+    "只用于解释编辑风险或显式 slash 命令。",
+    "Use only to explain edit risk or explicit slash commands.",
+    "dangerous",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "multiedit",
+    "/multiedit",
+    ["multiedit", "multi edit", "批量编辑"],
+    "批量编辑",
+    "MultiEdit",
+    "多处编辑，必须走权限管道。",
+    "Performs multiple edits through the permission pipeline.",
+    "只用于解释批量编辑风险或显式 slash 命令。",
+    "Use only to explain multi-edit risk or explicit slash commands.",
+    "dangerous",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "grep",
+    "/grep",
+    ["grep", "search", "搜索", "查找", "TODO"],
+    "搜索文本",
+    "Search text",
+    "搜索文本匹配。",
+    "Searches text matches.",
+    "想搜索代码、TODO 或错误信息。",
+    "Use to search code, TODOs, or error messages.",
+    "tool_permission",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "glob",
+    "/glob",
+    ["glob", "find files", "匹配文件", "文件列表", "按模式找文件", "模式找文件"],
+    "匹配文件",
+    "Match files",
+    "按 glob 匹配文件路径。",
+    "Matches file paths by glob.",
+    "想找文件名或按模式列文件。",
+    "Use to find files by name or pattern.",
+    "tool_permission",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "bash",
+    "/bash",
+    ["bash", "run command", "运行命令", "npm install", "install dependency"],
+    "Shell 命令",
+    "Shell command",
+    "执行 shell 命令，必须权限审批。",
+    "Runs shell commands through approval.",
+    "自然语言只能解释风险和审批要求，不能直通执行。",
+    "Natural language may only explain risk and approval requirements.",
+    "dangerous",
+    { entersPermissionPipeline: true },
+  ),
+  cap(
+    "todo",
+    "/todo",
+    ["todo", "任务", "task list"],
+    "任务",
+    "Todo",
+    "查看或更新会话任务列表。",
+    "Shows or updates the session task list.",
+    "需要可见任务进度。",
+    "Use for visible task progress.",
+    "start_gate",
+  ),
+  cap(
+    "diff",
+    "/diff",
+    ["diff", "changed files", "差异", "改动"],
+    "Diff",
+    "Diff",
+    "显示本轮工具改动摘要。",
+    "Shows current tool-change summary.",
+    "想看改了什么或 show me the diff。",
+    "Use to inspect current changes.",
+    "readonly",
+  ),
+  cap(
+    "exit",
+    "/exit",
+    ["exit", "quit", "退出"],
+    "退出",
+    "Exit",
+    "退出 REPL。",
+    "Exits the REPL.",
+    "需要结束当前 REPL。",
+    "Use to end the REPL.",
+    "start_gate",
+  ),
+  cap(
+    "status",
+    "/status",
+    ["status", "状态栏"],
+    "状态栏",
+    "Status",
+    "内部状态栏输出入口。",
+    "Internal status-bar output entry.",
+    "通常由系统自动输出；可用于调试短状态。",
+    "Usually emitted automatically; useful for short status debugging.",
+    "readonly",
+    { hiddenReason: "not listed in /help; status bar is emitted automatically" },
+  ),
+];
+
+export function getCommandCapabilityCatalog(): CommandCapability[] {
+  return [...COMMAND_CAPABILITY_DATA].sort(
+    (a, b) => a.slash.localeCompare(b.slash) || a.id.localeCompare(b.id),
+  );
+}
+
+export function validateCommandCapabilityCoverage(): string[] {
+  const catalog = getCommandCapabilityCatalog();
+  const missing = USER_VISIBLE_SLASH_COMMANDS.filter(
+    (slash) => !catalog.some((item) => item.slash === slash && item.userInvocable),
+  );
+  const invalidHidden = catalog
+    .filter((item) => item.hiddenReason !== undefined && item.hiddenReason.trim() === "")
+    .map((item) => item.id);
+  return [
+    ...missing.map((slash) => `missing ${slash}`),
+    ...invalidHidden.map((id) => `hidden reason missing ${id}`),
+  ];
+}
+
+export function buildRuntimeStatusForModel(context: RuntimeStatusSource): RuntimeStatusForModel {
+  const latest = context.cache.history.at(-1);
+  const freshness = latest?.freshness ?? context.cache.lastFreshness;
+  return {
+    memory: {
+      linghunMd: context.memory.projectRulesError
+        ? "unreadable"
+        : context.memory.projectRulesExists
+          ? "found"
+          : "missing",
+      candidates: context.memory.candidates.length,
+      accepted: context.memory.accepted.length,
+      autoAccept: false,
+    },
+    index: {
+      status: context.index.status,
+      changedFiles: context.index.changedFiles ?? null,
+    },
+    cache: {
+      latestHitRate: latest?.hitRate ?? null,
+      changedKeys: (freshness?.changedKeys ?? []).slice(0, 8),
+    },
+    model: { provider: "deepseek", name: context.model },
+    permissionMode: context.permissionMode,
+    extensions: {
+      skills: { enabled: context.skills.enabled, count: context.skills.skills.length },
+      plugins: { enabled: context.plugins.enabled, count: context.plugins.plugins.length },
+      hooks: { enabled: context.hooks.enabled, count: context.hooks.hooks.length },
+    },
+  };
+}
+
+export function createModelCapabilitySummary(limit = 30): string {
+  return getCommandCapabilityCatalog()
+    .filter((item) => item.modelInvocable || item.bridgeSafe)
+    .slice(0, limit)
+    .map((item) => `${item.slash} ${item.titleEn}: risk=${item.risk}; ${item.whenToUseEn}`)
+    .join("\n");
+}
+
+export function routeNaturalIntent(
+  text: string,
+  preferredLanguage: Language = "zh-CN",
+): NaturalIntent {
+  const language = detectInputLanguage(text, preferredLanguage);
+  const normalized = normalizeIntentText(text);
+  const mentionedSlash = /\/[a-z-]+/iu.exec(text)?.[0];
+  const catalog = getCommandCapabilityCatalog();
+  const explicit = mentionedSlash
+    ? catalog.find((item) => item.slash === mentionedSlash)
+    : undefined;
+  const inquiry = detectInquiry(normalized);
+  const dangerous = detectDangerousNaturalIntent(normalized);
+  const scored = catalog
+    .map((capability) => ({ capability, score: scoreCapability(capability, normalized, text) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.capability.slash.localeCompare(b.capability.slash));
+  const candidates = uniqueCapabilities([
+    ...(explicit ? [explicit] : []),
+    ...scored.map((item) => item.capability),
+  ]).slice(0, 5);
+  const capability = explicit ?? candidates[0];
+  const topScore = explicit ? Math.max(8, scored[0]?.score ?? 0) : (scored[0]?.score ?? 0);
+  const secondScore = scored[1]?.score ?? 0;
+
+  if (!capability) {
+    return {
+      action: "model",
+      confidence: 0,
+      reason: "no catalog match",
+      candidates: [],
+      language,
+      inquiry,
+      riskHandler: "model",
+    };
+  }
+  if (dangerous && isDangerousNaturalTarget(capability.id)) {
+    return createIntent(
+      "permission_pipeline",
+      capability,
+      0.92,
+      dangerous,
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
+  if (
+    inquiry === "status" &&
+    isFirstBatchStatusCapability(capability.id) &&
+    !isActionRequest(normalized)
+  ) {
+    return createIntent(
+      "execute_readonly",
+      capability,
+      Math.min(1, Math.max(0.7, topScore / 5)),
+      "readonly status",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (!explicit && topScore < 2.2) {
+    return createIntent(
+      "ask_clarify",
+      capability,
+      topScore / 5,
+      "low confidence",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (!explicit && candidates.length > 1 && Math.abs(topScore - secondScore) < 0.6) {
+    return createIntent(
+      "ask_clarify",
+      capability,
+      topScore / 6,
+      "multiple close candidates",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (isUsageOrRiskQuestion(normalized, inquiry) || explicit) {
+    return createIntent(
+      "answer",
+      capability,
+      1,
+      "catalog question",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (capability.readonly && isStatusLike(normalized, capability)) {
+    return createIntent(
+      "execute_readonly",
+      capability,
+      Math.min(1, topScore / 5),
+      "readonly status",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (capability.risk === "dangerous") {
+    return createIntent(
+      "permission_pipeline",
+      capability,
+      Math.min(1, topScore / 5),
+      "dangerous natural language cannot execute directly",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
+  return createIntent(
+    "start_gate",
+    capability,
+    Math.min(1, topScore / 5),
+    capability.risk === "tool_permission"
+      ? "tool permission path requires confirmation"
+      : "start gate required",
+    candidates,
+    language,
+    "execute",
+    normalized,
+  );
+}
+
+export function formatNaturalClarification(intent: NaturalIntent): string {
+  const lines =
+    intent.language === "en-US"
+      ? ["I found multiple or low-confidence command candidates. Please choose one explicitly:"]
+      : ["我找到了多个或低置信度候选。请明确选择一个："];
+  for (const item of intent.candidates.slice(0, 4)) {
+    lines.push(
+      `- ${item.slash}: ${intent.language === "en-US" ? item.titleEn : item.titleZh} · risk=${item.risk}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function formatCapabilityAnswer(intent: NaturalIntent): string {
+  const c = intent.capability;
+  if (!c) return "";
+  const zh = intent.language === "zh-CN";
+  const description = zh ? c.descriptionZh : c.descriptionEn;
+  const when = zh ? c.whenToUseZh : c.whenToUseEn;
+  const risk = formatRiskLine(c, intent.language);
+  const equivalent = intent.command ?? createNaturalEquivalentCommand(c, "");
+  return zh
+    ? [
+        `${c.slash}：${c.titleZh}`,
+        `- 用途：${description}`,
+        `- 何时使用：${when}`,
+        `- 风险：${risk}`,
+        `- 等价命令：${equivalent}`,
+        `- 自然语言桥：${c.bridgeSafe ? "可解释/可进入安全路径" : "不可直通"}`,
+      ].join("\n")
+    : [
+        `${c.slash}: ${c.titleEn}`,
+        `- Purpose: ${description}`,
+        `- When to use: ${when}`,
+        `- Risk: ${risk}`,
+        `- Equivalent command: ${equivalent}`,
+        `- Natural bridge: ${c.bridgeSafe ? "can explain / enter safe path" : "not direct"}`,
+      ].join("\n");
+}
+
+export function formatNaturalPermissionBlock(intent: NaturalIntent): string {
+  const c = intent.capability;
+  if (!c) return "";
+  const command = intent.command ?? createNaturalEquivalentCommand(c, "");
+  if (intent.language === "en-US") {
+    return [
+      `Blocked natural-language direct execution: ${c.titleEn}`,
+      `- Why: ${formatRiskLine(c, intent.language)}`,
+      `- Equivalent slash command: ${command}`,
+      "- Required confirmation: explicit slash command plus Start Gate or the existing permission pipeline.",
+      "- Rollback: inspect /diff or checkpoint before accepting changes; destructive restore/install/bypass requires explicit approval.",
+      "- I did not execute it.",
+    ].join("\n");
+  }
+  return [
+    `已阻止自然语言直通：${c.titleZh}`,
+    `- 原因：${formatRiskLine(c, intent.language)}`,
+    `- 等价 slash command：${command}`,
+    "- 需要确认：显式 slash command + Start Gate 或现有权限审批管道。",
+    "- 回滚方式：先查看 /diff 或 checkpoint；恢复、安装依赖、bypass 等破坏性动作必须显式审批。",
+    "- 本次没有执行。",
+  ].join("\n");
+}
+
+export function formatNaturalStartGate(
+  intent: NaturalIntent,
+  context: RuntimeStatusSource,
+): string {
+  const c = intent.capability;
+  const command = intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
+  const logPath = join(context.projectPath, ".linghun", "logs");
+  if (intent.language === "en-US") {
+    return [
+      `Start Gate: ${c?.titleEn ?? "command"}`,
+      `- Equivalent slash command: ${command}`,
+      `- Risk: ${c ? formatRiskLine(c, intent.language) : "unknown"}`,
+      `- Scope: current project ${context.projectPath}`,
+      "- Budget: local state/command path only unless the slash command later calls the model or tools.",
+      `- Output/log path: summaries in transcript; long task logs under ${logPath}`,
+      "- Cancel: use /interrupt or the command-specific cancel entry such as /agents cancel <id>.",
+      "Reply `yes` to run the equivalent slash command, or type a different request to cancel this gate.",
+    ].join("\n");
+  }
+  return [
+    `Start Gate：${c?.titleZh ?? "命令"}`,
+    `- 等价 slash command：${command}`,
+    `- 风险：${c ? formatRiskLine(c, intent.language) : "unknown"}`,
+    `- 范围：当前项目 ${context.projectPath}`,
+    "- 预算：仅本地状态/命令路径；除非后续 slash command 调模型或工具。",
+    `- 输出/日志：摘要写入 transcript；长任务日志位于 ${logPath}`,
+    "- 取消方式：输入其他请求会取消此门；长任务可用 /interrupt 或 /agents cancel <id>。",
+    "回复 `确认` 执行等价 slash command；输入其他内容则不执行。",
+  ].join("\n");
+}
+
+export function formatRiskLine(c: CommandCapability, language: Language): string {
+  const details = [
+    `risk=${c.risk}`,
+    `readonly=${c.readonly ? "yes" : "no"}`,
+    `startGate=${c.requiresStartGate ? "yes" : "no"}`,
+    `writesConfig=${c.writesConfig ? "yes" : "no"}`,
+    `permissionPipeline=${c.entersPermissionPipeline ? "yes" : "no"}`,
+  ];
+  const reason =
+    c.risk === "dangerous"
+      ? language === "en-US"
+        ? "cannot run directly from natural language"
+        : "不能由自然语言直通执行"
+      : c.risk === "tool_permission"
+        ? language === "en-US"
+          ? "must enter tool permission pipeline"
+          : "必须进入工具权限管道"
+        : c.risk === "start_gate"
+          ? language === "en-US"
+            ? "requires Start Gate confirmation"
+            : "需要 Start Gate 确认"
+          : language === "en-US"
+            ? "read-only local state"
+            : "只读本地状态";
+  return `${details.join(", ")} · ${reason}`;
+}
+
+function cap(
+  id: string,
+  slash: string,
+  aliases: string[],
+  titleZh: string,
+  titleEn: string,
+  descriptionZh: string,
+  descriptionEn: string,
+  whenToUseZh: string,
+  whenToUseEn: string,
+  risk: CommandRisk,
+  options: Partial<CommandCapability> = {},
+): CommandCapability {
+  const readonly = risk === "readonly" || options.readonly === true;
+  return {
+    id,
+    slash,
+    aliases,
+    titleZh,
+    titleEn,
+    descriptionZh,
+    descriptionEn,
+    whenToUseZh,
+    whenToUseEn,
+    risk,
+    readonly,
+    modelInvocable: options.modelInvocable ?? readonly,
+    userInvocable: options.userInvocable ?? true,
+    requiresStartGate:
+      options.requiresStartGate ?? ["start_gate", "config_write", "dangerous"].includes(risk),
+    writesConfig: options.writesConfig ?? risk === "config_write",
+    entersPermissionPipeline:
+      options.entersPermissionPipeline ?? (risk === "tool_permission" || risk === "dangerous"),
+    bridgeSafe:
+      options.bridgeSafe ?? (readonly || risk === "start_gate" || risk === "tool_permission"),
+    hiddenReason: options.hiddenReason,
+  };
+}
+
+function createIntent(
+  action: NaturalIntentAction,
+  capability: CommandCapability,
+  confidence: number,
+  reason: string,
+  candidates: CommandCapability[],
+  language: Language,
+  inquiry: NaturalIntent["inquiry"],
+  normalized = "",
+): NaturalIntent {
+  return {
+    action,
+    capability,
+    confidence,
+    command: createNaturalEquivalentCommand(capability, normalized),
+    reason,
+    candidates,
+    language,
+    inquiry,
+    riskHandler: action === "ask_clarify" ? "clarify" : capability.risk,
+  };
+}
+
+function detectInputLanguage(text: string, preferred: Language): Language {
+  if (preferred === "en-US") return "en-US";
+  return /[\u4e00-\u9fff]/u.test(text) ? "zh-CN" : "en-US";
+}
+
+function normalizeIntentText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[？?。！!,，:：()（）]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function detectInquiry(text: string): NaturalIntent["inquiry"] {
+  if (/风险|危险|safe|risk|danger/u.test(text)) return "risk";
+  if (/怎么|如何|用途|干什么|what does|how do i|how to|what is/u.test(text)) return "usage";
+  if (/是否|开了吗|enabled|status|状态|当前|命中|hit rate|list|有哪些/u.test(text)) return "status";
+  return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force/u.test(text)
+    ? "execute"
+    : "howto";
+}
+
+function detectDangerousNaturalIntent(text: string): string | null {
+  if (
+    /直接|force|强制|bypass|npm install|pnpm add|install dependency|安装依赖|接受所有|accept all|delete memory|restore|hook|remote|job/u.test(
+      text,
+    )
+  ) {
+    return "high-risk wording";
+  }
+  return null;
+}
+
+function isDangerousNaturalTarget(id: string): boolean {
+  return [
+    "write",
+    "edit",
+    "multiedit",
+    "bash",
+    "permissions",
+    "rewind",
+    "plugins",
+    "skills",
+    "index",
+    "cache",
+    "memory",
+    "hooks",
+    "mode",
+  ].includes(id);
+}
+
+function isFirstBatchStatusCapability(id: string): boolean {
+  return [
+    "memory",
+    "index",
+    "cache",
+    "model",
+    "mode",
+    "workflows",
+    "skills",
+    "plugins",
+    "hooks",
+    "sessions",
+    "resume",
+    "branch",
+  ].includes(id);
+}
+
+function isActionRequest(text: string): boolean {
+  return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force|切换|switch|set/u.test(
+    text,
+  );
+}
+
+function scoreCapability(
+  capability: CommandCapability,
+  normalized: string,
+  original: string,
+): number {
+  let score = 0;
+  const hay =
+    `${capability.id} ${capability.slash} ${capability.aliases.join(" ")} ${capability.titleZh} ${capability.titleEn} ${capability.descriptionZh} ${capability.descriptionEn} ${capability.whenToUseZh} ${capability.whenToUseEn}`.toLowerCase();
+  for (const token of splitIntentTokens(normalized)) {
+    if (token.length < 2) continue;
+    if (hay.includes(token)) score += token.length > 4 ? 1.2 : 0.7;
+  }
+  if (original.includes(capability.slash)) score += 6;
+  for (const alias of capability.aliases) {
+    const lower = alias.toLowerCase();
+    if (normalized.includes(lower)) score += 3;
+  }
+  if (capability.id === "hooks" && /hook|钩子/u.test(normalized)) score += 3;
+  if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
+    score += 3;
+  if (capability.id === "cache" && /命中|hit rate|cache/u.test(normalized)) score += 3;
+  if (capability.id === "memory" && /记忆|memory|linghun.md/u.test(normalized)) score += 3;
+  if (capability.id === "index" && /索引|index|搜索代码|search code|architecture/u.test(normalized))
+    score += 3;
+  if (capability.id === "model" && /模型|model|provider/u.test(normalized)) score += 3;
+  if (capability.id === "mode" && /权限模式|permission mode|bypass/u.test(normalized)) score += 3;
+  if (capability.id === "diff" && /diff|改动|差异/u.test(normalized)) score += 3;
+  if (capability.id === "review" && /review|审查/u.test(normalized)) score += 3;
+  if (capability.id === "grep" && /搜索代码|search code|搜索.*todo/u.test(normalized)) score += 5;
+  if (
+    capability.id === "todo" &&
+    /todo|任务|task/u.test(normalized) &&
+    !/搜索代码|search code|搜索.*todo/u.test(normalized)
+  )
+    score += 4;
+  if (capability.id === "background" && /后台|background|长任务|long task/u.test(normalized))
+    score += 6;
+  if (capability.id === "glob" && /按模式找文件|模式找文件|find files|匹配文件/u.test(normalized))
+    score += 4;
+  if (capability.id === "fork" && /agent|智能体|verifier/u.test(normalized)) score += 2;
+  return score;
+}
+
+function splitIntentTokens(text: string): string[] {
+  const ascii = text.match(/[a-z0-9_.\/-]+/giu) ?? [];
+  const zh = text.match(/[\u4e00-\u9fff]{2,}/gu) ?? [];
+  return [...ascii, ...zh];
+}
+
+function uniqueCapabilities(items: CommandCapability[]): CommandCapability[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function isUsageOrRiskQuestion(text: string, inquiry: NaturalIntent["inquiry"]): boolean {
+  return (
+    inquiry === "usage" ||
+    inquiry === "risk" ||
+    /干什么|what does|危险|risk|how do i|怎么/u.test(text)
+  );
+}
+
+function isStatusLike(text: string, capability: CommandCapability): boolean {
+  return (
+    capability.readonly ||
+    /状态|status|当前|enabled|开了吗|命中|hit rate|list|有哪些|what model/u.test(text)
+  );
+}
+
+function createNaturalEquivalentCommand(capability: CommandCapability, normalized: string): string {
+  if (capability.id === "hooks") return "/doctor hooks";
+  if (capability.id === "cache") {
+    return normalized.includes("refresh") ||
+      normalized.includes("刷新") ||
+      normalized.includes("预热")
+      ? "/cache refresh"
+      : "/cache status";
+  }
+  if (capability.id === "index") {
+    if (/build|建立|init/u.test(normalized)) return "/index init fast";
+    if (/refresh|刷新/u.test(normalized)) return "/index refresh";
+    if (/architecture|架构/u.test(normalized)) return "/index architecture";
+    if (/search|搜索|查找|todo/u.test(normalized)) return "/index search <query>";
+    return "/index status";
+  }
+  if (capability.id === "workflows" && /bug-fix|bug fix/u.test(normalized))
+    return "/workflows bug-fix";
+  if (capability.id === "fork" && /verifier|验证/u.test(normalized)) return "/fork verifier <task>";
+  if (capability.id === "permissions" && /add|remove|添加|删除/u.test(normalized))
+    return "/permissions add|remove ...";
+  if (capability.id === "mode" && /bypass/u.test(normalized)) return "/mode bypass";
+  if (capability.id === "bash" && /npm install/u.test(normalized)) return "/bash npm install";
+  return capability.slash;
+}

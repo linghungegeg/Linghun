@@ -45,6 +45,17 @@ import {
   createToolContext,
   runTool,
 } from "@linghun/tools";
+import {
+  type PendingNaturalCommand,
+  buildRuntimeStatusForModel,
+  createModelCapabilitySummary,
+  formatCapabilityAnswer,
+  formatNaturalClarification,
+  formatNaturalPermissionBlock,
+  formatNaturalStartGate,
+  getCommandCapabilityCatalog,
+  routeNaturalIntent,
+} from "./natural-command-bridge.js";
 
 export type TuiStatus = "ready";
 
@@ -548,6 +559,7 @@ export type TuiContext = {
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
+  pendingNaturalCommand?: PendingNaturalCommand;
 };
 
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
@@ -1179,7 +1191,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         return 0;
       }
       if (commandResult === "message") {
-        await sendMessage(text, context, gateway, output);
+        const naturalResult = await handleNaturalInput(text, context, output);
+        if (naturalResult === "message") {
+          await sendMessage(text, context, gateway, output);
+        }
       }
     }
     return 0;
@@ -1201,7 +1216,7 @@ export async function handleSlashCommand(
 
   const [command, ...rest] = text.split(/\s+/);
   if (command === "/help") {
-    writeLine(output, formatHelp(context.language));
+    writeLine(output, formatCatalogHelp(context.language));
     return "handled";
   }
   if (command === "/model") {
@@ -4936,6 +4951,63 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+async function handleNaturalInput(
+  text: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<"handled" | "message"> {
+  const normalized = text.trim().toLowerCase();
+  if (context.pendingNaturalCommand && /^(yes|y|confirm|确认|是|执行|继续)$/iu.test(normalized)) {
+    const command = context.pendingNaturalCommand.command;
+    context.pendingNaturalCommand = undefined;
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Confirmed. Running equivalent slash command: ${command}`
+        : `已确认。执行等价 slash command：${command}`,
+    );
+    const result = await handleSlashCommand(command, context, output);
+    return result === "message" ? "message" : "handled";
+  }
+  if (context.pendingNaturalCommand) {
+    context.pendingNaturalCommand = undefined;
+  }
+
+  const intent = routeNaturalIntent(text, context.language);
+  if (intent.action === "model") {
+    return "message";
+  }
+  if (intent.action === "ask_clarify") {
+    writeLine(output, formatNaturalClarification(intent));
+    return "handled";
+  }
+  if (!intent.capability) {
+    return "message";
+  }
+  if (intent.action === "answer") {
+    writeLine(output, formatCapabilityAnswer(intent));
+    return "handled";
+  }
+  if (intent.action === "execute_readonly" && intent.command) {
+    const result = await handleSlashCommand(intent.command, context, output);
+    return result === "message" ? "message" : "handled";
+  }
+  if (intent.action === "permission_pipeline") {
+    writeLine(output, formatNaturalPermissionBlock(intent));
+    return "handled";
+  }
+  if (intent.action === "start_gate" && intent.command) {
+    context.pendingNaturalCommand = {
+      command: intent.command,
+      capabilityId: intent.capability.id,
+      createdAt: new Date().toISOString(),
+    };
+    writeLine(output, formatNaturalStartGate(intent, context));
+    return "handled";
+  }
+  return "message";
+}
+
 async function sendMessage(
   text: string,
   context: TuiContext,
@@ -4960,13 +5032,15 @@ async function sendMessage(
   const assistantEventId = randomUUID();
   let assistantText = "";
   const controller = new AbortController();
+  const runtimeStatus = buildRuntimeStatusForModel(context);
   const messages: ModelMessage[] = [
     {
       role: "system",
-      content:
+      content: `${
         context.language === "en-US"
-          ? "You are Linghun Phase 14 skills/workflow engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 14 Skills/Workflows 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 15 preflight Natural Command Bridge engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing."
+          : "你是 Linghun Phase 15 preflight Natural Command Bridge 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。"
+      }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`,
     },
     { role: "user", content: text },
   ];
@@ -5050,6 +5124,27 @@ function decodeInput(bytes: Buffer): string {
     return utf8;
   }
   return new TextDecoder("gb18030", { fatal: false }).decode(bytes);
+}
+
+function formatCatalogHelp(language: Language): string {
+  const lines =
+    language === "en-US"
+      ? ["Available commands (from Command Capability Catalog):"]
+      : ["可用命令（来自 Command Capability Catalog）："];
+  for (const capability of getCommandCapabilityCatalog().filter((item) => !item.hiddenReason)) {
+    const title = language === "en-US" ? capability.titleEn : capability.titleZh;
+    const description = language === "en-US" ? capability.descriptionEn : capability.descriptionZh;
+    lines.push(
+      `  ${capability.slash.padEnd(18)} ${title} — ${description} [risk=${capability.risk}]`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    language === "en-US"
+      ? "Natural language can ask what any slash command does or request safe status. High-risk actions never bypass Start Gate or permission pipeline."
+      : "普通自然语言可以询问任何 slash command 的用途/风险，也可以请求安全状态查询。高风险动作不会绕过 Start Gate 或权限管道。",
+  );
+  return `${lines.join("\n")}\n\n${formatHelp(language)}`;
 }
 
 function formatHelp(language: Language): string {

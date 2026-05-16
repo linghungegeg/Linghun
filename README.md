@@ -13,9 +13,10 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 当前进度
 
-- Phase 00-14 主闭环与 Phase 14 hardening 已完成。
-- 下一步建议进入 Phase 15 真实项目 Beta；必须等用户明确确认后才能开始，不得自动进入 Phase 15+。
+- Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight：Natural Command Bridge 已完成。
+- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 15+ / Phase 16+。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
+- Phase 15 preflight 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；这不是固定关键词补丁，高风险命令不得自然语言直通。
 - 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
 - 用户未明确开始执行时，必须先通过 Start Gate 确认，不得擅自进入写文件、agent、job、workflow 或依赖安装。
 
@@ -35,8 +36,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 8. [docs/delivery/phase-12-agents.md](./docs/delivery/phase-12-agents.md)
 9. [docs/delivery/phase-13-multi-model.md](./docs/delivery/phase-13-multi-model.md)
 10. [docs/delivery/phase-14-skills-workflow.md](./docs/delivery/phase-14-skills-workflow.md)
+11. [docs/delivery/phase-15-natural-command-bridge.md](./docs/delivery/phase-15-natural-command-bridge.md)
 
-Phase 14 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
+Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
 
 ## 命令约定
 

@@ -197,6 +197,7 @@ apps/
 ```text
 UserInput
   -> Session 接收
+  -> Natural Command Bridge 识别程序状态查询/控制意图
   -> Behavior Guard 判断任务类型和风险
   -> Context Builder 组装上下文
   -> Cache Planner 稳定静态/半稳定层
@@ -209,6 +210,35 @@ UserInput
   -> Cost/Cache Recorder 记录命中率和费用
   -> TUI 更新消息、状态栏、会话
 ```
+
+Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测层。它负责把“自动记忆开了吗”“帮我建索引”“缓存命中怎么样”“切到更强模型”等中英文自然语言映射为本地状态查询、等价 slash command 或 Start Gate。模型只负责解释结构化结果；是否能执行、是否需要确认、是否进入权限审批，都由 Linghun 本地 core 裁决。
+
+设计上参考 CCB 的公开行为边界：命令/技能不是要求用户死记固定关键词，而是通过命令目录、description、when-to-use 和工具提示让模型做语义匹配；同时用 disable model invocation、bridge safe allowlist、权限模式和语言偏好把风险压回本地系统。Linghun 要自研一份稳定的 Command Capability Catalog，供 intent router、帮助系统和模型提示共同使用，避免“自然语言入口”和 slash help 两套解释漂移。
+
+分层规则：
+
+- 可自然语言查询：memory、index、cache、model、mode、skills、plugins、hooks、sessions、resume、branch 等状态。
+- 可自然语言建议：全部 slash 命令都应能被解释用途和风险。
+- 可自然语言确认后执行：索引建立/刷新、模型切换、模式切换、workflow Start Gate、低风险配置变更。
+- 不可自然语言直通：写文件、Bash、安装依赖、权限规则变更、长期记忆接受/删除、第三方 plugin/skill enable、force index、hook/job/remote。
+- 中英文一致：Command Capability Catalog 必须同时提供中文和英文语义说明；最终回复跟随 language preference 或用户输入主语言。
+- 目录预算：模型只看到短摘要和 when-to-use，不加载完整 skill/plugin/hook 内容；长描述截断且稳定排序，避免破坏 prompt cache。
+
+覆盖分三批：
+
+- 第一批：状态查询和安全启动门，Phase 15 preflight 必须完成。
+- 第二批：开发辅助命令的自然语言发现与确认，Phase 15 preflight 必须纳入 Catalog、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 继续用真实项目验证，Phase 15.5 修 P0/P1。
+- 第三批：高风险命令只解释和审批，不直通；必须保留 Start Gate 和权限管道。
+
+模型请求前可注入短 `RuntimeStatus`，包含 memory/index/cache/model/mode/extensions 的摘要，帮助模型回答当前状态问题；禁止注入完整 memory、完整 transcript、完整索引结果和大日志。
+
+非弱化验收：
+
+- Command Capability Catalog 覆盖所有用户可见 slash 命令，隐藏/内部命令必须显式标记。
+- 每个能力都有中英文 description 和 when-to-use；模型看到短摘要，用户看到可读说明。
+- 自然语言桥支持状态问句、动作祈使句、用途/风险询问、参数提取和低置信度候选。
+- 中文、英文和同义表达必须落到同一个风险处理路径，不能因为语言不同绕过 Start Gate 或权限管道。
+- 如果只能匹配少数固定短句、不能解释所有 slash 命令、不能给出来源真实的 RuntimeStatus，视为 preflight 未完成。
 
 ### 4.2 上下文分层
 
@@ -964,7 +994,7 @@ F:\LinghunProject 或新仓库根目录
 | Phase 12 | Agent 闭环 | explorer、worker、verifier、planner、`/fork`、agent transcript |
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
-| Phase 15 | 真实项目测试版 | 用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
+| Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
 | Phase 15.5 | 双模型交叉审查与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 release readiness / open-source readiness |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |

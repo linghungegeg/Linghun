@@ -327,6 +327,7 @@ main · DeepSeek V4 Pro · strict · cache 94% · index ready · 1 agent
 | 后台任务 | 长命令、agent、job 可折叠、查看、恢复、中断 | 阶段 12 / 17 |
 | 临时插问 | 类 `/btw` 小问题不打断主任务上下文 | 阶段 11 |
 | 命令别名兼容 | 保留 Claude 风格 slash 命令，新增能力也要有中文说明 | 阶段 4 起 |
+| 自然语言控制桥 | 常见状态查询和安全控制可用自然语言触发，由本地 intent router 裁决，模型只负责解释 | 阶段 15 preflight |
 | 语言跟随设置 | 用户设置中文则中文输出，设置 English 则英文输出；slash 命令和 transcript 字段保持英文 | 阶段 7 前置 |
 | resume / branch / fork | 恢复历史、分支试验、派生子会话或 agent | 阶段 11 / 12 / 17 |
 | review / diff / usage / stats | 审查、改动摘要、原始 usage、综合统计 | 阶段 5 / 8 / 9 |
@@ -361,6 +362,76 @@ Linghun 必须区分“讨论中”和“执行中”。当用户只是咨询、
 - 写入文档、代码、配置但用户尚未明确授权。
 
 Start Gate 不替代权限审批。用户同意开始任务后，具体高风险工具调用仍必须走权限/风险管道。
+
+### 4.8 自然语言控制桥 / Natural Command Bridge
+
+Linghun 不能只依赖 slash 命令。真实用户会直接问“自动记忆开了吗”“帮我建索引”“缓存命中怎么样”“切到更强模型”。这些请求必须基于本地真实状态回答或进入安全确认门，不能让模型凭印象泛泛回答。
+
+自然语言控制桥是成品级交互层，不是简单同义词补丁：
+
+```text
+用户自然语言
+  -> 本地 Intent Router 判断是否为程序状态查询/控制请求
+  -> 命中后读取本地状态或映射到等价 slash command
+  -> 模型只负责把结构化结果解释成人话
+  -> 高风险动作仍走 Start Gate 和权限管道
+```
+
+原则：
+
+- 底层负责判断、读取真实状态和执行安全命令；模型不能凭空猜当前开关、索引、缓存、记忆或权限状态。
+- slash 命令仍是精确入口；自然语言是可发现、可解释、可确认的桥接层。
+- 只读查询可以直接返回本地真实状态摘要。
+- 配置变更、索引、cache warmup/refresh、workflow、agent、skill/plugin enable 等必须进入确认门。
+- 写文件、Bash、安装依赖、权限规则修改、hook/job/remote 等高风险动作必须继续走权限管道。
+- 自然语言桥不得绕过 Start Gate、Plan、权限审批、验证闭环或阶段边界。
+- prompt 只能注入短 RuntimeStatus 摘要，不得注入完整 memory、完整 transcript、完整索引结果、完整 plugin/skill/hook 日志。
+
+自然语言控制桥必须参考 CCB 的“命令/技能目录给模型做语义匹配”的方向，但不能复制实现。CCB 的可参考行为边界是：命令/技能有 description、when-to-use、是否允许模型调用、用户可见说明、桥接/远程安全 allowlist 和语言偏好提示；模型看到的是短目录摘要，真正执行仍由本地命令系统和权限系统裁决。Linghun 应维护一份稳定的 Command Capability Catalog：每个命令声明 `id`、slash 入口、中文说明、英文说明、whenToUse、risk、是否只读、是否允许模型建议调用、是否需要 Start Gate、是否会写配置、是否会触发权限管道、是否允许远程/桥接入口。模型和 intent router 都消费这份目录，而不是靠零散关键词。
+
+用户不需要按固定关键词触发。下面的中文/英文只是验收样例，真实实现必须做语义识别：
+
+| 能力域 | 中文自然说法示例 | English examples | 等价能力 | 风险处理 |
+| --- | --- | --- | --- | --- |
+| memory | 自动记忆开了吗、记住了什么 | is memory on, what do you remember | `/memory`、`/memory review`、`/memory storage` 摘要 | 只读直接回答 |
+| index | 索引好了没、帮我建索引 | is the index ready, build the index | `/index status`、`/index init fast`、`/index refresh` | 查询只读；建立/刷新走 Start Gate |
+| cache | 缓存命中怎么样、为什么 cache 变了 | cache hit rate, why did cache change | `/cache status`、`/break-cache status` | 只读直接回答 |
+| model | 当前什么模型、切到更强模型 | current model, switch model | `/model`、`/model doctor`、`/model set`、`/model route doctor` | 查询只读；切换需确认 |
+| mode / permissions | 当前权限模式、切 plan mode | current mode, switch to plan mode | `/mode`、`/permissions`、`/permissions recent` | 查询只读；切换/写规则需确认或权限管道 |
+| workflow | 有哪些工作流、开始修 bug 流程 | list workflows, start bug fix workflow | `/workflows`、`/workflows <name>` | workflow 只进 Start Gate |
+| extensions | 有哪些 skills/plugins、hook 开了吗 | list skills/plugins, are hooks enabled | `/skills`、`/plugins`、`/plugins doctor`、`/doctor hooks` | 查询只读；enable 第三方需确认和权限摘要 |
+| sessions | 恢复会话、开个分支试试 | resume session, create a branch session | `/resume`、`/branch`、`/sessions` | resume 只读；branch 生成 handoff 摘要 |
+
+覆盖分三批，不允许做成后续缝补：
+
+1. **第一批：状态查询和安全启动门**  
+   Phase 15 preflight 必须完成。覆盖 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions、resume、branch。目标是让真实用户接入模型后，不必记 slash 命令也能查看 Linghun 状态和进入安全启动门。
+
+2. **第二批：开发辅助命令的自然语言发现与确认**  
+   Phase 15 Beta 中必须验证，必要时在 Phase 15.5 修 P0/P1。覆盖 read/grep/glob/todo/verify/review/diff/fork/agents 等。自然语言可以发现、解释、建议和进入确认门；涉及 agent/fork/verify 长任务时必须显示范围、预算、输出和取消方式。
+
+3. **第三批：高风险命令只解释和审批，不直通**  
+   write/edit/multiedit/bash/permissions add/remove/mode bypass/cache refresh/index force/skills enable/plugins enable/memory accept/delete/rewind restore/hook/job/remote 不能被自然语言直接执行。自然语言只能生成“我理解你要做 X，风险是 Y，是否继续”的 Start Gate 或权限请求。
+
+成品级非弱化要求：
+
+- Phase 15 preflight 不能只覆盖几个演示短句；必须从现有 slash command 注册表生成或校验 Command Capability Catalog，保证新增命令不会遗漏用途/风险说明。
+- 每个能力至少有三类自然语言验收：状态问句、动作祈使句、用途/风险询问；中文和英文都要覆盖。
+- 状态类回答必须附带来源，例如 RuntimeStatus、本地 slash handler 或本地状态函数；不能只输出模型自我介绍或泛泛产品说明。
+- 对同一意图的不同说法必须得到一致风险处理，例如“帮我建索引”“初始化索引”“build the index”都只能进入同一个索引 Start Gate。
+- 参数化意图必须能提取常见参数，例如 workflow 名称、model 名称、mode 名称、branch 目的；低置信度时给候选而不是猜。
+- 未实现或被阶段禁止的能力必须明确说明边界和下一步，而不是假装执行或悄悄降级。
+- 交付文档必须列出自然语言覆盖矩阵、未覆盖命令、被禁止直通命令、误识别/低置信度处理和中英文 smoke 结果。
+
+阶段要求：
+
+- Phase 15 真实项目 Beta 前必须先做 Natural Command Bridge 第一批完整闭环，作为 Phase 15 preflight。
+- Phase 15 preflight 不是固定关键词补丁；必须基于 Command Capability Catalog 做中英文语义识别。
+- Command Capability Catalog 必须区分用户可见说明和模型可见短摘要；长描述要预算截断，稳定排序，避免破坏 prompt cache。
+- 语言偏好必须进入自然语言桥：中文用户用中文解释，英文用户用英文解释；代码标识、命令名和 provider/model id 保持原文。
+- 所有 slash 命令都必须能被自然语言询问“这个能做什么/怎么用/风险是什么”，但不是所有命令都能自然语言直接执行。
+- 未命中的普通问题仍走普通模型对话，但模型请求前必须带短 RuntimeStatus，让模型知道当前 memory/index/cache/model/mode 的真实状态。
+- 如果实现只做硬编码关键词、只覆盖中文、只覆盖第一批演示句、或无法解释所有 slash 命令用途/风险，则 Phase 15 preflight 不算完成，不能进入 Phase 15 真实项目 Beta。
 
 ## 5. 阶段 0：设计冻结与基线确认
 
@@ -1381,7 +1452,20 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 
 ### 目标
 
-所有核心阶段完成后，进入可测试成品。
+所有核心阶段完成后，进入可测试成品。Phase 15 开始前必须先补齐 Natural Command Bridge 最小闭环，确保真实用户能用自然语言查看/控制 Linghun 核心状态，而不是必须记住每个 slash 命令。
+
+### Phase 15 preflight：自然语言控制桥
+
+正式真实项目测试前，必须先完成：
+
+- 普通输入先经过本地 intent router。
+- 基于 Command Capability Catalog 做中英文语义识别；用户不必说固定关键词。
+- 能识别 memory/index/cache/model/mode/workflow/skills/plugins/hooks/sessions/resume/branch 的高频自然语言查询和安全启动请求。
+- 只读查询直接读取本地真实状态并返回短摘要。
+- 索引建立/刷新、模型切换、模式切换、workflow 启动、skill/plugin enable 等动作必须给出确认门。
+- 写文件、Bash、权限规则、安装依赖、hook/job/remote 不得自然语言直通，必须继续走权限管道。
+- 模型请求前注入短 RuntimeStatus：memory autoAccept/candidates/accepted/LINGHUN.md、index status、cache hitRate/changedKeys、model、mode、skills/plugins/hooks 计数。
+- focused tests 覆盖中英文自然语言入口，例如“自动记忆是否打开 / is memory enabled”“帮我建立索引 / build the index”“缓存命中怎么样 / cache hit rate”“现在什么模型 / current model”“打开 bug-fix 工作流 / start bug-fix workflow”。
 
 ### 测试项目
 

@@ -433,6 +433,190 @@ CLI 参数指定的路径
 - Claude 风格常用命令尽量保留，新增命令必须有中文解释。
 - 命令别名必须可发现，不能只靠用户记忆。
 
+### 5.1 自然语言控制桥规格
+
+自然语言控制桥让用户用普通中文或英文查看和控制 Linghun 的核心状态，但执行裁决必须在本地程序中完成，不能让模型自由猜测或绕过命令系统。用户不需要按固定关键词说话；实现必须基于命令能力目录和语义识别。
+
+Linghun 必须维护稳定的命令能力目录：
+
+```ts
+export type CommandCapabilityRisk =
+  | 'readonly'
+  | 'start_gate'
+  | 'config_write'
+  | 'tool_permission'
+  | 'dangerous'
+  | 'unsupported'
+
+export type CommandCapability = {
+  id: string
+  slash: string
+  aliases?: string[]
+  titleZh: string
+  titleEn: string
+  descriptionZh: string
+  descriptionEn: string
+  whenToUseZh: string[]
+  whenToUseEn: string[]
+  risk: CommandCapabilityRisk
+  readonly: boolean
+  modelInvocable: boolean
+  userInvocable: boolean
+  requiresStartGate: boolean
+  writesConfig: boolean
+  entersPermissionPipeline: boolean
+  bridgeSafe: boolean
+  hiddenInBeginnerMode?: boolean
+}
+```
+
+要求：
+
+- 所有 slash 命令必须注册到 `CommandCapability` 或等价目录。
+- `CommandCapability` 应从命令注册表、help 元数据或统一 manifest 派生，禁止另写一份长期漂移的手工清单；确需手工补充时必须有测试发现未登记命令。
+- intent router 和模型提示都消费同一份稳定目录摘要，避免两套解释漂移。
+- 目录摘要必须稳定排序、短描述、可截断，不能把动态日志、时间戳或大输出放进去。
+- 中文和英文都必须有说明与 when-to-use，不要求机器翻译完全一致，但语义必须一致。
+- 必须区分用户可见说明和模型可见摘要；模型可见摘要只用于语义匹配和风险解释，不能包含完整 skill/plugin/hook 正文。
+- `modelInvocable=false` 的命令可以被自然语言解释用途和风险，但不得由模型或自然语言桥直接触发。
+- `bridgeSafe=false` 的命令不得从远程/IM/桥接入口直接执行，只能生成确认说明或要求用户回到本地终端。
+- 参考 CCB 的“命令/技能目录 + 描述 + whenToUse + disable model invocation + bridge safe allowlist + language preference”方向，但 Linghun 自研实现，不能复制可疑源码。
+
+```ts
+export type NaturalIntentRisk =
+  | 'readonly'
+  | 'start_gate'
+  | 'config_write'
+  | 'tool_permission'
+  | 'unsupported'
+
+export type NaturalIntent =
+  | { kind: 'memory.status'; risk: 'readonly' }
+  | { kind: 'memory.review'; risk: 'readonly' }
+  | { kind: 'memory.storage'; risk: 'readonly' }
+  | { kind: 'index.status'; risk: 'readonly' }
+  | { kind: 'index.init'; mode: 'fast'; risk: 'start_gate' }
+  | { kind: 'index.refresh'; risk: 'start_gate' }
+  | { kind: 'cache.status'; risk: 'readonly' }
+  | { kind: 'cache.breakStatus'; risk: 'readonly' }
+  | { kind: 'model.status'; risk: 'readonly' }
+  | { kind: 'model.doctor'; risk: 'readonly' }
+  | { kind: 'model.set'; model: string; risk: 'config_write' }
+  | { kind: 'mode.status'; risk: 'readonly' }
+  | { kind: 'mode.set'; mode: PermissionMode; risk: 'config_write' }
+  | { kind: 'workflow.list'; risk: 'readonly' }
+  | { kind: 'workflow.startGate'; name: string; risk: 'start_gate' }
+  | { kind: 'skills.status'; risk: 'readonly' }
+  | { kind: 'plugins.status'; risk: 'readonly' }
+  | { kind: 'plugins.doctor'; risk: 'readonly' }
+  | { kind: 'hooks.doctor'; risk: 'readonly' }
+  | { kind: 'session.resume'; risk: 'readonly' }
+  | { kind: 'session.branch'; purpose?: string; risk: 'start_gate' }
+  | { kind: 'unknown'; risk: 'unsupported' }
+
+export type RuntimeStatusForModel = {
+  memory: {
+    projectRules: 'found' | 'missing' | 'unreadable'
+    candidates: number
+    accepted: number
+    autoAccept: boolean
+  }
+  index: {
+    status: 'unknown' | 'ready' | 'missing' | 'stale' | 'error' | 'indexing'
+    changedFiles: number
+  }
+  cache: {
+    latestHitRate?: number
+    changedKeys: string[]
+  }
+  model: {
+    provider: string
+    name: string
+  }
+  permissionMode: PermissionMode
+  extensions: {
+    skills: { enabled: boolean; count: number }
+    plugins: { enabled: boolean; count: number }
+    hooks: { enabled: boolean; count: number }
+  }
+}
+```
+
+执行规则：
+
+- `readonly` 意图直接调用本地状态函数或等价 slash handler，返回短摘要。
+- `start_gate` 意图只输出确认门；用户确认后再调用等价 slash command。
+- `config_write` 意图必须展示即将变更的配置、风险和回滚方式；用户确认后再写配置。
+- `tool_permission` 意图不得由自然语言桥直接执行，必须进入现有工具权限管道。
+- `unsupported` 意图交给普通模型对话，但模型请求必须带短 `RuntimeStatusForModel`。
+
+语义识别要求：
+
+- 不能只做固定关键词匹配；必须至少支持同义表达、问句/祈使句、中文/英文、带参数和不带参数的变体。
+- 实现可以先用规则化 parser + capability catalog，不要求 Phase 15 preflight 引入额外模型分类器。
+- 如果规则识别置信度低，必须追问或给出候选命令，不能擅自执行。
+- 自然语言询问“这个能做什么/怎么用/风险是什么”时，所有 slash 命令都必须能被解释。
+- 回复语言必须跟随当前 language preference；没有设置时按用户输入主语言回复。命令名、路径、模型 id、provider id 和错误码保持原文。
+- 同一 `NaturalIntent` 的中英文、多种同义说法必须归一到同一 risk handler，不能出现中文直通、英文 Start Gate 或相反的风险不一致。
+- 参数提取必须显式返回置信度和候选值；例如 workflow/model/mode/branch purpose 缺失或模糊时，只能提示候选，不能猜测执行。
+- 普通模型对话前注入的 RuntimeStatus 必须是短结构化摘要，且必须可关闭或可审计，避免每轮增加大 token 成本。
+
+三批覆盖：
+
+| 批次 | 范围 | 要求 |
+| --- | --- | --- |
+| 第一批 | memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions、resume、branch | Phase 15 preflight 必须完整实现；中英文自然语言可查询状态或进入安全启动门 |
+| 第二批 | read、grep、glob、todo、verify、review、diff、fork、agents、background | Phase 15 preflight 必须纳入 Catalog、自然语言发现、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 继续用真实项目验证，Phase 15.5 修 P0/P1；长任务必须显示范围、预算、日志和取消方式 |
+| 第三批 | write、edit、multiedit、bash、permissions add/remove、mode bypass、cache refresh、index force、skills enable、plugins enable、memory accept/delete、rewind restore、hook/job/remote | 不允许自然语言直通；只允许解释风险、生成 Start Gate 或进入权限审批 |
+
+第一批验收样例必须覆盖中英文，但实现不能只匹配这些固定短语：
+
+| 意图 | 中文样例 | English samples | 等价命令 |
+| --- | --- | --- | --- |
+| memory.status | 自动记忆开了吗、记住了什么、记忆状态 | is memory enabled, what do you remember | `/memory` |
+| memory.review | 有待确认记忆吗、记忆候选 | pending memories, memory candidates | `/memory review` |
+| memory.storage | 记忆存在哪里、会话存在哪里 | where is memory stored, session storage | `/memory storage` |
+| index.status | 索引状态、索引好了没 | index status, is indexing ready | `/index status` |
+| index.init | 建立索引、初始化索引 | build the index, initialize index | `/index init fast` |
+| cache.status | 缓存命中怎么样、cache 状态 | cache hit rate, cache status | `/cache status` |
+| cache.breakStatus | 为什么 cache 变了、缓存为什么失效 | why did cache change, cache break status | `/break-cache status` |
+| model.status | 当前模型、你是什么模型 | current model, what model are you using | `/model` |
+| model.doctor | 模型配置有问题吗、key 配好了吗 | model doctor, is the API key configured | `/model doctor` |
+| mode.status | 当前权限模式、现在是什么模式 | current mode, permission mode | `/mode` |
+| workflow.list | 有哪些工作流 | list workflows, available workflows | `/workflows` |
+| workflow.startGate | 打开 bug-fix 工作流、开始修 bug 工作流 | start bug-fix workflow, open bug fix flow | `/workflows bug-fix` |
+| skills.status | 有哪些 skills、技能开了吗 | list skills, are skills enabled | `/skills` |
+| plugins.status | 有哪些 plugins、插件开了吗 | list plugins, plugin status | `/plugins` |
+| hooks.doctor | hook 开了吗、hook 状态 | are hooks enabled, hook status | `/doctor hooks` |
+| session.resume | 恢复会话、继续上次 | resume session, continue last session | `/resume` |
+| session.branch | 创建分支会话、开个分支试试 | create branch session, branch this conversation | `/branch` |
+
+禁止：
+
+- 不允许把自然语言“帮我改/写/运行/安装”直接映射到 `/write`、`/edit`、`/multiedit`、`/bash` 或依赖安装。
+- 不允许自然语言直接开启 `bypass`、写权限规则、接受长期记忆、启用第三方 plugin/skill、强制刷新索引或执行 hook/job/remote。
+- 不允许模型自行宣称“记忆已开启”“索引 ready”“缓存命中率”等状态；这些必须来自 RuntimeStatus 或本地命令结果。
+- 不允许为了让模型更聪明而把完整 memory、完整 transcript、大索引结果、大日志塞入 prompt。
+- 不允许只用少量硬编码中文/英文关键词冒充语义识别；至少要通过 capability catalog、别名、描述、when-to-use 和参数 parser 共同判断。
+- 不允许新增命令后没有自然语言用途/风险说明；这必须在 test/check 中失败。
+
+验收：
+
+- `CommandCapability` 覆盖率测试必须确保所有用户可见 slash 命令都有能力记录；隐藏或内部命令必须显式标记原因。
+- 自然语言 router 测试必须覆盖每个第一批能力的中文问句、中文祈使句、英文问句、英文祈使句和用途/风险询问。
+- 风险一致性测试必须覆盖同一意图的中文/英文/同义表达映射到同一 risk handler。
+- 低置信度测试必须覆盖相似命令、拼写错误、缺少参数、多个候选，结果只能追问或列候选。
+- 负向安全测试必须覆盖 write/edit/bash/install/bypass/permissions/memory accept/plugin enable/index force/hook/job/remote 等自然语言请求不会直通。
+- RuntimeStatus 测试必须确保 memory/index/cache/model/mode/extensions 来源真实、字段短小、不会包含完整 memory/transcript/index/log。
+- 用户输入“自动记忆功能是否打开”时，回答必须包含当前 `autoAccept`、candidate 数、accepted 数和 `LINGHUN.md` 状态。
+- 用户输入 “is memory enabled?” 时必须得到同等英文或当前语言下的本地状态回答。
+- 用户输入“帮我建立索引”时，必须进入 Start Gate，并保留大文件安全门。
+- 用户输入 “build the index” 时必须进入同等 Start Gate。
+- 用户输入“缓存命中怎么样”时，必须读取 `/cache status` 的真实公式和来源，不得自行估算。
+- 用户输入“你是什么模型”时，必须基于当前 provider/model 状态回答，而不是只复述 system prompt 身份。
+- 用户询问任意 slash 命令“这个能做什么/风险是什么”时，必须基于 `CommandCapability` 回答。
+- 未命中意图的普通问题仍能走模型对话，并且模型能看到短 RuntimeStatus。
+
 ## 6. TUI 规格
 
 ### 6.1 布局

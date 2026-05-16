@@ -6,7 +6,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
-  ${LINGHUN_CLI_NAME}                                   进入 Phase 14 交互式终端
+  ${LINGHUN_CLI_NAME}                                   进入 Phase 15 preflight 交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -41,6 +41,7 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
+  Phase 15 preflight 在 TUI 中提供 Natural Command Bridge：普通中英文输入先经 Command Capability Catalog 与本地风险裁决。
   Phase 14 主闭环提供本地 skills/workflows/hooks/plugins loader、doctor、启停、信任和权限边界。
   --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器、插件或 cache 统计系统。
 
