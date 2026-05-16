@@ -228,7 +228,7 @@ printf '/cache-log\n/cache status\n/stats endpoints\n/exit\n' | corepack pnpm ex
 - Light hints 不污染输入 prompt。
 - Phase 08 `/verify`、`/verify last`、`/review` 和 `test_result` evidence 回归保持通过。
 
-独立 verification agent 复检将在本阶段最终汇报前执行；若发现问题，必须修复后重新复检。
+独立 verification agent 复检：PASS。首次复检发现 REPL `/help` 未列出 Phase 09 命令；修复 discoverability 并补充回归断言后，第二次独立复检 PASS。
 
 ## 性能结果
 
@@ -379,8 +379,8 @@ validation_current:
     result: pass_phase09_help
   - command: "printf '/cache-log\\n/cache status\\n/stats endpoints\\n/exit\\n' | corepack pnpm exec linghun"
     result: pass_repl_cache_smoke
-validation_pending_before_final:
-  - independent verification agent PASS/FAIL/PARTIAL
+  - command: independent verification agent
+    result: pass_after_help_discoverability_fix
 index_status:
   project: F-Linghun
   status: ready

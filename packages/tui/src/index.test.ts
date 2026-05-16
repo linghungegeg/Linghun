@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { getSessionRootDir } from "@linghun/config";
+import { defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
@@ -10,6 +10,8 @@ import { describe, expect, it } from "vitest";
 import {
   type TuiContext,
   createCacheState,
+  createIndexState,
+  createMcpState,
   handleSlashCommand,
   recordModelUsage,
 } from "./index.js";
@@ -37,10 +39,13 @@ function createTestContext(
     tools: createToolContext(project),
     permissions: { rules: [], recentDenied: [] },
     language: "zh-CN",
+    config: defaultConfig,
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
     cache: createCacheState(project),
+    mcp: createMcpState(defaultConfig),
+    index: createIndexState(defaultConfig),
     interrupt: { type: "idle" },
   };
 }
@@ -63,6 +68,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/cache status");
     expect(output.text).toContain("/cache warmup|refresh");
     expect(output.text).toContain("/break-cache status");
+    expect(output.text).toContain("/mcp status");
+    expect(output.text).toContain("/mcp tools");
+    expect(output.text).toContain("/index status");
+    expect(output.text).toContain("/index search <query>");
+    expect(output.text).toContain("/index architecture");
     expect(output.text).toContain("/usage");
     expect(output.text).toContain("/stats endpoints");
     expect(output.text).toContain("当前模型：deepseek-v4-flash");

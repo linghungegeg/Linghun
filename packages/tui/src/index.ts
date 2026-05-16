@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
   stdin as defaultStdin,
@@ -9,7 +9,7 @@ import {
 } from "node:process";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
-import { getSessionRootDir, loadConfig } from "@linghun/config";
+import { type LinghunConfig, getSessionRootDir, loadConfig } from "@linghun/config";
 import {
   type CacheFreshness,
   type CacheTurnStats,
@@ -181,6 +181,38 @@ export type CacheState = {
   startedAt: number;
 };
 
+export type McpServerState = {
+  name: string;
+  command: string;
+  status: "configured" | "disabled" | "missing" | "error";
+  error?: string;
+};
+
+export type McpToolState = {
+  server: string;
+  name: string;
+  description: string;
+};
+
+export type McpState = {
+  enabled: boolean;
+  servers: McpServerState[];
+  tools: McpToolState[];
+  lastDoctor?: string;
+};
+
+export type IndexState = {
+  enabled: boolean;
+  projectName?: string;
+  status: "unknown" | "ready" | "missing" | "stale" | "error" | "indexing";
+  nodes?: number;
+  edges?: number;
+  indexedAt?: string;
+  error?: string;
+  lastQuery?: string;
+  lastSummary?: string;
+};
+
 type MessageKey =
   | "appTitle"
   | "intro"
@@ -217,10 +249,13 @@ export type TuiContext = {
   tools: ToolContext;
   permissions: PermissionState;
   language: Language;
+  config: LinghunConfig;
   backgroundTasks: BackgroundTaskState[];
   checkpoints: CheckpointState[];
   evidence: EvidenceRecord[];
   cache: CacheState;
+  mcp: McpState;
+  index: IndexState;
   lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
@@ -234,11 +269,15 @@ const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 
-export function createCacheState(projectPath: string, model = "deepseek-v4-flash"): CacheState {
+export function createCacheState(
+  projectPath: string,
+  model = "deepseek-v4-flash",
+  mcpToolList: McpToolState[] = [],
+): CacheState {
   const freshness = createCacheFreshness({
-    systemPrompt: "Linghun Phase 09 engineering assistant",
+    systemPrompt: "Linghun Phase 10 engineering assistant",
     toolSchema: builtInTools,
-    mcpToolList: [],
+    mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
     provider: "deepseek",
     projectRules: "local CLAUDE.md rules loaded by harness",
@@ -262,6 +301,40 @@ export function createCacheState(projectPath: string, model = "deepseek-v4-flash
   };
 }
 
+export function createMcpState(config: LinghunConfig): McpState {
+  const servers = Object.entries(config.mcp.servers)
+    .map(
+      ([name, server]) =>
+        ({
+          name,
+          command: server.command,
+          status: server.disabled ? "disabled" : "configured",
+        }) satisfies McpServerState,
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    enabled: config.mcp.enabledServers.length > 0,
+    servers,
+    tools: stabilizeMcpToolList(
+      servers
+        .filter((server) => server.status === "configured")
+        .map((server) => ({
+          server: server.name,
+          name: `${server.name}.status`,
+          description:
+            "MCP server health and tool discovery placeholder; real tool schemas are not dumped.",
+        })),
+    ),
+  };
+}
+
+export function createIndexState(config: LinghunConfig): IndexState {
+  return {
+    enabled: config.index.enabled,
+    status: config.index.enabled ? "unknown" : "missing",
+  };
+}
+
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const input = options.stdin ?? defaultStdin;
   const output = options.stdout ?? defaultStdout;
@@ -277,10 +350,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     tools: createToolContext(projectPath),
     permissions: await loadPermissionState(projectPath),
     language: config.language,
+    config,
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
     cache: createCacheState(projectPath, config.providers.deepseek.model),
+    mcp: createMcpState(config),
+    index: createIndexState(config),
     interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
@@ -396,6 +472,14 @@ export async function handleSlashCommand(
   }
   if (command === "/break-cache") {
     await handleBreakCacheCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/mcp") {
+    await handleMcpCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/index") {
+    await handleIndexCommand(rest, context, output);
     return "handled";
   }
   if (command === "/usage") {
@@ -892,6 +976,81 @@ async function handleBreakCacheCommand(
   writeLine(output, formatBreakCacheStatus(context));
 }
 
+async function handleMcpCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    writeLine(output, formatMcpStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "tools") {
+    context.mcp.tools = stabilizeMcpToolList(context.mcp.tools);
+    refreshCacheFreshness(context);
+    writeLine(output, formatMcpTools(context));
+    return;
+  }
+  if (action === "doctor") {
+    await runMcpDoctor(context);
+    writeLine(output, formatMcpStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  writeLine(output, "用法：/mcp | /mcp status | /mcp tools | /mcp doctor");
+}
+
+async function handleIndexCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    await refreshIndexStatus(context);
+    writeLine(output, formatIndexStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "init" && args[1] === "fast") {
+    await runIndexRepository(context, "fast");
+    writeLine(output, formatIndexStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "refresh") {
+    await runIndexRepository(context, context.config.index.mode);
+    writeLine(output, formatIndexStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "search") {
+    const query = args.slice(1).join(" ").trim();
+    if (!query) {
+      writeLine(output, "用法：/index search <query>");
+      return;
+    }
+    const result = await runIndexQuery(context, "search_code", { pattern: query, limit: 5 });
+    await recordIndexEvidence(context, `search ${query}`, result.summary);
+    writeLine(output, result.summary);
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "architecture") {
+    const result = await runIndexQuery(context, "get_architecture", {});
+    await recordIndexEvidence(context, "architecture", result.summary);
+    writeLine(output, result.summary);
+    writeStatus(output, context);
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/index status | /index init fast | /index refresh | /index search <query> | /index architecture",
+  );
+}
+
 export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
   const freshness = getCurrentFreshness(context);
   const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
@@ -942,6 +1101,349 @@ async function appendUsageEvents(
   await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
 }
 
+function getCodebaseMemoryCommand(context: TuiContext): string {
+  return context.config.mcp.servers["codebase-memory"]?.command ?? "codebase-memory-mcp";
+}
+
+async function runMcpDoctor(context: TuiContext): Promise<void> {
+  for (const server of context.mcp.servers) {
+    if (server.status === "disabled") {
+      continue;
+    }
+    const result = await runCommandCapture(
+      server.command,
+      ["--version"],
+      context.projectPath,
+      5_000,
+    );
+    if (result.exitCode === 0) {
+      server.status = "configured";
+      server.error = undefined;
+      continue;
+    }
+    server.status = result.errorCode === "ENOENT" ? "missing" : "error";
+    server.error = result.summary;
+  }
+  context.mcp.lastDoctor = new Date().toISOString();
+  context.mcp.tools = stabilizeMcpToolList(
+    context.mcp.servers
+      .filter((server) => server.status === "configured")
+      .map((server) => ({
+        server: server.name,
+        name: `${server.name}.status`,
+        description:
+          "MCP server is available; full tool schemas are intentionally omitted for cache stability.",
+      })),
+  );
+  refreshCacheFreshness(context);
+}
+
+function formatMcpStatus(context: TuiContext): string {
+  const servers = context.mcp.servers.map((server) => {
+    const suffix = server.error ? ` (${truncateDisplay(server.error, 80)})` : "";
+    return `- ${server.name}: ${server.status} command=${server.command}${suffix}`;
+  });
+  return [
+    "MCP status",
+    `- enabled: ${context.mcp.enabled ? "yes" : "no"}`,
+    `- servers: ${context.mcp.servers.length}`,
+    `- tools(stable): ${context.mcp.tools.length}`,
+    `- lastDoctor: ${context.mcp.lastDoctor ?? "not run"}`,
+    ...servers,
+    "- note: MCP 启动/检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
+  ].join("\n");
+}
+
+function formatMcpTools(context: TuiContext): string {
+  if (context.mcp.tools.length === 0) {
+    return "MCP tools：暂无稳定工具摘要。可运行 /mcp doctor 检测本机 server；不会输出完整 tool schema。";
+  }
+  return [
+    "MCP tools（稳定排序摘要，不输出完整 schema）",
+    ...context.mcp.tools.map((tool) => `- ${tool.server} :: ${tool.name} — ${tool.description}`),
+  ].join("\n");
+}
+
+async function refreshIndexStatus(context: TuiContext): Promise<void> {
+  const projects = await runCodebaseMemoryCli(context, "list_projects", {}, context.projectPath);
+  if (!projects.ok) {
+    context.index.status = projects.errorCode === "ENOENT" ? "missing" : "error";
+    context.index.error = projects.summary;
+    return;
+  }
+  const project = findCurrentIndexProject(projects.data, context.projectPath);
+  if (!project) {
+    context.index.status = "missing";
+    context.index.error = "未找到当前项目索引。请运行 /index init fast 建立索引。";
+    return;
+  }
+  context.index.projectName = project.name;
+  const status = await runCodebaseMemoryCli(
+    context,
+    "index_status",
+    { project: project.name },
+    context.projectPath,
+  );
+  if (!status.ok) {
+    context.index.status = "error";
+    context.index.error = status.summary;
+    return;
+  }
+  const data = status.data as { status?: string; nodes?: number; edges?: number };
+  context.index.status = data.status === "ready" ? "ready" : "stale";
+  context.index.nodes = data.nodes;
+  context.index.edges = data.edges;
+  context.index.error = undefined;
+}
+
+async function runIndexRepository(
+  context: TuiContext,
+  mode: "fast" | "moderate" | "full",
+): Promise<void> {
+  context.index.status = "indexing";
+  const result = await runCodebaseMemoryCli(
+    context,
+    "index_repository",
+    { repo_path: context.projectPath, mode, persistence: true },
+    context.projectPath,
+    120_000,
+  );
+  if (!result.ok) {
+    context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
+    context.index.error = `${result.summary}。请确认已安装 codebase-memory-mcp，或检查 .linghunignore 排除大 JSON/SQL/XML/min.js/生成物后重试。`;
+    return;
+  }
+  await refreshIndexStatus(context);
+}
+
+async function runIndexQuery(
+  context: TuiContext,
+  tool: "search_code" | "get_architecture",
+  input: Record<string, unknown>,
+): Promise<{ summary: string }> {
+  await refreshIndexStatus(context);
+  if (context.index.status !== "ready" || !context.index.projectName) {
+    const summary = formatIndexStatus(context);
+    return { summary };
+  }
+  const result = await runCodebaseMemoryCli(
+    context,
+    tool,
+    { project: context.index.projectName, ...input },
+    context.projectPath,
+  );
+  if (!result.ok) {
+    context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
+    context.index.error = result.summary;
+    return { summary: formatIndexStatus(context) };
+  }
+  const summary = summarizeIndexResult(tool, result.data);
+  context.index.lastQuery = tool === "search_code" ? String(input.pattern ?? "") : "architecture";
+  context.index.lastSummary = summary;
+  return { summary };
+}
+
+async function recordIndexEvidence(
+  context: TuiContext,
+  query: string,
+  summary: string,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const evidence: EvidenceRecord = {
+    id: randomUUID(),
+    kind: "index_query",
+    summary: truncateDisplay(summary.replace(/\s+/g, " "), 160),
+    source: `codebase-memory:${context.index.projectName ?? "unknown"}:${query}`,
+    supportsClaims: ["index_query", query],
+    createdAt: new Date().toISOString(),
+  };
+  context.evidence.unshift(evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
+function formatIndexStatus(context: TuiContext): string {
+  const suggestion =
+    context.index.status === "missing"
+      ? "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
+      : context.index.status === "stale"
+        ? "建议：运行 /index refresh 刷新索引；不会自动重建。"
+        : context.index.status === "error"
+          ? "建议：确认 codebase-memory-mcp 可执行，或修复索引错误后重试 /index status。"
+          : "建议：可用 /index search <query> 或 /index architecture 获取短结果。";
+  return [
+    "Index status",
+    `- enabled: ${context.index.enabled ? "yes" : "no"}`,
+    `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
+    `- status: ${context.index.status}`,
+    `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
+    `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
+    `- lastQuery: ${context.index.lastQuery ?? "-"}`,
+    `- ${suggestion}`,
+  ].join("\n");
+}
+
+function summarizeIndexResult(tool: "search_code" | "get_architecture", data: unknown): string {
+  if (tool === "get_architecture" && isRecord(data)) {
+    return [
+      "Index architecture（短摘要）",
+      `- project: ${String(data.project ?? "unknown")}`,
+      `- nodes/edges: ${String(data.total_nodes ?? "-")}/${String(data.total_edges ?? "-")}`,
+      `- node labels: ${summarizeNamedCounts(data.node_labels)}`,
+      `- edge types: ${summarizeNamedCounts(data.edge_types)}`,
+    ].join("\n");
+  }
+  if (isRecord(data)) {
+    const raw = Array.isArray(data.results) ? data.results : [];
+    const matches = raw
+      .slice(0, 5)
+      .map((item, index) => `- #${index + 1} ${truncateDisplay(stableStringify(item), 180)}`);
+    return [
+      "Index search（短摘要，最多 5 条）",
+      `- total: ${String(data.total_results ?? raw.length)}`,
+      ...matches,
+      matches.length === 0
+        ? "- no matches"
+        : "- truncated: full source is not dumped into transcript/status bar.",
+    ].join("\n");
+  }
+  return `Index result: ${truncateDisplay(stableStringify(data), 500)}`;
+}
+
+function summarizeNamedCounts(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return "-";
+  }
+  return value
+    .slice(0, 6)
+    .map((item) => {
+      if (!isRecord(item)) {
+        return truncateDisplay(String(item), 32);
+      }
+      return `${String(item.label ?? item.type ?? item.name ?? "?")}=${String(item.count ?? "?")}`;
+    })
+    .join(", ");
+}
+
+function findCurrentIndexProject(data: unknown, projectPath: string): { name: string } | null {
+  if (!isRecord(data) || !Array.isArray(data.projects)) {
+    return null;
+  }
+  const normalizedProjectPath = normalizePath(projectPath);
+  const match = data.projects.find((project) => {
+    if (!isRecord(project)) {
+      return false;
+    }
+    return normalizePath(String(project.root_path ?? "")) === normalizedProjectPath;
+  });
+  if (isRecord(match) && typeof match.name === "string") {
+    return { name: match.name };
+  }
+  return null;
+}
+
+async function runCodebaseMemoryCli(
+  context: TuiContext,
+  tool: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  timeoutMs = 30_000,
+): Promise<{ ok: true; data: unknown } | { ok: false; summary: string; errorCode?: string }> {
+  const command = getCodebaseMemoryCommand(context);
+  const result = await runCommandCapture(
+    command,
+    ["cli", tool, JSON.stringify(input)],
+    cwd,
+    timeoutMs,
+  );
+  if (result.exitCode !== 0) {
+    return { ok: false, summary: result.summary, errorCode: result.errorCode };
+  }
+  const jsonLine = [...result.stdout.trim().split(/\r?\n/)]
+    .reverse()
+    .find((line) => line.trim().startsWith("{"));
+  if (!jsonLine) {
+    return { ok: false, summary: "codebase-memory-mcp 未返回 JSON。" };
+  }
+  try {
+    return { ok: true, data: JSON.parse(jsonLine) };
+  } catch (error) {
+    return { ok: false, summary: `无法解析 codebase-memory-mcp 输出：${formatError(error)}` };
+  }
+}
+
+async function runCommandCapture(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  summary: string;
+  errorCode?: string;
+}> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const timer = setTimeout(() => {
+      child.kill();
+      resolvePromise({
+        exitCode: 124,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        summary: `命令超时：${command}`,
+      });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: 127,
+        stdout: "",
+        stderr: "",
+        summary: error.message,
+        errorCode: error.code,
+      });
+    });
+    child.on("close", (exitCode) => {
+      clearTimeout(timer);
+      const out = Buffer.concat(stdout).toString("utf8");
+      const err = Buffer.concat(stderr).toString("utf8");
+      resolvePromise({
+        exitCode: exitCode ?? 1,
+        stdout: out,
+        stderr: err,
+        summary: truncateDisplay((err || out || `exit ${exitCode}`).replace(/\s+/g, " "), 200),
+      });
+    });
+  });
+}
+
+function refreshCacheFreshness(context: TuiContext): void {
+  const freshness = getCurrentFreshness(context);
+  context.cache.lastFreshness = {
+    ...freshness,
+    changedKeys: diffFreshness(context.cache.lastFreshness, freshness),
+  };
+}
+
+function stabilizeMcpToolList(tools: McpToolState[]): McpToolState[] {
+  return tools
+    .map((tool) => ({
+      server: tool.server,
+      name: tool.name,
+      description: truncateDisplay(tool.description.replace(/\s+/g, " "), 120),
+    }))
+    .sort((a, b) => `${a.server}:${a.name}`.localeCompare(`${b.server}:${b.name}`));
+}
+
+function normalizePath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
+}
+
 function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSource {
   if (usage.cacheWriteTokensRaw === null) {
     return "missing";
@@ -968,10 +1470,10 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
       context.language === "en-US"
-        ? "Linghun Phase 09 EN system prompt"
-        : "Linghun Phase 09 ZH system prompt",
+        ? "Linghun Phase 10 EN system prompt"
+        : "Linghun Phase 10 ZH system prompt",
     toolSchema: builtInTools,
-    mcpToolList: [],
+    mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
     provider: "deepseek",
     reasoningEffort: "default",
@@ -1690,8 +2192,8 @@ async function sendMessage(
       role: "system",
       content:
         context.language === "en-US"
-          ? "You are Linghun Phase 09 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 09 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 10 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 10 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
@@ -1805,6 +2307,14 @@ function formatHelp(language: Language): string {
   /cache status         Show cache status and freshness
   /cache warmup|refresh Attempt cache warmup or refresh
   /break-cache status   Show cache freshness changes
+  /mcp [status]         Show MCP server status
+  /mcp tools            Show stable MCP tool summary
+  /mcp doctor           Diagnose MCP server availability
+  /index status         Show codebase-memory index status
+  /index init fast      Build a fast local index on explicit request
+  /index refresh        Refresh the current project index
+  /index search <query> Query codebase-memory and record evidence
+  /index architecture   Show short architecture summary
   /usage                Show token/cache usage summary
   /stats                Show local cache/cost statistics
   /stats endpoints      Group usage by endpoint
@@ -1852,6 +2362,15 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /cache status         查看 cache 状态与 freshness
   /cache warmup|refresh 尝试预热或刷新 cache
   /break-cache status   查看 cache freshness 变化
+  /mcp                  查看 MCP 状态
+  /mcp status           查看 MCP server 状态
+  /mcp tools            查看稳定排序的 MCP tool 摘要
+  /mcp doctor           诊断 MCP server 可用性
+  /index status         查看 codebase-memory 索引状态
+  /index init fast      显式建立 fast 索引
+  /index refresh        显式刷新当前项目索引
+  /index search <query> 查询索引并写入 evidence
+  /index architecture   输出短架构摘要并写入 evidence
   /usage                查看 token/cache usage 汇总
   /stats                查看本地 cache/cost 统计
   /stats endpoints      按 endpoint 聚合 usage
@@ -2592,6 +3111,7 @@ function writeStatus(output: Writable, context: TuiContext): void {
     mode: context.permissionMode,
     background: String(background),
     cache: formatPercent(latestHitRate),
+    index: context.index.status,
   });
   writeLine(output, truncateDisplay(status, 96));
 }
@@ -2606,13 +3126,13 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 09 TUI / REPL",
+    appTitle: "{name} Phase 10 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
     exit: "已退出 Linghun。",
     status:
-      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index --",
+      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index}",
     statusShort: "状态栏：{mode} · bg {background}",
     help: "帮助",
     inputPrompt: "你> ",
@@ -2634,13 +3154,13 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 09 TUI / REPL",
+    appTitle: "{name} Phase 10 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",
     exit: "Exited Linghun.",
     status:
-      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index --",
+      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index}",
     statusShort: "Status: {mode} · bg {background}",
     help: "Help",
     inputPrompt: "you> ",

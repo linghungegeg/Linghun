@@ -11,12 +11,28 @@ export type ProviderConfig = {
   maxOutputTokens?: number;
 };
 
+export type McpServerConfig = {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  disabled?: boolean;
+};
+
 export type LinghunConfig = {
   language: Language;
   defaultModel: string;
   providers: Record<string, ProviderConfig>;
   permission: {
     defaultMode: PermissionMode;
+  };
+  mcp: {
+    enabledServers: string[];
+    servers: Record<string, McpServerConfig>;
+  };
+  index: {
+    enabled: boolean;
+    mode: "fast" | "moderate" | "full";
+    ignoreFile: ".linghunignore" | ".cbmignore";
   };
 };
 
@@ -41,6 +57,20 @@ export const defaultConfig: LinghunConfig = {
   },
   permission: {
     defaultMode: "default",
+  },
+  mcp: {
+    enabledServers: ["codebase-memory"],
+    servers: {
+      "codebase-memory": {
+        command: process.env.LINGHUN_CODEBASE_MEMORY_MCP ?? "codebase-memory-mcp",
+        args: [],
+      },
+    },
+  },
+  index: {
+    enabled: true,
+    mode: "fast",
+    ignoreFile: ".linghunignore",
   },
 };
 
@@ -130,6 +160,18 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     permission: {
       ...defaultConfig.permission,
       ...input.permission,
+    },
+    mcp: {
+      ...defaultConfig.mcp,
+      ...input.mcp,
+      servers: {
+        ...defaultConfig.mcp.servers,
+        ...input.mcp?.servers,
+      },
+    },
+    index: {
+      ...defaultConfig.index,
+      ...input.index,
     },
   };
 }

@@ -41,4 +41,15 @@ describe("config directories", () => {
     expect(loaded.providers.deepseek.model).toBe("deepseek-v4-pro");
     expect(raw).toContain("deepseek-v4-pro");
   });
+
+  it("loads Phase 10 MCP and index defaults", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const config = await loadConfig(project);
+
+    expect(config.mcp.enabledServers).toContain("codebase-memory");
+    expect(config.mcp.servers["codebase-memory"]?.command).toBeTruthy();
+    expect(config.index.enabled).toBe(true);
+    expect(config.index.mode).toBe("fast");
+    expect(config.index.ignoreFile).toBe(".linghunignore");
+  });
 });
