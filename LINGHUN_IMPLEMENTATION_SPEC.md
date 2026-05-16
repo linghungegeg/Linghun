@@ -1441,10 +1441,16 @@ export type IndexHealth = {
 要求：
 
 - 首次进入项目提示 fast index。
-- 大文件扫描。
+- `/index status` 优先调用 `codebase-memory-mcp cli detect_changes` 做 stale 检测；可用且发现变更时显示 `stale` / changedFiles / stale hint。
+- `detect_changes` 不可用时必须清晰降级，不影响 `/index status` 基于 `index_status` 展示基本状态。
+- 大文件扫描必须在 `/index init fast` 和 `/index refresh` 前执行。
+- 风险文件包括未排除的大 JSON、SQL、XML、min.js，以及常见生成物/资源目录中的大文件。
 - `.linghunignore` 与 `.cbmignore` 兼容。
-- 变更超过阈值提示刷新。
+- 大文件安全门发现风险时默认阻止索引，并提示用户加入 `.linghunignore` 或 `.cbmignore`。
+- 用户显式执行 `/index init fast --force` 或 `/index refresh --force` 时才允许继续。
+- 变更超过阈值或 `detect_changes` 发现明显变更时提示刷新。
 - 不自动强制重建。
+- break-cache 深度诊断（last break 前后 cache read、工具增删、diff 路径等）记录为后续增强，不作为 Phase 10 hardening 实现范围。
 
 ## 15. Memory 规格
 

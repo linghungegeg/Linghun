@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
   stdin as defaultStdin,
@@ -208,6 +208,9 @@ export type IndexState = {
   nodes?: number;
   edges?: number;
   indexedAt?: string;
+  changedFiles?: number;
+  staleHint?: string;
+  safetyWarning?: string;
   error?: string;
   lastQuery?: string;
   lastSummary?: string;
@@ -268,6 +271,25 @@ const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
+const LARGE_INDEX_FILE_BYTES = 1_000_000;
+const LARGE_INDEX_FILE_LIMIT = 12;
+const LARGE_INDEX_RISK_EXTENSIONS = new Set([".json", ".sql", ".xml"]);
+const LARGE_INDEX_RISK_DIRS = new Set([
+  ".next",
+  ".turbo",
+  ".venv",
+  "assets",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+  "public",
+  "target",
+  "vendor",
+  "venv",
+]);
+const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
 
 export function createCacheState(
   projectPath: string,
@@ -1015,13 +1037,18 @@ async function handleIndexCommand(
     return;
   }
   if (action === "init" && args[1] === "fast") {
-    await runIndexRepository(context, "fast");
+    await runIndexRepository(context, "fast", "init fast", args.includes("--force"));
     writeLine(output, formatIndexStatus(context));
     writeStatus(output, context);
     return;
   }
   if (action === "refresh") {
-    await runIndexRepository(context, context.config.index.mode);
+    await runIndexRepository(
+      context,
+      context.config.index.mode,
+      "refresh",
+      args.includes("--force"),
+    );
     writeLine(output, formatIndexStatus(context));
     writeStatus(output, context);
     return;
@@ -1103,6 +1130,10 @@ async function appendUsageEvents(
 
 function getCodebaseMemoryCommand(context: TuiContext): string {
   return context.config.mcp.servers["codebase-memory"]?.command ?? "codebase-memory-mcp";
+}
+
+function getCodebaseMemoryCommandArgs(context: TuiContext): string[] {
+  return context.config.mcp.servers["codebase-memory"]?.args ?? [];
 }
 
 async function runMcpDoctor(context: TuiContext): Promise<void> {
@@ -1194,12 +1225,55 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   context.index.nodes = data.nodes;
   context.index.edges = data.edges;
   context.index.error = undefined;
+  context.index.changedFiles = undefined;
+  context.index.staleHint = undefined;
+  context.index.safetyWarning = undefined;
+  await refreshIndexStaleHint(context, project.name);
+}
+
+async function refreshIndexStaleHint(context: TuiContext, projectName: string): Promise<void> {
+  const changes = await runCodebaseMemoryCli(
+    context,
+    "detect_changes",
+    { project: projectName },
+    context.projectPath,
+    15_000,
+  );
+  if (!changes.ok) {
+    context.index.staleHint = `detect_changes 不可用：${changes.summary}。/index status 仍按 index_status 展示；不会自动刷新。`;
+    return;
+  }
+  const data = changes.data as { changed_count?: number; changed_files?: unknown[] };
+  const changedCount =
+    typeof data.changed_count === "number"
+      ? data.changed_count
+      : Array.isArray(data.changed_files)
+        ? data.changed_files.length
+        : 0;
+  context.index.changedFiles = changedCount;
+  if (changedCount > 0) {
+    context.index.status = "stale";
+    context.index.staleHint = `detect_changes 发现 ${changedCount} 个变更文件，建议运行 /index refresh；不会自动刷新。`;
+  }
 }
 
 async function runIndexRepository(
   context: TuiContext,
   mode: "fast" | "moderate" | "full",
+  actionLabel: "init fast" | "refresh",
+  force: boolean,
 ): Promise<void> {
+  const safety = await scanIndexSafety(context.projectPath);
+  if (!force && safety.riskyFiles.length > 0) {
+    context.index.status = "stale";
+    context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel);
+    context.index.error =
+      "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
+    return;
+  }
+  context.index.safetyWarning =
+    safety.riskyFiles.length > 0 ? formatIndexSafetyWarning(safety, actionLabel) : undefined;
+  context.index.error = undefined;
   context.index.status = "indexing";
   const result = await runCodebaseMemoryCli(
     context,
@@ -1276,6 +1350,9 @@ function formatIndexStatus(context: TuiContext): string {
     `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
     `- status: ${context.index.status}`,
     `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
+    `- changedFiles: ${context.index.changedFiles ?? "-"}`,
+    `- staleHint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
+    `- safety: ${context.index.safetyWarning ? truncateDisplay(context.index.safetyWarning, 180) : "-"}`,
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
     `- ${suggestion}`,
@@ -1324,6 +1401,162 @@ function summarizeNamedCounts(value: unknown): string {
     .join(", ");
 }
 
+type IndexSafetyFile = {
+  path: string;
+  size: number;
+  reason: string;
+};
+
+type IndexSafetyResult = {
+  riskyFiles: IndexSafetyFile[];
+  truncated: boolean;
+};
+
+async function scanIndexSafety(projectPath: string): Promise<IndexSafetyResult> {
+  const ignorePatterns = await readIndexIgnorePatterns(projectPath);
+  const riskyFiles: IndexSafetyFile[] = [];
+  let truncated = false;
+
+  async function visit(directory: string): Promise<void> {
+    if (riskyFiles.length >= LARGE_INDEX_FILE_LIMIT) {
+      truncated = true;
+      return;
+    }
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (riskyFiles.length >= LARGE_INDEX_FILE_LIMIT) {
+        truncated = true;
+        return;
+      }
+      const absolutePath = join(directory, entry.name);
+      const relativePath = normalizePath(relative(projectPath, absolutePath));
+      if (!relativePath || isIgnoredIndexPath(relativePath, ignorePatterns)) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (INDEX_SCAN_SKIP_DIRS.has(entry.name)) {
+          continue;
+        }
+        if (LARGE_INDEX_RISK_DIRS.has(entry.name)) {
+          riskyFiles.push({
+            path: `${relativePath}/`,
+            size: 0,
+            reason: "generated/dependency directory",
+          });
+          continue;
+        }
+        await visit(absolutePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const fileRisk = getIndexFileRisk(relativePath);
+      if (!fileRisk) {
+        continue;
+      }
+      let fileStat: Awaited<ReturnType<typeof stat>>;
+      try {
+        fileStat = await stat(absolutePath);
+      } catch {
+        continue;
+      }
+      if (fileStat.size < LARGE_INDEX_FILE_BYTES) {
+        continue;
+      }
+      riskyFiles.push({ path: relativePath, size: fileStat.size, reason: fileRisk });
+    }
+  }
+
+  await visit(projectPath);
+  return { riskyFiles, truncated };
+}
+
+async function readIndexIgnorePatterns(projectPath: string): Promise<string[]> {
+  const patterns: string[] = [];
+  for (const fileName of [".linghunignore", ".cbmignore"]) {
+    try {
+      const text = await readFile(join(projectPath, fileName), "utf8");
+      patterns.push(
+        ...text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0 && !line.startsWith("#"))
+          .map((line) => normalizePath(line)),
+      );
+    } catch {
+      // Ignore file is optional; missing or unreadable files must not break /index commands.
+    }
+  }
+  return patterns;
+}
+
+function isIgnoredIndexPath(relativePath: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => {
+    const normalized = pattern.replace(/^\//, "");
+    if (!normalized) {
+      return false;
+    }
+    if (normalized.endsWith("/")) {
+      return relativePath.startsWith(normalized);
+    }
+    if (normalized.includes("*")) {
+      const escaped = normalized.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+      return (
+        new RegExp(`^${escaped}$`).test(relativePath) ||
+        new RegExp(`(^|/)${escaped}$`).test(relativePath)
+      );
+    }
+    return relativePath === normalized || relativePath.startsWith(`${normalized}/`);
+  });
+}
+
+function getIndexFileRisk(relativePath: string): string | null {
+  const fileName = basename(relativePath);
+  const extension = extname(relativePath).toLowerCase();
+  const segments = relativePath.split("/");
+  if (fileName.endsWith(".min.js")) {
+    return "minified javascript";
+  }
+  if (LARGE_INDEX_RISK_EXTENSIONS.has(extension)) {
+    return `${extension} file`;
+  }
+  if (segments.some((segment) => LARGE_INDEX_RISK_DIRS.has(segment))) {
+    return "generated/resource directory";
+  }
+  return null;
+}
+
+function formatIndexSafetyWarning(
+  safety: IndexSafetyResult,
+  actionLabel: "init fast" | "refresh",
+): string {
+  const files = safety.riskyFiles.map((file) => {
+    const size = file.size > 0 ? `${formatBytes(file.size)}, ` : "";
+    return `- ${file.path} (${size}${file.reason})`;
+  });
+  return [
+    `索引安全门：/index ${actionLabel} 发现未排除的大文件风险，默认阻止索引。`,
+    ...files,
+    safety.truncated ? `- 仅展示前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
+    "建议：把这些路径加入 .linghunignore 或 .cbmignore 后重试；如确认要继续，可显式追加 --force。",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000) {
+    return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  }
+  return `${Math.round(bytes / 1_000)} KB`;
+}
+
 function findCurrentIndexProject(data: unknown, projectPath: string): { name: string } | null {
   if (!isRecord(data) || !Array.isArray(data.projects)) {
     return null;
@@ -1351,7 +1584,7 @@ async function runCodebaseMemoryCli(
   const command = getCodebaseMemoryCommand(context);
   const result = await runCommandCapture(
     command,
-    ["cli", tool, JSON.stringify(input)],
+    [...getCodebaseMemoryCommandArgs(context), "cli", tool, JSON.stringify(input)],
     cwd,
     timeoutMs,
   );

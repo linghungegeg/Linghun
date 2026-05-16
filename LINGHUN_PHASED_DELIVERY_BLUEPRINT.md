@@ -988,8 +988,11 @@ cancel 取消
 - MCP 失败隔离。
 - 工具列表稳定排序。
 - description/schema 稳定化。
-- 大文件扫描。
+- `/index status` 优先使用 `codebase-memory-mcp cli detect_changes` 做 stale 检测；不可用时清晰降级，不自动刷新。
+- `/index init fast` 和 `/index refresh` 前执行大文件扫描。
 - `.linghunignore` / `.cbmignore` 兼容。
+- 大文件安全门默认阻止未排除的大 JSON、SQL、XML、min.js 和常见生成物/资源目录；用户显式追加 `--force` 才继续。
+- break-cache 深度诊断记录为后续独立增强，不混入 Phase 10 hardening。
 
 ### 交互
 
@@ -1008,7 +1011,10 @@ cancel 取消
 
 - 当前项目建立索引。
 - 使用索引查调用链。
-- 修改大量文件后提示索引可能过期。
+- `/index status` 在 `detect_changes` 可用且发现变更时显示 stale 或 stale hint，并只提示 `/index refresh`。
+- `detect_changes` 不可用时 `/index status` 清晰降级，不影响基本索引状态查看。
+- `/index init fast` 和 `/index refresh` 在发现未排除大文件风险时默认阻止索引，并提示加入 `.linghunignore` 或 `.cbmignore`。
+- `/index init fast --force` 和 `/index refresh --force` 可作为显式继续路径。
 - 大文件未排除时给明确提示。
 
 ## 16. 阶段 11：会话交接与记忆闭环

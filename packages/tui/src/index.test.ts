@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { defaultConfig, getSessionRootDir } from "@linghun/config";
+import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
@@ -25,10 +25,69 @@ class MemoryOutput extends Writable {
   }
 }
 
+async function createMockCodebaseMemoryConfig(
+  project: string,
+  mockDir: string,
+  changes: { changed_count?: number; changed_files?: string[] } = { changed_count: 0 },
+): Promise<{ config: LinghunConfig; callsPath: string }> {
+  const callsPath = join(mockDir, "codebase-memory-calls.jsonl");
+  const mockPath = join(mockDir, "codebase-memory-mock.cjs");
+  await writeFile(
+    mockPath,
+    `const fs = require("node:fs");
+const tool = process.argv[3];
+const input = JSON.parse(process.argv[4] || "{}");
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ tool, input }) + "\\n");
+if (tool === "list_projects") {
+  console.log(JSON.stringify({ projects: [{ name: "test-project", root_path: ${JSON.stringify(project)} }] }));
+} else if (tool === "index_status") {
+  console.log(JSON.stringify({ status: "ready", nodes: 2, edges: 1 }));
+} else if (tool === "detect_changes") {
+  console.log(JSON.stringify(${JSON.stringify(changes)}));
+} else if (tool === "index_repository") {
+  console.log(JSON.stringify({ ok: true }));
+} else {
+  console.error("unexpected tool " + tool);
+  process.exit(2);
+}
+`,
+    "utf8",
+  );
+  return {
+    callsPath,
+    config: {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "codebase-memory": {
+            command: process.execPath,
+            args: [mockPath],
+          },
+        },
+      },
+    },
+  };
+}
+
+async function readMockCalls(callsPath: string): Promise<string[]> {
+  try {
+    return (await readFile(callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).tool as string);
+  } catch {
+    return [];
+  }
+}
+
 function createTestContext(
   project: string,
   store: SessionStore,
   session: { id: string; model: string; permissionMode: TuiContext["permissionMode"] },
+  config: LinghunConfig = defaultConfig,
 ): TuiContext {
   return {
     store,
@@ -39,13 +98,13 @@ function createTestContext(
     tools: createToolContext(project),
     permissions: { rules: [], recentDenied: [] },
     language: "zh-CN",
-    config: defaultConfig,
+    config,
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
     cache: createCacheState(project),
-    mcp: createMcpState(defaultConfig),
-    index: createIndexState(defaultConfig),
+    mcp: createMcpState(config),
+    index: createIndexState(config),
     interrupt: { type: "idle" },
   };
 }
@@ -553,6 +612,75 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/v1/messages: samples=1");
     expect(output.text).not.toContain("零成本");
     expect(output.text).not.toContain("¥");
+  });
+
+  it("marks index status stale from detect_changes without refreshing", async () => {
+    for (const changes of [{ changed_count: 2 }, { changed_files: ["src/a.ts", "src/b.ts"] }]) {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+      const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, changes);
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = createTestContext(project, store, session, config);
+
+      await handleSlashCommand("/index status", context, output);
+
+      expect(output.text).toContain("status: stale");
+      expect(output.text).toContain("changedFiles: 2");
+      expect(output.text).toContain("detect_changes 发现 2 个变更文件");
+      expect(output.text).toContain("不会自动刷新");
+      expect(await readMockCalls(callsPath)).toEqual([
+        "list_projects",
+        "index_status",
+        "detect_changes",
+      ]);
+    }
+  });
+
+  it("blocks index commands on unignored generated directories by default", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, "node_modules", "large-package"), { recursive: true });
+    await writeFile(
+      join(project, "node_modules", "large-package", "big.json"),
+      "x".repeat(1_100_000),
+      "utf8",
+    );
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index init fast", context, output);
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(output.text).toContain("索引安全门：/index init fast");
+    expect(output.text).toContain("索引安全门：/index refresh");
+    expect(output.text).toContain("node_modules/");
+    expect(output.text).toContain("generated/dependency directory");
+    expect(output.text).toContain(".linghunignore 或 .cbmignore");
+    expect(await readMockCalls(callsPath)).toEqual([]);
+  });
+
+  it("allows forced index commands to reach the index_repository path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, "dist"), { recursive: true });
+    await writeFile(join(project, "dist", "bundle.min.js"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index init fast --force", context, output);
+    await handleSlashCommand("/index refresh --force", context, output);
+
+    const calls = await readMockCalls(callsPath);
+    expect(calls.filter((tool) => tool === "index_repository")).toHaveLength(2);
+    expect(output.text).not.toContain("索引前发现未排除的大文件风险");
   });
 
   it("keeps light hints out of the prompt/input area", async () => {

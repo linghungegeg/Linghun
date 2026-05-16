@@ -21,8 +21,11 @@
 - codebase-memory 闭环：
   - `@linghun/config` 新增 `index` 默认配置：`enabled=true`、`mode=fast`、`ignoreFile=.linghunignore`。
   - `/index status` 通过本机 `codebase-memory-mcp cli list_projects` 和 `index_status` 识别当前项目索引。
-  - `/index init fast` 仅在用户显式执行时触发 fast 索引。
-  - `/index refresh` 仅在用户显式执行时按配置 mode 刷新索引。
+  - `/index status` hardening 优先调用 `codebase-memory-mcp cli detect_changes`；可用且发现变更时显示 `stale` / stale hint，只提示 `/index refresh`，不自动刷新。
+  - `detect_changes` 不可用时清晰降级为提示信息，`/index status` 仍按 `index_status` 展示。
+  - `/index init fast` 仅在用户显式执行时触发 fast 索引；索引前先扫描未排除的大 JSON、SQL、XML、min.js 和常见生成物/资源目录大文件。
+  - `/index refresh` 仅在用户显式执行时按配置 mode 刷新索引；同样经过大文件安全门。
+  - `/index init fast --force` 与 `/index refresh --force` 可在用户显式确认风险时绕过大文件安全门继续。
   - `/index search <query>` 进行短查询摘要并写入 transcript evidence，`kind=index_query`。
   - `/index architecture` 输出短架构摘要并写入 transcript evidence，`kind=index_query`。
   - 索引查询结果只做摘要和截断，不把大段源码或完整 graph dump 写入主输出。
@@ -58,7 +61,9 @@ Phase 10 新增命令：
 /mcp doctor
 /index status
 /index init fast
+/index init fast --force
 /index refresh
+/index refresh --force
 /index search <query>
 /index architecture
 ```
@@ -94,7 +99,12 @@ Phase 10 新增命令：
 /index refresh
 ```
 
-大仓库建议在项目根目录维护 `.linghunignore`，排除大 JSON、SQL、XML、min.js、生成物和不需要进入索引的目录。
+大仓库建议在项目根目录维护 `.linghunignore` 或 `.cbmignore`，排除大 JSON、SQL、XML、min.js、生成物和不需要进入索引的目录。Phase 10 hardening 后，`/index init fast` 与 `/index refresh` 会在索引前扫描未排除的大文件风险；默认阻止索引并提示加入 ignore。用户确认风险后可显式执行：
+
+```text
+/index init fast --force
+/index refresh --force
+```
 
 ## 涉及模块
 
@@ -115,10 +125,13 @@ Phase 10 新增命令：
 - MCP 失败隔离：`/mcp doctor` 和 `/index ...` 失败只更新状态与短错误，不让普通聊天、本地工具、cache/status 崩溃。
 - MCP tool list 稳定化：只记录 server/name/短 description，按 `server:name` 排序并截断 description，避免完整 schema 破坏 prompt cache。
 - cache freshness 衔接：`getCurrentFreshness()` 使用稳定 MCP tool list 计算 `mcpToolListHash`；变化进入 `changedKeys`。
+- stale 检测 hardening：`/index status` 在 `index_status` 成功后优先调用 `detect_changes`；发现变更时把 index 状态降为 `stale` 并显示 changedFiles/stale hint。`detect_changes` 失败只显示降级提示，不影响基本状态查看。
+- 大文件安全门 hardening：`/index init fast` 和 `/index refresh` 先扫描风险文件；风险类型包含大 JSON、SQL、XML、min.js 以及常见生成物/资源目录中的大文件，且尊重 `.linghunignore` / `.cbmignore`。`node_modules`、`.pnpm`、`dist`、`build`、`coverage`、`.next`、`.turbo`、`target`、`vendor` 等生成/依赖目录只做目录级风险提示，不深度逐文件扫描。
+- 显式继续：发现未排除风险文件时默认阻止索引；只有用户显式执行 `/index init fast --force` 或 `/index refresh --force` 才继续。
 - transcript evidence：`/index search` 和 `/index architecture` 写入 `evidence_record`，`kind=index_query`，`source=codebase-memory:<project>:<query>`。
 - 短摘要和截断：索引 search 最多输出 5 条短摘要；architecture 只输出节点/边统计和前几类 label/type，不 dump 源码。
 - 状态栏短状态：状态栏只显示 `index unknown/ready/stale/missing/error/indexing`，不显示金额、完整索引结果、完整 MCP tool schema 或日志。
-- 不自动索引：除非用户显式执行 `/index init fast` 或 `/index refresh`，Linghun 不会自动全量索引仓库。
+- 不自动索引：除非用户显式执行 `/index init fast`、`/index init fast --force`、`/index refresh` 或 `/index refresh --force`，Linghun 不会自动全量索引仓库。
 
 ## 配置项
 
@@ -168,7 +181,9 @@ REPL：
 /mcp doctor
 /index status
 /index init fast
+/index init fast --force
 /index refresh
+/index refresh --force
 /index search <query>
 /index architecture
 /cache status
@@ -193,6 +208,16 @@ corepack pnpm exec linghun --version
 corepack pnpm exec Linghun --version
 corepack pnpm exec linghun --help
 printf '/mcp status\n/mcp doctor\n/mcp tools\n/index status\n/index search cache\n/index architecture\n/cache status\n/exit\n' | corepack pnpm exec linghun
+```
+
+Phase 10 hardening 要求补充执行：
+
+```bash
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm build
+corepack pnpm check
+printf '/index status\n/index init fast\n/index init fast --force\n/index refresh\n/index refresh --force\n/cache status\n/exit\n' | corepack pnpm exec linghun
 ```
 
 已执行：
@@ -231,8 +256,10 @@ TUI smoke 结果摘要：
 - 本阶段通过 `codebase-memory-mcp cli` 做最小闭环，未引入完整 MCP SDK 客户端生命周期管理；完整 MCP session 管理可在后续独立增强，但不得阻塞 Phase 10 用户命令闭环。
 - MCP tools 当前是稳定摘要，不是完整 tool schema；这是为了保护 prompt cache，不代表所有 MCP tool 都已作为 Linghun 内置工具可调用。
 - `/index init fast` 和 `/index refresh` 可能因仓库大、ignore 不充分或本机索引器错误失败；失败时给出提示，不自动重试或自动扩大范围。
+- Phase 10 hardening 已增加索引前大文件安全门；生成/依赖目录只做目录级风险提示，不深度逐文件扫描。ignore 规则只覆盖常用 `.gitignore` 风格的本地路径/通配符，不等同完整 gitignore 引擎。
 - `codebase-memory-mcp` CLI 会输出自身 info 日志；Linghun 只解析最后一行 JSON，主输出只保留短错误/摘要。
 - Phase 10 不实现完整 resume/handoff 自动总结；只通过 transcript evidence 为 Phase 11 打基础。
+- break-cache 深度诊断（例如 last break 前后 cache read、工具增删、diff 路径）记录为后续独立增强，本次 hardening 不实现。
 
 ## 不在本阶段处理的内容
 
