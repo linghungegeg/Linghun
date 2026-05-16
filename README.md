@@ -21,6 +21,8 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 开发入口
 
+说明：本节是继续开发 Linghun 仓库本身的入口。Linghun 产品面向任意项目运行时，项目规则主入口是项目根目录 `LINGHUN.md`；`AGENTS.md` / `CLAUDE.md` 只作为兼容导入或迁移来源。本仓库开发 Linghun 自身时，才需要额外读取 `CLAUDE.md`、蓝图、规格书和阶段交付文档。
+
 新会话开始前，请先读取：
 
 1. [CLAUDE.md](./CLAUDE.md)

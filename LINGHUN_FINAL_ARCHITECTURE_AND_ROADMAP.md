@@ -522,6 +522,8 @@ type LinghunEvent =
 
 业务层不能直接依赖 Anthropic 或 OpenAI 原始事件。
 
+Provider adapter 的成品级验收不能只看“能返回文本”。每个 adapter 都要补齐事件转换、streaming/非流式降级、tool calling 能力声明、usage 映射、prompt cache 字段映射、model metadata、capability doctor、错误归一化、配置诊断和 focused tests。quota / balance query 是可选增强，放到 Phase 15 真实项目对账验证；不支持时必须标记 unknown，不能用本地估算冒充真实余额。
+
 ### 9.3 模型能力表
 
 每个模型记录：
@@ -555,6 +557,8 @@ DeepSeek V4 / V4 Pro：
 - 成本实时可见。
 
 公开口径必须保守：高命中率是 provider、模型、稳定上下文、工具列表、MCP 稳定化、索引和阶段化工作流共同作用的实测结果，不是任意模型天然保证。账单截图和 CSV usage 可以作为对账证据，但不能宣传固定 25 倍省钱或所有项目必达 98%。
+
+Phase 15 可以参考 CC Switch 的 usage query 思路补齐可选额度/余额对账，但只能参考公开行为和边界：官方订阅能自动查的才标记为 official / oauth reported；第三方中转站、New API、私有服务必须走模板或自定义脚本；查不到时标记 unknown。Linghun 的预算体系必须分成 local limit、provider usage、provider quota 和 billing reconciled 四类，不允许把本地估算伪装成真实余额，也不把不同 provider 的 tokens、credits、requests、interactions、CNY/USD 余额混成一个数字。
 
 ### 10.2 Cache Guard
 
@@ -652,7 +656,7 @@ cache read：45231 -> 2108
 本地私有规则 ./LINGHUN.local.md
 ```
 
-兼容是为了迁移方便，但 Linghun 自己的主文件应叫 `LINGHUN.md`。
+Linghun 产品运行时的项目规则主入口是项目根目录 `LINGHUN.md`。`AGENTS.md` / `CLAUDE.md` 仅作为兼容导入或迁移来源；只有在开发 Linghun 仓库自身或用户明确指定时，才把 `CLAUDE.md` 当作当前仓库的开发规则读取。
 
 ### 11.2 代码库索引
 
@@ -776,6 +780,15 @@ Hermes 值得吸收：
 - 工作流可进化，但必须用户确认。
 - 长期任务和自主能力可控开启，默认关闭。
 
+Hermes 的“越用越聪明”只能吸收为工程化、低成本、可审计版本：
+
+- 默认不每轮学习，不后台偷偷写长期记忆。
+- 只在任务完成、验证结束、workflow 收尾、阶段交付或用户明确要求时生成候选。
+- 候选优先来自 evidence、Todo、验证报告和 handoff；需要模型总结时走低成本 summarizer role，并有 token 上限。
+- 每轮 prompt 只注入少量相关记忆摘要，不能把完整 memory store 或完整 skill 全文塞进上下文。
+- 记忆 hash 必须基于稳定摘要，避免破坏 prompt cache。
+- `/memory stats` 必须让用户看到记忆数量、注入条数和估算 token，证明学习是在省重复解释，而不是增加负担。
+
 ## 13. 功能开关
 
 保留 CCB 的 FEATURE 思路，但统一、可见、可解释。
@@ -866,6 +879,7 @@ LINGHUN_FEATURE_LAN_PIPES=0
 
 - 第一版可以支持环境变量和本地配置。
 - 正式版必须支持系统 keychain。
+- Phase 15.5 必须做 release readiness / open-source readiness 检查：CLI 入口、安装路径、doctor、keychain/密钥脱敏、debug bundle、配置 schema、升级回滚和文档同步都要有明确结论。
 
 ## 15. 技术选型
 
@@ -949,12 +963,14 @@ F:\LinghunProject 或新仓库根目录
 | Phase 11 | 会话交接与记忆闭环 | `/resume`、`/branch`、`LINGHUN.md`、handoff packet、跨会话导入 |
 | Phase 12 | Agent 闭环 | explorer、worker、verifier、planner、`/fork`、agent transcript |
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
-| Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、Plugin 底座 |
-| Phase 15 | 真实项目测试版 | 用真实老项目验证完整开发闭环 |
-| Phase 15.5 | 双模型交叉审查与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1 |
+| Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
+| Phase 15 | 真实项目测试版 | 用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
+| Phase 15.5 | 双模型交叉审查与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 release readiness / open-source readiness |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
-| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels、单阶段自动工作 |
+| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |
 | Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界 |
+
+Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 adapter，例如飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli。Linghun 只把结构化、脱敏的任务摘要、审批和结果报告交给 CLI，不允许外部 CLI 直接读取完整 transcript、memory、API key、账单或项目源码。CLI 缺失、未登录、权限不足、版本不兼容或输出不可解析时，通道保持关闭，并由 `/remote channels doctor` 给出中文修复建议。
 
 当前进度：
 

@@ -17,8 +17,17 @@
   - 展示所有 role 的 provider/model/capability/tools/write/bash/budget。
   - 明确说明 Phase 13 不默认乱开多模型，只在相关入口按角色触发。
 - `/model route doctor`：
-  - 诊断缺 provider、provider 未配置、缺模型、能力不足、预算未配置、权限过宽。
-  - 预算问题只作为诊断提示；不会把未配置预算伪装成真实账单。
+  - 诊断缺 provider、provider 未配置、缺模型、能力不足、fallback 未配置 / 不可用、openai-compatible 缺 baseUrl / apiKey / 已确认 model、预算未配置、权限过宽。
+  - 输出 BLOCK / WARN / ok 分级；预算问题只作为 WARN，不会把未配置预算伪装成真实账单。
+  - 展示最近 `RoleRouteDecision` 摘要，便于排查最近一次按角色路由选择、fallback 和暂停原因。
+- `RoleRouteDecision` 运行时审计：
+  - agent、review、vision、image 入口按 role 触发路由决策记录。
+  - 记录 trigger reason、role、selected provider/model、fallback candidates、required capabilities、预算上限、stop conditions、repair suggestions、fallbackUsed、budgetStop、createdAt。
+  - 决策写入当前 TUI session state，并以 `system_event` 写入 transcript；不复制完整 transcript / memory / index / large logs。
+- fallback / pause：
+  - primary route 缺 provider/model/capability/provider config 时，不假装可用。
+  - fallback model 可用时自动选择 fallback，并记录 `fallbackUsed=yes`。
+  - primary 和 fallback 都不可用时暂停入口，输出中文修复建议；不做真实网络探测。
 - `/model route set <role> <model>`：
   - 最小配置路径，写入项目 `.linghun/settings.json`。
   - 根据模型名推断 provider：DeepSeek 模型走 `deepseek`，其他模型走 `openai-compatible`。
@@ -38,6 +47,7 @@
 - usage / stats：
   - `/usage` 新增 role usage 区块。
   - `/stats` 新增 role/model/provider usage 区块。
+  - role contribution summary 展示 role/provider/model、estimated tokens、createdAt、fallbackUsed、budgetStop 和贡献摘要。
   - 只显示 estimated token / estimatedCny；状态栏不显示金额。
 - Vision 最小闭环：
   - `/vision <path>` 需要 vision role 配置；未配置时清晰降级，不假装读图。
@@ -200,15 +210,15 @@ printf '/model route\n/model route doctor\n/model route set planner deepseek-v4-
 已执行：
 
 - `corepack pnpm exec tsc --noEmit --pretty false`：通过，无输出。
-- `corepack pnpm test -- --run packages/tui/src/index.test.ts`：最终通过，10 个测试文件、67 个测试通过。
+- `corepack pnpm test -- --run packages/tui/src/index.test.ts`：Phase 13 hardening 后通过，10 个测试文件、71 个测试通过；覆盖 route decision 记录、primary usable but fallback unavailable WARN、primary unavailable fallback、primary/fallback unavailable pause、openai-compatible 缺 baseUrl/apiKey 诊断、stats fallback summary。
 - `corepack pnpm check`：通过，41 个文件检查通过。
 - `corepack pnpm typecheck`：通过。
-- `corepack pnpm test`：通过，10 个测试文件、67 个测试通过。
+- `corepack pnpm test`：通过，10 个测试文件、70 个测试通过。
 - `corepack pnpm build`：通过，workspace 7 个包构建通过。
 - `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 13 CLI help。
-- TUI stdin smoke：通过，覆盖 `/model route`、`/model route doctor`、`/model route set planner`、`/model route set verifier`、`/fork planner`、`/fork verifier`、`/review`、vision missing-config degradation、image missing-config degradation、`/usage`、`/stats`、`/agents`、`/resume`、`/memory`、`/index status`、`/cache status`、`/break-cache status`、`/exit`。
+- TUI stdin smoke：通过，覆盖 `/model route`、`/model route doctor`、`/model route set planner`、`/model route set vision`、`/fork planner` route decision、`/review`、vision openai-compatible missing-config pause、`/usage`、`/stats`、`/exit`。
 
 ## 性能结果
 
@@ -220,7 +230,7 @@ printf '/model route\n/model route doctor\n/model route set planner deepseek-v4-
 ## 已知问题
 
 - route capability 判断为最小启发式，基于模型名匹配；后续可接入真实 provider model metadata。
-- fallbackModels 先作为结构字段保留，Phase 13 不实现自动 fallback 调度。
+- fallback 调度仅在本地配置和启发式 capability 可判断时执行，不做真实 provider 网络探测。
 - vision 只记录最小 `VisionObservation` evidence，不做真实 OCR / 图像理解调用。
 - image 只生成本地 metadata asset，不做真实远程生图调用。
 - budget 只诊断和展示 estimated usage，不做强制扣费或账单级对账。
@@ -291,24 +301,26 @@ Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skil
   "projectPath": "F:\\Linghun",
   "currentPhase": "Phase 13 Multi-model collaboration",
   "nextPhase": "Phase 14",
-  "phaseStatus": "completed_pending_full_validation",
-  "goal": "完成多模型协作闭环：role route、/model route、doctor、route set、agent role linkage、reviewer handoff、vision/image 最小闭环、role usage 可见。",
+  "phaseStatus": "completed_pending_independent_verifier",
+  "goal": "完成多模型协作闭环与 Phase 13 hardening：role route、RoleRouteDecision、fallback/pause、doctor、route set、agent role linkage、reviewer handoff、vision/image 最小闭环、role usage 可见。",
   "completed": [
     "ModelRole / ModelCapability / RoleModelRoute / ModelRouteConfig",
     "default role routes for planner/executor/reviewer/verifier/summarizer/vision/image",
     "/model route",
-    "/model route doctor",
+    "/model route doctor with BLOCK/WARN/recent decision summary",
     "/model route set <role> <model>",
+    "RoleRouteDecision runtime state and transcript system_event recording",
+    "primary route validation with local fallback selection and pause repair advice",
     "planner/verifier/executor agent role linkage",
     "reviewer read-only handoff via /review",
     "RoleHandoff with summary/evidence/diff/verification/keyFiles only",
-    "role/model/provider usage in /usage and /stats",
+    "role/model/provider usage in /usage and /stats with fallbackUsed/budgetStop/contribution summary",
     "vision missing-config degradation and VisionObservation evidence",
     "image missing-config degradation and ImageGenerationResult metadata asset",
     "Phase 13 help visibility"
   ],
   "pending": [
-    "Run full required validation commands and independent verifier before final report",
+    "Independent verifier final PASS before final report",
     "Phase 14 only after user confirmation"
   ],
   "mustNotDo": [
@@ -331,16 +343,24 @@ Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skil
     "docs/delivery/phase-13-multi-model.md"
   ],
   "verification": {
-    "status": "focused_validation_passed_full_validation_pending",
+    "status": "full_validation_passed_independent_verifier_pending",
     "commands": [
       "corepack pnpm exec tsc --noEmit --pretty false",
-      "corepack pnpm test -- --run packages/tui/src/index.test.ts"
+      "corepack pnpm test -- --run packages/tui/src/index.test.ts",
+      "corepack pnpm test",
+      "corepack pnpm typecheck",
+      "corepack pnpm build",
+      "corepack pnpm check",
+      "corepack pnpm exec linghun --version",
+      "corepack pnpm exec Linghun --version",
+      "corepack pnpm exec linghun --help",
+      "TUI stdin smoke for route doctor, route set, fork planner, review, vision pause, usage, stats"
     ]
   },
   "risks": [
     "Vision/image are minimal local evidence/metadata loops, not real provider calls.",
     "Capability detection is heuristic by model name.",
-    "Fallback policy is represented but not automatically executed in Phase 13."
+    "Fallback selection is local/config-based and does not probe provider network availability."
   ],
   "indexStatus": {
     "project": "F-Linghun",

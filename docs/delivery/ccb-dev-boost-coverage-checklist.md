@@ -51,7 +51,7 @@
 | 13. 多模型协作降本 | OpenCode 多模型；按角色使用 planner/executor/reviewer/verifier/vision/image | 已设计待开发 | Phase 03 基础；Phase 13 主实现 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1144-1224`；`LINGHUN_IMPLEMENTATION_SPEC.md:549-719`；`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md:456-483` | 未实现 role-to-model、per-role budget、vision/image provider、角色间结构化 handoff | 后续阶段实现；不应提前宣称多模型降本已完成 |
 | 14. 长期任务 / 定时任务 | CCB daemon/background sessions/job/cron/proactive/KAIROS/bridge 方向 | 已设计待开发，默认关闭 | Phase 17 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1446-1548`；`LINGHUN_IMPLEMENTATION_SPEC.md:1551-1613` | Phase 00-10 无 job scheduler、cron、remote channels | 后续阶段实现；不处理当前阶段；必须校验 handoff，缺失则暂停 |
 | 15. 插件 / skills / workflow / hooks | CCB Skills/workflow；Hermes Skills；OpenCode 插件化；hooks 管道 | 已设计待开发 | Phase 14；Phase 16 skill 固化 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1225-1348`；`LINGHUN_IMPLEMENTATION_SPEC.md:1614-1815`；`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md:725-750` | 本地插件底座、GitHub 安装、hooks runtime 均未实现 | 后续阶段实现；Phase 14 先做本地 loader/doctor/启停/失败隔离/权限接入，不做大型市场 |
-| 16. 真实项目数据对账 | cache history + provider usage / 账单交叉验证；真实项目指标 | 部分覆盖 | Phase 09 基础；Phase 15 主验证 | `ccb-optimizations.md:422-473,508-525`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1349-1389`；`phase-09-cache-cost.md:9-56,242-249,282-287` | 有 `/usage`、`/stats`、export，但无真实 billing API/账单样本；不能宣传固定省钱比例 | Phase 15 实现；公开口径必须含 provider/model/endpoint/样本数/公式/是否账单核对 |
+| 16. 真实项目数据对账 | cache history + provider usage / 账单交叉验证；真实项目指标；CC Switch usage query 类额度查询思路 | 部分覆盖 | Phase 09 基础；Phase 15 主验证 | `ccb-optimizations.md:422-473,508-525`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1349-1389`；`phase-09-cache-cost.md:9-56,242-249,282-287` | 有 `/usage`、`/stats`、export，但无真实 billing API/账单样本和 quota/balance query；不能宣传固定省钱比例 | Phase 15 实现；公开口径必须含 provider/model/endpoint/样本数/公式/是否账单核对；quota 来源必须标记 official_reported / oauth_reported / template_reported / custom_script / estimated / unknown |
 | 17. 权限 / Plan / Start Gate | CCB 权限管道、Plan 模式；修复 Plan bypass；Start Gate 防止自动开工 | 权限/Plan 已实现；Start Gate 规则已覆盖，后续需贯穿 agent/workflow/job | Phase 06；Start Gate 横跨后续阶段 | `CLAUDE.md:14-15`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:338-363,669-729`；`LINGHUN_IMPLEMENTATION_SPEC.md:722-745,825-944`；`docs/delivery/phase-06-permissions-plan.md` | Start Gate 当前更多是规则/规格；后续执行型功能必须接入，不能只靠模型自觉 | 保持；Phase 12/14/17 启动 agent/workflow/job 时必须硬接 Start Gate |
 | 18. 轻提示，不打断输入 | CCB cache/status/index 轻提示；不弹窗打断 | 已实现核心机制 | Phase 09；Phase 10/11 继续扩展 | `ccb-optimizations.md:43-66,342-352`；`phase-09-cache-cost.md:48-52,119-128,289-295`；`LINGHUN_IMPLEMENTATION_SPEC.md:1284-1315`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:936-938,1055-1056` | 提示覆盖面待扩：大文件、LINGHUN.md 缺失、高风险建议等仍需后续完善 | 保持；Phase 11 可只加 `LINGHUN.md` 缺失提示，不顺手扩全规则 |
 | 19. 索引和记忆联动 | codebase-memory + ai-sessions 降低重复 Grep 和重复上下文 | 部分覆盖 / 已设计待开发 | Phase 09/10 铺垫；Phase 11 主实现；Phase 16/17 增强 | `phase-10-mcp-index.md:29-32,247-255,362-365`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:1047-1053,1059-1065,1536-1540`；`LINGHUN_IMPLEMENTATION_SPEC.md:1245-1276,1449-1523` | memoryHash 只是 freshness 维度；还不是 Memory Store / Handoff / Resume 闭环 | Phase 11 实现；新会话启动上下文包必须含 `LINGHUN.md`、handoff、Todo、验证、索引状态，禁止塞完整历史 |
@@ -59,6 +59,8 @@
 | 21. cache freshness：system prompt / tool schema / MCP list / memory / compact / plugins hash | CCB 12 维缓存破坏诊断；system prompt、tool schema、model、tool 增删、betas、effort、cache control 等 | 已实现核心字段，部分真实源待后续 | Phase 09 / 10；Phase 11 memory；Phase 14 plugins | `ccb-optimizations.md:211-236,259-309`；`LINGHUN_IMPLEMENTATION_SPEC.md:1265-1276,1305-1311`；`phase-09-cache-cost.md:30-32,126`；`phase-10-mcp-index.md:17-20,116-118` | memory/plugin hash 字段已预留，但真实 Memory Store / Plugin List 尚未落地 | 保持；Phase 11/14 落地时只接稳定摘要，不塞完整 memory/plugin 内容 |
 | 22. 大输出保护：不把完整索引、完整 rawUsage、大日志、大源码塞回上下文 | CCB 防止大日志、大索引、大文件拖垮系统；cache-log 面板只展示摘要 | 已实现基础，后续新模块需继承 | Phase 05 / 07 / 08 / 09 / 10；Phase 12/14/17 待继承 | `ccb-optimizations.md:355-419,422-473`；`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md:642-654,769-770,873-875`；`LINGHUN_IMPLEMENTATION_SPEC.md:775-786,475-489,1028-1049`；`phase-10-mcp-index.md:27-28,118-120,237-244` | 当前覆盖内置工具、verification、index 摘要；agent/hook/job 大输出保护待对应阶段 | 保持；Phase 12/14/17 必须统一 `truncated/fullOutputPath/logPath` 语义，禁止裸 stdout 污染 UI |
 | 23. 开源前交叉审查 | CCB Dev Boost 能力落地后需要真实项目和多视角复核，避免缓存/索引/agent/多模型组合产生隐性回归 | 已设计待开发 | Phase 15.5 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md` Phase 15.5；`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md` 开发路线；`docs/delivery/README.md` Phase 15.5 | Phase 15 前不会执行；如果 Phase 15 后直接进入 Phase 16，可能漏掉产品/架构/安全/Windows 兼容问题 | 保持；Phase 15 完成后用 GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续 |
+| 24. 开源前发布就绪 | 安装、CLI 入口、配置、密钥、日志脱敏、doctor、升级回滚是个人开发者可用性的最后闸门 | 已设计待开发 | Phase 15.5 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md` Phase 15.5；`LINGHUN_IMPLEMENTATION_SPEC.md` Release readiness；`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md` 安装与配置 | 当前还未执行真实安装包、keychain、debug bundle、schema rollback 检查 | Phase 15.5 执行；必须检查 `linghun` / `Linghun`、`--help`、doctor、keychain/密钥脱敏、debug bundle 和文档同步 |
+| 25. Remote Channels 安全闸门 | 远程审批/IM bridge 需要防止重放、误触发、泄露上下文和重复执行；飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli 可作为官方 CLI adapter 参考 | 已设计待开发，默认关闭 | Phase 17 | `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md` Phase 17；`LINGHUN_IMPLEMENTATION_SPEC.md` Remote Channel | Phase 00-13 无 remote channel；后续如果只做消息推送而不做 nonce/签名/幂等/解绑/CLI doctor，会有安全风险 | Phase 17 执行；默认关闭，只发摘要/审批/报告，优先 official_cli adapter，必须校验用户/设备、过期时间、nonce/消息 id、签名或等价来源，并保留脱敏审计 |
 
 ## Phase 09 已落地能力
 
@@ -88,9 +90,9 @@
 - Phase 13：多模型角色路由、per-role budget、vision/image provider、角色间结构化 handoff。
 - Phase 14：Skills、Workflows、Hooks、本地 Plugin 底座、plugin/skill 稳定排序。
 - Phase 15：真实项目测试与 provider usage / 账单抽样对账。
-- Phase 15.5：双模型交叉审查与开源前 hardening。
+- Phase 15.5：双模型交叉审查、release readiness / open-source readiness 与开源前 hardening。
 - Phase 16：可控学习、候选 memory / skill、审查与回滚。
-- Phase 17：长期任务、定时任务、自动会话、remote channels、预算停止。
+- Phase 17：长期任务、定时任务、自动会话、remote channels 安全闸门、预算停止。
 - Phase 18：桌面端预留验证。
 
 ## 需要特别防漏的能力

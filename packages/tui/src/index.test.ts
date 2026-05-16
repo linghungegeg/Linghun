@@ -118,6 +118,7 @@ function createTestContext(
     },
     agents: [],
     roleUsage: [],
+    routeDecisions: [],
     roleHandoffs: [],
     visionObservations: [],
     imageResults: [],
@@ -350,10 +351,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/agents", context, output);
     await handleSlashCommand("/review", context, output);
     await handleSlashCommand("/vision screenshot.png", context, output);
-    await handleSlashCommand("/model route set vision gpt-4o", context, output);
+    await handleSlashCommand("/model route set vision deepseek-vl", context, output);
     await handleSlashCommand("/vision screenshot.png", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
-    await handleSlashCommand("/model route set image gpt-image-2", context, output);
+    await handleSlashCommand("/model route set image deepseek-image", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
     await handleSlashCommand("/usage", context, output);
     await handleSlashCommand("/stats", context, output);
@@ -378,7 +379,177 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.roleUsage.some((usage) => usage.role === "verifier")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "vision")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "image")).toBe(true);
+    expect(context.routeDecisions.some((decision) => decision.role === "planner")).toBe(true);
+    expect(output.text).toContain("fallbackUsed=");
     expect(output.text).not.toContain("¥--");
+  });
+
+  it("shows WARN when primary route is usable but fallback is unavailable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "planner"
+            ? {
+                ...route,
+                provider: "deepseek",
+                primaryModel: "deepseek-v4-pro",
+                fallbackModels: ["gpt-4o"],
+              }
+            : route,
+        ),
+      },
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: undefined,
+          apiKey: undefined,
+          model: "openai-compatible-model",
+        },
+      },
+    };
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/model route doctor", context, output);
+
+    expect(output.text).toContain("- planner: WARN");
+    expect(output.text).toContain("fallback 不可用 gpt-4o");
+    expect(output.text).not.toContain("- planner: BLOCK");
+  });
+
+  it("records route decisions and uses fallback when primary route is unavailable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "planner"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "gpt-4o",
+                fallbackModels: ["deepseek-v4-pro"],
+              }
+            : route,
+        ),
+      },
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: undefined,
+          apiKey: undefined,
+          model: "openai-compatible-model",
+        },
+      },
+    };
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/fork planner test route decision", context, output);
+    await handleSlashCommand("/stats", context, output);
+    const parentTranscript = (await store.resume(session.id)).transcript;
+
+    expect(context.agents[0]?.model).toBe("deepseek-v4-pro");
+    expect(context.routeDecisions[0]?.fallbackUsed).toBe(true);
+    expect(context.routeDecisions[0]?.selectedModel).toBe("deepseek-v4-pro");
+    expect(parentTranscript.some((event) => event.type === "system_event")).toBe(true);
+    expect(output.text).toContain("fallbackUsed=yes");
+  });
+
+  it("pauses unavailable routes with repair advice and diagnoses openai-compatible config", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "vision"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "gpt-4o",
+                fallbackModels: [],
+              }
+            : route,
+        ),
+      },
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: undefined,
+          apiKey: undefined,
+          model: "openai-compatible-model",
+        },
+      },
+    };
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/model route doctor", context, output);
+    await handleSlashCommand("/vision screenshot.png", context, output);
+    await handleSlashCommand("/model route doctor", context, output);
+
+    expect(output.text).toContain("openai-compatible 缺 baseUrl");
+    expect(output.text).toContain("openai-compatible 缺 apiKey");
+    expect(output.text).toContain("vision role 未就绪");
+    expect(output.text).toContain("修复建议");
+    expect(output.text).toContain("recent route decisions");
+    expect(context.routeDecisions[0]?.stopConditions.length).toBeGreaterThan(0);
+    expect(context.visionObservations).toHaveLength(0);
+  });
+
+  it("pauses openai-compatible routes when model is still unconfirmed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "vision"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "gpt-4o",
+                fallbackModels: [],
+              }
+            : route,
+        ),
+      },
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+          model: "openai-compatible-model",
+        },
+      },
+    };
+    const context = createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/vision screenshot.png", context, output);
+    await handleSlashCommand("/model route doctor", context, output);
+
+    expect(output.text).toContain("openai-compatible 缺已确认模型");
+    expect(output.text).toContain("vision role 未就绪");
+    expect(context.routeDecisions[0]?.stopConditions).toContain("openai-compatible 缺已确认模型");
+    expect(context.visionObservations).toHaveLength(0);
   });
 
   it("keeps worker writes behind the permission pipeline", async () => {

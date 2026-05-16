@@ -267,6 +267,33 @@ export type RoleUsage = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   estimatedCny: number;
+  createdAt: string;
+  durationMs?: number;
+  fallbackUsed: boolean;
+  budgetStop: boolean;
+  contributionSummary: string;
+};
+
+export type RoleRouteDecision = {
+  id: string;
+  triggerReason: string;
+  role: ModelRole;
+  selectedProvider: string;
+  selectedModel: string;
+  fallbackCandidates: string[];
+  requiredCapabilities: ModelCapability[];
+  maxCostCny?: number;
+  stopConditions: string[];
+  repairSuggestions: string[];
+  fallbackUsed: boolean;
+  budgetStop: boolean;
+  createdAt: string;
+};
+
+type ResolvedRoleRoute = {
+  route: RoleModelRoute;
+  decision: RoleRouteDecision;
+  usable: boolean;
 };
 
 export type RoleHandoff = {
@@ -400,6 +427,7 @@ export type TuiContext = {
   memory: MemoryState;
   agents: AgentRun[];
   roleUsage: RoleUsage[];
+  routeDecisions: RoleRouteDecision[];
   roleHandoffs: RoleHandoff[];
   visionObservations: VisionObservation[];
   imageResults: ImageGenerationResult[];
@@ -630,6 +658,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     memory: await createMemoryState(config, projectPath),
     agents: [],
     roleUsage: [],
+    routeDecisions: [],
     roleHandoffs: [],
     visionObservations: [],
     imageResults: [],
@@ -948,30 +977,63 @@ function formatModelRouteDoctor(context: TuiContext): string {
   const lines = ["Model route doctor"];
   for (const route of context.config.modelRoutes.routes) {
     const problems = diagnoseRoute(route, context);
+    const level = getRouteDoctorLevel(route, problems, context);
     lines.push(
-      `- ${route.role}: ${problems.length === 0 ? "ok" : problems.join("；")} provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
+      `- ${route.role}: ${level}${problems.length === 0 ? "" : `：${problems.join("；")}`} provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"} fallback=${route.fallbackModels.length > 0 ? route.fallbackModels.join(",") : "未配置"}`,
     );
   }
-  lines.push("- budget: 金额仅在 /usage 或 /stats 中以 estimated 展示，状态栏不会显示金额。");
+  if (context.routeDecisions.length > 0) {
+    lines.push("- recent route decisions:");
+    for (const decision of context.routeDecisions.slice(0, 3)) {
+      lines.push(
+        `  - ${decision.role}: trigger=${decision.triggerReason} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} stop=${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
+      );
+    }
+  }
+  lines.push(
+    "- budget: 未配置预算只作为 WARN；金额仅在 /usage 或 /stats 中以 estimated 展示，状态栏不会显示金额。",
+  );
   lines.push(
     "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
   );
   return lines.join("\n");
 }
 
+function getRouteDoctorLevel(
+  route: RoleModelRoute,
+  problems: string[],
+  context: TuiContext,
+): "BLOCK" | "WARN" | "ok" {
+  const primaryProblems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, context);
+  const primaryBlocking = getRouteBlockingProblems(primaryProblems);
+  if (primaryBlocking.length > 0) {
+    const hasUsableFallback = route.fallbackModels.some((fallbackModel) => {
+      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
+      const fallbackProblems = diagnoseConcreteRoute(
+        route,
+        fallbackModel,
+        fallbackProvider,
+        context,
+      );
+      return getRouteBlockingProblems(fallbackProblems).length === 0;
+    });
+    return hasUsableFallback ? "WARN" : "BLOCK";
+  }
+  return problems.length > 0 ? "WARN" : "ok";
+}
+
 function diagnoseRoute(route: RoleModelRoute, context: TuiContext): string[] {
-  const problems: string[] = [];
-  if (!route.provider) {
-    problems.push("缺 provider");
-  } else if (!context.config.providers[route.provider]) {
-    problems.push("provider 未配置");
+  const problems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, context);
+  if (route.fallbackModels.length === 0) {
+    problems.push("fallbackModels 未配置");
   }
-  if (!route.primaryModel) {
-    problems.push("缺模型");
-  }
-  for (const capability of route.requiredCapabilities) {
-    if (!routeSupportsCapability(route, capability)) {
-      problems.push(`能力不足：${capability}`);
+  for (const fallbackModel of route.fallbackModels) {
+    const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
+    const fallbackProblems = diagnoseConcreteRoute(route, fallbackModel, fallbackProvider, context);
+    if (getRouteBlockingProblems(fallbackProblems).length > 0) {
+      problems.push(
+        `fallback 不可用 ${fallbackModel}：${getRouteBlockingProblems(fallbackProblems).join("/")}`,
+      );
     }
   }
   if (route.maxCostCny === undefined) {
@@ -992,11 +1054,48 @@ function diagnoseRoute(route: RoleModelRoute, context: TuiContext): string[] {
   return problems;
 }
 
+function diagnoseConcreteRoute(
+  route: RoleModelRoute,
+  model: string,
+  providerId: string,
+  context: TuiContext,
+): string[] {
+  const problems: string[] = [];
+  const provider = providerId ? context.config.providers[providerId] : undefined;
+  if (!providerId) {
+    problems.push("缺 provider");
+  } else if (!provider) {
+    problems.push("provider 未配置");
+  }
+  if (!model) {
+    problems.push("缺模型");
+  }
+  if (provider?.type === "openai-compatible") {
+    if (!provider.baseUrl) problems.push("openai-compatible 缺 baseUrl");
+    if (!provider.apiKey) problems.push("openai-compatible 缺 apiKey");
+    if (!provider.model || provider.model === "openai-compatible-model") {
+      problems.push("openai-compatible 缺已确认模型");
+    }
+  }
+  for (const capability of route.requiredCapabilities) {
+    if (!routeSupportsCapability({ ...route, primaryModel: model }, capability)) {
+      problems.push(`能力不足：${capability}`);
+    }
+  }
+  return problems;
+}
+
 function getRouteBlockingProblems(problems: string[]): string[] {
   return problems.filter(
     (problem) =>
       problem !== "预算未配置" &&
-      (problem.startsWith("缺") || problem.includes("未配置") || problem.startsWith("能力不足")),
+      problem !== "fallbackModels 未配置" &&
+      (problem.startsWith("缺") ||
+        problem.includes("未配置") ||
+        problem.includes("缺 ") ||
+        problem.includes("缺已确认") ||
+        problem.includes("不匹配") ||
+        problem.startsWith("能力不足")),
   );
 }
 
@@ -1020,6 +1119,103 @@ function routeSupportsCapability(route: RoleModelRoute, capability: ModelCapabil
     return /claude|gpt|deepseek/i.test(route.primaryModel);
   }
   return false;
+}
+
+function inferProviderForRouteModel(model: string, context: TuiContext): string {
+  for (const [providerId, provider] of Object.entries(context.config.providers)) {
+    if (provider.model === model) {
+      return providerId;
+    }
+  }
+  return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
+}
+
+function resolveRoleRoute(
+  context: TuiContext,
+  role: ModelRole,
+  triggerReason: string,
+): ResolvedRoleRoute {
+  const baseRoute = getRoleRoute(context, role);
+  const primaryProblems = diagnoseConcreteRoute(
+    baseRoute,
+    baseRoute.primaryModel,
+    baseRoute.provider,
+    context,
+  );
+  const primaryBlocking = getRouteBlockingProblems(primaryProblems);
+  let selectedProvider = baseRoute.provider;
+  let selectedModel = baseRoute.primaryModel;
+  let stopConditions = primaryBlocking;
+  let fallbackUsed = false;
+
+  if (primaryBlocking.length > 0) {
+    for (const fallbackModel of baseRoute.fallbackModels) {
+      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
+      const fallbackProblems = diagnoseConcreteRoute(
+        baseRoute,
+        fallbackModel,
+        fallbackProvider,
+        context,
+      );
+      const fallbackBlocking = getRouteBlockingProblems(fallbackProblems);
+      if (fallbackBlocking.length === 0) {
+        selectedProvider = fallbackProvider;
+        selectedModel = fallbackModel;
+        stopConditions = [];
+        fallbackUsed = true;
+        break;
+      }
+    }
+  } else {
+    stopConditions = [];
+  }
+
+  const resolvedRoute = { ...baseRoute, provider: selectedProvider, primaryModel: selectedModel };
+  const repairSuggestions = createRouteRepairSuggestions(role, stopConditions, baseRoute);
+  const decision: RoleRouteDecision = {
+    id: `route-${randomUUID().slice(0, 8)}`,
+    triggerReason,
+    role,
+    selectedProvider: stopConditions.length > 0 ? "" : selectedProvider,
+    selectedModel: stopConditions.length > 0 ? "" : selectedModel,
+    fallbackCandidates: baseRoute.fallbackModels,
+    requiredCapabilities: baseRoute.requiredCapabilities,
+    maxCostCny: baseRoute.maxCostCny,
+    stopConditions,
+    repairSuggestions,
+    fallbackUsed,
+    budgetStop: false,
+    createdAt: new Date().toISOString(),
+  };
+  context.routeDecisions.unshift(decision);
+  return { route: resolvedRoute, decision, usable: stopConditions.length === 0 };
+}
+
+function createRouteRepairSuggestions(
+  role: ModelRole,
+  stopConditions: string[],
+  route: RoleModelRoute,
+): string[] {
+  if (stopConditions.length === 0) {
+    return [];
+  }
+  const suggestions = [`运行 /model route set ${role} <model> 设置可用模型`];
+  if (stopConditions.some((item) => item.includes("openai-compatible"))) {
+    suggestions.push(
+      "在 .linghun/settings.json 配置 openai-compatible 的 baseUrl、apiKey 和 model",
+    );
+  }
+  if (stopConditions.some((item) => item.startsWith("能力不足"))) {
+    suggestions.push(`选择满足 ${route.requiredCapabilities.join("+")} capability 的模型`);
+  }
+  if (route.fallbackModels.length === 0) {
+    suggestions.push("为该 role 配置 fallbackModels，避免 primary 不可用时直接暂停");
+  }
+  return suggestions;
+}
+
+function formatRoutePauseMessage(role: ModelRole, decision: RoleRouteDecision): string {
+  return `${role} role 路由暂停：${decision.stopConditions.join("；")}。修复建议：${decision.repairSuggestions.join("；")}。不会假装可用。`;
 }
 
 async function handleModeCommand(
@@ -1290,16 +1486,13 @@ async function handleForkCommand(
   const parentSessionId = await ensureSession(context);
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
   const role = getAgentRole(type);
-  const route = getRoleRoute(context, role);
-  const routeProblems = diagnoseRoute(route, context);
-  const blockingProblems = getRouteBlockingProblems(routeProblems);
-  if (blockingProblems.length > 0) {
-    writeLine(
-      output,
-      `${role} role 路由不可用：${blockingProblems.join("；")}。请先运行 /model route set ${role} <model>。`,
-    );
+  const resolved = resolveRoleRoute(context, role, `/fork ${type}`);
+  await appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
+  if (!resolved.usable) {
+    writeLine(output, formatRoutePauseMessage(role, resolved.decision));
     return;
   }
+  const route = resolved.route;
   const child = await context.store.create({
     model: route.primaryModel || context.model,
     summary: `agent:${type}:${truncateDisplay(task, 60)}`,
@@ -1439,9 +1632,10 @@ async function completeAgent(
   addRoleUsage(
     context,
     agent.role,
-    getRoleRoute(context, agent.role),
+    { ...getRoleRoute(context, agent.role), provider: agent.provider, primaryModel: agent.model },
     agent.cost.inputTokens,
     agent.cost.outputTokens,
+    `${agent.type} agent summary`,
   );
   context.roleHandoffs.unshift(
     createRoleHandoff("executor", agent.role, agent.id, summary, context),
@@ -3225,7 +3419,7 @@ function formatRoleUsageLines(context: TuiContext): string[] {
   }
   return context.roleUsage.map(
     (usage) =>
-      `  - ${usage.role}/${usage.provider}/${usage.model}: input=${usage.inputTokens} output=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens} estimatedCny=${usage.estimatedCny.toFixed(4)} estimated`,
+      `  - ${usage.role}/${usage.provider}/${usage.model}: input=${usage.inputTokens} output=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens} estimatedCny=${usage.estimatedCny.toFixed(4)} estimated createdAt=${usage.createdAt} fallbackUsed=${usage.fallbackUsed ? "yes" : "no"} budgetStop=${usage.budgetStop ? "yes" : "no"} contribution=${usage.contributionSummary}`,
   );
 }
 
@@ -3410,10 +3604,24 @@ async function handleVerifyCommand(
 }
 
 async function handleReviewCommand(context: TuiContext, output: Writable): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const resolved = resolveRoleRoute(context, "reviewer", "/review");
+  await appendRouteDecisionEvent(context, sessionId, resolved.decision);
+  if (!resolved.usable) {
+    writeLine(output, formatRoutePauseMessage("reviewer", resolved.decision));
+    return;
+  }
   const report = createReviewReport(context);
   const handoff = createRoleHandoff("executor", "reviewer", "review", report, context);
   context.roleHandoffs.unshift(handoff);
-  const sessionId = await ensureSession(context);
+  addRoleUsage(
+    context,
+    "reviewer",
+    resolved.route,
+    Math.ceil(report.length / 8),
+    Math.ceil(report.length / 4),
+    "read-only review handoff",
+  );
   await appendSystemEvent(context, sessionId, `review: ${report.replace(/\s+/g, " ")}`, "info");
   writeLine(output, report);
   writeLine(
@@ -3435,16 +3643,17 @@ async function handleVisionCommand(
     );
     return;
   }
-  const route = getRoleRoute(context, "vision");
-  const problems = getRouteBlockingProblems(diagnoseRoute(route, context));
-  if (problems.length > 0) {
+  const sessionId = await ensureSession(context);
+  const resolved = resolveRoleRoute(context, "vision", "/vision");
+  await appendRouteDecisionEvent(context, sessionId, resolved.decision);
+  if (!resolved.usable) {
     writeLine(
       output,
-      `vision role 未就绪：${problems.join("；")}。请先运行 /model route set vision <model>，再用 /model route doctor 复查。不会假装读图。`,
+      `vision role 未就绪：${formatRoutePauseMessage("vision", resolved.decision)}`,
     );
     return;
   }
-  const sessionId = await ensureSession(context);
+  const route = resolved.route;
   const evidence = createEvidenceRecord(
     "vision_observation",
     `VisionObservation: provider=${route.provider}, model=${route.primaryModel}, source=${sourcePath}`,
@@ -3498,16 +3707,14 @@ async function handleImageCommand(
     writeLine(output, "用法：/image generate <prompt>");
     return;
   }
-  const route = getRoleRoute(context, "image");
-  const problems = getRouteBlockingProblems(diagnoseRoute(route, context));
-  if (problems.length > 0) {
-    writeLine(
-      output,
-      `image role 未就绪：${problems.join("；")}。请先运行 /model route set image <model>，再用 /model route doctor 复查。不会假装生图。`,
-    );
+  const sessionId = await ensureSession(context);
+  const resolved = resolveRoleRoute(context, "image", "/image generate");
+  await appendRouteDecisionEvent(context, sessionId, resolved.decision);
+  if (!resolved.usable) {
+    writeLine(output, `image role 未就绪：${formatRoutePauseMessage("image", resolved.decision)}`);
     return;
   }
-  const sessionId = await ensureSession(context);
+  const route = resolved.route;
   const id = `image-${randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
   const outputDir = join(context.projectPath, ".linghun", "assets");
@@ -4794,16 +5001,26 @@ function addRoleUsage(
   route: RoleModelRoute,
   inputTokens: number,
   outputTokens: number,
+  contributionSummary = "role contribution recorded",
 ): void {
+  const latestDecision = context.routeDecisions.find(
+    (decision) =>
+      decision.role === role &&
+      decision.selectedProvider === route.provider &&
+      decision.selectedModel === route.primaryModel,
+  );
   const existing = context.roleUsage.find(
     (usage) =>
       usage.role === role &&
-      usage.provider === route.provider &&
-      usage.model === route.primaryModel,
+      usage.provider === (route.provider || "unconfigured") &&
+      usage.model === (route.primaryModel || "unconfigured"),
   );
   if (existing) {
     existing.inputTokens += inputTokens;
     existing.outputTokens += outputTokens;
+    existing.fallbackUsed = existing.fallbackUsed || Boolean(latestDecision?.fallbackUsed);
+    existing.budgetStop = existing.budgetStop || Boolean(latestDecision?.budgetStop);
+    existing.contributionSummary = contributionSummary;
     return;
   }
   context.roleUsage.push({
@@ -4815,6 +5032,10 @@ function addRoleUsage(
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     estimatedCny: 0,
+    createdAt: new Date().toISOString(),
+    fallbackUsed: Boolean(latestDecision?.fallbackUsed),
+    budgetStop: Boolean(latestDecision?.budgetStop),
+    contributionSummary,
   });
 }
 
@@ -4861,6 +5082,19 @@ async function appendSystemEvent(
     message,
     createdAt: new Date().toISOString(),
   });
+}
+
+async function appendRouteDecisionEvent(
+  context: TuiContext,
+  sessionId: string,
+  decision: RoleRouteDecision,
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `RoleRouteDecision ${decision.id}: trigger=${decision.triggerReason} role=${decision.role} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackCandidates=${decision.fallbackCandidates.join(",") || "none"} capabilities=${decision.requiredCapabilities.join("+")} budget=${decision.maxCostCny === undefined ? "unconfigured" : decision.maxCostCny} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} budgetStop=${decision.budgetStop ? "yes" : "no"} stop=${decision.stopConditions.join("|") || "none"}`,
+    decision.stopConditions.length > 0 ? "warning" : "info",
+  );
 }
 
 function checkEvidenceGate(text: string, context: TuiContext): string | null {

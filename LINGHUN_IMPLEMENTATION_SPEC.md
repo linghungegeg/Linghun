@@ -546,6 +546,29 @@ export type ModelInfo = {
 - thinking 只对白名单启用。
 - Provider 错误统一为 `LinghunError`。
 
+### 7.0 Provider adapter 成品级验收
+
+每个 provider adapter 不只负责“能发请求”，还必须完成能力、usage、错误和诊断闭环。新增或增强 provider 时必须至少交付：
+
+- request / response 到 `LinghunEvent` 的稳定转换，业务层不得依赖 provider 原始事件。
+- streaming 文本输出；不支持 streaming 的 provider 必须明确降级为非流式，并在 doctor 中说明。
+- tool calling 能力声明和格式适配；不支持工具调用时，`supportsTools=false`，不得假装可用。
+- usage 字段映射：input、output、total、rawUsage、provider/model/endpoint。
+- prompt cache 字段映射：cache read、cache write/create、字段来源 `reported` / `zero_reported` / `missing` / `estimated`。
+- `listModels()` 或等价静态 model metadata，至少包含 context window、max output、tools、vision、thinking、prompt cache 和价格字段。
+- capability table 接入 `/model route doctor`，能解释能力不足、fallback 不可用、价格/上下文缺失。
+- provider 错误归一化为 `LinghunError`，错误信息必须中文可读并给修复建议。
+- 配置诊断：base_url、api_key、model、endpoint、headers、timeout、代理/中转站兼容风险。
+- quota / balance query 可选支持；不支持时标记 `unknown`，不得用本地估算冒充真实余额。
+- focused tests：正常流式、非流式降级、错误归一化、usage 映射、cache 字段映射、capability doctor、Windows 环境变量和 base_url 配置。
+
+阶段边界：
+
+- Phase 03 只要求 DeepSeek / OpenAI-compatible 最小 adapter 闭环。
+- Phase 13 只要求 role route、capability doctor 和 role usage 对接现有 provider 能力。
+- Phase 15 才做真实项目 provider usage、账单和 quota/balance 抽样对账；硬验收是来源、公式、endpoint 拆分、诊断和对账完整，不要求每个 provider、每个项目都达到固定命中率。
+- 后续新增 Claude / Gemini / Ollama / OpenRouter / Grok / Azure / Bedrock / Vertex adapter 时，必须按本清单验收。
+
 ### 7.1 多模型路由规格
 
 ```ts
@@ -1353,6 +1376,45 @@ export type CostSummary = {
   endpoint?: string
   providerReported?: boolean
 }
+
+export type BudgetSource =
+  | 'local_limit'
+  | 'provider_usage'
+  | 'provider_quota'
+  | 'billing_reconciled'
+
+export type ProviderQuotaSource =
+  | 'official_reported'
+  | 'oauth_reported'
+  | 'template_reported'
+  | 'custom_script'
+  | 'estimated'
+  | 'unknown'
+
+export type ProviderQuotaQuery = {
+  providerId: string
+  enabled: boolean
+  source: ProviderQuotaSource
+  refreshIntervalMinutes: number
+  template?: 'claude_official' | 'codex_official' | 'gemini_official' | 'github_copilot' | 'deepseek_balance' | 'openrouter_balance' | 'new_api_quota' | string
+  endpoint?: string
+  method?: 'GET' | 'POST'
+  headersEnv?: string[]
+  extractor?: string
+}
+
+export type ProviderQuotaSnapshot = {
+  providerId: string
+  source: ProviderQuotaSource
+  fetchedAt: string
+  planName?: string
+  remaining?: number
+  used?: number
+  total?: number
+  unit: 'tokens' | 'credits' | 'cny' | 'usd' | 'requests' | 'interactions' | 'unknown'
+  resetAt?: string
+  warning?: string
+}
 ```
 
 要求：
@@ -1361,6 +1423,13 @@ export type CostSummary = {
 - `/usage` 展示原始 token/cache usage。
 - `/stats` 展示综合统计、耗时、模型和可选费用估算。
 - 金额必须标记 `estimated`，不得伪装成真实账单。
+- Phase 15 可加入可选 provider quota / balance 查询，但必须和 `provider_usage`、本地预算和账单对账分开展示。
+- `ProviderQuotaQuery` 默认关闭或低频刷新；用户必须能手动刷新、关闭或删除查询配置。
+- 官方订阅类 quota 只有在来源明确时才能标记为 `official_reported` 或 `oauth_reported`；第三方中转站、New API、私有服务必须使用 `template_reported` 或 `custom_script`。
+- quota 查询可能消耗少量 API 请求额度，UI 必须提示刷新间隔和最近查询时间。
+- quota 查询结果不得写入状态栏；只进入 `/usage`、`/stats`、`/stats providers` 或等价详情视图。
+- 不同 provider 的单位必须保留原语义，例如 tokens、credits、CNY、USD、requests、interactions，不得混成一个统一余额。
+- 查询失败时标记 `unknown` 并保留最近成功快照；不得用本地估算冒充 provider 余额。
 
 ### 12.1 缓存命中率计算口径
 
@@ -1392,6 +1461,7 @@ hitRate = cacheReadTokens / denominator
 - cache write/create 字段按 provider 适配到统一 `cacheWriteTokens`。
 - 任何“省钱比例”必须和输出 tokens、cache write 成本、模型单价分开说明。
 - 账单对账只能作为验证来源，不得覆盖原始 usage 记录。
+- Phase 15 真实项目测试中的 92% - 96% 命中率是目标观察区间，不是任意模型/项目/provider 的硬承诺；未达到目标时必须输出 provider、模型、endpoint、样本数、cache 字段来源和 break-cache 原因。
 
 ### 12.2 公开数据口径
 
@@ -1496,6 +1566,28 @@ export type MemoryItem = {
   status: 'active' | 'disabled' | 'candidate'
 }
 
+export type MemoryLearningPolicy = {
+  enabled: boolean
+  autoAccept: boolean
+  triggerOn: Array<'task_completed' | 'verification_passed' | 'workflow_finished' | 'phase_delivery' | 'manual'>
+  summarizerRole: 'summarizer'
+  maxCandidateChars: number
+  maxInjectedItems: number
+  maxInjectedCharsPerItem: number
+  maxSummarizerInputTokens: number
+  maxSummarizerOutputTokens: number
+}
+
+export type MemoryStats = {
+  candidates: number
+  accepted: number
+  disabled: number
+  injectedItems: number
+  estimatedInjectedTokens: number
+  autoAcceptEnabled: boolean
+  lastLearningRunAt?: string
+}
+
 export type HandoffPacket = {
   id: string
   sessionId: string
@@ -1530,6 +1622,14 @@ export type HandoffPacket = {
 - 可查看、编辑、删除、禁用。
 - 不存大段原始对话。
 - 不让错误记忆不可逆。
+- 默认不每轮学习；只有 `MemoryLearningPolicy.triggerOn` 中允许的收尾事件才可生成候选记忆或候选 Skill。
+- 普通聊天、`/btw`、失败的中间尝试和未经验证的猜测不得自动进入长期记忆候选。
+- 候选提取优先基于结构化 evidence、Todo、验证报告、handoff packet 和用户确认内容；需要模型总结时必须使用 `summarizer` role，并受 `maxSummarizerInputTokens` / `maxSummarizerOutputTokens` 限制。
+- `autoAccept=false` 为默认；开启自动接受必须由用户明确配置，并可在 `/memory` 或 `/memory stats` 中看到状态。
+- prompt 注入默认只取相关 top-k 记忆摘要，受 `maxInjectedItems` 和 `maxInjectedCharsPerItem` 限制。
+- `memoryHash` 只能基于稳定摘要、scope、status 和排序后的 id 计算；不得包含访问次数、最近查看时间、随机顺序或运行时日志。
+- 记忆、候选 Skill 和注入摘要必须稳定排序，避免无意义破坏 prompt cache。
+- `/memory stats` 必须展示 `MemoryStats`，包括候选数、已接受数、禁用数、本轮注入条数和估算 token。
 - 项目级记忆默认写入 `<project>/.linghun/memory/`。
 - 用户级记忆默认写入 `~/.linghun/data/memory/`，但必须可通过 `LINGHUN_DATA_DIR` 或 `storage.memory.user` 配置到其他磁盘。
 - 会话级临时记忆默认跟随 session 存储位置。
@@ -1537,6 +1637,7 @@ export type HandoffPacket = {
 - `/memory storage` 必须能解释每类记忆当前写在哪里。
 - 迁移项目时，项目级记忆必须能随项目目录一起迁移。
 - `LINGHUN.md` 只保存长期稳定事实、工程规则、常用命令和禁止事项。
+- Linghun 产品运行时的项目规则主入口是项目根目录 `LINGHUN.md`；`AGENTS.md` / `CLAUDE.md` 仅作为兼容导入或迁移来源，不能覆盖用户明确维护的 `LINGHUN.md`。
 - 临时想法、阶段进度、短期计划必须写入 `HandoffPacket`，不得无限追加到 `LINGHUN.md`。
 - `HandoffPacket` 是新会话、自动任务、`/resume`、`/branch` 和 `/fork` 的结构化交接契约，不是自由文本摘要。
 - `HandoffPacket` 必须至少包含当前阶段、下一阶段、已完成、待处理、禁止事项、Todo、关键文件、变更文件、证据引用、验证结果、风险、索引状态、权限模式、模型/provider、最近提交和预算使用情况。
@@ -1677,11 +1778,68 @@ Remote Channel：
 ```ts
 export type RemoteChannelConfig = {
   id: string
-  type: 'wechat' | 'feishu' | 'qq' | 'dingtalk' | 'telegram' | 'discord' | 'webhook'
+  type: 'wechat' | 'feishu' | 'lark' | 'wecom' | 'qq' | 'dingtalk' | 'telegram' | 'discord' | 'webhook'
+  adapter: 'official_cli' | 'webhook' | 'custom'
   enabled: boolean
+  boundUserIds: string[]
+  boundDeviceIds: string[]
   allowedCommands: string[]
   requireApprovalFor: PermissionMode[]
   summaryOnly: boolean
+  signingSecretRef?: string
+  maxMessageAgeSeconds: number
+  auditLogPath: string
+}
+
+export type RemoteCliAdapterConfig = {
+  channelId: string
+  provider: 'feishu' | 'lark' | 'dingtalk' | 'wecom'
+  command: string
+  args: string[]
+  versionCommand?: string
+  authCheckCommand?: string
+  supportsJsonOutput: boolean
+  minVersion?: string
+  enabled: boolean
+}
+
+export type RemoteCommandMessage = {
+  id: string
+  channelId: string
+  userId: string
+  deviceId?: string
+  command: string
+  payloadSummary: string
+  nonce: string
+  createdAt: string
+  expiresAt: string
+  signature?: string
+}
+
+export type RemoteApprovalRecord = {
+  id: string
+  channelId: string
+  messageId: string
+  userId: string
+  action: 'approved' | 'rejected' | 'expired' | 'ignored_duplicate'
+  riskSummary: string
+  commandSummary: string
+  createdAt: string
+  auditLogPath: string
+}
+
+export type RemoteChannelDoctorReport = {
+  channelId: string
+  status: 'ok' | 'warning' | 'error' | 'disabled'
+  adapter: 'official_cli' | 'webhook' | 'custom'
+  provider?: 'feishu' | 'lark' | 'dingtalk' | 'wecom'
+  commandFound: boolean
+  version?: string
+  authValid?: boolean
+  jsonOutputValid?: boolean
+  permissionIssues: string[]
+  errors: string[]
+  suggestions: string[]
 }
 ```
 
@@ -1690,8 +1848,52 @@ export type RemoteChannelConfig = {
 - 默认关闭。
 - 只发送命令、摘要、审批和结果报告，不推送完整上下文。
 - 必须有来源校验、用户绑定、命令白名单和审批记录。
+- 飞书/Lark、钉钉、企业微信优先通过官方或官方团队开源 CLI 做 `official_cli` adapter；不得在 Phase 17 里自研完整 IM SDK 或复制第三方实现。
+- `official_cli` adapter 只接收 Linghun 生成的脱敏 remote event，并调用外部 CLI 发送摘要或接收审批；外部 CLI 不得直接读取完整 transcript、memory、API key、账单或项目源码。
+- CLI 不存在、版本不兼容、未登录、权限不足、输出不可解析或返回非 JSON 时，通道必须保持 `disabled` / `error`，并通过 `/remote channels doctor` 给中文修复建议。
+- `/remote channels doctor` 必须输出 `RemoteChannelDoctorReport`，覆盖 command found、version、auth、JSON output、权限和错误建议。
+- 必须校验 `expiresAt`、`nonce` / `id` 去重、签名或等价来源证明、绑定用户和绑定设备。
+- 远程审批必须幂等：重复、延迟、乱序消息只能产生一次有效动作。
+- 用户必须能暂停通道、解绑设备、清理失效绑定并查看最近审计记录。
+- 审计日志只能保存命令摘要、风险摘要、审批结果、时间、通道和脱敏 user/device id；不得保存完整 prompt、完整 transcript、API key、原始账单或大文件内容。
 - 通道失败不影响本地 TUI 和当前任务。
 - 高风险操作必须暂停等待明确审批。
+
+## 17.1 Release readiness / Open-source readiness 规格
+
+Phase 15.5 必须增加发布就绪检查，确认 Linghun 可以被个人开发者安全安装、配置、诊断和回滚。
+
+```ts
+export type ReleaseReadinessReport = {
+  version: string
+  platform: string
+  cliEntrypoints: Array<'linghun' | 'Linghun'>
+  installCheck: 'pass' | 'fail' | 'partial'
+  helpCheck: 'pass' | 'fail' | 'partial'
+  doctorCheck: 'pass' | 'fail' | 'partial'
+  keyStorage: 'env' | 'local_config' | 'keychain' | 'unknown'
+  secretLeakCheck: 'pass' | 'fail' | 'partial'
+  pathCheck: {
+    windowsDrive: boolean
+    chinesePath: boolean
+    longPath: boolean
+  }
+  debugBundlePolicy: 'redacted_summary_only'
+  configSchemaVersion: string
+  rollbackNotes: string[]
+  docsSynced: boolean
+  risks: string[]
+}
+```
+
+要求：
+
+- `linghun --version`、`Linghun --version`、`linghun --help` 和基础 doctor 必须进入检查清单。
+- 正式版密钥必须支持系统 keychain 或等价安全存储；阶段内仍使用环境变量/本地配置时必须标记限制。
+- 密钥、原始账单、完整 prompt、完整 transcript 和私有大文件内容不得写入 transcript、日志、交付文档、debug bundle 或公开样例。
+- debug bundle 只能包含脱敏摘要、版本、平台、错误码、命令摘要、必要日志路径和复现步骤。
+- 配置 schema 必须有版本号；升级、降级和回滚失败必须有说明和恢复路径。
+- README、START_NEXT_CHAT、docs/delivery、蓝图和规格书必须同步当前阶段状态，不能宣称未完成阶段能力。
 
 ## 18. Skills / Workflow 规格
 
