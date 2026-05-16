@@ -974,8 +974,10 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 
 当前进度：
 
-- Phase 00-08 已完成。
-- 下一阶段是 Phase 09：缓存与成本闭环。
+- Phase 00-13 已完成。
+- 下一阶段是 Phase 14：Skills 与工作流闭环；只有用户明确确认后才能开始。
+- Phase 13 只完成多模型 role route、route doctor、role usage 对接现有 provider、受限 handoff、vision/image 最小 evidence/metadata 闭环；不得写成已完成完整 provider adapter、quota/balance 查询、Phase 14+、长期任务、Remote Channels 或桌面端。
+- Phase 14 主闭环只做本地 Skills / Workflows / Hooks / Plugin loader、doctor、启停、信任和权限接入；不做插件市场、GitHub 安装、自动更新或 Phase 15+ 能力。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
 

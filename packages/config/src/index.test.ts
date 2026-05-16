@@ -11,6 +11,7 @@ import {
   loadConfig,
   resolveStoragePaths,
   saveDefaultModel,
+  saveExtensionEnablement,
   saveModelRoute,
 } from "./index.js";
 
@@ -58,6 +59,13 @@ describe("config directories", () => {
     expect(config.index.enabled).toBe(true);
     expect(config.index.mode).toBe("fast");
     expect(config.index.ignoreFile).toBe(".linghunignore");
+    expect(config.skills.projectDir).toBe(".linghun/skills");
+    expect(config.skills.disabledIds).toEqual([]);
+    expect(config.workflows.enabled).toBe(true);
+    expect(config.hooks.enabled).toBe(false);
+    expect(config.hooks.timeoutMs).toBe(5_000);
+    expect(config.plugins.projectDir).toBe(".linghun/plugins");
+    expect(config.plugins.disabledIds).toEqual([]);
     expect(config.modelRoutes.routes.map((route) => route.role)).toEqual([
       "planner",
       "executor",
@@ -97,5 +105,20 @@ describe("config directories", () => {
     expect(loaded.modelRoutes.routes.find((route) => route.role === "vision")?.primaryModel).toBe(
       "",
     );
+  });
+
+  it("persists Phase 14 extension enablement and trust", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    await saveExtensionEnablement("skills", "bug-helper", false, project);
+    const disabled = await loadConfig(project);
+    await saveExtensionEnablement("skills", "bug-helper", true, project);
+    await saveExtensionEnablement("plugins", "local-tools", true, project);
+    const enabled = await loadConfig(project);
+
+    expect(disabled.skills.disabledIds).toEqual(["bug-helper"]);
+    expect(enabled.skills.disabledIds).toEqual([]);
+    expect(enabled.skills.trustedIds).toEqual(["bug-helper"]);
+    expect(enabled.plugins.trustedIds).toEqual(["local-tools"]);
   });
 });

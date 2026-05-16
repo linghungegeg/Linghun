@@ -6,7 +6,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
-  ${LINGHUN_CLI_NAME}                                   进入 Phase 13 交互式终端
+  ${LINGHUN_CLI_NAME}                                   进入 Phase 14 交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -22,6 +22,15 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   TUI /model route set <role> <model>               设置 planner/executor/reviewer/verifier/summarizer/vision/image
   TUI /vision <path>                                记录 VisionObservation evidence
   TUI /image generate <prompt>                      生成 image role 本地资产 metadata
+  TUI /skills                                       列出本地 skill metadata 摘要
+  TUI /skills add                                   显示本地 skill 注册路径
+  TUI /skills enable|disable <id>                   持久化启停 skill
+  TUI /workflows                                    列出 workflow 模板、风险和验证建议
+  TUI /workflows <name>                             进入 workflow Start Gate
+  TUI /plugins                                      列出本地 plugin manifest 与贡献项
+  TUI /plugins doctor                               诊断 plugin 信任、权限和加载错误
+  TUI /plugins enable|disable <id>                  持久化启停 plugin
+  TUI /doctor hooks                                 诊断 hook 来源、事件、timeout 和 cache 影响
 
 Slash 兼容：
   ${LINGHUN_CLI_NAME} /sessions
@@ -32,8 +41,8 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  Phase 13 提供多模型角色路由、/model route、vision/image 最小闭环与按 role/model/provider 的 estimated usage。
-  --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器或 cache 统计系统。
+  Phase 14 主闭环提供本地 skills/workflows/hooks/plugins loader、doctor、启停、信任和权限边界。
+  --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器、插件或 cache 统计系统。
 
 Windows 兼容：
   Linghun --version 与 linghun --version 行为一致。`;

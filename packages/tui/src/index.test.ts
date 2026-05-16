@@ -10,9 +10,13 @@ import { describe, expect, it } from "vitest";
 import {
   type TuiContext,
   createCacheState,
+  createHookState,
   createIndexState,
   createMcpState,
   createMemoryState,
+  createPluginState,
+  createSkillState,
+  createWorkflowState,
   handleSlashCommand,
   recordModelUsage,
 } from "./index.js";
@@ -84,12 +88,12 @@ async function readMockCalls(callsPath: string): Promise<string[]> {
   }
 }
 
-function createTestContext(
+async function createTestContext(
   project: string,
   store: SessionStore,
   session: { id: string; model: string; permissionMode: TuiContext["permissionMode"] },
   config: LinghunConfig = defaultConfig,
-): TuiContext {
+): Promise<TuiContext> {
   return {
     store,
     sessionId: session.id,
@@ -116,6 +120,10 @@ function createTestContext(
       candidates: [],
       accepted: [],
     },
+    skills: await createSkillState(config, project),
+    workflows: createWorkflowState(config),
+    hooks: await createHookState(config, project),
+    plugins: await createPluginState(config, project),
     agents: [],
     roleUsage: [],
     routeDecisions: [],
@@ -132,7 +140,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/help", context, output);
     await handleSlashCommand("/model", context, output);
@@ -149,6 +157,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/model route set <role> <model>");
     expect(output.text).toContain("/vision <path>");
     expect(output.text).toContain("/image generate <prompt>");
+    expect(output.text).toContain("/skills");
+    expect(output.text).toContain("/skills enable <id>");
+    expect(output.text).toContain("/workflows <name>");
+    expect(output.text).toContain("/plugins doctor");
+    expect(output.text).toContain("/doctor hooks");
     expect(output.text).toContain("/agents");
     expect(output.text).toContain("/fork <类型> <任务>");
     expect(output.text).toContain("/cache-log config size <n>");
@@ -175,7 +188,7 @@ describe("Phase 06 TUI slash commands", () => {
     const current = await store.create({ model: "deepseek-v4-flash" });
     const previous = await store.create({ model: "deepseek-v4-pro" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, current);
+    const context = await createTestContext(project, store, current);
 
     await handleSlashCommand(`/sessions resume ${previous.id}`, context, output);
 
@@ -191,7 +204,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory", context, output);
     await handleSlashCommand("/memory storage", context, output);
@@ -224,7 +237,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const loaded = await createMemoryState(defaultConfig, project);
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
     context.memory = loaded;
 
     await handleSlashCommand("/memory", context, output);
@@ -248,14 +261,14 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory candidate 项目长期规则只保存稳定工程事实", context, output);
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
 
     const loaded = await createMemoryState(defaultConfig, project);
-    const reloadedContext = createTestContext(project, store, session);
+    const reloadedContext = await createTestContext(project, store, session);
     reloadedContext.memory = loaded;
     await handleSlashCommand("/memory", reloadedContext, output);
     await handleSlashCommand("/memory review", reloadedContext, output);
@@ -274,7 +287,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/branch hardening", context, output);
     const branchId = context.sessionId;
@@ -304,7 +317,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/fork explorer inspect cache", context, output);
     await handleSlashCommand("/fork planner plan agent loop", context, output);
@@ -340,7 +353,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/model route", context, output);
     await handleSlashCommand("/model route doctor", context, output);
@@ -414,7 +427,7 @@ describe("Phase 06 TUI slash commands", () => {
         },
       },
     };
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/model route doctor", context, output);
 
@@ -453,7 +466,7 @@ describe("Phase 06 TUI slash commands", () => {
         },
       },
     };
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/fork planner test route decision", context, output);
     await handleSlashCommand("/stats", context, output);
@@ -496,7 +509,7 @@ describe("Phase 06 TUI slash commands", () => {
         },
       },
     };
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/model route doctor", context, output);
     await handleSlashCommand("/vision screenshot.png", context, output);
@@ -541,7 +554,7 @@ describe("Phase 06 TUI slash commands", () => {
         },
       },
     };
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/vision screenshot.png", context, output);
     await handleSlashCommand("/model route doctor", context, output);
@@ -557,7 +570,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
@@ -575,7 +588,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory init", context, output);
 
@@ -589,7 +602,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/read sample.txt", context, output);
@@ -608,7 +621,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/plan", context, output);
     await handleSlashCommand("/plan accept a", context, output);
@@ -625,7 +638,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/mode acceptEdits", context, output);
     await handleSlashCommand("/edit sample.txt alpha => beta", context, output);
@@ -645,7 +658,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/permissions add deny Bash high", context, output);
     await handleSlashCommand("/permissions", context, output);
@@ -662,7 +675,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/permissions add ask Write medium", context, output);
     await handleSlashCommand("/write ask.txt should-not-write", context, output);
@@ -683,7 +696,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/help", context, output);
     await handleSlashCommand("/language en-US", context, output);
@@ -701,7 +714,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/write sample.txt beta", context, output);
     const checkpointId = context.checkpoints[0]?.id;
@@ -718,7 +731,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/bash node --version", context, output);
     await handleSlashCommand("/background", context, output);
@@ -734,7 +747,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/claim-check", context, output);
     await handleSlashCommand("/claim-check 已修复并已验证", context, output);
@@ -749,7 +762,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/plan", context, output);
     await handleSlashCommand("/todo add 主任务", context, output);
@@ -766,7 +779,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/interrupt", context, output);
 
@@ -783,7 +796,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/verify plan", context, output);
     await handleSlashCommand("/verify", context, output);
@@ -813,7 +826,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/verify", context, output);
 
@@ -839,7 +852,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/verify", context, output);
     await handleSlashCommand("/verify last", context, output);
@@ -869,7 +882,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/verify", context, output);
 
@@ -883,7 +896,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/claim-check 已验证", context, output);
     await handleSlashCommand("/verify smoke", context, output);
@@ -902,7 +915,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/verify smoke", context, output);
     await handleSlashCommand("/background", context, output);
@@ -940,7 +953,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     const reported = recordModelUsage(context, {
       inputTokens: 100,
@@ -998,7 +1011,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     recordModelUsage(context, {
       inputTokens: 100,
@@ -1050,7 +1063,7 @@ describe("Phase 06 TUI slash commands", () => {
       const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
       const session = await store.create({ model: "deepseek-v4-flash" });
       const output = new MemoryOutput();
-      const context = createTestContext(project, store, session, config);
+      const context = await createTestContext(project, store, session, config);
 
       await handleSlashCommand("/index status", context, output);
 
@@ -1079,7 +1092,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index init fast", context, output);
     await handleSlashCommand("/index refresh", context, output);
@@ -1101,7 +1114,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session, config);
+    const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index init fast --force", context, output);
     await handleSlashCommand("/index refresh --force", context, output);
@@ -1116,7 +1129,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session);
 
     recordModelUsage(context, {
       inputTokens: 100,
@@ -1132,5 +1145,85 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("你> [hint");
     expect(output.text).not.toContain("you> [hint");
     expect(output.text).not.toContain("¥");
+  });
+
+  it("handles Phase 14 skills, workflows, plugins, hooks, and freshness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun", "skills"), { recursive: true });
+    await mkdir(join(project, ".linghun", "plugins"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "skills", "bug-helper.json"),
+      JSON.stringify({
+        id: "bug-helper",
+        name: "Bug Helper",
+        source: "third-party",
+        version: "1.0.0",
+        description: "Help debug local failures without loading full body.",
+        triggers: ["bug", "failure"],
+        summary: "Stable summary only.",
+        permissions: ["write", "bash"],
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, ".linghun", "plugins", "local-tools.json"),
+      JSON.stringify({
+        id: "local-tools",
+        name: "Local Tools",
+        source: "third-party",
+        version: "0.1.0",
+        description: "Local manifest contributions.",
+        permissions: ["network", "bash"],
+        contributions: {
+          commands: ["/local-test"],
+          hooks: ["PreToolUse"],
+          workflows: ["bug-fix"],
+          skills: ["bug-helper"],
+          providers: ["local-provider"],
+          mcpServers: ["local-mcp"],
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/skills", context, output);
+    await handleSlashCommand("/skills add", context, output);
+    await handleSlashCommand("/skills enable bug-helper", context, output);
+    await handleSlashCommand("/skills disable bug-helper", context, output);
+    await handleSlashCommand("/workflows", context, output);
+    await handleSlashCommand("/workflows bug-fix", context, output);
+    await handleSlashCommand("/plugins", context, output);
+    await handleSlashCommand("/plugins doctor", context, output);
+    await handleSlashCommand("/plugins enable local-tools", context, output);
+    await handleSlashCommand("/plugins disable local-tools", context, output);
+    await handleSlashCommand("/doctor hooks", context, output);
+    await handleSlashCommand("/break-cache status", context, output);
+
+    const orphanOutput = new MemoryOutput();
+    const orphanContext = await createTestContext(project, store, session);
+    await handleSlashCommand("/skills enable ghost-skill", orphanContext, orphanOutput);
+    await handleSlashCommand("/plugins enable ghost-plugin", orphanContext, orphanOutput);
+
+    expect(output.text).toContain("Skills（Phase 14");
+    expect(output.text).toContain("summary-first / load-on-demand");
+    expect(output.text).toContain("Trust notice：即将启用 skill bug-helper");
+    expect(output.text).toContain("已禁用 skill：bug-helper");
+    expect(output.text).toContain("Workflows（Phase 14");
+    expect(output.text).toContain("bug-fix");
+    expect(output.text).toContain("Workflow Start Gate：bug-fix");
+    expect(output.text).toContain("recommended validation");
+    expect(output.text).toContain("Plugins doctor");
+    expect(output.text).toContain("Trust notice：即将启用 plugin local-tools");
+    expect(output.text).toContain("已禁用 plugin：local-tools");
+    expect(output.text).toContain("Hooks doctor");
+    expect(output.text).toContain("timeoutMs");
+    expect(output.text).toContain("pluginListHash");
+    expect(output.text).not.toContain("完整 skill 正文");
+    expect(orphanOutput.text).toContain("未知 skill：ghost-skill");
+    expect(orphanOutput.text).toContain("未知 plugin：ghost-plugin");
   });
 });

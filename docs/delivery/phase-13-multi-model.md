@@ -213,7 +213,7 @@ printf '/model route\n/model route doctor\n/model route set planner deepseek-v4-
 - `corepack pnpm test -- --run packages/tui/src/index.test.ts`：Phase 13 hardening 后通过，10 个测试文件、71 个测试通过；覆盖 route decision 记录、primary usable but fallback unavailable WARN、primary unavailable fallback、primary/fallback unavailable pause、openai-compatible 缺 baseUrl/apiKey 诊断、stats fallback summary。
 - `corepack pnpm check`：通过，41 个文件检查通过。
 - `corepack pnpm typecheck`：通过。
-- `corepack pnpm test`：通过，10 个测试文件、70 个测试通过。
+- `corepack pnpm test`：通过，10 个测试文件、71 个测试通过。
 - `corepack pnpm build`：通过，workspace 7 个包构建通过。
 - `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
@@ -233,7 +233,8 @@ printf '/model route\n/model route doctor\n/model route set planner deepseek-v4-
 - fallback 调度仅在本地配置和启发式 capability 可判断时执行，不做真实 provider 网络探测。
 - vision 只记录最小 `VisionObservation` evidence，不做真实 OCR / 图像理解调用。
 - image 只生成本地 metadata asset，不做真实远程生图调用。
-- budget 只诊断和展示 estimated usage，不做强制扣费或账单级对账。
+- budget 只诊断和展示 estimated usage，不做强制扣费、真实 quota / balance 查询或账单级对账。
+- Phase 13 未实现完整 provider adapter 成品验收；事件转换、streaming/非流式降级、tool calling 能力声明、usage/cache 字段完整适配、quota/balance 查询和真实项目账单对账属于后续阶段，尤其 Phase 15 真实项目对账。
 
 ## 不在本阶段处理的内容
 
@@ -250,9 +251,11 @@ printf '/model route\n/model route doctor\n/model route set planner deepseek-v4-
 
 ## 下一阶段衔接
 
-Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skills / Workflows / Hooks / Plugins，但必须继续遵守：
+Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计本地 Skills / Workflows / Hooks / Plugin loader，但必须继续遵守：
 
 - Phase 14 只有用户明确确认后才能开始。
+- Phase 14 主闭环只做本地 Skills / Workflows / Hooks / Plugin loader、doctor、启停、信任和权限接入。
+- Phase 14 主闭环不做插件市场、GitHub 安装、自动更新、长期任务、Remote Channels、桌面端或 Phase 15+ 能力。
 - Skills / Workflows 不能绕过现有权限、Start Gate、verification 和 role route 边界。
 - Hooks / Plugins 不得默认自动执行危险动作。
 - 多模型角色之间继续只传结构化摘要、证据、diff、验证报告和关键文件列表。
@@ -301,7 +304,7 @@ Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skil
   "projectPath": "F:\\Linghun",
   "currentPhase": "Phase 13 Multi-model collaboration",
   "nextPhase": "Phase 14",
-  "phaseStatus": "completed_pending_independent_verifier",
+  "phaseStatus": "completed",
   "goal": "完成多模型协作闭环与 Phase 13 hardening：role route、RoleRouteDecision、fallback/pause、doctor、route set、agent role linkage、reviewer handoff、vision/image 最小闭环、role usage 可见。",
   "completed": [
     "ModelRole / ModelCapability / RoleModelRoute / ModelRouteConfig",
@@ -320,12 +323,12 @@ Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skil
     "Phase 13 help visibility"
   ],
   "pending": [
-    "Independent verifier final PASS before final report",
     "Phase 14 only after user confirmation"
   ],
   "mustNotDo": [
     "Do not enter Phase 14+ without user confirmation",
     "Do not implement Skills, Workflows, Hooks or Plugins in Phase 13",
+    "Phase 14 main loop requires explicit user confirmation and is limited to local loader/doctor/enable-disable/trust/permission integration; no marketplace, GitHub install, auto-update, long-running jobs, Remote Channels, desktop or Phase 15+ capabilities",
     "Do not default to multi-model fanout",
     "Do not let planner/reviewer/vision/image write or execute Bash",
     "Do not copy full transcript/full memory/full index/large logs between roles",
@@ -343,7 +346,7 @@ Phase 14 可以在 Phase 13 role route 与结构化 handoff 基础上设计 Skil
     "docs/delivery/phase-13-multi-model.md"
   ],
   "verification": {
-    "status": "full_validation_passed_independent_verifier_pending",
+    "status": "full_validation_passed_independent_verifier_passed",
     "commands": [
       "corepack pnpm exec tsc --noEmit --pretty false",
       "corepack pnpm test -- --run packages/tui/src/index.test.ts",

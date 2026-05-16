@@ -71,6 +71,46 @@ export type StorageConfig = {
   cache: StorageLocation;
 };
 
+export type TrustSource = "local" | "official" | "third-party";
+
+export type SkillConfig = {
+  enabled: boolean;
+  projectDir: string;
+  userDir: string;
+  disabledIds: string[];
+  trustedIds: string[];
+};
+
+export type WorkflowConfig = {
+  enabled: boolean;
+  disabledIds: string[];
+};
+
+export type HookEvent =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Stop"
+  | "Notification"
+  | "Workflow"
+  | "Plugin";
+
+export type HookConfig = {
+  enabled: boolean;
+  timeoutMs: number;
+  outputLimitBytes: number;
+  projectTrusted: boolean;
+  disabledIds: string[];
+  trustedIds: string[];
+};
+
+export type PluginConfig = {
+  enabled: boolean;
+  projectDir: string;
+  userDir: string;
+  disabledIds: string[];
+  trustedIds: string[];
+};
+
 export type LinghunConfig = {
   language: Language;
   defaultModel: string;
@@ -89,6 +129,10 @@ export type LinghunConfig = {
     mode: "fast" | "moderate" | "full";
     ignoreFile: ".linghunignore" | ".cbmignore";
   };
+  skills: SkillConfig;
+  workflows: WorkflowConfig;
+  hooks: HookConfig;
+  plugins: PluginConfig;
 };
 
 export const defaultModelRoutes: ModelRouteConfig = {
@@ -232,6 +276,32 @@ export const defaultConfig: LinghunConfig = {
     mode: "fast",
     ignoreFile: ".linghunignore",
   },
+  skills: {
+    enabled: true,
+    projectDir: ".linghun/skills",
+    userDir: "~/.linghun/skills",
+    disabledIds: [],
+    trustedIds: [],
+  },
+  workflows: {
+    enabled: true,
+    disabledIds: [],
+  },
+  hooks: {
+    enabled: false,
+    timeoutMs: 5_000,
+    outputLimitBytes: 4_096,
+    projectTrusted: false,
+    disabledIds: [],
+    trustedIds: [],
+  },
+  plugins: {
+    enabled: true,
+    projectDir: ".linghun/plugins",
+    userDir: "~/.linghun/plugins",
+    disabledIds: [],
+    trustedIds: [],
+  },
 };
 
 export function getUserConfigDir(home = homedir()): string {
@@ -368,6 +438,34 @@ export async function saveModelRoute(
   return next;
 }
 
+export async function saveExtensionEnablement(
+  kind: "skills" | "plugins",
+  id: string,
+  enabled: boolean,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const section = current[kind];
+  const disabledIds = enabled
+    ? section.disabledIds.filter((item) => item !== id)
+    : stableUnique([...section.disabledIds, id]);
+  const trustedIds = enabled ? stableUnique([...section.trustedIds, id]) : section.trustedIds;
+  const next: LinghunConfig = {
+    ...current,
+    [kind]: {
+      ...section,
+      disabledIds,
+      trustedIds,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+function stableUnique(values: string[]): string[] {
+  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+}
+
 async function writeConfig(projectPath: string, config: LinghunConfig): Promise<void> {
   await mkdir(getProjectConfigDir(projectPath), { recursive: true });
   await writeFile(
@@ -446,6 +544,22 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     index: {
       ...defaultConfig.index,
       ...input.index,
+    },
+    skills: {
+      ...defaultConfig.skills,
+      ...input.skills,
+    },
+    workflows: {
+      ...defaultConfig.workflows,
+      ...input.workflows,
+    },
+    hooks: {
+      ...defaultConfig.hooks,
+      ...input.hooks,
+    },
+    plugins: {
+      ...defaultConfig.plugins,
+      ...input.plugins,
     },
   };
 }

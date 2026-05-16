@@ -13,9 +13,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 当前进度
 
-- Phase 00-13 已完成。
-- 下一阶段是 Phase 14：Skills 与工作流闭环；必须等用户明确确认后才能开始。
-- Phase 13 已在 Phase 12 Agent 闭环基础上补齐多模型角色路由、/model route、route doctor、route set、agent role linkage、reviewer handoff、vision/image 最小闭环和 role/model/provider usage；不得写成已经实现 Phase 14+ 功能。
+- Phase 00-14 主闭环已完成。
+- 下一步建议进入 Phase 14 hardening；必须等用户明确确认后才能开始，不得直接进入 Phase 15+。
+- Phase 14 主闭环已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
 - 用户未明确开始执行时，必须先通过 Start Gate 确认，不得擅自进入写文件、agent、job、workflow 或依赖安装。
 
@@ -34,8 +34,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 7. [docs/delivery/phase-11-sessions-memory.md](./docs/delivery/phase-11-sessions-memory.md)
 8. [docs/delivery/phase-12-agents.md](./docs/delivery/phase-12-agents.md)
 9. [docs/delivery/phase-13-multi-model.md](./docs/delivery/phase-13-multi-model.md)
+10. [docs/delivery/phase-14-skills-workflow.md](./docs/delivery/phase-14-skills-workflow.md)
 
-Phase 13 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
+Phase 14 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
 
 ## 命令约定
 

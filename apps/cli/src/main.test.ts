@@ -13,10 +13,10 @@ describe("CLI", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("prints help for the Phase 13 CLI", async () => {
+  it("prints help for the Phase 14 CLI", async () => {
     const result = await runCli(["--help"]);
 
-    expect(result.stdout).toContain("Phase 13");
+    expect(result.stdout).toContain("Phase 14");
     expect(result.stdout).toContain("linghun --version");
     expect(result.stdout).toContain("Linghun --version");
     expect(result.stdout).toContain("sessions list");
@@ -24,6 +24,10 @@ describe("CLI", () => {
     expect(result.stdout).toContain("/model route");
     expect(result.stdout).toContain("/model route doctor");
     expect(result.stdout).toContain("/image generate <prompt>");
+    expect(result.stdout).toContain("/skills");
+    expect(result.stdout).toContain("/workflows <name>");
+    expect(result.stdout).toContain("/plugins doctor");
+    expect(result.stdout).toContain("/doctor hooks");
     expect(result.exitCode).toBe(0);
   });
 

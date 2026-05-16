@@ -24,6 +24,7 @@
 17. F:\Linghun\docs\delivery\phase-11-sessions-memory.md
 18. F:\Linghun\docs\delivery\phase-12-agents.md
 19. F:\Linghun\docs\delivery\phase-13-multi-model.md
+20. F:\Linghun\docs\delivery\phase-14-skills-workflow.md
 
 这是 Linghun 项目的阶段开发仓库。请严格按阶段蓝图推进，不要跳阶段，不要提前实现后续功能。
 
@@ -44,8 +45,9 @@
 - Phase 11 会话交接与记忆闭环已完成。
 - Phase 12 Agent 闭环已完成。
 - Phase 13 多模型协作闭环已完成。
+- Phase 14 Skills 与工作流主闭环已完成。
 
-当前任务：Phase 14 Skills 与工作流闭环仅在用户明确确认后开始；没有确认前不要进入 Phase 14+。
+当前任务：下一步仅建议进入 Phase 14 hardening；必须由用户明确确认后开始。没有确认前不要进入 Phase 14 hardening 或 Phase 15+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。

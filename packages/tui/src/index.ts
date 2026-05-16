@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
@@ -16,6 +17,7 @@ import {
   type RoleModelRoute,
   loadConfig,
   resolveStoragePaths,
+  saveExtensionEnablement,
   saveModelRoute,
 } from "@linghun/config";
 import {
@@ -381,6 +383,112 @@ export type MemoryState = {
   lastResumeReadonly?: boolean;
 };
 
+export type ExtensionSource = "local" | "official" | "third-party";
+export type ExtensionScope = "project" | "user";
+
+export type SkillSummary = {
+  id: string;
+  name: string;
+  description: string;
+  triggers: string[];
+  summary: string;
+  source: ExtensionSource;
+  scope: ExtensionScope;
+  path: string;
+  version: string;
+  enabled: boolean;
+  trusted: boolean;
+  permissions: string[];
+  mayWrite: boolean;
+  mayExecute: boolean;
+  mayNetwork: boolean;
+};
+
+export type SkillState = {
+  enabled: boolean;
+  projectDir: string;
+  userDir: string;
+  skills: SkillSummary[];
+  disabledIds: string[];
+  trustedIds: string[];
+  lastError?: string;
+};
+
+export type WorkflowTemplate = {
+  id: string;
+  purpose: string;
+  risk: "low" | "medium" | "high";
+  writesFiles: boolean;
+  recommendedValidation: string[];
+  steps: string[];
+};
+
+export type WorkflowState = {
+  enabled: boolean;
+  templates: WorkflowTemplate[];
+  disabledIds: string[];
+  lastStarted?: string;
+};
+
+export type HookSummary = {
+  id: string;
+  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "Workflow" | "Plugin";
+  source: ExtensionSource;
+  scope: ExtensionScope;
+  path: string;
+  enabled: boolean;
+  trusted: boolean;
+  timeoutMs: number;
+  outputLimitBytes: number;
+  lastError?: string;
+  logPath?: string;
+  permissions: string[];
+};
+
+export type HookState = {
+  enabled: boolean;
+  projectTrusted: boolean;
+  timeoutMs: number;
+  outputLimitBytes: number;
+  hooks: HookSummary[];
+  recentErrors: string[];
+};
+
+export type PluginSummary = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  source: ExtensionSource;
+  scope: ExtensionScope;
+  path: string;
+  enabled: boolean;
+  trusted: boolean;
+  permissions: string[];
+  mayWrite: boolean;
+  mayExecute: boolean;
+  mayNetwork: boolean;
+  contributions: {
+    commands: string[];
+    mcpServers: string[];
+    providers: string[];
+    hooks: string[];
+    workflows: string[];
+    skills: string[];
+  };
+  lastError?: string;
+};
+
+export type PluginState = {
+  enabled: boolean;
+  projectDir: string;
+  userDir: string;
+  plugins: PluginSummary[];
+  disabledIds: string[];
+  trustedIds: string[];
+  lastError?: string;
+};
+
 type MessageKey =
   | "appTitle"
   | "intro"
@@ -425,6 +533,10 @@ export type TuiContext = {
   mcp: McpState;
   index: IndexState;
   memory: MemoryState;
+  skills: SkillState;
+  workflows: WorkflowState;
+  hooks: HookState;
+  plugins: PluginState;
   agents: AgentRun[];
   roleUsage: RoleUsage[];
   routeDecisions: RoleRouteDecision[];
@@ -471,13 +583,13 @@ export function createCacheState(
   mcpToolList: McpToolState[] = [],
 ): CacheState {
   const freshness = createCacheFreshness({
-    systemPrompt: "Linghun Phase 13 multi-model engineering assistant",
+    systemPrompt: "Linghun Phase 14 skills/workflow engineering assistant",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
     provider: "deepseek",
     projectRules: "local CLAUDE.md rules loaded by harness",
-    memory: "Phase 13 memory/handoff not loaded yet",
+    memory: "Phase 14 memory/handoff not loaded yet",
     compact: "not compacted",
     plugins: [],
   });
@@ -623,6 +735,352 @@ function isMemoryCandidate(value: unknown): value is MemoryCandidate {
   );
 }
 
+function resolveConfiguredDir(projectPath: string, configured: string): string {
+  if (configured.startsWith("~/")) {
+    return join(homedir(), configured.slice(2));
+  }
+  return resolve(projectPath, configured);
+}
+
+export async function createSkillState(
+  config: LinghunConfig,
+  projectPath: string,
+): Promise<SkillState> {
+  const projectDir = resolveConfiguredDir(projectPath, config.skills.projectDir);
+  const userDir = resolveConfiguredDir(projectPath, config.skills.userDir);
+  try {
+    const skills = await loadSkillSummaries(config, projectDir, userDir);
+    return {
+      enabled: config.skills.enabled,
+      projectDir,
+      userDir,
+      skills,
+      disabledIds: [...config.skills.disabledIds].sort((a, b) => a.localeCompare(b)),
+      trustedIds: [...config.skills.trustedIds].sort((a, b) => a.localeCompare(b)),
+    };
+  } catch (error) {
+    return {
+      enabled: config.skills.enabled,
+      projectDir,
+      userDir,
+      skills: [],
+      disabledIds: config.skills.disabledIds,
+      trustedIds: config.skills.trustedIds,
+      lastError: formatError(error),
+    };
+  }
+}
+
+export function createWorkflowState(config: LinghunConfig): WorkflowState {
+  return {
+    enabled: config.workflows.enabled,
+    disabledIds: [...config.workflows.disabledIds].sort((a, b) => a.localeCompare(b)),
+    templates: [
+      workflow("bug-fix", "定位 bug、做最小修复、运行相关验证", "medium", true, [
+        "corepack pnpm test",
+        "corepack pnpm typecheck",
+      ]),
+      workflow("design-to-code", "把已确认设计转成最小代码改动", "high", true, [
+        "corepack pnpm test",
+        "corepack pnpm build",
+      ]),
+      workflow("doc-to-code", "按文档差异补齐代码入口和验证", "medium", true, [
+        "corepack pnpm test",
+        "corepack pnpm check",
+      ]),
+      workflow("refactor-plan", "只输出重构计划与风险，不直接改代码", "medium", false, [
+        "corepack pnpm typecheck",
+      ]),
+      workflow("release-note", "基于已验证变更生成发布说明", "low", false, ["corepack pnpm check"]),
+      workflow("review", "只读审查 diff、风险和验证证据", "low", false, ["corepack pnpm test"]),
+    ].sort((a, b) => a.id.localeCompare(b.id)),
+  };
+}
+
+function workflow(
+  id: string,
+  purpose: string,
+  risk: WorkflowTemplate["risk"],
+  writesFiles: boolean,
+  recommendedValidation: string[],
+): WorkflowTemplate {
+  return {
+    id,
+    purpose,
+    risk,
+    writesFiles,
+    recommendedValidation,
+    steps: [
+      "Start Gate：启动前先让用户确认范围。",
+      "执行中任何写文件、Bash、联网或依赖安装仍走现有权限管道。",
+      "结束前提示运行推荐验证并输出交付检查。",
+    ],
+  };
+}
+
+export async function createHookState(
+  config: LinghunConfig,
+  projectPath: string,
+): Promise<HookState> {
+  const hooks = await loadHookSummaries(config, projectPath);
+  return {
+    enabled: config.hooks.enabled,
+    projectTrusted: config.hooks.projectTrusted,
+    timeoutMs: config.hooks.timeoutMs,
+    outputLimitBytes: config.hooks.outputLimitBytes,
+    hooks,
+    recentErrors: hooks.flatMap((hook) =>
+      hook.lastError ? [`${hook.id}: ${hook.lastError}`] : [],
+    ),
+  };
+}
+
+export async function createPluginState(
+  config: LinghunConfig,
+  projectPath: string,
+): Promise<PluginState> {
+  const projectDir = resolveConfiguredDir(projectPath, config.plugins.projectDir);
+  const userDir = resolveConfiguredDir(projectPath, config.plugins.userDir);
+  try {
+    const plugins = await loadPluginSummaries(config, projectDir, userDir);
+    return {
+      enabled: config.plugins.enabled,
+      projectDir,
+      userDir,
+      plugins,
+      disabledIds: [...config.plugins.disabledIds].sort((a, b) => a.localeCompare(b)),
+      trustedIds: [...config.plugins.trustedIds].sort((a, b) => a.localeCompare(b)),
+    };
+  } catch (error) {
+    return {
+      enabled: config.plugins.enabled,
+      projectDir,
+      userDir,
+      plugins: [],
+      disabledIds: config.plugins.disabledIds,
+      trustedIds: config.plugins.trustedIds,
+      lastError: formatError(error),
+    };
+  }
+}
+
+async function loadSkillSummaries(
+  config: LinghunConfig,
+  projectDir: string,
+  userDir: string,
+): Promise<SkillSummary[]> {
+  const loaded = await Promise.all([
+    loadSkillDir(config, projectDir, "project"),
+    loadSkillDir(config, userDir, "user"),
+  ]);
+  return loaded.flat().sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function loadSkillDir(
+  config: LinghunConfig,
+  directory: string,
+  scope: ExtensionScope,
+): Promise<SkillSummary[]> {
+  const entries = await readJsonManifestFiles(directory);
+  const items = await Promise.all(entries.map((path) => readSkillManifest(config, path, scope)));
+  return items.filter((item): item is SkillSummary => item !== null);
+}
+
+async function readSkillManifest(
+  config: LinghunConfig,
+  path: string,
+  scope: ExtensionScope,
+): Promise<SkillSummary | null> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    const id = stableId(value.id, basename(path, extname(path)));
+    const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
+    const source = parseSource(value.source, scope);
+    const trusted = source !== "third-party" || config.skills.trustedIds.includes(id);
+    return {
+      id,
+      name: stringValue(value.name, id),
+      description: truncateDisplay(stringValue(value.description, "no description"), 240),
+      triggers: stringArray(value.triggers).sort((a, b) => a.localeCompare(b)),
+      summary: truncateDisplay(stringValue(value.summary, stringValue(value.description, "")), 600),
+      source,
+      scope,
+      path,
+      version: stringValue(value.version, "0.0.0"),
+      enabled: config.skills.enabled && !config.skills.disabledIds.includes(id) && trusted,
+      trusted,
+      permissions,
+      mayWrite: permissions.includes("write"),
+      mayExecute: permissions.includes("bash") || permissions.includes("execute"),
+      mayNetwork: permissions.includes("network"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function loadPluginSummaries(
+  config: LinghunConfig,
+  projectDir: string,
+  userDir: string,
+): Promise<PluginSummary[]> {
+  const loaded = await Promise.all([
+    loadPluginDir(config, projectDir, "project"),
+    loadPluginDir(config, userDir, "user"),
+  ]);
+  return loaded.flat().sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function loadPluginDir(
+  config: LinghunConfig,
+  directory: string,
+  scope: ExtensionScope,
+): Promise<PluginSummary[]> {
+  const entries = await readJsonManifestFiles(directory);
+  const items = await Promise.all(entries.map((path) => readPluginManifest(config, path, scope)));
+  return items.filter((item): item is PluginSummary => item !== null);
+}
+
+async function readPluginManifest(
+  config: LinghunConfig,
+  path: string,
+  scope: ExtensionScope,
+): Promise<PluginSummary | null> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    const id = stableId(value.id, basename(path, extname(path)));
+    const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
+    const source = parseSource(value.source, scope);
+    const trusted = source !== "third-party" || config.plugins.trustedIds.includes(id);
+    return {
+      id,
+      name: stringValue(value.name, id),
+      version: stringValue(value.version, "0.0.0"),
+      description: truncateDisplay(stringValue(value.description, "no description"), 240),
+      source,
+      scope,
+      path,
+      enabled: config.plugins.enabled && !config.plugins.disabledIds.includes(id) && trusted,
+      trusted,
+      permissions,
+      mayWrite: permissions.includes("write"),
+      mayExecute: permissions.includes("bash") || permissions.includes("execute"),
+      mayNetwork: permissions.includes("network"),
+      contributions: normalizeContributions(value.contributions),
+    };
+  } catch (error) {
+    return {
+      id: basename(path, extname(path)),
+      name: basename(path),
+      version: "unknown",
+      description: "manifest load failed; plugin isolated from main session",
+      source: scope === "project" ? "third-party" : "local",
+      scope,
+      path,
+      enabled: false,
+      trusted: false,
+      permissions: [],
+      mayWrite: false,
+      mayExecute: false,
+      mayNetwork: false,
+      contributions: normalizeContributions(undefined),
+      lastError: formatError(error),
+    };
+  }
+}
+
+async function loadHookSummaries(
+  config: LinghunConfig,
+  projectPath: string,
+): Promise<HookSummary[]> {
+  const pluginHooks = (await createPluginState(config, projectPath)).plugins.flatMap((plugin) =>
+    plugin.contributions.hooks.map((event) => ({ plugin, event })),
+  );
+  return pluginHooks
+    .map(({ plugin, event }) => ({
+      id: `${plugin.id}:${event}`,
+      event: parseHookEvent(event),
+      source: plugin.source,
+      scope: plugin.scope,
+      path: plugin.path,
+      enabled:
+        config.hooks.enabled &&
+        plugin.enabled &&
+        plugin.trusted &&
+        (plugin.scope !== "project" || config.hooks.projectTrusted),
+      trusted: plugin.trusted && (plugin.scope !== "project" || config.hooks.projectTrusted),
+      timeoutMs: config.hooks.timeoutMs,
+      outputLimitBytes: config.hooks.outputLimitBytes,
+      permissions: plugin.permissions,
+      logPath: join(projectPath, ".linghun", "logs", "hooks", `${plugin.id}.log`),
+      lastError: plugin.lastError,
+    }))
+    .sort((a, b) => `${a.event}:${a.id}`.localeCompare(`${b.event}:${b.id}`));
+}
+
+function parseHookEvent(value: string): HookSummary["event"] {
+  const allowed: HookSummary["event"][] = [
+    "Notification",
+    "Plugin",
+    "PostToolUse",
+    "PreToolUse",
+    "Stop",
+    "Workflow",
+  ];
+  return allowed.includes(value as HookSummary["event"])
+    ? (value as HookSummary["event"])
+    : "Plugin";
+}
+
+async function readJsonManifestFiles(directory: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.endsWith(".json"))
+    .map((entry) => join(directory, entry))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeContributions(value: unknown): PluginSummary["contributions"] {
+  const input = isRecord(value) ? value : {};
+  return {
+    commands: stringArray(input.commands).sort((a, b) => a.localeCompare(b)),
+    hooks: stringArray(input.hooks).sort((a, b) => a.localeCompare(b)),
+    mcpServers: stringArray(input.mcpServers).sort((a, b) => a.localeCompare(b)),
+    providers: stringArray(input.providers).sort((a, b) => a.localeCompare(b)),
+    skills: stringArray(input.skills).sort((a, b) => a.localeCompare(b)),
+    workflows: stringArray(input.workflows).sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function parseSource(value: unknown, scope: ExtensionScope): ExtensionSource {
+  if (value === "official" || value === "third-party" || value === "local") {
+    return value;
+  }
+  return scope === "project" ? "third-party" : "local";
+}
+
+function stableId(value: unknown, fallback: string): string {
+  return stringValue(value, fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-");
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function stringValue(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -656,6 +1114,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
+    skills: await createSkillState(config, projectPath),
+    workflows: createWorkflowState(config),
+    hooks: await createHookState(config, projectPath),
+    plugins: await createPluginState(config, projectPath),
     agents: [],
     roleUsage: [],
     routeDecisions: [],
@@ -820,6 +1282,22 @@ export async function handleSlashCommand(
     await handleMemoryCommand(rest, context, output);
     return "handled";
   }
+  if (command === "/skills") {
+    await handleSkillsCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/workflows") {
+    await handleWorkflowsCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/plugins") {
+    await handlePluginsCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/doctor") {
+    await handleDoctorCommand(rest, context, output);
+    return "handled";
+  }
   if (command === "/usage") {
     writeLine(output, formatUsage(context));
     return "handled";
@@ -873,6 +1351,260 @@ export async function handleSlashCommand(
 
   writeLine(output, `未知命令：${command}。输入 /help 查看可用命令。`);
   return "handled";
+}
+
+function formatSkills(context: TuiContext): string {
+  const lines = [
+    "Skills（Phase 14，summary-first / load-on-demand）",
+    `- projectDir: ${context.skills.projectDir}`,
+    `- userDir: ${context.skills.userDir}`,
+    `- enabled: ${context.skills.enabled ? "yes" : "no"}`,
+  ];
+  if (context.skills.lastError) {
+    lines.push(`- lastError: ${context.skills.lastError}`);
+  }
+  if (context.skills.skills.length === 0) {
+    lines.push("- none：可运行 /skills add 查看本地注册路径。");
+  }
+  for (const skill of context.skills.skills) {
+    lines.push(
+      `- ${skill.id}: ${skill.enabled ? "enabled" : "disabled"} trusted=${skill.trusted ? "yes" : "no"} source=${skill.source} scope=${skill.scope} version=${skill.version} triggers=${skill.triggers.join(",") || "-"} write=${skill.mayWrite ? "yes" : "no"} bash=${skill.mayExecute ? "yes" : "no"} network=${skill.mayNetwork ? "yes" : "no"} summary=${skill.summary}`,
+    );
+  }
+  lines.push(
+    "- note: 默认只加载 metadata/description/triggers/stable summary；不会把 skill 正文塞进 prompt。",
+  );
+  return lines.join("\n");
+}
+
+function formatWorkflows(context: TuiContext): string {
+  return [
+    "Workflows（Phase 14，本地模板，启动前必须 Start Gate）",
+    ...context.workflows.templates.map(
+      (item) =>
+        `- ${item.id}: purpose=${item.purpose} risk=${item.risk} writesFiles=${item.writesFiles ? "yes" : "no"} validation=${item.recommendedValidation.join(" | ")}`,
+    ),
+    "- run: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
+  ].join("\n");
+}
+
+function formatPlugins(context: TuiContext): string {
+  const lines = [
+    "Plugins（Phase 14，本地 manifest loader）",
+    `- projectDir: ${context.plugins.projectDir}`,
+    `- userDir: ${context.plugins.userDir}`,
+    `- enabled: ${context.plugins.enabled ? "yes" : "no"}`,
+  ];
+  if (context.plugins.lastError) {
+    lines.push(`- lastError: ${context.plugins.lastError}`);
+  }
+  if (context.plugins.plugins.length === 0) {
+    lines.push(
+      "- none：把本地 manifest 放到 project/user plugins 目录；不支持市场/GitHub/远程安装。",
+    );
+  }
+  for (const plugin of context.plugins.plugins) {
+    lines.push(
+      `- ${plugin.id}: ${plugin.enabled ? "enabled" : "disabled"} trusted=${plugin.trusted ? "yes" : "no"} source=${plugin.source} scope=${plugin.scope} version=${plugin.version} write=${plugin.mayWrite ? "yes" : "no"} bash=${plugin.mayExecute ? "yes" : "no"} network=${plugin.mayNetwork ? "yes" : "no"} commands=${plugin.contributions.commands.join(",") || "-"} hooks=${plugin.contributions.hooks.join(",") || "-"} workflows=${plugin.contributions.workflows.join(",") || "-"} skills=${plugin.contributions.skills.join(",") || "-"}`,
+    );
+  }
+  lines.push("- note: plugin 贡献项稳定排序；贡献工具仍走统一权限管道，加载失败隔离。");
+  return lines.join("\n");
+}
+
+function formatPluginsDoctor(context: TuiContext): string {
+  return [
+    "Plugins doctor",
+    `- manifest count: ${context.plugins.plugins.length}`,
+    `- disabledIds: ${context.plugins.disabledIds.join(",") || "none"}`,
+    `- trustedIds: ${context.plugins.trustedIds.join(",") || "none"}`,
+    ...context.plugins.plugins.map((plugin) => {
+      const risk =
+        plugin.source === "third-party" && !plugin.trusted ? "BLOCK untrusted third-party" : "ok";
+      const error = plugin.lastError ? ` lastError=${plugin.lastError}` : "";
+      return `- ${plugin.id}: ${risk} path=${plugin.path} permissions=${plugin.permissions.join(",") || "none"}${error}`;
+    }),
+    "- boundary: 不执行远程安装/自动更新/完整沙箱；第三方未信任前不得写文件、联网或执行命令。",
+  ].join("\n");
+}
+
+function formatHooksDoctor(context: TuiContext): string {
+  const cacheImpact = stableHash(createExtensionFreshnessSummary(context));
+  const lines = [
+    "Hooks doctor",
+    `- hooks enabled: ${context.hooks.enabled ? "yes" : "no"}（默认关闭）`,
+    `- projectTrusted: ${context.hooks.projectTrusted ? "yes" : "no"}`,
+    `- timeoutMs: ${context.hooks.timeoutMs}`,
+    `- outputLimitBytes: ${context.hooks.outputLimitBytes}`,
+    `- cacheImpactHash: ${cacheImpact}`,
+  ];
+  if (context.hooks.hooks.length === 0) {
+    lines.push("- hooks: none");
+  }
+  for (const hook of context.hooks.hooks) {
+    lines.push(
+      `- ${hook.id}: event=${hook.event} enabled=${hook.enabled ? "yes" : "no"} trusted=${hook.trusted ? "yes" : "no"} source=${hook.source} scope=${hook.scope} path=${hook.path} permissions=${hook.permissions.join(",") || "none"} logPath=${hook.logPath ?? "-"} lastError=${hook.lastError ?? "none"}`,
+    );
+  }
+  lines.push("- boundary: hook 不能绕过权限系统；失败隔离；大输出截断，完整输出写 logPath。");
+  return lines.join("\n");
+}
+
+function formatTrustNotice(kind: "skill" | "plugin", item: SkillSummary | PluginSummary): string {
+  return [
+    `Trust notice：即将启用 ${kind} ${item.id}`,
+    `- source: ${item.source}`,
+    `- path: ${item.path}`,
+    `- version: ${item.version}`,
+    `- permissions: ${item.permissions.join(",") || "none"}`,
+    `- trust: ${item.trusted ? "trusted" : "untrusted third-party"}`,
+    `- mayWrite=${item.mayWrite ? "yes" : "no"} mayExecute=${item.mayExecute ? "yes" : "no"} mayNetwork=${item.mayNetwork ? "yes" : "no"}`,
+    "- 未信任第三方不得写文件、联网或执行命令；实际工具调用仍走权限管道。",
+  ].join("\n");
+}
+
+async function handleSkillsCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (!action) {
+    writeLine(output, formatSkills(context));
+    return;
+  }
+  if (action === "add") {
+    writeLine(
+      output,
+      [
+        "Skills add（本地注册提示）",
+        `- project: ${context.skills.projectDir}`,
+        `- user: ${context.skills.userDir}`,
+        "- 放入 *.json manifest；默认只读取 metadata/description/triggers/summary，正文按需由用户确认后再读。",
+        "- 不做 GitHub/远程安装，不自动安装依赖。",
+      ].join("\n"),
+    );
+    return;
+  }
+  if (action === "enable" || action === "disable") {
+    const id = args[1];
+    if (!id) {
+      writeLine(output, `用法：/skills ${action} <id>`);
+      return;
+    }
+    const skill = context.skills.skills.find((item) => item.id === id);
+    if (action === "enable") {
+      if (!skill) {
+        writeLine(output, `未知 skill：${id}。请先在本地 manifest 注册后再启用。`);
+        return;
+      }
+      writeLine(output, formatTrustNotice("skill", skill));
+    }
+    context.config = await saveExtensionEnablement(
+      "skills",
+      id,
+      action === "enable",
+      context.projectPath,
+    );
+    context.skills = await createSkillState(context.config, context.projectPath);
+    writeLine(
+      output,
+      `${action === "enable" ? "已启用" : "已禁用"} skill：${id}（状态写入 .linghun/settings.json，重启后保留）`,
+    );
+    return;
+  }
+  writeLine(output, "用法：/skills | /skills add | /skills enable <id> | /skills disable <id>");
+}
+
+async function handleWorkflowsCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const name = args[0];
+  if (!name) {
+    writeLine(output, formatWorkflows(context));
+    return;
+  }
+  const template = context.workflows.templates.find((item) => item.id === name);
+  if (!template) {
+    writeLine(output, `未知 workflow：${name}。可运行 /workflows 查看可用模板。`);
+    return;
+  }
+  context.workflows.lastStarted = template.id;
+  writeLine(
+    output,
+    [
+      `Workflow Start Gate：${template.id}`,
+      `- purpose: ${template.purpose}`,
+      `- risk: ${template.risk}`,
+      `- writesFiles: ${template.writesFiles ? "yes" : "no"}`,
+      "- 启动前需要用户明确确认；本命令只展示启动门，不会自动改文件。",
+      "- 后续写文件、Bash、联网、安装依赖仍走现有权限管道。",
+      `- recommended validation: ${template.recommendedValidation.join(" && ")}`,
+      "- finish check: 输出修改文件、验证结果、已知限制与交付检查。",
+    ].join("\n"),
+  );
+}
+
+async function handlePluginsCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (!action) {
+    writeLine(output, formatPlugins(context));
+    return;
+  }
+  if (action === "doctor") {
+    writeLine(output, formatPluginsDoctor(context));
+    return;
+  }
+  if (action === "enable" || action === "disable") {
+    const id = args[1];
+    if (!id) {
+      writeLine(output, `用法：/plugins ${action} <id>`);
+      return;
+    }
+    const plugin = context.plugins.plugins.find((item) => item.id === id);
+    if (action === "enable") {
+      if (!plugin) {
+        writeLine(output, `未知 plugin：${id}。请先在本地 manifest 注册后再启用。`);
+        return;
+      }
+      writeLine(output, formatTrustNotice("plugin", plugin));
+    }
+    context.config = await saveExtensionEnablement(
+      "plugins",
+      id,
+      action === "enable",
+      context.projectPath,
+    );
+    context.plugins = await createPluginState(context.config, context.projectPath);
+    context.hooks = await createHookState(context.config, context.projectPath);
+    writeLine(
+      output,
+      `${action === "enable" ? "已启用" : "已禁用"} plugin：${id}（状态写入 .linghun/settings.json，重启后保留）`,
+    );
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/plugins | /plugins doctor | /plugins enable <id> | /plugins disable <id>",
+  );
+}
+
+async function handleDoctorCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (args[0] === "hooks") {
+    writeLine(output, formatHooksDoctor(context));
+    return;
+  }
+  writeLine(output, "用法：/doctor hooks");
 }
 
 async function handleModelCommand(
@@ -2309,39 +3041,45 @@ function createHandoffPacket(
     sessionId,
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
-    currentPhase: "Phase 13",
-    nextPhase: "Phase 14",
+    currentPhase: "Phase 14",
+    nextPhase: "Phase 14 hardening",
     phaseStatus: "completed",
-    goal: "多模型协作闭环：角色路由、agent role linkage、reviewer handoff、vision/image 最小闭环和 role usage。",
+    goal: "Skills 与工作流主闭环：本地 skills、workflow templates、hooks doctor、plugin manifest loader、启停、信任和权限边界。",
     completed: [
-      "Model role routes",
-      "/model route / doctor / set",
-      "agent role linkage",
-      "reviewer role handoff",
-      "vision/image evidence loops",
-      "role/model/provider usage",
+      "local skill manifest loader and /skills commands",
+      "workflow templates and /workflows Start Gate",
+      "local plugin manifest loader and /plugins commands",
+      "hooks disabled by default and /doctor hooks diagnostics",
+      "trust notice and enable/disable persistence",
+      "extension freshness pluginListHash",
     ],
-    pending: ["Phase 14 Skills 与工作流闭环仅在用户确认后开始"],
+    pending: [
+      "Phase 14 hardening：hook timeout/logPath 实测、输出截断实测、schema 兼容性增强、workflow 结束检查强化",
+      "Phase 15+ 必须等待用户明确确认后才能开始",
+    ],
     mustNotDo: [
-      "不要进入 Phase 14+",
-      "不要复制完整历史聊天到新会话",
-      "不要自动写长期记忆",
-      "不要自动刷新索引",
-      "不要实现 Skills、Workflows、Hooks、Plugins、长期任务或 Remote Channels",
+      "不要进入 Phase 15+，除非用户明确确认",
+      "不要实现插件市场、GitHub 安装、远程安装或自动更新",
+      "不要实现长期任务或 Remote Channels",
+      "不要执行完整 hook 脚本；Phase 14 主闭环只做诊断和边界",
+      "不要让 workflow、hook 或 plugin 绕过 Start Gate、Plan、权限审批和验证闭环",
+      "不要把完整 skill、plugin manifest、hook 日志或大输出塞进 prompt / 状态栏",
     ],
     todos,
     keyFiles: [
       "packages/tui/src/index.ts",
       "packages/config/src/index.ts",
-      "packages/core/src/session.ts",
-      "docs/delivery/phase-13-multi-model.md",
+      "packages/tui/src/index.test.ts",
+      "packages/config/src/index.test.ts",
+      "apps/cli/src/cli.ts",
+      "docs/delivery/phase-14-skills-workflow.md",
     ],
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
     verification: context.lastVerification ?? null,
     risks: context.lastVerification
       ? context.lastVerification.risk
-      : ["尚未运行 Phase 13 完整验证"],
+      : ["Phase 14 主闭环已完成；Phase 14 hardening 尚未开始"],
     indexStatus: {
       projectName: context.index.projectName,
       status: context.index.status,
@@ -2353,9 +3091,10 @@ function createHandoffPacket(
     permissionMode: context.permissionMode,
     modelProvider: { provider: "deepseek", model: context.model },
     recentCommit: "unknown until git metadata is checked externally",
-    budgetUsage: "local usage only; no billing fields; status bar does not show money",
+    budgetUsage:
+      "local validation only; no external provider calls; status bar does not show money",
     createdAt: new Date().toISOString(),
-    generatedBy: "Linghun Phase 13 HandoffPacket",
+    generatedBy: "Linghun Phase 14 HandoffPacket",
   };
 }
 
@@ -3230,8 +3969,8 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
       context.language === "en-US"
-        ? "Linghun Phase 13 EN system prompt"
-        : "Linghun Phase 13 ZH system prompt",
+        ? "Linghun Phase 14 EN system prompt"
+        : "Linghun Phase 14 ZH system prompt",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
@@ -3240,7 +3979,7 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     projectRules: createProjectRulesFreshnessSummary(context),
     memory: createMemoryFreshnessSummary(context),
     compact: context.cache.compacted ? "compacted" : "not compacted",
-    plugins: [],
+    plugins: createExtensionFreshnessSummary(context),
   });
 }
 
@@ -3268,6 +4007,41 @@ function createMemoryFreshnessSummary(context: TuiContext): string {
     })),
     handoffCreatedAt: context.memory.lastHandoff?.createdAt ?? "none",
   });
+}
+
+function createExtensionFreshnessSummary(context: TuiContext): unknown {
+  return {
+    skills: context.skills.skills.map((skill) => ({
+      id: skill.id,
+      enabled: skill.enabled,
+      source: skill.source,
+      trusted: skill.trusted,
+      triggers: skill.triggers,
+      summary: skill.summary,
+      permissions: skill.permissions,
+    })),
+    workflows: context.workflows.templates.map((workflow) => ({
+      id: workflow.id,
+      risk: workflow.risk,
+      writesFiles: workflow.writesFiles,
+      validation: workflow.recommendedValidation,
+    })),
+    hooks: context.hooks.hooks.map((hook) => ({
+      id: hook.id,
+      event: hook.event,
+      enabled: hook.enabled,
+      trusted: hook.trusted,
+      permissions: hook.permissions,
+    })),
+    plugins: context.plugins.plugins.map((plugin) => ({
+      id: plugin.id,
+      enabled: plugin.enabled,
+      source: plugin.source,
+      trusted: plugin.trusted,
+      permissions: plugin.permissions,
+      contributions: plugin.contributions,
+    })),
+  };
 }
 
 function createCacheFreshness(input: {
@@ -4264,6 +5038,15 @@ function formatHelp(language: Language): string {
   /model route set <role> <model>  Set one role route
   /vision <path>        Record VisionObservation evidence through vision role
   /image generate <prompt> Generate image asset metadata through image role
+  /skills               List local skills metadata summaries
+  /skills add           Show local skill registration paths
+  /skills enable|disable <id> Persist local skill enablement
+  /workflows            List workflow templates, risks, write/validation hints
+  /workflows <name>     Show Start Gate for one workflow
+  /plugins              List local plugin manifests and contributions
+  /plugins doctor       Diagnose plugin trust, permissions, and load errors
+  /plugins enable|disable <id> Persist local plugin enablement
+  /doctor hooks         Diagnose hook sources, events, timeout, logs, and cache impact
   /sessions             List sessions
   /sessions resume <id> Resume a session using structured handoff
   /resume [id]          Resume latest or selected session without full transcript injection
@@ -4332,6 +5115,16 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /model route set <role> <model>  设置单个角色路由
   /vision <path>        通过 vision role 记录 VisionObservation evidence
   /image generate <prompt>  通过 image role 生成本地资产 metadata
+  /skills               列出本地 skill metadata 摘要
+  /skills add           显示本地 skill 注册路径
+  /skills enable <id>   启用并信任本地 skill
+  /skills disable <id>  禁用本地 skill，重启后保留
+  /workflows            列出 workflow 模板、风险、写文件和验证提示
+  /workflows <name>     展示单个 workflow 的 Start Gate
+  /plugins              列出本地 plugin manifest 与贡献项
+  /plugins doctor       诊断 plugin 信任、权限和加载错误
+  /plugins enable|disable <id> 持久化启停 plugin
+  /doctor hooks         诊断 hook 来源、事件、timeout、日志和 cache 影响
   /sessions             列出当前项目会话
   /sessions resume <id> 基于结构化 handoff 恢复历史会话
   /resume [id]          恢复最近或指定会话，不注入完整历史
@@ -5249,7 +6042,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 13 TUI / REPL",
+    appTitle: "{name} Phase 14 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -5277,7 +6070,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 13 TUI / REPL",
+    appTitle: "{name} Phase 14 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",
