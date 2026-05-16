@@ -3410,14 +3410,67 @@ function formatMemoryReview(context: TuiContext): string {
   ].join("\n");
 }
 
+function createLinghunMdTemplate(language: Language): string {
+  if (language === "en-US") {
+    return `# Project Rules
+
+## Purpose
+- LINGHUN.md records long-lived project rules, stable facts, common commands, and explicit constraints.
+- Keep this file concise so it can be loaded into context without adding unnecessary tokens.
+
+## What to write here
+- Stable engineering rules, validation commands, architecture boundaries, coding style, and project-specific do/don't items.
+- Facts that have been checked against code, index results, command output, or project documents.
+
+## What not to write here
+- Temporary plans, phase progress, full transcripts, large logs, raw index dumps, secrets, tokens, billing details, or private credentials.
+- Short-term handoff content belongs in structured handoff/todo/verification records, not in long-term rules.
+
+## Work rules
+- Prefer facts over guesses: read code, project index, documentation, or command results before making claims.
+- Natural-language commands do not bypass Start Gate or permission approval.
+- Writing files, Bash, network access, dependency installation, and permission/config changes require explicit user confirmation.
+- Long-term memory is candidate-first by default; do not auto-write it without user review and acceptance.
+- After code changes, run the smallest project-approved validation that covers the touched area.
+- Do not paste full transcripts, huge logs, large index results, or full memory stores back into model context.
+- Keep clean rewrite boundaries: reference public behavior and project docs, but do not copy suspicious or proprietary source.
+- Be friendly to Chinese and English projects; keep names, commands, and errors readable for both when practical.
+`;
+  }
+
+  return `# 项目规则
+
+## 用途
+- LINGHUN.md 记录项目长期稳定规则、稳定事实、常用命令和明确禁止事项。
+- 保持短小清晰，避免把完整文件塞进上下文造成 token 负担。
+
+## 应该写入
+- 稳定工程规则、验证命令、架构边界、代码风格、项目专属约定和禁止事项。
+- 已通过代码、项目索引、文档或命令结果确认过的事实。
+
+## 不应该写入
+- 临时计划、阶段进度、完整 transcript、大日志、原始索引结果、密钥、token、账单细节或私有凭据。
+- 短期交接内容应进入结构化 handoff、Todo 或验证记录，不要追加到长期规则。
+
+## 工作规则
+- 事实优先：先读代码、项目索引、文档或命令结果，再判断和下结论。
+- 自然语言命令不能绕过 Start Gate 或权限审批。
+- 写文件、Bash、联网、安装依赖、权限或配置变更，都必须先得到用户明确确认。
+- 长期记忆默认先生成候选，用户 review/accept 后再写入，不自动长期保存。
+- 改代码后运行项目认可的最小必要验证，覆盖本次改动范围。
+- 不要把完整 transcript、大日志、大索引结果或完整 memory 塞回模型上下文。
+- 遵守 clean rewrite：可参考公开行为和项目文档，不复制可疑或专有源码。
+- 中文友好，同时尽量保留中英文项目名、命令和错误信息的可读性。
+`;
+}
+
 async function initLinghunMd(context: TuiContext, output: Writable): Promise<void> {
   if (await pathExists(context.memory.projectRulesPath)) {
     context.memory.projectRulesExists = true;
     writeLine(output, `LINGHUN.md 已存在：${context.memory.projectRulesPath}`);
     return;
   }
-  const content =
-    "# Linghun Project Rules\n\n- 只记录长期稳定工程规则。\n- 不记录临时想法、阶段进度或短期计划；这些内容进入 HandoffPacket。\n- 修改代码后运行项目认可的最小验证。\n- 不要把密钥、完整聊天记录、大日志或完整索引写入长期记忆。\n";
+  const content = createLinghunMdTemplate(context.language);
   await writeFile(context.memory.projectRulesPath, content, "utf8");
   context.memory.projectRulesExists = true;
   context.memory.projectRulesSummary = summarizeProjectRules(content);

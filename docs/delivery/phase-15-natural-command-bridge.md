@@ -30,6 +30,7 @@
   - refresh/init、workflow、fork、高风险、写配置、权限管道等 gate 不接受普通“确认/yes”，必须输入 exact command；过期 gate 拒绝执行。
   - `bypass` 必须 `LINGHUN_ENABLE_BYPASS=1` 本地显式 opt-in；`auto` 必须 `LINGHUN_ENABLE_AUTO_PERMISSION=1` 表示本地 gate/classifier 可用；Plan approval 只确认方案边界，不授权所有工具。
   - 写文件、编辑、多处编辑、Bash、权限规则、bypass、force refresh、第三方启用、记忆接受/删除、rewind restore、hook/job/remote/dependency install 等自然语言不直通，只解释风险或进入权限管道。
+- LINGHUN.md template cleanup follow-up：`/memory init` 默认生成中文“项目规则”模板，覆盖长期规则用途、写入/不写入边界、事实优先、Start Gate/权限审批、候选记忆确认、最小验证、上下文裁剪、clean rewrite 和中英文可读性；已有 `LINGHUN.md` 继续只提示已存在，不静默覆盖。
 
 ## 使用方式
 
@@ -209,6 +210,14 @@ corepack pnpm exec linghun --help
 - `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
+
+本次 LINGHUN.md template cleanup follow-up 已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/index.test.ts`：通过，11 个测试文件、154 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm check`：通过，43 个文件检查通过。
+- `corepack pnpm build`：通过，workspace 7 个包构建通过。
+- 临时空项目 TUI smoke：通过；`/memory init` 生成中文“项目规则”模板，再次运行 `/memory init` 只提示 `LINGHUN.md 已存在`，`/memory` 显示截断摘要而非全文 dump。
 
 ## 性能结果
 

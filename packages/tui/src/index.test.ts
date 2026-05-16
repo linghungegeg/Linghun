@@ -607,7 +607,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/memory init", context, output);
 
     expect(output.text).toContain("已生成基础 LINGHUN.md");
-    expect(await readFile(join(project, "LINGHUN.md"), "utf8")).toContain("只记录长期稳定工程规则");
+    const template = await readFile(join(project, "LINGHUN.md"), "utf8");
+    expect(template).toContain("# 项目规则");
+    expect(template).toContain("事实优先：先读代码、项目索引、文档或命令结果");
+    expect(template).toContain("自然语言命令不能绕过 Start Gate 或权限审批");
+    expect(template).toContain("长期记忆默认先生成候选");
+    expect(template).not.toContain("# Linghun Project Rules");
   });
 
   it("enforces plan permissions and records recent denials", async () => {

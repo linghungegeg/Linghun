@@ -1908,6 +1908,7 @@ export type HandoffPacket = {
 - `/memory storage` 必须能解释每类记忆当前写在哪里。
 - 迁移项目时，项目级记忆必须能随项目目录一起迁移。
 - `LINGHUN.md` 只保存长期稳定事实、工程规则、常用命令和禁止事项。
+- `/memory init` 生成的默认 `LINGHUN.md` 应使用中文友好的“项目规则”模板，覆盖用途、写入/不写入边界、事实优先、Start Gate/权限审批、候选记忆确认、最小验证、上下文裁剪、clean rewrite 和中英文可读性；模板必须短小，避免增加不必要 token 负担。
 - Linghun 产品运行时的项目规则主入口是项目根目录 `LINGHUN.md`；`AGENTS.md` / `CLAUDE.md` 仅作为兼容导入或迁移来源，不能覆盖用户明确维护的 `LINGHUN.md`。
 - 临时想法、阶段进度、短期计划必须写入 `HandoffPacket`，不得无限追加到 `LINGHUN.md`。
 - `HandoffPacket` 是新会话、自动任务、`/resume`、`/branch` 和 `/fork` 的结构化交接契约，不是自由文本摘要。
