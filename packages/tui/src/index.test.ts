@@ -109,6 +109,7 @@ function createTestContext(
     memory: {
       projectRulesPath: join(project, "LINGHUN.md"),
       projectRulesExists: false,
+      projectRulesSummary: "missing",
       projectDir: join(project, ".linghun", "memory"),
       userDir: join(project, ".user-memory"),
       sessionDir: join(project, ".linghun", "memory", "session"),
@@ -197,6 +198,36 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("changedKeys: memoryHash");
     expect(output.text).toContain("已创建分支会话");
     expect(output.text).toContain("禁止事项");
+  });
+
+  it("loads LINGHUN.md stable summary into resume and freshness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "LINGHUN.md"),
+      `${"长期稳定项目规则 ".repeat(80)}\n- 不要把完整规则文件塞进 prompt/status。`,
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const loaded = await createMemoryState(defaultConfig, project);
+    const context = createTestContext(project, store, session);
+    context.memory = loaded;
+
+    await handleSlashCommand("/memory", context, output);
+    await handleSlashCommand("/break-cache status", context, output);
+    await handleSlashCommand("/resume", context, output);
+
+    expect(loaded.projectRulesExists).toBe(true);
+    expect(loaded.projectRulesSummary).toContain("长期稳定项目规则");
+    expect(loaded.projectRulesSummary.length).toBeLessThan(700);
+    expect(output.text).toContain("projectRulesSummary");
+    expect(output.text).toContain("projectRulesHash");
+    expect(output.text).toMatch(/changedKeys: .*projectRulesHash/);
+    expect(output.text).toContain("projectRules:");
+    expect(output.text).not.toContain(
+      "长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则",
+    );
   });
 
   it("loads accepted memory from disk and uses it in memory freshness", async () => {

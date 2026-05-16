@@ -24,7 +24,8 @@
   - 本阶段没有实现 Phase 12 `/fork` agent。
 - `LINGHUN.md` 项目规则：
   - 启动时检测项目根目录 `LINGHUN.md`。
-  - 缺失时给 CCB 风格轻提示，不打断输入。
+  - Follow-up hardening：读取 `LINGHUN.md` 的稳定规则摘要，并截断后接入 `/memory`、`/resume` context package 与 `projectRulesHash` freshness。
+  - 缺失或读取失败时给 CCB 风格轻提示，不自动生成、不打断输入。
   - `/memory init` 显式生成基础模板。
   - 模板明确：`LINGHUN.md` 只保存长期稳定工程规则，不保存临时想法、阶段进度或短期计划。
 - 记忆闭环：
@@ -39,8 +40,9 @@
   - 支持 `storage.userData`、`storage.sessions`、`storage.memory.user`、`storage.logs`、`storage.jobs`、`storage.cache` 等配置结构；未单独配置时继承用户数据根目录或项目 `.linghun/`。
   - CLI `sessions` 命令改为通过 `resolveStoragePaths(config).sessions` 获取路径。
 - 索引和记忆联动：
-  - `memoryHash` 接入 `CacheFreshness`，由 `LINGHUN.md` 是否存在、候选/已接收记忆短摘要和最近 handoff 时间组成。
-  - memory/handoff/LINGHUN.md 变化会进入 freshness，`/break-cache status` 可看到 `memoryHash` changedKeys。
+  - `projectRulesHash` 接入 `CacheFreshness`，基于截断后的 `LINGHUN.md` 稳定摘要变化，而不是只看 found/missing。
+  - `memoryHash` 接入 `CacheFreshness`，由 `LINGHUN.md` 稳定摘要、候选/已接收记忆短摘要和最近 handoff 时间组成。
+  - memory/handoff/LINGHUN.md 变化会进入 freshness，`/break-cache status` 可看到 `projectRulesHash` / `memoryHash` changedKeys。
   - 恢复时如果索引 stale/missing，会提示 `/index status` 或 `/index refresh`，但不自动刷新。
   - 不把完整索引、完整 handoff、完整 memory 或完整 transcript dump 到主输出。
 - AI sessions / 跨工具导入基础：
@@ -104,8 +106,8 @@ Phase 11 新增/增强命令：
 - `packages/config/src/index.ts`：新增 `StorageConfig`、`resolveStoragePaths()`、`LINGHUN_DATA_DIR` 用户数据根目录解析。
 - `packages/config/src/index.test.ts`：覆盖 Phase 11 存储默认路径。
 - `packages/core/src/session.ts`：扩展 transcript event，记录 handoff、memory candidate/accepted、branch、session import。
-- `packages/tui/src/index.ts`：新增 `HandoffPacket`、`MemoryState`、`/resume`、`/branch`、`/memory*`、`LINGHUN.md` 检测、memoryHash freshness、恢复上下文裁剪。
-- `packages/tui/src/index.test.ts`：覆盖 help 可发现性、结构化恢复、memory accept、LINGHUN.md init、memoryHash changedKeys。
+- `packages/tui/src/index.ts`：新增 `HandoffPacket`、`MemoryState`、`/resume`、`/branch`、`/memory*`、`LINGHUN.md` 检测与稳定摘要加载、projectRulesHash / memoryHash freshness、恢复上下文裁剪。
+- `packages/tui/src/index.test.ts`：覆盖 help 可发现性、结构化恢复、memory accept、LINGHUN.md init、LINGHUN.md 摘要加载、projectRulesHash / memoryHash changedKeys。
 - `apps/cli/src/cli.ts`：更新 Phase 11 help，并让 sessions 路径走 `resolveStoragePaths()`。
 - `apps/cli/src/main.test.ts`：更新 CLI help 回归。
 - `docs/delivery/README.md`：Phase 11 标记为 done。
@@ -119,7 +121,7 @@ Phase 11 新增/增强命令：
 - 记忆候选机制：长期记忆必须先进入 candidate，再由 `/memory accept <id>` 显式写入。默认不自动写用户级或项目级长期记忆。
 - 长短分层：长期稳定工程规则进 `LINGHUN.md` 或 memory；临时想法、阶段进度、短期计划进入 handoff packet。
 - 存储可迁移：用户级路径统一通过 `LINGHUN_DATA_DIR` / `storage.*` 解析，项目级路径在 `.linghun/` 下，避免硬编码 C 盘或固定用户名。
-- cache 保护：`memoryHash` 使用短摘要和 handoff 时间，不把完整 memory / handoff 放进 freshness 或状态栏。
+- cache 保护：`projectRulesHash` / `memoryHash` 使用截断后的规则/记忆短摘要和 handoff 时间，不把完整 LINGHUN.md / memory / handoff 放进 freshness 或状态栏。
 - AI sessions 最小入口：本阶段只预留/记录摘要与候选，不抓取敏感原文，不承诺全自动接管所有工具对话。
 
 ## 配置项
@@ -224,6 +226,7 @@ printf '/memory\n/memory storage\n/memory candidate stable-rule\n/memory review\
 - `corepack pnpm exec linghun --help`：通过，显示 Phase 11 帮助与快速路径说明。
 - TUI smoke：`/memory`、`/memory storage`、`/memory candidate`、`/memory review`、`/resume`、`/branch`、`/index status`、`/cache status`、`/break-cache status`、`/exit` 通过；输出包含 memory storage、结构化 resume、只读降级提示、branch session、index stale 提示与 `memoryHash` changedKeys。
 - Hardening focused tests：`corepack pnpm test -- --run packages/tui/src/index.test.ts` 通过；新增覆盖 accepted memory 落盘后新 context 加载、`memoryHash` 包含已加载 accepted memory、handoff identity 字段与 branch `parentSessionId` / source session。
+- Follow-up focused tests：补充覆盖 `LINGHUN.md` 稳定摘要加载、摘要截断、`/resume` context package 引用规则摘要，以及 `/break-cache status` 的 `projectRulesHash` changedKeys。
 
 ## 性能结果
 
@@ -231,7 +234,7 @@ printf '/memory\n/memory storage\n/memory candidate stable-rule\n/memory review\
 - `/memory`、`/memory storage`、`/memory review` 为本地状态/路径格式化，不调用模型。
 - `/resume` 只读取目标会话 JSONL 并抽取摘要事件，不把完整 transcript 放回模型上下文。
 - `/branch` 只创建普通 Session 和 handoff 事件，不启动 agent 或后台任务。
-- `memoryHash` 使用候选/已接受 memory 短摘要和 handoff 时间，不写入完整 memory / handoff / transcript。
+- `projectRulesHash` 使用截断后的 `LINGHUN.md` 稳定摘要，`memoryHash` 使用候选/已接受 memory 短摘要和 handoff 时间，不写入完整 LINGHUN.md / memory / handoff / transcript。
 - 状态栏继续限制为短字段。
 
 ## 已知问题

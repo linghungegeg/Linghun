@@ -257,6 +257,8 @@ export type MemoryCandidate = {
 export type MemoryState = {
   projectRulesPath: string;
   projectRulesExists: boolean;
+  projectRulesSummary: string;
+  projectRulesError?: string;
   projectDir: string;
   userDir: string;
   sessionDir: string;
@@ -341,6 +343,8 @@ const LARGE_INDEX_RISK_DIRS = new Set([
   "venv",
 ]);
 const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
+const PROJECT_RULES_SUMMARY_WIDTH = 600;
+const PROJECT_RULES_STATUS_WIDTH = 160;
 
 export function createCacheState(
   projectPath: string,
@@ -414,15 +418,43 @@ export async function createMemoryState(
 ): Promise<MemoryState> {
   const paths = resolveStoragePaths(config, projectPath);
   const projectRulesPath = join(projectPath, "LINGHUN.md");
+  const projectRules = await loadProjectRulesSummary(projectRulesPath);
   return {
     projectRulesPath,
-    projectRulesExists: await pathExists(projectRulesPath),
+    projectRulesExists: projectRules.exists,
+    projectRulesSummary: projectRules.summary,
+    ...(projectRules.error ? { projectRulesError: projectRules.error } : {}),
     projectDir: paths.memoryProject,
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
     candidates: [],
     accepted: await loadAcceptedMemory(paths.memoryProject, paths.memoryUser),
   };
+}
+
+async function loadProjectRulesSummary(
+  path: string,
+): Promise<{ exists: boolean; summary: string; error?: string }> {
+  try {
+    const content = await readFile(path, "utf8");
+    return { exists: true, summary: summarizeProjectRules(content) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return { exists: false, summary: "missing" };
+    }
+    return { exists: false, summary: "unreadable", error: formatError(error) };
+  }
+}
+
+function summarizeProjectRules(content: string): string {
+  const normalized = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(" ")
+    .replace(/\s+/g, " ");
+  return truncateDisplay(normalized || "empty", PROJECT_RULES_SUMMARY_WIDTH);
 }
 
 async function loadAcceptedMemory(projectDir: string, userDir: string): Promise<MemoryCandidate[]> {
@@ -1335,7 +1367,7 @@ async function resumeSessionWithHandoff(
     context.memory.lastResumeReadonly = missing.length > 0;
     writeLine(output, `已恢复会话：${resumed.session.id}`);
     writeLine(output, `恢复方式：${source}；不会把完整 transcript 塞回上下文。`);
-    writeLine(output, formatResumePacket(packet, missing));
+    writeLine(output, formatResumePacket(packet, missing, context));
     if (context.index.status === "stale" || context.index.status === "missing") {
       writeLine(
         output,
@@ -1493,9 +1525,20 @@ function isHandoffPacket(value: unknown): value is HandoffPacket {
   );
 }
 
-function formatResumePacket(packet: HandoffPacket, missing: string[]): string {
+function formatProjectRulesContext(context: TuiContext): string {
+  if (context.memory.projectRulesError) {
+    return "unreadable; 可检查文件权限或运行 /memory storage 定位路径";
+  }
+  if (!context.memory.projectRulesExists) {
+    return "missing; 可运行 /memory init 生成基础模板，不会自动生成";
+  }
+  return truncateDisplay(context.memory.projectRulesSummary, PROJECT_RULES_STATUS_WIDTH);
+}
+
+function formatResumePacket(packet: HandoffPacket, missing: string[], context: TuiContext): string {
   return [
     "Resume context package（摘要，不含完整历史）：",
+    `- projectRules: ${formatProjectRulesContext(context)}`,
     `- currentPhase: ${packet.currentPhase}`,
     `- phaseStatus: ${packet.phaseStatus}`,
     `- goal: ${packet.goal}`,
@@ -1505,6 +1548,9 @@ function formatResumePacket(packet: HandoffPacket, missing: string[]): string {
     `- verification: ${packet.verification?.status ?? "missing"}`,
     `- indexStatus: ${packet.indexStatus.status}`,
     `- readonly: ${missing.length > 0 ? `yes (${missing.join(", ")})` : "no"}`,
+    context.memory.projectRulesError
+      ? `- projectRules warning: ${context.memory.projectRulesError}`
+      : "- projectRules warning: none",
     missing.length > 0
       ? "- 下一步：补齐 handoff 关键字段或先只读检查 /index status、/memory review、/verify last。"
       : "- 下一步：可基于摘要、Todo、证据和关键文件继续。",
@@ -1549,15 +1595,18 @@ function formatMemoryStatus(context: TuiContext): string {
   return [
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}`,
+    `- projectRulesSummary: ${formatProjectRulesContext(context)}`,
     `- candidates: ${context.memory.candidates.length}`,
     `- accepted: ${context.memory.accepted.length}`,
     ...context.memory.accepted
       .slice(0, 5)
       .map((item) => `  - ${item.id} [${item.scope}] ${item.summary}`),
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
-    context.memory.projectRulesExists
-      ? "- note: LINGHUN.md 只用于长期稳定工程规则。"
-      : "- hint: 缺少 LINGHUN.md。可运行 /memory init 生成基础模板；不会打断输入。",
+    context.memory.projectRulesError
+      ? "- hint: LINGHUN.md 读取失败；可运行 /memory storage 定位路径，不会自动生成或打断输入。"
+      : context.memory.projectRulesExists
+        ? "- note: LINGHUN.md 只用于长期稳定工程规则；这里只显示截断摘要。"
+        : "- hint: 缺少 LINGHUN.md。可运行 /memory init 生成基础模板；不会打断输入。",
   ].join("\n");
 }
 
@@ -1608,6 +1657,8 @@ async function initLinghunMd(context: TuiContext, output: Writable): Promise<voi
     "# Linghun Project Rules\n\n- 只记录长期稳定工程规则。\n- 不记录临时想法、阶段进度或短期计划；这些内容进入 HandoffPacket。\n- 修改代码后运行项目认可的最小验证。\n- 不要把密钥、完整聊天记录、大日志或完整索引写入长期记忆。\n";
   await writeFile(context.memory.projectRulesPath, content, "utf8");
   context.memory.projectRulesExists = true;
+  context.memory.projectRulesSummary = summarizeProjectRules(content);
+  context.memory.projectRulesError = undefined;
   refreshCacheFreshness(context);
   writeLine(output, `已生成基础 LINGHUN.md：${context.memory.projectRulesPath}`);
 }
@@ -2324,16 +2375,25 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     model: context.model,
     provider: "deepseek",
     reasoningEffort: "default",
-    projectRules: "CLAUDE.md project rules",
+    projectRules: createProjectRulesFreshnessSummary(context),
     memory: createMemoryFreshnessSummary(context),
     compact: context.cache.compacted ? "compacted" : "not compacted",
     plugins: [],
   });
 }
 
+function createProjectRulesFreshnessSummary(context: TuiContext): string {
+  return stableStringify({
+    path: normalizePath(context.memory.projectRulesPath),
+    exists: context.memory.projectRulesExists,
+    summary: context.memory.projectRulesSummary,
+    error: context.memory.projectRulesError ? "unreadable" : "none",
+  });
+}
+
 function createMemoryFreshnessSummary(context: TuiContext): string {
   return stableStringify({
-    projectRules: context.memory.projectRulesExists ? "LINGHUN.md" : "missing",
+    projectRules: context.memory.projectRulesSummary,
     candidates: context.memory.candidates.map((item) => ({
       id: item.id,
       scope: item.scope,
