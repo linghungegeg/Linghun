@@ -15,7 +15,7 @@
 | Phase 08 | done | [phase-08-verification.md](./phase-08-verification.md) | 代码自检与验证增强闭环 |
 | Phase 09 | done | [phase-09-cache-cost.md](./phase-09-cache-cost.md) | 缓存与成本闭环 |
 | Phase 10 | done | [phase-10-mcp-index.md](./phase-10-mcp-index.md) | MCP 与 codebase-memory 闭环 |
-| Phase 11 | pending | phase-11-sessions-memory.md | 会话交接与记忆闭环 |
+| Phase 11 | done | [phase-11-sessions-memory.md](./phase-11-sessions-memory.md) | 会话交接与记忆闭环 |
 | Phase 12 | pending | phase-12-agents.md | Agent 闭环 |
 | Phase 13 | pending | phase-13-multi-model.md | 多模型协作闭环 |
 | Phase 14 | pending | phase-14-skills-workflow.md | Skills 与工作流闭环 |

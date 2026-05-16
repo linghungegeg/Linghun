@@ -9,7 +9,7 @@ import {
 } from "node:process";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
-import { type LinghunConfig, getSessionRootDir, loadConfig } from "@linghun/config";
+import { type LinghunConfig, loadConfig, resolveStoragePaths } from "@linghun/config";
 import {
   type CacheFreshness,
   type CacheTurnStats,
@@ -216,6 +216,56 @@ export type IndexState = {
   lastSummary?: string;
 };
 
+export type HandoffPacket = {
+  id: string;
+  sessionId: string;
+  projectPath: string;
+  parentSessionId?: string;
+  currentPhase: string;
+  nextPhase: string;
+  phaseStatus: "pending" | "in_progress" | "completed" | "blocked";
+  goal: string;
+  completed: string[];
+  pending: string[];
+  mustNotDo: string[];
+  todos: TodoItem[];
+  keyFiles: string[];
+  changedFiles: string[];
+  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  verification: VerificationReport | null;
+  risks: string[];
+  indexStatus: Pick<
+    IndexState,
+    "projectName" | "status" | "nodes" | "edges" | "changedFiles" | "staleHint"
+  >;
+  permissionMode: PermissionMode;
+  modelProvider: { provider: string; model: string };
+  recentCommit: string;
+  budgetUsage: string;
+  createdAt: string;
+  generatedBy: string;
+};
+
+export type MemoryCandidate = {
+  id: string;
+  scope: "project" | "user";
+  summary: string;
+  source: string;
+  createdAt: string;
+};
+
+export type MemoryState = {
+  projectRulesPath: string;
+  projectRulesExists: boolean;
+  projectDir: string;
+  userDir: string;
+  sessionDir: string;
+  candidates: MemoryCandidate[];
+  accepted: MemoryCandidate[];
+  lastHandoff?: HandoffPacket;
+  lastResumeReadonly?: boolean;
+};
+
 type MessageKey =
   | "appTitle"
   | "intro"
@@ -259,6 +309,7 @@ export type TuiContext = {
   cache: CacheState;
   mcp: McpState;
   index: IndexState;
+  memory: MemoryState;
   lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
@@ -297,13 +348,13 @@ export function createCacheState(
   mcpToolList: McpToolState[] = [],
 ): CacheState {
   const freshness = createCacheFreshness({
-    systemPrompt: "Linghun Phase 10 engineering assistant",
+    systemPrompt: "Linghun Phase 11 engineering assistant",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
     provider: "deepseek",
     projectRules: "local CLAUDE.md rules loaded by harness",
-    memory: "session-local memory not implemented until Phase 11",
+    memory: "Phase 11 memory/handoff not loaded yet",
     compact: "not compacted",
     plugins: [],
   });
@@ -357,13 +408,87 @@ export function createIndexState(config: LinghunConfig): IndexState {
   };
 }
 
+export async function createMemoryState(
+  config: LinghunConfig,
+  projectPath: string,
+): Promise<MemoryState> {
+  const paths = resolveStoragePaths(config, projectPath);
+  const projectRulesPath = join(projectPath, "LINGHUN.md");
+  return {
+    projectRulesPath,
+    projectRulesExists: await pathExists(projectRulesPath),
+    projectDir: paths.memoryProject,
+    userDir: paths.memoryUser,
+    sessionDir: paths.memorySession,
+    candidates: [],
+    accepted: await loadAcceptedMemory(paths.memoryProject, paths.memoryUser),
+  };
+}
+
+async function loadAcceptedMemory(projectDir: string, userDir: string): Promise<MemoryCandidate[]> {
+  const [projectMemory, userMemory] = await Promise.all([
+    loadAcceptedMemoryDir(projectDir),
+    loadAcceptedMemoryDir(userDir),
+  ]);
+  return [...projectMemory, ...userMemory].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function loadAcceptedMemoryDir(directory: string): Promise<MemoryCandidate[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return [];
+  }
+
+  const memory = await Promise.all(
+    entries
+      .filter((entry) => entry.endsWith(".json"))
+      .map(async (entry) => readMemoryCandidate(join(directory, entry))),
+  );
+  return memory.filter((item): item is MemoryCandidate => item !== null);
+}
+
+async function readMemoryCandidate(path: string): Promise<MemoryCandidate | null> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    if (!isMemoryCandidate(value)) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function isMemoryCandidate(value: unknown): value is MemoryCandidate {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (value.scope === "project" || value.scope === "user") &&
+    typeof value.summary === "string" &&
+    typeof value.source === "string" &&
+    typeof value.createdAt === "string"
+  );
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const input = options.stdin ?? defaultStdin;
   const output = options.stdout ?? defaultStdout;
   const errorOutput = options.stderr ?? defaultStderr;
   const projectPath = options.projectPath ?? process.cwd();
   const config = await loadConfig(projectPath);
-  const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath });
+  const storagePaths = resolveStoragePaths(config, projectPath);
+  const store = new SessionStore({ sessionRootDir: storagePaths.sessions, projectPath });
   const context: TuiContext = {
     store,
     model: config.providers.deepseek.model,
@@ -379,6 +504,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     cache: createCacheState(projectPath, config.providers.deepseek.model),
     mcp: createMcpState(config),
     index: createIndexState(config),
+    memory: await createMemoryState(config, projectPath),
     interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
@@ -392,6 +518,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
   writeStatus(output, context);
   writeLine(output, `${t(context, "intro")}\n`);
+  if (!context.memory.projectRulesExists) {
+    writeLine(
+      output,
+      "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
+    );
+  }
 
   try {
     for await (const line of readInputLines(input, output)) {
@@ -504,6 +636,18 @@ export async function handleSlashCommand(
     await handleIndexCommand(rest, context, output);
     return "handled";
   }
+  if (command === "/resume") {
+    await handleResumeCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/branch") {
+    await handleBranchCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/memory") {
+    await handleMemoryCommand(rest, context, output);
+    return "handled";
+  }
   if (command === "/usage") {
     writeLine(output, formatUsage(context));
     return "handled";
@@ -527,17 +671,7 @@ export async function handleSlashCommand(
         writeLine(output, "用法：/sessions resume <id>");
         return "handled";
       }
-      try {
-        const resumed = await context.store.resume(sessionId);
-        context.sessionId = resumed.session.id;
-        context.sessionEnded = isSessionEnded(resumed.transcript);
-        context.model = resumed.session.model;
-        writeLine(output, `已恢复会话：${resumed.session.id}`);
-        writeLine(output, `消息数：${resumed.transcript.length}`);
-        writeStatus(output, context);
-      } catch (error) {
-        writeLine(output, formatError(error));
-      }
+      await resumeSessionWithHandoff(sessionId, context, output, "sessions resume");
       return "handled";
     }
 
@@ -1022,6 +1156,486 @@ async function handleMcpCommand(
     return;
   }
   writeLine(output, "用法：/mcp | /mcp status | /mcp tools | /mcp doctor");
+}
+
+async function handleResumeCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sessionId = args[0] ?? (await context.store.list())[0]?.id;
+  if (!sessionId) {
+    writeLine(output, "还没有可恢复会话。下一步：先正常对话，或用 /sessions 查看历史。");
+    return;
+  }
+  await resumeSessionWithHandoff(sessionId, context, output, "resume");
+}
+
+async function handleBranchCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const purpose = args.join(" ").trim() || "试验分支会话";
+  const parentSessionId = context.sessionId ?? "none";
+  const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
+  const branch = await context.store.create({
+    model: context.model,
+    summary: `branch from ${parentSessionId}: ${purpose}`,
+  });
+  const branchPacket: HandoffPacket = {
+    ...packet,
+    id: randomUUID(),
+    sessionId: branch.id,
+    projectPath: context.projectPath,
+    parentSessionId,
+    createdAt: new Date().toISOString(),
+  };
+  const missing = validateHandoffPacket(branchPacket);
+  context.memory.lastHandoff = branchPacket;
+  context.sessionId = branch.id;
+  context.sessionEnded = false;
+  await writeHandoffPacket(context, branchPacket);
+  await context.store.appendEvent(branch.id, {
+    type: "branch_created",
+    branch: {
+      id: branch.id,
+      parentSessionId,
+      sourceSession: parentSessionId,
+      purpose,
+      permissionMode: context.permissionMode,
+      mustNotDo: branchPacket.mustNotDo,
+      handoffReadonly: missing.length > 0,
+    },
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(branch.id, {
+    type: "handoff_packet",
+    packet: branchPacket,
+    createdAt: new Date().toISOString(),
+  });
+  writeLine(output, `已创建分支会话：${branch.id}`);
+  writeLine(output, `来源 session：${parentSessionId}`);
+  writeLine(output, `目的：${purpose}`);
+  writeLine(
+    output,
+    `权限边界：${context.permissionMode}；禁止事项：${branchPacket.mustNotDo.join("；")}`,
+  );
+  if (missing.length > 0) {
+    writeLine(output, `handoff 缺少关键字段，分支按只读恢复：${missing.join(", ")}`);
+  }
+  refreshCacheFreshness(context);
+  writeStatus(output, context);
+}
+
+async function handleMemoryCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status" || action === "list") {
+    writeLine(output, formatMemoryStatus(context));
+    return;
+  }
+  if (action === "storage") {
+    writeLine(output, formatMemoryStorage(context));
+    return;
+  }
+  if (action === "review") {
+    writeLine(output, formatMemoryReview(context));
+    return;
+  }
+  if (action === "candidate") {
+    const summary = args.slice(1).join(" ").trim();
+    if (!summary) {
+      writeLine(output, "用法：/memory candidate <短小稳定记忆摘要>");
+      return;
+    }
+    const candidate = createMemoryCandidate("project", summary, "manual /memory candidate");
+    context.memory.candidates.unshift(candidate);
+    const sessionId = await ensureSession(context);
+    await context.store.appendEvent(sessionId, {
+      type: "memory_candidate",
+      candidate,
+      createdAt: new Date().toISOString(),
+    });
+    refreshCacheFreshness(context);
+    writeLine(
+      output,
+      `已创建候选记忆：${candidate.id}。写入长期记忆前请运行 /memory review 和 /memory accept ${candidate.id}`,
+    );
+    return;
+  }
+  if (action === "accept") {
+    const id = args[1];
+    const candidate = context.memory.candidates.find((item) => item.id === id);
+    if (!candidate) {
+      writeLine(output, "未找到候选记忆。用法：/memory accept <candidate-id>");
+      return;
+    }
+    await acceptMemoryCandidate(candidate, context);
+    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
+    context.memory.accepted.unshift(candidate);
+    const sessionId = await ensureSession(context);
+    await context.store.appendEvent(sessionId, {
+      type: "memory_accepted",
+      memory: candidate,
+      createdAt: new Date().toISOString(),
+    });
+    refreshCacheFreshness(context);
+    writeLine(
+      output,
+      `已写入${candidate.scope === "project" ? "项目" : "用户"}级长期记忆：${candidate.id}`,
+    );
+    return;
+  }
+  if (action === "delete") {
+    const id = args[1];
+    const before = context.memory.candidates.length + context.memory.accepted.length;
+    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
+    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== id);
+    refreshCacheFreshness(context);
+    writeLine(
+      output,
+      before === context.memory.candidates.length + context.memory.accepted.length
+        ? "未找到该记忆。"
+        : `已删除本会话中的记忆记录：${id}`,
+    );
+    return;
+  }
+  if (action === "init") {
+    await initLinghunMd(context, output);
+    return;
+  }
+  if (action === "import" && args[1] === "sessions") {
+    await importAiSessions(args.slice(2), context, output);
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/memory | /memory storage | /memory review | /memory candidate <摘要> | /memory accept <id> | /memory delete <id> | /memory init | /memory import sessions [source] [query]",
+  );
+}
+
+async function resumeSessionWithHandoff(
+  sessionId: string,
+  context: TuiContext,
+  output: Writable,
+  source: "resume" | "sessions resume",
+): Promise<void> {
+  try {
+    const resumed = await context.store.resume(sessionId);
+    context.sessionId = resumed.session.id;
+    context.sessionEnded = isSessionEnded(resumed.transcript);
+    context.model = resumed.session.model;
+    hydrateResumeContext(context, resumed.transcript);
+    const packet = context.memory.lastHandoff ?? createHandoffPacket(context, resumed.transcript);
+    const missing = validateHandoffPacket(packet);
+    context.memory.lastResumeReadonly = missing.length > 0;
+    writeLine(output, `已恢复会话：${resumed.session.id}`);
+    writeLine(output, `恢复方式：${source}；不会把完整 transcript 塞回上下文。`);
+    writeLine(output, formatResumePacket(packet, missing));
+    if (context.index.status === "stale" || context.index.status === "missing") {
+      writeLine(
+        output,
+        "索引不是 ready：建议先运行 /index status 或 /index refresh；不会自动刷新。 ",
+      );
+    }
+    writeStatus(output, context);
+  } catch (error) {
+    writeLine(output, formatError(error));
+  }
+}
+
+function hydrateResumeContext(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const latestTodo = [...transcript].reverse().find((event) => event.type === "todo_update");
+  if (latestTodo?.type === "todo_update") {
+    context.tools.todos = latestTodo.items.map((item) => ({ ...item }));
+  }
+  const latestVerification = [...transcript]
+    .reverse()
+    .find((event) => event.type === "verification_end");
+  if (latestVerification?.type === "verification_end") {
+    context.lastVerification = latestVerification.report as VerificationReport;
+  }
+  const evidence = transcript
+    .filter(
+      (event): event is Extract<TranscriptEvent, { type: "evidence_record" }> =>
+        event.type === "evidence_record",
+    )
+    .slice(-10)
+    .map((event) => ({
+      id: event.id,
+      kind: event.kind,
+      summary: event.summary,
+      source: event.source,
+      supportsClaims: event.supportsClaims,
+      createdAt: event.createdAt,
+    }));
+  context.evidence = [...evidence.reverse(), ...context.evidence].slice(0, 20);
+  const handoff = [...transcript].reverse().find((event) => event.type === "handoff_packet");
+  if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
+    context.memory.lastHandoff = handoff.packet;
+  }
+  refreshCacheFreshness(context);
+}
+
+async function loadOrCreateHandoffPacket(
+  context: TuiContext,
+  parentSessionId?: string,
+): Promise<HandoffPacket> {
+  if (context.memory.lastHandoff) {
+    return context.memory.lastHandoff;
+  }
+  const sessionId = await ensureSession(context);
+  const packet = createHandoffPacket(context, [], parentSessionId, sessionId);
+  context.memory.lastHandoff = packet;
+  await writeHandoffPacket(context, packet);
+  await context.store.appendEvent(sessionId, {
+    type: "handoff_packet",
+    packet,
+    createdAt: new Date().toISOString(),
+  });
+  return packet;
+}
+
+function createHandoffPacket(
+  context: TuiContext,
+  transcript: TranscriptEvent[],
+  parentSessionId?: string,
+  sessionId = context.sessionId ?? "uncreated",
+): HandoffPacket {
+  const latestEvidence = context.evidence.slice(0, 8).map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    source: item.source,
+    summary: item.summary,
+  }));
+  const transcriptTodos = [...transcript].reverse().find((event) => event.type === "todo_update");
+  const todos =
+    context.tools.todos.length > 0
+      ? context.tools.todos
+      : transcriptTodos?.type === "todo_update"
+        ? transcriptTodos.items
+        : [];
+  return {
+    id: randomUUID(),
+    sessionId,
+    projectPath: context.projectPath,
+    ...(parentSessionId ? { parentSessionId } : {}),
+    currentPhase: "Phase 11",
+    nextPhase: "Phase 12",
+    phaseStatus: "in_progress",
+    goal: "会话交接与记忆闭环：结构化 handoff、/resume、/branch、LINGHUN.md、memory storage 和 AI sessions 导入入口。",
+    completed: [],
+    pending: ["完成 Phase 11 验证与交付文档"],
+    mustNotDo: [
+      "不要进入 Phase 12+",
+      "不要复制完整历史聊天到新会话",
+      "不要自动写长期记忆",
+      "不要自动刷新索引",
+      "不要实现 Agent、多模型、Plugins、Hooks、长期任务或 Remote Channels",
+    ],
+    todos,
+    keyFiles: [
+      "packages/tui/src/index.ts",
+      "packages/config/src/index.ts",
+      "packages/core/src/session.ts",
+      "docs/delivery/phase-11-sessions-memory.md",
+    ],
+    changedFiles: [...new Set(context.tools.changedFiles)],
+    evidenceRefs: latestEvidence,
+    verification: context.lastVerification ?? null,
+    risks: context.lastVerification
+      ? context.lastVerification.risk
+      : ["尚未运行 Phase 11 完整验证"],
+    indexStatus: {
+      projectName: context.index.projectName,
+      status: context.index.status,
+      nodes: context.index.nodes,
+      edges: context.index.edges,
+      changedFiles: context.index.changedFiles,
+      staleHint: context.index.staleHint,
+    },
+    permissionMode: context.permissionMode,
+    modelProvider: { provider: "deepseek", model: context.model },
+    recentCommit: "unknown until git metadata is checked externally",
+    budgetUsage: "local usage only; no billing fields; status bar does not show money",
+    createdAt: new Date().toISOString(),
+    generatedBy: "Linghun Phase 11 HandoffPacket",
+  };
+}
+
+function validateHandoffPacket(packet: HandoffPacket): string[] {
+  const missing: string[] = [];
+  if (!packet.id) missing.push("id");
+  if (!packet.sessionId) missing.push("sessionId");
+  if (!packet.projectPath) missing.push("projectPath");
+  if (!packet.verification) missing.push("verification");
+  if (packet.evidenceRefs.length === 0) missing.push("evidenceRefs");
+  if (packet.mustNotDo.length === 0) missing.push("mustNotDo");
+  if (!packet.indexStatus.status || packet.indexStatus.status === "unknown")
+    missing.push("indexStatus");
+  return missing;
+}
+
+function isHandoffPacket(value: unknown): value is HandoffPacket {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.sessionId === "string" &&
+    typeof value.projectPath === "string" &&
+    typeof value.currentPhase === "string" &&
+    typeof value.nextPhase === "string" &&
+    Array.isArray(value.mustNotDo) &&
+    Array.isArray(value.evidenceRefs)
+  );
+}
+
+function formatResumePacket(packet: HandoffPacket, missing: string[]): string {
+  return [
+    "Resume context package（摘要，不含完整历史）：",
+    `- currentPhase: ${packet.currentPhase}`,
+    `- phaseStatus: ${packet.phaseStatus}`,
+    `- goal: ${packet.goal}`,
+    `- todos: ${packet.todos.length}`,
+    `- evidenceRefs: ${packet.evidenceRefs.length}`,
+    `- keyFiles: ${packet.keyFiles.join(", ")}`,
+    `- verification: ${packet.verification?.status ?? "missing"}`,
+    `- indexStatus: ${packet.indexStatus.status}`,
+    `- readonly: ${missing.length > 0 ? `yes (${missing.join(", ")})` : "no"}`,
+    missing.length > 0
+      ? "- 下一步：补齐 handoff 关键字段或先只读检查 /index status、/memory review、/verify last。"
+      : "- 下一步：可基于摘要、Todo、证据和关键文件继续。",
+  ].join("\n");
+}
+
+async function writeHandoffPacket(context: TuiContext, packet: HandoffPacket): Promise<void> {
+  await mkdir(context.memory.sessionDir, { recursive: true });
+  await writeFile(
+    join(context.memory.sessionDir, "handoff-latest.json"),
+    `${JSON.stringify(packet, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function createMemoryCandidate(
+  scope: "project" | "user",
+  summary: string,
+  source: string,
+): MemoryCandidate {
+  return {
+    id: randomUUID(),
+    scope,
+    summary: truncateDisplay(summary.replace(/\s+/g, " "), 240),
+    source,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+async function acceptMemoryCandidate(
+  candidate: MemoryCandidate,
+  context: TuiContext,
+): Promise<void> {
+  const directory =
+    candidate.scope === "project" ? context.memory.projectDir : context.memory.userDir;
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `${candidate.id}.json`);
+  await writeFile(path, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
+}
+
+function formatMemoryStatus(context: TuiContext): string {
+  return [
+    "Memory status",
+    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}`,
+    `- candidates: ${context.memory.candidates.length}`,
+    `- accepted: ${context.memory.accepted.length}`,
+    ...context.memory.accepted
+      .slice(0, 5)
+      .map((item) => `  - ${item.id} [${item.scope}] ${item.summary}`),
+    `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
+    context.memory.projectRulesExists
+      ? "- note: LINGHUN.md 只用于长期稳定工程规则。"
+      : "- hint: 缺少 LINGHUN.md。可运行 /memory init 生成基础模板；不会打断输入。",
+  ].join("\n");
+}
+
+function formatMemoryStorage(context: TuiContext): string {
+  const paths = resolveStoragePaths(context.config, context.projectPath);
+  return [
+    "Memory storage",
+    `- project rules: ${context.memory.projectRulesPath}`,
+    `- project memory: ${paths.memoryProject}`,
+    `- user memory: ${paths.memoryUser}`,
+    `- session memory/handoff: ${paths.memorySession}`,
+    `- sessions: ${paths.sessions}`,
+    `- logs: ${paths.logs}`,
+    `- jobs: ${paths.jobs}`,
+    `- cache: ${paths.cache}`,
+    `- index metadata: ${paths.index}`,
+    `- LINGHUN_DATA_DIR: ${process.env.LINGHUN_DATA_DIR ?? "not set; default user data is under ~/.linghun/data"}`,
+  ].join("\n");
+}
+
+function formatMemoryReview(context: TuiContext): string {
+  const accepted = context.memory.accepted.map(
+    (item) => `- accepted ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
+  );
+  if (context.memory.candidates.length === 0) {
+    return [
+      "Memory review：暂无候选记忆。可用 /memory candidate <短小稳定摘要> 创建候选；长期写入前必须 /memory accept。",
+      ...accepted,
+    ].join("\n");
+  }
+  return [
+    "Memory review（候选，不是长期记忆）",
+    ...context.memory.candidates.map(
+      (item) => `- candidate ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
+    ),
+    ...accepted,
+    "确认写入：/memory accept <id>；删除候选：/memory delete <id>",
+  ].join("\n");
+}
+
+async function initLinghunMd(context: TuiContext, output: Writable): Promise<void> {
+  if (await pathExists(context.memory.projectRulesPath)) {
+    context.memory.projectRulesExists = true;
+    writeLine(output, `LINGHUN.md 已存在：${context.memory.projectRulesPath}`);
+    return;
+  }
+  const content =
+    "# Linghun Project Rules\n\n- 只记录长期稳定工程规则。\n- 不记录临时想法、阶段进度或短期计划；这些内容进入 HandoffPacket。\n- 修改代码后运行项目认可的最小验证。\n- 不要把密钥、完整聊天记录、大日志或完整索引写入长期记忆。\n";
+  await writeFile(context.memory.projectRulesPath, content, "utf8");
+  context.memory.projectRulesExists = true;
+  refreshCacheFreshness(context);
+  writeLine(output, `已生成基础 LINGHUN.md：${context.memory.projectRulesPath}`);
+}
+
+async function importAiSessions(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const source = args[0] ?? "auto";
+  const query = args.slice(1).join(" ").trim() || basename(context.projectPath);
+  const summary = `AI sessions import requested: source=${source}, query=${query}. 当前 Linghun 最小入口只记录摘要和证据引用，不读取或保存敏感聊天原文；如 MCP bridge 不可用，请先配置 ai-sessions。`;
+  const sessionId = await ensureSession(context);
+  await context.store.appendEvent(sessionId, {
+    type: "session_import",
+    source,
+    summary,
+    createdAt: new Date().toISOString(),
+  });
+  const candidate = createMemoryCandidate(
+    "project",
+    `外部会话导入线索：${source} / ${query}`,
+    "AI sessions import summary",
+  );
+  context.memory.candidates.unshift(candidate);
+  refreshCacheFreshness(context);
+  writeLine(output, summary);
+  writeLine(output, `已创建候选记忆等待确认：${candidate.id}`);
 }
 
 async function handleIndexCommand(
@@ -1703,17 +2317,34 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
       context.language === "en-US"
-        ? "Linghun Phase 10 EN system prompt"
-        : "Linghun Phase 10 ZH system prompt",
+        ? "Linghun Phase 11 EN system prompt"
+        : "Linghun Phase 11 ZH system prompt",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
     provider: "deepseek",
     reasoningEffort: "default",
     projectRules: "CLAUDE.md project rules",
-    memory: "no Phase 11 memory injection",
+    memory: createMemoryFreshnessSummary(context),
     compact: context.cache.compacted ? "compacted" : "not compacted",
     plugins: [],
+  });
+}
+
+function createMemoryFreshnessSummary(context: TuiContext): string {
+  return stableStringify({
+    projectRules: context.memory.projectRulesExists ? "LINGHUN.md" : "missing",
+    candidates: context.memory.candidates.map((item) => ({
+      id: item.id,
+      scope: item.scope,
+      summary: item.summary,
+    })),
+    accepted: context.memory.accepted.map((item) => ({
+      id: item.id,
+      scope: item.scope,
+      summary: item.summary,
+    })),
+    handoffCreatedAt: context.memory.lastHandoff?.createdAt ?? "none",
   });
 }
 
@@ -1819,7 +2450,11 @@ function formatBreakCacheStatus(context: TuiContext): string {
   const current = getCurrentFreshness(context);
   const changed = diffFreshness(context.cache.lastFreshness, current);
   const keys =
-    changed.length > 0 ? changed : (context.cache.history.at(-1)?.freshness.changedKeys ?? []);
+    changed.length > 0
+      ? changed
+      : context.cache.lastFreshness?.changedKeys.length
+        ? context.cache.lastFreshness.changedKeys
+        : (context.cache.history.at(-1)?.freshness.changedKeys ?? []);
   return [
     "Break-cache status",
     `- systemPromptHash: ${current.systemPromptHash}`,
@@ -2425,8 +3060,8 @@ async function sendMessage(
       role: "system",
       content:
         context.language === "en-US"
-          ? "You are Linghun Phase 10 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 10 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 11 engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 11 的工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
@@ -2519,7 +3154,16 @@ function formatHelp(language: Language): string {
   /language zh-CN|en-US Switch UI language
   /model                Show current model
   /sessions             List sessions
-  /sessions resume <id> Resume a session
+  /sessions resume <id> Resume a session using structured handoff
+  /resume [id]          Resume latest or selected session without full transcript injection
+  /branch [purpose]     Create a normal branch session from structured handoff
+  /memory               Show memory and handoff status
+  /memory storage       Show sessions/memory/log/cache storage paths
+  /memory review        Review candidate memories before accepting
+  /memory accept <id>   Accept a candidate memory
+  /memory delete <id>   Delete a candidate memory in this session
+  /memory init          Create a basic LINGHUN.md template on explicit request
+  /memory import sessions [source] [query]  Import external AI session summary/evidence only
   /mode                 Show permission mode
   /mode plan|acceptEdits|dontAsk|auto|bypass|default  Switch mode
   /tab                  Shift+Tab equivalent: cycle common modes
@@ -2569,7 +3213,16 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
   /sessions             列出当前项目会话
-  /sessions resume <id> 恢复历史会话
+  /sessions resume <id> 基于结构化 handoff 恢复历史会话
+  /resume [id]          恢复最近或指定会话，不注入完整历史
+  /branch [目的]        基于结构化 handoff 创建普通分支会话
+  /memory               查看记忆与 handoff 状态
+  /memory storage       查看会话/记忆/日志/cache 存储路径
+  /memory review        审查候选记忆
+  /memory accept <id>   确认写入候选记忆
+  /memory delete <id>   删除本会话候选/已接收记忆记录
+  /memory init          显式生成基础 LINGHUN.md 模板
+  /memory import sessions [source] [query]  只导入外部 AI 会话摘要和证据引用
   /mode                 查看权限模式
   /mode plan|acceptEdits|dontAsk|auto|bypass|default  切换模式
   /tab                  等价 Shift+Tab：循环切换常用模式
@@ -3359,7 +4012,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 10 TUI / REPL",
+    appTitle: "{name} Phase 11 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -3387,7 +4040,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 10 TUI / REPL",
+    appTitle: "{name} Phase 11 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",

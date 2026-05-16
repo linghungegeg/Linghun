@@ -9,6 +9,7 @@ import {
   getSessionRootDir,
   getUserDataDir,
   loadConfig,
+  resolveStoragePaths,
   saveDefaultModel,
 } from "./index.js";
 
@@ -42,12 +43,17 @@ describe("config directories", () => {
     expect(raw).toContain("deepseek-v4-pro");
   });
 
-  it("loads Phase 10 MCP and index defaults", async () => {
+  it("loads Phase 11 storage, MCP, and index defaults", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     const config = await loadConfig(project);
+    const paths = resolveStoragePaths(config, project, "/tmp/home");
 
     expect(config.mcp.enabledServers).toContain("codebase-memory");
     expect(config.mcp.servers["codebase-memory"]?.command).toBeTruthy();
+    expect(config.storage.sessions.scope).toBe("user");
+    expect(paths.memoryProject.replaceAll("\\", "/")).toContain("/.linghun/memory");
+    expect(paths.memoryUser.replaceAll("\\", "/")).toBe("/tmp/home/.linghun/data/memory");
+    expect(paths.sessions.replaceAll("\\", "/")).toBe("/tmp/home/.linghun/data/sessions");
     expect(config.index.enabled).toBe(true);
     expect(config.index.mode).toBe("fast");
     expect(config.index.ignoreFile).toBe(".linghunignore");

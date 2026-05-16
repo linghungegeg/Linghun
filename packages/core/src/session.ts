@@ -265,6 +265,11 @@ export type TranscriptEvent =
       };
       createdAt: string;
     }
+  | { type: "handoff_packet"; packet: unknown; createdAt: string }
+  | { type: "memory_candidate"; candidate: unknown; createdAt: string }
+  | { type: "memory_accepted"; memory: unknown; createdAt: string }
+  | { type: "branch_created"; branch: unknown; createdAt: string }
+  | { type: "session_import"; source: string; summary: string; createdAt: string }
   | { type: "session_end"; sessionId: string; createdAt: string };
 
 export type SessionListItem = Pick<

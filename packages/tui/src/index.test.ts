@@ -12,6 +12,7 @@ import {
   createCacheState,
   createIndexState,
   createMcpState,
+  createMemoryState,
   handleSlashCommand,
   recordModelUsage,
 } from "./index.js";
@@ -105,6 +106,15 @@ function createTestContext(
     cache: createCacheState(project),
     mcp: createMcpState(config),
     index: createIndexState(config),
+    memory: {
+      projectRulesPath: join(project, "LINGHUN.md"),
+      projectRulesExists: false,
+      projectDir: join(project, ".linghun", "memory"),
+      userDir: join(project, ".user-memory"),
+      sessionDir: join(project, ".linghun", "memory", "session"),
+      candidates: [],
+      accepted: [],
+    },
     interrupt: { type: "idle" },
   };
 }
@@ -122,6 +132,11 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/sessions", context, output);
 
     expect(output.text).toContain("/sessions resume <id>");
+    expect(output.text).toContain("/resume [id]");
+    expect(output.text).toContain("/branch [目的]");
+    expect(output.text).toContain("/memory storage");
+    expect(output.text).toContain("/memory review");
+    expect(output.text).toContain("/memory accept <id>");
     expect(output.text).toContain("/cache-log config size <n>");
     expect(output.text).toContain("/cache-log export [path]");
     expect(output.text).toContain("/cache status");
@@ -140,7 +155,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(session.id);
   });
 
-  it("resumes a previous session", async () => {
+  it("resumes a previous session through structured handoff", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const current = await store.create({ model: "deepseek-v4-flash" });
@@ -153,6 +168,104 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.sessionId).toBe(previous.id);
     expect(context.model).toBe("deepseek-v4-pro");
     expect(output.text).toContain(`已恢复会话：${previous.id}`);
+    expect(output.text).toContain("不会把完整 transcript 塞回上下文");
+    expect(output.text).toContain("Resume context package");
+  });
+
+  it("handles Phase 11 memory, resume, branch, and cache freshness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/memory", context, output);
+    await handleSlashCommand("/memory storage", context, output);
+    await handleSlashCommand("/memory candidate 项目长期规则只保存稳定工程事实", context, output);
+    const candidateId = context.memory.candidates[0]?.id;
+    await handleSlashCommand("/memory review", context, output);
+    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    await handleSlashCommand("/break-cache status", context, output);
+    await handleSlashCommand("/resume", context, output);
+    await handleSlashCommand("/branch 试验另一种实现", context, output);
+
+    expect(output.text).toContain("缺少 LINGHUN.md");
+    expect(output.text).toContain("Memory storage");
+    expect(output.text).toContain("Memory review");
+    expect(output.text).toContain("已写入项目级长期记忆");
+    expect(output.text).toContain("memoryHash");
+    expect(output.text).toContain("changedKeys: memoryHash");
+    expect(output.text).toContain("已创建分支会话");
+    expect(output.text).toContain("禁止事项");
+  });
+
+  it("loads accepted memory from disk and uses it in memory freshness", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/memory candidate 项目长期规则只保存稳定工程事实", context, output);
+    const candidateId = context.memory.candidates[0]?.id;
+    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+
+    const loaded = await createMemoryState(defaultConfig, project);
+    const reloadedContext = createTestContext(project, store, session);
+    reloadedContext.memory = loaded;
+    await handleSlashCommand("/memory", reloadedContext, output);
+    await handleSlashCommand("/memory review", reloadedContext, output);
+    await handleSlashCommand("/break-cache status", reloadedContext, output);
+
+    expect(loaded.accepted).toHaveLength(1);
+    expect(loaded.accepted[0]?.summary).toBe("项目长期规则只保存稳定工程事实");
+    expect(output.text).toContain("accepted: 1");
+    expect(output.text).toContain("项目长期规则只保存稳定工程事实");
+    expect(output.text).toContain("memoryHash");
+    expect(output.text).toMatch(/changedKeys: .*memoryHash/);
+  });
+
+  it("records complete handoff identity and branch parent source", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/branch hardening", context, output);
+    const branchId = context.sessionId;
+    const resumed = await store.resume(branchId ?? "missing");
+    const handoff = resumed.transcript.find((event) => event.type === "handoff_packet");
+    const branch = resumed.transcript.find((event) => event.type === "branch_created");
+
+    expect(handoff?.type).toBe("handoff_packet");
+    expect(branch?.type).toBe("branch_created");
+    expect((handoff as { packet?: { id?: string } }).packet?.id).toBeTruthy();
+    expect((handoff as { packet?: { sessionId?: string } }).packet?.sessionId).toBe(branchId);
+    expect((handoff as { packet?: { projectPath?: string } }).packet?.projectPath).toBe(project);
+    expect((handoff as { packet?: { parentSessionId?: string } }).packet?.parentSessionId).toBe(
+      session.id,
+    );
+    expect((branch as { branch?: { parentSessionId?: string } }).branch?.parentSessionId).toBe(
+      session.id,
+    );
+    expect((branch as { branch?: { sourceSession?: string } }).branch?.sourceSession).toBe(
+      session.id,
+    );
+    expect(output.text).toContain(`来源 session：${session.id}`);
+  });
+
+  it("creates LINGHUN.md only on explicit memory init", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/memory init", context, output);
+
+    expect(output.text).toContain("已生成基础 LINGHUN.md");
+    expect(await readFile(join(project, "LINGHUN.md"), "utf8")).toContain("只记录长期稳定工程规则");
   });
 
   it("enforces plan permissions and records recent denials", async () => {

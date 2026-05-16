@@ -13,9 +13,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 当前进度
 
-- Phase 00-10 已完成。
-- 下一阶段是 Phase 11：会话交接与记忆闭环。
-- Phase 10 已在 Phase 09 缓存与成本闭环基础上补齐 MCP 与 codebase-memory 最小闭环；不得写成已经实现 Phase 11+ 功能。
+- Phase 00-11 已完成。
+- 下一阶段是 Phase 12：Agent 闭环；必须等用户明确确认后才能开始。
+- Phase 11 已在 Phase 10 MCP 与 codebase-memory 闭环基础上补齐结构化 handoff、/resume、/branch、LINGHUN.md 与记忆闭环；不得写成已经实现 Phase 12+ 功能。
 - 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
 - 用户未明确开始执行时，必须先通过 Start Gate 确认，不得擅自进入写文件、agent、job、workflow 或依赖安装。
 
@@ -29,8 +29,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 4. [LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md](./LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md)
 5. [docs/delivery/README.md](./docs/delivery/README.md)
 6. [docs/delivery/phase-10-mcp-index.md](./docs/delivery/phase-10-mcp-index.md)
+7. [docs/delivery/phase-11-sessions-memory.md](./docs/delivery/phase-11-sessions-memory.md)
 
-Phase 10 之后的新对话应优先基于 codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
+Phase 11 之后的新对话应优先基于结构化 handoff、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
 
 ## 命令约定
 

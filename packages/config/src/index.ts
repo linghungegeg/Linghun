@@ -18,6 +18,28 @@ export type McpServerConfig = {
   disabled?: boolean;
 };
 
+export type StorageScope = "project" | "user" | "custom";
+
+export type StorageLocation = {
+  scope: StorageScope;
+  path?: string;
+};
+
+export type StorageConfig = {
+  projectData: StorageLocation;
+  userData: StorageLocation;
+  sessions: StorageLocation;
+  memory: {
+    project: StorageLocation;
+    user: StorageLocation;
+    session: StorageLocation;
+  };
+  index: StorageLocation;
+  logs: StorageLocation;
+  jobs: StorageLocation;
+  cache: StorageLocation;
+};
+
 export type LinghunConfig = {
   language: Language;
   defaultModel: string;
@@ -29,6 +51,7 @@ export type LinghunConfig = {
     enabledServers: string[];
     servers: Record<string, McpServerConfig>;
   };
+  storage: StorageConfig;
   index: {
     enabled: boolean;
     mode: "fast" | "moderate" | "full";
@@ -67,6 +90,20 @@ export const defaultConfig: LinghunConfig = {
       },
     },
   },
+  storage: {
+    projectData: { scope: "project" },
+    userData: { scope: "user" },
+    sessions: { scope: "user" },
+    memory: {
+      project: { scope: "project" },
+      user: { scope: "user" },
+      session: { scope: "project" },
+    },
+    index: { scope: "project" },
+    logs: { scope: "user" },
+    jobs: { scope: "user" },
+    cache: { scope: "user" },
+  },
   index: {
     enabled: true,
     mode: "fast",
@@ -83,11 +120,69 @@ export function getProjectConfigDir(projectPath = process.cwd()): string {
 }
 
 export function getUserDataDir(home = homedir()): string {
-  return join(home, ".linghun", "data");
+  return process.env.LINGHUN_DATA_DIR || join(home, ".linghun", "data");
 }
 
 export function getSessionRootDir(home = homedir()): string {
   return join(getUserDataDir(home), "sessions");
+}
+
+export type ResolvedStoragePaths = {
+  projectData: string;
+  userData: string;
+  sessions: string;
+  memoryProject: string;
+  memoryUser: string;
+  memorySession: string;
+  index: string;
+  logs: string;
+  jobs: string;
+  cache: string;
+};
+
+export function resolveStoragePaths(
+  config: LinghunConfig = defaultConfig,
+  projectPath = process.cwd(),
+  home = homedir(),
+): ResolvedStoragePaths {
+  const userData = resolveStorageLocation(config.storage.userData, projectPath, home, "");
+  const projectData = resolveStorageLocation(config.storage.projectData, projectPath, home, "");
+  return {
+    projectData,
+    userData,
+    sessions: resolveStorageLocation(config.storage.sessions, projectPath, home, "sessions"),
+    memoryProject: resolveStorageLocation(
+      config.storage.memory.project,
+      projectPath,
+      home,
+      "memory",
+    ),
+    memoryUser: resolveStorageLocation(config.storage.memory.user, projectPath, home, "memory"),
+    memorySession: resolveStorageLocation(
+      config.storage.memory.session,
+      projectPath,
+      home,
+      join("memory", "session"),
+    ),
+    index: resolveStorageLocation(config.storage.index, projectPath, home, "index"),
+    logs: resolveStorageLocation(config.storage.logs, projectPath, home, "logs"),
+    jobs: resolveStorageLocation(config.storage.jobs, projectPath, home, "jobs"),
+    cache: resolveStorageLocation(config.storage.cache, projectPath, home, "cache"),
+  };
+}
+
+function resolveStorageLocation(
+  location: StorageLocation,
+  projectPath: string,
+  home: string,
+  defaultSubdir: string,
+): string {
+  if (location.scope === "custom" && location.path) {
+    return location.path;
+  }
+  const root =
+    location.scope === "project" ? getProjectConfigDir(projectPath) : getUserDataDir(home);
+  return defaultSubdir ? join(root, defaultSubdir) : root;
 }
 
 export function getProjectSettingsPath(projectPath = process.cwd()): string {
@@ -167,6 +262,14 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
       servers: {
         ...defaultConfig.mcp.servers,
         ...input.mcp?.servers,
+      },
+    },
+    storage: {
+      ...defaultConfig.storage,
+      ...input.storage,
+      memory: {
+        ...defaultConfig.storage.memory,
+        ...input.storage?.memory,
       },
     },
     index: {
