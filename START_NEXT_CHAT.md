@@ -46,8 +46,9 @@
 - Phase 12 Agent 闭环已完成。
 - Phase 13 多模型协作闭环已完成。
 - Phase 14 Skills 与工作流主闭环已完成。
+- Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性与安全边界已加固。
 
-当前任务：下一步仅建议进入 Phase 14 hardening；必须由用户明确确认后开始。没有确认前不要进入 Phase 14 hardening 或 Phase 15+。
+当前任务：下一步仅建议进入 Phase 15 真实项目 Beta；必须由用户明确确认后开始。没有确认前不要进入 Phase 15 或 Phase 15+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。

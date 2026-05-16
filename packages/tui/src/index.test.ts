@@ -1165,6 +1165,7 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
+    await writeFile(join(project, ".linghun", "skills", "broken-skill.json"), "{", "utf8");
     await writeFile(
       join(project, ".linghun", "plugins", "local-tools.json"),
       JSON.stringify({
@@ -1192,6 +1193,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/skills", context, output);
     await handleSlashCommand("/skills add", context, output);
+    await handleSlashCommand("/skills enable broken-skill", context, output);
     await handleSlashCommand("/skills enable bug-helper", context, output);
     await handleSlashCommand("/skills disable bug-helper", context, output);
     await handleSlashCommand("/workflows", context, output);
@@ -1210,17 +1212,25 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Skills（Phase 14");
     expect(output.text).toContain("summary-first / load-on-demand");
+    expect(output.text).toContain("broken-skill");
+    expect(output.text).toContain("manifest load failed; skill isolated from prompt and tools");
+    expect(output.text).toContain("lastError");
+    expect(output.text).toContain("skill manifest 加载失败，不能启用：broken-skill");
     expect(output.text).toContain("Trust notice：即将启用 skill bug-helper");
     expect(output.text).toContain("已禁用 skill：bug-helper");
     expect(output.text).toContain("Workflows（Phase 14");
     expect(output.text).toContain("bug-fix");
     expect(output.text).toContain("Workflow Start Gate：bug-fix");
     expect(output.text).toContain("recommended validation");
+    expect(output.text).toContain("是否越界");
     expect(output.text).toContain("Plugins doctor");
     expect(output.text).toContain("Trust notice：即将启用 plugin local-tools");
     expect(output.text).toContain("已禁用 plugin：local-tools");
     expect(output.text).toContain("Hooks doctor");
     expect(output.text).toContain("timeoutMs");
+    expect(output.text).toContain("outputLimitBytes");
+    expect(output.text).toContain("logPath");
+    expect(output.text).toContain("只诊断 hook 边界，不执行完整 hook 脚本");
     expect(output.text).toContain("pluginListHash");
     expect(output.text).not.toContain("完整 skill 正文");
     expect(orphanOutput.text).toContain("未知 skill：ghost-skill");

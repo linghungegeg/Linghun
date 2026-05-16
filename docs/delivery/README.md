@@ -18,7 +18,7 @@
 | Phase 11 | done | [phase-11-sessions-memory.md](./phase-11-sessions-memory.md) | 会话交接与记忆闭环 |
 | Phase 12 | done | [phase-12-agents.md](./phase-12-agents.md) | Agent 闭环 |
 | Phase 13 | done | [phase-13-multi-model.md](./phase-13-multi-model.md) | 多模型协作闭环 |
-| Phase 14 | done | [phase-14-skills-workflow.md](./phase-14-skills-workflow.md) | Skills 与工作流主闭环 |
+| Phase 14 | done | [phase-14-skills-workflow.md](./phase-14-skills-workflow.md) | Skills 与工作流主闭环 + hardening |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版 |
 | Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查与开源前 hardening |
 | Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |

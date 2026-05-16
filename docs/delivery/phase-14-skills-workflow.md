@@ -4,7 +4,7 @@
 
 完成 Linghun Phase 14 主闭环：本地 Skills、Workflow templates、Hooks runtime 诊断面、本地 Plugin manifest loader、启停、信任和权限边界接入。
 
-本轮只交付 Phase 14 主闭环，不进入 Phase 14 hardening 或 Phase 15+。不实现插件市场、GitHub 插件安装、远程安装、自动更新、评分推荐、账号体系、完整沙箱、长期后台 job、Remote Channels、真实联网安装依赖、真实项目 Beta、可控学习或桌面端。
+Phase 14 hardening 已补齐 Skills / Workflows / Hooks / Plugins 稳定性与安全边界加固：普通对话 system prompt 同步到 Phase 14 口径、skill 解析失败可诊断、hook doctor 明确 timeout/outputLimit/logPath 与不执行完整 hook 脚本边界、workflow 结束检查补充范围边界。Phase 14 仍不实现插件市场、GitHub 插件安装、远程安装、自动更新、评分推荐、账号体系、完整沙箱、长期后台 job、Remote Channels、真实联网安装依赖、真实项目 Beta、可控学习或桌面端。
 
 ## 已完成功能
 
@@ -17,12 +17,13 @@
   - `/skills add` 显示本地注册路径，不做联网安装。
   - `/skills enable <id>` / `/skills disable <id>` 持久化到 `.linghun/settings.json`，重启后保留。
   - 第三方 skill 未信任时不会启用；启用时显示 trust notice。
+  - hardening 后 skill manifest 解析失败会显示 disabled 诊断项与 `lastError`，不会静默消失，不能被 enable 预信任，也不会进入 prompt 或工具执行层。
 - Workflow templates：
   - 内置 `bug-fix`、`review`、`doc-to-code`、`design-to-code`、`release-note`、`refactor-plan`。
   - `/workflows` 展示用途、风险、是否写文件、建议验证命令。
   - `/workflows <name>` 只进入 Start Gate 说明，不自动改文件。
   - workflow 内部写文件、Bash、联网、安装依赖仍必须走现有权限管道。
-  - workflow 启动提示包含结束时验证/交付检查。
+  - workflow 启动提示包含结束时验证/交付检查；hardening 后结束检查明确包含修改文件、验证结果、已知限制和是否越界。
 - Hooks runtime 最小闭环：
   - 支持 hook 事件类型：`PreToolUse`、`PostToolUse`、`Stop`、`Notification`、`Workflow`、`Plugin`。
   - hooks 默认关闭。
@@ -30,6 +31,7 @@
   - hook 来源来自本地 plugin manifest 的 hook 贡献项；不会绕过权限管道。
   - `/doctor hooks` 展示来源、路径、事件、启用状态、信任状态、timeout、输出截断阈值、最近错误、权限和 cache 影响 hash。
   - hook 输出边界以 `outputLimitBytes` 与 `logPath` 表达；主闭环不执行 hook 正文。
+  - hardening 后每条 hook 诊断行明确显示 `timeoutMs`、`outputLimitBytes`、`logPath` 和 `lastError`；doctor 文案明确 Phase 14 只诊断边界，不执行完整 hook 脚本。
 - Plugin manifest loader：
   - 支持项目级 `.linghun/plugins/*.json`。
   - 支持用户级 `~/.linghun/plugins/*.json`。
@@ -253,7 +255,7 @@ printf '/skills\n/skills add\n/skills disable bug-helper\n/workflows\n/workflows
 - `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 14 CLI help，并列出 `/skills`、`/workflows <name>`、`/plugins doctor`、`/doctor hooks`。
-- TUI stdin smoke：通过，覆盖 `/skills`、`/skills add`、`/skills disable`、`/workflows`、`/workflows bug-fix` Start Gate、`/plugins`、`/plugins doctor`、`/plugins disable`、`/doctor hooks`、`/model route doctor`、`/usage`、`/stats`、`/cache status`、`/break-cache status`、`/index status`、`/exit`。
+- TUI stdin smoke：通过，覆盖 `/skills`、`/skills add`、`/skills enable` 安全等价路径（未知/解析失败 manifest 拒绝启用）、`/skills disable`、`/workflows`、`/workflows bug-fix` Start Gate、`/plugins`、`/plugins doctor`、`/plugins enable` 安全等价路径（未知 plugin 拒绝启用）、`/plugins disable`、`/doctor hooks`、`/model route doctor`、`/usage`、`/stats`、`/cache status`、`/break-cache status`、`/index status`、`/resume`、`/branch`、`/exit`。
 
 ## 性能结果
 
@@ -273,8 +275,8 @@ printf '/skills\n/skills add\n/skills disable bug-helper\n/workflows\n/workflows
 
 ## 不在本阶段处理的内容
 
-- 不进入 Phase 14 hardening。
-- 不进入 Phase 15 真实项目 Beta。
+- Phase 14 hardening 已完成，本阶段到此停止。
+- 不进入 Phase 15 真实项目 Beta，除非用户另行明确确认。
 - 不实现 GitHub 插件安装、插件市场、远程安装、自动更新、评分推荐、商业化或账号体系。
 - 不实现完整沙箱运行时。
 - 不实现长期任务 / Remote Channels。
@@ -284,15 +286,15 @@ printf '/skills\n/skills add\n/skills disable bug-helper\n/workflows\n/workflows
 
 ## 下一阶段衔接
 
-建议下一步进入 Phase 14 hardening，但必须由用户明确确认后再开始。Phase 14 hardening 可聚焦：
+建议下一步进入 Phase 15 真实项目 Beta，但必须由用户明确确认后再开始。Phase 14 hardening 已聚焦完成：
 
-- hook 实际执行前后的更细权限闸门与 timeout 实测。
-- hook 输出截断和 logPath 写入实测。
-- manifest schema 兼容性和错误报告增强。
-- plugin/skill list hash 在真实 enable/disable 后的 cache changedKeys 回归。
-- workflow 结束时验证/交付检查更强约束。
+- 普通对话 system prompt 从 Phase 13 同步到 Phase 14 Skills/Workflows 工程助手口径。
+- skill 解析失败显示 disabled 诊断项与 `lastError`，不静默消失。
+- hook doctor 强化 timeout/outputLimit/logPath/lastError 展示，并明确只诊断边界、不执行完整 hook 脚本。
+- plugin/skill list hash 继续基于稳定摘要进入 `/break-cache status` 的 `pluginListHash` changedKeys。
+- workflow Start Gate 结束检查补充修改文件、验证结果、已知限制和是否越界。
 
-不得在 hardening 中顺手做插件市场、GitHub 安装、远程安装、自动更新、长期任务或 Phase 15+ 能力。
+不得在 Phase 15 确认前顺手做真实项目 Beta；不得把插件市场、GitHub 安装、远程安装、自动更新或长期任务误写成已完成。
 
 ## 开发者排查入口
 
@@ -330,8 +332,8 @@ printf '/skills\n/skills add\n/skills disable bug-helper\n/workflows\n/workflows
 ```json
 {
   "phase": "Phase 14",
-  "phaseStatus": "main-loop-completed",
-  "nextPhase": "Phase 14 hardening",
+  "phaseStatus": "hardening-completed",
+  "nextPhase": "Phase 15 real-project beta",
   "mustNotDo": [
     "不要进入 Phase 15+，除非用户明确确认",
     "不要实现插件市场/GitHub 安装/远程安装/自动更新",
@@ -341,15 +343,17 @@ printf '/skills\n/skills add\n/skills disable bug-helper\n/workflows\n/workflows
   ],
   "completed": [
     "本地 skill manifest loader 与 /skills 系列命令",
+    "skill manifest 解析失败诊断与 lastError 隔离",
     "6 个 workflow templates 与 /workflows Start Gate 路径",
+    "workflow 结束检查包含修改文件、验证结果、已知限制和是否越界",
     "本地 plugin manifest loader 与 /plugins 系列命令",
-    "hooks 默认关闭与 /doctor hooks 诊断",
+    "hooks 默认关闭与 /doctor hooks 边界诊断",
+    "hook timeout/outputLimit/logPath/lastError 展示",
     "trust notice 与启停持久化",
     "pluginListHash 接入 extension freshness"
   ],
   "pending": [
-    "Phase 14 hardening：hook timeout/logPath 实测、输出截断实测、schema 兼容性增强、workflow 结束检查强化",
-    "Phase 15：真实项目 Beta 与 provider usage / 账单抽样对账"
+    "Phase 15：真实项目 Beta 与 provider usage / 账单抽样对账，必须等待用户明确确认"
   ],
   "evidenceRefs": [
     "packages/tui/src/index.ts",

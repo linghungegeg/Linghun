@@ -402,6 +402,7 @@ export type SkillSummary = {
   mayWrite: boolean;
   mayExecute: boolean;
   mayNetwork: boolean;
+  lastError?: string;
 };
 
 export type SkillState = {
@@ -813,7 +814,7 @@ function workflow(
     steps: [
       "Start Gate：启动前先让用户确认范围。",
       "执行中任何写文件、Bash、联网或依赖安装仍走现有权限管道。",
-      "结束前提示运行推荐验证并输出交付检查。",
+      "结束前提示运行推荐验证，并输出修改文件、验证结果、已知限制和范围边界。",
     ],
   };
 }
@@ -914,8 +915,25 @@ async function readSkillManifest(
       mayExecute: permissions.includes("bash") || permissions.includes("execute"),
       mayNetwork: permissions.includes("network"),
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      id: basename(path, extname(path)),
+      name: basename(path),
+      description: "manifest load failed; skill isolated from main session",
+      triggers: [],
+      summary: "manifest load failed; skill isolated from prompt and tools",
+      source: scope === "project" ? "third-party" : "local",
+      scope,
+      path,
+      version: "unknown",
+      enabled: false,
+      trusted: false,
+      permissions: [],
+      mayWrite: false,
+      mayExecute: false,
+      mayNetwork: false,
+      lastError: formatError(error),
+    };
   }
 }
 
@@ -1367,8 +1385,9 @@ function formatSkills(context: TuiContext): string {
     lines.push("- none：可运行 /skills add 查看本地注册路径。");
   }
   for (const skill of context.skills.skills) {
+    const error = skill.lastError ? ` lastError=${skill.lastError}` : "";
     lines.push(
-      `- ${skill.id}: ${skill.enabled ? "enabled" : "disabled"} trusted=${skill.trusted ? "yes" : "no"} source=${skill.source} scope=${skill.scope} version=${skill.version} triggers=${skill.triggers.join(",") || "-"} write=${skill.mayWrite ? "yes" : "no"} bash=${skill.mayExecute ? "yes" : "no"} network=${skill.mayNetwork ? "yes" : "no"} summary=${skill.summary}`,
+      `- ${skill.id}: ${skill.enabled ? "enabled" : "disabled"} trusted=${skill.trusted ? "yes" : "no"} source=${skill.source} scope=${skill.scope} version=${skill.version} triggers=${skill.triggers.join(",") || "-"} write=${skill.mayWrite ? "yes" : "no"} bash=${skill.mayExecute ? "yes" : "no"} network=${skill.mayNetwork ? "yes" : "no"} summary=${skill.summary}${error}`,
     );
   }
   lines.push(
@@ -1443,10 +1462,12 @@ function formatHooksDoctor(context: TuiContext): string {
   }
   for (const hook of context.hooks.hooks) {
     lines.push(
-      `- ${hook.id}: event=${hook.event} enabled=${hook.enabled ? "yes" : "no"} trusted=${hook.trusted ? "yes" : "no"} source=${hook.source} scope=${hook.scope} path=${hook.path} permissions=${hook.permissions.join(",") || "none"} logPath=${hook.logPath ?? "-"} lastError=${hook.lastError ?? "none"}`,
+      `- ${hook.id}: event=${hook.event} enabled=${hook.enabled ? "yes" : "no"} trusted=${hook.trusted ? "yes" : "no"} source=${hook.source} scope=${hook.scope} path=${hook.path} timeoutMs=${hook.timeoutMs} outputLimitBytes=${hook.outputLimitBytes} permissions=${hook.permissions.join(",") || "none"} logPath=${hook.logPath ?? "-"} lastError=${hook.lastError ?? "none"}`,
     );
   }
-  lines.push("- boundary: hook 不能绕过权限系统；失败隔离；大输出截断，完整输出写 logPath。");
+  lines.push(
+    "- boundary: Phase 14 hardening 只诊断 hook 边界，不执行完整 hook 脚本；hook 不能绕过权限系统；失败隔离；显示输出按 outputLimitBytes 截断，完整输出只能写 logPath。",
+  );
   return lines.join("\n");
 }
 
@@ -1498,6 +1519,10 @@ async function handleSkillsCommand(
         writeLine(output, `未知 skill：${id}。请先在本地 manifest 注册后再启用。`);
         return;
       }
+      if (skill.lastError) {
+        writeLine(output, `skill manifest 加载失败，不能启用：${id}。请先修复 manifest。`);
+        return;
+      }
       writeLine(output, formatTrustNotice("skill", skill));
     }
     context.config = await saveExtensionEnablement(
@@ -1542,7 +1567,7 @@ async function handleWorkflowsCommand(
       "- 启动前需要用户明确确认；本命令只展示启动门，不会自动改文件。",
       "- 后续写文件、Bash、联网、安装依赖仍走现有权限管道。",
       `- recommended validation: ${template.recommendedValidation.join(" && ")}`,
-      "- finish check: 输出修改文件、验证结果、已知限制与交付检查。",
+      "- finish check: 输出修改文件、验证结果、已知限制、交付检查与是否越界。",
     ].join("\n"),
   );
 }
@@ -3042,26 +3067,26 @@ function createHandoffPacket(
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
     currentPhase: "Phase 14",
-    nextPhase: "Phase 14 hardening",
+    nextPhase: "Phase 15 real-project beta",
     phaseStatus: "completed",
-    goal: "Skills 与工作流主闭环：本地 skills、workflow templates、hooks doctor、plugin manifest loader、启停、信任和权限边界。",
+    goal: "Skills 与工作流主闭环和 hardening：本地 skills、workflow templates、hooks doctor、plugin manifest loader、启停、信任、权限边界与稳定性加固。",
     completed: [
       "local skill manifest loader and /skills commands",
-      "workflow templates and /workflows Start Gate",
+      "skill manifest failure diagnostics with lastError",
+      "workflow templates and /workflows Start Gate finish checks",
       "local plugin manifest loader and /plugins commands",
-      "hooks disabled by default and /doctor hooks diagnostics",
+      "hooks disabled by default and /doctor hooks boundary diagnostics",
       "trust notice and enable/disable persistence",
       "extension freshness pluginListHash",
     ],
     pending: [
-      "Phase 14 hardening：hook timeout/logPath 实测、输出截断实测、schema 兼容性增强、workflow 结束检查强化",
-      "Phase 15+ 必须等待用户明确确认后才能开始",
+      "Phase 15 真实项目 Beta 与 provider usage / 账单抽样对账必须等待用户明确确认后才能开始",
     ],
     mustNotDo: [
       "不要进入 Phase 15+，除非用户明确确认",
       "不要实现插件市场、GitHub 安装、远程安装或自动更新",
       "不要实现长期任务或 Remote Channels",
-      "不要执行完整 hook 脚本；Phase 14 主闭环只做诊断和边界",
+      "不要执行完整 hook 脚本；Phase 14 hardening 只做诊断和边界",
       "不要让 workflow、hook 或 plugin 绕过 Start Gate、Plan、权限审批和验证闭环",
       "不要把完整 skill、plugin manifest、hook 日志或大输出塞进 prompt / 状态栏",
     ],
@@ -3079,7 +3104,7 @@ function createHandoffPacket(
     verification: context.lastVerification ?? null,
     risks: context.lastVerification
       ? context.lastVerification.risk
-      : ["Phase 14 主闭环已完成；Phase 14 hardening 尚未开始"],
+      : ["Phase 14 hardening 已完成；Phase 15 真实项目 Beta 尚未开始，必须等待用户明确确认"],
     indexStatus: {
       projectName: context.index.projectName,
       status: context.index.status,
@@ -4940,8 +4965,8 @@ async function sendMessage(
       role: "system",
       content:
         context.language === "en-US"
-          ? "You are Linghun Phase 13 multi-model engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
-          : "你是 Linghun Phase 13 的多模型工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
+          ? "You are Linghun Phase 14 skills/workflow engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims."
+          : "你是 Linghun Phase 14 Skills/Workflows 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。",
     },
     { role: "user", content: text },
   ];
