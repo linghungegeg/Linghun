@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 
@@ -69,6 +70,7 @@ export type RuntimeStatusForModel = {
 
 export type RuntimeStatusSource = {
   model: string;
+  provider?: string;
   permissionMode: PermissionMode;
   projectPath: string;
   language: Language;
@@ -89,56 +91,80 @@ export type RuntimeStatusSource = {
 };
 
 export type PendingNaturalCommand = {
-  command: string;
+  gateId: string;
   capabilityId: string;
+  source: "natural";
+  exactCommand: string;
+  command: string;
+  risk: CommandRisk;
+  scope: string;
   createdAt: string;
+  expiresAt: string;
+  requiresExactConfirmation: boolean;
 };
 
-const USER_VISIBLE_SLASH_COMMANDS = [
-  "/help",
-  "/language",
-  "/model",
-  "/vision",
-  "/image",
-  "/skills",
-  "/workflows",
-  "/plugins",
-  "/doctor",
-  "/sessions",
-  "/resume",
-  "/branch",
-  "/memory",
-  "/mode",
-  "/tab",
-  "/plan",
-  "/permissions",
-  "/background",
-  "/agents",
-  "/fork",
-  "/rewind",
-  "/btw",
-  "/interrupt",
-  "/claim-check",
-  "/verify",
-  "/review",
-  "/cache-log",
-  "/cache",
-  "/break-cache",
-  "/mcp",
-  "/index",
-  "/usage",
-  "/stats",
-  "/read",
-  "/write",
-  "/edit",
-  "/multiedit",
-  "/grep",
-  "/glob",
-  "/bash",
-  "/todo",
-  "/diff",
-  "/exit",
+export type SlashCommandRegistryEntry = {
+  slash: string;
+  capabilityId: string;
+  userVisible: boolean;
+  hiddenReason?: string;
+};
+
+export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
+  { slash: "/help", capabilityId: "help", userVisible: true },
+  { slash: "/language", capabilityId: "language", userVisible: true },
+  { slash: "/model", capabilityId: "model", userVisible: true },
+  { slash: "/vision", capabilityId: "vision", userVisible: true },
+  { slash: "/image", capabilityId: "image", userVisible: true },
+  { slash: "/skills", capabilityId: "skills", userVisible: true },
+  { slash: "/workflows", capabilityId: "workflows", userVisible: true },
+  { slash: "/plugins", capabilityId: "plugins", userVisible: true },
+  { slash: "/doctor", capabilityId: "hooks", userVisible: true },
+  { slash: "/sessions", capabilityId: "sessions", userVisible: true },
+  { slash: "/resume", capabilityId: "resume", userVisible: true },
+  { slash: "/branch", capabilityId: "branch", userVisible: true },
+  { slash: "/memory", capabilityId: "memory", userVisible: true },
+  { slash: "/mode", capabilityId: "mode", userVisible: true },
+  { slash: "/tab", capabilityId: "tab", userVisible: true },
+  { slash: "/plan", capabilityId: "plan", userVisible: true },
+  { slash: "/permissions", capabilityId: "permissions", userVisible: true },
+  { slash: "/background", capabilityId: "background", userVisible: true },
+  { slash: "/agents", capabilityId: "agents", userVisible: true },
+  { slash: "/fork", capabilityId: "fork", userVisible: true },
+  { slash: "/rewind", capabilityId: "rewind", userVisible: true },
+  { slash: "/btw", capabilityId: "btw", userVisible: true },
+  { slash: "/interrupt", capabilityId: "interrupt", userVisible: true },
+  { slash: "/claim-check", capabilityId: "claim-check", userVisible: true },
+  { slash: "/verify", capabilityId: "verify", userVisible: true },
+  { slash: "/review", capabilityId: "review", userVisible: true },
+  { slash: "/cache-log", capabilityId: "cache-log", userVisible: true },
+  { slash: "/cache", capabilityId: "cache", userVisible: true },
+  { slash: "/break-cache", capabilityId: "break-cache", userVisible: true },
+  { slash: "/mcp", capabilityId: "mcp", userVisible: true },
+  { slash: "/index", capabilityId: "index", userVisible: true },
+  { slash: "/usage", capabilityId: "usage", userVisible: true },
+  { slash: "/stats", capabilityId: "stats", userVisible: true },
+  { slash: "/read", capabilityId: "read", userVisible: true },
+  { slash: "/write", capabilityId: "write", userVisible: true },
+  { slash: "/edit", capabilityId: "edit", userVisible: true },
+  { slash: "/multiedit", capabilityId: "multiedit", userVisible: true },
+  { slash: "/grep", capabilityId: "grep", userVisible: true },
+  { slash: "/glob", capabilityId: "glob", userVisible: true },
+  { slash: "/bash", capabilityId: "bash", userVisible: true },
+  { slash: "/todo", capabilityId: "todo", userVisible: true },
+  { slash: "/diff", capabilityId: "diff", userVisible: true },
+  { slash: "/exit", capabilityId: "exit", userVisible: true },
+  {
+    slash: "/status",
+    capabilityId: "status",
+    userVisible: false,
+    hiddenReason: "status bar is emitted automatically",
+  },
 ] as const;
+
+const USER_VISIBLE_SLASH_COMMANDS = SLASH_COMMAND_REGISTRY.filter((item) => item.userVisible).map(
+  (item) => item.slash,
+);
 
 const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
@@ -688,16 +714,28 @@ export function getCommandCapabilityCatalog(): CommandCapability[] {
   );
 }
 
-export function validateCommandCapabilityCoverage(): string[] {
+export function validateCommandCapabilityCoverage(
+  dispatchSlashes = USER_VISIBLE_SLASH_COMMANDS,
+): string[] {
   const catalog = getCommandCapabilityCatalog();
-  const missing = USER_VISIBLE_SLASH_COMMANDS.filter(
-    (slash) => !catalog.some((item) => item.slash === slash && item.userInvocable),
+  const registry = SLASH_COMMAND_REGISTRY;
+  const missingFromRegistry = dispatchSlashes.filter(
+    (slash) => !registry.some((item) => item.slash === slash && item.userVisible),
+  );
+  const missingFromCatalog = dispatchSlashes.filter((slash) => {
+    const entry = registry.find((item) => item.slash === slash && item.userVisible);
+    return !entry || !catalog.some((item) => item.id === entry.capabilityId && item.userInvocable);
+  });
+  const registryWithoutCatalog = registry.filter(
+    (entry) => !catalog.some((item) => item.id === entry.capabilityId),
   );
   const invalidHidden = catalog
     .filter((item) => item.hiddenReason !== undefined && item.hiddenReason.trim() === "")
     .map((item) => item.id);
   return [
-    ...missing.map((slash) => `missing ${slash}`),
+    ...missingFromRegistry.map((slash) => `dispatch missing registry ${slash}`),
+    ...missingFromCatalog.map((slash) => `dispatch missing catalog ${slash}`),
+    ...registryWithoutCatalog.map((entry) => `registry missing catalog ${entry.slash}`),
     ...invalidHidden.map((id) => `hidden reason missing ${id}`),
   ];
 }
@@ -724,7 +762,7 @@ export function buildRuntimeStatusForModel(context: RuntimeStatusSource): Runtim
       latestHitRate: latest?.hitRate ?? null,
       changedKeys: (freshness?.changedKeys ?? []).slice(0, 8),
     },
-    model: { provider: "deepseek", name: context.model },
+    model: { provider: context.provider ?? "deepseek", name: context.model },
     permissionMode: context.permissionMode,
     extensions: {
       skills: { enabled: context.skills.enabled, count: context.skills.skills.length },
@@ -927,52 +965,128 @@ export function formatNaturalPermissionBlock(intent: NaturalIntent): string {
   if (intent.language === "en-US") {
     return [
       `Blocked natural-language direct execution: ${c.titleEn}`,
-      `- Why: ${formatRiskLine(c, intent.language)}`,
-      `- Equivalent slash command: ${command}`,
-      "- Required confirmation: explicit slash command plus Start Gate or the existing permission pipeline.",
-      "- Rollback: inspect /diff or checkpoint before accepting changes; destructive restore/install/bypass requires explicit approval.",
+      `- Exact action: ${command}`,
+      `- Risk: ${formatRiskLine(c, intent.language)}`,
+      "- Scope: current project or the command-specific target; config/permission/tool effects must be reviewed before execution.",
+      "- Reason: request came from the Natural Command Bridge; bridge/workflow/agent/plugin/hook/remote paths can only create gates or permission requests.",
+      "- Rollback: inspect /diff, checkpoint, config state, or disable the affected extension before accepting follow-up changes.",
+      "- Choices: type the explicit slash command locally, enter a Start Gate, or reject and provide feedback; plain natural-language confirmation is not enough.",
+      "- Start Gate does not replace the existing permission pipeline.",
       "- I did not execute it.",
     ].join("\n");
   }
   return [
     `已阻止自然语言直通：${c.titleZh}`,
-    `- 原因：${formatRiskLine(c, intent.language)}`,
-    `- 等价 slash command：${command}`,
-    "- 需要确认：显式 slash command + Start Gate 或现有权限审批管道。",
-    "- 回滚方式：先查看 /diff 或 checkpoint；恢复、安装依赖、bypass 等破坏性动作必须显式审批。",
+    `- 精确动作：${command}`,
+    `- 风险：${formatRiskLine(c, intent.language)}`,
+    "- 范围：当前项目或命令指定目标；配置、权限、工具影响必须在执行前复核。",
+    "- 原因：请求来自 Natural Command Bridge；自然语言桥、workflow、agent、plugin、hook、remote 只能生成确认门或权限请求。",
+    "- 回滚方式：先查看 /diff、checkpoint、配置状态，或禁用受影响扩展，再接受后续变更。",
+    "- 选择：在本地显式输入 slash command、进入 Start Gate，或拒绝并提供反馈；普通自然语言确认不够。",
+    "- Start Gate 不替代现有权限审批管道。",
     "- 本次没有执行。",
   ].join("\n");
+}
+
+export function createPendingNaturalCommand(
+  intent: NaturalIntent,
+  context: RuntimeStatusSource,
+  now = new Date(),
+): PendingNaturalCommand | null {
+  const c = intent.capability;
+  const command = intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
+  if (!c || !command) return null;
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + 90_000).toISOString();
+  return {
+    gateId: `ng-${randomUUID().slice(0, 8)}`,
+    capabilityId: c.id,
+    source: "natural",
+    exactCommand: command,
+    command,
+    risk: c.risk,
+    scope: `current project ${context.projectPath}`,
+    createdAt,
+    expiresAt,
+    requiresExactConfirmation: requiresExactNaturalConfirmation(c, command),
+  };
 }
 
 export function formatNaturalStartGate(
   intent: NaturalIntent,
   context: RuntimeStatusSource,
+  gate = createPendingNaturalCommand(intent, context),
 ): string {
   const c = intent.capability;
-  const command = intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
+  const command =
+    gate?.exactCommand ?? intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
   const logPath = join(context.projectPath, ".linghun", "logs");
+  const exactHint = gate?.requiresExactConfirmation
+    ? intent.language === "en-US"
+      ? `Reply with the exact command \`${command}\` to continue; plain yes is not enough for this risk.`
+      : `回复精确命令 \`${command}\` 才能继续；此风险级别不能只用普通“确认”。`
+    : intent.language === "en-US"
+      ? "Reply `yes` to run the equivalent slash command, or type a different request to cancel this gate."
+      : "回复 `确认` 执行等价 slash command；输入其他内容则不执行。";
   if (intent.language === "en-US") {
     return [
       `Start Gate: ${c?.titleEn ?? "command"}`,
-      `- Equivalent slash command: ${command}`,
+      `- Gate: ${gate?.gateId ?? "pending"}; expiresAt=${gate?.expiresAt ?? "unknown"}; source=natural`,
+      `- Exact command: ${command}`,
       `- Risk: ${c ? formatRiskLine(c, intent.language) : "unknown"}`,
-      `- Scope: current project ${context.projectPath}`,
+      `- Scope: ${gate?.scope ?? `current project ${context.projectPath}`}`,
+      "- Reason: natural-language bridge can only open a gate; Start Gate does not replace later permission approval.",
+      "- Rollback: inspect /diff, checkpoint, config state, or cancel the task before accepting follow-up changes.",
+      "- Choices: cancel by typing anything else; continue only with the required confirmation below.",
       "- Budget: local state/command path only unless the slash command later calls the model or tools.",
       `- Output/log path: summaries in transcript; long task logs under ${logPath}`,
       "- Cancel: use /interrupt or the command-specific cancel entry such as /agents cancel <id>.",
-      "Reply `yes` to run the equivalent slash command, or type a different request to cancel this gate.",
+      exactHint,
     ].join("\n");
   }
   return [
     `Start Gate：${c?.titleZh ?? "命令"}`,
-    `- 等价 slash command：${command}`,
+    `- Gate：${gate?.gateId ?? "pending"}；expiresAt=${gate?.expiresAt ?? "unknown"}；source=natural`,
+    `- 精确命令：${command}`,
     `- 风险：${c ? formatRiskLine(c, intent.language) : "unknown"}`,
-    `- 范围：当前项目 ${context.projectPath}`,
+    `- 范围：${gate?.scope ?? `当前项目 ${context.projectPath}`}`,
+    "- 原因：自然语言桥只能打开确认门；Start Gate 不替代后续权限审批。",
+    "- 回滚方式：继续前可查看 /diff、checkpoint、配置状态或取消任务。",
+    "- 选择：输入其他内容取消；继续必须按下方要求确认。",
     "- 预算：仅本地状态/命令路径；除非后续 slash command 调模型或工具。",
     `- 输出/日志：摘要写入 transcript；长任务日志位于 ${logPath}`,
     "- 取消方式：输入其他请求会取消此门；长任务可用 /interrupt 或 /agents cancel <id>。",
-    "回复 `确认` 执行等价 slash command；输入其他内容则不执行。",
+    exactHint,
   ].join("\n");
+}
+
+export function isNaturalGateExpired(gate: PendingNaturalCommand, now = new Date()): boolean {
+  return Date.parse(gate.expiresAt) <= now.getTime();
+}
+
+export function matchesNaturalGateConfirmation(
+  gate: PendingNaturalCommand,
+  text: string,
+  now = new Date(),
+): "confirmed" | "expired" | "exact_required" | "cancelled" {
+  if (isNaturalGateExpired(gate, now)) return "expired";
+  const normalized = text.trim();
+  if (gate.requiresExactConfirmation) {
+    return normalized === gate.exactCommand ? "confirmed" : "exact_required";
+  }
+  return /^(yes|y|confirm|确认|是|执行|继续)$/iu.test(normalized) ? "confirmed" : "cancelled";
+}
+
+function requiresExactNaturalConfirmation(c: CommandCapability, command: string): boolean {
+  return (
+    c.risk === "dangerous" ||
+    c.writesConfig ||
+    c.entersPermissionPipeline ||
+    ["workflows", "fork"].includes(c.id) ||
+    /\b(refresh|init|enable|accept|delete|restore|bypass|add|remove|install|job|remote|hook)\b|刷新|建立|启用|接受|删除|恢复|安装依赖/u.test(
+      command,
+    )
+  );
 }
 
 export function formatRiskLine(c: CommandCapability, language: Language): string {
@@ -1162,8 +1276,18 @@ function scoreCapability(
   if (capability.id === "memory" && /记忆|memory|linghun.md/u.test(normalized)) score += 3;
   if (capability.id === "index" && /索引|index|搜索代码|search code|architecture/u.test(normalized))
     score += 3;
-  if (capability.id === "model" && /模型|model|provider/u.test(normalized)) score += 3;
-  if (capability.id === "mode" && /权限模式|permission mode|bypass/u.test(normalized)) score += 3;
+  if (
+    capability.id === "model" &&
+    /模型|model|provider|claude|deepseek|gpt|route|路由/u.test(normalized)
+  )
+    score += 4;
+  if (
+    capability.id === "mode" &&
+    /权限模式|permission mode|bypass|accept edits|acceptedits|auto|dontask|don't ask|plan mode/u.test(
+      normalized,
+    )
+  )
+    score += 5;
   if (capability.id === "diff" && /diff|改动|差异/u.test(normalized)) score += 3;
   if (capability.id === "review" && /review|审查/u.test(normalized)) score += 3;
   if (capability.id === "grep" && /搜索代码|search code|搜索.*todo/u.test(normalized)) score += 5;
@@ -1227,12 +1351,80 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     if (/search|搜索|查找|todo/u.test(normalized)) return "/index search <query>";
     return "/index status";
   }
-  if (capability.id === "workflows" && /bug-fix|bug fix/u.test(normalized))
-    return "/workflows bug-fix";
-  if (capability.id === "fork" && /verifier|验证/u.test(normalized)) return "/fork verifier <task>";
+  if (capability.id === "workflows") {
+    const workflow = extractWorkflowName(normalized);
+    return workflow ? `/workflows ${workflow}` : "/workflows";
+  }
+  if (capability.id === "fork") {
+    const role = extractAgentRole(normalized);
+    return role ? `/fork ${role} <task>` : "/fork <explorer|planner|verifier|worker> <task>";
+  }
   if (capability.id === "permissions" && /add|remove|添加|删除/u.test(normalized))
     return "/permissions add|remove ...";
-  if (capability.id === "mode" && /bypass/u.test(normalized)) return "/mode bypass";
+  if (capability.id === "mode") {
+    const mode = extractPermissionMode(normalized);
+    return mode ? `/mode ${mode}` : "/mode";
+  }
+  if (capability.id === "model") {
+    if (/doctor|诊断/u.test(normalized)) return "/model route doctor";
+    if (/route|路由/u.test(normalized)) return "/model route";
+    const candidate = extractModelCandidate(normalized);
+    return candidate ? `/model route set executor ${candidate}` : "/model";
+  }
+  if (capability.id === "branch") {
+    const purpose = extractBranchPurpose(normalized);
+    return purpose ? `/branch ${purpose}` : "/branch";
+  }
   if (capability.id === "bash" && /npm install/u.test(normalized)) return "/bash npm install";
   return capability.slash;
+}
+
+function extractPermissionMode(text: string): PermissionMode | null {
+  if (/acceptedits|accept edits|接受编辑/u.test(text)) return "acceptEdits";
+  if (/dontask|don't ask|dont ask|不询问/u.test(text)) return "dontAsk";
+  if (/bypass|绕过/u.test(text)) return "bypass";
+  if (/auto|自动审批/u.test(text)) return "auto";
+  if (/plan|计划/u.test(text)) return "plan";
+  if (/default|默认/u.test(text)) return "default";
+  return null;
+}
+
+function extractWorkflowName(text: string): string | null {
+  const names = [
+    "bug-fix",
+    "review",
+    "refactor-plan",
+    "doc-to-code",
+    "design-to-code",
+    "release-note",
+  ];
+  for (const name of names) {
+    if (text.includes(name)) return name;
+  }
+  if (/bug fix|修 bug|修复 bug/u.test(text)) return "bug-fix";
+  if (/审查|代码审查/u.test(text)) return "review";
+  if (/重构/u.test(text)) return "refactor-plan";
+  if (/文档.*代码|doc to code/u.test(text)) return "doc-to-code";
+  if (/设计.*代码|design to code/u.test(text)) return "design-to-code";
+  if (/release|发布说明/u.test(text)) return "release-note";
+  return null;
+}
+
+function extractAgentRole(text: string): string | null {
+  if (/explorer|探索|查代码/u.test(text)) return "explorer";
+  if (/planner|计划|规划/u.test(text)) return "planner";
+  if (/verifier|验证|复检/u.test(text)) return "verifier";
+  if (/worker|执行|实现/u.test(text)) return "worker";
+  return null;
+}
+
+function extractModelCandidate(text: string): string | null {
+  const match = /(?:set|switch to|切到|换到|使用)\s+([a-z0-9_.:-]+)/iu.exec(text);
+  return match?.[1] && !["model", "route"].includes(match[1]) ? match[1] : null;
+}
+
+function extractBranchPurpose(text: string): string | null {
+  const match = /(?:branch|分支)(?: session)?\s+(.+)$/iu.exec(text);
+  if (!match?.[1]) return null;
+  return match[1].trim().slice(0, 80) || null;
 }

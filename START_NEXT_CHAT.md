@@ -26,6 +26,7 @@
 19. F:\Linghun\docs\delivery\phase-13-multi-model.md
 20. F:\Linghun\docs\delivery\phase-14-skills-workflow.md
 21. F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md
+22. F:\Linghun\docs\audit\reference-map.md
 
 这是 Linghun 项目的阶段开发仓库。请严格按阶段蓝图推进，不要跳阶段，不要提前实现后续功能。
 
@@ -48,15 +49,17 @@
 - Phase 13 多模型协作闭环已完成。
 - Phase 14 Skills 与工作流主闭环已完成。
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性与安全边界已加固。
-- Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
+- Phase 15 preflight hardening 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel、高风险自然语言阻断、Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认、bypass/auto/Plan 边界。
 
-当前任务：Phase 15 preflight 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
+当前任务：Phase 15 preflight hardening 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。
 - Phase 14 已补 Skills / Hooks / Plugins 加载边界：summary-first、load-on-demand、第三方来源/权限/信任级别可见、失败隔离、稳定排序、Start Gate 和权限管道不可绕过。
 - Phase 14 已补主闭环 / hardening 分段边界：主闭环只做本地 loader、doctor、启停、信任和权限接入；hardening 再补稳定排序、缓存 hash、失败隔离、hook 超时、大输出截断和 workflow 验收；GitHub 安装/插件市场不混入主闭环。
 - Phase 15 前新增 Natural Command Bridge preflight：普通自然语言必须能查看/控制高频 Linghun 状态，底层 intent router 负责裁决，模型只负责解释；这不是关键词补丁，也不能做成弱化版。必须参考 CCB 的公开行为边界，以 Command Capability Catalog 暴露中英文 description/whenToUse、modelInvocable、bridgeSafe、risk 和 Start Gate 信息。Catalog 必须覆盖所有用户可见 slash 命令，隐藏/内部命令显式标记；只读状态直接回答，索引/模型/模式/workflow 等动作走 Start Gate，写文件/Bash/权限规则/第三方启用/force/remote 等不得自然语言直通。
+- Phase 15 preflight 交互审查后的成品级补强要求已写入蓝图/规格/路线图：进入 Phase 15 真实项目 Beta 前，必须先闭环 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明和测试矩阵；这属于 Phase 15 preflight hardening，不是 Phase 16+。
+- 权限/提权交互必须显示 exact action、risk、scope、reason、rollback 和 choices；Start Gate 不替代权限审批。`bypass` 必须本地显式 opt-in，`auto` 必须有可用 gate/classifier，Plan approval 必须区分手动确认编辑、acceptEdits 边界和拒绝反馈。
 - Phase 15 后新增 Phase 15.5：双模型交叉审查与开源前 hardening。GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续。
 - Phase 15.5 已补 release readiness / open-source readiness：安装、CLI 入口、Windows 大小写 shim、doctor、keychain/密钥脱敏、debug bundle、配置 schema、升级回滚和文档同步都要检查。
 - Phase 15 已补 provider quota / balance 查询设计：参考 CC Switch usage query 的公开行为和边界，区分 local_limit、provider_usage、provider_quota、billing_reconciled；官方订阅可自动查的才标记 official/oauth，第三方中转站和私有服务走 template/custom_script，查不到标记 unknown。
@@ -66,6 +69,7 @@
 - Phase 17 已补 Remote Channels 安全硬化：默认关闭，必须校验绑定用户/设备、过期时间、nonce/消息 id、签名或等价来源证明，审批幂等，支持设备解绑和审计日志；远程端只发摘要/审批/报告，不发送完整上下文。
 - Phase 17 已补官方 CLI adapter 方向：飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli 等只作为公开 adapter 边界参考；优先用 official_cli 发送脱敏摘要/审批/报告，CLI 缺失、未登录、权限不足或输出不可解析时保持 disabled，并通过 `/remote channels doctor` 诊断。
 - oh-my-openagent 只作为公开行为、交互和验收边界参考，不复制实现，不提前堆功能。
+- 参考源总表已补到 F:\Linghun\docs\audit\reference-map.md；后续阶段开工前必须先看该表，确认公开地址/本地路径、可参考内容和禁止事项。需要联网核验公开项目时按需联网，不得虚造，不得复制第三方源码或内部实现。
 
 新对话恢复上下文时，优先使用结构化 HandoffPacket、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence，避免一上来全量读取文件；索引缺失或过期时先提示用户运行 /index init fast 或 /index refresh。
 

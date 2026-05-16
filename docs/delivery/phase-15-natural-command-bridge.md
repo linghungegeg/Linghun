@@ -21,9 +21,14 @@
   - 支持中英文语义变体、疑问句、命令式、slash command 用途/风险询问。
   - 低置信度、拼写不准、多候选时进入澄清，不猜测执行。
   - 中文/英文同一能力进入同一风险处理路径。
-- 风险裁决：
+- 风险裁决与 preflight hardening：
   - 只读状态查询可走等价 slash command。
   - 需要动作的索引、workflow、resume、branch、fork、verify、review 等进入 Start Gate。
+  - Catalog 增加 `SLASH_COMMAND_REGISTRY`，并用 TUI 真实用户可见 dispatch 列表做漂移检测。
+  - mode/workflow/fork/index/model/branch 支持关键自然语言参数提取；低置信度或多候选时澄清，不猜测。
+  - pending natural Start Gate 记录 `gateId`、`createdAt`、`expiresAt`、`source`、`exactCommand`、`risk`、`scope`，状态栏显示 pending gate。
+  - refresh/init、workflow、fork、高风险、写配置、权限管道等 gate 不接受普通“确认/yes”，必须输入 exact command；过期 gate 拒绝执行。
+  - `bypass` 必须 `LINGHUN_ENABLE_BYPASS=1` 本地显式 opt-in；`auto` 必须 `LINGHUN_ENABLE_AUTO_PERMISSION=1` 表示本地 gate/classifier 可用；Plan approval 只确认方案边界，不授权所有工具。
   - 写文件、编辑、多处编辑、Bash、权限规则、bypass、force refresh、第三方启用、记忆接受/删除、rewind restore、hook/job/remote/dependency install 等自然语言不直通，只解释风险或进入权限管道。
 
 ## 使用方式
@@ -138,7 +143,12 @@ force refresh index
 
 ## 配置项
 
-本阶段不新增配置项。
+本阶段不新增持久化配置 schema；为避免自然语言、workflow、agent、plugin 或 hook 静默提权，preflight hardening 仅使用本地显式环境开关：
+
+- `LINGHUN_ENABLE_BYPASS=1`：允许用户本地显式切换 `/mode bypass`。未设置时拒绝切换。
+- `LINGHUN_ENABLE_AUTO_PERMISSION=1`：表示本地 auto gate/classifier 已可用，允许 `/mode auto`。未设置时拒绝切换。
+
+上述开关不替代 Start Gate 或工具权限审批；Plan approval 也不授权 Bash、联网、依赖、权限规则或第三方启用。
 
 ## 命令
 
@@ -191,16 +201,14 @@ corepack pnpm exec linghun --help
 
 已执行：
 
-- `corepack pnpm exec tsc --noEmit --pretty false --project packages/tui/tsconfig.json`：通过，无输出。
-- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、138 个测试通过。
-- `corepack pnpm test`：通过，11 个测试文件、138 个测试通过。
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、154 个测试通过。
+- `corepack pnpm test`：通过，11 个测试文件、154 个测试通过。首次完整重跑曾命中一个既有长耗时验证 runner 用例 5s 超时；未改测试超时配置，直接重跑通过。
 - `corepack pnpm typecheck`：通过。
 - `corepack pnpm build`：通过，workspace 7 个包构建通过。
 - `corepack pnpm check`：通过，43 个文件检查通过。
 - `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
-- TUI stdin smoke：通过，覆盖第一批中英文自然语言、slash command 用途询问、第二批发现/解释、第三批高风险阻断；高风险样例未执行。
 
 ## 性能结果
 
@@ -286,7 +294,7 @@ validation_completed:
   - command: "corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts"
     result: "pass"
   - command: "corepack pnpm test"
-    result: "pass; 11 test files, 138 tests"
+    result: "pass; 11 test files, 154 tests"
   - command: "corepack pnpm typecheck"
     result: "pass"
   - command: "corepack pnpm build"
@@ -304,7 +312,7 @@ validation_completed:
 verification_agent:
   verdict: "PASS"
   spot_check:
-    - "corepack pnpm test: pass; 11 test files, 138 tests"
+    - "corepack pnpm test: pass; 11 test files, 154 tests"
     - "corepack pnpm build: pass; workspace 7 packages"
     - "corepack pnpm check: pass; 43 files"
 index_status:

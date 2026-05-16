@@ -47,13 +47,16 @@ import {
 } from "@linghun/tools";
 import {
   type PendingNaturalCommand,
+  type SLASH_COMMAND_REGISTRY,
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
+  createPendingNaturalCommand,
   formatCapabilityAnswer,
   formatNaturalClarification,
   formatNaturalPermissionBlock,
   formatNaturalStartGate,
   getCommandCapabilityCatalog,
+  matchesNaturalGateConfirmation,
   routeNaturalIntent,
 } from "./natural-command-bridge.js";
 
@@ -526,6 +529,52 @@ type MessageKey =
   | "btwPrefix"
   | "evidenceBlocked"
   | "claimNeedsDisclaimer";
+
+export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
+  "/help",
+  "/model",
+  "/language",
+  "/mode",
+  "/plan",
+  "/permissions",
+  "/background",
+  "/agents",
+  "/fork",
+  "/rewind",
+  "/btw",
+  "/interrupt",
+  "/claim-check",
+  "/verify",
+  "/review",
+  "/vision",
+  "/image",
+  "/cache-log",
+  "/cache",
+  "/break-cache",
+  "/mcp",
+  "/index",
+  "/resume",
+  "/branch",
+  "/memory",
+  "/skills",
+  "/workflows",
+  "/plugins",
+  "/doctor",
+  "/usage",
+  "/stats",
+  "/tab",
+  "/sessions",
+  "/read",
+  "/write",
+  "/edit",
+  "/multiedit",
+  "/grep",
+  "/glob",
+  "/bash",
+  "/todo",
+  "/diff",
+  "/exit",
+] as const satisfies readonly (typeof SLASH_COMMAND_REGISTRY)[number]["slash"][];
 
 export type TuiContext = {
   store: SessionStore;
@@ -1999,37 +2048,75 @@ async function handleModeCommand(
   if (!nextMode) {
     writeLine(output, `当前权限模式：${context.permissionMode}`);
     writeLine(output, "可选：default / plan / acceptEdits / dontAsk / auto / bypass");
+    writeLine(
+      output,
+      "边界：bypass 需要本地显式 opt-in；auto 需要本地 gate/classifier 可用。Plan approval 不授权所有工具。",
+    );
     return;
   }
   if (!isPermissionMode(nextMode)) {
     writeLine(output, "未知模式。可选：default / plan / acceptEdits / dontAsk / auto / bypass");
     return;
   }
-  if (context.permissionMode === "plan" && nextMode === "bypass" && !context.planAccepted) {
-    writeLine(
-      output,
-      "Plan 模式不能直接切到 bypass 执行写入。请先运行 /plan accept <方案> 确认计划，或切回 default。 ",
-    );
+  const guard = getModeChangeGuard(nextMode, context);
+  if (guard) {
+    writeLine(output, guard);
+    writeStatus(output, context);
     return;
   }
+  await setPermissionMode(context, output, nextMode, `mode command -> ${nextMode}`);
+}
+
+async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
+  const modes: PermissionMode[] = ["default", "plan", "acceptEdits", "auto"];
+  const index = modes.indexOf(context.permissionMode);
+  const nextMode = modes[(index + 1) % modes.length] ?? "default";
+  const guard = getModeChangeGuard(nextMode, context);
+  if (guard) {
+    writeLine(output, guard);
+    writeStatus(output, context);
+    return;
+  }
+  await setPermissionMode(context, output, nextMode, "tab mode cycle");
+  writeLine(output, `已切换模式：${context.permissionMode}（/tab 等价 Shift+Tab）`);
+}
+
+function getModeChangeGuard(nextMode: PermissionMode, context: TuiContext): string | null {
+  if (context.permissionMode === "plan" && nextMode === "bypass" && !context.planAccepted) {
+    return "Plan 模式不能直接切到 bypass 执行写入。请先批准计划的明确边界，或切回 default。";
+  }
+  if (nextMode === "bypass" && process.env.LINGHUN_ENABLE_BYPASS !== "1") {
+    return "已拒绝切换 bypass：bypass 必须本地显式 opt-in（设置 LINGHUN_ENABLE_BYPASS=1 后重新启动），不能由自然语言、workflow、agent、plugin 或 hook 静默开启。";
+  }
+  if (nextMode === "auto" && process.env.LINGHUN_ENABLE_AUTO_PERMISSION !== "1") {
+    return "已拒绝切换 auto：当前没有可用的本地 gate/classifier（LINGHUN_ENABLE_AUTO_PERMISSION=1 未开启）。请使用 default 或 plan。";
+  }
+  return null;
+}
+
+async function setPermissionMode(
+  context: TuiContext,
+  output: Writable,
+  nextMode: PermissionMode,
+  reason: string,
+): Promise<void> {
+  const previousMode = context.permissionMode;
   context.permissionMode = nextMode;
   context.planAccepted = false;
+  const sessionId = await ensureSession(context);
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `permission_mode_change: ${previousMode} -> ${nextMode}; reason=${reason}; boundary=Start Gate and permission pipeline remain active`,
+    "info",
+  );
   writeLine(output, `已切换权限模式：${nextMode}`);
   if (nextMode === "plan") {
     writeLine(
       output,
-      "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后再执行写入。",
+      "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后仍不等于授权所有工具。",
     );
   }
-  writeStatus(output, context);
-}
-
-function cycleMode(context: TuiContext, output: Writable): void {
-  const modes: PermissionMode[] = ["default", "plan", "acceptEdits", "auto"];
-  const index = modes.indexOf(context.permissionMode);
-  context.permissionMode = modes[(index + 1) % modes.length] ?? "default";
-  context.planAccepted = false;
-  writeLine(output, `已切换模式：${context.permissionMode}（/tab 等价 Shift+Tab）`);
   writeStatus(output, context);
 }
 
@@ -2044,9 +2131,17 @@ async function handlePlanCommand(
       writeLine(output, "当前没有待确认计划。先运行 /plan 生成结构化方案。");
       return;
     }
-    const optionId = args[1] ?? context.activePlan.options[0]?.id ?? "a";
+    const boundary = args[1] ?? "manual";
+    if (boundary !== "manual" && boundary !== "acceptEdits") {
+      writeLine(
+        output,
+        "用法：/plan accept manual|acceptEdits。批准计划不等于授权所有工具；Bash/联网/依赖/权限仍走权限管道。",
+      );
+      return;
+    }
+    const optionId = args[2] ?? context.activePlan.options[0]?.id ?? "a";
     context.planAccepted = true;
-    context.permissionMode = "default";
+    context.permissionMode = boundary === "acceptEdits" ? "acceptEdits" : "default";
     const sessionId = await ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "plan_decision",
@@ -2055,10 +2150,36 @@ async function handlePlanCommand(
       decision: "accepted",
       createdAt: new Date().toISOString(),
     });
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `plan_approved: proposal=${context.activePlan.id}; option=${optionId}; boundary=${boundary}; note=does not authorize all tools`,
+      "info",
+    );
     writeLine(
       output,
-      `已确认计划 ${context.activePlan.id} / 方案 ${optionId}，已回到 default 模式，可以执行允许的写入路径。`,
+      `已确认计划 ${context.activePlan.id} / 方案 ${optionId}；边界=${boundary}；当前模式=${context.permissionMode}。写入、Bash、联网、依赖和权限变更仍走权限管道。`,
     );
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "reject") {
+    if (!context.activePlan) {
+      writeLine(output, "当前没有待拒绝计划。先运行 /plan 生成结构化方案。");
+      return;
+    }
+    const feedback = args.slice(1).join(" ") || "no feedback";
+    const sessionId = await ensureSession(context);
+    await context.store.appendEvent(sessionId, {
+      type: "plan_decision",
+      proposalId: context.activePlan.id,
+      optionId: context.activePlan.options[0]?.id ?? "a",
+      decision: "rejected",
+      createdAt: new Date().toISOString(),
+    });
+    await appendSystemEvent(context, sessionId, `plan_rejected: ${feedback}`, "info");
+    context.planAccepted = false;
+    writeLine(output, `已拒绝当前计划并保留 plan 模式。反馈：${feedback}`);
     writeStatus(output, context);
     return;
   }
@@ -2096,7 +2217,10 @@ async function handlePlanCommand(
     createdAt: new Date().toISOString(),
   });
   writeLine(output, formatPlanProposal(proposal));
-  writeLine(output, "确认执行请运行：/plan accept a；继续只读请保持 /mode plan。 ");
+  writeLine(
+    output,
+    "确认执行请运行：/plan accept manual a 或 /plan accept acceptEdits a；拒绝请运行 /plan reject <反馈>。批准计划不授权 Bash/联网/依赖/权限变更。",
+  );
   writeStatus(output, context);
 }
 
@@ -4956,20 +5080,53 @@ async function handleNaturalInput(
   context: TuiContext,
   output: Writable,
 ): Promise<"handled" | "message"> {
-  const normalized = text.trim().toLowerCase();
-  if (context.pendingNaturalCommand && /^(yes|y|confirm|确认|是|执行|继续)$/iu.test(normalized)) {
-    const command = context.pendingNaturalCommand.command;
-    context.pendingNaturalCommand = undefined;
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? `Confirmed. Running equivalent slash command: ${command}`
-        : `已确认。执行等价 slash command：${command}`,
-    );
-    const result = await handleSlashCommand(command, context, output);
-    return result === "message" ? "message" : "handled";
-  }
   if (context.pendingNaturalCommand) {
+    const gate = context.pendingNaturalCommand;
+    const decision = matchesNaturalGateConfirmation(gate, text);
+    if (decision === "expired") {
+      context.pendingNaturalCommand = undefined;
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? `Start Gate expired: ${gate.gateId}. Reissue the request before running ${gate.exactCommand}.`
+          : `Start Gate 已过期：${gate.gateId}。请重新发起请求后再执行 ${gate.exactCommand}。`,
+      );
+      writeStatus(output, context);
+      return "handled";
+    }
+    if (decision === "exact_required") {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? `Exact confirmation required for ${gate.gateId}: type ${gate.exactCommand}. Plain confirmation was not accepted.`
+          : `Gate ${gate.gateId} 需要精确确认：请输入 ${gate.exactCommand}。普通确认未被接受。`,
+      );
+      writeStatus(output, context);
+      return "handled";
+    }
+    if (decision === "confirmed") {
+      context.pendingNaturalCommand = undefined;
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? [
+              `Confirmed Start Gate ${gate.gateId}.`,
+              `- Exact command: ${gate.exactCommand}`,
+              `- Risk: ${gate.risk}`,
+              `- Scope: ${gate.scope}`,
+              "- Note: Start Gate does not replace later permission approval.",
+            ].join("\n")
+          : [
+              `已确认 Start Gate ${gate.gateId}。`,
+              `- 精确命令：${gate.exactCommand}`,
+              `- 风险：${gate.risk}`,
+              `- 范围：${gate.scope}`,
+              "- 注意：Start Gate 不替代后续权限审批。",
+            ].join("\n"),
+      );
+      const result = await handleSlashCommand(gate.exactCommand, context, output);
+      return result === "message" ? "message" : "handled";
+    }
     context.pendingNaturalCommand = undefined;
   }
 
@@ -4997,12 +5154,11 @@ async function handleNaturalInput(
     return "handled";
   }
   if (intent.action === "start_gate" && intent.command) {
-    context.pendingNaturalCommand = {
-      command: intent.command,
-      capabilityId: intent.capability.id,
-      createdAt: new Date().toISOString(),
-    };
-    writeLine(output, formatNaturalStartGate(intent, context));
+    const gate = createPendingNaturalCommand(intent, context);
+    if (!gate) return "message";
+    context.pendingNaturalCommand = gate;
+    writeLine(output, formatNaturalStartGate(intent, context, gate));
+    writeStatus(output, context);
     return "handled";
   }
   return "message";
@@ -6138,6 +6294,9 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter((task) => task.status === "running").length;
   const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
+  const gate = context.pendingNaturalCommand
+    ? `${context.pendingNaturalCommand.gateId}:${context.pendingNaturalCommand.risk}`
+    : "none";
   const status = t(context, "status", {
     session: truncateDisplay(
       context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
@@ -6148,8 +6307,9 @@ function writeStatus(output: Writable, context: TuiContext): void {
     background: String(background),
     cache: formatPercent(latestHitRate),
     index: context.index.status,
+    gate,
   });
-  writeLine(output, truncateDisplay(status, 96));
+  writeLine(output, truncateDisplay(status, 120));
 }
 
 function t(context: TuiContext, key: MessageKey, values: Record<string, string> = {}): string {
@@ -6168,7 +6328,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     unknownCommand: "未知命令",
     exit: "已退出 Linghun。",
     status:
-      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index}",
+      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",
     statusShort: "状态栏：{mode} · bg {background}",
     help: "帮助",
     inputPrompt: "你> ",
@@ -6196,7 +6356,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     unknownCommand: "Unknown command",
     exit: "Exited Linghun.",
     status:
-      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index}",
+      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",
     statusShort: "Status: {mode} · bg {background}",
     help: "Help",
     inputPrompt: "you> ",

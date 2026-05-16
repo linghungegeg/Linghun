@@ -3,8 +3,10 @@ import {
   type RuntimeStatusSource,
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
+  createPendingNaturalCommand,
   formatNaturalPermissionBlock,
   getCommandCapabilityCatalog,
+  matchesNaturalGateConfirmation,
   routeNaturalIntent,
   validateCommandCapabilityCoverage,
 } from "./natural-command-bridge.js";
@@ -152,10 +154,80 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(["dangerous", "start_gate"]).toContain(capability?.risk);
   });
 
+  it.each([
+    ["切到 plan mode", "mode", "/mode plan"],
+    ["switch to accept edits", "mode", "/mode acceptEdits"],
+    ["直接开启 bypass", "mode", "/mode bypass"],
+    ["start review workflow", "workflows", "/workflows review"],
+    ["打开 refactor-plan 工作流", "workflows", "/workflows refactor-plan"],
+    ["start a planner agent", "fork", "/fork planner <task>"],
+    ["开一个 explorer agent", "fork", "/fork explorer <task>"],
+    ["index architecture", "index", "/index architecture"],
+    ["search index for auth", "index", "/index search <query>"],
+    ["model route doctor", "model", "/model route doctor"],
+    ["switch to claude-sonnet", "model", "/model route set executor claude-sonnet"],
+    ["create branch session 登录修复", "branch", "/branch 登录修复"],
+  ])("extracts key natural parameters for %s", (phrase, id, command) => {
+    const intent = routeNaturalIntent(phrase);
+    expect(intent.capability?.id).toBe(id);
+    expect(intent.command).toBe(command);
+  });
+
   it("asks for clarification on low confidence and multiple candidates", () => {
     expect(routeNaturalIntent("cach statuz").action).toBe("ask_clarify");
     const multi = routeNaturalIntent("status");
     expect(["ask_clarify", "model", "execute_readonly"]).toContain(multi.action);
+  });
+});
+
+describe("Phase 15 pending natural gate hardening", () => {
+  const runtime: RuntimeStatusSource = {
+    model: "deepseek-v4-flash",
+    provider: "deepseek",
+    permissionMode: "default",
+    projectPath: "/tmp/project",
+    language: "zh-CN",
+    memory: { projectRulesExists: false, candidates: [], accepted: [] },
+    index: { status: "ready", changedFiles: 0 },
+    cache: { history: [] },
+    skills: { enabled: true, skills: [] },
+    plugins: { enabled: true, plugins: [] },
+    hooks: { enabled: false, hooks: [] },
+  };
+
+  it("creates gate metadata and requires exact command for refresh/init style actions", () => {
+    const intent = routeNaturalIntent("build the index");
+    const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
+    expect(gate).toMatchObject({
+      capabilityId: "index",
+      source: "natural",
+      exactCommand: "/index init fast",
+      risk: "start_gate",
+      scope: "current project /tmp/project",
+      requiresExactConfirmation: true,
+    });
+    expect(gate).toBeTruthy();
+    if (!gate) return;
+    expect(gate.gateId).toMatch(/^ng-/);
+    expect(gate.expiresAt).toBe("2026-05-17T00:01:30.000Z");
+    expect(matchesNaturalGateConfirmation(gate, "确认")).toBe("exact_required");
+    expect(matchesNaturalGateConfirmation(gate, "/index init fast")).toBe("confirmed");
+  });
+
+  it("expires pending gates before confirmation", () => {
+    const intent = routeNaturalIntent("start review workflow");
+    const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
+    expect(gate).toBeTruthy();
+    if (!gate) return;
+    expect(matchesNaturalGateConfirmation(gate, "yes")).toBe("exact_required");
+    expect(matchesNaturalGateConfirmation(gate, "/workflows review")).toBe("confirmed");
+    expect(
+      matchesNaturalGateConfirmation(
+        gate,
+        "/workflows review",
+        new Date("2026-05-17T00:02:00.000Z"),
+      ),
+    ).toBe("expired");
   });
 });
 

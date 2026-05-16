@@ -103,6 +103,8 @@ Linghun 的正确定位是：
 | AI Sessions MCP | 跨工具会话检索 | 不承诺全自动接管所有工具上下文 |
 | Reasonix 类缓存方案 | 缓存稳定、命中率观测、静态上下文稳定 | 不做用户看不懂的黑盒 |
 
+详细参考源、公开地址、本地路径、禁止事项和阶段对应关系维护在 `docs/audit/reference-map.md`。后续阶段执行时必须先按该表确认参考边界；需要联网核验的公开项目应按需联网，不得虚造或复制实现。
+
 ## 2. 产品原则
 
 ### 2.1 强编码优先
@@ -224,6 +226,16 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 - 中英文一致：Command Capability Catalog 必须同时提供中文和英文语义说明；最终回复跟随 language preference 或用户输入主语言。
 - 目录预算：模型只看到短摘要和 when-to-use，不加载完整 skill/plugin/hook 内容；长描述截断且稳定排序，避免破坏 prompt cache。
 
+权限和提权交互必须是成品级安全面，而不是后补弹窗：
+
+- Start Gate 是执行门，只确认“是否开始这个动作”；它不替代工具权限审批、配置写入审批、第三方扩展信任确认或远程审批。
+- pending gate 必须在 UI 可见，带过期时间，确认时重放 exact command、risk、scope；高风险动作不能只靠普通“确认”直通。
+- 权限请求必须展示 exact action、risk、scope、reason、rollback 和 choices，并记录可审计事件。
+- `bypass` 必须本地显式 opt-in，不能由模型、自然语言桥、remote channel、workflow、agent、plugin 或 hook 静默开启。
+- `auto` 必须依赖可用的本地 classifier/gate；不可用时拒绝或降级，不得默认放行。
+- Plan 不是“批准后任意执行”。计划批准至少区分手动确认编辑、进入 acceptEdits 边界、拒绝并反馈；具体写入、Bash、联网、依赖和权限规则仍走权限管道。
+- OpenCode 的 output grouping / expand-collapse 可以后置到体验 hardening；但 summary-first、pending gate 可见、大输出不进 prompt 是 Beta 前安全边界。
+
 覆盖分三批：
 
 - 第一批：状态查询和安全启动门，Phase 15 preflight 必须完成。
@@ -235,10 +247,12 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 非弱化验收：
 
 - Command Capability Catalog 覆盖所有用户可见 slash 命令，隐藏/内部命令必须显式标记。
+- Beta 前必须有真实 slash dispatch 与 Catalog 的 drift test；长期成品应由统一 command registry / manifest 派生 help、router、model summary 和 dispatch，不能靠两份手工清单互相校验。
 - 每个能力都有中英文 description 和 when-to-use；模型看到短摘要，用户看到可读说明。
 - 自然语言桥支持状态问句、动作祈使句、用途/风险询问、参数提取和低置信度候选。
+- 参数提取必须覆盖 mode、workflow、fork/agent role、index action/query、model route/set candidate、branch purpose；低置信度时给候选。
 - 中文、英文和同义表达必须落到同一个风险处理路径，不能因为语言不同绕过 Start Gate 或权限管道。
-- 如果只能匹配少数固定短句、不能解释所有 slash 命令、不能给出来源真实的 RuntimeStatus，视为 preflight 未完成。
+- 如果只能匹配少数固定短句、不能解释所有 slash 命令、不能给出来源真实的 RuntimeStatus，或不能保证 Start Gate / bypass / auto / permission escalation 边界，视为 preflight 未达到进入真实项目 Beta 的硬度。
 
 ### 4.2 上下文分层
 
@@ -1004,10 +1018,12 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 
 当前进度：
 
-- Phase 00-13 已完成。
-- 下一阶段是 Phase 14：Skills 与工作流闭环；只有用户明确确认后才能开始。
-- Phase 13 只完成多模型 role route、route doctor、role usage 对接现有 provider、受限 handoff、vision/image 最小 evidence/metadata 闭环；不得写成已完成完整 provider adapter、quota/balance 查询、Phase 14+、长期任务、Remote Channels 或桌面端。
-- Phase 14 主闭环只做本地 Skills / Workflows / Hooks / Plugin loader、doctor、启停、信任和权限接入；不做插件市场、GitHub 安装、自动更新或 Phase 15+ 能力。
+- Phase 00-14 主闭环已完成。
+- Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
+- Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
+- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
+- Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
+- Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
 

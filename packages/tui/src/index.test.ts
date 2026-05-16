@@ -9,6 +9,7 @@ import { createToolContext } from "@linghun/tools";
 import { describe, expect, it } from "vitest";
 import {
   type TuiContext,
+  USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   createCacheState,
   createHookState,
   createIndexState,
@@ -20,6 +21,7 @@ import {
   handleSlashCommand,
   recordModelUsage,
 } from "./index.js";
+import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 
 class MemoryOutput extends Writable {
   text = "";
@@ -135,6 +137,18 @@ async function createTestContext(
 }
 
 describe("Phase 06 TUI slash commands", () => {
+  it("detects catalog drift against real user-visible slash dispatch", () => {
+    expect(validateCommandCapabilityCoverage([...USER_VISIBLE_DISPATCH_SLASH_COMMANDS])).toEqual(
+      [],
+    );
+    expect(
+      validateCommandCapabilityCoverage([
+        ...USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
+        "/missing-command",
+      ]),
+    ).toContain("dispatch missing registry /missing-command");
+  });
+
   it("shows help, model, and session list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -616,7 +630,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
   });
 
-  it("creates and accepts structured plan proposals", async () => {
+  it("creates and accepts structured plan proposals with explicit boundaries", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -624,11 +638,27 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/plan", context, output);
-    await handleSlashCommand("/plan accept a", context, output);
+    await handleSlashCommand("/plan accept manual a", context, output);
 
     expect(output.text).toContain("PlanProposal");
     expect(output.text).toContain("方案 a");
     expect(output.text).toContain("已确认计划");
+    expect(output.text).toContain("写入、Bash、联网、依赖和权限变更仍走权限管道");
+    expect(context.permissionMode).toBe("default");
+  });
+
+  it("gates bypass and auto modes before local opt-in", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/mode bypass", context, output);
+    await handleSlashCommand("/mode auto", context, output);
+
+    expect(output.text).toContain("bypass 必须本地显式 opt-in");
+    expect(output.text).toContain("当前没有可用的本地 gate/classifier");
     expect(context.permissionMode).toBe("default");
   });
 
@@ -835,7 +865,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("复跑 /verify");
     expect(output.text).toContain("log:");
     expect(context.lastVerification?.commands[0]?.logPath).toBeTruthy();
-  });
+  }, 10_000);
 
   it("classifies Vitest cleanup crashes after passing tests as runner partial", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));

@@ -468,12 +468,25 @@ export type CommandCapability = {
   bridgeSafe: boolean
   hiddenInBeginnerMode?: boolean
 }
+
+export type SlashCommandRegistryEntry = {
+  slash: string
+  subcommands?: string[]
+  handlerId: string
+  capabilityId: string
+  userVisible: boolean
+  hiddenReason?: string
+  risk: CommandCapabilityRisk
+  readonly: boolean
+}
 ```
 
 要求：
 
 - 所有 slash 命令必须注册到 `CommandCapability` 或等价目录。
 - `CommandCapability` 应从命令注册表、help 元数据或统一 manifest 派生，禁止另写一份长期漂移的手工清单；确需手工补充时必须有测试发现未登记命令。
+- Phase 15 preflight hardening 的最低要求是建立 `SlashCommandRegistryEntry` 或等价真实 dispatch 清单，并测试 `dispatch user-visible slash commands -> capability metadata` 不漂移；新增可执行 slash command 没有 capability 时测试必须失败。
+- `/help`、Natural Intent Router、model-visible `CommandCapabilitySummary` 和 slash dispatch 的用户可见命令列表必须来自同一 registry / manifest 或被同一个 drift test 约束。
 - intent router 和模型提示都消费同一份稳定目录摘要，避免两套解释漂移。
 - 目录摘要必须稳定排序、短描述、可截断，不能把动态日志、时间戳或大输出放进去。
 - 中文和英文都必须有说明与 when-to-use，不要求机器翻译完全一致，但语义必须一致。
@@ -514,6 +527,25 @@ export type NaturalIntent =
   | { kind: 'session.branch'; purpose?: string; risk: 'start_gate' }
   | { kind: 'unknown'; risk: 'unsupported' }
 
+export type NaturalIntentSlot =
+  | { name: 'mode'; value: PermissionMode; confidence: number }
+  | { name: 'workflow'; value: 'bug-fix' | 'review' | 'refactor-plan' | 'doc-to-code' | 'design-to-code' | 'release-note'; confidence: number }
+  | { name: 'agentRole'; value: 'explorer' | 'planner' | 'verifier' | 'worker'; confidence: number }
+  | { name: 'indexAction'; value: 'status' | 'init' | 'refresh' | 'search' | 'architecture'; confidence: number }
+  | { name: 'modelAction'; value: 'status' | 'route' | 'doctor' | 'setCandidate'; confidence: number }
+  | { name: 'modelCandidate'; value: string; confidence: number }
+  | { name: 'branchPurpose'; value: string; confidence: number }
+
+export type NaturalRouteResult = {
+  intent: NaturalIntent
+  capabilityId?: string
+  equivalentCommand?: string
+  slots: NaturalIntentSlot[]
+  confidence: number
+  candidates: Array<{ capabilityId: string; command: string; score: number }>
+  riskHandler: CommandCapabilityRisk | 'clarify' | 'model'
+}
+
 export type RuntimeStatusForModel = {
   memory: {
     projectRules: 'found' | 'missing' | 'unreadable'
@@ -540,6 +572,39 @@ export type RuntimeStatusForModel = {
     hooks: { enabled: boolean; count: number }
   }
 }
+
+export type PendingStartGate = {
+  gateId: string
+  source: 'natural_command' | 'slash' | 'workflow' | 'agent' | 'plugin' | 'hook' | 'remote_channel' | 'user_request'
+  capabilityId: string
+  exactCommand: string
+  structuredAction?: unknown
+  risk: CommandCapabilityRisk
+  scope: string
+  budgetHint?: string
+  logPath?: string
+  cancelHint: string
+  createdAt: string
+  expiresAt: string
+  requiresExactConfirmation: boolean
+  requiresPermissionPipeline: boolean
+  writesConfig: boolean
+  writesFiles: boolean
+  runsBash: boolean
+  usesNetwork: boolean
+}
+
+export type PermissionEscalationProposal = {
+  requestId: string
+  source: PendingStartGate['source'] | 'tool' | 'model'
+  exactAction: string
+  risk: CommandCapabilityRisk
+  scope: string
+  reason: string
+  rollback: string
+  choices: Array<'allow_once' | 'allow_session' | 'allow_project' | 'deny' | 'deny_with_feedback'>
+  allowAlwaysAvailable: boolean
+}
 ```
 
 执行规则：
@@ -549,6 +614,10 @@ export type RuntimeStatusForModel = {
 - `config_write` 意图必须展示即将变更的配置、风险和回滚方式；用户确认后再写配置。
 - `tool_permission` 意图不得由自然语言桥直接执行，必须进入现有工具权限管道。
 - `unsupported` 意图交给普通模型对话，但模型请求必须带短 `RuntimeStatusForModel`。
+- 自然语言桥确认路径必须生成 `PendingStartGate`。pending gate 必须短时间过期；确认时必须重放 exact command、risk、scope；高风险 gate 必须要求 exact command/明确选项或进入权限管道。
+- `PendingStartGate.requiresPermissionPipeline=true` 时，Start Gate 只能作为任务启动确认，不能直接执行底层工具或配置写入。
+- 自然语言请求 `mode bypass`、权限规则、第三方 enable、`cache refresh`、`index refresh --force`、Bash、依赖安装、记忆接受/删除、rewind restore、hook/job/remote 时，必须生成 `PermissionEscalationProposal` 或阻断说明，不得直接执行。
+- pending gate 存在时，TUI 状态栏或 footer 必须显示待确认状态；用户输入非确认内容时取消或重新选择，不得让旧 gate 在后台继续等待。
 
 语义识别要求：
 
@@ -559,7 +628,16 @@ export type RuntimeStatusForModel = {
 - 回复语言必须跟随当前 language preference；没有设置时按用户输入主语言回复。命令名、路径、模型 id、provider id 和错误码保持原文。
 - 同一 `NaturalIntent` 的中英文、多种同义说法必须归一到同一 risk handler，不能出现中文直通、英文 Start Gate 或相反的风险不一致。
 - 参数提取必须显式返回置信度和候选值；例如 workflow/model/mode/branch purpose 缺失或模糊时，只能提示候选，不能猜测执行。
+- Phase 15 preflight hardening 必须补齐关键 slot：`mode`、`workflow`、`agentRole`、`indexAction`、`modelAction/modelCandidate`、`branchPurpose`。不能把“切到 plan mode”“打开 review workflow”“开 verifier agent”“搜索 TODO”“创建修复登录 bug 的分支会话”都退化成泛化 `/mode`、`/workflows`、`/fork`、`/index` 或 `/branch`。
 - 普通模型对话前注入的 RuntimeStatus 必须是短结构化摘要，且必须可关闭或可审计，避免每轮增加大 token 成本。
+
+模式和提权硬边界：
+
+- `bypass` 必须有本地显式 opt-in 配置，例如 `permission.allowBypass=true` 或等价交互确认；模型、自然语言桥、remote channel、workflow、agent、plugin、hook 不得静默打开。
+- `auto` 必须检查本地 classifier/gate 可用性；不可用时拒绝或降级到 `default`，并记录 reason。
+- `plan` 模式禁止写文件和高危命令；计划批准必须生成结构化决策：`approve_manual_edits`、`approve_accept_edits`、`reject_with_feedback` 或等价值。
+- `acceptEdits` 只自动允许工作区内低风险编辑；Bash、联网、依赖、权限、越界路径、第三方扩展、hook/job/remote 仍必须审批或拒绝。
+- mode change 必须写入 session-visible event，避免状态栏、transcript 和权限管道状态漂移。
 
 三批覆盖：
 
@@ -568,6 +646,15 @@ export type RuntimeStatusForModel = {
 | 第一批 | memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions、resume、branch | Phase 15 preflight 必须完整实现；中英文自然语言可查询状态或进入安全启动门 |
 | 第二批 | read、grep、glob、todo、verify、review、diff、fork、agents、background | Phase 15 preflight 必须纳入 Catalog、自然语言发现、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 继续用真实项目验证，Phase 15.5 修 P0/P1；长任务必须显示范围、预算、日志和取消方式 |
 | 第三批 | write、edit、multiedit、bash、permissions add/remove、mode bypass、cache refresh、index force、skills enable、plugins enable、memory accept/delete、rewind restore、hook/job/remote | 不允许自然语言直通；只允许解释风险、生成 Start Gate 或进入权限审批 |
+
+Beta 前 hardening 验收：
+
+- Drift test：实际 dispatch 可执行用户可见 slash command 与 `CommandCapability` / registry 一致。
+- Matrix test：每个 capability 至少覆盖中文用途/风险询问、英文用途/风险询问、动作请求、状态/只读路径如适用、高风险反例如适用。
+- Slot test：mode/workflow/agentRole/indexAction/model/branchPurpose 能提取常见参数；模糊时给候选，不猜。
+- Gate test：pending gate 有过期、状态可见、确认时重放 exact command/risk/scope；高风险 gate 不接受普通“确认”直通。
+- Mode test：bypass 无本地 opt-in 时拒绝；auto gate 不可用时拒绝或降级；plan approval 不等于授权后续所有工具。
+- Summary test：RuntimeStatus 和 CommandCapabilitySummary 保持短、稳定排序，不包含完整 transcript/memory/index/log/skill/plugin/hook 正文。
 
 第一批验收样例必须覆盖中英文，但实现不能只匹配这些固定短语：
 
