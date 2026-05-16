@@ -246,6 +246,32 @@ export type HandoffPacket = {
   generatedBy: string;
 };
 
+export type AgentType = "explorer" | "worker" | "verifier" | "planner";
+
+export type AgentRun = {
+  id: string;
+  type: AgentType;
+  parentSessionId?: string;
+  forkedFrom?: string;
+  task: string;
+  model: string;
+  permissionMode: PermissionMode;
+  status: "running" | "completed" | "failed" | "cancelled";
+  transcriptPath: string;
+  transcriptSessionId: string;
+  summary: string;
+  contextSummary: string;
+  cost: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    estimatedCny: number;
+  };
+  startedAt: string;
+  updatedAt: string;
+};
+
 export type MemoryCandidate = {
   id: string;
   scope: "project" | "user";
@@ -312,6 +338,7 @@ export type TuiContext = {
   mcp: McpState;
   index: IndexState;
   memory: MemoryState;
+  agents: AgentRun[];
   lastVerification?: VerificationReport;
   activePlan?: PlanProposal;
   planAccepted?: boolean;
@@ -537,6 +564,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
+    agents: [],
     interrupt: { type: "idle" },
   };
   const gateway = new ModelGateway([
@@ -622,6 +650,14 @@ export async function handleSlashCommand(
   }
   if (command === "/background") {
     await handleBackgroundCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/agents") {
+    await handleAgentsCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/fork") {
+    await handleForkCommand(rest, context, output);
     return "handled";
   }
   if (command === "/rewind") {
@@ -954,6 +990,343 @@ async function handleBackgroundCommand(
   for (const task of context.backgroundTasks) {
     writeLine(output, formatBackgroundTask(task, context.language));
   }
+}
+
+async function handleAgentsCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "list";
+  if (action === "list") {
+    writeLine(output, formatAgentsList(context));
+    return;
+  }
+  if (action === "show") {
+    const agent = findAgent(context, args[1]);
+    writeLine(output, agent ? formatAgentDetails(agent, context) : "未找到 agent。");
+    return;
+  }
+  if (action === "cancel" || action === "interrupt") {
+    const agent = findAgent(context, args[1]);
+    if (!agent) {
+      writeLine(output, "未找到 agent。");
+      return;
+    }
+    await cancelAgent(agent, context, output);
+    return;
+  }
+  writeLine(output, "用法：/agents | /agents show <id> | /agents cancel <id>");
+}
+
+async function handleForkCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const type = args[0] as AgentType | undefined;
+  const task = args.slice(1).join(" ").trim();
+  if (!type || !isAgentType(type) || !task) {
+    writeLine(output, "用法：/fork explorer|planner|verifier|worker <task>");
+    return;
+  }
+  const runningCount = context.agents.filter((agent) => agent.status === "running").length;
+  if (runningCount >= 3) {
+    writeLine(output, "最多同时运行 3 个 agent；请先 /agents cancel <id> 或等待完成。");
+    return;
+  }
+
+  const parentSessionId = await ensureSession(context);
+  const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
+  const child = await context.store.create({
+    model: context.model,
+    summary: `agent:${type}:${truncateDisplay(task, 60)}`,
+  });
+  const now = new Date().toISOString();
+  const agent: AgentRun = {
+    id: `agent-${randomUUID().slice(0, 8)}`,
+    type,
+    parentSessionId,
+    forkedFrom: packet.id,
+    task,
+    model: context.model,
+    permissionMode: getAgentPermissionMode(type, context.permissionMode),
+    status: "running",
+    transcriptPath: child.transcriptPath,
+    transcriptSessionId: child.id,
+    summary: "agent running",
+    contextSummary: createAgentContextSummary(packet, task, context),
+    cost: createEmptyAgentCost(task),
+    startedAt: now,
+    updatedAt: now,
+  };
+  context.agents.unshift(agent);
+  const background = createAgentBackgroundTask(agent, context);
+  context.backgroundTasks.unshift(background);
+  await context.store.appendEvent(parentSessionId, { type: "agent_start", agent, createdAt: now });
+  await context.store.appendEvent(child.id, {
+    type: "system_event",
+    id: randomUUID(),
+    level: "info",
+    message: agent.contextSummary,
+    createdAt: now,
+  });
+  await appendBackgroundTaskEvent(context, parentSessionId, background);
+  writeLine(output, formatBackgroundTask(background, context.language));
+
+  if (task.includes("--background")) {
+    writeLine(
+      output,
+      `agent ${agent.id} 已在后台运行；可用 /agents show ${agent.id} 查看，/agents cancel ${agent.id} 中断。`,
+    );
+    writeStatus(output, context);
+    return;
+  }
+
+  await completeAgent(agent, background, context, output);
+}
+
+function isAgentType(value: string): value is AgentType {
+  return value === "explorer" || value === "worker" || value === "verifier" || value === "planner";
+}
+
+function getAgentPermissionMode(type: AgentType, parentMode: PermissionMode): PermissionMode {
+  if (type === "explorer" || type === "planner") {
+    return "plan";
+  }
+  if (type === "verifier") {
+    return "dontAsk";
+  }
+  return parentMode;
+}
+
+function createEmptyAgentCost(task: string): AgentRun["cost"] {
+  const inputTokens = Math.ceil(task.length / 4);
+  return { inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 };
+}
+
+function createAgentContextSummary(
+  packet: HandoffPacket,
+  task: string,
+  context: TuiContext,
+): string {
+  const evidence = packet.evidenceRefs.map((item) => `${item.kind}:${item.source}`).slice(0, 5);
+  const files = packet.keyFiles.slice(0, 8);
+  return [
+    "Agent context package (trimmed)",
+    `handoff=${packet.id}`,
+    `task=${truncateDisplay(task, 200)}`,
+    `todos=${packet.todos.length}`,
+    `evidence=${evidence.length > 0 ? evidence.join("; ") : "none"}`,
+    `keyFiles=${files.length > 0 ? files.join(", ") : "none"}`,
+    `permission=${context.permissionMode}`,
+    "notIncluded=full transcript/full memory/full index/large logs",
+  ].join(" | ");
+}
+
+function createAgentBackgroundTask(agent: AgentRun, context: TuiContext): BackgroundTaskState {
+  return {
+    id: agent.id,
+    kind: "agent",
+    title: `Agent ${agent.type}: ${truncateDisplay(agent.task, 40)}`,
+    status: "running",
+    currentStep: context.language === "en-US" ? "running agent" : "正在运行 agent",
+    progress: { completed: 0, total: 1, label: agent.type },
+    startedAt: agent.startedAt,
+    updatedAt: agent.updatedAt,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    outputPath: agent.transcriptPath,
+    hasOutput: true,
+    userVisibleSummary:
+      context.language === "en-US"
+        ? `Started ${agent.type} agent. Use /agents show ${agent.id}.`
+        : `已启动 ${agent.type} agent。可用 /agents show ${agent.id} 查看。`,
+    nextAction:
+      context.language === "en-US"
+        ? `Use /agents cancel ${agent.id} to interrupt.`
+        : `可用 /agents cancel ${agent.id} 中断。`,
+  };
+}
+
+async function completeAgent(
+  agent: AgentRun,
+  task: BackgroundTaskState,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const parentSessionId = agent.parentSessionId ?? (await ensureSession(context));
+  const summary = await runAgentWork(agent, context, output);
+  const now = new Date().toISOString();
+  agent.status = "completed";
+  agent.summary = summary;
+  agent.updatedAt = now;
+  agent.cost.outputTokens = Math.ceil(summary.length / 4);
+  task.status = "completed";
+  task.result = "pass";
+  task.currentStep = context.language === "en-US" ? "summary ready" : "摘要已生成";
+  task.progress = { completed: 1, total: 1, label: agent.type };
+  task.updatedAt = now;
+  task.lastOutputAt = now;
+  task.nextAction =
+    context.language === "en-US" ? "Review /agents show output." : "查看 /agents show 输出。";
+  await context.store.appendEvent(agent.transcriptSessionId, {
+    type: "assistant_text_delta",
+    id: randomUUID(),
+    text: summary,
+    createdAt: now,
+  });
+  await context.store.appendEvent(parentSessionId, {
+    type: "agent_end",
+    agentId: agent.id,
+    status: "completed",
+    summary,
+    createdAt: now,
+  });
+  await appendBackgroundTaskEvent(context, parentSessionId, task);
+  writeLine(output, formatAgentSummary(agent, context));
+  writeStatus(output, context);
+}
+
+async function runAgentWork(
+  agent: AgentRun,
+  context: TuiContext,
+  output: Writable,
+): Promise<string> {
+  if (agent.type === "explorer") {
+    return `explorer 摘要：只读分析任务「${agent.task}」。可读取索引/证据/关键文件；不会写入。上下文已裁剪为 handoff、Todo、证据和关键文件。`;
+  }
+  if (agent.type === "planner") {
+    return `planner 摘要：只规划任务「${agent.task}」。输出计划建议，不执行写入、Bash 或后续阶段能力。`;
+  }
+  if (agent.type === "verifier") {
+    const plan = await createVerificationPlan(context.projectPath, "smoke");
+    const report = await runVerificationPlan(plan, context, agent.transcriptSessionId, output);
+    context.lastVerification = report;
+    return `verifier 摘要：已在独立 transcript 中运行验证命令，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
+  }
+  return runWorkerAgent(agent, context, output);
+}
+
+async function runWorkerAgent(
+  agent: AgentRun,
+  context: TuiContext,
+  output: Writable,
+): Promise<string> {
+  const match = /^write\s+(\S+)\s+([\s\S]+)$/u.exec(agent.task);
+  if (!match) {
+    return `worker 摘要：已接收明确子任务「${agent.task}」。worker 可编辑，但本次没有匹配低风险 write 路径，因此未改文件。所有编辑必须走权限管道。`;
+  }
+  const [, path, content] = match;
+  const input = { path, content };
+  const parentSessionId = agent.parentSessionId ?? (await ensureSession(context));
+  const permission = await decidePermission("Write", input, context, parentSessionId);
+  await context.store.appendEvent(parentSessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(parentSessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision !== "allow") {
+    return `worker 摘要：权限管道拒绝写入 ${path}。原因：${permission.reason}`;
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  const result = await runTool("Write", input, context.tools);
+  await context.store.appendEvent(agent.transcriptSessionId, {
+    type: "tool_call_start",
+    id: randomUUID(),
+    name: "Write",
+    input,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(
+    agent.transcriptSessionId,
+    createToolEndEvent(randomUUID(), result.output),
+  );
+  return `worker 摘要：已通过权限管道执行低风险写入 ${path}。${result.output.text}`;
+}
+
+async function cancelAgent(agent: AgentRun, context: TuiContext, output: Writable): Promise<void> {
+  const now = new Date().toISOString();
+  agent.status = "cancelled";
+  agent.summary = `agent ${agent.id} 已取消；主会话可继续。`;
+  agent.updatedAt = now;
+  const background = context.backgroundTasks.find((task) => task.id === agent.id);
+  if (background) {
+    background.status = "cancelled";
+    background.result = "cancelled";
+    background.updatedAt = now;
+    background.currentStep = context.language === "en-US" ? "cancelled" : "已取消";
+  }
+  const parentSessionId = agent.parentSessionId ?? (await ensureSession(context));
+  await context.store.appendEvent(parentSessionId, {
+    type: "agent_end",
+    agentId: agent.id,
+    status: "cancelled",
+    summary: agent.summary,
+    createdAt: now,
+  });
+  if (background) {
+    await appendBackgroundTaskEvent(context, parentSessionId, background);
+  }
+  writeLine(output, agent.summary);
+  writeStatus(output, context);
+}
+
+function findAgent(context: TuiContext, id: string | undefined): AgentRun | undefined {
+  if (!id) {
+    return context.agents[0];
+  }
+  return context.agents.find((agent) => agent.id === id || agent.id.endsWith(id));
+}
+
+function formatAgentsList(context: TuiContext): string {
+  if (context.agents.length === 0) {
+    return "当前没有 agent。用法：/fork explorer|planner|verifier|worker <task>";
+  }
+  const lines = ["Agents:"];
+  for (const agent of context.agents) {
+    lines.push(
+      `${agent.id}  ${agent.type}  ${agent.status}  model=${agent.model}  mode=${agent.permissionMode}  cost≈${agent.cost.inputTokens + agent.cost.outputTokens} tokens  task=${truncateDisplay(agent.task, 60)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatAgentDetails(agent: AgentRun, context: TuiContext): string {
+  const lines = [
+    `Agent ${agent.id}`,
+    `- type: ${agent.type}`,
+    `- status: ${agent.status}`,
+    `- parentSessionId: ${agent.parentSessionId ?? "none"}`,
+    `- transcript: ${agent.transcriptPath}`,
+    `- permissionMode: ${agent.permissionMode}`,
+    `- cost: input=${agent.cost.inputTokens}, output=${agent.cost.outputTokens}, cacheRead=${agent.cost.cacheReadTokens}, cacheWrite=${agent.cost.cacheWriteTokens}, estimatedCny=${agent.cost.estimatedCny}`,
+    `- context: ${agent.contextSummary}`,
+    `- summary: ${agent.summary}`,
+  ];
+  if (agent.status === "running") {
+    lines.push(
+      context.language === "en-US"
+        ? `- cancel: /agents cancel ${agent.id}`
+        : `- 中断：/agents cancel ${agent.id}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatAgentSummary(agent: AgentRun, context: TuiContext): string {
+  return context.language === "en-US"
+    ? `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`
+    : `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`;
 }
 
 async function handleRewindCommand(
@@ -3231,6 +3604,10 @@ function formatHelp(language: Language): string {
   /plan accept [id]     Accept a plan and return to default
   /permissions          Show permission rules
   /background           Show collapsed background task summaries
+  /agents               List agent status, transcripts, and usage
+  /agents show <id>     Show one agent detail
+  /agents cancel <id>   Interrupt one agent without stopping the main session
+  /fork <type> <task>   Start explorer/planner/verifier/worker from trimmed handoff
   /rewind               List checkpoints
   /rewind restore <id>  Restore a checkpoint
   /btw <question>       Answer a temporary question without changing Todo/Plan/checkpoints
@@ -3295,6 +3672,10 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /permissions recent delete <id> 删除单条最近拒绝
   /permissions recent clear  清空最近拒绝
   /background           查看后台任务一行摘要
+  /agents               查看 agent 状态、transcript 和 usage
+  /agents show <id>     查看单个 agent 详情
+  /agents cancel <id>   中断单个 agent，不影响主会话
+  /fork <类型> <任务>    从裁剪 handoff 派生 explorer/planner/verifier/worker
   /rewind               列出 checkpoint
   /rewind restore <id>  恢复 checkpoint
   /btw <question>       临时插问，不修改 Todo/Plan/checkpoint
@@ -4072,7 +4453,7 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
 
 const messages: Record<Language, Record<MessageKey, string>> = {
   "zh-CN": {
-    appTitle: "{name} Phase 11 TUI / REPL",
+    appTitle: "{name} Phase 12 TUI / REPL",
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
@@ -4100,7 +4481,7 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
   },
   "en-US": {
-    appTitle: "{name} Phase 11 TUI / REPL",
+    appTitle: "{name} Phase 12 TUI / REPL",
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",

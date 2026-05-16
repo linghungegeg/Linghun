@@ -6,7 +6,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
-  ${LINGHUN_CLI_NAME}                                   进入 Phase 11 交互式终端
+  ${LINGHUN_CLI_NAME}                                   进入 Phase 12 交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -27,7 +27,7 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  Phase 11 提供结构化 handoff、/resume、/branch、LINGHUN.md 与记忆闭环。
+  Phase 12 提供 Agent 闭环、/agents、/fork、独立 transcript、状态查看与中断。
   --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器或 cache 统计系统。
 
 Windows 兼容：

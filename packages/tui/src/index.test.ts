@@ -116,6 +116,7 @@ function createTestContext(
       candidates: [],
       accepted: [],
     },
+    agents: [],
     interrupt: { type: "idle" },
   };
 }
@@ -138,6 +139,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
+    expect(output.text).toContain("/agents");
+    expect(output.text).toContain("/fork <类型> <任务>");
     expect(output.text).toContain("/cache-log config size <n>");
     expect(output.text).toContain("/cache-log export [path]");
     expect(output.text).toContain("/cache status");
@@ -284,6 +287,60 @@ describe("Phase 06 TUI slash commands", () => {
       session.id,
     );
     expect(output.text).toContain(`来源 session：${session.id}`);
+  });
+
+  it("runs Phase 12 agents with trimmed context, transcript, status, and cancel path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/fork explorer inspect cache", context, output);
+    await handleSlashCommand("/fork planner plan agent loop", context, output);
+    await handleSlashCommand("/fork verifier verify agent loop", context, output);
+    await handleSlashCommand("/agents", context, output);
+    await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, output);
+    await handleSlashCommand("/fork explorer cancellable --background", context, output);
+    const running = context.agents[0];
+    await handleSlashCommand(`/agents cancel ${running?.id}`, context, output);
+
+    const parentTranscript = (await store.resume(session.id)).transcript;
+    const agentTranscript = (
+      await store.resume(context.agents[1]?.transcriptSessionId ?? "missing")
+    ).transcript;
+
+    expect(output.text).toContain("Agent context package (trimmed)");
+    expect(output.text).toContain("notIncluded=full transcript/full memory/full index/large logs");
+    expect(output.text).toContain("explorer 摘要");
+    expect(output.text).toContain("planner 摘要");
+    expect(output.text).toContain("verifier 摘要");
+    expect(output.text).toContain("Agents:");
+    expect(output.text).toContain("transcript:");
+    expect(output.text).toContain("已取消；主会话可继续");
+    expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(0);
+    expect(context.agents.length).toBe(4);
+    expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
+    expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
+    expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
+  });
+
+  it("keeps worker writes behind the permission pipeline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = createTestContext(project, store, session);
+
+    await handleSlashCommand("/mode plan", context, output);
+    await handleSlashCommand("/fork worker write agent.txt hello", context, output);
+    await handleSlashCommand("/mode default", context, output);
+    await handleSlashCommand("/fork worker write agent.txt hello", context, output);
+
+    expect(output.text).toContain("权限管道拒绝写入 agent.txt");
+    expect(output.text).toContain("Plan 模式禁止写入");
+    expect(output.text).toContain("已通过权限管道执行低风险写入 agent.txt");
+    expect(await readFile(join(project, "agent.txt"), "utf8")).toBe("hello");
   });
 
   it("creates LINGHUN.md only on explicit memory init", async () => {

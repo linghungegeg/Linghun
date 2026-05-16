@@ -266,6 +266,14 @@ export type TranscriptEvent =
       createdAt: string;
     }
   | { type: "handoff_packet"; packet: unknown; createdAt: string }
+  | { type: "agent_start"; agent: unknown; createdAt: string }
+  | {
+      type: "agent_end";
+      agentId: string;
+      status: "completed" | "failed" | "cancelled";
+      summary: string;
+      createdAt: string;
+    }
   | { type: "memory_candidate"; candidate: unknown; createdAt: string }
   | { type: "memory_accepted"; memory: unknown; createdAt: string }
   | { type: "branch_created"; branch: unknown; createdAt: string }

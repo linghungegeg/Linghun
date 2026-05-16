@@ -4,7 +4,7 @@
     "enabled": false
   },
   "files": {
-    "ignore": ["dist", "node_modules", ".codebase-memory"]
+    "ignore": ["dist", "node_modules", ".codebase-memory", ".linghun"]
   },
   "formatter": {
     "enabled": true,
