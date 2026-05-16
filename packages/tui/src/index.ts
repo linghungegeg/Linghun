@@ -1811,6 +1811,16 @@ function formatModelRouteDoctor(context: TuiContext): string {
       );
     }
   }
+  if (hasOpenAiCompatibleDoctorProblem(context)) {
+    lines.push(
+      "- openai-compatible 修复：设置 LINGHUN_OPENAI_BASE_URL、LINGHUN_OPENAI_API_KEY、LINGHUN_OPENAI_MODEL 后重启 Linghun。",
+    );
+  }
+  if (hasOpenAiCompatiblePlaceholderProblem(context)) {
+    lines.push(
+      "- openai-compatible 占位提示：请检查 .linghun/settings.json，避免 openai-compatible-model 占位值覆盖真实模型。",
+    );
+  }
   lines.push(
     "- budget: 未配置预算只作为 WARN；金额仅在 /usage 或 /stats 中以 estimated 展示，状态栏不会显示金额。",
   );
@@ -1818,6 +1828,21 @@ function formatModelRouteDoctor(context: TuiContext): string {
     "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
   );
   return lines.join("\n");
+}
+
+function hasOpenAiCompatibleDoctorProblem(context: TuiContext): boolean {
+  const provider = context.config.providers["openai-compatible"];
+  return Boolean(
+    provider &&
+      (!provider.baseUrl ||
+        !provider.apiKey ||
+        !provider.model ||
+        provider.model === "openai-compatible-model"),
+  );
+}
+
+function hasOpenAiCompatiblePlaceholderProblem(context: TuiContext): boolean {
+  return context.config.providers["openai-compatible"]?.model === "openai-compatible-model";
 }
 
 function getRouteDoctorLevel(

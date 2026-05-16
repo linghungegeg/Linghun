@@ -265,6 +265,27 @@ DeepSeek V4 Pro 报告裁决：
 
 Phase 15 Beta 仍需用户明确确认后才能开始。
 
+### Provider env config minimal fix
+
+本轮性质：provider env config minimal fix，只修复双模型 role route 测试前的配置可靠性问题；未进入 Phase 15 Beta，未做 provider 管理 UI，未做大重构。
+
+修复点：
+
+- 新增 `LINGHUN_DEEPSEEK_MODEL` 覆盖 deepseek provider 默认模型；新增 `LINGHUN_DEFAULT_MODEL` 覆盖 Linghun `defaultModel`。
+- 保留 `LINGHUN_DEEPSEEK_API_KEY` / `LINGHUN_DEEPSEEK_BASE_URL` / `LINGHUN_OPENAI_API_KEY` / `LINGHUN_OPENAI_BASE_URL` / `LINGHUN_OPENAI_MODEL`。
+- `mergeConfig()` 不再让项目 `.linghun/settings.json` 中缺失或为空的 openai-compatible `baseUrl` / `apiKey` 覆盖环境变量；当环境变量已设置 `LINGHUN_OPENAI_MODEL` 时，项目配置里的 `openai-compatible-model` 占位值不覆盖真实环境模型。
+- `/model route doctor` 在 openai-compatible 缺 `baseUrl` / `apiKey` / 已确认 `model` 时提示设置 `LINGHUN_OPENAI_BASE_URL`、`LINGHUN_OPENAI_API_KEY`、`LINGHUN_OPENAI_MODEL` 并重启 Linghun；占位模型场景提示检查 `.linghun/settings.json`。
+- 测试覆盖环境变量覆盖、占位模型不覆盖环境变量、doctor 环境变量修复建议，以及不输出真实 API key。
+
+验证命令：
+
+```bash
+corepack pnpm test -- --run packages/config/src/index.test.ts packages/tui/src/index.test.ts
+corepack pnpm typecheck
+corepack pnpm check
+corepack pnpm build
+```
+
 ## 已知问题
 
 - 本阶段是 preflight，不承诺真实项目 Beta 的完整自然语言命令成功率。

@@ -1,7 +1,7 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensureConfigDirs,
   getProjectConfigDir,
@@ -14,6 +14,11 @@ import {
   saveExtensionEnablement,
   saveModelRoute,
 } from "./index.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
+});
 
 describe("config directories", () => {
   it("uses .linghun under the project", () => {
@@ -105,6 +110,54 @@ describe("config directories", () => {
     expect(loaded.modelRoutes.routes.find((route) => route.role === "vision")?.primaryModel).toBe(
       "",
     );
+  });
+
+  it("allows env to override default DeepSeek model and Linghun default model", async () => {
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-v4-pro");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const { defaultConfig: envDefaultConfig, loadConfig: envLoadConfig } = await import(
+      "./index.js"
+    );
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const config = await envLoadConfig(project);
+
+    expect(envDefaultConfig.providers.deepseek.model).toBe("deepseek-v4-pro");
+    expect(config.providers.deepseek.model).toBe("deepseek-v4-pro");
+    expect(envDefaultConfig.defaultModel).toBe("gpt-5.5");
+    expect(config.defaultModel).toBe("gpt-5.5");
+  });
+
+  it("keeps LINGHUN_OPENAI_MODEL when project settings contain the placeholder model", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://example.invalid/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const { getProjectConfigDir: envGetProjectConfigDir, loadConfig: envLoadConfig } = await import(
+      "./index.js"
+    );
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(envGetProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      join(envGetProjectConfigDir(project), "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "",
+            apiKey: "",
+            model: "openai-compatible-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://example.invalid/v1");
+    expect(config.providers["openai-compatible"]?.apiKey).toBe("test-openai-key");
+    expect(config.providers["openai-compatible"]?.model).toBe("gpt-5.5");
   });
 
   it("persists Phase 14 extension enablement and trust", async () => {

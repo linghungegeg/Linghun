@@ -548,6 +548,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("openai-compatible 缺 baseUrl");
     expect(output.text).toContain("openai-compatible 缺 apiKey");
+    expect(output.text).toContain("LINGHUN_OPENAI_BASE_URL");
+    expect(output.text).toContain("LINGHUN_OPENAI_API_KEY");
+    expect(output.text).toContain("LINGHUN_OPENAI_MODEL");
+    expect(output.text).toContain("重启 Linghun");
+    expect(output.text).toContain("检查 .linghun/settings.json");
+    expect(output.text).not.toContain("test-openai-secret");
     expect(output.text).toContain("vision role 未就绪");
     expect(output.text).toContain("修复建议");
     expect(output.text).toContain("recent route decisions");
@@ -580,7 +586,7 @@ describe("Phase 06 TUI slash commands", () => {
         "openai-compatible": {
           ...defaultConfig.providers["openai-compatible"],
           baseUrl: "https://example.invalid/v1",
-          apiKey: "test-key",
+          apiKey: "test-openai-secret",
           model: "openai-compatible-model",
         },
       },
@@ -591,6 +597,8 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/model route doctor", context, output);
 
     expect(output.text).toContain("openai-compatible 缺已确认模型");
+    expect(output.text).toContain("检查 .linghun/settings.json");
+    expect(output.text).not.toContain("test-openai-secret");
     expect(output.text).toContain("vision role 未就绪");
     expect(context.routeDecisions[0]?.stopConditions).toContain("openai-compatible 缺已确认模型");
     expect(context.visionObservations).toHaveLength(0);

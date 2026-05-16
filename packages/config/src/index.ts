@@ -135,8 +135,12 @@ export type LinghunConfig = {
   plugins: PluginConfig;
 };
 
+const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+const defaultLinghunModel = process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel;
+const openAiCompatibleModelPlaceholder = "openai-compatible-model";
+
 export const defaultModelRoutes: ModelRouteConfig = {
-  defaultModel: "deepseek-v4-flash",
+  defaultModel: defaultLinghunModel,
   routes: [
     {
       role: "planner",
@@ -227,20 +231,20 @@ export const defaultModelRoutes: ModelRouteConfig = {
 
 export const defaultConfig: LinghunConfig = {
   language: "zh-CN",
-  defaultModel: "deepseek-v4-flash",
+  defaultModel: defaultLinghunModel,
   providers: {
     deepseek: {
       type: "deepseek",
       baseUrl: process.env.LINGHUN_DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1",
       apiKey: process.env.LINGHUN_DEEPSEEK_API_KEY,
-      model: "deepseek-v4-flash",
+      model: defaultDeepSeekModel,
       maxOutputTokens: 8_192,
     },
     "openai-compatible": {
       type: "openai-compatible",
       baseUrl: process.env.LINGHUN_OPENAI_BASE_URL,
       apiKey: process.env.LINGHUN_OPENAI_API_KEY,
-      model: process.env.LINGHUN_OPENAI_MODEL ?? "openai-compatible-model",
+      model: process.env.LINGHUN_OPENAI_MODEL ?? openAiCompatibleModelPlaceholder,
       maxOutputTokens: 4_096,
     },
   },
@@ -500,20 +504,72 @@ function mergeModelRoutes(inputRoutes: RoleModelRoute[] | undefined): RoleModelR
   });
 }
 
+function cleanProviderOverride(
+  provider: ProviderConfig | undefined,
+  placeholderModel?: string,
+): ProviderConfig | undefined {
+  if (!provider) {
+    return provider;
+  }
+  return Object.fromEntries(
+    Object.entries(provider).filter(([key, value]) => {
+      if ((key === "baseUrl" || key === "apiKey") && (value === undefined || value === "")) {
+        return false;
+      }
+      if (key === "model" && value === placeholderModel) {
+        return false;
+      }
+      return true;
+    }),
+  ) as ProviderConfig;
+}
+
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
+  const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
+  const openAiCompatibleProvider = cleanProviderOverride(
+    input.providers?.["openai-compatible"],
+    process.env.LINGHUN_OPENAI_MODEL ? openAiCompatibleModelPlaceholder : undefined,
+  );
+
   return {
     ...defaultConfig,
     ...input,
+    defaultModel:
+      process.env.LINGHUN_DEFAULT_MODEL ?? input.defaultModel ?? defaultConfig.defaultModel,
     providers: {
       ...defaultConfig.providers,
       ...input.providers,
       deepseek: {
         ...defaultConfig.providers.deepseek,
-        ...input.providers?.deepseek,
+        ...deepseekProvider,
+        baseUrl:
+          process.env.LINGHUN_DEEPSEEK_BASE_URL ??
+          deepseekProvider?.baseUrl ??
+          defaultConfig.providers.deepseek.baseUrl,
+        apiKey:
+          process.env.LINGHUN_DEEPSEEK_API_KEY ??
+          deepseekProvider?.apiKey ??
+          defaultConfig.providers.deepseek.apiKey,
+        model:
+          process.env.LINGHUN_DEEPSEEK_MODEL ??
+          deepseekProvider?.model ??
+          defaultConfig.providers.deepseek.model,
       },
       "openai-compatible": {
         ...defaultConfig.providers["openai-compatible"],
-        ...input.providers?.["openai-compatible"],
+        ...openAiCompatibleProvider,
+        baseUrl:
+          process.env.LINGHUN_OPENAI_BASE_URL ??
+          openAiCompatibleProvider?.baseUrl ??
+          defaultConfig.providers["openai-compatible"].baseUrl,
+        apiKey:
+          process.env.LINGHUN_OPENAI_API_KEY ??
+          openAiCompatibleProvider?.apiKey ??
+          defaultConfig.providers["openai-compatible"].apiKey,
+        model:
+          process.env.LINGHUN_OPENAI_MODEL ??
+          openAiCompatibleProvider?.model ??
+          defaultConfig.providers["openai-compatible"].model,
       },
     },
     modelRoutes: {
