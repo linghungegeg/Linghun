@@ -211,6 +211,15 @@ export type TranscriptEvent =
       createdAt: string;
     }
   | {
+      type: "tool_result";
+      toolUseId: string;
+      toolName: string;
+      content: unknown;
+      isError?: boolean;
+      evidenceId?: string;
+      createdAt: string;
+    }
+  | {
       type: "permission_request";
       request: {
         id: string;

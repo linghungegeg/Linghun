@@ -50,6 +50,51 @@ describe("OpenAI compatible provider", () => {
     });
   });
 
+  it("uses OpenAI tool schemas and assistant tool results", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+
+    const request = provider.createChatRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "Read", input: { path: "README.md" } }],
+        },
+        { role: "tool", tool_call_id: "call-1", content: "ok" },
+      ],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+      toolChoice: "auto",
+    });
+
+    expect(request.tools).toEqual([
+      {
+        type: "function",
+        function: { name: "Read", description: "Read a file", parameters: { type: "object" } },
+      },
+    ]);
+    expect(request.tool_choice).toBe("auto");
+    expect(request.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call-1",
+            type: "function",
+            function: { name: "Read", arguments: '{"path":"README.md"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call-1", content: "ok" },
+    ]);
+  });
+
   it("uses the DeepSeek default base URL", async () => {
     const provider = new DeepSeekProvider({ model: "deepseek-v4-pro" });
     const models = await provider.listModels();
@@ -98,6 +143,35 @@ describe("OpenAI stream parser", () => {
           endpoint: "/v1/chat/completions",
         },
       },
+    ]);
+  });
+
+  it("converts streamed tool call deltas into tool_use events", async () => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"Read","arguments":"{\\"path\\":"}}]}}]}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\\"README.md\\"}"}}]}}]}\n\n',
+          ),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const events = [];
+
+    for await (const event of parseOpenAiStream(body)) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
     ]);
   });
 });

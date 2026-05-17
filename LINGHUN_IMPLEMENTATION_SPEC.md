@@ -663,11 +663,19 @@ export type PermissionEscalationProposal = {
 | 批次 | 范围 | 要求 |
 | --- | --- | --- |
 | 第一批 | memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions、resume、branch | Phase 15 preflight 必须完整实现；中英文自然语言可查询状态或进入安全启动门 |
-| 第二批 | read、grep、glob、todo、verify、review、diff、fork、agents、background | Phase 15 preflight 必须纳入 Catalog、自然语言发现、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 继续用真实项目验证，Phase 15.5 修 P0/P1；长任务必须显示范围、预算、日志和取消方式 |
+| 第二批 | read、grep、glob、todo、verify、review、diff、fork、agents、background | Phase 15 preflight 必须纳入 Catalog、自然语言发现、用途/风险解释、参数提取、确认门和 focused tests；P0-1 到 P0-6 全量闭环前不得进入 Phase 15 Beta；Phase 15.5 只承接非阻塞 P1/P2 和 release hardening；长任务必须显示范围、预算、日志和取消方式 |
 | 第三批 | write、edit、multiedit、bash、permissions add/remove、mode bypass、cache refresh、index force、skills enable、plugins enable、memory accept/delete、rewind restore、hook/job/remote | 不允许自然语言直通；只允许解释风险、生成 Start Gate 或进入权限审批 |
 
 Beta 前 hardening 验收：
 
+- P0 full interaction maturity test：`PHASE_15_PRE_BETA_FULL_INTERACTION_MATURITY_AUDIT.md` 的 P0-1 到 P0-6 必须全部修复并验证后，才能进入 Phase 15 Beta；不得只修 3 项，也不得把 tool_use 降级成文本 hint。
+- Tool-use test：模型可通过真实 `tool_use` 发起 `Read/Grep/Glob/Diff/Write/Edit/MultiEdit/Bash/Todo`，执行层复用现有工具和权限管道；危险工具不会因为来自模型 tool_use 而绕过审批。
+- Evidence injection test：Read/Grep/Glob/Diff/Bash/Verify 结果进入 `EvidenceSummary`，模型能看到短证据摘要，不能只依赖 transcript 中的持久化事件。
+- Interrupt test：模型流、权限等待和可取消工具调用能响应 Ctrl+C 或等价 abort，并恢复 TUI 输入。
+- File reference test：自然语言“读一下 <file>”“刚才那个文件”“那个配置文件”能读取明确文件或给候选，不再让模型只口头建议 `/glob`/`/read`。
+- Onboarding / project rules template test：首次项目或缺 `.linghun/` 状态下给 3-5 行轻提示，不做完整向导；`/memory init` 默认 `LINGHUN.md` 模板必须包含最小必要改动、禁止顺手修、减少屎山、重构边界、公共接口/依赖/配置变更边界、高风险先说明、最小必要验证和事实优先。
+- Deep parity decision test：P0 hardening 完成后不得自动进入 Phase 15 Beta；必须先审阅 P0 报告并决定是否启动 CCB / CCB Dev Boost Deep Parity Closure。若启动，该 closure 必须按 CCB / CCB Dev Boost 公开成熟行为对照 Phase 00-14 的真实使用体验，输出 P0/P1/P2、参考源、证据和验证方式；P0 / 阻塞 P1 未关闭前不得进入 Phase 15 Beta。
+- i18n critical path test：`en-US` 下未知命令、错误、Start Gate/permission 关键提示、light hints 和 `LINGHUN.md` 缺失提示不能输出中文。
 - Drift test：实际 dispatch 可执行用户可见 slash command 与 `CommandCapability` / registry 一致。
 - Matrix test：每个 capability 至少覆盖中文用途/风险询问、英文用途/风险询问、动作请求、状态/只读路径如适用、高风险反例如适用。
 - Request-kind test：每个第一批 capability 至少覆盖 `status_query`、`usage_help` 和动作请求；有 doctor 能力的 capability 必须覆盖 `doctor_query`；高风险 capability 必须覆盖 `dangerous_action_request`；模糊请求必须覆盖 `ambiguous_request`。
@@ -864,6 +872,64 @@ export type ModelInfo = {
 - 配置诊断：base_url、api_key、model、endpoint、headers、timeout、代理/中转站兼容风险。
 - quota / balance query 可选支持；不支持时标记 `unknown`，不得用本地估算冒充真实余额。
 - focused tests：正常流式、非流式降级、错误归一化、usage 映射、cache 字段映射、capability doctor、Windows 环境变量和 base_url 配置。
+
+### 7.0.1 Tool use / tool result 成品级闭环
+
+Phase 15 pre-Beta 审计确认：如果 provider adapter 只能输出纯文本事件，Linghun 会从编码 Agent 退化成编码 Advisor。P0 收尾必须参考 CCB 的公开成熟边界：完整工具协议 + 统一权限中枢，而不是只做模型文本 hint 或只开放少量只读工具的弱化版本。
+
+必须实现：
+
+```ts
+export type LinghunEvent =
+  | { type: 'message_start'; id: string }
+  | { type: 'assistant_text_delta'; id: string; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; toolUseId: string; content: unknown; isError?: boolean }
+  | { type: 'usage'; usage: ModelUsage }
+  | { type: 'error'; error: LinghunError }
+  | { type: 'message_stop'; id: string; stopReason?: string }
+
+export type ModelToolSchema = {
+  name: string
+  description: string
+  inputSchema: unknown
+  risk: CommandCapabilityRisk
+  isReadOnly: boolean
+}
+
+export type ModelRequest = {
+  messages: ModelMessage[]
+  tools?: ModelToolSchema[]
+  model?: string
+  maxOutputTokens?: number
+}
+```
+
+执行规则：
+
+- Provider adapter 必须把 OpenAI-compatible / Claude-compatible / native provider 的工具调用事件归一为 `tool_use`，并把本地工具执行结果归一为 `tool_result` 回灌模型。
+- `tool_use` 不得通过解析模型自然语言文本实现；模型说“我会先读文件”只能算普通文本，不能当作工具调用。
+- 工具 schema 必须来自 Linghun 现有工具 registry / metadata / Command Capability Catalog 或等价同源清单；不得新增第二套工具系统。
+- 第一轮 P0 收尾必须覆盖现有核心工具 schema：`Read`、`Grep`、`Glob`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Todo`、`Diff`。
+- `Read` / `Grep` / `Glob` / `Diff` 按只读工具路径处理；`Write` / `Edit` / `MultiEdit` / `Bash` / `Todo` 可以被模型发起，但必须进入现有 `decidePermission()` / Start Gate / Plan / acceptEdits / auto / bypass 边界。
+- Plan 模式下，模型发起写入、编辑、Bash、依赖安装、权限规则、第三方启用必须拒绝；Plan 不能继承 bypass。
+- `acceptEdits` 只降低工作区内低风险编辑摩擦；Bash、联网、依赖、权限、越界路径、第三方扩展、hook/job/remote 仍必须审批或拒绝。
+- `auto` 必须依赖可用的本地 classifier/gate；不可用时 fail closed 或降级到 default，不得默认放行。
+- `bypass` 只能由用户本地显式开启；模型、tool_use、workflow、plugin、hook、remote channel 不得打开 bypass。
+- 安全检查优先于 allow/bypass：`.git`、权限配置、密钥、系统路径、项目外路径、依赖发布、破坏性 Bash 等必须特殊保护。
+- tool result 回灌模型时必须 summary-first：短摘要、evidence id、必要片段；完整文件、大 Bash 输出、大 grep 结果、完整索引和日志只进 transcript/log 或可展开详情。
+- 每个 tool_use/tool_result pair 必须可审计：记录 tool name、toolUseId、输入摘要、权限决策、执行结果摘要、evidence id、错误和是否截断。
+- 中转站如果不支持工具调用，`supportsTools=false`，role route doctor 必须 `WARN/BLOCK`；不得把纯文本计划包装成真实 tool_use。
+
+Phase 15 pre-Beta P0 验收：
+
+- 模型能发起 `Read/Grep/Glob/Diff`，工具结果回灌后模型能继续基于结果回答。
+- 模型发起 `Write/Edit/MultiEdit/Bash/Todo` 时，权限管道能询问、拒绝或按模式放行；不得直通。
+- Plan 模式下写入和 Bash 被拒绝，即使已有 allow rule。
+- default 模式下危险工具需要审批；`bypass` 未本地启用时不能被模型开启。
+- provider 不支持 tool calling 时，doctor 明确说明能力缺失和 fallback，不得假装可用。
+- 工具结果进入 `EvidenceSummary`，最终回答中的代码事实能引用 evidence。
+- focused tests 覆盖 tool_use 解析、tool_result 回灌、权限拒绝、Plan 拒绝、Bash 审批、输出截断和 unsupported provider。
 
 阶段边界：
 
@@ -1608,7 +1674,74 @@ export type ClaimCheckResult = {
 - 证据不足：要求改写为不确定表达。
 - 明显无证据却强断言：阻止最终回答，要求先查证。
 
-### 11.6 最终回答结构
+### 11.6 Solution Completeness Gate / 方案完整性闸门
+
+Evidence Gate 解决“不能靠猜”，Claim Checker 解决“最终结论不能虚构”。Solution Completeness Gate 解决另一类问题：当真实使用暴露出系统性缺口时，模型不能发现一个现象就补一个文字或关键词补丁，必须先判断这是单点 bug 还是产品级/阶段级缺口。
+
+该闸门不是新的复杂 agent 系统，也不是长期学习功能；它是 Phase 15 pre-Beta 和 Phase 15.5 hardening 的轻量质量门，复用现有文档、Evidence、Freshness Gate、Command Capability Catalog、RuntimeStatus 和 slash handler，不新增第二套命令解释系统。
+
+```ts
+export type CompletenessTrigger =
+  | 'repeated_similar_failures'
+  | 'user_requests_product_grade'
+  | 'phase_beta_or_release_risk'
+  | 'cross_capability_impact'
+  | 'user_corrected_direction'
+  | 'reference_parity_needed'
+  | 'patch_like_fix_detected'
+
+export type CompletenessDecision =
+  | { type: 'single_issue'; reason: string }
+  | {
+      type: 'systemic_gap'
+      reason: string
+      impactAreas: string[]
+      requiredAction: 'audit_first' | 'scope_then_fix'
+    }
+  | { type: 'defer'; reason: string; phase: string }
+```
+
+触发条件：
+
+- 同一模块或同一用户路径连续暴露相似问题，例如自然语言状态查询、项目规则读取、Start Gate 文案和只读工具路由反复失真。
+- 用户明确说“成品级”“不要缝缝补补”“不要弱化版”“先看 CCB / OpenCode 怎么做”“有没有漏”。
+- 问题会污染 Phase 15 Beta、发布测试、新手路径、安全边界、成本统计或反幻觉结论。
+- 修复横跨自然语言、TUI、权限、文档、测试、provider、memory/index/cache 等多个能力面。
+- 用户已经多次纠正模型方向，说明模型正在局部补丁化处理。
+- 模型准备给出单点修复命令，但证据显示需要参考公开行为边界或全链路对照。
+- P0 hardening 已完成但真实项目 Beta 前仍无法确认 Phase 00-14 是否达到 CCB / CCB Dev Boost 核心体验等价。
+
+触发后必须先输出短评估，再给修复命令：
+
+```text
+问题类型：single issue / systemic gap
+已确认依据：本地文档、代码、索引、测试、用户实测或 web_source
+影响面：natural command / TUI / permission / provider / memory / docs / tests ...
+参考源：本地文档、公开行为参考、需要联网则走 Freshness Gate
+阶段判断：Phase 15 pre-Beta / Phase 15.5 / later / not-do
+优先级：P0 / P1 / P2
+最小完整修复边界：这轮必须修什么，什么只登记不做
+验证方式：focused tests / TUI smoke / docs check / full check
+```
+
+规则：
+
+- 小的独立 bug 不强制扩大范围；判定为 `single_issue` 时按最小修复处理。
+- 判定为 `systemic_gap` 时，不得直接给单点补丁命令；必须先做范围判断、参考源核验、影响面拆分和 P0/P1/P2。
+- 如果需要“最新/社区/公开项目当前行为”证据，必须先走 Web Evidence / Freshness Gate；没有新鲜证据不得假装已经对照完成。
+- 在 Phase 15 pre-Beta Deep Parity Closure 中，必须判断 Solution Completeness Gate 目前是文档约束、工作流检查还是 runtime guard；如果真实工作仍会退化成发现一个补一个，必须提出最小升级路径，并按 P0/P1/P2 分类。
+- 输出必须 concise；不得把完整 transcript、完整审计报告、完整索引结果或大日志塞入 prompt。
+- 不能绕过 Start Gate、权限管道、Plan mode、bypass/auto 边界或 Verification Runner。
+- 修复命令必须约束“不新增第二套解释系统、不复制第三方源码、不进入未确认阶段、不顺手扩范围”。
+
+典型例子：
+
+```text
+用户实测：索引 ready 后问“索引已经建立了吗”仍触发 /index init fast。
+单点补丁是不够的；应触发 Solution Completeness Gate，检查所有状态查询是否会被动作词污染，覆盖 index/cache/model/memory/project rules/read-only commands，并补 TUI smoke。
+```
+
+### 11.7 最终回答结构
 
 涉及代码改动的最终回答必须包含：
 
@@ -1634,16 +1767,17 @@ export type ClaimCheckResult = {
 - “不会有问题”
 - “已经完全修复”
 
-### 11.7 与 Verification Runner 的关系
+### 11.8 与 Verification Runner 的关系
 
 - Evidence Gate 负责“不能靠猜”。
 - Verification Runner 负责“改完要验证”。
 - Claim Checker 负责“最终回答不能虚构结论”。
+- Solution Completeness Gate 负责“系统性缺口不能按单点补丁处理”。
 
 三者必须串联：
 
 ```text
-tool evidence -> verification evidence -> claim check -> final answer
+tool evidence -> completeness decision -> verification evidence -> claim check -> final answer
 ```
 
 ## 12. Cache / Cost 规格
@@ -1998,6 +2132,9 @@ export type HandoffPacket = {
 - 迁移项目时，项目级记忆必须能随项目目录一起迁移。
 - `LINGHUN.md` 只保存长期稳定事实、工程规则、常用命令和禁止事项。
 - `/memory init` 生成的默认 `LINGHUN.md` 应使用中文友好的“项目规则”模板，覆盖用途、写入/不写入边界、事实优先、Start Gate/权限审批、候选记忆确认、最小验证、上下文裁剪、clean rewrite 和中英文可读性；模板必须短小，避免增加不必要 token 负担。
+- 默认 `LINGHUN.md` 模板必须吸收项目规则草稿中的核心工程纪律，但不能原样塞入长文：只做最小必要改动；不顺手修无关问题；不主动新增抽象、helper、wrapper、目录层级或结构性改造；优先局部补丁和现有代码风格；重构仅在必要、存在直接风险或用户明确要求时进行；默认不改公共接口、依赖、配置、构建脚本、文件名和目录结构；涉及超过 3 个文件、公共接口、依赖/配置、删除/重命名、明显重构时先说明理由和范围；修 bug 要定位直接原因，不接受只掩盖症状；改代码后运行最小必要验证。
+- 默认模板必须支持 zh-CN / en-US 两种项目规则内容或按当前语言生成等价语义；英文模板不能缺少上述工程纪律。
+- 已存在 `LINGHUN.md` 时仍不得静默覆盖；只能提示路径、摘要和可选更新建议，用户确认后才改。
 - Linghun 产品运行时的项目规则主入口是项目根目录 `LINGHUN.md`；`AGENTS.md` / `CLAUDE.md` 仅作为兼容导入或迁移来源，不能覆盖用户明确维护的 `LINGHUN.md`。
 - 临时想法、阶段进度、短期计划必须写入 `HandoffPacket`，不得无限追加到 `LINGHUN.md`。
 - `HandoffPacket` 是新会话、自动任务、`/resume`、`/branch` 和 `/fork` 的结构化交接契约，不是自由文本摘要。

@@ -14,7 +14,7 @@
 
 | 参考源 | 公开地址 / 本地路径 | 可参考内容 | 禁止事项 | 对应阶段 |
 | --- | --- | --- | --- | --- |
-| CCB / Claude Code Best | 本地：`F:\ccb-source`；公开来源以用户提供或当次联网核验为准；公开参考：`https://github.com/claude-code-best/claude-code/releases/tag/v2.4.3` | TUI 编码体验、工具闭环、权限审批、提权说明、Plan 模式、Agent 生命周期、MCP 接入、缓存组织、状态栏交互、轻提示、help/doctor/error 交互；v2.4.3 可参考 discovery-before-execute 工具 guard：未先搜索/发现延迟工具和 schema 时，执行层拒绝直接调用 | 复制反编译源码、内部 API、专有实现、遥测、私有协议、照搬补丁代码 | Phase 04-08、12、15 preflight/hardening、15 Beta、15.5 |
+| CCB / Claude Code Best | 本地：`F:\ccb-source`；公开来源以用户提供或当次联网核验为准；公开参考：`https://github.com/claude-code-best/claude-code/releases/tag/v2.4.3` | TUI 编码体验、完整 tool_use/tool_result 工具协议、工具级权限检查、权限审批、提权说明、Plan/bypass/auto 边界、Agent 生命周期、MCP 接入、缓存组织、状态栏交互、轻提示、help/doctor/error 交互；v2.4.3 可参考 discovery-before-execute 工具 guard：未先搜索/发现延迟工具和 schema 时，执行层拒绝直接调用 | 复制反编译源码、内部 API、专有实现、遥测、私有协议、照搬补丁代码；不得把模型文本 hint 当作 CCB 级 tool_use；不得只暴露只读工具后宣称完成 CCB 级工具闭环 | Phase 04-08、12、15 preflight/hardening、15 Beta、15.5 |
 | CCB Dev Boost | 本地：`F:\ccb-source\docs\ccb-optimizations.md`；对照：`F:\Linghun\docs\delivery\ccb-dev-boost-coverage-checklist.md` | cache-first、prefix stable、break-cache、MCP tool list 稳定化、codebase-memory 索引、usage/stats、中文提示、真实账单对账思路 | 宣传固定 98% / 25x，复制实现，把 provider 字段误说成零成本 | Phase 09-10、15 |
 | Phase 15 interaction review | `F:\Linghun\docs\audit\PHASE_15_PREFLIGHT_INTERACTION_REVIEW_REPORT.md` | Natural Command Bridge、Catalog/dispatch 漂移、参数提取、Start Gate、bypass/auto/Plan、权限提权交互、OpenCode 输出边界 | 把报告当成已实现代码；把 Phase 15.5 或 Phase 16 功能塞进 preflight hardening | Phase 15 preflight hardening |
 | OpenCode | 公开：`https://github.com/opencode-ai/opencode`；本地：`F:\freecodex\opencode-source` | 多模型开放、provider 抽象、LSP/插件化方向、TUI/output 组织、视觉层级、pending 状态可见、summary-first 输出 | 照搬执行层、复制源码、牺牲 CCB 风格编码手感 | Phase 13、14、15 preflight/hardening、15.5、18 |
@@ -38,7 +38,7 @@
 
 | 阶段 | 必查参考 |
 | --- | --- |
-| Phase 15 preflight hardening | CCB / Claude Code Best、Phase 15 interaction review、OpenCode、CCB Dev Boost |
+| Phase 15 preflight hardening | CCB / Claude Code Best、Phase 15 interaction review、OpenCode、CCB Dev Boost、`F:\Linghun\PHASE_15_PRE_BETA_FULL_INTERACTION_MATURITY_AUDIT.md` |
 | Phase 15 真实项目 Beta | CCB / Claude Code Best、CCB Dev Boost、CC Switch、Aider、codebase-memory-mcp |
 | Phase 15.5 | Phase 15 交付文档、双模型审查报告、release readiness、OpenCode 输出边界与视觉层级、CCB TUI/权限/提权/Plan/help/doctor/error 交互边界、CCB v2.4.3 discovery-before-execute 工具 guard、LiteLLM/OpenRouter/Vercel AI SDK 类 provider 抽象边界、WebSearch/WebFetch Freshness Gate 与 web_source evidence 边界 |
 | Phase 16 | Hermes Agent、LINGHUN.md / memory 规格、CCB/CCB Dev Boost 的 summary-first 和 cache freshness 边界 |

@@ -19,9 +19,10 @@
 | Phase 12 | done | [phase-12-agents.md](./phase-12-agents.md) | Agent 闭环 |
 | Phase 13 | done | [phase-13-multi-model.md](./phase-13-multi-model.md) | 多模型协作闭环 |
 | Phase 14 | done | [phase-14-skills-workflow.md](./phase-14-skills-workflow.md) | Skills 与工作流主闭环 + hardening |
-| Phase 15 preflight | done | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup + Interaction Maturity Fix 已完成；可在用户明确确认后恢复进入 Phase 15 Beta |
+| Phase 15 preflight | done pending Beta decision | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup + Interaction Maturity Fix + Full Interaction P0 hardening 已完成；P0-1~P0-6 已本地验证，是否进入 Phase 15 Beta 仍必须用户明确确认，不得自动进入 Phase 15.5 / Phase 16+ |
+| Phase 15 pre-Beta deep parity | pending decision | [phase-15-pre-beta-ccb-deep-parity-closure.md](./phase-15-pre-beta-ccb-deep-parity-closure.md) | P0 hardening 报告输出后再决定是否启动；用于确认 Phase 00-14 达到 CCB / CCB Dev Boost 核心体验等价，避免 Phase 15 Beta 测试基线失真 |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版 |
-| Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening |
+| Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查、Solution Completeness Gate 复检、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening |
 | Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |
 | Phase 17 | pending | phase-17-jobs-autonomous-sessions.md | 长期托管任务与自动会话 |
 | Phase 18 | pending | phase-18-desktop-ready.md | 桌面端预留验证；基础终端 TUI 手感不后置到本阶段 |

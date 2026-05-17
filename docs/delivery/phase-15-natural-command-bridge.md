@@ -121,6 +121,62 @@ force refresh index
 
 本轮完成后，仍需通过真实 TUI smoke 复检；若自然语言状态查询、只读查看、项目规则读取、Start Gate 和 i18n 仍出现失真，不得进入 Phase 15 真实项目 Beta。否则真实项目测试会被“能识别命令但手感仍像命令壳”的问题污染。
 
+## Phase 15 pre-Beta Solution Completeness Gate hardening（pending）
+
+本轮性质：Phase 15 Beta 前置质量门，不是 Phase 15 Beta、不是 Phase 15.5 实现、也不是 Phase 16+ 长期学习。目标是防止交互实测暴露系统性问题后，模型继续发现一个现象就补一个局部关键词或文案。
+
+触发背景：
+
+- 真实 TUI smoke 已多次暴露自然语言入口、只读查询、项目规则读取、Start Gate 文案和模型口头计划之间的连续失真。
+- 用户已经明确要求“成品级”“不要缝缝补补”“参考 CCB / OpenCode 的成熟交互边界”，说明这不是单个句子的 bug。
+- 如果带着这些失真进入 Phase 15 真实项目 Beta，测试数据会混入交互入口缺陷，无法准确评估编码、索引、记忆、多模型和权限底座。
+
+必须补齐的质量门：
+
+- 当同类问题反复出现、用户要求成品级、问题影响 Beta/release 或跨 natural command / TUI / 权限 / provider / memory / docs / tests 多个能力面时，必须先判定 `single_issue` 还是 `systemic_gap`。
+- 判定为 `systemic_gap` 时，先列影响面、参考源、P0/P1/P2、当前阶段处理边界、后续登记项和验证命令，再给修复命令。
+- 小的独立 bug 仍按最小修复处理；该闸门不能变成大重构借口。
+- 实现时复用现有 Command Capability Catalog、RuntimeStatusForModel、Natural Intent Contract、Evidence/Freshness Gate 和 slash handlers；不得新增第二套命令解释系统。
+- 不复制 CCB、OpenCode 或其他第三方源码；只参考公开行为、边界和验收标准。
+
+进入 Phase 15 Beta 前的最低验收：
+
+- 当前完整交互审计和修复完成后，补一轮 Solution Completeness Gate focused docs/tests 或 TUI smoke 记录。
+- 报告必须说明哪些问题是单点修复，哪些是系统性缺口，哪些 P0/P1 已修，哪些 P2 放 Phase 15.5。
+- 若仍出现“只给单条补丁命令、没有影响面和阶段边界”的输出，不得进入 Phase 15 真实项目 Beta。
+
+## Phase 15 pre-Beta Full Interaction P0 hardening（done）
+
+本轮性质：Phase 15 Beta 前置阻塞修复，不是 Phase 15 Beta，不进入 Phase 15.5，也不做 Phase 16+。`F:\Linghun\PHASE_15_PRE_BETA_FULL_INTERACTION_MATURITY_AUDIT.md` 已确认 Phase 15 Beta 必须暂停，直到 P0-1 到 P0-6 全部修复并验证。本轮已完成 P0-1 到 P0-6 的最小闭环与验证记录；是否恢复 Phase 15 真实项目 Beta 仍必须由用户明确确认。
+
+审计后裁决：
+
+- P0-1 必须做完整 tool_use / tool_result 架构与权限中枢，不得做只读工具弱化版，不得用模型文本 hint 代替工具事件。
+- P0-2 到 P0-6 必须同轮闭环；只修部分 P0 会继续污染真实项目 Beta 数据。
+- CCB 只作为公开行为和边界参考：完整工具协议、工具级权限检查、Plan/bypass/auto 边界、可取消链路、tool_result 回灌和可审计记录；不得复制源码或 UI 实现。
+
+P0 范围：
+
+| P0 | 必须完成 | 验收 |
+| --- | --- | --- |
+| P0-1 | Provider / TUI 支持真实 `tool_use` / `tool_result`；核心工具 schema 覆盖 `Read`、`Grep`、`Glob`、`Diff`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Todo`；执行层复用现有工具和权限管道 | 已完成：OpenAI-compatible request 传入工具 schema / `tool_choice`，stream parser 解析分片 `tool_calls` 为 `tool_use`；TUI 多轮回灌 `tool_result`，执行层复用 `runTool()`、`decidePermission()`、Plan/acceptEdits/auto/bypass/硬拒绝安全检查 |
+| P0-2 | 文件智能指代与通用自然语言读文件：最近文件、明确文件名、模糊候选、多匹配消歧义 | 已完成最小闭环：明确路径、最近提到文件、模糊候选和多匹配提示走现有 `Read` 工具；自然语言 smoke 覆盖 `读一下 LINGHUN.md` 后的“看看这个文件” |
+| P0-3 | 新手轻引导 + 默认 `LINGHUN.md` 模板成熟度：首次项目或缺 `.linghun/` 时 3-5 行提示；`/memory init` 默认模板提炼最小必要改动、禁止顺手修、减少屎山、重构边界、高风险先说明和最小验证 | 已完成：启动缺失提示本地化；模板继续只在显式 `/memory init` 生成，已有 `LINGHUN.md` 不覆盖；focused test 验证模板包含最小验证、Start Gate/权限和事实优先边界 |
+| P0-4 | EvidenceSummary 注入模型上下文，并和 tool_result / evidence_record 同源 | 已完成：system prompt 注入截断 `EvidenceSummary`；模型工具调用和 slash 工具调用都写入 `tool_result`，并复用同一 `recordToolEvidence()` evidence id |
+| P0-5 | 模型流、权限等待和可取消工具调用接入 abort | 已完成：foreground 模型流持有 `activeAbortController`，SIGINT 与 `/interrupt` 可 abort；`ToolContext.abortSignal` 传入 Bash `runShell()`，finally 恢复 TUI idle 输入状态 |
+| P0-6 | en-US 关键路径：未知命令、错误、Start Gate/permission、light hints、`LINGHUN.md` 缺失提示 | 已完成：未知命令、错误、light hints、缺失 `LINGHUN.md`、Start Gate/permission 关键路径保留 en-US 输出；TUI i18n focused test 覆盖 unknown command/error/light hint |
+
+不做范围：
+
+- 不做完整 registry/dispatch 大重构。
+- 不做完整 TUI 美化和 output grouping。
+- 不做 Bash 流式输出大改。
+- 不做完整 onboarding wizard。
+- 不做复杂规则市场、自动学习或自动覆盖已有 `LINGHUN.md`；只升级默认模板和 focused tests。
+- 不做 rate limit/context 状态栏。
+- 不做 Web Evidence runtime 完整实现。
+- 不做 Agent/Skill/Plugin/Remote 全量 tool_use 接入。
+
 ## Phase 15 pre-Beta Interaction Maturity Fix（done）
 
 本轮性质：Phase 15 Beta 前置阻塞修复，不是新阶段，不进入 Phase 15 Beta，也不进入 Phase 15.5。目标是修复真实 TUI smoke 已暴露的自然语言交互失真，确保 Phase 15 真实项目测试是在成品级自然语言入口下进行，而不是在 demo 级命令桥上测出失真数据。
@@ -176,7 +232,7 @@ force refresh index
 - 项目规则读取不会误入 `/memory` 泛化解释。
 - zh-CN 环境默认输出不混入英文 Gate 模板。
 - `git diff` 中代码改动只限自然语言交互编排、只读路由、i18n 文案和 focused tests；不得借机进入 Phase 15.5 大美化、registry dispatch 大重构、桌面端或 Phase 16+。
-- 验证通过后，才允许恢复进入 Phase 15 真实项目 Beta。
+- 本节原本的“验证通过后允许恢复 Beta”只适用于 Interaction Maturity Fix 当轮小修，已被后续 Full Interaction Maturity Audit 覆盖；当前必须先完成 P0-1 到 P0-6 全量阻塞修复并验证，才允许恢复 Phase 15 真实项目 Beta。
 
 ### Interaction Maturity Fix 完成记录
 
@@ -413,6 +469,34 @@ corepack pnpm exec linghun --help
 - `corepack pnpm exec linghun --help`：通过，输出 Linghun 0.1.0 help。
 - TUI stdin smoke：通过，覆盖模型状态、模型 doctor、索引 build Start Gate、索引 ready/status 只读、项目规则读取、缓存状态、自动记忆状态、`/model`、`/index status`、`/memory`、`直接 npm install` 阻断、`开启 bypass` 阻断；默认输出不包含 `I can prepare this action`、`gateId`、`expiresAt` 或 raw `risk=`。
 
+### Phase 15 pre-Beta Full Interaction P0 hardening 验证结果
+
+已执行：
+
+- `corepack pnpm --filter @linghun/providers test`：通过；覆盖 OpenAI-compatible tool schema / assistant tool result request shaping、streamed `tool_calls` 分片聚合为 `tool_use`、ModelGateway 新事件透传。
+- `corepack pnpm --filter @linghun/tui test`：通过；覆盖自然语言最近文件读取、默认 `LINGHUN.md` 模板不覆盖、en-US unknown command/error/light hint、权限/Plan/Start Gate 既有边界。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm test`：通过，11 个测试文件、198 个测试通过。
+- `corepack pnpm build`：通过，workspace packages 构建通过。
+- `corepack pnpm exec linghun --help`：通过，输出 Linghun 0.1.0 help。
+- `corepack pnpm exec Linghun --help`：通过，输出 Linghun 0.1.0 help。
+
+独立 verification gate（2026-05-17）已执行并 PASS：
+
+- `corepack pnpm test`：通过，11 个测试文件、198 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm build`：通过，workspace packages 构建通过。
+- `corepack pnpm exec linghun --help`：通过，输出 Linghun 0.1.0 help。
+- `corepack pnpm exec Linghun --help`：通过，输出 Linghun 0.1.0 help。
+- verifier 额外执行 `corepack pnpm lint`：通过，43 个文件检查通过。
+- verifier 额外执行 TUI smoke：`/help` 暴露 Read/Grep/Glob/Diff/Write/Edit/MultiEdit/Bash/Todo 能力和风险边界；缺失 `LINGHUN.md` 只输出轻提示，不自动生成。
+- verifier 额外执行 P0 focused tests：provider tool events、TUI tool/evidence/cancel/onboarding/i18n、权限边界相关测试通过。
+- verifier 额外执行临时项目 adversarial smoke：明确读取 `LINGHUN.md`、最近文件指代“看看这个文件”、模糊多匹配 `读 alpha` 候选列表、`直接开启 bypass` 阻断并保留 Start Gate/权限边界，均符合预期。
+
+Focused smoke 覆盖：provider 工具 schema、分片 tool call parser、TUI 自然语言 `读一下 LINGHUN.md` 后“看看这个文件”、缺失 `LINGHUN.md` 轻提示、en-US unknown command/error/light hint、Plan 模式工具权限拒绝、dangerous natural request 阻断。
+
+未验证项：尚未运行真实 provider 在线 tool_call 对话，因为本轮按本地 pre-Beta hardening 收口，不执行真实 API 联网；真实项目 Beta 仍需用户明确确认后单独启动。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。
@@ -437,9 +521,9 @@ DeepSeek V4 Pro 报告裁决：
 - pluginListHash / extension freshness 稳定性：已补测；当前实现已有稳定排序，无需重构。
 - START_NEXT_CHAT 与交付文档未同步 cross-review 报告：已修。
 - Catalog/dispatch registry-map 重构：不在本轮做；当前只保留 drift detection + coverage test。完整同源 registry/dispatch 重构属于 Phase 15.5 或后续架构 cleanup，不能混入 pre-Beta 小修。
-- command-level permission framework、permission modal、allow once/always、插件市场、远程安装、完整 hook 执行、长期任务、Remote Channels、桌面端：不在本轮做，也不阻塞 Phase 15 Beta；当前安全边界仍由 Start Gate、exact command、drift detection、权限管道和 focused tests 兜底。
+- command-level permission framework、permission modal、allow once/always、插件市场、远程安装、完整 hook 执行、长期任务、Remote Channels、桌面端：不在本轮做；是否阻塞 Beta 以之后的 Full Interaction Maturity Audit 审计后裁决为准。当前裁决是 P0-1 到 P0-6 全量修复前不得进入 Phase 15 Beta。
 
-Phase 15 Beta 的前置 Interaction Maturity Fix 已完成并通过复检；后续仍必须由用户明确确认后才能开始 Phase 15 真实项目 Beta。
+Phase 15 Beta 的前置 Interaction Maturity Fix 已完成并通过复检，但该小修不是 Beta 恢复条件的最终口径；后续仍必须先完成 P0-1 到 P0-6 全量阻塞修复，并由用户明确确认后才能开始 Phase 15 真实项目 Beta。
 
 ### Phase 15 pre-Beta Interaction P1 cleanup
 
@@ -488,6 +572,7 @@ corepack pnpm build
 - 本阶段是 preflight，不承诺真实项目 Beta 的完整自然语言命令成功率。
 - Router 采用本地 catalog、aliases、描述、whenToUse 与 intent clues 的保守评分；低置信度会澄清，可能比模型猜测更保守。
 - 高风险命令的真实审批、工具执行与权限细节仍由已有 slash/tool 权限管道负责。
+- OpenAI-compatible stream parser 已支持常见分片 `tool_calls` 聚合；不同 provider 若返回非标准 tool call delta，需要在真实 Beta 中补 provider-specific adapter 测试。
 - 未实现 Phase 15.5 双模型交叉审查与开源前 hardening。
 
 ## 不在本阶段处理的内容
@@ -501,12 +586,13 @@ corepack pnpm build
 
 ## 下一阶段衔接
 
-完成本阶段并经验证后，下一步只能在用户明确确认后进入：
+Phase 15 pre-Beta P0 hardening 已完成本地闭环。下一步只能在用户明确确认后进入：
 
-1. Phase 15 真实项目 Beta；或
-2. Phase 15.5 双模型交叉审查与开源前 hardening。
+1. Phase 15 真实项目 Beta；
+2. Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure；
+3. Phase 15 完成后，Phase 15.5 双模型交叉审查与开源前 hardening。
 
-不得自动进入 Phase 16+。
+不得自动进入 Phase 15 Beta、Phase 15.5 或 Phase 16+；如启动 Deep Parity Closure，仍只作为 Beta 前质量门，不等同于进入 Phase 15.5。
 
 ## 开发者排查入口
 
@@ -538,53 +624,62 @@ corepack pnpm build
 ## 成品级结构化 Handoff Packet
 
 ```yaml
-phase: "Phase 15 preflight"
-status: "done"
+phase: "Phase 15 preflight / pre-Beta Full Interaction P0 hardening"
+status: "done locally; independent verification gate PASS; pending user decision for next step"
 delivery_doc: "F:\\Linghun\\docs\\delivery\\phase-15-natural-command-bridge.md"
 next_phase_options:
   - "Phase 15 real-project Beta（必须用户明确确认）"
-  - "Phase 15.5 cross-model hardening（必须用户明确确认）"
+  - "Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure（必须用户明确确认）"
+  - "Phase 15.5 cross-model hardening（Phase 15 完成后且必须用户明确确认）"
 forbidden_without_user_confirmation:
   - "Phase 15 real-project Beta"
+  - "Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure"
   - "Phase 15.5 双模型交叉审查"
   - "Phase 16+"
   - "长期学习/长期任务/Remote Channels/桌面端"
   - "依赖安装或联网安装"
 evidence:
+  - "packages/providers/src/index.ts"
+  - "packages/providers/src/index.test.ts"
+  - "packages/core/src/session.ts"
+  - "packages/tools/src/index.ts"
+  - "packages/tui/src/index.ts"
+  - "packages/tui/src/index.test.ts"
   - "packages/tui/src/natural-command-bridge.ts"
   - "packages/tui/src/natural-command-bridge.test.ts"
-  - "packages/tui/src/index.ts"
   - "docs/delivery/phase-15-natural-command-bridge.md"
+  - "docs/delivery/README.md"
+  - "START_NEXT_CHAT.md"
 validation_completed:
-  - command: "corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts"
-    result: "pass; 11 test files, 196 tests"
-  - command: "corepack pnpm test"
-    result: "pass; 11 test files, 196 tests"
+  - command: "corepack pnpm --filter @linghun/providers test"
+    result: "pass; provider tool schema and streamed tool_call parser coverage"
+  - command: "corepack pnpm --filter @linghun/tui test"
+    result: "pass; TUI focused interaction coverage"
   - command: "corepack pnpm typecheck"
     result: "pass"
   - command: "corepack pnpm check"
-    result: "pass; 43 files"
+    result: "pass"
+  - command: "corepack pnpm test"
+    result: "pass; 11 test files, 198 tests"
   - command: "corepack pnpm build"
     result: "pass; workspace packages built"
   - command: "corepack pnpm exec linghun --help"
     result: "pass; Linghun 0.1.0 help"
-  - command: "TUI stdin natural-command smoke"
-    result: "pass; model status, model doctor, index Start Gate/status, project rules read, cache/memory status, dangerous request blocks"
+  - command: "corepack pnpm exec Linghun --help"
+    result: "pass; Linghun 0.1.0 help"
 verification_agent:
   verdict: "PASS"
-  spot_check:
-    - "corepack pnpm test: pass; 11 test files, 196 tests"
-    - "corepack pnpm check: pass; 43 files"
-    - "corepack pnpm exec linghun --help: pass; Linghun 0.1.0 help"
+  note: "Independent verification gate completed on 2026-05-17; no minimal fixes required. Required commands passed: test, typecheck, build, lowercase/uppercase CLI help. Additional lint, focused P0 tests and TUI smoke also passed."
 index_status:
   project: "F-Linghun"
   status: "ready"
-  nodes: 773
-  edges: 1510
+  nodes: 780
+  edges: 1527
 permission_mode: "default"
 model_provider: "claude-sonnet-4-6 in Claude Code session; Linghun runtime model unchanged"
 budget_notes: "No dependency install; no remote execution; no full transcript/memory/index injection."
 remaining_risk:
-  - "Router is intentionally conservative and may ask clarification on ambiguous natural language."
-  - "Phase 15 real-project Beta and Phase 15.5 hardening are not implemented in this preflight."
+  - "OpenAI-compatible stream parser supports common streamed tool_calls, but non-standard provider deltas still require real provider Beta validation."
+  - "Natural file read fuzzy matching is intentionally bounded and conservative; ambiguous matches ask for explicit selection."
+  - "Phase 15 real-project Beta, Deep Parity Closure, Phase 15.5 and Phase 16+ are not entered by this handoff."
 ```

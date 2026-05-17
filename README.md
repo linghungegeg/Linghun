@@ -13,8 +13,9 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 ## 当前进度
 
-- Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口，Phase 15 Beta 仍需用户明确确认后才能开始。
-- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 15+ / Phase 16+。
+- Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口。
+- Phase 15 pre-Beta Full Interaction Maturity Audit 后，Phase 15 Beta 暂停；必须先完成 P0-1~P0-6 全量阻塞修复：完整 tool_use/tool_result 工具闭环、文件智能指代、新手轻引导和默认 `LINGHUN.md` 模板成熟度、EvidenceSummary 入模型、模型流可取消、en-US 关键提示。
+- 下一步只能在用户明确确认后推进 Phase 15 pre-Beta P0 hardening；P0 收口前不得进入 Phase 15 真实项目 Beta、Phase 15.5 或 Phase 16+。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认、bypass/auto/Plan 边界；高风险命令不得自然语言直通；Beta 前还需确保状态查询、doctor 查询、用法询问、动作请求、配置变更和高风险请求不会互相退化。
 - 自动工作默认只推进一个阶段，完成后必须输出交付文档、验证结果和 handoff packet。
@@ -38,6 +39,8 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 10. [docs/delivery/phase-14-skills-workflow.md](./docs/delivery/phase-14-skills-workflow.md)
 11. [docs/delivery/phase-15-natural-command-bridge.md](./docs/delivery/phase-15-natural-command-bridge.md)
 
+后续撰写开源项目介绍、README 卖点或发布说明时，参考 [docs/open-source-positioning-notes.md](./docs/open-source-positioning-notes.md)，不要忘记 evidence-first coding 这一定位。
+
 Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence 恢复上下文，避免一上来全量读取文件。
 
 ## 命令约定
@@ -58,7 +61,8 @@ Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent tr
 └── docs
     ├── audit
     ├── archive
-    └── delivery
+    ├── delivery
+    └── open-source-positioning-notes.md
 ```
 
 ## 开发规则

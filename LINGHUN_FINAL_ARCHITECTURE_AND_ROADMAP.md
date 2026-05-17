@@ -239,7 +239,7 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 覆盖分三批：
 
 - 第一批：状态查询和安全启动门，Phase 15 preflight 必须完成。
-- 第二批：开发辅助命令的自然语言发现与确认，Phase 15 preflight 必须纳入 Catalog、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 继续用真实项目验证，Phase 15.5 修 P0/P1。
+- 第二批：开发辅助命令的自然语言发现与确认，Phase 15 preflight 必须纳入 Catalog、用途/风险解释、参数提取、确认门和 focused tests；Phase 15 Beta 只能在 P0-1 到 P0-6 全量闭环后恢复真实项目验证，Phase 15.5 只承接非阻塞 P1/P2 与 release hardening。
 - 第三批：高风险命令只解释和审批，不直通；必须保留 Start Gate 和权限管道。
 
 模型请求前可注入短 `RuntimeStatus`，包含 memory/index/cache/model/mode/extensions 的摘要，帮助模型回答当前状态问题；禁止注入完整 memory、完整 transcript、完整索引结果和大日志。
@@ -561,7 +561,7 @@ type LinghunEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; id: string; result: unknown }
+  | { type: 'tool_result'; toolUseId: string; content: unknown; isError?: boolean }
   | { type: 'usage'; usage: ModelUsage }
   | { type: 'message_stop'; reason: string }
   | { type: 'error'; error: LinghunError }
@@ -1003,7 +1003,7 @@ F:\LinghunProject 或新仓库根目录
 | Phase 04 | TUI / REPL 最小闭环 | 无参数进入 REPL、状态栏、slash 命令、对话写入 transcript |
 | Phase 05 | 核心工具闭环 | Read / Write / Edit / MultiEdit / Grep / Glob / Bash / Todo / Diff |
 | Phase 06 | 权限与 Plan 闭环 | 权限规则、Plan 方案选择、acceptEdits、模式切换 |
-| Phase 07 | 工程行为控制闭环 | 反幻觉、最小改动、基础 i18n、TUI 渲染稳定性、后台状态反馈、checkpoint/rewind、输入队列与中断 |
+| Phase 07 | 工程行为控制闭环 | 反幻觉、最小改动、方案完整性闸门、基础 i18n、TUI 渲染稳定性、后台状态反馈、checkpoint/rewind、输入队列与中断 |
 | Phase 08 | 代码自检与验证增强闭环 | verifier、验证计划、验证进度、PASS/FAIL/PARTIAL 结果归档、review |
 | Phase 09 | 缓存与成本闭环 | cache history、cache break、`/usage`、`/stats`、轻提示 |
 | Phase 10 | MCP 与 codebase-memory 闭环 | MCP 面板、索引、索引过期提醒、大文件保护 |
@@ -1011,8 +1011,8 @@ F:\LinghunProject 或新仓库根目录
 | Phase 12 | Agent 闭环 | explorer、worker、verifier、planner、`/fork`、agent transcript |
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
-| Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
-| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、终端 TUI 产品手感、release readiness / open-source readiness |
+| Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight 和 P0-1 到 P0-6 全量交互硬化，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
+| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、终端 TUI 产品手感、release readiness / open-source readiness |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |
 | Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界；不承担基础 TUI 美化和交互补课 |
@@ -1024,9 +1024,12 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 00-14 主闭环已完成。
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
-- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening；不得自动进入 Phase 16+。
+- 下一步只能在用户明确确认后推进 Phase 15 pre-Beta P0 hardening；P0-1 到 P0-6 收口前不得进入 Phase 15 真实项目 Beta、Phase 15.5 或 Phase 16+。
+- P0 hardening 完成并输出报告后，必须先基于报告决定是否启动 Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure。该闭环用于确认 Phase 00-14 的实际使用体验、交互细节、建议/提权、错误/doctor/help、自然语言入口、cache/index/memory、多模型和 TUI 基础手感是否达到 CCB / CCB Dev Boost 公开成熟行为的核心体验等价；P0 或阻塞 P1 必须在 Beta 前修复，非阻塞 P2 才能登记到 Phase 15.5。
 - Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
+- Phase 15 Beta 前和 Phase 15.5 必须启用 Solution Completeness Gate：真实使用暴露跨能力系统性缺口时，先区分单点 bug / 系统性缺口，列影响面、参考源、P0/P1/P2、阶段边界和验证方式，再给修复命令；不能发现一个现象补一个关键词。若系统性缺口涉及“0-14 与 CCB / CCB Dev Boost 使用体验不等价”，必须先做 Deep Parity Closure 决策，不得把 Phase 15 真实项目测试建立在不干净的交互基线上。
+- Phase 15 pre-Beta Full Interaction Maturity Audit 已把 Beta 恢复条件升级为 P0-1 到 P0-6 全量闭环：完整 tool_use/tool_result 架构、文件智能指代、新手轻引导和默认 `LINGHUN.md` 模板成熟度、EvidenceSummary 入模型、模型流可取消、en-US 关键提示。P0-1 必须做完整工具协议和权限中枢，不得只做 Read/Grep/Glob 弱化版或模型文本 hint。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
 
@@ -1141,13 +1144,18 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 
 联网取证也必须在 Phase 15.5 收口。Linghun 的反幻觉不是禁止联网，而是“本地证据优先、实时信息请求授权联网、官方来源优先、web_source evidence 记录、失败降级”。用户问最新 release、社区项目现状、provider 文档、模型价格、API 行为、安全公告或政策变化时，未联网不得给确定结论；已联网必须给来源、查询时间和保守结论。
 
+方案完整性闸门也必须在 Phase 15 Beta 前开始生效，并在 Phase 15.5 收口。它不是新功能堆叠，而是工作质量门：当用户连续指出“这不是成品级”“不要缝缝补补”“先看成熟参考怎么做”，或实测暴露同类问题反复出现时，Linghun 必须先判断是否系统性缺口，再决定本轮修 P0/P1、登记 P2 或明确不做。这样既压住模型靠猜，也压住模型只会局部补丁化处理问题。
+
+Phase 15 Beta 前的工具闭环不能弱化。CCB 的可参考成熟点不是“少量只读工具”，而是模型通过真实 tool_use 发起完整工具集、执行层统一走权限中枢、tool_result 回灌模型继续推理。Linghun 必须自研同等边界：核心工具 schema 覆盖 Read/Grep/Glob/Diff/Write/Edit/MultiEdit/Bash/Todo，危险工具继续受 Plan、Start Gate、decidePermission、acceptEdits、auto、bypass 和安全检查约束。
+
 社区项目如 oh-my-openagent 证明 team mode、skills、hooks、角色路由和后台生命周期是有价值的方向，但 Linghun 只吸收公开行为和验收边界：角色可审计、状态表可见、预算可控、失败可诊断、输出摘要化。它们不能替代 Linghun 的 clean rewrite 原则，也不能成为提前堆功能、绕过权限或复制实现的理由。
 
-如果按本文路线执行，Linghun 的第一阶段目标不是立刻超越 CCB，而是达到：
+如果按本文路线执行，Linghun 的第一阶段目标不是堆功能数量超越 CCB，而是在 Phase 15 P0 hardening 后，让真实项目测试的核心编码链路达到 CCB 级可用手感：
 
-- CCB 核心编码体验的 70% - 80%。
-- 中文体验、安装配置、成本可见性明显优于 CCB。
-- 后续通过真实项目打磨接近 90%+。
+- 模型能通过真实 `tool_use` / `tool_result` 使用核心工具，并由统一权限中枢守住写入、Bash、Plan、auto、bypass 和 Start Gate 边界。
+- 自然语言状态查询、文件指代、项目规则读取、新手轻引导、取消长任务、中英文关键提示和 EvidenceSummary 入模型必须在真实 TUI 中可实测。
+- 中文体验、安装配置、成本可见性、模型中立、反幻觉证据链和 clean rewrite 可维护性应成为 Linghun 的差异化优势。
+- Phase 15.5 再补非阻塞 P1/P2、终端 TUI 产品手感、模型接入成熟度、联网取证成熟度和开源前 release hardening。
 
 最终优势应落在：
 

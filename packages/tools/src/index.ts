@@ -36,6 +36,7 @@ export type ToolContext = {
   logRoot?: string;
   changedFiles: string[];
   todos: TodoItem[];
+  abortSignal?: AbortSignal;
 };
 
 export type ToolName =
@@ -374,7 +375,12 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   await mkdir(logRoot, { recursive: true });
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
-  const result = await runShell(input.command, context.workspaceRoot, timeoutMs);
+  const result = await runShell(
+    input.command,
+    context.workspaceRoot,
+    timeoutMs,
+    context.abortSignal,
+  );
   const fullText = `$ ${input.command}\nexitCode=${result.exitCode}\n\n${result.output}`;
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
@@ -527,14 +533,35 @@ function runShell(
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(command, { cwd, shell: true, windowsHide: true });
     let output = "";
+    let settled = false;
+    const finish = (exitCode: number, nextOutput = output) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolvePromise({ exitCode, output: nextOutput });
+    };
+    const onAbort = () => {
+      child.kill();
+      output += "\n工具调用已取消。";
+      finish(1);
+    };
     const timer = setTimeout(() => {
       child.kill();
       output += `\n命令超时：超过 ${timeoutMs}ms，已尝试终止。`;
     }, timeoutMs);
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (chunk) => {
       output += chunk.toString();
@@ -543,12 +570,10 @@ function runShell(
       output += chunk.toString();
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolvePromise({ exitCode: code ?? 1, output });
+      finish(code ?? 1);
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      resolvePromise({ exitCode: 1, output: `命令执行失败：${error.message}` });
+      finish(1, `命令执行失败：${error.message}`);
     });
   });
 }

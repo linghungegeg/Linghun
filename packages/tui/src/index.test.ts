@@ -21,6 +21,7 @@ import {
   handleSlashCommand,
   recordModelUsage,
   runTui,
+  writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 
@@ -134,6 +135,7 @@ async function createTestContext(
     visionObservations: [],
     imageResults: [],
     interrupt: { type: "idle" },
+    recentlyMentionedFiles: [],
   };
 }
 
@@ -506,6 +508,7 @@ describe("Phase 06 TUI slash commands", () => {
         "项目规则是什么\n",
         "本仓库规则是什么\n",
         "读一下 LINGHUN.md\n",
+        "看看这个文件\n",
         "缓存状态怎么样\n",
         "自动记忆是否打开\n",
         "/model\n",
@@ -525,6 +528,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("status: ready");
     expect(output.text).toContain("项目规则：");
     expect(output.text).toContain("只做最小必要改动");
+    expect(output.text.match(/工具 Read 结果/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
     expect(output.text).toContain("Cache status");
     expect(output.text).toContain("Memory status");
     expect(output.text).toContain("已阻止自然语言直通：Shell 命令");
@@ -827,7 +831,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(template).toContain("事实优先：先读代码、项目索引、文档或命令结果");
     expect(template).toContain("自然语言命令不能绕过 Start Gate 或权限审批");
     expect(template).toContain("长期记忆默认先生成候选");
+    expect(template).toContain("改代码后运行项目认可的最小必要验证");
     expect(template).not.toContain("# Linghun Project Rules");
+
+    const existingOutput = new MemoryOutput();
+    await handleSlashCommand("/memory init", context, existingOutput);
+    expect(existingOutput.text).toContain("LINGHUN.md 已存在");
+    expect(await readFile(join(project, "LINGHUN.md"), "utf8")).toBe(template);
   });
 
   it("enforces plan permissions and records recent denials", async () => {
@@ -957,11 +967,15 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/help", context, output);
     await handleSlashCommand("/language en-US", context, output);
     await handleSlashCommand("/help", context, output);
+    await handleSlashCommand("/not-a-command", context, output);
+    await handleSlashCommand("/read missing.txt", context, output);
 
     expect(output.text).toContain("可用命令");
     expect(output.text).toContain("Language switched to English.");
     expect(output.text).toContain("Available commands");
     expect(output.text).toContain("Status: session");
+    expect(output.text).toContain("Unknown command: /not-a-command");
+    expect(output.text).toContain("Error:");
   });
 
   it("creates checkpoints and restores them with rewind", async () => {
@@ -1410,7 +1424,12 @@ describe("Phase 06 TUI slash commands", () => {
     });
     await handleSlashCommand("/cache status", context, output);
     await handleSlashCommand("/status", context, output);
+    context.language = "en-US";
+    writeLightHintsForTest(output, context);
 
+    expect(output.text).toContain(
+      "[hint:warning] Cache hit rate dropped; suggestion: /break-cache status",
+    );
     expect(output.text).not.toContain("你> [hint");
     expect(output.text).not.toContain("you> [hint");
     expect(output.text).not.toContain("¥");

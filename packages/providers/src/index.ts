@@ -12,8 +12,16 @@ export type ModelUsage = {
   endpoint?: string;
 };
 
+export type ModelToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+};
+
 export type LinghunEvent =
   | { type: "assistant_text_delta"; id: string; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; toolUseId: string; content: unknown; isError?: boolean }
   | { type: "usage"; usage: ModelUsage }
   | { type: "error"; error: LinghunError };
 
@@ -46,15 +54,29 @@ export type ProviderConfig = {
   maxOutputTokens?: number;
 };
 
-export type ModelMessage = {
-  role: "system" | "user" | "assistant";
-  content: string;
+export type ModelToolCall = {
+  id: string;
+  name: string;
+  input: unknown;
 };
+
+type PendingOpenAiToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+export type ModelMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string; toolCalls?: ModelToolCall[] }
+  | { role: "tool"; content: string; tool_call_id: string };
 
 export type ModelRequest = {
   messages: ModelMessage[];
   model?: string;
   maxOutputTokens?: number;
+  tools?: ModelToolDefinition[];
+  toolChoice?: "auto" | "none";
 };
 
 export type Provider = {
@@ -67,9 +89,34 @@ export type Provider = {
 
 export type OpenAiChatRequest = {
   model: string;
-  messages: ModelMessage[];
+  messages: OpenAiChatMessage[];
   stream: true;
   max_tokens: number;
+  tools?: OpenAiToolDefinition[];
+  tool_choice?: "auto" | "none";
+};
+
+type OpenAiChatMessage =
+  | { role: "system" | "user"; content: string }
+  | { role: "assistant"; content: string | null; tool_calls?: OpenAiToolCall[] }
+  | { role: "tool"; content: string; tool_call_id: string };
+
+type OpenAiToolDefinition = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: unknown;
+  };
+};
+
+type OpenAiToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
 };
 
 export const deepSeekModels: ModelInfo[] = [
@@ -79,7 +126,7 @@ export const deepSeekModels: ModelInfo[] = [
     providerId: "deepseek",
     contextWindow: 128_000,
     maxOutputTokens: 8_192,
-    supportsTools: false,
+    supportsTools: true,
     supportsVision: false,
     supportsThinking: false,
     supportsPromptCache: false,
@@ -90,7 +137,7 @@ export const deepSeekModels: ModelInfo[] = [
     providerId: "deepseek",
     contextWindow: 1_048_576,
     maxOutputTokens: 16_384,
-    supportsTools: false,
+    supportsTools: true,
     supportsVision: false,
     supportsThinking: false,
     supportsPromptCache: false,
@@ -169,7 +216,7 @@ export class OpenAiCompatibleProvider implements Provider {
         providerId: this.id,
         contextWindow: 128_000,
         maxOutputTokens: this.config.maxOutputTokens ?? 4_096,
-        supportsTools: false,
+        supportsTools: true,
         supportsVision: false,
         supportsThinking: false,
         supportsPromptCache: false,
@@ -182,11 +229,20 @@ export class OpenAiCompatibleProvider implements Provider {
     const known = findKnownModel(model);
     const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
     const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
+    const tools = request.tools?.map((tool) => ({
+      type: "function" as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
     return {
       model,
-      messages: request.messages,
+      messages: request.messages.map(toOpenAiMessage),
       stream: true,
       max_tokens: Math.min(requested, maxAllowed),
+      ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
     };
   }
 
@@ -251,12 +307,38 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 }
 
+function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {
+  if (message.role === "assistant") {
+    return {
+      role: "assistant",
+      content: message.content || null,
+      ...(message.toolCalls && message.toolCalls.length > 0
+        ? {
+            tool_calls: message.toolCalls.map((toolCall) => ({
+              id: toolCall.id,
+              type: "function" as const,
+              function: {
+                name: toolCall.name,
+                arguments: JSON.stringify(toolCall.input ?? {}),
+              },
+            })),
+          }
+        : {}),
+    };
+  }
+  if (message.role === "tool") {
+    return message;
+  }
+  return message;
+}
+
 export async function* parseOpenAiStream(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<LinghunEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const pendingToolCalls = new Map<number, PendingOpenAiToolCall>();
 
   while (true) {
     const { value, done } = await reader.read();
@@ -268,7 +350,7 @@ export async function* parseOpenAiStream(
     buffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      for (const event of parseOpenAiStreamLine(line)) {
+      for (const event of parseOpenAiStreamLine(line, pendingToolCalls)) {
         yield event;
       }
     }
@@ -278,12 +360,15 @@ export async function* parseOpenAiStream(
   if (tail) {
     buffer += tail;
   }
-  for (const event of parseOpenAiStreamLine(buffer)) {
+  for (const event of parseOpenAiStreamLine(buffer, pendingToolCalls)) {
     yield event;
   }
 }
 
-function parseOpenAiStreamLine(line: string): LinghunEvent[] {
+function parseOpenAiStreamLine(
+  line: string,
+  pendingToolCalls: Map<number, PendingOpenAiToolCall>,
+): LinghunEvent[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("data:")) {
     return [];
@@ -294,7 +379,16 @@ function parseOpenAiStreamLine(line: string): LinghunEvent[] {
   }
   const parsed = JSON.parse(payload) as {
     id?: string;
-    choices?: { delta?: { content?: string } }[];
+    choices?: {
+      delta?: {
+        content?: string;
+        tool_calls?: {
+          id?: string;
+          type?: string;
+          function?: { name?: string; arguments?: string };
+        }[];
+      };
+    }[];
     usage?: {
       prompt_tokens?: number;
       completion_tokens?: number;
@@ -309,9 +403,33 @@ function parseOpenAiStreamLine(line: string): LinghunEvent[] {
     };
   };
   const events: LinghunEvent[] = [];
-  const text = parsed.choices?.[0]?.delta?.content;
+  const delta = parsed.choices?.[0]?.delta;
+  const text = delta?.content;
   if (text) {
     events.push({ type: "assistant_text_delta", id: parsed.id ?? "assistant", text });
+  }
+  for (const [index, toolCall] of (delta?.tool_calls ?? []).entries()) {
+    const existing = pendingToolCalls.get(index) ?? {
+      id: `tool-${index + 1}`,
+      name: "",
+      arguments: "",
+    };
+    const next = {
+      id: toolCall.id ?? existing.id,
+      name: toolCall.function?.name ?? existing.name,
+      arguments: existing.arguments + (toolCall.function?.arguments ?? ""),
+    };
+    pendingToolCalls.set(index, next);
+    if (!next.name || !isCompleteJsonObject(next.arguments)) {
+      continue;
+    }
+    events.push({
+      type: "tool_use",
+      id: next.id,
+      name: next.name,
+      input: parseToolArguments(next.arguments),
+    });
+    pendingToolCalls.delete(index);
   }
   if (parsed.usage) {
     const cacheWriteTokensRaw = readCacheWriteTokens(parsed.usage);
@@ -331,6 +449,26 @@ function parseOpenAiStreamLine(line: string): LinghunEvent[] {
     });
   }
   return events;
+}
+
+function parseToolArguments(value: string): unknown {
+  try {
+    return JSON.parse(value || "{}");
+  } catch {
+    return { raw: value };
+  }
+}
+
+function isCompleteJsonObject(value: string): boolean {
+  if (!value.trim()) {
+    return false;
+  }
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function readCacheWriteTokens(usage: {

@@ -32,6 +32,8 @@ import {
   DeepSeekProvider,
   ModelGateway,
   type ModelMessage,
+  type ModelToolCall,
+  type ModelToolDefinition,
   type ModelUsage,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
@@ -528,7 +530,9 @@ type MessageKey =
   | "interruptCancelled"
   | "btwPrefix"
   | "evidenceBlocked"
-  | "claimNeedsDisclaimer";
+  | "claimNeedsDisclaimer"
+  | "projectRulesMissingHint"
+  | "toolInterrupted";
 
 export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/help",
@@ -609,6 +613,8 @@ export type TuiContext = {
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
   pendingNaturalCommand?: PendingNaturalCommand;
+  activeAbortController?: AbortController;
+  recentlyMentionedFiles: string[];
 };
 
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
@@ -617,6 +623,7 @@ const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
+const MAX_MODEL_TOOL_ROUNDS = 4;
 const LARGE_INDEX_FILE_BYTES = 1_000_000;
 const LARGE_INDEX_FILE_LIMIT = 12;
 const LARGE_INDEX_RISK_EXTENSIONS = new Set([".json", ".sql", ".xml"]);
@@ -1204,6 +1211,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     visionObservations: [],
     imageResults: [],
     interrupt: { type: "idle" },
+    recentlyMentionedFiles: [],
   };
   const gateway = new ModelGateway([
     new DeepSeekProvider({
@@ -1217,14 +1225,22 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   writeStatus(output, context);
   writeLine(output, `${t(context, "intro")}\n`);
   if (!context.memory.projectRulesExists) {
-    writeLine(
-      output,
-      "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
-    );
+    writeLine(output, t(context, "projectRulesMissingHint"));
   }
+
+  const sigintHandler = () => {
+    if (!context.activeAbortController) {
+      return;
+    }
+    context.activeAbortController.abort();
+    writeLine(output, t(context, "toolInterrupted"));
+  };
+  process.once("SIGINT", sigintHandler);
 
   try {
     for await (const line of readInputLines(input, output)) {
+      process.removeListener("SIGINT", sigintHandler);
+      process.once("SIGINT", sigintHandler);
       const text = line.trim();
       if (!text) {
         continue;
@@ -1251,6 +1267,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const message = error instanceof Error ? error.message : "TUI 运行失败。";
     writeLine(errorOutput, `错误：${message}`);
     return 1;
+  } finally {
+    process.removeListener("SIGINT", sigintHandler);
   }
 }
 
@@ -1435,7 +1453,12 @@ export async function handleSlashCommand(
     return "exit";
   }
 
-  writeLine(output, `未知命令：${command}。输入 /help 查看可用命令。`);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Unknown command: ${command}. Type /help to see available commands.`
+      : `未知命令：${command}。输入 /help 查看可用命令。`,
+  );
   return "handled";
 }
 
@@ -2839,6 +2862,19 @@ async function handleBtwCommand(
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
   const running = context.backgroundTasks.find((task) => task.status === "running");
   const sessionId = await ensureSession(context);
+  if (context.activeAbortController) {
+    context.activeAbortController.abort();
+    context.interrupt = { type: "idle" };
+    await context.store.appendEvent(sessionId, {
+      type: "interrupt",
+      id: randomUUID(),
+      status: "cancelled",
+      message: t(context, "toolInterrupted"),
+      createdAt: new Date().toISOString(),
+    });
+    writeLine(output, t(context, "toolInterrupted"));
+    return;
+  }
   if (!running) {
     await context.store.appendEvent(sessionId, {
       type: "interrupt",
@@ -4584,18 +4620,34 @@ function collectLightHints(context: TuiContext): LightHint[] {
     latest.hitRate < context.cache.config.warnBelowHitRate
   ) {
     hints.push(
-      createLightHint("cache-hit-low", "warning", "cache 命中率下降", "/break-cache status"),
+      createLightHint(
+        "cache-hit-low",
+        "warning",
+        context.language === "en-US" ? "Cache hit rate dropped" : "cache 命中率下降",
+        "/break-cache status",
+      ),
     );
   }
   if ((latest?.inputTokens ?? 0) > 96_000) {
-    hints.push(createLightHint("context-long", "info", "context 较长，建议按需压缩", "/compact"));
+    hints.push(
+      createLightHint(
+        "context-long",
+        "info",
+        context.language === "en-US"
+          ? "Context is long; consider compacting when needed"
+          : "context 较长，建议按需压缩",
+        "/compact",
+      ),
+    );
   }
   if (latest?.cacheWriteTokensSource === "zero_reported" && latest.cacheReadTokens > 0) {
     hints.push(
       createLightHint(
         "cache-zero-create-with-read",
         "info",
-        "cache_creation 长期为 0 但 cache_read 很高时通常是 provider 字段口径，不代表零写入成本",
+        context.language === "en-US"
+          ? "cache_creation is reported as 0 while cache_read is high; this is usually provider field semantics, not zero write cost"
+          : "cache_creation 长期为 0 但 cache_read 很高时通常是 provider 字段口径，不代表零写入成本",
         "/usage",
       ),
     );
@@ -4610,7 +4662,9 @@ function collectLightHints(context: TuiContext): LightHint[] {
       createLightHint(
         "freshness-changed",
         "warning",
-        "缓存 freshness 关键 hash 已变化",
+        context.language === "en-US"
+          ? "Important cache freshness hashes changed"
+          : "缓存 freshness 关键 hash 已变化",
         "/cache warmup",
       ),
     );
@@ -4645,8 +4699,17 @@ function writeLightHints(output: Writable, context: TuiContext): void {
       continue;
     }
     context.cache.hintLastShownAt[hint.dedupeKey] = now;
-    writeLine(output, `[hint:${hint.severity}] ${hint.message}；建议：${hint.suggestedCommand}`);
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `[hint:${hint.severity}] ${hint.message}; suggestion: ${hint.suggestedCommand}`
+        : `[hint:${hint.severity}] ${hint.message}；建议：${hint.suggestedCommand}`,
+    );
   }
+}
+
+export function writeLightHintsForTest(output: Writable, context: TuiContext): void {
+  writeLightHints(output, context);
 }
 
 async function handleVerifyCommand(
@@ -5274,6 +5337,16 @@ async function handleNaturalInput(
   }
 
   const intent = routeNaturalIntent(text, context.language);
+  const fileRead = await resolveNaturalFileRead(text, context);
+  if (fileRead.status === "resolved") {
+    await handleToolCommand("Read", [fileRead.path], context, output);
+    return "handled";
+  }
+  if (fileRead.status === "ambiguous") {
+    writeLine(output, formatFileCandidates(fileRead.candidates, context.language));
+    return "handled";
+  }
+
   if (intent.action === "model") {
     return "message";
   }
@@ -5335,6 +5408,9 @@ async function sendMessage(
   const assistantEventId = randomUUID();
   let assistantText = "";
   const controller = new AbortController();
+  context.activeAbortController = controller;
+  context.tools.abortSignal = controller.signal;
+  context.interrupt = { type: "running", taskId: "model-stream", canCancel: true };
   const runtimeStatus = buildRuntimeStatusForModel({
     ...context,
     provider: getRuntimeStatusProvider(context),
@@ -5344,32 +5420,82 @@ async function sendMessage(
       role: "system",
       content: `${
         context.language === "en-US"
-          ? "You are Linghun Phase 15 preflight Natural Command Bridge engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing."
-          : "你是 Linghun Phase 15 preflight Natural Command Bridge 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。"
-      }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`,
+          ? "You are Linghun Phase 15 preflight Natural Command Bridge engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
+          : "你是 Linghun Phase 15 preflight Natural Command Bridge 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
+      }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`,
     },
     { role: "user", content: text },
   ];
 
-  for await (const event of gateway.stream(
-    "deepseek",
-    { messages, model: context.model },
-    controller.signal,
-  )) {
-    if (event.type === "assistant_text_delta") {
-      assistantText += event.text;
-      output.write(event.text);
-      continue;
+  try {
+    for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
+      const toolCalls: ModelToolCall[] = [];
+      let roundAssistantText = "";
+      for await (const event of gateway.stream(
+        "deepseek",
+        {
+          messages,
+          model: context.model,
+          tools: createModelToolDefinitions(),
+          toolChoice: "auto",
+        },
+        controller.signal,
+      )) {
+        if (controller.signal.aborted) {
+          writeLine(output, t(context, "toolInterrupted"));
+          return;
+        }
+        if (event.type === "assistant_text_delta") {
+          assistantText += event.text;
+          roundAssistantText += event.text;
+          output.write(event.text);
+          continue;
+        }
+        if (event.type === "tool_use") {
+          toolCalls.push({ id: event.id, name: event.name, input: event.input });
+          continue;
+        }
+        if (event.type === "usage") {
+          const stats = recordModelUsage(context, event.usage);
+          await appendUsageEvents(context, sessionId, stats);
+          continue;
+        }
+        if (event.type === "error") {
+          writeLine(output, formatError(event.error, context.language));
+          return;
+        }
+      }
+
+      if (roundAssistantText || toolCalls.length > 0) {
+        messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
+      }
+      if (toolCalls.length === 0) {
+        break;
+      }
+      if (roundAssistantText) {
+        output.write("\n");
+      }
+      for (const toolCall of toolCalls) {
+        const result = await executeModelToolUse(toolCall, context, sessionId, output);
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        });
+      }
+      if (round === MAX_MODEL_TOOL_ROUNDS - 1) {
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "Tool round limit reached; stopping tool recursion for safety."
+            : "已达到工具轮次上限；为安全起见停止继续递归调用工具。",
+        );
+      }
     }
-    if (event.type === "usage") {
-      const stats = recordModelUsage(context, event.usage);
-      await appendUsageEvents(context, sessionId, stats);
-      continue;
-    }
-    if (event.type === "error") {
-      writeLine(output, formatError(event.error));
-      return;
-    }
+  } finally {
+    context.activeAbortController = undefined;
+    context.tools.abortSignal = undefined;
+    context.interrupt = { type: "idle" };
   }
 
   if (assistantText) {
@@ -5383,6 +5509,413 @@ async function sendMessage(
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+}
+
+function createModelToolDefinitions(): ModelToolDefinition[] {
+  return (Object.values(builtInTools) as (typeof builtInTools)[ToolName][]).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: createToolInputSchema(tool.name),
+  }));
+}
+
+function createToolInputSchema(name: ToolName): unknown {
+  const base = { type: "object", additionalProperties: false } as const;
+  if (name === "Read") {
+    return {
+      ...base,
+      properties: {
+        path: { type: "string" },
+        offset: { type: "number" },
+        limit: { type: "number" },
+      },
+      required: ["path"],
+    };
+  }
+  if (name === "Write") {
+    return {
+      ...base,
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+    };
+  }
+  if (name === "Edit") {
+    return {
+      ...base,
+      properties: {
+        path: { type: "string" },
+        oldText: { type: "string" },
+        newText: { type: "string" },
+      },
+      required: ["path", "oldText", "newText"],
+    };
+  }
+  if (name === "MultiEdit") {
+    return {
+      ...base,
+      properties: {
+        path: { type: "string" },
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { oldText: { type: "string" }, newText: { type: "string" } },
+            required: ["oldText", "newText"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["path", "edits"],
+    };
+  }
+  if (name === "Grep") {
+    return {
+      ...base,
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        limit: { type: "number" },
+      },
+      required: ["pattern"],
+    };
+  }
+  if (name === "Glob") {
+    return {
+      ...base,
+      properties: {
+        pattern: { type: "string" },
+        path: { type: "string" },
+        limit: { type: "number" },
+      },
+      required: ["pattern"],
+    };
+  }
+  if (name === "Bash") {
+    return {
+      ...base,
+      properties: { command: { type: "string" }, timeoutMs: { type: "number" } },
+      required: ["command"],
+    };
+  }
+  if (name === "Todo") {
+    return {
+      ...base,
+      properties: {
+        action: { type: "string", enum: ["list", "add", "start", "done", "block"] },
+        content: { type: "string" },
+        id: { type: "string" },
+        evidence: { type: "string" },
+      },
+      required: ["action"],
+    };
+  }
+  return { ...base, properties: { files: { type: "array", items: { type: "string" } } } };
+}
+
+async function executeModelToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
+  const toolName = normalizeToolName(toolCall.name);
+  if (!toolName) {
+    return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
+  }
+  const permission = await decidePermission(toolName, toolCall.input, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision !== "allow") {
+    const text = `${permission.decision}: ${permission.reason}`;
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true);
+    return { ok: false, tool: toolName, text };
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: toolName,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    const result = await runTool(toolName, toolCall.input, context.tools);
+    await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
+    await appendDerivedToolEvents(context, sessionId, toolName, result.output);
+    const evidence = await recordToolEvidence(context, sessionId, toolName, result.output);
+    rememberToolFiles(context, toolName, toolCall.input, result.output);
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolName,
+      result.output,
+      false,
+      evidence?.id,
+    );
+    writeLine(output, formatToolOutput(toolName, result.output, context.language));
+    return {
+      ok: true,
+      tool: toolName,
+      text: result.output.text,
+      data: result.output.data,
+      evidenceId: evidence?.id,
+    };
+  } catch (error) {
+    const text = formatError(error, context.language);
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true);
+    return { ok: false, tool: toolName, text };
+  }
+}
+
+function normalizeToolName(name: string): ToolName | null {
+  const found = (Object.keys(builtInTools) as ToolName[]).find(
+    (item) => item.toLowerCase() === name.toLowerCase(),
+  );
+  return found ?? null;
+}
+
+async function appendToolResultEvent(
+  context: TuiContext,
+  sessionId: string,
+  toolUseId: string,
+  toolName: ToolName,
+  content: unknown,
+  isError: boolean,
+  evidenceId?: string,
+): Promise<void> {
+  await context.store.appendEvent(sessionId, {
+    type: "tool_result",
+    toolUseId,
+    toolName,
+    content,
+    isError,
+    evidenceId,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function createEvidenceSummaryForModel(context: TuiContext): string {
+  return JSON.stringify(
+    context.evidence.slice(0, 5).map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      source: item.source,
+      summary: truncateDisplay(item.summary.replace(/\s+/g, " "), 180),
+    })),
+  );
+}
+
+function rememberToolFiles(
+  context: TuiContext,
+  name: ToolName,
+  input: unknown,
+  output: ToolOutput,
+): void {
+  const paths: string[] = [];
+  if (typeof input === "object" && input !== null && "path" in input) {
+    const path = (input as { path?: unknown }).path;
+    if (typeof path === "string") {
+      paths.push(path.replaceAll("\\", "/"));
+    }
+  }
+  if (Array.isArray(output.changedFiles)) {
+    paths.push(...output.changedFiles);
+  }
+  if (name === "Glob" || name === "Grep") {
+    paths.push(...extractFileMentions(output.text));
+  }
+  context.recentlyMentionedFiles = uniqueStrings([
+    ...paths.filter(Boolean),
+    ...context.recentlyMentionedFiles,
+  ]).slice(0, 10);
+}
+
+function extractFileMentions(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.split(":")[0]?.trim() ?? "")
+    .filter((line) => /[\\/]|\.[a-z0-9]+$/iu.test(line))
+    .map((line) => line.replaceAll("\\", "/"));
+}
+
+type NaturalFileReadResult =
+  | { status: "none" }
+  | { status: "resolved"; path: string }
+  | { status: "ambiguous"; candidates: string[] };
+
+async function resolveNaturalFileRead(
+  text: string,
+  context: TuiContext,
+): Promise<NaturalFileReadResult> {
+  if (!isNaturalReadFileRequest(text)) {
+    return { status: "none" };
+  }
+
+  const explicit = extractNaturalReadPath(text);
+  if (explicit) {
+    return { status: "resolved", path: explicit };
+  }
+
+  const recent = context.recentlyMentionedFiles.filter(Boolean);
+  if (/这个|刚才|上面|最近|this|that|previous|recent/i.test(text) && recent.length > 0) {
+    return { status: "resolved", path: recent[0] };
+  }
+
+  const candidates = await findNaturalFileCandidates(text, context.projectPath, recent);
+  if (candidates.length === 1) {
+    return { status: "resolved", path: candidates[0] };
+  }
+  if (candidates.length > 1) {
+    return { status: "ambiguous", candidates };
+  }
+  return { status: "none" };
+}
+
+function isNaturalReadFileRequest(text: string): boolean {
+  return /(?:读|读取|打开|看看|查看|show|read|open|view)\s*(?:一下|下)?/iu.test(text);
+}
+
+function extractNaturalReadPath(text: string): string | null {
+  const quoted = /["'“”‘’`]([^"'“”‘’`]+)["'“”‘’`]/u.exec(text)?.[1];
+  if (quoted && looksLikeFilePath(quoted)) {
+    return normalizeRelativePath(quoted);
+  }
+
+  const token = text
+    .split(/\s+/)
+    .map((item) => item.replace(/[，。,.!?；;：:）)]+$/u, ""))
+    .find(looksLikeFilePath);
+  return token ? normalizeRelativePath(token) : null;
+}
+
+function looksLikeFilePath(value: string): boolean {
+  return /[\\/]/u.test(value) || /\.[a-z0-9]{1,12}$/iu.test(value);
+}
+
+async function findNaturalFileCandidates(
+  text: string,
+  projectPath: string,
+  recent: string[],
+): Promise<string[]> {
+  const keywords = extractFileSearchKeywords(text);
+  const recentMatches = recent.filter((file) => matchesFileKeywords(file, keywords));
+  if (recentMatches.length > 0) {
+    return uniqueStrings(recentMatches).slice(0, 5);
+  }
+  if (keywords.length === 0) {
+    return [];
+  }
+
+  const files = await listProjectFiles(projectPath, 300);
+  return files.filter((file) => matchesFileKeywords(file, keywords)).slice(0, 5);
+}
+
+function extractFileSearchKeywords(text: string): string[] {
+  return text
+    .replace(/["'“”‘’`]/gu, " ")
+    .split(/[^\p{L}\p{N}_.-]+/u)
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => item.length >= 2)
+    .filter(
+      (item) =>
+        ![
+          "read",
+          "open",
+          "view",
+          "show",
+          "file",
+          "the",
+          "this",
+          "that",
+          "previous",
+          "recent",
+          "读取",
+          "打开",
+          "查看",
+          "看看",
+          "文件",
+          "这个",
+          "刚才",
+          "上面",
+          "最近",
+        ].includes(item),
+    );
+}
+
+function matchesFileKeywords(file: string, keywords: string[]): boolean {
+  if (keywords.length === 0) {
+    return false;
+  }
+  const normalized = file.toLowerCase();
+  const name = basename(normalized);
+  return keywords.some((keyword) => normalized.includes(keyword) || name.includes(keyword));
+}
+
+async function listProjectFiles(projectPath: string, limit: number): Promise<string[]> {
+  const files: string[] = [];
+  await collectProjectFiles(projectPath, projectPath, files, limit);
+  return files;
+}
+
+async function collectProjectFiles(
+  root: string,
+  current: string,
+  files: string[],
+  limit: number,
+): Promise<void> {
+  if (files.length >= limit) {
+    return;
+  }
+  let entries: { name: string; isDirectory(): boolean; isFile(): boolean }[];
+  try {
+    entries = await readdir(current, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (files.length >= limit) {
+      return;
+    }
+    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
+      continue;
+    }
+    const fullPath = join(current, entry.name);
+    if (entry.isDirectory()) {
+      await collectProjectFiles(root, fullPath, files, limit);
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push(relative(root, fullPath).replaceAll("\\", "/"));
+    }
+  }
+}
+
+function normalizeRelativePath(path: string): string {
+  return path.trim().replaceAll("\\", "/").replace(/^\.\//u, "");
+}
+
+function formatFileCandidates(candidates: string[], language: Language): string {
+  const lines = candidates.map((candidate) => `- ${candidate}`);
+  return language === "en-US"
+    ? [
+        "Multiple files match that request. Please choose one with an explicit command:",
+        ...lines,
+        "Example: /read <path>",
+      ].join("\n")
+    : ["找到多个可能文件，请用明确命令选择一个：", ...lines, "示例：/read <path>"].join("\n");
 }
 
 async function* readInputLines(input: Readable, output: Writable): AsyncGenerator<string> {
@@ -5703,17 +6236,27 @@ async function handleToolCommand(
     }
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
     await appendDerivedToolEvents(context, sessionId, name, result.output);
-    await recordToolEvidence(context, sessionId, name, result.output);
+    const evidence = await recordToolEvidence(context, sessionId, name, result.output);
+    rememberToolFiles(context, name, input, result.output);
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      callId,
+      name,
+      result.output,
+      false,
+      evidence?.id,
+    );
     writeLine(output, formatToolOutput(name, result.output, context.language));
     writeStatus(output, context);
   } catch (error) {
-    writeLine(output, formatError(error));
+    writeLine(output, formatError(error, context.language));
   }
 }
 
 function parseToolInput(name: ToolName, args: string[]): unknown {
   if (name === "Read") {
-    return { path: requireArg(args[0], "用法：/read <path>") };
+    return { path: requireArg(args.join(" ").trim(), "用法：/read <path>") };
   }
   if (name === "Write") {
     return {
@@ -6263,7 +6806,7 @@ async function recordToolEvidence(
   sessionId: string,
   name: ToolName,
   output: ToolOutput,
-): Promise<void> {
+): Promise<EvidenceRecord | null> {
   const kind =
     name === "Read"
       ? "file_read"
@@ -6273,7 +6816,7 @@ async function recordToolEvidence(
           ? "command_output"
           : null;
   if (!kind) {
-    return;
+    return null;
   }
   const evidence = createEvidenceRecord(
     kind,
@@ -6286,6 +6829,7 @@ async function recordToolEvidence(
     type: "evidence_record",
     ...evidence,
   });
+  return evidence;
 }
 
 async function appendSystemEvent(
@@ -6496,6 +7040,9 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     evidenceBlocked:
       "尚未确认，需要先检查。涉及代码事实的结论必须先通过 /read、/grep、索引查询或命令输出获得证据。",
     claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
+    projectRulesMissingHint:
+      "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
+    toolInterrupted: "当前模型响应或工具调用已取消；可以继续输入。",
   },
   "en-US": {
     appTitle: "{name} TUI / REPL",
@@ -6525,6 +7072,9 @@ const messages: Record<Language, Record<MessageKey, string>> = {
       "Not confirmed yet; evidence is required first. Use /read, /grep, index query, or command output before code-fact claims.",
     claimNeedsDisclaimer:
       "Evidence is missing; downgrade to unverified or pending confirmation wording.",
+    projectRulesMissingHint:
+      "[hint:info] LINGHUN.md project rules are missing. To create a basic template, run /memory init. I will not generate it automatically or interrupt input.",
+    toolInterrupted: "The current model response or tool call was cancelled; input is ready again.",
   },
 };
 
@@ -6568,14 +7118,16 @@ function createSessionEndEvent(sessionId: string): TranscriptEvent {
   };
 }
 
-function formatError(error: unknown): string {
+function formatError(error: unknown, language: Language = "zh-CN"): string {
   if (error instanceof Error && "suggestion" in error && typeof error.suggestion === "string") {
-    return `错误：${error.message}\n建议：${error.suggestion}`;
+    return language === "en-US"
+      ? `Error: ${error.message}\nSuggestion: ${error.suggestion}`
+      : `错误：${error.message}\n建议：${error.suggestion}`;
   }
   if (error instanceof Error) {
-    return `错误：${error.message}`;
+    return language === "en-US" ? `Error: ${error.message}` : `错误：${error.message}`;
   }
-  return "错误：未知错误。";
+  return language === "en-US" ? "Error: unknown error." : "错误：未知错误。";
 }
 
 function writeLine(output: Writable, text: string): void {
