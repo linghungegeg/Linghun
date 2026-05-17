@@ -377,11 +377,9 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    const prompt = createModelSystemPrompt(
-      "不要缝缝补补，先看 CCB 有没有漏",
-      context,
-      { model: { provider: "deepseek", name: "deepseek-v4-flash" } },
-    );
+    const prompt = createModelSystemPrompt("不要缝缝补补，先看 CCB 有没有漏", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
 
     expect(prompt).toContain("SYSTEMIC_GAP_WARNING");
     expect(prompt).toContain("single_issue / systemic_gap");
@@ -542,13 +540,15 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["帮我给这个项目建立索引\n确认\nyes\n直接 npm install\n/exit\n"]),
+      stdin: Readable.from(["帮我重建索引\n确认\nyes\n直接 npm install\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("精确命令：/index init fast");
-    expect(output.text).toContain("需要精确确认：请输入 /index init fast。普通确认未被接受。");
+    expect(output.text).toContain("精确命令：/index refresh --confirm-rebuild");
+    expect(output.text).toContain(
+      "需要精确确认：请输入 /index refresh --confirm-rebuild。普通确认未被接受。",
+    );
     expect(output.text).toContain("已阻止自然语言直通");
     expect(output.text).toContain("不能由自然语言直通执行");
     expect(output.text).not.toContain("gate ng-");
@@ -595,7 +595,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
     expect(output.text).toContain("Model route doctor");
-    expect(output.text).toContain("精确命令：/index init fast");
+    expect(output.text).toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
     expect(output.text).toContain("项目规则：");
     expect(output.text).toContain("只做最小必要改动");
@@ -611,7 +611,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/memory：记忆");
     expect(
       (await readMockCalls(callsPath)).filter((tool) => tool === "index_repository"),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
   });
 
   it("truncates long Todo, Grep, Glob, and Read outputs in the main output", async () => {

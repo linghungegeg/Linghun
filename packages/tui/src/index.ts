@@ -31,11 +31,11 @@ import {
 import {
   DeepSeekProvider,
   ModelGateway,
-  findKnownModel,
   type ModelMessage,
   type ModelToolCall,
   type ModelToolDefinition,
   type ModelUsage,
+  findKnownModel,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
@@ -1988,7 +1988,9 @@ function diagnoseConcreteRoute(
   }
   for (const capability of route.requiredCapabilities) {
     if (!routeSupportsCapability({ ...route, primaryModel: model }, capability)) {
-      problems.push(capability === "tools" ? "能力不足：tools/tool calling" : `能力不足：${capability}`);
+      problems.push(
+        capability === "tools" ? "能力不足：tools/tool calling" : `能力不足：${capability}`,
+      );
     }
   }
   return problems;
@@ -3664,17 +3666,20 @@ async function handleIndexCommand(
     return;
   }
   if (action === "init" && args[1] === "fast") {
-    await runIndexRepository(context, "fast", "init fast", args.includes("--force"));
+    writeIndexActionStart(output, context, "init fast", "fast");
+    await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output);
     writeLine(output, formatIndexStatus(context));
     writeStatus(output, context);
     return;
   }
   if (action === "refresh") {
+    writeIndexActionStart(output, context, "refresh", context.config.index.mode);
     await runIndexRepository(
       context,
       context.config.index.mode,
       "refresh",
       args.includes("--force"),
+      output,
     );
     writeLine(output, formatIndexStatus(context));
     writeStatus(output, context);
@@ -3892,19 +3897,26 @@ async function runIndexRepository(
   mode: "fast" | "moderate" | "full",
   actionLabel: "init fast" | "refresh",
   force: boolean,
+  output: Writable,
 ): Promise<void> {
+  writeLine(output, "Index: scanning safety risks...");
   const safety = await scanIndexSafety(context.projectPath);
   if (!force && safety.riskyFiles.length > 0) {
     context.index.status = "stale";
     context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel);
     context.index.error =
       "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
+    writeLine(
+      output,
+      "Index: paused by safety scan. Add .linghunignore/.cbmignore or use explicit --force.",
+    );
     return;
   }
   context.index.safetyWarning =
     safety.riskyFiles.length > 0 ? formatIndexSafetyWarning(safety, actionLabel) : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
+  writeLine(output, `Index: ${actionLabel} indexing...`);
   const result = await runCodebaseMemoryCli(
     context,
     "index_repository",
@@ -3915,9 +3927,23 @@ async function runIndexRepository(
   if (!result.ok) {
     context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
     context.index.error = `${result.summary}。请确认已安装 codebase-memory-mcp，或检查 .linghunignore 排除大 JSON/SQL/XML/min.js/生成物后重试。`;
+    writeLine(output, `Index: ${context.index.status}. ${context.index.error}`);
     return;
   }
   await refreshIndexStatus(context);
+  writeLine(
+    output,
+    `Index: ${context.index.status}; nodes/edges=${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
+  );
+}
+
+function writeIndexActionStart(
+  output: Writable,
+  context: TuiContext,
+  actionLabel: "init fast" | "refresh",
+  mode: "fast" | "moderate" | "full",
+): void {
+  writeLine(output, `Index: start ${actionLabel}; project=${context.projectPath}; mode=${mode}`);
 }
 
 async function runIndexQuery(
@@ -5754,7 +5780,11 @@ async function appendToolResultEvent(
   });
 }
 
-export function createModelSystemPrompt(text: string, context: TuiContext, runtimeStatus: unknown): string {
+export function createModelSystemPrompt(
+  text: string,
+  context: TuiContext,
+  runtimeStatus: unknown,
+): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   return `${
     context.language === "en-US"
@@ -5784,9 +5814,10 @@ function createSolutionCompletenessStatus(): SolutionCompletenessStatus {
 }
 
 function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
-  const userRequestedGate = /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|有没有漏|系统性|完整性|solution completeness/i.test(
-    text,
-  );
+  const userRequestedGate =
+    /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|有没有漏|系统性|完整性|solution completeness/i.test(
+      text,
+    );
   const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
   if (!userRequestedGate && !repeatedDenial) {
     context.solutionCompleteness = createSolutionCompletenessStatus();
@@ -7116,7 +7147,10 @@ const TOOL_OUTPUT_CHAR_LIMIT = 6_000;
 
 function formatToolOutput(name: ToolName, output: ToolOutput, language: Language): string {
   const preview = createToolOutputPreview(name, output.text, language);
-  const lines = [language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`, preview.text];
+  const lines = [
+    language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
+    preview.text,
+  ];
   if (preview.truncated || output.truncated) {
     lines.push(
       output.fullOutputPath
@@ -7169,9 +7203,10 @@ function createToolOutputPreview(
     preview = preview.slice(0, TOOL_OUTPUT_CHAR_LIMIT);
   }
   const hiddenLines = Math.max(0, lines.length - preview.split(/\r?\n/u).length);
-  const suffix = language === "en-US"
-    ? `... output truncated in main view${hiddenLines > 0 ? `; ${hiddenLines} line(s) hidden` : ""}.`
-    : `... 主输出已截断${hiddenLines > 0 ? `，隐藏 ${hiddenLines} 行` : ""}。`;
+  const suffix =
+    language === "en-US"
+      ? `... output truncated in main view${hiddenLines > 0 ? `; ${hiddenLines} line(s) hidden` : ""}.`
+      : `... 主输出已截断${hiddenLines > 0 ? `，隐藏 ${hiddenLines} 行` : ""}。`;
   return { text: `${preview}\n${suffix}`, truncated: true };
 }
 

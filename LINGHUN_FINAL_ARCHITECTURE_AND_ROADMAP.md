@@ -145,6 +145,14 @@ Linghun 的第一优先级是：
 - `/config advanced`
 - 首次启动向导。
 
+默认简单不是功能弱化。Linghun 必须采用渐进披露：
+
+- 默认界面只给当前任务最有用的短路径，减少学习成本。
+- 完整能力仍必须通过 `/help all`、`/features`、`/config advanced`、doctor 详情和自然语言用途询问可发现。
+- 常见工作不要求用户先学 slash command；自然语言应能进入成熟的状态查询、项目规则读取、索引、缓存、模型、验证和恢复路径。
+- 高级功能默认隐藏或关闭，但开启后必须完整：有诊断、权限、审计、失败降级和关闭入口。
+- 安全确认只在真正需要用户决策时出现，不能让普通只读查询和低风险本地动作变成学习负担。
+
 ### 2.3 严格工程行为
 
 模型默认不是“自由聊天人格”，而是工程执行者：
@@ -1031,6 +1039,8 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 15 Beta 前和 Phase 15.5 必须启用 Solution Completeness Gate：真实使用暴露跨能力系统性缺口时，先区分单点 bug / 系统性缺口，列影响面、参考源、P0/P1/P2、阶段边界和验证方式，再给修复命令；不能发现一个现象补一个关键词。若系统性缺口涉及“0-14 与 CCB / CCB Dev Boost 使用体验不等价”，必须先做 Deep Parity Closure 决策，不得把 Phase 15 真实项目测试建立在不干净的交互基线上。
 - Phase 15 pre-Beta Full Interaction Maturity Audit 已把 Beta 恢复条件升级为 P0-1 到 P0-6 全量闭环：完整 tool_use/tool_result 架构、文件智能指代、新手轻引导和默认 `LINGHUN.md` 模板成熟度、EvidenceSummary 入模型、模型流可取消、en-US 关键提示。P0-1 必须做完整工具协议和权限中枢，不得只做 Read/Grep/Glob 弱化版或模型文本 hint。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
+- 连续阶段模式必须是高级危险开关，默认关闭，只能由本地用户通过高级设置或显式本地命令单独 opt-in；模型、自然语言、agent、workflow、job、hook、plugin 和 remote channel 都不能静默开启。
+- 即使连续阶段模式已开启，每个阶段之间仍必须停止在用户审核点，生成独立交付文档、验证结果、handoff packet 和下一阶段确认；普通“继续/确认/yes”不能作为跨阶段授权。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
 
 ## 18. MVP 定义
@@ -1138,7 +1148,7 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 
 在这五个底座稳定之前，桌面端、技能市场、远程控制、自动自治都应该后置。
 
-终端 TUI 的产品手感不应该后置到桌面端。Phase 15.5 必须先把终端首屏、状态栏、help 分组、Start Gate、权限/提权、Plan/auto/bypass 说明、错误 doctor、长任务轻提示、primary/details/debug 输出层级、自然语言状态查询、中英文一致性和窄终端渲染收口。Phase 18 只是在这个成熟终端 core 之上验证桌面端壳、IPC/API 和会话/状态复用。
+终端 TUI 的产品手感不应该后置到桌面端。Phase 15.5 必须先把终端首屏、状态栏、help 分组、渐进披露、Start Gate、权限/提权、Plan/auto/bypass 说明、错误 doctor、长任务轻提示、primary/details/debug 输出层级、自然语言状态查询、中英文一致性和窄终端渲染收口。Phase 18 只是在这个成熟终端 core 之上验证桌面端壳、IPC/API 和会话/状态复用。
 
 模型接入成熟度也不应该后置到 Phase 16+。Phase 15.5 必须把 provider adapter、profile、capability doctor、role route doctor、usage/cache 来源、quota/balance 来源、provider error classifier、fallback/retry 审计和配置/key 脱敏收口。OpenAI-compatible 或 Claude-compatible 中转站可以降低接入门槛，但不能被当作能力完全等价的 native provider。
 

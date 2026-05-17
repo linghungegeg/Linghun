@@ -181,7 +181,10 @@ export class ModelGateway {
     }
   }
 
-  private async withSupportedTools(provider: Provider, request: ModelRequest): Promise<ModelRequest> {
+  private async withSupportedTools(
+    provider: Provider,
+    request: ModelRequest,
+  ): Promise<ModelRequest> {
     if (!request.tools || request.tools.length === 0) {
       return request;
     }

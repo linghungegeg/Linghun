@@ -49,8 +49,7 @@ describe("Phase 05 core tools", () => {
     const bash = await runTool(
       "Bash",
       {
-        command:
-          "node -e \"process.stdout.write('first\\n'); process.stderr.write('warn\\n');\"",
+        command: "node -e \"process.stdout.write('first\\n'); process.stderr.write('warn\\n');\"",
       },
       context,
     );

@@ -432,6 +432,9 @@ CLI 参数指定的路径
 - 新手模式隐藏高级危险命令。
 - Claude 风格常用命令尽量保留，新增命令必须有中文解释。
 - 命令别名必须可发现，不能只靠用户记忆。
+- 降低学习成本不得降低功能完整性：默认 `/help` 按任务分组展示推荐路径，`/help all` 或等价详情必须列出完整用户可见命令、风险和高级入口。
+- 每个命令必须声明 beginner visibility、advanced visibility、natural-language discoverability、risk、doctor/debug 入口和关闭/回滚方式；新手模式可以隐藏危险入口，但不能让功能不可发现、不可诊断或不可关闭。
+- 自然语言用途询问必须能解释所有用户可见命令的用途、风险和下一步；普通用户不应为了完成常见任务先学习完整 slash command 表。
 
 ### 5.1 自然语言控制桥规格
 
@@ -2195,6 +2198,14 @@ export type JobDefinition = {
   allowBash: boolean
   allowAgents: boolean
   requirePlanBeforeWrite: boolean
+  continuousPhaseOptIn: {
+    enabled: boolean
+    source: 'advanced_setting' | 'explicit_local_command'
+    enabledBy: string
+    enabledAt: string
+    maxPhases: number
+    requireReviewBetweenPhases: true
+  }
   continuousPhases: boolean
   remoteChannels?: string[]
 }
@@ -2256,7 +2267,10 @@ export type JobReport = {
 - 每次 job 必须创建 `HandoffPacket`，用于新会话接续。
 - 每次 job 必须创建 `JobTaskGraph`，记录目标、阶段、子任务、依赖、agent 分工、验收标准、预算和停止条件。
 - 默认一次只推进一个阶段；`continuousPhases=false`。
-- 连续阶段模式必须由用户明确开启，每阶段之间仍必须有交付文档、验证结果和确认点。
+- `continuousPhases=true` 只有在 `continuousPhaseOptIn.enabled=true` 且来源为 `advanced_setting` 或 `explicit_local_command` 时有效；模型、自然语言、agent、workflow、job、hook、plugin 和 remote channel 不能设置该开关。
+- 连续阶段模式属于高级危险开关，默认关闭；开启时必须记录启用人、时间、来源、最大连续阶段数和“阶段间仍需审核”的不变量。
+- 每阶段完成后必须暂停在 `phase_review_required` 或等价状态，写入交付文档、验证结果、handoff packet 和下一阶段建议；用户明确确认目标阶段后才能继续。
+- 普通 `确认` / `yes` / `继续` 不足以授权跨阶段推进；跨阶段继续必须包含目标阶段或明确任务目标，并写入 job 报告。
 - 自动新会话只能读取 `LINGHUN.md`、阶段状态、最近 handoff、Todo、验证结果和索引状态。
 - 禁止把完整历史聊天直接塞入 job 新会话。
 - job 创建自动新会话前必须校验 `HandoffPacket` 的 `nextPhase`、`mustNotDo`、`permissionMode`、`verification`、`evidenceRefs`、`indexStatus` 和 `budgetUsed`。
@@ -2414,6 +2428,8 @@ export type TuiOutputLayer = 'primary' | 'details' | 'debug'
 - 启动首屏必须显示项目、provider/model、权限模式、规则、index/cache/memory 的短状态和下一步建议；缺失项不自动生成、不自动刷新、不自动安装。
 - 状态栏必须 scan-friendly：短字段、稳定排序、可截断；不得显示金额、API key、完整路径、完整 hash、raw flags、完整 schema、大日志或大 index 结果。
 - `/help` 必须按任务分组：对话/模型、项目规则与记忆、索引与缓存、工具与验证、权限与计划、agent/多模型、skills/workflows/plugins/hooks、诊断与退出。每组只给短用途，详情通过命令询问。
+- `/help all` 或等价详情必须展示完整用户可见能力、风险、是否新手默认展示、是否高级开关、doctor/debug 入口和自然语言示例；默认简洁不能变成能力不可达。
+- `/features` 必须区分 recommended、advanced、dangerous、disabled、unsupported，说明是否增加学习成本、token/费用、后台运行、安全风险和关闭方式。
 - Start Gate、权限审批和提权提示必须统一为 human-first decision prompt：动作、范围、风险、原因、继续方式、取消方式、后续是否还会走权限管道。内部字段只进 `debug`。
 - Plan、acceptEdits、auto、bypass 的提示必须说明边界：是否只读、是否可写、是否仍需工具权限、是否本地显式 opt-in。
 - 错误必须包含 `what happened`、`likely cause`、`next action`。provider/key/baseUrl/model、index、MCP、plugin、skill、hook、workflow 的错误不得只返回 slash 用法。
@@ -2427,7 +2443,7 @@ export type TuiOutputLayer = 'primary' | 'details' | 'debug'
 Phase 15.5 的 TUI 验收必须至少覆盖：
 
 - startup：无 `LINGHUN.md`、无 provider/key、index missing/ready/stale、cache n/a、memory empty。
-- help：分组输出、中文/英文命令用途询问。
+- help：分组输出、`/help all` 完整能力发现、`/features` 风险分层、中文/英文命令用途询问。
 - natural intent：状态查询、doctor 查询、用法询问、安全动作、危险动作、模糊请求。
 - decision prompts：Start Gate、权限审批、提权、Plan、acceptEdits、auto、bypass。
 - long-running hints：index、verification、agent、cross-review、build/test。

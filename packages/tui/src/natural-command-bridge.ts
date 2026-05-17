@@ -532,7 +532,17 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "index",
     "/index",
-    ["index", "索引", "codebase", "architecture", "search code", "build index", "更新索引", "刷新索引", "重建索引"],
+    [
+      "index",
+      "索引",
+      "codebase",
+      "architecture",
+      "search code",
+      "build index",
+      "更新索引",
+      "刷新索引",
+      "重建索引",
+    ],
     "代码索引",
     "Index",
     "查看只读索引状态/搜索/架构摘要；建立或刷新 codebase-memory 索引需要确认。",
@@ -871,6 +881,46 @@ export function routeNaturalIntent(
       "execute",
       normalized,
     );
+  }
+  if (!explicit && capability.id === "index" && isRebuildIndexRequest(normalized)) {
+    return createIntent(
+      "start_gate",
+      capability,
+      Math.min(1, Math.max(0.85, topScore / 5)),
+      "rebuild index requires exact confirmation",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
+  if (
+    !explicit &&
+    capability.id === "index" &&
+    !["usage", "risk"].includes(inquiry) &&
+    isSafeIndexActionRequest(normalized)
+  ) {
+    return createIntent(
+      "execute_readonly",
+      capability,
+      Math.min(1, Math.max(0.8, topScore / 5)),
+      "safe local index action",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
+  if (!explicit && !isNaturalControlPlaneIntent(capability.id, normalized, inquiry)) {
+    return {
+      action: "model",
+      confidence: Math.min(1, topScore / 5),
+      reason: "ordinary development request",
+      candidates,
+      language,
+      inquiry,
+      riskHandler: "model",
+    };
   }
   if (!explicit && topScore < 2.2) {
     return createIntent(
@@ -1320,6 +1370,32 @@ function isDangerousNaturalTarget(id: string): boolean {
   ].includes(id);
 }
 
+function isSafeIndexActionRequest(text: string): boolean {
+  return (
+    /(?:帮我|请)?.*(?:更新|刷新|同步).*索引|refresh the project index|update the project index|sync the project index/u.test(
+      text,
+    ) ||
+    /(?:帮我|请)?.*(?:建立|初始化|创建).*索引|build the index|init index|create index/u.test(text)
+  );
+}
+
+function isRebuildIndexRequest(text: string): boolean {
+  return /重建|重新索引|重做索引|清空.*重建|force rebuild|rebuild|reindex/u.test(text);
+}
+
+function isNaturalControlPlaneIntent(
+  id: string,
+  text: string,
+  inquiry: NaturalIntent["inquiry"],
+): boolean {
+  if (["status", "doctor", "usage", "risk", "read"].includes(inquiry)) return true;
+  if (id === "read") return isProjectRulesReadRequest(text);
+  if (id === "index") return isSafeIndexActionRequest(text);
+  return (
+    ["help", "model", "index", "cache", "memory", "mode"].includes(id) && !isActionRequest(text)
+  );
+}
+
 function isFirstBatchStatusCapability(id: string): boolean {
   return [
     "memory",
@@ -1366,7 +1442,12 @@ function scoreCapability(
     score += 3;
   if (capability.id === "cache" && /命中|hit rate|cache/u.test(normalized)) score += 3;
   if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
-  if (capability.id === "index" && /索引|index|搜索代码|search code|architecture|更新|刷新|重建|重新索引|重做索引|同步索引/u.test(normalized))
+  if (
+    capability.id === "index" &&
+    /索引|index|搜索代码|search code|architecture|更新|刷新|重建|重新索引|重做索引|同步索引/u.test(
+      normalized,
+    )
+  )
     score += 3;
   if (capability.id === "read" && /项目规则|本仓库规则|linghun\.md|project rules/u.test(normalized))
     score += 8;
@@ -1461,7 +1542,8 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     if (/好了没|好了么|已经.*是吧|已经.*了吗|已经建立了吗|ready|status|状态/u.test(normalized)) {
       return "/index status";
     }
-    if (/重建|重新索引|重做索引|rebuild|reindex/u.test(normalized)) return "/index refresh --confirm-rebuild";
+    if (/重建|重新索引|重做索引|rebuild|reindex/u.test(normalized))
+      return "/index refresh --confirm-rebuild";
     if (/更新|刷新|同步索引|refresh|sync/u.test(normalized)) return "/index refresh";
     if (/build|建立|初始化|init/u.test(normalized)) return "/index init fast";
     if (/architecture|架构/u.test(normalized)) return "/index architecture";

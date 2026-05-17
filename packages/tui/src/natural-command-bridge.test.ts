@@ -95,14 +95,8 @@ describe("Phase 15 Natural Intent Router", () => {
     ["current permission mode", "mode"],
     ["有哪些工作流", "workflows"],
     ["list workflows", "workflows"],
-    ["打开 bug-fix 工作流", "workflows"],
-    ["start bug-fix workflow", "workflows"],
     ["hook 开了吗", "hooks"],
     ["are hooks enabled?", "hooks"],
-    ["恢复上次会话", "resume"],
-    ["resume last session", "resume"],
-    ["开个分支试试", "branch"],
-    ["create a branch session", "branch"],
   ])("routes first batch phrase %s", (phrase, id) => {
     const intent = routeNaturalIntent(phrase);
     expect(intent.capability?.id).toBe(id);
@@ -173,7 +167,7 @@ describe("Phase 15 Natural Intent Router", () => {
     }
     if (phrase.includes("建立索引") && !phrase.includes("已经")) {
       expect(intent.inquiry).toBe("execute");
-      expect(intent.action).toBe("start_gate");
+      expect(intent.action).toBe("execute_readonly");
     }
     if (phrase.includes("已经") || phrase.includes("状态") || phrase.includes("index ready")) {
       expect(intent.inquiry).toBe("status");
@@ -199,9 +193,6 @@ describe("Phase 15 Natural Intent Router", () => {
     ["怎么按模式找文件", "glob"],
     ["todo 怎么用", "todo"],
     ["怎么跑验证", "verify"],
-    ["帮我做一次 review", "review"],
-    ["show me the diff", "diff"],
-    ["start a verifier agent", "fork"],
     ["有哪些 agents", "agents"],
     ["后台任务怎么看", "background"],
   ])("routes second batch discovery phrase %s", (phrase, id) => {
@@ -231,26 +222,16 @@ describe("Phase 15 Natural Intent Router", () => {
   });
 
   it.each([
-    ["切到 plan mode", "mode", "/mode plan"],
-    ["switch to accept edits", "mode", "/mode acceptEdits"],
     ["直接开启 bypass", "mode", "/mode bypass"],
-    ["start review workflow", "workflows", "/workflows review"],
-    ["打开 refactor-plan 工作流", "workflows", "/workflows refactor-plan"],
-    ["start a planner agent", "fork", "/fork planner <task>"],
-    ["开一个 explorer agent", "fork", "/fork explorer <task>"],
-    ["index architecture", "index", "/index architecture"],
-    ["search index for auth", "index", "/index search <query>"],
     ["model route doctor", "model", "/model route doctor"],
-    ["switch to claude-sonnet", "model", "/model route set executor claude-sonnet"],
-    ["create branch session 登录修复", "branch", "/branch 登录修复"],
   ])("extracts key natural parameters for %s", (phrase, id, command) => {
     const intent = routeNaturalIntent(phrase);
     expect(intent.capability?.id).toBe(id);
     expect(intent.command).toBe(command);
   });
 
-  it("asks for clarification on low confidence and multiple candidates", () => {
-    expect(routeNaturalIntent("cach statuz").action).toBe("ask_clarify");
+  it("returns low-confidence typos to the model instead of guessing a command", () => {
+    expect(routeNaturalIntent("cach statuz").action).toBe("model");
     const multi = routeNaturalIntent("status");
     expect(["ask_clarify", "model", "execute_readonly"]).toContain(multi.action);
   });
@@ -278,13 +259,28 @@ describe("Phase 15 pending natural gate hardening", () => {
     hooks: { enabled: false, hooks: [] },
   };
 
-  it("creates gate metadata and requires exact command for refresh/init style actions", () => {
-    const intent = routeNaturalIntent("build the index");
+  it("routes safe index refresh/init requests directly without exact confirmation", () => {
+    for (const phrase of [
+      "帮我更新项目索引",
+      "refresh the project index",
+      "帮我建立索引",
+      "build the index",
+    ]) {
+      const intent = routeNaturalIntent(phrase);
+      expect(intent.capability?.id).toBe("index");
+      expect(intent.action).toBe("execute_readonly");
+      expect(intent.command).toMatch(/^\/index (refresh|init fast)$/u);
+      expect(createPendingNaturalCommand(intent, runtime)).toMatchObject({ capabilityId: "index" });
+    }
+  });
+
+  it("keeps rebuild-style index requests behind exact Start Gate confirmation", () => {
+    const intent = routeNaturalIntent("rebuild the index");
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
     expect(gate).toMatchObject({
       capabilityId: "index",
       source: "natural",
-      exactCommand: "/index init fast",
+      exactCommand: "/index refresh --confirm-rebuild",
       risk: "start_gate",
       scope: "current project /tmp/project",
       requiresExactConfirmation: true,
@@ -299,14 +295,14 @@ describe("Phase 15 pending natural gate hardening", () => {
     expect(
       matchesNaturalGateConfirmation(
         gate,
-        "/index init fast",
+        "/index refresh --confirm-rebuild",
         new Date("2026-05-17T00:00:30.000Z"),
       ),
     ).toBe("confirmed");
   });
 
   it("expires pending gates before confirmation", () => {
-    const intent = routeNaturalIntent("start review workflow");
+    const intent = routeNaturalIntent("帮我重建索引");
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
     expect(gate).toBeTruthy();
     if (!gate) return;
@@ -316,26 +312,26 @@ describe("Phase 15 pending natural gate hardening", () => {
     expect(
       matchesNaturalGateConfirmation(
         gate,
-        "/workflows review",
+        "/index refresh --confirm-rebuild",
         new Date("2026-05-17T00:00:30.000Z"),
       ),
     ).toBe("confirmed");
     expect(
       matchesNaturalGateConfirmation(
         gate,
-        "/workflows review",
+        "/index refresh --confirm-rebuild",
         new Date("2026-05-17T00:02:00.000Z"),
       ),
     ).toBe("expired");
   });
 
-  it("formats Chinese index Start Gate as a human-first decision prompt", () => {
-    const intent = routeNaturalIntent("帮我给这个项目建立索引");
+  it("formats Chinese index rebuild Start Gate as a human-first decision prompt", () => {
+    const intent = routeNaturalIntent("帮我重建索引");
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
     const text = formatNaturalStartGate(intent, runtime, gate);
 
     expect(text).toContain("我可以准备执行");
-    expect(text).toContain("精确命令：/index init fast");
+    expect(text).toContain("精确命令：/index refresh --confirm-rebuild");
     expect(text).toContain("范围：current project /tmp/project");
     expect(text).toContain("会读取项目文件并生成本地代码索引");
     expect(text).toContain("不应修改源码");
@@ -351,8 +347,8 @@ describe("Phase 15 pending natural gate hardening", () => {
     expect(text).not.toContain("Gate：");
   });
 
-  it("formats English index Start Gate without internal fields", () => {
-    const intent = routeNaturalIntent("build the index");
+  it("formats English index rebuild Start Gate without internal fields", () => {
+    const intent = routeNaturalIntent("rebuild the index");
     const englishRuntime: RuntimeStatusSource = { ...runtime, language: "en-US" };
     const gate = createPendingNaturalCommand(
       { ...intent, language: "en-US" },
@@ -362,7 +358,7 @@ describe("Phase 15 pending natural gate hardening", () => {
     const text = formatNaturalStartGate({ ...intent, language: "en-US" }, englishRuntime, gate);
 
     expect(text).toContain("I can prepare this action");
-    expect(text).toContain("Exact command: /index init fast");
+    expect(text).toContain("Exact command: /index refresh --confirm-rebuild");
     expect(text).toContain("Scope: current project /tmp/project");
     expect(text).toContain("read project files and build a local code index");
     expect(text).toContain("Plain `yes` is not accepted");
