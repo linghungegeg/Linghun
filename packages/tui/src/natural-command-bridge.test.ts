@@ -82,8 +82,13 @@ describe("Phase 15 Natural Intent Router", () => {
     ["build the index", "index"],
     ["缓存命中怎么样", "cache"],
     ["cache hit rate", "cache"],
+    ["现在是什么模型", "model"],
+    ["你现在用的哪个模型", "model"],
+    ["你用的哪个模型", "model"],
+    ["当前模型是什么", "model"],
     ["你是什么模型", "model"],
     ["what model are you using?", "model"],
+    ["current model", "model"],
     ["当前权限模式", "mode"],
     ["current permission mode", "mode"],
     ["有哪些工作流", "workflows"],
@@ -116,6 +121,47 @@ describe("Phase 15 Natural Intent Router", () => {
       expect(zh.riskHandler).toBe(en.riskHandler);
     },
   );
+
+  it.each([
+    ["现在是什么模型", "model", "/model"],
+    ["你用的哪个模型", "model", "/model"],
+    ["what model are you using", "model", "/model"],
+    ["模型 key 配好了吗", "model", "/model route doctor"],
+    ["模型配置正常吗", "model", "/model route doctor"],
+    ["is the model configured correctly", "model", "/model route doctor"],
+    ["/model 怎么用", "model", "/model"],
+    ["what does /model do", "model", "/model"],
+    ["帮我建立索引", "index", "/index init fast"],
+    ["直接 npm install", "bash", "/bash npm install"],
+    ["开启 bypass", "mode", "/mode bypass"],
+  ])("classifies Natural Intent Contract sample %s", (phrase, id, command) => {
+    const intent = routeNaturalIntent(phrase);
+    expect(intent.capability?.id).toBe(id);
+    expect(intent.command).toBe(command);
+    if (
+      phrase.includes("模型 key") ||
+      phrase.includes("配置正常") ||
+      phrase.includes("configured")
+    ) {
+      expect(intent.inquiry).toBe("doctor");
+      expect(intent.action).toBe("execute_readonly");
+    }
+    if (phrase.includes("现在") || phrase.includes("哪个模型") || phrase.includes("what model")) {
+      expect(intent.inquiry).toBe("status");
+      expect(intent.action).toBe("execute_readonly");
+    }
+    if (phrase.includes("怎么用") || phrase.includes("what does")) {
+      expect(intent.inquiry).toBe("usage");
+      expect(intent.action).toBe("answer");
+    }
+    if (phrase.includes("建立索引")) {
+      expect(intent.inquiry).toBe("execute");
+      expect(intent.action).toBe("start_gate");
+    }
+    if (phrase.includes("npm install") || phrase.includes("bypass")) {
+      expect(intent.action).toBe("permission_pipeline");
+    }
+  });
 
   it.each([
     ["怎么搜索代码里的 TODO", "grep"],
@@ -210,8 +256,16 @@ describe("Phase 15 pending natural gate hardening", () => {
     if (!gate) return;
     expect(gate.gateId).toMatch(/^ng-/);
     expect(gate.expiresAt).toBe("2026-05-17T00:01:30.000Z");
-    expect(matchesNaturalGateConfirmation(gate, "确认")).toBe("exact_required");
-    expect(matchesNaturalGateConfirmation(gate, "/index init fast")).toBe("confirmed");
+    expect(matchesNaturalGateConfirmation(gate, "确认", new Date("2026-05-17T00:00:30.000Z"))).toBe(
+      "exact_required",
+    );
+    expect(
+      matchesNaturalGateConfirmation(
+        gate,
+        "/index init fast",
+        new Date("2026-05-17T00:00:30.000Z"),
+      ),
+    ).toBe("confirmed");
   });
 
   it("expires pending gates before confirmation", () => {
@@ -219,8 +273,16 @@ describe("Phase 15 pending natural gate hardening", () => {
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
     expect(gate).toBeTruthy();
     if (!gate) return;
-    expect(matchesNaturalGateConfirmation(gate, "yes")).toBe("exact_required");
-    expect(matchesNaturalGateConfirmation(gate, "/workflows review")).toBe("confirmed");
+    expect(matchesNaturalGateConfirmation(gate, "yes", new Date("2026-05-17T00:00:30.000Z"))).toBe(
+      "exact_required",
+    );
+    expect(
+      matchesNaturalGateConfirmation(
+        gate,
+        "/workflows review",
+        new Date("2026-05-17T00:00:30.000Z"),
+      ),
+    ).toBe("confirmed");
     expect(
       matchesNaturalGateConfirmation(
         gate,

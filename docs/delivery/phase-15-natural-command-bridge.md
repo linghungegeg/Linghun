@@ -87,10 +87,56 @@ force refresh index
 
 - Catalog 是单一事实来源：router、`/help` 和 model-visible summary 共用同一份能力目录。
 - 本地裁决优先：自然语言是否执行不交给模型猜，先由本地 router 决定 action。
+- 意图契约优先：同一 capability 下必须继续区分状态查询、诊断查询、用法/风险询问、安全动作、配置变更、高风险动作和模糊请求，避免“现在是什么模型”这类状态查询退化成 `/model route` 用法提示。
 - 双语等价：中英文 title/description/whenToUse/aliases 都进入匹配与解释；同一能力的中英文意图保持同一 risk handler。
 - Summary-first：给模型的 catalog/runtime 状态是短摘要，不注入完整日志、完整 transcript、完整 memory、完整索引、完整 skill/plugin/hook 正文。
 - 保守安全：高风险自然语言不直通，即使用户写“直接”“force”“bypass”“npm install”“接受所有记忆”等，也只进入权限阻断/审批说明。
 - Start Gate 不替代权限审批：自然语言确认只能触发等价 slash command；slash command 内部写文件、Bash、配置写入、第三方启用等仍必须走后续权限管道。
+
+## Natural Intent Contract hardening
+
+本轮性质：Phase 15 preflight 的成品级手感硬化，不是新阶段，不进入 Phase 15 Beta，也不做关键词补丁。
+
+要补齐的底层契约：
+
+- `status_query`：读取本地真实状态或等价只读 slash handler，例如“现在是什么模型”“自动记忆是否打开”“缓存命中怎么样”“索引好了没”。
+- `doctor_query`：进入对应诊断能力，例如“模型 key 配好了吗”“模型配置正常吗”“索引为什么不能用”。
+- `usage_help`：只用于用户明确询问“怎么用/能做什么/风险是什么/这个命令是什么意思”。
+- `safe_action_request`：进入 Start Gate，例如建立索引、启动 workflow、resume/branch/fork/verifier。
+- `config_change_request`：展示将变更的配置键、风险、scope 和回滚方式，例如模型切换、mode 切换、role route 设置。
+- `dangerous_action_request`：阻断或进入权限管道，例如 Bash、依赖安装、write/edit、permission 规则、bypass、force refresh、memory accept/delete、第三方 enable、hook/job/remote。
+- `ambiguous_request`：列候选或追问，不猜测执行。
+
+成品级验收样例：
+
+| 用户说法 | 期望识别 | 期望行为 |
+| --- | --- | --- |
+| 现在是什么模型、你现在用的哪个模型 | `model.status` + `status_query` | 返回当前 provider/model、角色路由短摘要和可选 doctor 提示；不得只返回 `/model route` 用法。 |
+| 模型 key 配好了吗、模型配置正常吗 | `model.doctor` + `doctor_query` | 返回 provider/baseUrl/apiKey/model 的诊断摘要和环境变量修复建议；不得泄露 API key。 |
+| `/model` 怎么用、模型命令有什么风险 | `model.*` + `usage_help` | 解释 `/model`、`/model route`、`/model route doctor`、`/model route set` 的用途和风险边界。 |
+| 自动记忆是否打开、现在记住了什么 | `memory.status` + `status_query` | 返回 `autoAccept`、candidate 数、accepted 数和 `LINGHUN.md` 状态；不得让模型泛泛自称没有记忆。 |
+| 索引好了没、当前索引状态 | `index.status` + `status_query` | 返回本地 index 状态、changedFiles/staleHint 和下一步建议；不得自动 refresh。 |
+| 帮我建立索引、初始化索引 | `index.init` + `safe_action_request` | 进入 Start Gate，并保留大文件安全门；不得直接执行。 |
+| 直接开启 bypass、直接 npm install、接受所有记忆 | 对应能力 + `dangerous_action_request` | 阻断或进入权限管道，显示风险、scope、reason 和恢复方式。 |
+
+本轮完成后，才建议进入 Phase 15 真实项目 Beta；否则真实项目测试会被“能识别命令但手感仍像命令壳”的问题污染。
+
+### Natural Intent Contract hardening 完成记录
+
+本轮已完成 Phase 15 preflight 的 Natural Intent Contract 成品级手感硬化；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+已修复/确认：
+
+- `doctor_query`：`模型 key 配好了吗`、`模型配置正常吗`、`is the model configured correctly` 路由到 `/model route doctor`，通过只读诊断口径输出 provider/baseUrl/apiKey/model 修复建议，不输出真实 API key。
+- `status_query`：`现在是什么模型`、`你用的哪个模型`、`what model are you using`、`current model` 作为 `execute_readonly` 执行 `/model`，返回真实 `provider=<id> model=<model>` 与角色路由短摘要；不进入 Start Gate，也不退化成 `/model route` 用法页。
+- `usage_help`：`/model 怎么用` 与 `what does /model do` 保持 `usage` + `answer`，只解释命令用途和风险边界。
+- Plan mode 权限顺序：`decidePermission()` 已按 `hardDeny -> plan -> userRules -> acceptEdits -> bypass -> auto -> default` 收口；Plan 模式下即使存在 allow Write/Edit/Bash 规则，也拒绝写入、编辑和 Bash。
+- cache freshness provider：`getCurrentFreshness()` 使用当前实际 provider；当前模型无法匹配 provider 时显示/参与 hash 的 provider 为 `unknown`，不伪造 `deepseek`。
+- extension freshness stability：focused test 覆盖 skill/plugin manifest 顺序、贡献项顺序、运行时 top-level skills/workflows/hooks/plugins 顺序稳定；同时验证 freshness 使用 summary-first 字段，完整正文变化不影响 `pluginListHash`。
+- CCB parity audit：`docs/audit/phase-15-pre-beta-ccb-coding-experience-parity-audit.md` 是本轮应纳入提交的审计报告文件，已加入下一轮启动必读清单；未删除、未移动。
+- Phase 15.5 discovery-before-execute：仅保留为 Phase 15.5 设计记录，未实现 runtime guard，未做 registry dispatch 大重构。
+
+本轮验证结果见“Natural Intent Contract hardening 验证结果”。
 
 ## 覆盖矩阵
 
@@ -236,6 +282,19 @@ corepack pnpm exec linghun --help
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help。
 - TUI stdin smoke：通过，覆盖 `/cache status`、`/break-cache status`、`/index status`、`/memory`、`/memory storage`、`/mode`、`/plugins doctor`、`/doctor hooks`、`/model route doctor`、`/exit`；输出标题为 `Linghun TUI / REPL`，未显示 Phase 14 标题。
+
+### Natural Intent Contract hardening 验证结果
+
+已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts packages/config/src/index.test.ts`：通过，11 个测试文件、179 个测试通过。说明：该 pnpm/vitest 参数路径实际运行仓库测试集；另用等价定向命令确认目标 3 个测试文件通过，152 个测试通过。
+- `corepack pnpm test`：通过，11 个测试文件、179 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm check`：通过，43 个文件检查通过。首次运行只发现本轮新增断言的 formatter 差异，按 formatter 建议做最小格式修正后通过。
+- `corepack pnpm build`：通过，workspace 7 个包构建通过。
+- `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
 
 ## 性能结果
 

@@ -186,6 +186,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/model route");
     expect(output.text).toContain("/model route doctor");
     expect(output.text).toContain("/model route set <role> <model>");
+    expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain("角色路由摘要");
     expect(output.text).toContain("/vision <path>");
     expect(output.text).toContain("/image generate <prompt>");
     expect(output.text).toContain("/skills");
@@ -207,7 +209,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/index architecture");
     expect(output.text).toContain("/usage");
     expect(output.text).toContain("/stats endpoints");
-    expect(output.text).toContain("当前模型：deepseek-v4-flash");
+    expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
     expect(output.text).toContain("cache n/a · index");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
@@ -426,6 +428,82 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.routeDecisions.some((decision) => decision.role === "planner")).toBe(true);
     expect(output.text).toContain("fallbackUsed=");
     expect(output.text).not.toContain("¥--");
+  });
+
+  it("handles natural model status as readonly status output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["现在是什么模型\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain("角色路由摘要");
+    expect(output.text).not.toContain("Start Gate：");
+    expect(output.text).not.toContain("Model routes（Phase 13");
+    expect(output.text).not.toContain("/model route 查看");
+  });
+
+  it("handles natural model doctor without leaking API keys", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "test-openai-secret",
+            model: "openai-compatible-model",
+          },
+        },
+        modelRoutes: {
+          routes: [{ role: "vision", provider: "openai-compatible", primaryModel: "gpt-4o" }],
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["模型 key 配好了吗\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("openai-compatible 缺已确认模型");
+    expect(output.text).toContain("LINGHUN_OPENAI_API_KEY");
+    expect(output.text).not.toContain("test-openai-secret");
+    expect(output.text).not.toContain("Start Gate：");
+  });
+
+  it("reports unknown provider when the current model has no provider match", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "unmatched-model" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      providers: {
+        ...defaultConfig.providers,
+        deepseek: {
+          ...defaultConfig.providers.deepseek,
+          model: "different-model",
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/model", context, output);
+
+    expect(output.text).toContain("provider=unknown model=unmatched-model");
+    expect(output.text).not.toContain("provider=deepseek model=unmatched-model");
   });
 
   it("shows WARN when primary route is usable but fallback is unavailable", async () => {
@@ -648,15 +726,21 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
+    await handleSlashCommand("/permissions add allow Write medium", context, output);
+    await handleSlashCommand("/permissions add allow Edit low", context, output);
+    await handleSlashCommand("/permissions add allow Bash high", context, output);
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/read sample.txt", context, output);
     await handleSlashCommand("/write sample.txt beta", context, output);
+    await handleSlashCommand("/edit sample.txt alpha => beta", context, output);
+    await handleSlashCommand("/bash node --version", context, output);
     await handleSlashCommand("/permissions recent", context, output);
 
     expect(output.text).toContain("已切换权限模式：plan");
     expect(output.text).toContain("工具 Read 结果");
     expect(output.text).toContain("权限已拒绝");
     expect(output.text).toContain("Plan 模式禁止写入");
+    expect(output.text).not.toContain("命中 allow 规则");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
   });
 
@@ -1207,12 +1291,51 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥");
   });
 
+  it("uses actual provider and model in cache freshness hash", async () => {
+    async function modelProviderHashFor(model: string, providerId: string): Promise<string> {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model });
+      const output = new MemoryOutput();
+      const config: LinghunConfig = {
+        ...defaultConfig,
+        providers: {
+          ...defaultConfig.providers,
+          [providerId]: {
+            ...defaultConfig.providers.deepseek,
+            type: providerId === "deepseek" ? "deepseek" : "openai-compatible",
+            model,
+          },
+        },
+      };
+      const context = await createTestContext(project, store, session, config);
+
+      await handleSlashCommand("/break-cache status", context, output);
+      const match = output.text.match(/modelProviderHash: ([a-f0-9]+)/);
+      expect(match).toBeTruthy();
+      return match?.[1] ?? "";
+    }
+
+    const deepseekHash = await modelProviderHashFor("shared-model", "deepseek");
+    const openaiHash = await modelProviderHashFor("shared-model", "openai-compatible");
+
+    expect(openaiHash).not.toBe(deepseekHash);
+  });
+
   it("keeps extension freshness hash stable across manifest and contribution order", async () => {
     async function writeExtensionFixtures(project: string, reversed: boolean): Promise<void> {
       await mkdir(join(project, ".linghun", "skills"), { recursive: true });
       await mkdir(join(project, ".linghun", "plugins"), { recursive: true });
       const skills = [
-        ["a-skill.json", { id: "a-skill", triggers: ["z", "a"], permissions: ["write", "bash"] }],
+        [
+          "a-skill.json",
+          {
+            id: "a-skill",
+            triggers: ["z", "a"],
+            permissions: ["write", "bash"],
+            body: "full skill body must not affect freshness",
+          },
+        ],
         [
           "b-skill.json",
           { id: "b-skill", triggers: ["review", "bug"], permissions: ["network", "read"] },
@@ -1263,6 +1386,9 @@ describe("Phase 06 TUI slash commands", () => {
             summary: value.id,
             source: "local",
             version: "1.0.0",
+            fullBody: reversed
+              ? "changed full body must not affect freshness"
+              : "full body must not affect freshness",
             ...value,
             triggers: reversed ? [...value.triggers].reverse() : value.triggers,
             permissions: reversed ? [...value.permissions].reverse() : value.permissions,

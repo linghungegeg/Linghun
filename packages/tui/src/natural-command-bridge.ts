@@ -46,7 +46,7 @@ export type NaturalIntent = {
   reason: string;
   candidates: CommandCapability[];
   language: Language;
-  inquiry: "status" | "usage" | "risk" | "howto" | "execute";
+  inquiry: "status" | "doctor" | "usage" | "risk" | "howto" | "execute";
   riskHandler: CommandRisk | "model" | "clarify";
 };
 
@@ -829,6 +829,22 @@ export function routeNaturalIntent(
     );
   }
   if (
+    inquiry === "doctor" &&
+    isFirstBatchStatusCapability(capability.id) &&
+    !isActionRequest(normalized)
+  ) {
+    return createIntent(
+      "execute_readonly",
+      capability,
+      Math.min(1, Math.max(0.75, topScore / 5)),
+      "readonly doctor",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (
     inquiry === "status" &&
     isFirstBatchStatusCapability(capability.id) &&
     !isActionRequest(normalized)
@@ -1193,8 +1209,21 @@ function normalizeIntentText(text: string): string {
 
 function detectInquiry(text: string): NaturalIntent["inquiry"] {
   if (/风险|危险|safe|risk|danger/u.test(text)) return "risk";
+  if (
+    /key|api key|configured|connected|working|doctor|诊断|配好了吗|配置正常|配置.*问题|为什么不能用|不能用|连上了吗|可用吗/u.test(
+      text,
+    )
+  ) {
+    return "doctor";
+  }
   if (/怎么|如何|用途|干什么|what does|how do i|how to|what is/u.test(text)) return "usage";
-  if (/是否|开了吗|enabled|status|状态|当前|命中|hit rate|list|有哪些/u.test(text)) return "status";
+  if (
+    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model/u.test(
+      text,
+    )
+  ) {
+    return "status";
+  }
   return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force/u.test(text)
     ? "execute"
     : "howto";
@@ -1366,7 +1395,13 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     return mode ? `/mode ${mode}` : "/mode";
   }
   if (capability.id === "model") {
-    if (/doctor|诊断/u.test(normalized)) return "/model route doctor";
+    if (
+      /key|api key|configured|connected|working|doctor|诊断|配好了吗|配置正常|配置.*问题|为什么不能用|不能用|连上了吗|可用吗/u.test(
+        normalized,
+      )
+    ) {
+      return "/model route doctor";
+    }
     if (/route|路由/u.test(normalized)) return "/model route";
     const candidate = extractModelCandidate(normalized);
     return candidate ? `/model route set executor ${candidate}` : "/model";

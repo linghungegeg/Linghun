@@ -1706,8 +1706,10 @@ async function handleModelCommand(
     await handleModelRouteCommand(args.slice(1), context, output);
     return;
   }
-  writeLine(output, `${t(context, "currentModel")}：${context.model}`);
-  writeLine(output, "提示：/model route 查看多模型角色路由；/model route doctor 诊断配置。");
+  const provider = getRuntimeStatusProvider(context);
+  writeLine(output, `${t(context, "currentModel")}：provider=${provider} model=${context.model}`);
+  writeLine(output, formatModelRouteSummary(context));
+  writeLine(output, "提示：如需诊断配置，可运行 /model route doctor。");
   writeStatus(output, context);
 }
 
@@ -1774,6 +1776,16 @@ function getRoleRoute(context: TuiContext, role: ModelRole): RoleModelRoute {
     allowBash: false,
     requireApprovalBeforeRun: true,
   };
+}
+
+function formatModelRouteSummary(context: TuiContext): string {
+  const routes = context.config.modelRoutes.routes
+    .map(
+      (route) =>
+        `${route.role}:${route.provider || "unknown"}/${route.primaryModel || "unconfigured"}`,
+    )
+    .slice(0, 4);
+  return `角色路由摘要：${routes.length > 0 ? routes.join("；") : "未配置"}`;
 }
 
 function formatModelRoutes(context: TuiContext): string {
@@ -4225,7 +4237,7 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
-    provider: "deepseek",
+    provider: getRuntimeStatusProvider(context),
     reasoningEffort: "default",
     projectRules: createProjectRulesFreshnessSummary(context),
     memory: createMemoryFreshnessSummary(context),
@@ -5756,6 +5768,16 @@ async function decidePermission(
     return { request, decision: "deny", reason: hardDeny };
   }
 
+  if (context.permissionMode === "plan") {
+    if (isPlanAllowedTool(name, tool.isReadOnly)) {
+      return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。" };
+    }
+    const reason =
+      "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
+    await recordPermissionDenied(context, name, reason);
+    return { request, decision: "deny", reason };
+  }
+
   const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
   if (rule) {
     if (rule.effect === "deny") {
@@ -5769,16 +5791,6 @@ async function decidePermission(
       return { request, decision: "ask", reason };
     }
     return { request, decision: "allow", reason: `命中 allow 规则：${rule.id}` };
-  }
-
-  if (context.permissionMode === "plan") {
-    if (isPlanAllowedTool(name, tool.isReadOnly)) {
-      return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。" };
-    }
-    const reason =
-      "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
   }
 
   if (context.permissionMode === "dontAsk") {

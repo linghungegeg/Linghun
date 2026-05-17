@@ -503,6 +503,15 @@ export type NaturalIntentRisk =
   | 'tool_permission'
   | 'unsupported'
 
+export type NaturalRequestKind =
+  | 'status_query'
+  | 'doctor_query'
+  | 'usage_help'
+  | 'safe_action_request'
+  | 'config_change_request'
+  | 'dangerous_action_request'
+  | 'ambiguous_request'
+
 export type NaturalIntent =
   | { kind: 'memory.status'; risk: 'readonly' }
   | { kind: 'memory.review'; risk: 'readonly' }
@@ -538,6 +547,7 @@ export type NaturalIntentSlot =
 
 export type NaturalRouteResult = {
   intent: NaturalIntent
+  requestKind: NaturalRequestKind
   capabilityId?: string
   equivalentCommand?: string
   slots: NaturalIntentSlot[]
@@ -609,6 +619,14 @@ export type PermissionEscalationProposal = {
 
 执行规则：
 
+- 自然语言桥必须先判断 `requestKind`，再决定读取状态、解释用途、进入 doctor、生成 Start Gate、写配置确认、权限阻断或追问。不能只命中 capability 后直接退回 slash command 用法。
+- `status_query` 必须读取本地真实状态或等价只读 slash handler，并返回短摘要。例如“现在是什么模型”“自动记忆是否打开”“缓存命中怎么样”“索引好了没”不得回答成命令用法。
+- `doctor_query` 必须进入对应诊断能力，例如“模型 key 配好了吗”“模型配置正常吗”应走 model doctor / route doctor 诊断口径；缺失 provider/baseUrl/apiKey/model 时给可操作修复提示，但不得输出真实 API key。
+- `usage_help` 只用于用户明确询问“怎么用/能做什么/风险是什么/这个命令是什么意思”的场景；所有 slash 命令都必须可解释用途、风险和边界。
+- `safe_action_request` 只能生成 Start Gate，例如建立索引、启动 workflow、resume/branch/fork/verifier 等安全启动请求；确认后仍走等价 slash command 和后续权限管道。
+- `config_change_request` 必须展示将修改的配置键、旧值/新值摘要、风险、scope 和回滚方式；模型切换、mode 切换、role route 设置不能静默写配置。
+- `dangerous_action_request` 必须阻断或进入权限管道，例如 Bash、依赖安装、write/edit、permission 规则、bypass、force refresh、memory accept/delete、第三方 enable、hook/job/remote；不得自然语言直通。
+- `ambiguous_request` 必须列候选或追问，不得猜测执行。候选应包含 capability、可能的等价命令和风险摘要。
 - `readonly` 意图直接调用本地状态函数或等价 slash handler，返回短摘要。
 - `start_gate` 意图只输出确认门；用户确认后再调用等价 slash command。
 - `config_write` 意图必须展示即将变更的配置、风险和回滚方式；用户确认后再写配置。
@@ -622,6 +640,7 @@ export type PermissionEscalationProposal = {
 语义识别要求：
 
 - 不能只做固定关键词匹配；必须至少支持同义表达、问句/祈使句、中文/英文、带参数和不带参数的变体。
+- 同一 capability 下必须区分状态查询、诊断查询、用法/风险询问和动作请求。例如 `model` 能力下，“现在是什么模型”是 `status_query`，“模型配置正常吗/key 配好了吗”是 `doctor_query`，“/model 怎么用”是 `usage_help`，“切到 gpt-5.5”是 `config_change_request`。
 - 实现可以先用规则化 parser + capability catalog，不要求 Phase 15 preflight 引入额外模型分类器。
 - 如果规则识别置信度低，必须追问或给出候选命令，不能擅自执行。
 - 自然语言询问“这个能做什么/怎么用/风险是什么”时，所有 slash 命令都必须能被解释。
@@ -651,6 +670,7 @@ Beta 前 hardening 验收：
 
 - Drift test：实际 dispatch 可执行用户可见 slash command 与 `CommandCapability` / registry 一致。
 - Matrix test：每个 capability 至少覆盖中文用途/风险询问、英文用途/风险询问、动作请求、状态/只读路径如适用、高风险反例如适用。
+- Request-kind test：每个第一批 capability 至少覆盖 `status_query`、`usage_help` 和动作请求；有 doctor 能力的 capability 必须覆盖 `doctor_query`；高风险 capability 必须覆盖 `dangerous_action_request`；模糊请求必须覆盖 `ambiguous_request`。
 - Slot test：mode/workflow/agentRole/indexAction/model/branchPurpose 能提取常见参数；模糊时给候选，不猜。
 - Gate test：pending gate 有过期、状态可见、确认时重放 exact command/risk/scope；高风险 gate 不接受普通“确认”直通。
 - Mode test：bypass 无本地 opt-in 时拒绝；auto gate 不可用时拒绝或降级；plan approval 不等于授权后续所有工具。
@@ -677,6 +697,18 @@ Beta 前 hardening 验收：
 | hooks.doctor | hook 开了吗、hook 状态 | are hooks enabled, hook status | `/doctor hooks` |
 | session.resume | 恢复会话、继续上次 | resume session, continue last session | `/resume` |
 | session.branch | 创建分支会话、开个分支试试 | create branch session, branch this conversation | `/branch` |
+
+第一批成品级手感验收还必须覆盖以下反例，避免把状态查询误当成用法帮助：
+
+| 用户说法 | 必须识别为 | 期望行为 |
+| --- | --- | --- |
+| 现在是什么模型、你现在用的哪个模型 | `model.status` + `status_query` | 返回当前 provider/model、角色路由短摘要和可选 doctor 提示；不得只返回 `/model route` 用法。 |
+| 模型 key 配好了吗、模型配置正常吗 | `model.doctor` + `doctor_query` | 返回 provider/baseUrl/apiKey/model 的诊断摘要和环境变量修复建议；不得泄露 API key。 |
+| `/model` 怎么用、模型命令有什么风险 | `model.*` + `usage_help` | 解释 `/model`、`/model route`、`/model route doctor`、`/model route set` 的用途和风险边界。 |
+| 自动记忆是否打开、现在记住了什么 | `memory.status` + `status_query` | 返回 `autoAccept`、candidate 数、accepted 数和 `LINGHUN.md` 状态；不得让模型泛泛自称没有记忆。 |
+| 索引好了没、当前索引状态 | `index.status` + `status_query` | 返回本地 index 状态、changedFiles/staleHint 和下一步建议；不得自动 refresh。 |
+| 帮我建立索引、初始化索引 | `index.init` + `safe_action_request` | 进入 Start Gate，并保留大文件安全门；不得直接执行。 |
+| 直接开启 bypass、直接 npm install、接受所有记忆 | 对应能力 + `dangerous_action_request` | 阻断或进入权限管道，显示风险、scope、reason 和恢复方式。 |
 
 禁止：
 
@@ -2165,6 +2197,8 @@ export type ReleaseReadinessReport = {
 - 密钥、原始账单、完整 prompt、完整 transcript 和私有大文件内容不得写入 transcript、日志、交付文档、debug bundle 或公开样例。
 - debug bundle 只能包含脱敏摘要、版本、平台、错误码、命令摘要、必要日志路径和复现步骤。
 - 配置 schema 必须有版本号；升级、降级和回滚失败必须有说明和恢复路径。
+- Phase 15.5 必须补齐 discovery-before-execute 工具执行不变量：MCP tool、plugin command、skill action、workflow/hook 贡献工具或任何延迟加载工具，必须先完成 discover/register/trust/schema load，执行层才能调用；未发现、未注册、未信任、schema 未加载或版本不兼容时必须拒绝执行并提示先发现/启用/诊断，不能只依赖 prompt 提醒模型。
+- 上述 guard 必须在 runtime 执行层兜底，并写入 focused tests；测试至少覆盖“模型试图直接执行未发现的延迟工具时被拒绝”“已发现且 schema 已加载后才进入权限管道”“拒绝消息不泄露完整 schema 或敏感配置”。
 - README、START_NEXT_CHAT、docs/delivery、蓝图和规格书必须同步当前阶段状态，不能宣称未完成阶段能力。
 
 ## 18. Skills / Workflow 规格
@@ -2301,6 +2335,7 @@ export type PluginTrustLevel = 'local' | 'official' | 'third-party'
 - Plugin 默认不启用高风险能力。
 - Plugin 新增命令、MCP、provider、hook 时必须进入 `/plugins doctor` 可见。
 - Plugin 贡献的工具仍走统一权限管道。
+- Plugin / MCP / skill / workflow / hook 贡献的延迟工具必须遵守 discovery-before-execute：贡献项先进入稳定排序的 catalog / doctor 摘要，用户或模型只有在工具已 discover、已注册、已信任且 schema 已加载后，才能进入 Start Gate 或权限管道；未发现工具名不得被 `ExecuteExtraTool` 类入口直接调用。
 - Plugin 加载失败不能影响主会话。
 - Plugin 清单排序稳定，避免破坏 prompt cache。
 - Plugin 的 manifest、贡献点、权限摘要和 doctor 摘要必须稳定排序；动态字段只能进入日志或 doctor 详情，不进入 prompt 稳定层。

@@ -19,7 +19,7 @@
 | Phase 12 | done | [phase-12-agents.md](./phase-12-agents.md) | Agent 闭环 |
 | Phase 13 | done | [phase-13-multi-model.md](./phase-13-multi-model.md) | 多模型协作闭环 |
 | Phase 14 | done | [phase-14-skills-workflow.md](./phase-14-skills-workflow.md) | Skills 与工作流主闭环 + hardening |
-| Phase 15 preflight | done | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup：RuntimeStatus provider fallback 修复、TUI 标题去 Phase 14、extension freshness 稳定性补测；Phase 15 Beta 仍 pending |
+| Phase 15 preflight | done | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup：RuntimeStatus provider fallback、Natural Intent Contract、Plan 权限顺序、cache freshness provider 和 extension freshness 稳定性已收口；Phase 15 Beta 仍 pending |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版 |
 | Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查与开源前 hardening |
 | Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |

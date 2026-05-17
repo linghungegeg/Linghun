@@ -388,6 +388,7 @@ type ToolDefinition<Input, Output> = {
 
 ```text
 find tool
+  -> require discover/register/trust/schema loaded for extra or contributed tools
   -> parse input
   -> validate input
   -> permission check
@@ -398,6 +399,8 @@ find tool
   -> post hooks
   -> record cost/time/error
 ```
+
+Phase 15.5 release hardening 必须补齐 discovery-before-execute guard：`ExecuteExtraTool`、`MCPTool`、plugin command、skill action、workflow/hook 贡献工具等延迟或外部贡献工具，未先发现、注册、信任并加载 schema 时不得进入执行层；runtime 必须拒绝并提示先搜索/启用/诊断。prompt 提醒只能辅助，不能替代执行层 guard。
 
 ### 6.4 并发规则
 
