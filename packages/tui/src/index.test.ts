@@ -901,6 +901,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(template).toContain("自然语言命令不能绕过 Start Gate 或权限审批");
     expect(template).toContain("长期记忆默认先生成候选");
     expect(template).toContain("改代码后运行项目认可的最小必要验证");
+    expect(template).toContain("## 工程纪律");
+    expect(template).toContain("默认只做完成当前任务所必需的最小改动");
+    expect(template).toContain("不顺手修无关问题");
+    expect(template).toContain("避免继续放大屎山");
+    expect(template).toContain("涉及超过 3 个文件");
+    expect(template).toContain("修 bug 要定位直接原因");
     expect(template).not.toContain("# Linghun Project Rules");
 
     const existingOutput = new MemoryOutput();
