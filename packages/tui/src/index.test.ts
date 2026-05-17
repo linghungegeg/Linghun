@@ -318,9 +318,20 @@ describe("Phase 06 TUI slash commands", () => {
   it("records complete handoff identity and branch parent source", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
+    const session = await store.create({ model: "gpt-4.1" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, {
+      ...defaultConfig,
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
 
     await handleSlashCommand("/branch hardening", context, output);
     const branchId = context.sessionId;
@@ -336,6 +347,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect((handoff as { packet?: { parentSessionId?: string } }).packet?.parentSessionId).toBe(
       session.id,
     );
+    expect(
+      (handoff as { packet?: { modelProvider?: { provider?: string } } }).packet?.modelProvider
+        ?.provider,
+    ).toBe("openai-compatible");
     expect((branch as { branch?: { parentSessionId?: string } }).branch?.parentSessionId).toBe(
       session.id,
     );
@@ -448,6 +463,28 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/model route 查看");
   });
 
+  it("keeps exact Start Gate confirmation strict while allowing a new dangerous request to be blocked", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我给这个项目建立索引\n确认\nyes\n直接 npm install\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("精确命令：/index init fast");
+    expect(output.text).toContain("需要精确确认：请输入 /index init fast。普通确认未被接受。");
+    expect(output.text).toContain("已阻止自然语言直通");
+    expect(output.text).toContain("不能由自然语言直通执行");
+    expect(output.text).not.toContain("gate ng-");
+    expect(output.text).not.toContain("risk=");
+    expect(output.text).not.toContain("readonly=");
+    expect(output.text).not.toContain("writesConfig");
+    expect(output.text).not.toContain("permissionPipeline");
+  });
+
   it("handles natural model doctor without leaking API keys", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -501,9 +538,13 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/model", context, output);
+    await handleSlashCommand("/usage", context, output);
+    await handleSlashCommand("/stats", context, output);
 
     expect(output.text).toContain("provider=unknown model=unmatched-model");
+    expect(output.text).toContain("- provider: unknown");
     expect(output.text).not.toContain("provider=deepseek model=unmatched-model");
+    expect(output.text).not.toContain("- provider: deepseek");
   });
 
   it("shows WARN when primary route is usable but fallback is unavailable", async () => {
@@ -1095,9 +1136,20 @@ describe("Phase 06 TUI slash commands", () => {
   it("records cache usage, classifies write sources, and trims cache history", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
+    const session = await store.create({ model: "gpt-4.1" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, {
+      ...defaultConfig,
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
 
     const reported = recordModelUsage(context, {
       inputTokens: 100,
@@ -1138,6 +1190,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(missing.cacheWriteTokensSource).toBe("missing");
     expect(estimated.cacheWriteTokensSource).toBe("estimated");
     expect(reported.hitRate).toBe(0.25);
+    expect(reported.provider).toBe("openai-compatible");
+    expect(context.cache.history.every((item) => item.provider === "openai-compatible")).toBe(true);
 
     await handleSlashCommand("/cache-log", context, output);
     await handleSlashCommand("/cache-log config size 2", context, output);

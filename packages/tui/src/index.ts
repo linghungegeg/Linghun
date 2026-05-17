@@ -1263,6 +1263,10 @@ export async function handleSlashCommand(
     return "message";
   }
 
+  if (context.pendingNaturalCommand?.exactCommand === text.trim()) {
+    context.pendingNaturalCommand = undefined;
+  }
+
   const [command, ...rest] = text.split(/\s+/);
   if (command === "/help") {
     writeLine(output, formatCatalogHelp(context.language));
@@ -3299,7 +3303,7 @@ function createHandoffPacket(
       staleHint: context.index.staleHint,
     },
     permissionMode: context.permissionMode,
-    modelProvider: { provider: "deepseek", model: context.model },
+    modelProvider: { provider: getRuntimeStatusProvider(context), model: context.model },
     recentCommit: "unknown until git metadata is checked externally",
     budgetUsage:
       "local validation only; no external provider calls; status bar does not show money",
@@ -3613,6 +3617,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
   const cacheReadTokens = usage.cacheReadTokens ?? 0;
   const cacheWriteTokensSource = classifyCacheWriteTokensSource(usage);
   const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const provider = getRuntimeStatusProvider(context);
   const stats: CacheTurnStats = {
     turn: context.cache.nextTurn,
     timestamp: Date.now(),
@@ -3621,7 +3626,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
       outputTokens: usage.outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
-      provider: "deepseek",
+      provider,
       model: context.model,
     }),
     cacheReadTokens,
@@ -3630,7 +3635,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     model: context.model,
-    provider: "deepseek",
+    provider,
     endpoint: usage.endpoint ?? CHAT_COMPLETIONS_ENDPOINT,
     source:
       usage.cacheReadTokens === undefined && usage.cacheWriteTokensRaw === undefined
@@ -4448,7 +4453,7 @@ function formatUsage(context: TuiContext): string {
     `- cache read tokens: ${totals.cacheReadTokens}`,
     `- cache write/create tokens: ${totals.cacheWriteTokens}`,
     `- model: ${latest?.model ?? context.model}`,
-    `- provider: ${latest?.provider ?? "deepseek"}`,
+    `- provider: ${latest?.provider ?? "unknown"}`,
     `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- rawUsage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
@@ -4473,12 +4478,14 @@ function formatStats(args: string[], context: TuiContext): string {
     return formatEndpointStats(context.cache.history);
   }
   const totals = sumCacheHistory(context.cache.history);
+  const latest = context.cache.history.at(-1);
+  const provider = latest?.provider ?? "unknown";
   const hitRate = computePromptCacheHitRate({
     inputTokens: totals.inputTokens,
     outputTokens: totals.outputTokens,
     cacheReadTokens: totals.cacheReadTokens,
     cacheWriteTokens: totals.cacheWriteTokens,
-    provider: "deepseek",
+    provider,
     model: context.model,
   });
   return [
@@ -4486,7 +4493,7 @@ function formatStats(args: string[], context: TuiContext): string {
     `- samples: ${context.cache.history.length}`,
     `- elapsedMs: ${Date.now() - context.cache.startedAt}`,
     `- model: ${context.model}`,
-    "- provider: deepseek",
+    `- provider: ${provider}`,
     `- hitRate: ${formatPercent(hitRate)}`,
     `- tokens: input=${totals.inputTokens}, output=${totals.outputTokens}, cache_read=${totals.cacheReadTokens}, cache_write=${totals.cacheWriteTokens}`,
     "- role/model/provider usage (estimated):",
@@ -5202,14 +5209,17 @@ async function handleNaturalInput(
       return "handled";
     }
     if (decision === "exact_required") {
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? `Exact confirmation required for ${gate.gateId}: type ${gate.exactCommand}. Plain confirmation was not accepted.`
-          : `Gate ${gate.gateId} 需要精确确认：请输入 ${gate.exactCommand}。普通确认未被接受。`,
-      );
-      writeStatus(output, context);
-      return "handled";
+      if (/^(yes|y|confirm|确认|是|执行|继续)$/iu.test(text.trim())) {
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? `Exact confirmation required: type ${gate.exactCommand}. Plain confirmation was not accepted.`
+            : `需要精确确认：请输入 ${gate.exactCommand}。普通确认未被接受。`,
+        );
+        writeStatus(output, context);
+        return "handled";
+      }
+      context.pendingNaturalCommand = undefined;
     }
     if (decision === "confirmed") {
       context.pendingNaturalCommand = undefined;
@@ -6404,9 +6414,7 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter((task) => task.status === "running").length;
   const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
-  const gate = context.pendingNaturalCommand
-    ? `${context.pendingNaturalCommand.gateId}:${context.pendingNaturalCommand.risk}`
-    : "none";
+  const gate = context.pendingNaturalCommand ? "waiting confirmation" : "none";
   const status = t(context, "status", {
     session: truncateDisplay(
       context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),

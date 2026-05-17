@@ -5,6 +5,7 @@ import {
   createModelCapabilitySummary,
   createPendingNaturalCommand,
   formatNaturalPermissionBlock,
+  formatNaturalStartGate,
   getCommandCapabilityCatalog,
   matchesNaturalGateConfirmation,
   routeNaturalIntent,
@@ -290,6 +291,65 @@ describe("Phase 15 pending natural gate hardening", () => {
         new Date("2026-05-17T00:02:00.000Z"),
       ),
     ).toBe("expired");
+  });
+
+  it("formats Chinese index Start Gate as a human-first decision prompt", () => {
+    const intent = routeNaturalIntent("帮我给这个项目建立索引");
+    const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
+    const text = formatNaturalStartGate(intent, runtime, gate);
+
+    expect(text).toContain("我可以准备执行");
+    expect(text).toContain("精确命令：/index init fast");
+    expect(text).toContain("范围：current project /tmp/project");
+    expect(text).toContain("会读取项目文件并生成本地代码索引");
+    expect(text).toContain("不应修改源码");
+    expect(text).toContain("取消方式");
+    expect(text).toContain("不能只回复“确认”或 yes");
+    expect(text).not.toContain("gateId");
+    expect(text).not.toContain("expiresAt");
+    expect(text).not.toContain("risk=");
+    expect(text).not.toContain("readonly=");
+    expect(text).not.toContain("writesConfig");
+    expect(text).not.toContain("permissionPipeline");
+    expect(text).not.toContain("logPath");
+    expect(text).not.toContain("Gate：");
+  });
+
+  it("formats English index Start Gate without internal fields", () => {
+    const intent = routeNaturalIntent("build the index");
+    const englishRuntime: RuntimeStatusSource = { ...runtime, language: "en-US" };
+    const gate = createPendingNaturalCommand(
+      { ...intent, language: "en-US" },
+      englishRuntime,
+      new Date("2026-05-17T00:00:00.000Z"),
+    );
+    const text = formatNaturalStartGate({ ...intent, language: "en-US" }, englishRuntime, gate);
+
+    expect(text).toContain("I can prepare this action");
+    expect(text).toContain("Exact command: /index init fast");
+    expect(text).toContain("Scope: current project /tmp/project");
+    expect(text).toContain("read project files and build a local code index");
+    expect(text).toContain("Plain `yes` is not accepted");
+    expect(text).not.toContain("gateId");
+    expect(text).not.toContain("expiresAt");
+    expect(text).not.toContain("risk=");
+    expect(text).not.toContain("readonly=");
+    expect(text).not.toContain("writesConfig");
+    expect(text).not.toContain("permissionPipeline");
+    expect(text).not.toContain("logPath");
+    expect(text).not.toContain("Gate:");
+  });
+
+  it("keeps dangerous natural requests human-readable without raw flags", () => {
+    const intent = routeNaturalIntent("直接 npm install");
+    const text = formatNaturalPermissionBlock(intent);
+
+    expect(intent.action).toBe("permission_pipeline");
+    expect(text).toContain("不能由自然语言直通执行");
+    expect(text).not.toContain("risk=");
+    expect(text).not.toContain("readonly=");
+    expect(text).not.toContain("writesConfig");
+    expect(text).not.toContain("permissionPipeline");
   });
 });
 

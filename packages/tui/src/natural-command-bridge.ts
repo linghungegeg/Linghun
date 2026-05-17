@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 
 export type CommandRisk =
@@ -982,7 +981,7 @@ export function formatNaturalPermissionBlock(intent: NaturalIntent): string {
     return [
       `Blocked natural-language direct execution: ${c.titleEn}`,
       `- Exact action: ${command}`,
-      `- Risk: ${formatRiskLine(c, intent.language)}`,
+      `- Risk: ${formatHumanRisk(c, intent.language)}`,
       "- Scope: current project or the command-specific target; config/permission/tool effects must be reviewed before execution.",
       "- Reason: request came from the Natural Command Bridge; bridge/workflow/agent/plugin/hook/remote paths can only create gates or permission requests.",
       "- Rollback: inspect /diff, checkpoint, config state, or disable the affected extension before accepting follow-up changes.",
@@ -994,7 +993,7 @@ export function formatNaturalPermissionBlock(intent: NaturalIntent): string {
   return [
     `已阻止自然语言直通：${c.titleZh}`,
     `- 精确动作：${command}`,
-    `- 风险：${formatRiskLine(c, intent.language)}`,
+    `- 风险：${formatHumanRisk(c, intent.language)}`,
     "- 范围：当前项目或命令指定目标；配置、权限、工具影响必须在执行前复核。",
     "- 原因：请求来自 Natural Command Bridge；自然语言桥、workflow、agent、plugin、hook、remote 只能生成确认门或权限请求。",
     "- 回滚方式：先查看 /diff、checkpoint、配置状态，或禁用受影响扩展，再接受后续变更。",
@@ -1036,42 +1035,32 @@ export function formatNaturalStartGate(
   const c = intent.capability;
   const command =
     gate?.exactCommand ?? intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
-  const logPath = join(context.projectPath, ".linghun", "logs");
+  const scope = gate?.scope ?? `current project ${context.projectPath}`;
   const exactHint = gate?.requiresExactConfirmation
     ? intent.language === "en-US"
-      ? `Reply with the exact command \`${command}\` to continue; plain yes is not enough for this risk.`
-      : `回复精确命令 \`${command}\` 才能继续；此风险级别不能只用普通“确认”。`
+      ? `To continue, reply with exactly \`${command}\`. Plain \`yes\` is not accepted for this action.`
+      : `如要继续，请原样回复 \`${command}\`。这个动作不能只回复“确认”或 yes。`
     : intent.language === "en-US"
-      ? "Reply `yes` to run the equivalent slash command, or type a different request to cancel this gate."
-      : "回复 `确认` 执行等价 slash command；输入其他内容则不执行。";
+      ? "Reply `yes` to run the equivalent slash command, or type anything else to cancel."
+      : "回复 `确认` 执行等价 slash command；输入其他内容则取消。";
   if (intent.language === "en-US") {
     return [
-      `Start Gate: ${c?.titleEn ?? "command"}`,
-      `- Gate: ${gate?.gateId ?? "pending"}; expiresAt=${gate?.expiresAt ?? "unknown"}; source=natural`,
+      `I can prepare this action: ${c?.titleEn ?? "command"}`,
       `- Exact command: ${command}`,
-      `- Risk: ${c ? formatRiskLine(c, intent.language) : "unknown"}`,
-      `- Scope: ${gate?.scope ?? `current project ${context.projectPath}`}`,
-      "- Reason: natural-language bridge can only open a gate; Start Gate does not replace later permission approval.",
-      "- Rollback: inspect /diff, checkpoint, config state, or cancel the task before accepting follow-up changes.",
-      "- Choices: cancel by typing anything else; continue only with the required confirmation below.",
-      "- Budget: local state/command path only unless the slash command later calls the model or tools.",
-      `- Output/log path: summaries in transcript; long task logs under ${logPath}`,
-      "- Cancel: use /interrupt or the command-specific cancel entry such as /agents cancel <id>.",
+      `- Scope: ${scope}`,
+      `- Risk: ${formatHumanRisk(c, intent.language)}`,
+      "- Safety: this only opens the action path; any later file writes, Bash, network access, config changes, or tool permissions still require their own approval.",
+      "- Cancel: type anything other than the required confirmation, or use /interrupt if a later long-running task has started.",
       exactHint,
     ].join("\n");
   }
   return [
-    `Start Gate：${c?.titleZh ?? "命令"}`,
-    `- Gate：${gate?.gateId ?? "pending"}；expiresAt=${gate?.expiresAt ?? "unknown"}；source=natural`,
+    `我可以准备执行：${c?.titleZh ?? "命令"}`,
     `- 精确命令：${command}`,
-    `- 风险：${c ? formatRiskLine(c, intent.language) : "unknown"}`,
-    `- 范围：${gate?.scope ?? `当前项目 ${context.projectPath}`}`,
-    "- 原因：自然语言桥只能打开确认门；Start Gate 不替代后续权限审批。",
-    "- 回滚方式：继续前可查看 /diff、checkpoint、配置状态或取消任务。",
-    "- 选择：输入其他内容取消；继续必须按下方要求确认。",
-    "- 预算：仅本地状态/命令路径；除非后续 slash command 调模型或工具。",
-    `- 输出/日志：摘要写入 transcript；长任务日志位于 ${logPath}`,
-    "- 取消方式：输入其他请求会取消此门；长任务可用 /interrupt 或 /agents cancel <id>。",
+    `- 范围：${scope}`,
+    `- 风险：${formatHumanRisk(c, intent.language)}`,
+    "- 安全边界：这里只打开动作路径；后续如需写文件、Bash、联网、改配置或工具权限，仍会单独审批。",
+    "- 取消方式：输入任何非确认内容即可取消；如果后续长任务已开始，可用 /interrupt。",
     exactHint,
   ].join("\n");
 }
@@ -1103,6 +1092,39 @@ function requiresExactNaturalConfirmation(c: CommandCapability, command: string)
       command,
     )
   );
+}
+
+function formatHumanRisk(c: CommandCapability | undefined, language: Language): string {
+  if (!c)
+    return language === "en-US"
+      ? "Unknown risk; do not continue if unsure."
+      : "风险未知；不确定时不要继续。";
+  if (c.risk === "dangerous") {
+    return language === "en-US"
+      ? "High risk. This cannot run directly from natural language and must stay behind explicit confirmation and the permission pipeline."
+      : "高风险。不能由自然语言直通执行，必须保留精确确认和权限管道。";
+  }
+  if (c.risk === "tool_permission") {
+    return language === "en-US"
+      ? "May use tools or touch project state. It will still enter the tool permission flow before any protected action."
+      : "可能使用工具或触及项目状态；任何受保护动作仍会进入工具权限审批。";
+  }
+  if (c.risk === "config_write") {
+    return language === "en-US"
+      ? "May change Linghun configuration. Review the exact command and keep a rollback path before continuing."
+      : "可能修改 Linghun 配置；继续前请确认精确命令，并保留回滚路径。";
+  }
+  if (c.risk === "start_gate") {
+    if (c.id === "index") {
+      return language === "en-US"
+        ? "This may read project files and build a local code index; it should not modify source files, and large-file/generated-output checks still apply."
+        : "会读取项目文件并生成本地代码索引；不应修改源码，仍会保留大文件和生成物检查。";
+    }
+    return language === "en-US"
+      ? "Requires a Start Gate before the equivalent command starts; later protected actions still need approval."
+      : "需要先通过 Start Gate 才会启动等价命令；后续受保护动作仍需审批。";
+  }
+  return language === "en-US" ? "Read-only local state check." : "只读本地状态检查。";
 }
 
 export function formatRiskLine(c: CommandCapability, language: Language): string {

@@ -296,6 +296,20 @@ corepack pnpm exec linghun --help
 - `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
 
+### Phase 15 pre-Beta Interaction P1 cleanup 验证结果
+
+已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts packages/config/src/index.test.ts`：通过，11 个测试文件、183 个测试通过。
+- `corepack pnpm test`：通过，11 个测试文件、183 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm check`：通过，43 个文件检查通过。首次运行发现 2 处 formatter 差异，按 formatter 建议做最小格式修正后通过；最终重跑通过。
+- `corepack pnpm build`：通过，workspace 7 个包构建通过。
+- `corepack pnpm exec linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec Linghun --version`：通过，输出 `0.1.0`。
+- `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
+- TUI stdin smoke：通过，覆盖“帮我给这个项目建立索引”进入 human-first Start Gate；`确认` / `yes` 不能执行；`/index init fast` 才进入等价命令路径并被索引安全门阻止未排除大文件风险；“直接 npm install”被人话风险阻断且不暴露 raw flags；`/usage`、`/stats`、`/memory`、`/model route doctor`、`/exit` 可用。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。
@@ -323,6 +337,27 @@ DeepSeek V4 Pro 报告裁决：
 - command-level permission framework、permission modal、allow once/always、插件市场、远程安装、完整 hook 执行、长期任务、Remote Channels、桌面端：不在本轮做，也不阻塞 Phase 15 Beta；当前安全边界仍由 Start Gate、exact command、drift detection、权限管道和 focused tests 兜底。
 
 Phase 15 Beta 仍需用户明确确认后才能开始。
+
+### Phase 15 pre-Beta Interaction P1 cleanup
+
+本轮性质：Phase 15 pre-Beta Interaction P1 cleanup，只修复 Beta 前阻塞的 provider 统计/交接准确性问题，以及 Start Gate 默认主输出过度工程化问题；未进入 Phase 15 真实项目 Beta、Phase 15.5 或 Phase 16+。
+
+修复点：
+
+- `recordModelUsage()` 使用当前可解析 provider 或 `unknown`，不再把 cache stats provider 硬编码为 `deepseek`。
+- `/stats` 的 hitRate provider 输入和展示行使用当前 provider 或 `unknown`。
+- `/usage` 无历史记录时 provider fallback 为 `unknown`，不伪造 `deepseek`。
+- `createHandoffPacket()` 的 `modelProvider.provider` 使用当前 provider 或 `unknown`。
+- Start Gate 默认主输出改为 human-first decision prompt：默认展示精确命令、scope、人话风险、安全边界、继续方式和取消方式；不展示 `gateId`、`expiresAt`、raw risk flags、`writesConfig`、`permissionPipeline`、`logPath` 等内部字段。
+- 状态栏的 pending gate 默认展示改为 `waiting confirmation`，不再输出 `ng-...` gate id；exact command 直输后会清理 pending gate 状态。
+- exact command 仍是高风险/索引 init 等动作的唯一确认路径；普通“确认”或 `yes` 不会执行。
+- dangerous natural request 仍会阻断，并输出人话风险说明，不暴露 raw flags。
+
+补测：
+
+- 中文“帮我给这个项目建立索引”和英文 `build the index` 的 Start Gate 默认输出不包含内部字段，且包含 `/index init fast`、scope、人话风险、继续/取消提示。
+- `直接 npm install` 仍走阻断路径，默认输出不包含 raw flags。
+- openai-compatible provider 下 `recordModelUsage`、`/stats`、handoff packet 使用真实 provider；`/usage` fallback 为 `unknown`。
 
 ### Provider env config minimal fix
 

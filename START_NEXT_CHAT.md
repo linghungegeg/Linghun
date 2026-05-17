@@ -29,7 +29,8 @@
 22. F:\Linghun\docs\audit\PHASE_15_PREFLIGHT_INTERACTION_REVIEW_REPORT.md
 23. F:\Linghun\docs\audit\phase-15-pre-beta-cross-review-report.md
 24. F:\Linghun\docs\audit\phase-15-pre-beta-ccb-coding-experience-parity-audit.md
-25. F:\Linghun\docs\audit\reference-map.md
+25. F:\Linghun\docs\audit\phase-15-pre-beta-ccb-interaction-parity-audit-v2.md
+26. F:\Linghun\docs\audit\reference-map.md
 
 这是 Linghun 项目的阶段开发仓库。请严格按阶段蓝图推进，不要跳阶段，不要提前实现后续功能。
 
@@ -56,8 +57,9 @@
 - Phase 15 preflight hardening follow-up 已完成：`/memory init` 的默认 `LINGHUN.md` 已从简单占位升级为中文“项目规则”模板；已有 `LINGHUN.md` 继续不静默覆盖；本 follow-up 只做模板 cleanup，不进入 Phase 15 Beta / Phase 15.5 / Phase 16+。
 - Phase 15 pre-Beta cleanup 已完成：根据 `docs/audit/phase-15-pre-beta-cross-review-report.md` 做最小修复，RuntimeStatus provider 不再 fallback 为 deepseek，缺失时为 unknown；TUI 标题去掉 Phase 14；pluginListHash / extension freshness 增加顺序稳定性补测；DeepSeek V4 Pro 报告中的 catalog/dispatch registry-map 重构不在本轮执行，只保留 drift detection + coverage test。
 - Phase 15 Natural Intent Contract 成品级手感硬化已完成：自然语言桥已区分 status_query、doctor_query、usage_help、safe_action_request、config_change_request、dangerous_action_request 和 ambiguous_request，避免“现在是什么模型”等状态查询退化成命令用法提示；这属于 Phase 15 preflight 收口，不是新阶段。
+- Phase 15 pre-Beta CCB Interaction Parity Audit v2 已完成并登记，且 Phase 15 pre-Beta Interaction P1 cleanup 已完成：`recordModelUsage`、`/stats`、`/usage` fallback、handoff packet 不再伪造 `deepseek`，改用真实 provider 或 `unknown`；Start Gate 默认主输出已改为 human-first decision prompt，不暴露 gateId、expiresAt、raw risk flags、writesConfig、permissionPipeline、logPath 等内部字段，同时保留 exact command 唯一确认路径和权限管道。
 
-当前任务：Phase 15 preflight / pre-Beta cleanup / Natural Intent Contract hardening 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
+当前任务：Phase 15 preflight / pre-Beta cleanup / Natural Intent Contract hardening / Phase 15 pre-Beta Interaction P1 cleanup 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。
