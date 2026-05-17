@@ -100,9 +100,13 @@ describe("Phase 15 Natural Intent Router", () => {
   ])("routes first batch phrase %s", (phrase, id) => {
     const intent = routeNaturalIntent(phrase);
     expect(intent.capability?.id).toBe(id);
-    expect(["execute_readonly", "start_gate", "answer", "permission_pipeline"]).toContain(
-      intent.action,
-    );
+    expect([
+      "execute_readonly",
+      "safe_local_action",
+      "start_gate",
+      "answer",
+      "permission_pipeline",
+    ]).toContain(intent.action);
   });
 
   it.each(firstBatch)(
@@ -167,7 +171,7 @@ describe("Phase 15 Natural Intent Router", () => {
     }
     if (phrase.includes("建立索引") && !phrase.includes("已经")) {
       expect(intent.inquiry).toBe("execute");
-      expect(intent.action).toBe("execute_readonly");
+      expect(intent.action).toBe("safe_local_action");
     }
     if (phrase.includes("已经") || phrase.includes("状态") || phrase.includes("index ready")) {
       expect(intent.inquiry).toBe("status");
@@ -236,6 +240,25 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(["ask_clarify", "model", "execute_readonly"]).toContain(multi.action);
   });
 
+  it.each([
+    "帮我分析一下这个是什么项目，要怎么部署，将报告输出在根目录下",
+    "分析这个 repo 并写一份报告",
+    "help me understand this project and deploy it",
+    "please inspect the code and create a root report",
+  ])("leaves ordinary development request to the model loop: %s", (phrase) => {
+    const intent = routeNaturalIntent(phrase);
+    expect(intent.action).toBe("model");
+    expect(intent.riskHandler).toBe("model");
+  });
+
+  it("keeps index capability wording aligned with safe local actions", () => {
+    const capability = getCommandCapabilityCatalog().find((item) => item.id === "index");
+    expect(capability?.descriptionZh).toContain("本地安全动作");
+    expect(capability?.descriptionEn).toContain("safe local actions");
+    expect(capability?.whenToUseZh).toContain("重建或 force 需精确确认");
+    expect(capability?.whenToUseEn).toContain("rebuild or force needs exact confirmation");
+  });
+
   it("asks for clarification on ambiguous capability lists", () => {
     const intent = routeNaturalIntent("模型索引缓存");
     expect(intent.action).toBe("ask_clarify");
@@ -259,24 +282,39 @@ describe("Phase 15 pending natural gate hardening", () => {
     hooks: { enabled: false, hooks: [] },
   };
 
-  it("routes safe index refresh/init requests directly without exact confirmation", () => {
-    for (const phrase of [
-      "帮我更新项目索引",
-      "refresh the project index",
-      "帮我建立索引",
-      "build the index",
-    ]) {
-      const intent = routeNaturalIntent(phrase);
-      expect(intent.capability?.id).toBe("index");
-      expect(intent.action).toBe("execute_readonly");
-      expect(intent.command).toMatch(/^\/index (refresh|init fast)$/u);
-      expect(createPendingNaturalCommand(intent, runtime)).toMatchObject({ capabilityId: "index" });
-    }
+  it.each([
+    ["帮我更新项目索引", "/index refresh"],
+    ["请刷新索引", "/index refresh"],
+    ["帮我同步索引", "/index refresh"],
+    ["refresh the project index", "/index refresh"],
+    ["update the project index", "/index refresh"],
+    ["sync the project index", "/index refresh"],
+    ["帮我建立索引", "/index init fast"],
+    ["请初始化索引", "/index init fast"],
+    ["帮我创建索引", "/index init fast"],
+    ["build the index", "/index init fast"],
+    ["init index", "/index init fast"],
+    ["create index", "/index init fast"],
+  ])("routes safe index phrase %s as a safe local action", (phrase, command) => {
+    const intent = routeNaturalIntent(phrase);
+    expect(intent.capability?.id).toBe("index");
+    expect(intent.action).toBe("safe_local_action");
+    expect(intent.riskHandler).toBe("safe_local_action");
+    expect(intent.command).toBe(command);
+    expect(createPendingNaturalCommand(intent, runtime)).toBeNull();
   });
 
-  it("keeps rebuild-style index requests behind exact Start Gate confirmation", () => {
-    const intent = routeNaturalIntent("rebuild the index");
+  it.each([
+    "帮我重建索引",
+    "重新索引",
+    "重做索引",
+    "rebuild the index",
+    "reindex",
+    "force rebuild index",
+  ])("keeps rebuild-style index phrase %s behind exact Start Gate confirmation", (phrase) => {
+    const intent = routeNaturalIntent(phrase);
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
+    expect(intent.action).toBe("start_gate");
     expect(gate).toMatchObject({
       capabilityId: "index",
       source: "natural",
@@ -333,7 +371,7 @@ describe("Phase 15 pending natural gate hardening", () => {
     expect(text).toContain("我可以准备执行");
     expect(text).toContain("精确命令：/index refresh --confirm-rebuild");
     expect(text).toContain("范围：current project /tmp/project");
-    expect(text).toContain("会读取项目文件并生成本地代码索引");
+    expect(text).toContain("带安全扫描的本地安全动作");
     expect(text).toContain("不应修改源码");
     expect(text).toContain("取消方式");
     expect(text).toContain("不能只回复“确认”或 yes");
@@ -360,7 +398,7 @@ describe("Phase 15 pending natural gate hardening", () => {
     expect(text).toContain("I can prepare this action");
     expect(text).toContain("Exact command: /index refresh --confirm-rebuild");
     expect(text).toContain("Scope: current project /tmp/project");
-    expect(text).toContain("read project files and build a local code index");
+    expect(text).toContain("safe local actions that run a safety scan");
     expect(text).toContain("Plain `yes` is not accepted");
     expect(text).not.toContain("gateId");
     expect(text).not.toContain("expiresAt");

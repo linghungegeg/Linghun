@@ -32,6 +32,7 @@ export type CommandCapability = {
 export type NaturalIntentAction =
   | "answer"
   | "execute_readonly"
+  | "safe_local_action"
   | "start_gate"
   | "permission_pipeline"
   | "ask_clarify"
@@ -46,7 +47,7 @@ export type NaturalIntent = {
   candidates: CommandCapability[];
   language: Language;
   inquiry: "status" | "doctor" | "read" | "usage" | "risk" | "howto" | "execute";
-  riskHandler: CommandRisk | "model" | "clarify";
+  riskHandler: CommandRisk | "safe_local_action" | "model" | "clarify";
 };
 
 export type RuntimeStatusForModel = {
@@ -545,10 +546,10 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     ],
     "代码索引",
     "Index",
-    "查看只读索引状态/搜索/架构摘要；建立或刷新 codebase-memory 索引需要确认。",
-    "Shows read-only index status/search/architecture; init or refresh of the codebase-memory index needs confirmation.",
-    "询问只读索引状态、搜索代码、架构摘要；建立/刷新索引需进入确认。",
-    "Use for read-only index status, code search, or architecture summary; init/refresh needs confirmation.",
+    "status/search/architecture 为只读；init fast/refresh 是带安全扫描的本地安全动作；rebuild/force 需要精确确认。",
+    "Status/search/architecture are read-only; init fast/refresh are safe local actions with a safety scan; rebuild/force requires exact confirmation.",
+    "询问只读索引状态、搜索代码、架构摘要；普通 init fast/refresh 可安全执行，重建或 force 需精确确认。",
+    "Use for read-only index status/search/architecture; normal init fast/refresh can run safely, while rebuild or force needs exact confirmation.",
     "start_gate",
   ),
   cap(
@@ -809,8 +810,9 @@ export function routeNaturalIntent(
   const explicit = mentionedSlash
     ? catalog.find((item) => item.slash === mentionedSlash)
     : undefined;
-  const inquiry = detectInquiry(normalized);
-  const dangerous = detectDangerousNaturalIntent(normalized);
+  const classification = classifyNaturalControlIntent(normalized);
+  const inquiry = classification.inquiry;
+  const dangerous = classification.dangerousReason;
   const scored = catalog
     .map((capability) => ({ capability, score: scoreCapability(capability, normalized, text) }))
     .filter((item) => item.score > 0)
@@ -870,6 +872,18 @@ export function routeNaturalIntent(
       normalized,
     );
   }
+  if (!explicit && capability.id === "index" && classification.indexAction === "rebuild") {
+    return createIntent(
+      "start_gate",
+      capability,
+      Math.min(1, Math.max(0.85, topScore / 5)),
+      "rebuild index requires exact confirmation",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
   if (dangerous && isDangerousNaturalTarget(capability.id)) {
     return createIntent(
       "permission_pipeline",
@@ -882,26 +896,14 @@ export function routeNaturalIntent(
       normalized,
     );
   }
-  if (!explicit && capability.id === "index" && isRebuildIndexRequest(normalized)) {
-    return createIntent(
-      "start_gate",
-      capability,
-      Math.min(1, Math.max(0.85, topScore / 5)),
-      "rebuild index requires exact confirmation",
-      candidates,
-      language,
-      "execute",
-      normalized,
-    );
-  }
   if (
     !explicit &&
     capability.id === "index" &&
     !["usage", "risk"].includes(inquiry) &&
-    isSafeIndexActionRequest(normalized)
+    classification.indexAction === "safe"
   ) {
     return createIntent(
-      "execute_readonly",
+      "safe_local_action",
       capability,
       Math.min(1, Math.max(0.8, topScore / 5)),
       "safe local index action",
@@ -1095,7 +1097,7 @@ export function createPendingNaturalCommand(
 ): PendingNaturalCommand | null {
   const c = intent.capability;
   const command = intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
-  if (!c || !command) return null;
+  if (!c || !command || intent.action !== "start_gate") return null;
   const createdAt = now.toISOString();
   const expiresAt = new Date(now.getTime() + 90_000).toISOString();
   return {
@@ -1202,8 +1204,8 @@ function formatHumanRisk(c: CommandCapability | undefined, language: Language): 
   if (c.risk === "start_gate") {
     if (c.id === "index") {
       return language === "en-US"
-        ? "Status/search/architecture are read-only. Init/refresh may read project files and build a local code index; rebuild-like requests need explicit confirmation. It should not modify source files."
-        : "status/search/architecture 为只读；init/refresh 会读取项目文件并生成本地代码索引；重建类请求需要精确确认；不应修改源码。";
+        ? "Status/search/architecture are read-only. Init fast/refresh are safe local actions that run a safety scan before building the local code index. Rebuild/force requires exact confirmation. It should not modify source files."
+        : "status/search/architecture 为只读；init fast/refresh 是带安全扫描的本地安全动作，会生成本地代码索引；rebuild/force 需要精确确认；不应修改源码。";
     }
     return language === "en-US"
       ? "Requires a Start Gate before the equivalent command starts; later protected actions still need approval."
@@ -1297,7 +1299,12 @@ function createIntent(
     candidates,
     language,
     inquiry,
-    riskHandler: action === "ask_clarify" ? "clarify" : capability.risk,
+    riskHandler:
+      action === "ask_clarify"
+        ? "clarify"
+        : action === "safe_local_action"
+          ? "safe_local_action"
+          : capability.risk,
   };
 }
 
@@ -1314,7 +1321,33 @@ function normalizeIntentText(text: string): string {
     .trim();
 }
 
-function detectInquiry(text: string): NaturalIntent["inquiry"] {
+type NaturalControlClassification = {
+  inquiry: NaturalIntent["inquiry"];
+  dangerousReason: string | null;
+  indexAction: "safe" | "rebuild" | null;
+  projectRulesRead: boolean;
+  actionRequest: boolean;
+};
+
+function classifyNaturalControlIntent(text: string): NaturalControlClassification {
+  const projectRulesRead = /项目规则|本仓库规则|linghun\.md|project rules/u.test(text);
+  const indexAction = classifyIndexAction(text);
+  const actionRequest = isActionRequest(text);
+
+  return {
+    inquiry: classifyInquiry(text, projectRulesRead, actionRequest),
+    dangerousReason: classifyDangerousReason(text),
+    indexAction,
+    projectRulesRead,
+    actionRequest,
+  };
+}
+
+function classifyInquiry(
+  text: string,
+  projectRulesRead: boolean,
+  actionRequest: boolean,
+): NaturalIntent["inquiry"] {
   if (
     /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(
       text,
@@ -1329,19 +1362,17 @@ function detectInquiry(text: string): NaturalIntent["inquiry"] {
   ) {
     return "doctor";
   }
-  if (isProjectRulesReadRequest(text)) return "read";
+  if (projectRulesRead) return "read";
   if (/风险|危险|safe|risk|danger/u.test(text)) return "risk";
   if (/怎么|如何|用途|干什么|what does|how do i|how to|what is/u.test(text)) return "usage";
-  return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force/u.test(text)
-    ? "execute"
-    : "howto";
+  return actionRequest ? "execute" : "howto";
 }
 
-function isProjectRulesReadRequest(text: string): boolean {
-  return /项目规则|本仓库规则|linghun\.md|project rules/u.test(text);
+function detectInquiry(text: string): NaturalIntent["inquiry"] {
+  return classifyNaturalControlIntent(text).inquiry;
 }
 
-function detectDangerousNaturalIntent(text: string): string | null {
+function classifyDangerousReason(text: string): string | null {
   if (
     /直接|force|强制|bypass|npm install|pnpm add|install dependency|安装依赖|接受所有|accept all|delete memory|restore|hook|remote|job/u.test(
       text,
@@ -1370,17 +1401,19 @@ function isDangerousNaturalTarget(id: string): boolean {
   ].includes(id);
 }
 
-function isSafeIndexActionRequest(text: string): boolean {
-  return (
+function classifyIndexAction(text: string): NaturalControlClassification["indexAction"] {
+  if (/重建|重新索引|重做索引|清空.*重建|force rebuild|rebuild|reindex/u.test(text)) {
+    return "rebuild";
+  }
+  if (
     /(?:帮我|请)?.*(?:更新|刷新|同步).*索引|refresh the project index|update the project index|sync the project index/u.test(
       text,
     ) ||
     /(?:帮我|请)?.*(?:建立|初始化|创建).*索引|build the index|init index|create index/u.test(text)
-  );
-}
-
-function isRebuildIndexRequest(text: string): boolean {
-  return /重建|重新索引|重做索引|清空.*重建|force rebuild|rebuild|reindex/u.test(text);
+  ) {
+    return "safe";
+  }
+  return null;
 }
 
 function isNaturalControlPlaneIntent(
@@ -1388,11 +1421,12 @@ function isNaturalControlPlaneIntent(
   text: string,
   inquiry: NaturalIntent["inquiry"],
 ): boolean {
+  const classification = classifyNaturalControlIntent(text);
   if (["status", "doctor", "usage", "risk", "read"].includes(inquiry)) return true;
-  if (id === "read") return isProjectRulesReadRequest(text);
-  if (id === "index") return isSafeIndexActionRequest(text);
+  if (id === "read") return classification.projectRulesRead;
+  if (id === "index") return classification.indexAction === "safe";
   return (
-    ["help", "model", "index", "cache", "memory", "mode"].includes(id) && !isActionRequest(text)
+    ["model", "index", "cache", "memory", "mode"].includes(id) && !classification.actionRequest
   );
 }
 
@@ -1418,6 +1452,10 @@ function isActionRequest(text: string): boolean {
   return /帮我|请|直接|打开|建立|恢复|build|start|create|run|enable|accept|force|切换|switch|set|resume/u.test(
     text,
   );
+}
+
+function isOrdinaryDevelopmentRequest(text: string): boolean {
+  return /分析|部署|报告|输出|inspect|understand|deploy|report/u.test(text);
 }
 
 function scoreCapability(
@@ -1544,8 +1582,8 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     }
     if (/重建|重新索引|重做索引|rebuild|reindex/u.test(normalized))
       return "/index refresh --confirm-rebuild";
-    if (/更新|刷新|同步索引|refresh|sync/u.test(normalized)) return "/index refresh";
-    if (/build|建立|初始化|init/u.test(normalized)) return "/index init fast";
+    if (/更新|刷新|同步索引|refresh|update|sync/u.test(normalized)) return "/index refresh";
+    if (/build|建立|初始化|创建|init|create/u.test(normalized)) return "/index init fast";
     if (/architecture|架构/u.test(normalized)) return "/index architecture";
     if (/search|搜索|查找|todo/u.test(normalized)) return "/index search <query>";
     return "/index status";

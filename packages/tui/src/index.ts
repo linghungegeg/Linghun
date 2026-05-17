@@ -5421,7 +5421,7 @@ async function handleNaturalInput(
     writeLine(output, formatCapabilityAnswer(intent));
     return "handled";
   }
-  if (intent.action === "execute_readonly" && intent.command) {
+  if (["execute_readonly", "safe_local_action"].includes(intent.action) && intent.command) {
     if (intent.inquiry === "read" && intent.command === "/read LINGHUN.md") {
       writeLine(output, await formatProjectRulesRead(context));
       return "handled";
