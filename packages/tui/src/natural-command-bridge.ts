@@ -532,13 +532,13 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "index",
     "/index",
-    ["index", "索引", "codebase", "architecture", "search code", "build index"],
+    ["index", "索引", "codebase", "architecture", "search code", "build index", "更新索引", "刷新索引", "重建索引"],
     "代码索引",
     "Index",
-    "查看、建立、刷新或查询 codebase-memory 索引。",
-    "Shows, builds, refreshes, or queries the codebase-memory index.",
-    "询问索引状态、建立索引、搜索代码、架构摘要。",
-    "Use for index status, build, refresh, code search, or architecture summary.",
+    "查看只读索引状态/搜索/架构摘要；建立或刷新 codebase-memory 索引需要确认。",
+    "Shows read-only index status/search/architecture; init or refresh of the codebase-memory index needs confirmation.",
+    "询问只读索引状态、搜索代码、架构摘要；建立/刷新索引需进入确认。",
+    "Use for read-only index status, code search, or architecture summary; init/refresh needs confirmation.",
     "start_gate",
   ),
   cap(
@@ -1152,8 +1152,8 @@ function formatHumanRisk(c: CommandCapability | undefined, language: Language): 
   if (c.risk === "start_gate") {
     if (c.id === "index") {
       return language === "en-US"
-        ? "This may read project files and build a local code index; it should not modify source files, and large-file/generated-output checks still apply."
-        : "会读取项目文件并生成本地代码索引；不应修改源码，仍会保留大文件和生成物检查。";
+        ? "Status/search/architecture are read-only. Init/refresh may read project files and build a local code index; rebuild-like requests need explicit confirmation. It should not modify source files."
+        : "status/search/architecture 为只读；init/refresh 会读取项目文件并生成本地代码索引；重建类请求需要精确确认；不应修改源码。";
     }
     return language === "en-US"
       ? "Requires a Start Gate before the equivalent command starts; later protected actions still need approval."
@@ -1266,7 +1266,7 @@ function normalizeIntentText(text: string): string {
 
 function detectInquiry(text: string): NaturalIntent["inquiry"] {
   if (
-    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|ready/u.test(
+    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(
       text,
     )
   ) {
@@ -1366,7 +1366,7 @@ function scoreCapability(
     score += 3;
   if (capability.id === "cache" && /命中|hit rate|cache/u.test(normalized)) score += 3;
   if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
-  if (capability.id === "index" && /索引|index|搜索代码|search code|architecture/u.test(normalized))
+  if (capability.id === "index" && /索引|index|搜索代码|search code|architecture|更新|刷新|重建|重新索引|重做索引|同步索引/u.test(normalized))
     score += 3;
   if (capability.id === "read" && /项目规则|本仓库规则|linghun\.md|project rules/u.test(normalized))
     score += 8;
@@ -1458,11 +1458,12 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
       : "/cache status";
   }
   if (capability.id === "index") {
-    if (/好了没|好了么|已经.*是吧|已经.*了吗|ready|status|状态/u.test(normalized)) {
+    if (/好了没|好了么|已经.*是吧|已经.*了吗|已经建立了吗|ready|status|状态/u.test(normalized)) {
       return "/index status";
     }
-    if (/build|建立|init/u.test(normalized)) return "/index init fast";
-    if (/refresh|刷新/u.test(normalized)) return "/index refresh";
+    if (/重建|重新索引|重做索引|rebuild|reindex/u.test(normalized)) return "/index refresh --confirm-rebuild";
+    if (/更新|刷新|同步索引|refresh|sync/u.test(normalized)) return "/index refresh";
+    if (/build|建立|初始化|init/u.test(normalized)) return "/index init fast";
     if (/architecture|架构/u.test(normalized)) return "/index architecture";
     if (/search|搜索|查找|todo/u.test(normalized)) return "/index search <query>";
     return "/index status";

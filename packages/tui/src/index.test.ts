@@ -192,6 +192,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
+    expect(output.text).toContain("/model doctor");
     expect(output.text).toContain("/model route");
     expect(output.text).toContain("/model route doctor");
     expect(output.text).toContain("/model route set <role> <model>");
@@ -475,6 +476,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/model route", context, output);
+    await handleSlashCommand("/model doctor", context, output);
     await handleSlashCommand("/model route doctor", context, output);
     await handleSlashCommand("/model route set planner deepseek-v4-pro", context, output);
     await handleSlashCommand("/model route set verifier deepseek-v4-pro", context, output);
@@ -610,6 +612,36 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       (await readMockCalls(callsPath)).filter((tool) => tool === "index_repository"),
     ).toHaveLength(0);
+  });
+
+  it("truncates long Todo, Grep, Glob, and Read outputs in the main output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, "src"), { recursive: true });
+    await writeFile(
+      join(project, "long.txt"),
+      Array.from({ length: 120 }, (_, index) => `line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    for (let index = 0; index < 90; index += 1) {
+      await writeFile(join(project, "src", `match-${index}.txt`), `needle ${index}\n`, "utf8");
+    }
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    for (let index = 0; index < 10; index += 1) {
+      await handleSlashCommand(`/todo add task-${index + 1}`, context, output);
+    }
+    await handleSlashCommand("/read long.txt", context, output);
+    await handleSlashCommand("/grep needle src", context, output);
+    await handleSlashCommand("/glob *.txt src", context, output);
+
+    expect(output.text).toContain("主输出已隐藏 2 条 Todo");
+    expect(output.text).toContain("主输出已截断");
+    expect(output.text).toContain("完整结果仍保留在 tool_result transcript/evidence 记录中");
+    expect(output.text).not.toContain("120\tline 120");
+    expect(output.text).not.toContain("match-89.txt");
   });
 
   it("does not generate LINGHUN.md when natural project-rules read is missing", async () => {

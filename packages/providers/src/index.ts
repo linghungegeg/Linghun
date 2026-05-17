@@ -173,11 +173,29 @@ export class ModelGateway {
   ): AsyncGenerator<LinghunEvent> {
     const provider = this.findProvider(providerId);
     try {
-      yield* provider.stream(request, signal);
+      const safeRequest = await this.withSupportedTools(provider, request);
+      yield* provider.stream(safeRequest, signal);
     } catch (error) {
       const linghunError = normalizeProviderError(error);
       yield { type: "error", error: linghunError };
     }
+  }
+
+  private async withSupportedTools(provider: Provider, request: ModelRequest): Promise<ModelRequest> {
+    if (!request.tools || request.tools.length === 0) {
+      return request;
+    }
+    const model = request.model;
+    if (!model) {
+      return request;
+    }
+    const models = await provider.listModels();
+    const info = models.find((item) => item.id === model);
+    if (info?.supportsTools !== false) {
+      return request;
+    }
+    const { tools: _tools, toolChoice: _toolChoice, ...rest } = request;
+    return rest;
   }
 
   private findProvider(providerId: string): Provider {

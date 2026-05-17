@@ -221,6 +221,51 @@ describe("ModelGateway", () => {
     ]);
   });
 
+  it("does not send tools or toolChoice when the selected model lacks tool calling", async () => {
+    let captured: ModelRequest | undefined;
+    const provider: Provider = {
+      id: "mock",
+      displayName: "Mock",
+      supports: { streaming: true, usage: true },
+      async listModels() {
+        return [
+          {
+            id: "mock-no-tools",
+            displayName: "Mock No Tools",
+            providerId: "mock",
+            contextWindow: 8_000,
+            maxOutputTokens: 1_000,
+            supportsTools: false,
+            supportsVision: false,
+            supportsThinking: false,
+            supportsPromptCache: false,
+          },
+        ];
+      },
+      async *stream(request: ModelRequest): AsyncGenerator<LinghunEvent> {
+        captured = request;
+        yield { type: "assistant_text_delta", id: "a1", text: "ok" };
+      },
+    };
+    const gateway = new ModelGateway([provider]);
+
+    for await (const _event of gateway.stream(
+      "mock",
+      {
+        model: "mock-no-tools",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+      },
+      new AbortController().signal,
+    )) {
+      // drain stream
+    }
+
+    expect(captured?.tools).toBeUndefined();
+    expect(captured?.toolChoice).toBeUndefined();
+  });
+
   it("normalizes provider errors to LinghunError events", async () => {
     const provider: Provider = {
       id: "mock",

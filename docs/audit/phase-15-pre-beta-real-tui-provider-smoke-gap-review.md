@@ -11,11 +11,25 @@
 
 ## Executive Summary
 
-### Verdict: BLOCKED — 3 项 P0、2 项阻塞 P1 必须在 Phase 15 Beta 前修复
+### Verdict: READY FOR USER DECISION — 3 项 P0、2 项阻塞 P1 已完成最小修复与验证闭环
 
-本轮审计发现当前代码中存在 **3 项 P0** 和 **2 项阻塞 P1**，均影响 Phase 15 Beta 的真实项目测试基线。这些不是"发现一个补一个"的单点 bug，而是跨 Natural Command Bridge、Provider adapter、Output layer、Doctor/help routing 和 Index capability 的系统性缺口。
+本轮审计原发现 **3 项 P0** 和 **2 项阻塞 P1**，均影响 Phase 15 Beta 的真实项目测试基线。这些不是"发现一个补一个"的单点 bug，而是跨 Natural Command Bridge、Provider adapter、Output layer、Doctor/help routing 和 Index capability 的系统性缺口。
 
-**核心结论**：当前代码不可直接进入 Phase 15 真实项目 Beta。必须先修复 P0 和阻塞 P1 并经过 independent verification gate 后，再由用户明确确认是否进入。
+**修复结论（2026-05-17）**：3 项 P0 + 2 项阻塞 P1 已按最小边界完成本地修复，并通过 focused tests、`corepack pnpm test`、`corepack pnpm typecheck`、`corepack pnpm build`、`corepack pnpm exec linghun --help`、`corepack pnpm exec Linghun --help`、`git diff --check`。独立 verifier 除真实 DeepSeek API key 缺失外全部 PASS；随后已用用户提供的临时环境变量补跑 Real DeepSeek API `tool_use → tool_result → second request` smoke PASS。Phase 15 Beta 仍未开始；必须由用户明确确认后才能进入。
+
+---
+
+## 0.1 2026-05-17 修复结果登记
+
+| ID | 级别 | 修复结论 | 证据 |
+|---|---|---|---|
+| NCB-INDEX-1 | P0 | 已修复：`更新/刷新/同步索引` 映射 `/index refresh`；`建立/初始化/init/build` 仍映射 `/index init fast`；`重建/重新索引/重做索引` 进入需要精确确认的安全命令，不再落到 `/index status`；状态查询仍为 `/index status`。 | `packages/tui/src/natural-command-bridge.ts`、`packages/tui/src/natural-command-bridge.test.ts` |
+| OUT-1 | P0 | 已修复：`formatToolOutput()` 对主输出做最小防刷屏；Todo 默认最多 8 条；Read/Grep/Glob 长输出按行数/字符数截断；完整结果仍保留在 tool_result transcript/evidence 或 `fullOutputPath`。 | `packages/tui/src/index.ts`、`packages/tui/src/index.test.ts` |
+| PROV-1 | P0 | 已修复：TUI 发送模型请求前检查当前模型 `supportsTools`，不支持时降级纯文本且不发送 `tools/toolChoice`；`ModelGateway` 对 provider 请求再做一层 supportsTools 保护；route doctor 对 tools/tool calling 缺失给出能力不足提示。 | `packages/tui/src/index.ts`、`packages/providers/src/index.ts`、`packages/providers/src/index.test.ts` |
+| NCB-INDEX-2 | 阻塞 P1 | 已修复：Index capability/help/risk 文案明确 `status/search/architecture` 为只读，`init/refresh` 需要确认；未拆 registry/dispatch。 | `packages/tui/src/natural-command-bridge.ts`、`packages/tui/src/index.ts` |
+| DOC-1 | 阻塞 P1 | 已修复：`/model doctor` 等价输出真实 `Model route doctor` 诊断；`/model` 仍显示当前 provider/model 和角色摘要。 | `packages/tui/src/index.ts`、`packages/tui/src/index.test.ts` |
+
+本轮未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+；未修非阻塞 P1/P2；未做 registry/dispatch 大重构、完整 TUI 美化、完整 output grouping/details/debug、完整 provider adapter 重构或 FreshnessGate/web_source runtime。
 
 ---
 
@@ -473,13 +487,30 @@ Phase 15 Beta 不可在以下条件未满足前启动：
 
 ---
 
-## 11. 成品级结构化 Handoff Packet
+## 11. 修复后验证结果（2026-05-17）
+
+| 命令 | 结果 |
+|---|---|
+| `corepack pnpm vitest run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts packages/providers/src/index.test.ts` | PASS：3 files / 178 tests passed |
+| `corepack pnpm test` | PASS：11 files / 207 tests passed |
+| `corepack pnpm typecheck` | PASS |
+| `corepack pnpm build` | PASS |
+| `corepack pnpm exec linghun --help` | PASS：输出 lowercase CLI help |
+| `corepack pnpm exec Linghun --help` | PASS：输出 uppercase Windows-compatible CLI help |
+| `git diff --check` | PASS：仅 CRLF 工作区提示，无 whitespace error |
+| Real DeepSeek API `tool_use → tool_result → second request` smoke | PASS：临时环境变量注入 API key，首轮返回 1 个 `Read` tool call，第二轮 HTTP 成功并回答 root package name；key 未写入 repo、文档、配置、settings 或日志。 |
+
+真实 DeepSeek API tool_use smoke 已用用户提供的临时 key 完成一次最小在线验证；未进入 Phase 15 Beta，未将 key 保存到 repo、文档、配置、settings 或日志中。
+
+---
+
+## 12. 成品级结构化 Handoff Packet
 
 ```yaml
 phase: "Phase 15 pre-Beta Final Real TUI / Provider Smoke Gap Review"
-status: "audit complete; verdict: BLOCKED"
+status: "fix complete locally; awaiting independent verification gate"
 delivery_doc: "F:\\Linghun\\docs\\audit\\phase-15-pre-beta-real-tui-provider-smoke-gap-review.md"
-verdict: "BLOCKED — 3 项 P0 + 2 项阻塞 P1 必须在 Phase 15 Beta 前修复"
+verdict: "FIXED LOCALLY — 3 项 P0 + 2 项阻塞 P1 已完成最小修复；Phase 15 Beta 仍需用户确认"
 p0_count: 3
 blocking_p1_count: 2
 non_blocking_p1_count: 0
@@ -487,40 +518,35 @@ p2_count: 3
 p0_details:
   - id: "NCB-INDEX-1"
     gap: "Index 命令关键词覆盖不足；'帮我更新项目索引' 误映射为 /index status"
-    fix: "createNaturalEquivalentCommand 增加中文变体覆盖 + 安全默认值"
-    loc: "~10-15"
+    fix: "已完成：更新/刷新/同步→/index refresh；建立/init/build→/index init fast；重建/重新索引/重做索引→精确确认路径；状态查询仍→/index status"
   - id: "OUT-1"
     gap: "Tool 结果无输出分层；Todo/Grep/Glob/Read 全量写入主输出，污染主屏"
-    fix: "formatToolOutput 增加最小截断和折叠提示"
-    loc: "~20-30"
+    fix: "已完成：formatToolOutput 主输出最小截断；Todo 8 条；Read/Grep/Glob 长输出截断；完整结果保留在 transcript/evidence/fullOutputPath"
   - id: "PROV-1"
     gap: "不检查 supportsTools 就发送 tools；tool_use/tool_result 消息格式可能导致 DeepSeek HTTP 400"
-    fix: "sendMessage 前检查 ModelInfo.supportsTools + 真实 API smoke"
-    loc: "~15-20"
+    fix: "已完成：TUI 与 ModelGateway 均检查 supportsTools=false 时不发送 tools/toolChoice；/model doctor 可暴露 tools/tool calling 能力不足"
 blocking_p1_details:
   - id: "NCB-INDEX-2"
     gap: "Index catalog risk 统一为 start_gate，/index status 实际只读；help 文案不一致"
-    fix: "formatCapabilityAnswer 或 help 区分只读子命令和动作子命令"
-    loc: "~10"
+    fix: "已完成：help/risk 文案声明 status/search/architecture 只读，init/refresh 需确认；未拆 registry/dispatch"
   - id: "DOC-1"
     gap: "/model doctor alias 未实现"
-    fix: "handleModelCommand 增加 doctor action 映射"
-    loc: "~5"
+    fix: "已完成：handleModelCommand 增加 doctor action，输出 Model route doctor"
 next_phase_options:
-  - "修复 3 P0 + 2 阻塞 P1 → independent verification gate → Phase 15 真实项目 Beta（必须用户明确确认）"
+  - "independent verification gate PASS → 用户明确确认 → Phase 15 真实项目 Beta"
   - "Phase 15.5 双模型交叉审查与开源前 hardening（Phase 15 完成后且必须用户明确确认）"
 forbidden_without_user_confirmation:
   - "Phase 15 真实项目 Beta"
   - "Phase 15.5 双模型交叉审查"
   - "Phase 16+"
-  - "修复 P0/阻塞P1（必须先由用户确认是否开始修复）"
+  - "非阻塞 P1/P2 修复"
 key_evidence:
-  - "packages/tui/src/natural-command-bridge.ts L1460-1468: createNaturalEquivalentCommand index routing"
-  - "packages/tui/src/natural-command-bridge.ts L533-543: index catalog risk=start_gate"
-  - "packages/tui/src/index.ts L7091-7104: formatToolOutput no truncation"
-  - "packages/tui/src/index.ts L5456-5464: sendMessage hardcoded deepseek + always sends tools"
-  - "packages/providers/src/index.ts L249-283: OpenAiCompatibleProvider.stream no capability check"
-  - "packages/tui/src/index.ts L1745-1760: handleModelCommand no doctor alias"
+  - "packages/tui/src/natural-command-bridge.ts: index natural routing covers 更新/刷新/同步/重建/状态"
+  - "packages/tui/src/natural-command-bridge.ts: index capability/risk 文案区分只读 status/search/architecture 与 init/refresh"
+  - "packages/tui/src/index.ts: formatToolOutput/createToolOutputPreview performs minimal main-output truncation"
+  - "packages/tui/src/index.ts: sendMessage checks currentModelSupportsTools before sending tools/toolChoice"
+  - "packages/providers/src/index.ts: ModelGateway.withSupportedTools strips tools/toolChoice for supportsTools=false"
+  - "packages/tui/src/index.ts: /model doctor maps to formatModelRouteDoctor"
 index_status:
   project: "F-Linghun"
   status: "ready"

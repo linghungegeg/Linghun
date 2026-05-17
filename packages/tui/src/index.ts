@@ -31,6 +31,7 @@ import {
 import {
   DeepSeekProvider,
   ModelGateway,
+  findKnownModel,
   type ModelMessage,
   type ModelToolCall,
   type ModelToolDefinition,
@@ -1752,10 +1753,14 @@ async function handleModelCommand(
     await handleModelRouteCommand(args.slice(1), context, output);
     return;
   }
+  if (action === "doctor") {
+    writeLine(output, formatModelRouteDoctor(context));
+    return;
+  }
   const provider = getRuntimeStatusProvider(context);
   writeLine(output, `${t(context, "currentModel")}：provider=${provider} model=${context.model}`);
   writeLine(output, formatModelRouteSummary(context));
-  writeLine(output, "提示：如需诊断配置，可运行 /model route doctor。");
+  writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
   writeStatus(output, context);
 }
 
@@ -1983,7 +1988,7 @@ function diagnoseConcreteRoute(
   }
   for (const capability of route.requiredCapabilities) {
     if (!routeSupportsCapability({ ...route, primaryModel: model }, capability)) {
-      problems.push(`能力不足：${capability}`);
+      problems.push(capability === "tools" ? "能力不足：tools/tool calling" : `能力不足：${capability}`);
     }
   }
   return problems;
@@ -3696,7 +3701,7 @@ async function handleIndexCommand(
   }
   writeLine(
     output,
-    "用法：/index status | /index init fast | /index refresh | /index search <query> | /index architecture",
+    "用法：/index status | /index search <query> | /index architecture（只读） | /index init fast | /index refresh（需确认）",
   );
 }
 
@@ -5453,13 +5458,23 @@ async function sendMessage(
     for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      const modelSupportsTools = currentModelSupportsTools(context);
+      if (!modelSupportsTools && round === 0) {
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "Tool calling is not supported by the current provider/model; continuing as plain text without tools. Run /model doctor for details."
+            : "当前 provider/model 不支持 tool calling；本轮降级为纯文本，不发送 tools/toolChoice。可运行 /model doctor 查看详情。",
+        );
+      }
       for await (const event of gateway.stream(
         "deepseek",
         {
           messages,
           model: context.model,
-          tools: createModelToolDefinitions(),
-          toolChoice: "auto",
+          ...(modelSupportsTools
+            ? { tools: createModelToolDefinitions(), toolChoice: "auto" as const }
+            : {}),
         },
         controller.signal,
       )) {
@@ -5531,6 +5546,11 @@ async function sendMessage(
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+}
+
+function currentModelSupportsTools(context: TuiContext): boolean {
+  const known = findKnownModel(context.model);
+  return known?.supportsTools !== false;
 }
 
 function createModelToolDefinitions(): ModelToolDefinition[] {
@@ -6077,6 +6097,7 @@ function formatHelp(language: Language): string {
   /help                 Show help
   /language zh-CN|en-US Switch UI language
   /model                Show current model
+  /model doctor         Alias of /model route doctor
   /model route          Show Phase 13 role model routes
   /model route doctor   Diagnose role provider/model/capability/budget
   /model route set <role> <model>  Set one role route
@@ -6154,6 +6175,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /help                 显示帮助
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
+  /model doctor         等价于 /model route doctor
   /model route          查看 Phase 13 角色模型路由
   /model route doctor   诊断角色 provider/model/capability/budget
   /model route set <role> <model>  设置单个角色路由
@@ -7088,19 +7110,69 @@ function isDiffSummary(value: unknown): value is DiffSummary {
   return typeof value === "object" && value !== null && "changedFiles" in value;
 }
 
+const TODO_OUTPUT_ITEM_LIMIT = 8;
+const TOOL_OUTPUT_LINE_LIMIT = 80;
+const TOOL_OUTPUT_CHAR_LIMIT = 6_000;
+
 function formatToolOutput(name: ToolName, output: ToolOutput, language: Language): string {
-  const lines = [
-    language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
-    output.text,
-  ];
-  if (output.truncated && output.fullOutputPath) {
+  const preview = createToolOutputPreview(name, output.text, language);
+  const lines = [language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`, preview.text];
+  if (preview.truncated || output.truncated) {
     lines.push(
-      language === "en-US"
-        ? `Full log: ${output.fullOutputPath}`
-        : `完整日志：${output.fullOutputPath}`,
+      output.fullOutputPath
+        ? language === "en-US"
+          ? `Full log: ${output.fullOutputPath}`
+          : `完整日志：${output.fullOutputPath}`
+        : language === "en-US"
+          ? "Full result remains in the tool_result transcript/evidence record."
+          : "完整结果仍保留在 tool_result transcript/evidence 记录中。",
     );
   }
   return lines.join("\n");
+}
+
+function createToolOutputPreview(
+  name: ToolName,
+  text: string,
+  language: Language,
+): { text: string; truncated: boolean } {
+  if (name === "Todo") {
+    const lines = text.split(/\r?\n/u);
+    if (lines.length <= TODO_OUTPUT_ITEM_LIMIT) {
+      return { text, truncated: false };
+    }
+    const remaining = lines.length - TODO_OUTPUT_ITEM_LIMIT;
+    return {
+      text: [
+        ...lines.slice(0, TODO_OUTPUT_ITEM_LIMIT),
+        language === "en-US"
+          ? `... ${remaining} more todo item(s) hidden from main output.`
+          : `... 主输出已隐藏 ${remaining} 条 Todo。`,
+      ].join("\n"),
+      truncated: true,
+    };
+  }
+
+  if (name !== "Read" && name !== "Grep" && name !== "Glob") {
+    return { text, truncated: false };
+  }
+
+  const lines = text.split(/\r?\n/u);
+  const byLine = lines.length > TOOL_OUTPUT_LINE_LIMIT;
+  const byChar = text.length > TOOL_OUTPUT_CHAR_LIMIT;
+  if (!byLine && !byChar) {
+    return { text, truncated: false };
+  }
+
+  let preview = lines.slice(0, TOOL_OUTPUT_LINE_LIMIT).join("\n");
+  if (preview.length > TOOL_OUTPUT_CHAR_LIMIT) {
+    preview = preview.slice(0, TOOL_OUTPUT_CHAR_LIMIT);
+  }
+  const hiddenLines = Math.max(0, lines.length - preview.split(/\r?\n/u).length);
+  const suffix = language === "en-US"
+    ? `... output truncated in main view${hiddenLines > 0 ? `; ${hiddenLines} line(s) hidden` : ""}.`
+    : `... 主输出已截断${hiddenLines > 0 ? `，隐藏 ${hiddenLines} 行` : ""}。`;
+  return { text: `${preview}\n${suffix}`, truncated: true };
 }
 
 async function ensureSession(context: TuiContext): Promise<string> {
