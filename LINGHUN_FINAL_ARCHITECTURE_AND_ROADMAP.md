@@ -1012,10 +1012,10 @@ F:\LinghunProject 或新仓库根目录
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
 | Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
-| Phase 15.5 | 双模型交叉审查与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 release readiness / open-source readiness |
+| Phase 15.5 | 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补终端 TUI 产品手感、release readiness / open-source readiness |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |
-| Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界 |
+| Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界；不承担基础 TUI 美化和交互补课 |
 
 Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 adapter，例如飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli。Linghun 只把结构化、脱敏的任务摘要、审批和结果报告交给 CLI，不允许外部 CLI 直接读取完整 transcript、memory、API key、账单或项目源码。CLI 缺失、未登录、权限不足、版本不兼容或输出不可解析时，通道保持关闭，并由 `/remote channels doctor` 给出中文修复建议。
 
@@ -1024,8 +1024,8 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 00-14 主闭环已完成。
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
-- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查与开源前 hardening；不得自动进入 Phase 16+。
-- Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
+- 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening；不得自动进入 Phase 16+。
+- Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、终端 TUI 成品级收口、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
@@ -1134,6 +1134,8 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 5. 模型事件适配。
 
 在这五个底座稳定之前，桌面端、技能市场、远程控制、自动自治都应该后置。
+
+终端 TUI 的产品手感不应该后置到桌面端。Phase 15.5 必须先把终端首屏、状态栏、help 分组、Start Gate、权限/提权、Plan/auto/bypass 说明、错误 doctor、长任务轻提示、primary/details/debug 输出层级、自然语言状态查询、中英文一致性和窄终端渲染收口。Phase 18 只是在这个成熟终端 core 之上验证桌面端壳、IPC/API 和会话/状态复用。
 
 社区项目如 oh-my-openagent 证明 team mode、skills、hooks、角色路由和后台生命周期是有价值的方向，但 Linghun 只吸收公开行为和验收边界：角色可审计、状态表可见、预算可控、失败可诊断、输出摘要化。它们不能替代 Linghun 的 clean rewrite 原则，也不能成为提前堆功能、绕过权限或复制实现的理由。
 

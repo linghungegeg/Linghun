@@ -2201,6 +2201,45 @@ export type ReleaseReadinessReport = {
 - 上述 guard 必须在 runtime 执行层兜底，并写入 focused tests；测试至少覆盖“模型试图直接执行未发现的延迟工具时被拒绝”“已发现且 schema 已加载后才进入权限管道”“拒绝消息不泄露完整 schema 或敏感配置”。
 - README、START_NEXT_CHAT、docs/delivery、蓝图和规格书必须同步当前阶段状态，不能宣称未完成阶段能力。
 
+## 17.2 Terminal TUI product polish 规格
+
+Phase 15.5 必须把终端 TUI 成品级收口作为 release gate。桌面端仍属于 Phase 18；Phase 18 只复用已成熟的 core 和终端交互语义，不承担补齐基础 TUI 手感。
+
+终端输出必须分为三层：
+
+```ts
+export type TuiOutputLayer = 'primary' | 'details' | 'debug'
+```
+
+- `primary`：默认给用户看的短摘要、下一步、确认选择和关键风险。
+- `details`：用户显式展开或运行详情命令后展示的证据、路径、来源、测试结果和诊断。
+- `debug`：内部 id、gate expiresAt、raw risk flags、logPath、schema 摘要、hash、provider raw usage 等，只能在 debug/doctor/export 中出现。
+
+终端成品级要求：
+
+- 启动首屏必须显示项目、provider/model、权限模式、规则、index/cache/memory 的短状态和下一步建议；缺失项不自动生成、不自动刷新、不自动安装。
+- 状态栏必须 scan-friendly：短字段、稳定排序、可截断；不得显示金额、API key、完整路径、完整 hash、raw flags、完整 schema、大日志或大 index 结果。
+- `/help` 必须按任务分组：对话/模型、项目规则与记忆、索引与缓存、工具与验证、权限与计划、agent/多模型、skills/workflows/plugins/hooks、诊断与退出。每组只给短用途，详情通过命令询问。
+- Start Gate、权限审批和提权提示必须统一为 human-first decision prompt：动作、范围、风险、原因、继续方式、取消方式、后续是否还会走权限管道。内部字段只进 `debug`。
+- Plan、acceptEdits、auto、bypass 的提示必须说明边界：是否只读、是否可写、是否仍需工具权限、是否本地显式 opt-in。
+- 错误必须包含 `what happened`、`likely cause`、`next action`。provider/key/baseUrl/model、index、MCP、plugin、skill、hook、workflow 的错误不得只返回 slash 用法。
+- 长任务轻提示必须包含预计时间范围、是否需要值守、完成产物、查看方式、取消方式和等待确认状态；时间只能是范围或保守估计，不承诺精确分钟。
+- 自然语言状态查询必须先读本地 RuntimeStatus / CommandCapability / storage 状态。包含动作词的完成度问题，例如“索引已经建立了吗”，必须走 status 查询，不得误开 Start Gate。
+- cache/index/memory/model/agent/multi-model 的默认输出必须 summary-first；大输出、完整日志、完整 memory、完整 handoff、完整 transcript 和完整 index 结果只能通过 details/debug 或文件路径查看。
+- provider usage、cache、quota、budget、balance 必须标记来源：`reported`、`zero_reported`、`estimated`、`missing` 或 `unknown`；状态栏不显示金额。
+- zh-CN 和 en-US 文案必须语义等价，同一 capability 不得出现中文已成品、英文只剩命令用法的情况。
+- 窄终端、Windows Terminal、中文路径、长 provider/model、长状态栏、多行粘贴、resize 和连续工具输出必须有 smoke 或 snapshot 覆盖。
+
+Phase 15.5 的 TUI 验收必须至少覆盖：
+
+- startup：无 `LINGHUN.md`、无 provider/key、index missing/ready/stale、cache n/a、memory empty。
+- help：分组输出、中文/英文命令用途询问。
+- natural intent：状态查询、doctor 查询、用法询问、安全动作、危险动作、模糊请求。
+- decision prompts：Start Gate、权限审批、提权、Plan、acceptEdits、auto、bypass。
+- long-running hints：index、verification、agent、cross-review、build/test。
+- diagnostics：model doctor、MCP doctor、plugin/skill/hook/workflow doctor。
+- rendering：窄宽度、中文路径、长模型名、长状态栏、连续工具输出和后台刷新。
+
 ## 18. Skills / Workflow 规格
 
 Skill 目录：
@@ -2477,7 +2516,7 @@ export type LinghunError = {
 13. 多模型。
 14. Skills。
 15. 真实项目测试。
-15.5. 双模型交叉审查与开源前 hardening。
+15.5. 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening。
 16. 可控学习。
 17. 长期托管。
 18. 桌面端预留。
