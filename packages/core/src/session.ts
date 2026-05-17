@@ -198,6 +198,7 @@ export type TranscriptEvent =
       createdAt: string;
     }
   | { type: "tool_call_start"; id: string; name: string; input: unknown; createdAt: string }
+  | { type: "tool_call_delta"; id: string; message: string; createdAt: string }
   | {
       type: "tool_call_end";
       id: string;

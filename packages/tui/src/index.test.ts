@@ -15,6 +15,7 @@ import {
   createIndexState,
   createMcpState,
   createMemoryState,
+  createModelSystemPrompt,
   createPluginState,
   createSkillState,
   createWorkflowState,
@@ -136,6 +137,12 @@ async function createTestContext(
     imageResults: [],
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
+    solutionCompleteness: {
+      triggered: false,
+      triggerReason: "none",
+      classificationRequired: false,
+      checklist: [],
+    },
   };
 }
 
@@ -360,6 +367,68 @@ describe("Phase 06 TUI slash commands", () => {
       session.id,
     );
     expect(output.text).toContain(`来源 session：${session.id}`);
+  });
+
+  it("records Solution Completeness Gate status in model prompt and handoff", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt(
+      "不要缝缝补补，先看 CCB 有没有漏",
+      context,
+      { model: { provider: "deepseek", name: "deepseek-v4-flash" } },
+    );
+
+    expect(prompt).toContain("SYSTEMIC_GAP_WARNING");
+    expect(prompt).toContain("single_issue / systemic_gap");
+    expect(prompt).toContain("影响面");
+    expect(prompt).toContain("P0/P1/P2");
+    expect(prompt).toContain("阶段边界");
+    expect(prompt).toContain("验证方式");
+    expect(context.solutionCompleteness.triggered).toBe(true);
+    expect(context.solutionCompleteness.triggerReason).toBe("user_request");
+
+    context.permissions.recentDenied = [
+      {
+        id: "1",
+        toolName: "Bash",
+        mode: "plan",
+        reason: "Plan 模式禁止写入、编辑和 Bash 执行",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "2",
+        toolName: "Bash",
+        mode: "plan",
+        reason: "Plan 模式禁止写入、编辑和 Bash 执行",
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "3",
+        toolName: "Bash",
+        mode: "plan",
+        reason: "Plan 模式禁止写入、编辑和 Bash 执行",
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const repeatedPrompt = createModelSystemPrompt("帮我继续修", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+    expect(repeatedPrompt).toContain("最近同类权限拒绝反复出现");
+    expect(context.solutionCompleteness.triggerReason).toBe("repeated_denial");
+
+    await handleSlashCommand("/branch solution gate", context, output);
+    const resumed = await store.resume(context.sessionId ?? "missing");
+    const handoff = resumed.transcript.find((event) => event.type === "handoff_packet");
+
+    expect(handoff?.type).toBe("handoff_packet");
+    expect(
+      (handoff as { packet?: { solutionCompleteness?: { triggered?: boolean } } }).packet
+        ?.solutionCompleteness?.triggered,
+    ).toBe(true);
   });
 
   it("runs Phase 12 agents with trimmed context, transcript, status, and cancel path", async () => {

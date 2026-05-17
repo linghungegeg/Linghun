@@ -31,12 +31,19 @@ export type ToolDefinition<Input = unknown> = {
   call(input: Input, context: ToolContext): Promise<ToolOutput>;
 };
 
+export type ToolProgressEvent = {
+  toolName: ToolName;
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+};
+
 export type ToolContext = {
   workspaceRoot: string;
   logRoot?: string;
   changedFiles: string[];
   todos: TodoItem[];
   abortSignal?: AbortSignal;
+  onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
 };
 
 export type ToolName =
@@ -380,6 +387,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.workspaceRoot,
     timeoutMs,
     context.abortSignal,
+    (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
   );
   const fullText = `$ ${input.command}\nexitCode=${result.exitCode}\n\n${result.output}`;
   await writeFile(fullOutputPath, fullText, "utf8");
@@ -534,6 +542,7 @@ function runShell(
   cwd: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
 ): Promise<{ exitCode: number; output: string }> {
   return new Promise((resolvePromise) => {
     const child = spawn(command, { cwd, shell: true, windowsHide: true });
@@ -551,11 +560,14 @@ function runShell(
     const onAbort = () => {
       child.kill();
       output += "\n工具调用已取消。";
+      onProgress?.("system", "工具调用已取消。\n");
       finish(1);
     };
     const timer = setTimeout(() => {
       child.kill();
-      output += `\n命令超时：超过 ${timeoutMs}ms，已尝试终止。`;
+      const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止。`;
+      output += message;
+      onProgress?.("system", `${message}\n`);
     }, timeoutMs);
     if (signal?.aborted) {
       onAbort();
@@ -564,10 +576,14 @@ function runShell(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (chunk) => {
-      output += chunk.toString();
+      const text = chunk.toString();
+      output += text;
+      onProgress?.("stdout", text);
     });
     child.stderr.on("data", (chunk) => {
-      output += chunk.toString();
+      const text = chunk.toString();
+      output += text;
+      onProgress?.("stderr", text);
     });
     child.on("close", (code) => {
       finish(code ?? 1);

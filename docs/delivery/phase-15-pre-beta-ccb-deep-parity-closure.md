@@ -90,3 +90,55 @@ Phase 15 是真实项目 Beta。进入 Beta 前，Phase 00-14 不能只是“功
 - 报告必须给证据，不得只写“感觉已接近 CCB”。
 - 没有交互决策矩阵、真实场景复检和 gate 成熟度结论时，本 closure 不算完成。
 - 完成后更新 `START_NEXT_CHAT.md` 和本文件的验证记录。
+
+## Blocking P1 fix 完成记录（SC-1 / BASH-1）
+
+本轮性质：Phase 15 pre-Beta Deep Parity Closure blocking P1 fix，只关闭报告中的 2 项阻塞 P1；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+### SC-1：Solution Completeness Gate 最小升级
+
+已完成：
+
+- 在 TUI 模型 system prompt 构建路径增加轻量 Solution Completeness Gate 工作流检查。
+- 触发条件保持最小：用户明确要求“成品级 / 不要缝补 / 先看 CCB / 有没有漏 / 系统性 / Solution Completeness”等，或最近同类 permission denial 反复出现。
+- 触发后注入 `SYSTEMIC_GAP_WARNING`，要求先判断 `single_issue / systemic_gap`、影响面、P0/P1/P2、阶段边界和验证方式，不直接给单点补丁。
+- `HandoffPacket` 增加 `solutionCompleteness` 状态，记录是否触发、触发原因、是否要求分类和 checklist。
+- workflow 模板增加 `solution-completeness-check`，只提供判断框架，不自动修代码。
+
+明确未做：完整 runtime guard、完整 FreshnessGate/web_source runtime、第二套命令解释系统、registry/dispatch 大重构。
+
+### BASH-1：Bash 流式输出 / 实时进度反馈最小闭环
+
+已完成：
+
+- 保持 `runTool()` Promise 最终结果兼容，不改 Bash 最终 `ToolOutput`、exit code、error、timeout、abortSignal 语义。
+- 仅在 `ToolContext` 增加可选 `onProgress` 回调；Bash stdout/stderr/system chunk 到达时调用进度回调。
+- TUI 工具执行路径安装临时 progress handler：写入 `tool_call_delta` transcript event、刷新 background task，并即时写入 TUI 输出，让长命令可见仍在输出。
+- 权限管道、Start Gate、Plan、auto、bypass、hard deny、安全检查仍在 `decidePermission()` / `runTool()` 外层路径中执行，未绕过。
+
+明确未做：不把整个工具接口改成 AsyncGenerator，不做完整 TUI 输出分层美化，不扩展 Grep/Glob 进度反馈。
+
+### Blocking P1 focused 验证
+
+已执行：
+
+- `corepack pnpm test -- --run packages/tools/src/index.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、200 个测试通过。覆盖 Bash stdout/stderr progress chunk、最终输出/exitCode 兼容；覆盖 Solution Completeness Gate 显式触发、同类 denied 触发、system prompt checklist 和 handoff `solutionCompleteness` 写入。
+- `corepack pnpm typecheck`：通过。
+
+本轮最终收口已执行：
+
+- `corepack pnpm test`：通过，11 个测试文件、200 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm build`：通过，workspace packages 构建通过。
+- `corepack pnpm exec linghun --help`：通过，输出 Linghun 0.1.0 help。
+- `corepack pnpm exec Linghun --help`：通过，输出 Linghun 0.1.0 help。
+- `git status --short`：已执行，列出本轮修改文件和新增审计报告。
+- `git diff --check`：通过；仅有 Windows LF/CRLF 提示，无 whitespace error。
+- independent verification gate：PASS。verifier 独立运行并通过 `corepack pnpm test`、`corepack pnpm typecheck`、`corepack pnpm lint`、`corepack pnpm build`、`corepack pnpm exec linghun --help`、`corepack pnpm exec Linghun --help`、`git diff --check`，并额外执行 Bash timeout adversarial probe；结论为 SC-1/BASH-1 硬约束、权限管道和 Bash final result 兼容性均 PASS。
+- 主会话 spot-check：复跑 `corepack pnpm typecheck`、`corepack pnpm exec linghun --help`、`git diff --check`，结果与 verifier 报告一致；`git diff --check` 仅 Windows LF/CRLF warning，无 whitespace error。
+
+### 剩余风险与阶段边界
+
+- SC-1 当前是最小 workflow/prompt/handoff check，不是完整 runtime 强制中断；完整 runtime guard 仍登记到 Phase 15.5 或后续，必须用户确认后才可做。
+- BASH-1 当前只覆盖 Bash chunk streaming；Grep/Glob 进度、完整 output grouping、长任务 heartbeat 美化仍为 Phase 15.5 范围。
+- 仍禁止自动进入 Phase 15 Beta、Phase 15.5 或 Phase 16+；Phase 15 Beta 即使 blocking P1 全部关闭，也必须用户明确确认后才可启动。

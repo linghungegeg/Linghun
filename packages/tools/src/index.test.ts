@@ -38,6 +38,30 @@ describe("Phase 05 core tools", () => {
     expect(diff.output.text).toContain("sample.txt");
   });
 
+  it("streams Bash progress before returning final output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const progress: string[] = [];
+    context.onProgress = (event) => {
+      progress.push(`${event.stream}:${event.text}`);
+    };
+
+    const bash = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stdout.write('first\\n'); process.stderr.write('warn\\n');\"",
+      },
+      context,
+    );
+
+    expect(progress.join("")).toContain("stdout:first");
+    expect(progress.join("")).toContain("stderr:warn");
+    expect(bash.output.text).toContain("first");
+    expect(bash.output.text).toContain("warn");
+    expect(bash.output.data).toEqual({ exitCode: 0 });
+  });
+
   it("rejects non-unique edits and workspace escape writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "sample.txt"), "same\nsame\n", "utf8");

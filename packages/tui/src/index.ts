@@ -43,6 +43,7 @@ import {
   type ToolContext,
   type ToolName,
   type ToolOutput,
+  type ToolProgressEvent,
   builtInTools,
   createToolContext,
   runTool,
@@ -91,6 +92,14 @@ export type RecentPermissionRejection = {
 export type PermissionState = {
   rules: PermissionRule[];
   recentDenied: RecentPermissionRejection[];
+};
+
+export type SolutionCompletenessStatus = {
+  triggered: boolean;
+  triggerReason: "none" | "user_request" | "repeated_denial";
+  classificationRequired: boolean;
+  checklist: string[];
+  lastWarning?: string;
 };
 
 export type PlanProposal = {
@@ -272,6 +281,7 @@ export type HandoffPacket = {
   budgetUsage: string;
   createdAt: string;
   generatedBy: string;
+  solutionCompleteness?: SolutionCompletenessStatus;
 };
 
 export type AgentType = "explorer" | "worker" | "verifier" | "planner";
@@ -615,6 +625,7 @@ export type TuiContext = {
   pendingNaturalCommand?: PendingNaturalCommand;
   activeAbortController?: AbortController;
   recentlyMentionedFiles: string[];
+  solutionCompleteness: SolutionCompletenessStatus;
 };
 
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
@@ -862,6 +873,13 @@ export function createWorkflowState(config: LinghunConfig): WorkflowState {
       ]),
       workflow("release-note", "基于已验证变更生成发布说明", "low", false, ["corepack pnpm check"]),
       workflow("review", "只读审查 diff、风险和验证证据", "low", false, ["corepack pnpm test"]),
+      workflow(
+        "solution-completeness-check",
+        "先判断 single_issue/systemic_gap、影响面、P0/P1/P2、阶段边界和验证方式",
+        "low",
+        false,
+        ["focused Solution Completeness Gate test"],
+      ),
     ].sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
@@ -1212,6 +1230,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     imageResults: [],
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
+    solutionCompleteness: createSolutionCompletenessStatus(),
   };
   const gateway = new ModelGateway([
     new DeepSeekProvider({
@@ -3345,6 +3364,7 @@ function createHandoffPacket(
       "local validation only; no external provider calls; status bar does not show money",
     createdAt: new Date().toISOString(),
     generatedBy: "Linghun Phase 14 HandoffPacket",
+    solutionCompleteness: context.solutionCompleteness,
   };
 }
 
@@ -5416,14 +5436,7 @@ async function sendMessage(
     provider: getRuntimeStatusProvider(context),
   });
   const messages: ModelMessage[] = [
-    {
-      role: "system",
-      content: `${
-        context.language === "en-US"
-          ? "You are Linghun Phase 15 preflight Natural Command Bridge engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
-          : "你是 Linghun Phase 15 preflight Natural Command Bridge 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
-      }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`,
-    },
+    { role: "system", content: createModelSystemPrompt(text, context, runtimeStatus) },
     { role: "user", content: text },
   ];
 
@@ -5650,8 +5663,11 @@ async function executeModelToolUse(
     input: toolCall.input,
     createdAt: new Date().toISOString(),
   });
+  const progress = installToolProgressHandler(context, sessionId, toolCall.id, output);
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
+    progress.restore();
+    await Promise.all(progress.pending);
     await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
     await appendDerivedToolEvents(context, sessionId, toolName, result.output);
     const evidence = await recordToolEvidence(context, sessionId, toolName, result.output);
@@ -5674,6 +5690,8 @@ async function executeModelToolUse(
       evidenceId: evidence?.id,
     };
   } catch (error) {
+    progress.restore();
+    await Promise.all(progress.pending);
     const text = formatError(error, context.language);
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true);
     return { ok: false, tool: toolName, text };
@@ -5707,6 +5725,15 @@ async function appendToolResultEvent(
   });
 }
 
+export function createModelSystemPrompt(text: string, context: TuiContext, runtimeStatus: unknown): string {
+  const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
+  return `${
+    context.language === "en-US"
+      ? "You are Linghun Phase 15 preflight Natural Command Bridge engineering assistant. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
+      : "你是 Linghun Phase 15 preflight Natural Command Bridge 工程型中文助手。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+}
+
 function createEvidenceSummaryForModel(context: TuiContext): string {
   return JSON.stringify(
     context.evidence.slice(0, 5).map((item) => ({
@@ -5716,6 +5743,55 @@ function createEvidenceSummaryForModel(context: TuiContext): string {
       summary: truncateDisplay(item.summary.replace(/\s+/g, " "), 180),
     })),
   );
+}
+
+function createSolutionCompletenessStatus(): SolutionCompletenessStatus {
+  return {
+    triggered: false,
+    triggerReason: "none",
+    classificationRequired: false,
+    checklist: [],
+  };
+}
+
+function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
+  const userRequestedGate = /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|有没有漏|系统性|完整性|solution completeness/i.test(
+    text,
+  );
+  const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
+  if (!userRequestedGate && !repeatedDenial) {
+    context.solutionCompleteness = createSolutionCompletenessStatus();
+    return "";
+  }
+
+  const triggerReason = userRequestedGate ? "user_request" : "repeated_denial";
+  const warning = [
+    "SYSTEMIC_GAP_WARNING:",
+    triggerReason === "user_request"
+      ? "用户明确要求成品级/不要缝补/先对照成熟参考/检查遗漏。"
+      : "最近同类权限拒绝反复出现。",
+    "回答或修复前必须先判断 single_issue / systemic_gap。",
+    "必须列出：影响面、P0/P1/P2、阶段边界、验证方式。",
+    "若属于当前阶段外内容，只登记风险，不要扩大实现范围。",
+  ].join(" ");
+  context.solutionCompleteness = {
+    triggered: true,
+    triggerReason,
+    classificationRequired: true,
+    checklist: ["single_issue/systemic_gap", "影响面", "P0/P1/P2", "阶段边界", "验证方式"],
+    lastWarning: warning,
+  };
+  return warning;
+}
+
+function hasRepeatedPermissionDenial(recentDenied: RecentPermissionRejection[]): boolean {
+  const latest = recentDenied.slice(0, 5);
+  const counts = new Map<string, number>();
+  for (const item of latest) {
+    const key = `${item.toolName}:${item.mode}:${item.reason}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.values()].some((count) => count >= 3);
 }
 
 function rememberToolFiles(
@@ -6219,7 +6295,14 @@ async function handleToolCommand(
       input,
       createdAt: new Date().toISOString(),
     });
-    const result = await runTool(name, input, context.tools);
+    const progress = installToolProgressHandler(context, sessionId, callId, output, task);
+    let result: Awaited<ReturnType<typeof runTool>>;
+    try {
+      result = await runTool(name, input, context.tools);
+    } finally {
+      progress.restore();
+      await Promise.all(progress.pending);
+    }
     if (task) {
       task.status = "completed";
       task.result = "pass";
@@ -6697,6 +6780,47 @@ async function appendBackgroundTaskEvent(
     task,
     createdAt: new Date().toISOString(),
   });
+}
+
+function installToolProgressHandler(
+  context: TuiContext,
+  sessionId: string,
+  callId: string,
+  output: Writable,
+  task?: BackgroundTaskState,
+): { pending: Promise<void>[]; restore: () => void } {
+  const previous = context.tools.onProgress;
+  const pending: Promise<void>[] = [];
+  context.tools.onProgress = (event: ToolProgressEvent) => {
+    if (event.toolName !== "Bash") {
+      void previous?.(event);
+      return;
+    }
+    const message = `[${event.stream}] ${event.text}`;
+    if (task) {
+      task.currentStep = event.stream === "stderr" ? "stderr output" : "streaming output";
+      task.updatedAt = new Date().toISOString();
+      task.lastOutputAt = task.updatedAt;
+      task.hasOutput = true;
+      task.progress = { completed: 0, total: 1, label: "streaming" };
+      pending.push(appendBackgroundTaskEvent(context, sessionId, task));
+    }
+    pending.push(
+      context.store.appendEvent(sessionId, {
+        type: "tool_call_delta",
+        id: callId,
+        message: truncateDisplay(message.replace(/\s+/g, " "), 500),
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    output.write(message);
+  };
+  return {
+    pending,
+    restore: () => {
+      context.tools.onProgress = previous;
+    },
+  };
 }
 
 function createEvidenceRecord(
