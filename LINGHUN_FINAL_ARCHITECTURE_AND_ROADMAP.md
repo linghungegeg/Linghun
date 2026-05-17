@@ -1024,7 +1024,7 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 00-14 主闭环已完成。
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
-- 下一步只能在用户明确确认后推进 Phase 15 pre-Beta P0 hardening；P0-1 到 P0-6 收口前不得进入 Phase 15 真实项目 Beta、Phase 15.5 或 Phase 16+。
+- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；下一步必须由用户明确确认：启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta；不得自动进入 Phase 15.5 或 Phase 16+。
 - P0 hardening 完成并输出报告后，必须先基于报告决定是否启动 Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure。该闭环用于确认 Phase 00-14 的实际使用体验、交互细节、建议/提权、错误/doctor/help、自然语言入口、cache/index/memory、多模型和 TUI 基础手感是否达到 CCB / CCB Dev Boost 公开成熟行为的核心体验等价；P0 或阻塞 P1 必须在 Beta 前修复，非阻塞 P2 才能登记到 Phase 15.5。
 - Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。

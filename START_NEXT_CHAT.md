@@ -98,7 +98,7 @@
 要求：
 - 只做当前阶段范围内的事情。
 - Phase 15 preflight 已完成，交付文档为 F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md。自然语言桥已覆盖中文和英文语义变体，例如“自动记忆是否打开 / is memory enabled”“帮我建立索引 / build the index”“缓存命中怎么样 / cache hit rate”“现在什么模型 / current model”“打开 bug-fix 工作流 / start bug-fix workflow”。所有 slash 命令都能被自然语言询问用途和风险，高风险命令只能解释、Start Gate 或进入权限审批。
-- 开始 Phase 15 真实项目 Beta 或 Phase 15.5 前，必须由用户明确确认；Interaction Maturity Fix 的“可恢复 Beta”旧结论已被后续 Full Interaction Maturity Audit 覆盖。当前下一步只能在用户明确确认后推进 Phase 15 pre-Beta P0 hardening；P0-1 到 P0-6 全量修复并验证前，不得恢复 Phase 15 真实项目 Beta。
+- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；Interaction Maturity Fix 的“可恢复 Beta”旧结论已被后续 Full Interaction Maturity Audit 与 P0 hardening 收口覆盖。下一步必须由用户明确确认：启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta；未确认前不得进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
 - 每个后续阶段完成后仍必须在 F:\Linghun\docs\delivery\ 下输出阶段交付文档；没有阶段交付文档，不视为阶段完成。
 - 每次改动后说明验证结果和剩余风险。
 - 自动工作默认只推进一个阶段；完成当前用户确认的阶段后必须停止，输出验证结果和 handoff packet。
