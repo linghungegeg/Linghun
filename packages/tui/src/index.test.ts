@@ -485,6 +485,77 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("permissionPipeline");
   });
 
+  it("covers Phase 15 pre-Beta natural readonly and action smoke inputs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "LINGHUN.md"), "# 项目规则\n\n- 只做最小必要改动。", "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "当前是什么模型\n",
+        "你现在用的哪个模型\n",
+        "模型 key 配好了吗\n",
+        "帮我给这个项目建立索引\n",
+        "索引已经建立了是吧\n",
+        "索引状态怎么样\n",
+        "项目规则是什么\n",
+        "本仓库规则是什么\n",
+        "读一下 LINGHUN.md\n",
+        "缓存状态怎么样\n",
+        "自动记忆是否打开\n",
+        "/model\n",
+        "/index status\n",
+        "/memory\n",
+        "直接 npm install\n",
+        "开启 bypass\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("精确命令：/index init fast");
+    expect(output.text).toContain("status: ready");
+    expect(output.text).toContain("项目规则：");
+    expect(output.text).toContain("只做最小必要改动");
+    expect(output.text).toContain("Cache status");
+    expect(output.text).toContain("Memory status");
+    expect(output.text).toContain("已阻止自然语言直通：Shell 命令");
+    expect(output.text).toContain("已阻止自然语言直通：权限模式");
+    expect(output.text).not.toContain("I can prepare this action");
+    expect(output.text).not.toContain("gateId");
+    expect(output.text).not.toContain("expiresAt");
+    expect(output.text).not.toContain("risk=");
+    expect(output.text).not.toContain("/memory：记忆");
+    expect(
+      (await readMockCalls(callsPath)).filter((tool) => tool === "index_repository"),
+    ).toHaveLength(0);
+  });
+
+  it("does not generate LINGHUN.md when natural project-rules read is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["项目规则是什么\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("项目规则文件不存在");
+    expect(output.text).toContain("/memory init");
+    expect(output.text).not.toContain("已生成基础 LINGHUN.md");
+    await expect(readFile(join(project, "LINGHUN.md"), "utf8")).rejects.toThrow();
+  });
+
   it("handles natural model doctor without leaking API keys", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });

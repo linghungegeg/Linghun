@@ -1437,6 +1437,8 @@ export type EvidenceRecord = {
   source: string
   createdAt: string
   supportsClaims: string[]
+  retrievedAt?: string
+  freshness?: 'current' | 'possibly_stale' | 'stale' | 'unknown'
 }
 
 export type EvidenceRef = {
@@ -1456,6 +1458,61 @@ export type EvidenceRef = {
 - Verification Runner 产生 `test_result`。
 - WebSearch / WebFetch 产生 `web_source`。
 - 用户粘贴的明确内容产生 `user_provided`。
+
+### 11.2.1 Web Evidence / Freshness Gate
+
+实时信息、第三方公开项目、provider 文档、模型价格、API 规则、开源 release、法律/安全更新和社区现状必须走 Freshness Gate。目标是允许联网取证，但禁止在未联网或本地证据过期时虚构“最新”结论。
+
+```ts
+export type FreshnessSensitiveTopic =
+  | 'latest_release'
+  | 'provider_docs'
+  | 'model_pricing'
+  | 'quota_policy'
+  | 'api_behavior'
+  | 'security_advisory'
+  | 'legal_or_policy'
+  | 'community_project_status'
+
+export type WebEvidenceDecision =
+  | { type: 'local_evidence_sufficient'; reason: string }
+  | { type: 'require_web_permission'; reason: string; preferredSources: string[] }
+  | { type: 'web_evidence_allowed'; preferredSources: string[] }
+  | { type: 'web_unavailable'; reason: string; fallback: 'answer_with_disclaimer' | 'ask_user' | 'stop' }
+```
+
+规则：
+
+- 用户问“最新、现在、当前外面、社区有没有、价格、版本、官方文档、release、API 是否支持”等问题时，默认判定为 freshness-sensitive。
+- 本地索引、旧交付文档、旧审计报告和模型记忆只能作为背景，不能支撑“最新”断言。
+- 未授权联网时，必须提示“这属于实时信息，本地证据可能过期，需要联网查询公开来源，是否继续？”并说明将优先查询哪些来源。
+- 已授权联网时，优先官方/项目源：official docs、release notes、GitHub repo、provider docs、标准文档；其次才是社区文章或二手资料。
+- 联网结果必须写入 `EvidenceRecord(kind='web_source')`，包含摘要、URL/source、`retrievedAt`、freshness 状态和支持的 claims。
+- 最终回答必须给来源链接、查询时间和保守结论；不得把搜索摘要包装成确定事实。
+- 联网失败、权限拒绝、来源冲突、页面不可访问或结果不可信时，必须降级：说明本地证据不足、联网失败/未授权、可执行下一步；不得卡死或编造。
+- Web evidence 不得把完整网页、完整 PDF、完整 release 列表或大结果塞进 prompt；只注入短摘要、链接和必要证据 id。
+- 插件、workflow、hook、agent、remote channel 触发联网仍必须走 Start Gate 或权限管道；Web Evidence 不能绕过工具权限。
+
+示例：
+
+```text
+用户问：OpenCode 最新版本改了什么？
+Linghun：这属于实时信息，本地索引可能过期。需要联网查询官方 release / repo，是否继续？
+```
+
+已授权联网后：
+
+```text
+已查询官方 release / repo。结论：...
+来源：...
+查询时间：...
+```
+
+联网不可用时：
+
+```text
+本地资料不足以确认最新版本；当前未联网/联网失败。可以先基于本地文档讨论已知设计，或授权联网后再核验。
+```
 
 ### 11.3 Evidence Gate
 
@@ -1483,7 +1540,7 @@ export type EvidenceGateDecision =
 - 没读文件就断言代码实现。
 - 没查索引就断言调用链。
 - 没跑验证就声称验证通过。
-- 没联网就声称最新版本或最新规则。
+- 没联网或没有新鲜 web evidence 就声称最新版本、最新规则、当前价格、当前 API 支持状态或社区现状。
 - 当前模型无视觉能力却声称看懂图片。
 
 允许：
@@ -2239,6 +2296,67 @@ Phase 15.5 的 TUI 验收必须至少覆盖：
 - long-running hints：index、verification、agent、cross-review、build/test。
 - diagnostics：model doctor、MCP doctor、plugin/skill/hook/workflow doctor。
 - rendering：窄宽度、中文路径、长模型名、长状态栏、连续工具输出和后台刷新。
+
+## 17.3 Provider integration maturity 规格
+
+Phase 15.5 必须把模型接入成熟度作为 release gate。Phase 13 只证明多模型角色路由闭环；Phase 15.5 要证明不同官方 provider、OpenAI-compatible 中转站、Claude-compatible 中转站和自定义服务在能力、usage/cache、quota、错误、fallback 和配置体验上不会误导用户。
+
+```ts
+export type ProviderProfileKind =
+  | 'openai_native'
+  | 'anthropic_native'
+  | 'deepseek_native'
+  | 'openai_compatible_gateway'
+  | 'claude_compatible_gateway'
+  | 'custom_http'
+  | 'unknown'
+
+export type ProviderCapabilitySource =
+  | 'reported'
+  | 'configured'
+  | 'profile_default'
+  | 'estimated'
+  | 'unknown'
+
+export type ProviderUsageSource =
+  | 'reported'
+  | 'zero_reported'
+  | 'missing'
+  | 'estimated'
+  | 'unknown'
+
+export type ProviderQuotaSource =
+  | 'official_reported'
+  | 'oauth_reported'
+  | 'gateway_reported'
+  | 'template_reported'
+  | 'custom_script'
+  | 'estimated'
+  | 'unknown'
+```
+
+要求：
+
+- Adapter 成品级验收不能只看“能返回文本”；必须验证统一事件转换、streaming/非流式降级、tool calling 能力声明、usage 映射、prompt cache 字段映射、model metadata、错误归一化、配置诊断和 focused tests。
+- Provider profile 必须明确来源。第三方中转站即使兼容 OpenAI 或 Claude 接口，也只能标记为 gateway/custom，不得伪装成官方 native provider。
+- Capability doctor 必须覆盖 tool calling、vision、image、reasoning effort、prompt cache、JSON schema、max context、max output、streaming usage、quota query；能力缺失时输出 `OK/WARN/BLOCK` 和下一步建议。
+- Role route doctor 必须按 planner、executor、reviewer、verifier、summarizer、vision、image 检查能力需求、fallback、预算和 stop 条件；不能只检查模型名是否存在。
+- Usage/cache 字段必须按 source 标记。`cache_creation_tokens=0` 只能解释为 `zero_reported`，不得说成零成本或缓存一定新鲜。
+- Quota/balance 查询必须区分官方 OAuth/订阅、gateway reported、自定义脚本、模板查询和 unknown；不同单位不能混成一个余额数字。
+- Provider error classifier 必须把 key 缺失、baseUrl 错误、model 不存在、quota 不足、rate limit、tool 不支持、gateway 格式异常、网络超时、HTML 错误页转成可操作 doctor 输出。
+- Fallback/retry 必须可审计：记录原 provider/model、fallback provider/model、触发原因、是否保留工具能力、是否影响 usage/cache/quota；不得静默切模型。
+- 配置优先级必须明确：环境变量、本地 config、系统 keychain 或等价安全存储的读取顺序、脱敏展示和删除/回滚方式必须可诊断。
+- API key、token、原始账单、完整 prompt、完整 transcript、私有 baseUrl 参数不得进入 transcript、日志、debug bundle 或交付文档。
+
+Phase 15.5 的模型接入验收必须至少覆盖：
+
+- OpenAI-compatible gateway、DeepSeek、OpenAI native、Anthropic/Claude native 或 mock native adapter 的 doctor 路径；未实现的 native adapter 必须明确 pending/unsupported。
+- role route doctor 的 OK/WARN/BLOCK 分支。
+- usage/cache 的 reported、zero_reported、missing、estimated、unknown 分支。
+- quota/balance 的 gateway_reported、custom_script、unknown 分支。
+- provider error classifier 的中英文输出。
+- fallback/retry 的 transcript、usage 和 handoff 审计记录。
+- key 脱敏、baseUrl/model 配置错误和配置回滚路径。
 
 ## 18. Skills / Workflow 规格
 

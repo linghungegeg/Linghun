@@ -45,7 +45,7 @@ export type NaturalIntent = {
   reason: string;
   candidates: CommandCapability[];
   language: Language;
-  inquiry: "status" | "doctor" | "usage" | "risk" | "howto" | "execute";
+  inquiry: "status" | "doctor" | "read" | "usage" | "risk" | "howto" | "execute";
   riskHandler: CommandRisk | "model" | "clarify";
 };
 
@@ -568,13 +568,22 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "read",
     "/read",
-    ["read", "读取", "看文件", "open file"],
+    [
+      "read",
+      "读取",
+      "看文件",
+      "open file",
+      "项目规则",
+      "本仓库规则",
+      "linghun.md",
+      "project rules",
+    ],
     "读取文件",
     "Read file",
     "读取文件内容。",
     "Reads file content.",
-    "自然语言询问怎么看文件时解释；执行走只读/确认路径。",
-    "Explain file reading; execution follows read-only/confirmation path.",
+    "自然语言询问怎么看文件时解释；项目规则读取走只读路径。",
+    "Explain file reading; project-rules reads use a read-only path.",
     "tool_permission",
     { entersPermissionPipeline: true },
   ),
@@ -815,23 +824,19 @@ export function routeNaturalIntent(
       riskHandler: "model",
     };
   }
-  if (dangerous && isDangerousNaturalTarget(capability.id)) {
+  if (inquiry === "status" && isFirstBatchStatusCapability(capability.id)) {
     return createIntent(
-      "permission_pipeline",
+      "execute_readonly",
       capability,
-      0.92,
-      dangerous,
+      Math.min(1, Math.max(0.7, topScore / 5)),
+      "readonly status",
       candidates,
       language,
-      "execute",
+      inquiry,
       normalized,
     );
   }
-  if (
-    inquiry === "doctor" &&
-    isFirstBatchStatusCapability(capability.id) &&
-    !isActionRequest(normalized)
-  ) {
+  if (inquiry === "doctor" && isFirstBatchStatusCapability(capability.id)) {
     return createIntent(
       "execute_readonly",
       capability,
@@ -843,19 +848,27 @@ export function routeNaturalIntent(
       normalized,
     );
   }
-  if (
-    inquiry === "status" &&
-    isFirstBatchStatusCapability(capability.id) &&
-    !isActionRequest(normalized)
-  ) {
+  if (inquiry === "read" && capability.id === "read") {
     return createIntent(
       "execute_readonly",
       capability,
-      Math.min(1, Math.max(0.7, topScore / 5)),
-      "readonly status",
+      Math.min(1, Math.max(0.75, topScore / 5)),
+      "readonly project rules",
       candidates,
       language,
       inquiry,
+      normalized,
+    );
+  }
+  if (dangerous && isDangerousNaturalTarget(capability.id)) {
+    return createIntent(
+      "permission_pipeline",
+      capability,
+      0.92,
+      dangerous,
+      candidates,
+      language,
+      "execute",
       normalized,
     );
   }
@@ -877,6 +890,18 @@ export function routeNaturalIntent(
       capability,
       topScore / 6,
       "multiple close candidates",
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
+  if (!explicit && isAmbiguousCapabilityList(normalized, candidates)) {
+    return createIntent(
+      "ask_clarify",
+      capability,
+      Math.min(0.8, topScore / 6),
+      "ambiguous capability list",
       candidates,
       language,
       inquiry,
@@ -934,15 +959,25 @@ export function routeNaturalIntent(
 }
 
 export function formatNaturalClarification(intent: NaturalIntent): string {
-  const lines =
-    intent.language === "en-US"
-      ? ["I found multiple or low-confidence command candidates. Please choose one explicitly:"]
-      : ["我找到了多个或低置信度候选。请明确选择一个："];
-  for (const item of intent.candidates.slice(0, 4)) {
+  const zh = intent.language === "zh-CN";
+  const lines = zh
+    ? ["我不确定你想做哪件事。请选择一个自然语言方向："]
+    : ["I am not sure which action you want. Please choose one natural-language direction:"];
+  for (const item of intent.candidates.slice(0, 3)) {
+    const title = zh ? item.titleZh : item.titleEn;
+    const when = zh ? item.whenToUseZh : item.whenToUseEn;
+    const risk = formatHumanRisk(item, intent.language);
     lines.push(
-      `- ${item.slash}: ${intent.language === "en-US" ? item.titleEn : item.titleZh} · risk=${item.risk}`,
+      zh
+        ? `- 查看/处理「${title}」：${when} 风险：${risk}`
+        : `- View/handle ${title}: ${when} Risk: ${risk}`,
     );
   }
+  lines.push(
+    zh
+      ? "如果你只是想聊天或说明需求，可以直接补充一句目标；我不会猜测执行。"
+      : "If you only want to chat or describe a task, add the goal in plain language; I will not guess and execute.",
+  );
   return lines.join("\n");
 }
 
@@ -1230,7 +1265,13 @@ function normalizeIntentText(text: string): string {
 }
 
 function detectInquiry(text: string): NaturalIntent["inquiry"] {
-  if (/风险|危险|safe|risk|danger/u.test(text)) return "risk";
+  if (
+    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|ready/u.test(
+      text,
+    )
+  ) {
+    return "status";
+  }
   if (
     /key|api key|configured|connected|working|doctor|诊断|配好了吗|配置正常|配置.*问题|为什么不能用|不能用|连上了吗|可用吗/u.test(
       text,
@@ -1238,17 +1279,16 @@ function detectInquiry(text: string): NaturalIntent["inquiry"] {
   ) {
     return "doctor";
   }
+  if (isProjectRulesReadRequest(text)) return "read";
+  if (/风险|危险|safe|risk|danger/u.test(text)) return "risk";
   if (/怎么|如何|用途|干什么|what does|how do i|how to|what is/u.test(text)) return "usage";
-  if (
-    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model/u.test(
-      text,
-    )
-  ) {
-    return "status";
-  }
   return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force/u.test(text)
     ? "execute"
     : "howto";
+}
+
+function isProjectRulesReadRequest(text: string): boolean {
+  return /项目规则|本仓库规则|linghun\.md|project rules/u.test(text);
 }
 
 function detectDangerousNaturalIntent(text: string): string | null {
@@ -1298,7 +1338,8 @@ function isFirstBatchStatusCapability(id: string): boolean {
 }
 
 function isActionRequest(text: string): boolean {
-  return /帮我|请|直接|打开|建立|build|start|create|run|enable|accept|force|切换|switch|set/u.test(
+  if (/好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(text)) return false;
+  return /帮我|请|直接|打开|建立|恢复|build|start|create|run|enable|accept|force|切换|switch|set|resume/u.test(
     text,
   );
 }
@@ -1324,9 +1365,11 @@ function scoreCapability(
   if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
     score += 3;
   if (capability.id === "cache" && /命中|hit rate|cache/u.test(normalized)) score += 3;
-  if (capability.id === "memory" && /记忆|memory|linghun.md/u.test(normalized)) score += 3;
+  if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
   if (capability.id === "index" && /索引|index|搜索代码|search code|architecture/u.test(normalized))
     score += 3;
+  if (capability.id === "read" && /项目规则|本仓库规则|linghun\.md|project rules/u.test(normalized))
+    score += 8;
   if (
     capability.id === "model" &&
     /模型|model|provider|claude|deepseek|gpt|route|路由/u.test(normalized)
@@ -1379,6 +1422,25 @@ function isUsageOrRiskQuestion(text: string, inquiry: NaturalIntent["inquiry"]):
   );
 }
 
+function isAmbiguousCapabilityList(text: string, candidates: CommandCapability[]): boolean {
+  const inquiry = detectInquiry(text);
+  if (
+    candidates.length < 2 ||
+    inquiry === "status" ||
+    inquiry === "doctor" ||
+    inquiry === "read" ||
+    isActionRequest(text) ||
+    isUsageOrRiskQuestion(text, inquiry) ||
+    !/^[\u4e00-\u9fff]{4,}$/u.test(text)
+  ) {
+    return false;
+  }
+  const matched = candidates.filter((item) =>
+    item.aliases.some((alias) => alias.length >= 2 && text.includes(alias.toLowerCase())),
+  );
+  return matched.length >= 2;
+}
+
 function isStatusLike(text: string, capability: CommandCapability): boolean {
   return (
     capability.readonly ||
@@ -1396,6 +1458,9 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
       : "/cache status";
   }
   if (capability.id === "index") {
+    if (/好了没|好了么|已经.*是吧|已经.*了吗|ready|status|状态/u.test(normalized)) {
+      return "/index status";
+    }
     if (/build|建立|init/u.test(normalized)) return "/index init fast";
     if (/refresh|刷新/u.test(normalized)) return "/index refresh";
     if (/architecture|架构/u.test(normalized)) return "/index architecture";
@@ -1433,6 +1498,8 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     return purpose ? `/branch ${purpose}` : "/branch";
   }
   if (capability.id === "bash" && /npm install/u.test(normalized)) return "/bash npm install";
+  if (capability.id === "read" && /项目规则|本仓库规则|linghun\.md|project rules/u.test(normalized))
+    return "/read LINGHUN.md";
   return capability.slash;
 }
 

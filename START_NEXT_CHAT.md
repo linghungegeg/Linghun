@@ -60,8 +60,9 @@
 - Phase 15 Natural Intent Contract 成品级手感硬化已完成：自然语言桥已区分 status_query、doctor_query、usage_help、safe_action_request、config_change_request、dangerous_action_request 和 ambiguous_request，避免“现在是什么模型”等状态查询退化成命令用法提示；这属于 Phase 15 preflight 收口，不是新阶段。
 - Phase 15 pre-Beta CCB Interaction Parity Audit v2 已完成并登记，且 Phase 15 pre-Beta Interaction P1 cleanup 已完成：`recordModelUsage`、`/stats`、`/usage` fallback、handoff packet 不再伪造 `deepseek`，改用真实 provider 或 `unknown`；Start Gate 默认主输出已改为 human-first decision prompt，不暴露 gateId、expiresAt、raw risk flags、writesConfig、permissionPipeline、logPath 等内部字段，同时保留 exact command 唯一确认路径和权限管道。
 - Phase 15 pre-Beta CCB Full Parity Audit 已完成：`docs/audit/phase-15-pre-beta-ccb-full-parity-audit.md`。覆盖 20 个审计面、CCB 主链路证据、Linghun 主链路证据、完整差距矩阵、P0/P1/P2 清单。结论：不阻塞 Phase 15 Beta，3 项 P1（交互工程化/else-if 链 registry map 化/CCB feedback 模式缺失）放 Phase 15.5。
+- Phase 15 pre-Beta Interaction Maturity Fix 已完成：状态/完成度查询优先只读 RuntimeStatus 或等价 slash handler；`索引已经建立了是吧` / `is the index ready` 不再触发 `/index init fast`；只读能力不进入 Start Gate；项目规则自然语言入口读取当前项目 `LINGHUN.md`，缺失时只提示 `/memory init`；zh-CN 默认输出不混入英文 Gate 模板；低置信度澄清改为自然语言方向和风险摘要。
 
-当前任务：Phase 15 preflight / pre-Beta cleanup / Natural Intent Contract hardening / Phase 15 pre-Beta Interaction P1 cleanup 已完成。下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening；不得自动进入 Phase 16+。
+当前任务：Phase 15 preflight / pre-Beta cleanup / Natural Intent Contract hardening / Phase 15 pre-Beta Interaction P1 cleanup / Interaction Maturity Fix 已完成。下一步可在用户明确确认后恢复进入 Phase 15 真实项目 Beta；不得自动进入 Phase 15.5 或 Phase 16+。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。
@@ -71,8 +72,10 @@
 - Natural Intent Contract 已写入规格和 Phase 15 交付文档：同一 capability 下必须继续区分状态查询、doctor 查询、用法/风险询问、安全动作、配置变更、高风险动作和模糊请求。例如“现在是什么模型”必须返回真实 provider/model 状态和角色路由短摘要，不得只返回 `/model route` 用法；“模型 key 配好了吗”必须进入 doctor 诊断；“/model 怎么用”才返回用法说明。
 - Phase 15 preflight 交互审查后的成品级补强要求已写入蓝图/规格/路线图：进入 Phase 15 真实项目 Beta 前，必须先闭环 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明和测试矩阵；这属于 Phase 15 preflight hardening，不是 Phase 16+。
 - 权限/提权交互必须显示 exact action、risk、scope、reason、rollback 和 choices；Start Gate 不替代权限审批。`bypass` 必须本地显式 opt-in，`auto` 必须有可用 gate/classifier，Plan approval 必须区分手动确认编辑、acceptEdits 边界和拒绝反馈。
-- Phase 15 后新增 Phase 15.5：双模型交叉审查、终端 TUI 成品级收口与开源前 hardening。GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续。
+- Phase 15 后新增 Phase 15.5：双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening。GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续。
 - Phase 15.5 已补 release readiness / open-source readiness：安装、CLI 入口、Windows 大小写 shim、doctor、keychain/密钥脱敏、debug bundle、配置 schema、升级回滚、文档同步和 discovery-before-execute 工具 guard 都要检查；CCB / Claude Code Best v2.4.3 只作为公开行为参考，吸收“未发现/未加载 schema 的延迟工具不得执行”的 runtime guard，不复制实现。
+- Phase 15.5 已补模型接入成熟度收口：provider adapter 不能只验证返回文本，必须覆盖 native/gateway/custom profile、capability doctor、role route doctor、usage/cache 来源、quota/balance 来源、provider error classifier、fallback/retry 审计、配置优先级和 key 脱敏；OpenAI-compatible / Claude-compatible 中转站只能降低接入门槛，不能假装能力、usage、cache、quota 和 tool calling 与官方 native provider 完全等价。
+- Phase 15.5 已补联网取证成熟度收口：反幻觉不是禁止联网，而是本地证据优先、实时信息触发 Freshness Gate、未授权联网先询问、已授权联网优先官方来源、结果写入 `web_source` evidence、失败降级；未联网或无新鲜 web evidence 不得声称最新版本、当前价格、当前 API 行为或社区现状。
 - Phase 15.5 已补终端 TUI 成品级收口：基础终端美化、首屏、状态栏、help 分组、Start Gate、权限/提权、Plan/auto/bypass 说明、错误 doctor、长任务轻提示、primary/details/debug 输出层级、自然语言状态查询、中英文一致性和窄终端渲染必须在 Phase 15.5 收口；Phase 18 只做桌面端壳、IPC/API 和 core 复用验证，不负责补基础终端交互。
 - Phase 15 已补 provider quota / balance 查询设计：参考 CC Switch usage query 的公开行为和边界，区分 local_limit、provider_usage、provider_quota、billing_reconciled；官方订阅可自动查的才标记 official/oauth，第三方中转站和私有服务走 template/custom_script，查不到标记 unknown。
 - Phase 15 命中率口径已改成目标观察区间：92%-96% 是稳定样本目标，不是任意模型/项目/provider 的硬承诺；硬验收是 usage 来源、公式、endpoint 拆分、break-cache 诊断和账单/usage 抽样对账。
@@ -88,11 +91,11 @@
 要求：
 - 只做当前阶段范围内的事情。
 - Phase 15 preflight 已完成，交付文档为 F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md。自然语言桥已覆盖中文和英文语义变体，例如“自动记忆是否打开 / is memory enabled”“帮我建立索引 / build the index”“缓存命中怎么样 / cache hit rate”“现在什么模型 / current model”“打开 bug-fix 工作流 / start bug-fix workflow”。所有 slash 命令都能被自然语言询问用途和风险，高风险命令只能解释、Start Gate 或进入权限审批。
-- 开始 Phase 15 真实项目 Beta 或 Phase 15.5 前，必须由用户明确确认。
+- 开始 Phase 15 真实项目 Beta 或 Phase 15.5 前，必须由用户明确确认；Interaction Maturity Fix 已完成并通过 focused tests / TUI smoke，下一步只能在用户明确确认后恢复 Phase 15 真实项目 Beta。
 - 每个后续阶段完成后仍必须在 F:\Linghun\docs\delivery\ 下输出阶段交付文档；没有阶段交付文档，不视为阶段完成。
 - 每次改动后说明验证结果和剩余风险。
 - 自动工作默认只推进一个阶段；完成当前用户确认的阶段后必须停止，输出验证结果和 handoff packet。
-- Phase 15 完成后不得直接进入 Phase 16，必须先执行 Phase 15.5 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening，除非用户明确决定跳过并记录风险。
+- Phase 15 完成后不得直接进入 Phase 16，必须先执行 Phase 15.5 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening，除非用户明确决定跳过并记录风险。
 - 如果用户只是讨论、评估或问方案，必须先通过 Start Gate 询问是否开始执行。
 - CLI 主命令统一为 linghun；Windows 下必须兼容 Linghun 大小写入口。
 ```

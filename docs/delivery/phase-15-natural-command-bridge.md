@@ -119,7 +119,98 @@ force refresh index
 | 帮我建立索引、初始化索引 | `index.init` + `safe_action_request` | 进入 Start Gate，并保留大文件安全门；不得直接执行。 |
 | 直接开启 bypass、直接 npm install、接受所有记忆 | 对应能力 + `dangerous_action_request` | 阻断或进入权限管道，显示风险、scope、reason 和恢复方式。 |
 
-本轮完成后，才建议进入 Phase 15 真实项目 Beta；否则真实项目测试会被“能识别命令但手感仍像命令壳”的问题污染。
+本轮完成后，仍需通过真实 TUI smoke 复检；若自然语言状态查询、只读查看、项目规则读取、Start Gate 和 i18n 仍出现失真，不得进入 Phase 15 真实项目 Beta。否则真实项目测试会被“能识别命令但手感仍像命令壳”的问题污染。
+
+## Phase 15 pre-Beta Interaction Maturity Fix（done）
+
+本轮性质：Phase 15 Beta 前置阻塞修复，不是新阶段，不进入 Phase 15 Beta，也不进入 Phase 15.5。目标是修复真实 TUI smoke 已暴露的自然语言交互失真，确保 Phase 15 真实项目测试是在成品级自然语言入口下进行，而不是在 demo 级命令桥上测出失真数据。
+
+### 触发原因
+
+真实 `F:\linghun-ceshi` TUI smoke 已暴露以下问题：
+
+- `索引已经建立了是吧` 在 index 已经 `ready` 后仍误触发 `/index init fast` Start Gate；状态查询被动作词“建立”污染。
+- `/model`、模型状态等只读查询曾被要求 Start Gate；只读能力和动作能力边界不稳。
+- `读一下 LINGHUN.md` 被错误映射到 `/memory`，而不是读取当前项目规则文件。
+- `项目规则是什么` 让模型泛泛解释规则，而不是优先读取本地 `LINGHUN.md` 或项目规则摘要。
+- zh-CN 环境下出现英文 Gate 文案，例如 `I can prepare this action`；中英文交互口径不一致。
+- 低置信度澄清仍偏 slash command 列表，而不是面向用户的自然语言选项。
+
+这些问题会直接影响 Phase 15 Beta 的实测真实性：用户会被迫学习和输入更多 slash command，测试结果会混入交互入口失真，而不是客观验证编码能力、缓存、索引、记忆、多模型和权限底座。
+
+### 必须修复的底层契约
+
+- Intent Frame 优先级必须固定为：`status_query > doctor_query > read_query > safe_action_request > dangerous_action_request > ambiguous_request > chat_task`。
+- 状态/完成度查询必须优先读取本地 `RuntimeStatus`、storage 状态或等价只读 command result；不得因为句子里出现动作词就触发动作 Start Gate。
+- 只读能力不得 Start Gate：`/model`、`/model route doctor`、`/index status`、`/cache status`、`/break-cache status`、`/memory`、`/memory storage`、`/memory review`、`/help` 和读取项目规则文件必须直接只读执行或回答。
+- 项目规则自然语言入口必须成品化：`项目规则是什么`、`本仓库规则是什么`、`读一下 LINGHUN.md`、`read project rules` 必须读取或摘要当前项目 `LINGHUN.md`；文件不存在时只提示可运行 `/memory init`，不得自动生成。
+- Start Gate 只用于真实动作：建立/刷新索引、生成规则模板、写入记忆、启用插件、运行 workflow、改配置、写文件、Bash、联网、force、bypass 等。
+- 默认输出必须是 human-first primary 信息；`gateId`、`expiresAt`、raw risk flags、`logPath`、hash、schema 等内部字段不得进入默认主输出。
+- 当前语言为 zh-CN 时，Gate、clarify、doctor、错误和确认文案必须中文；不得出现英文默认模板。
+- 模糊请求必须给 2-3 个自然语言选项和风险摘要，不得只甩 slash command 候选。
+
+### 必须覆盖的 focused tests / TUI smoke 句子
+
+- `当前是什么模型`
+- `你现在用的哪个模型`
+- `模型 key 配好了吗`
+- `帮我给这个项目建立索引`
+- `索引已经建立了是吧`
+- `索引状态怎么样`
+- `项目规则是什么`
+- `本仓库规则是什么`
+- `读一下 LINGHUN.md`
+- `缓存状态怎么样`
+- `自动记忆是否打开`
+- `/model`
+- `/index status`
+- `/memory`
+- `直接 npm install`
+- `开启 bypass`
+
+### 修复完成标准
+
+- 上述真实输入全部有 focused tests 或 TUI smoke 证据。
+- 状态查询不会误开动作 Start Gate。
+- 只读查询不会进入 Start Gate。
+- 项目规则读取不会误入 `/memory` 泛化解释。
+- zh-CN 环境默认输出不混入英文 Gate 模板。
+- `git diff` 中代码改动只限自然语言交互编排、只读路由、i18n 文案和 focused tests；不得借机进入 Phase 15.5 大美化、registry dispatch 大重构、桌面端或 Phase 16+。
+- 验证通过后，才允许恢复进入 Phase 15 真实项目 Beta。
+
+### Interaction Maturity Fix 完成记录
+
+本轮已完成 Phase 15 Beta 前置阻塞修复；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+已修复/确认：
+
+- Intent Frame 优先级收口为状态查询、诊断查询和项目规则读取优先于动作请求；`索引已经建立了是吧`、`索引状态怎么样`、`is the index ready` 均走 `/index status` 只读路径，不触发 `/index init fast`。
+- 只读能力保持直读：`/model`、自然语言模型状态、`/model route doctor`、`/index status`、`/cache status`、`/memory` 均不进入 Start Gate。
+- 项目规则自然语言入口复用 `read` capability 与现有 `LINGHUN.md` memory 状态：`项目规则是什么`、`本仓库规则是什么`、`读一下 LINGHUN.md`、`read project rules` 读取当前项目 `LINGHUN.md`；文件缺失时只提示 `/memory init`，不自动生成。
+- `LINGHUN.md` 不再提升 `memory` capability 得分，避免项目规则读取误映射到 `/memory`。
+- 低置信度澄清改为 2-3 个自然语言方向和风险摘要，不再只甩 slash command 候选。
+- zh-CN TUI smoke 覆盖 Start Gate、只读状态、项目规则读取和危险请求阻断，默认输出不包含 `I can prepare this action`、`gateId`、`expiresAt`、raw `risk=` 等内部字段。
+
+Focused tests / TUI smoke 覆盖：
+
+- `当前是什么模型`
+- `你现在用的哪个模型`
+- `模型 key 配好了吗`
+- `帮我给这个项目建立索引`
+- `索引已经建立了是吧`
+- `索引状态怎么样`
+- `is the index ready`
+- `项目规则是什么`
+- `本仓库规则是什么`
+- `读一下 LINGHUN.md`
+- `read project rules`
+- `缓存状态怎么样`
+- `自动记忆是否打开`
+- `/model`
+- `/index status`
+- `/memory`
+- `直接 npm install`
+- `开启 bypass`
 
 ### Natural Intent Contract hardening 完成记录
 
@@ -310,6 +401,18 @@ corepack pnpm exec linghun --help
 - `corepack pnpm exec linghun --help`：通过，输出 Phase 15 preflight CLI help，并说明 TUI Natural Command Bridge。
 - TUI stdin smoke：通过，覆盖“帮我给这个项目建立索引”进入 human-first Start Gate；`确认` / `yes` 不能执行；`/index init fast` 才进入等价命令路径并被索引安全门阻止未排除大文件风险；“直接 npm install”被人话风险阻断且不暴露 raw flags；`/usage`、`/stats`、`/memory`、`/model route doctor`、`/exit` 可用。
 
+### Phase 15 pre-Beta Interaction Maturity Fix 验证结果
+
+已执行：
+
+- `corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：通过，11 个测试文件、196 个测试通过。
+- `corepack pnpm test`：通过，11 个测试文件、196 个测试通过。
+- `corepack pnpm typecheck`：通过。
+- `corepack pnpm check`：通过，43 个文件检查通过。首次运行发现本轮新增测试/路由格式差异，按 formatter 建议做最小格式修正后通过；最终重跑通过。
+- `corepack pnpm build`：通过，workspace packages 构建通过。
+- `corepack pnpm exec linghun --help`：通过，输出 Linghun 0.1.0 help。
+- TUI stdin smoke：通过，覆盖模型状态、模型 doctor、索引 build Start Gate、索引 ready/status 只读、项目规则读取、缓存状态、自动记忆状态、`/model`、`/index status`、`/memory`、`直接 npm install` 阻断、`开启 bypass` 阻断；默认输出不包含 `I can prepare this action`、`gateId`、`expiresAt` 或 raw `risk=`。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。
@@ -336,7 +439,7 @@ DeepSeek V4 Pro 报告裁决：
 - Catalog/dispatch registry-map 重构：不在本轮做；当前只保留 drift detection + coverage test。完整同源 registry/dispatch 重构属于 Phase 15.5 或后续架构 cleanup，不能混入 pre-Beta 小修。
 - command-level permission framework、permission modal、allow once/always、插件市场、远程安装、完整 hook 执行、长期任务、Remote Channels、桌面端：不在本轮做，也不阻塞 Phase 15 Beta；当前安全边界仍由 Start Gate、exact command、drift detection、权限管道和 focused tests 兜底。
 
-Phase 15 Beta 仍需用户明确确认后才能开始。
+Phase 15 Beta 的前置 Interaction Maturity Fix 已完成并通过复检；后续仍必须由用户明确确认后才能开始 Phase 15 真实项目 Beta。
 
 ### Phase 15 pre-Beta Interaction P1 cleanup
 
@@ -453,37 +556,31 @@ evidence:
   - "packages/tui/src/index.ts"
   - "docs/delivery/phase-15-natural-command-bridge.md"
 validation_completed:
-  - command: "corepack pnpm exec tsc --noEmit --pretty false --project packages/tui/tsconfig.json"
-    result: "pass"
   - command: "corepack pnpm test -- --run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts"
-    result: "pass"
+    result: "pass; 11 test files, 196 tests"
   - command: "corepack pnpm test"
-    result: "pass; 11 test files, 154 tests"
+    result: "pass; 11 test files, 196 tests"
   - command: "corepack pnpm typecheck"
     result: "pass"
-  - command: "corepack pnpm build"
-    result: "pass; workspace 7 packages"
   - command: "corepack pnpm check"
     result: "pass; 43 files"
-  - command: "corepack pnpm exec linghun --version"
-    result: "pass; 0.1.0"
-  - command: "corepack pnpm exec Linghun --version"
-    result: "pass; 0.1.0"
+  - command: "corepack pnpm build"
+    result: "pass; workspace packages built"
   - command: "corepack pnpm exec linghun --help"
-    result: "pass; Phase 15 preflight help"
-  - command: "TUI stdin bilingual natural-command smoke"
-    result: "pass; first/second/third batch samples covered, high-risk samples blocked"
+    result: "pass; Linghun 0.1.0 help"
+  - command: "TUI stdin natural-command smoke"
+    result: "pass; model status, model doctor, index Start Gate/status, project rules read, cache/memory status, dangerous request blocks"
 verification_agent:
   verdict: "PASS"
   spot_check:
-    - "corepack pnpm test: pass; 11 test files, 154 tests"
-    - "corepack pnpm build: pass; workspace 7 packages"
+    - "corepack pnpm test: pass; 11 test files, 196 tests"
     - "corepack pnpm check: pass; 43 files"
+    - "corepack pnpm exec linghun --help: pass; Linghun 0.1.0 help"
 index_status:
   project: "F-Linghun"
   status: "ready"
-  nodes: 706
-  edges: 1371
+  nodes: 773
+  edges: 1510
 permission_mode: "default"
 model_provider: "claude-sonnet-4-6 in Claude Code session; Linghun runtime model unchanged"
 budget_notes: "No dependency install; no remote execution; no full transcript/memory/index injection."

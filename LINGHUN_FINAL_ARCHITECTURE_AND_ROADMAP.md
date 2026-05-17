@@ -317,7 +317,7 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 模型必须遵守：
 
 - 没读到文件，不说“代码一定是”。
-- 没联网，不说“最新版本是”。
+- 没联网或没有新鲜 web evidence，不说“最新版本是”“当前价格是”“社区现在是”。
 - 没运行验证，不说“已验证通过”。
 - 当前模型不支持视觉，就提示切换视觉模型。
 - 当前环境没有 MCP，就不要假装已查索引。
@@ -569,7 +569,7 @@ type LinghunEvent =
 
 业务层不能直接依赖 Anthropic 或 OpenAI 原始事件。
 
-Provider adapter 的成品级验收不能只看“能返回文本”。每个 adapter 都要补齐事件转换、streaming/非流式降级、tool calling 能力声明、usage 映射、prompt cache 字段映射、model metadata、capability doctor、错误归一化、配置诊断和 focused tests。quota / balance query 是可选增强，放到 Phase 15 真实项目对账验证；不支持时必须标记 unknown，不能用本地估算冒充真实余额。
+Provider adapter 的成品级验收不能只看“能返回文本”。每个 adapter 都要补齐事件转换、streaming/非流式降级、tool calling 能力声明、usage 映射、prompt cache 字段映射、model metadata、capability doctor、错误归一化、配置诊断和 focused tests。quota / balance query 在 Phase 15 真实项目对账中验证可行性，并在 Phase 15.5 做模型接入成熟度收口；不支持时必须标记 unknown，不能用本地估算冒充真实余额。
 
 ### 9.3 模型能力表
 
@@ -1012,7 +1012,7 @@ F:\LinghunProject 或新仓库根目录
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
 | Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
-| Phase 15.5 | 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补终端 TUI 产品手感、release readiness / open-source readiness |
+| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、终端 TUI 产品手感、release readiness / open-source readiness |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |
 | Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界；不承担基础 TUI 美化和交互补课 |
@@ -1025,7 +1025,7 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
 - 下一步只能在用户明确确认后进入 Phase 15 真实项目 Beta 或 Phase 15.5 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening；不得自动进入 Phase 16+。
-- Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、终端 TUI 成品级收口、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
+- Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
 - 自动工作默认一次只推进一个阶段；每阶段完成后必须写交付文档、验证结果和 handoff packet。
 - 自动会话和长期任务必须先校验 handoff packet；缺少验证、证据、禁止事项、索引状态或预算信息时暂停，不继续自动执行。
@@ -1136,6 +1136,10 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 在这五个底座稳定之前，桌面端、技能市场、远程控制、自动自治都应该后置。
 
 终端 TUI 的产品手感不应该后置到桌面端。Phase 15.5 必须先把终端首屏、状态栏、help 分组、Start Gate、权限/提权、Plan/auto/bypass 说明、错误 doctor、长任务轻提示、primary/details/debug 输出层级、自然语言状态查询、中英文一致性和窄终端渲染收口。Phase 18 只是在这个成熟终端 core 之上验证桌面端壳、IPC/API 和会话/状态复用。
+
+模型接入成熟度也不应该后置到 Phase 16+。Phase 15.5 必须把 provider adapter、profile、capability doctor、role route doctor、usage/cache 来源、quota/balance 来源、provider error classifier、fallback/retry 审计和配置/key 脱敏收口。OpenAI-compatible 或 Claude-compatible 中转站可以降低接入门槛，但不能被当作能力完全等价的 native provider。
+
+联网取证也必须在 Phase 15.5 收口。Linghun 的反幻觉不是禁止联网，而是“本地证据优先、实时信息请求授权联网、官方来源优先、web_source evidence 记录、失败降级”。用户问最新 release、社区项目现状、provider 文档、模型价格、API 行为、安全公告或政策变化时，未联网不得给确定结论；已联网必须给来源、查询时间和保守结论。
 
 社区项目如 oh-my-openagent 证明 team mode、skills、hooks、角色路由和后台生命周期是有价值的方向，但 Linghun 只吸收公开行为和验收边界：角色可审计、状态表可见、预算可控、失败可诊断、输出摘要化。它们不能替代 Linghun 的 clean rewrite 原则，也不能成为提前堆功能、绕过权限或复制实现的理由。
 

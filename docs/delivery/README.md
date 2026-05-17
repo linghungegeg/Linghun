@@ -19,9 +19,9 @@
 | Phase 12 | done | [phase-12-agents.md](./phase-12-agents.md) | Agent 闭环 |
 | Phase 13 | done | [phase-13-multi-model.md](./phase-13-multi-model.md) | 多模型协作闭环 |
 | Phase 14 | done | [phase-14-skills-workflow.md](./phase-14-skills-workflow.md) | Skills 与工作流主闭环 + hardening |
-| Phase 15 preflight | done | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup：RuntimeStatus provider fallback、Natural Intent Contract、Plan 权限顺序、cache freshness provider 和 extension freshness 稳定性已收口；Phase 15 Beta 仍 pending |
+| Phase 15 preflight | done | [phase-15-natural-command-bridge.md](./phase-15-natural-command-bridge.md) | 自然语言控制桥 + preflight hardening + pre-Beta cleanup + Interaction Maturity Fix 已完成；可在用户明确确认后恢复进入 Phase 15 Beta |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版 |
-| Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening |
+| Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 成品级收口与开源前 hardening |
 | Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |
 | Phase 17 | pending | phase-17-jobs-autonomous-sessions.md | 长期托管任务与自动会话 |
 | Phase 18 | pending | phase-18-desktop-ready.md | 桌面端预留验证；基础终端 TUI 手感不后置到本阶段 |

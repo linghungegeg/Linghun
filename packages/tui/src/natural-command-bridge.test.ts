@@ -4,6 +4,7 @@ import {
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
   createPendingNaturalCommand,
+  formatNaturalClarification,
   formatNaturalPermissionBlock,
   formatNaturalStartGate,
   getCommandCapabilityCatalog,
@@ -133,6 +134,16 @@ describe("Phase 15 Natural Intent Router", () => {
     ["/model 怎么用", "model", "/model"],
     ["what does /model do", "model", "/model"],
     ["帮我建立索引", "index", "/index init fast"],
+    ["帮我给这个项目建立索引", "index", "/index init fast"],
+    ["索引已经建立了是吧", "index", "/index status"],
+    ["索引状态怎么样", "index", "/index status"],
+    ["is the index ready", "index", "/index status"],
+    ["项目规则是什么", "read", "/read LINGHUN.md"],
+    ["本仓库规则是什么", "read", "/read LINGHUN.md"],
+    ["读一下 LINGHUN.md", "read", "/read LINGHUN.md"],
+    ["read project rules", "read", "/read LINGHUN.md"],
+    ["缓存状态怎么样", "cache", "/cache status"],
+    ["自动记忆是否打开", "memory", "/memory"],
     ["直接 npm install", "bash", "/bash npm install"],
     ["开启 bypass", "mode", "/mode bypass"],
   ])("classifies Natural Intent Contract sample %s", (phrase, id, command) => {
@@ -155,9 +166,22 @@ describe("Phase 15 Natural Intent Router", () => {
       expect(intent.inquiry).toBe("usage");
       expect(intent.action).toBe("answer");
     }
-    if (phrase.includes("建立索引")) {
+    if (phrase.includes("建立索引") && !phrase.includes("已经")) {
       expect(intent.inquiry).toBe("execute");
       expect(intent.action).toBe("start_gate");
+    }
+    if (phrase.includes("已经") || phrase.includes("状态") || phrase.includes("index ready")) {
+      expect(intent.inquiry).toBe("status");
+      expect(intent.action).toBe("execute_readonly");
+    }
+    if (
+      phrase.includes("项目规则") ||
+      phrase.includes("本仓库规则") ||
+      phrase.includes("LINGHUN.md") ||
+      phrase.includes("project rules")
+    ) {
+      expect(intent.inquiry).toBe("read");
+      expect(intent.action).toBe("execute_readonly");
     }
     if (phrase.includes("npm install") || phrase.includes("bypass")) {
       expect(intent.action).toBe("permission_pipeline");
@@ -224,6 +248,13 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(routeNaturalIntent("cach statuz").action).toBe("ask_clarify");
     const multi = routeNaturalIntent("status");
     expect(["ask_clarify", "model", "execute_readonly"]).toContain(multi.action);
+  });
+
+  it("asks for clarification on ambiguous capability lists", () => {
+    const intent = routeNaturalIntent("模型索引缓存");
+    expect(intent.action).toBe("ask_clarify");
+    expect(formatNaturalClarification(intent)).toContain("请选择一个自然语言方向");
+    expect(formatNaturalClarification(intent)).toContain("风险：");
   });
 });
 

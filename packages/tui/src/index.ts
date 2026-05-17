@@ -3514,6 +3514,32 @@ function createLinghunMdTemplate(language: Language): string {
 `;
 }
 
+async function formatProjectRulesRead(context: TuiContext): Promise<string> {
+  if (!(await pathExists(context.memory.projectRulesPath))) {
+    context.memory.projectRulesExists = false;
+    context.memory.projectRulesSummary = "missing";
+    return context.language === "en-US"
+      ? `Project rules file is missing: ${context.memory.projectRulesPath}\n- To create a template, run /memory init. I will not generate it automatically.`
+      : `项目规则文件不存在：${context.memory.projectRulesPath}\n- 如需生成模板，请运行 /memory init。本次不会自动生成。`;
+  }
+  try {
+    const content = await readFile(context.memory.projectRulesPath, "utf8");
+    context.memory.projectRulesExists = true;
+    context.memory.projectRulesSummary = summarizeProjectRules(content);
+    context.memory.projectRulesError = undefined;
+    return context.language === "en-US"
+      ? `Project rules: ${context.memory.projectRulesPath}\n${truncateDisplay(content, 2000)}`
+      : `项目规则：${context.memory.projectRulesPath}\n${truncateDisplay(content, 2000)}`;
+  } catch (error) {
+    context.memory.projectRulesExists = false;
+    context.memory.projectRulesSummary = "unreadable";
+    context.memory.projectRulesError = formatError(error);
+    return context.language === "en-US"
+      ? `Failed to read project rules: ${context.memory.projectRulesError}`
+      : `读取项目规则失败：${context.memory.projectRulesError}`;
+  }
+}
+
 async function initLinghunMd(context: TuiContext, output: Writable): Promise<void> {
   if (await pathExists(context.memory.projectRulesPath)) {
     context.memory.projectRulesExists = true;
@@ -5263,6 +5289,10 @@ async function handleNaturalInput(
     return "handled";
   }
   if (intent.action === "execute_readonly" && intent.command) {
+    if (intent.inquiry === "read" && intent.command === "/read LINGHUN.md") {
+      writeLine(output, await formatProjectRulesRead(context));
+      return "handled";
+    }
     const result = await handleSlashCommand(intent.command, context, output);
     return result === "message" ? "message" : "handled";
   }
