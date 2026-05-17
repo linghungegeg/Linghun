@@ -547,6 +547,7 @@ type MessageKey =
 
 export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/help",
+  "/features",
   "/model",
   "/language",
   "/mode",
@@ -1310,6 +1311,10 @@ export async function handleSlashCommand(
     writeLine(output, formatCatalogHelp(context.language));
     return "handled";
   }
+  if (command === "/features") {
+    writeLine(output, formatFeaturePolicy(context));
+    return "handled";
+  }
   if (command === "/model") {
     await handleModelCommand(rest, context, output);
     return "handled";
@@ -1480,6 +1485,33 @@ export async function handleSlashCommand(
       : `未知命令：${command}。输入 /help 查看可用命令。`,
   );
   return "handled";
+}
+
+function formatFeaturePolicy(context: TuiContext): string {
+  return [
+    "Feature policy（default CCB-style posture）",
+    "Recommended foundation（default on / visible）",
+    `- language: ${context.config.language}; en-US available via /language en-US`,
+    `- model/tool loop: enabled through provider tools=${context.config.modelRoutes.routes.find((route) => route.role === "executor")?.allowTools ? "yes" : "no"}; EvidenceSummary and long output fullOutputPath stay visible`,
+    `- cache/stats: /cache status, /break-cache status, /usage, /stats; history=${context.cache.history.length}`,
+    `- model doctor: /model doctor and /model route doctor; provider=${getRuntimeStatusProvider(context)} model=${context.model}`,
+    "- index: status/search/architecture are readonly; init fast/refresh are safe local actions with safety scan; auto full-repo index on startup=no",
+    `- codebase-memory MCP: discoverable/diagnosable via /mcp doctor; enabledServers=${context.config.mcp.enabledServers.join(",") || "none"}`,
+    `- permissions: project allowlist visible via /permissions; defaultMode=${context.permissionMode}`,
+    "Advanced/high-cost/automation（discoverable, not auto-run）",
+    "- memory: auto long-term extraction=no; autoAccept=no; review via /memory review",
+    `- skills: discover manifests=${context.skills.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.skills.trustedIds.join(",") || "none"}`,
+    `- workflows: discover templates=${context.workflows.enabled ? "yes" : "no"}; autoRun=no; /workflows <name> only shows Start Gate`,
+    `- plugins: discover manifests=${context.plugins.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.plugins.trustedIds.join(",") || "none"}`,
+    "- agents/background: manual commands only; verifier auto fork=no; coordinator/multi-worker=unsupported",
+    "Dangerous defaults（off）",
+    "- bypass/auto permission: default off; bypass requires LINGHUN_ENABLE_BYPASS=1; auto requires LINGHUN_ENABLE_AUTO_PERMISSION=1",
+    `- hooks: enabled=${context.hooks.enabled ? "yes" : "no"}; projectTrusted=${context.hooks.projectTrusted ? "yes" : "no"}; auto execution=no`,
+    "- auto accept all edits=no; auto dependency install=no; auto networking=no; delete/rename/restore auto execution=no",
+    "- plugin marketplace auto install/update=no; remote bridge/control auto connect=no; continuous phase progression=no",
+    "Unsupported / pending",
+    "- remote channels, voice, computer-use/browser control, daemon jobs, plugin marketplace, and AI sessions auto injection are not default features.",
+  ].join("\n");
 }
 
 function formatSkills(context: TuiContext): string {
@@ -6126,6 +6158,7 @@ function formatHelp(language: Language): string {
   if (language === "en-US") {
     return `Available commands:
   /help                 Show help
+  /features             Show default feature policy and disabled automation boundaries
   /language zh-CN|en-US Switch UI language
   /model                Show current model
   /model doctor         Alias of /model route doctor
@@ -6204,6 +6237,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   }
   return `可用命令：
   /help                 显示帮助
+  /features             查看默认功能策略与关闭的自动化边界
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
   /model doctor         等价于 /model route doctor

@@ -192,6 +192,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
+    expect(output.text).toContain("/features");
     expect(output.text).toContain("/model doctor");
     expect(output.text).toContain("/model route");
     expect(output.text).toContain("/model route doctor");
@@ -1692,6 +1693,37 @@ describe("Phase 06 TUI slash commands", () => {
     const expectedHash = await pluginListHashFor(firstProject);
 
     await expect(pluginListHashFor(secondProject, true)).resolves.toBe(expectedHash);
+  });
+
+  it("shows default feature policy without enabling dangerous automation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/features", context, output);
+
+    expect(output.text).toContain("Recommended foundation");
+    expect(output.text).toContain("Advanced/high-cost/automation");
+    expect(output.text).toContain("Dangerous defaults");
+    expect(output.text).toContain("Unsupported / pending");
+    expect(output.text).toContain("auto full-repo index on startup=no");
+    expect(output.text).toContain(
+      "skills: discover manifests=yes; autoExecute=no; trustedIds=none",
+    );
+    expect(output.text).toContain("workflows: discover templates=yes; autoRun=no");
+    expect(output.text).toContain(
+      "plugins: discover manifests=yes; autoExecute=no; trustedIds=none",
+    );
+    expect(output.text).toContain("bypass requires LINGHUN_ENABLE_BYPASS=1");
+    expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
+    expect(output.text).toContain("continuous phase progression=no");
+    expect(context.config.permission.defaultMode).toBe("default");
+    expect(context.hooks.enabled).toBe(false);
+    expect(context.hooks.projectTrusted).toBe(false);
+    expect(context.skills.trustedIds).toEqual([]);
+    expect(context.plugins.trustedIds).toEqual([]);
   });
 
   it("handles Phase 14 skills, workflows, plugins, hooks, and freshness", async () => {

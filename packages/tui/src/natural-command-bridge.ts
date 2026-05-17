@@ -112,6 +112,7 @@ export type SlashCommandRegistryEntry = {
 
 export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/help", capabilityId: "help", userVisible: true },
+  { slash: "/features", capabilityId: "features", userVisible: true },
   { slash: "/language", capabilityId: "language", userVisible: true },
   { slash: "/model", capabilityId: "model", userVisible: true },
   { slash: "/vision", capabilityId: "vision", userVisible: true },
@@ -177,6 +178,18 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "Shows the command list.",
     "了解可用命令或自然语言桥能力。",
     "Use for available commands or bridge capabilities.",
+    "readonly",
+  ),
+  cap(
+    "features",
+    "/features",
+    ["features", "feature policy", "功能开关", "默认功能"],
+    "功能策略",
+    "Feature policy",
+    "显示默认功能策略、推荐底座、高级/危险/未支持边界。",
+    "Shows default feature policy, recommended foundation, advanced/dangerous/unsupported boundaries.",
+    "核对默认功能开关、自动执行边界和权限风险。",
+    "Use to audit default feature switches, auto-run boundaries, and permission risk.",
     "readonly",
   ),
   cap(
