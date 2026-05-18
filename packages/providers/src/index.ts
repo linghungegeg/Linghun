@@ -20,9 +20,17 @@ export type ModelToolDefinition = {
 
 export type LinghunEvent =
   | { type: "assistant_text_delta"; id: string; text: string }
+  | { type: "assistant_thinking_delta"; id: string; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; toolUseId: string; content: unknown; isError?: boolean }
   | { type: "usage"; usage: ModelUsage }
+  | {
+      type: "message_stop";
+      id: string;
+      finishReason?: string;
+      chunkCount: number;
+      hadUsage: boolean;
+    }
   | { type: "error"; error: LinghunError };
 
 export type ModelInfo = {
@@ -358,7 +366,13 @@ export async function* parseOpenAiStream(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  const pendingToolCalls = new Map<number, PendingOpenAiToolCall>();
+  const state: OpenAiStreamParseState = {
+    pendingToolCalls: new Map(),
+    chunkCount: 0,
+    finishReason: undefined,
+    hadUsage: false,
+    lastId: "assistant",
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -370,7 +384,7 @@ export async function* parseOpenAiStream(
     buffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      for (const event of parseOpenAiStreamLine(line, pendingToolCalls)) {
+      for (const event of parseOpenAiStreamLine(line, state)) {
         yield event;
       }
     }
@@ -380,15 +394,63 @@ export async function* parseOpenAiStream(
   if (tail) {
     buffer += tail;
   }
-  for (const event of parseOpenAiStreamLine(buffer, pendingToolCalls)) {
+  for (const event of parseOpenAiStreamLine(buffer, state)) {
     yield event;
   }
+  yield {
+    type: "message_stop",
+    id: state.lastId,
+    finishReason: state.finishReason,
+    chunkCount: state.chunkCount,
+    hadUsage: state.hadUsage,
+  };
 }
 
-function parseOpenAiStreamLine(
-  line: string,
-  pendingToolCalls: Map<number, PendingOpenAiToolCall>,
-): LinghunEvent[] {
+type OpenAiStreamParseState = {
+  pendingToolCalls: Map<number, PendingOpenAiToolCall>;
+  chunkCount: number;
+  finishReason?: string;
+  hadUsage: boolean;
+  lastId: string;
+};
+
+type OpenAiStreamChoice = {
+  delta?: {
+    content?: string | null;
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+    tool_calls?: OpenAiStreamToolCall[];
+  };
+  message?: {
+    content?: string | null;
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+    tool_calls?: OpenAiStreamToolCall[];
+  };
+  finish_reason?: string | null;
+};
+
+type OpenAiStreamToolCall = {
+  id?: string;
+  index?: number;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+};
+
+type OpenAiStreamUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_creation_tokens?: number;
+  };
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_creation_tokens?: number;
+};
+
+function parseOpenAiStreamLine(line: string, state: OpenAiStreamParseState): LinghunEvent[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("data:")) {
     return [];
@@ -397,61 +459,78 @@ function parseOpenAiStreamLine(
   if (!payload || payload === "[DONE]") {
     return [];
   }
-  const parsed = JSON.parse(payload) as {
+  state.chunkCount += 1;
+
+  let parsed: {
     id?: string;
-    choices?: {
-      delta?: {
-        content?: string;
-        tool_calls?: {
-          id?: string;
-          type?: string;
-          function?: { name?: string; arguments?: string };
-        }[];
-      };
-    }[];
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-      prompt_tokens_details?: {
-        cached_tokens?: number;
-        cache_creation_tokens?: number;
-      };
-      cache_read_input_tokens?: number;
-      cache_creation_input_tokens?: number;
-      cache_creation_tokens?: number;
-    };
+    choices?: OpenAiStreamChoice[];
+    usage?: OpenAiStreamUsage;
+    error?: { message?: string; type?: string; code?: string } | string;
   };
-  const events: LinghunEvent[] = [];
-  const delta = parsed.choices?.[0]?.delta;
-  const text = delta?.content;
-  if (text) {
-    events.push({ type: "assistant_text_delta", id: parsed.id ?? "assistant", text });
+  try {
+    parsed = JSON.parse(payload);
+  } catch (error) {
+    return [
+      {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_MALFORMED_STREAM",
+          message: "模型请求失败：provider 返回了无法解析的流式 JSON。",
+          suggestion:
+            "请运行 /model doctor 检查 base_url 是否为 OpenAI compatible 接口，或切换 provider/model 后重试。",
+          cause: error,
+          recoverable: true,
+        }),
+      },
+    ];
   }
-  for (const [index, toolCall] of (delta?.tool_calls ?? []).entries()) {
-    const existing = pendingToolCalls.get(index) ?? {
-      id: `tool-${index + 1}`,
-      name: "",
-      arguments: "",
-    };
-    const next = {
-      id: toolCall.id ?? existing.id,
-      name: toolCall.function?.name ?? existing.name,
-      arguments: existing.arguments + (toolCall.function?.arguments ?? ""),
-    };
-    pendingToolCalls.set(index, next);
-    if (!next.name || !isCompleteJsonObject(next.arguments)) {
-      continue;
+
+  if (parsed.id) {
+    state.lastId = parsed.id;
+  }
+  if (parsed.error) {
+    const message = typeof parsed.error === "string" ? parsed.error : parsed.error.message;
+    return [
+      {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_STREAM_ERROR",
+          message: `模型请求失败：provider 流式返回错误${message ? `：${message}` : "。"}`,
+          suggestion:
+            "请运行 /model doctor 检查 provider/model、额度、base_url 和 tool calling 兼容性。",
+          recoverable: true,
+        }),
+      },
+    ];
+  }
+
+  const events: LinghunEvent[] = [];
+  for (const choice of parsed.choices ?? []) {
+    if (choice.finish_reason) {
+      state.finishReason = choice.finish_reason;
     }
-    events.push({
-      type: "tool_use",
-      id: next.id,
-      name: next.name,
-      input: parseToolArguments(next.arguments),
-    });
-    pendingToolCalls.delete(index);
+    const content = choice.delta?.content ?? choice.message?.content;
+    if (content) {
+      events.push({ type: "assistant_text_delta", id: parsed.id ?? "assistant", text: content });
+    }
+    const reasoning =
+      choice.delta?.reasoning_content ??
+      choice.delta?.reasoning ??
+      choice.message?.reasoning_content ??
+      choice.message?.reasoning;
+    if (reasoning) {
+      events.push({
+        type: "assistant_thinking_delta",
+        id: parsed.id ?? "assistant",
+        text: reasoning,
+      });
+    }
+    events.push(
+      ...parseOpenAiToolCalls(choice.delta?.tool_calls ?? choice.message?.tool_calls ?? [], state),
+    );
   }
   if (parsed.usage) {
+    state.hadUsage = true;
     const cacheWriteTokensRaw = readCacheWriteTokens(parsed.usage);
     events.push({
       type: "usage",
@@ -467,6 +546,38 @@ function parseOpenAiStreamLine(
         endpoint: "/v1/chat/completions",
       },
     });
+  }
+  return events;
+}
+
+function parseOpenAiToolCalls(
+  toolCalls: OpenAiStreamToolCall[],
+  state: OpenAiStreamParseState,
+): LinghunEvent[] {
+  const events: LinghunEvent[] = [];
+  for (const [fallbackIndex, toolCall] of toolCalls.entries()) {
+    const index = toolCall.index ?? fallbackIndex;
+    const existing = state.pendingToolCalls.get(index) ?? {
+      id: `tool-${index + 1}`,
+      name: "",
+      arguments: "",
+    };
+    const next = {
+      id: toolCall.id ?? existing.id,
+      name: toolCall.function?.name ?? existing.name,
+      arguments: existing.arguments + (toolCall.function?.arguments ?? ""),
+    };
+    state.pendingToolCalls.set(index, next);
+    if (!next.name || !isCompleteJsonObject(next.arguments)) {
+      continue;
+    }
+    events.push({
+      type: "tool_use",
+      id: next.id,
+      name: next.name,
+      input: parseToolArguments(next.arguments),
+    });
+    state.pendingToolCalls.delete(index);
   }
   return events;
 }

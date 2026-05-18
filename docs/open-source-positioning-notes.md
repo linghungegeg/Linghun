@@ -36,6 +36,39 @@ Linghun 的路线是把事实层放在产品底座里：
 - 更强编码能力：模型把推理能力用在真实项目问题上，而不是补不存在的上下文。
 - 更适合长期项目：记忆、handoff、索引和验证闭环让跨会话开发更稳定。
 
+## 为什么强模型和普通模型都受益
+
+Linghun 的 evidence-first 设计不是替代模型能力，而是把模型能力放到正确轨道上。新手也可以这样理解：模型像很聪明的开发者，但它需要看到真实文件、真实命令结果、真实测试结果和明确任务边界。没有这些，越强的模型也可能很自信地猜错。
+
+- 对强模型：证据链越干净，推理能力越容易转化成一次命中，少走弯路。
+- 对普通模型：工具结果、索引、权限和验证能减少跑偏，让它少凭空补项目结构、测试结果或完成度。
+- 对弱一些的模型：至少能被权限、证据和 verdict gate 拦住，不容易乱写文件、乱跑命令或乱宣布完成。
+- 对用户：不用反复解释同一批项目事实，也不用每次都判断模型到底有没有真的验证。
+
+这也是 Linghun 的核心价值之一：不是只追求“模型更强”，而是让不同能力的模型都更稳定地完成真实工程任务。
+
+## Verdict Evidence Gate
+
+后续 README 和开源介绍必须单独强调：Linghun 的反幻觉不只针对代码事实，也针对“完成度结论”。大项目里最危险的幻觉不是模型不会写代码，而是把局部 PASS、mock PASS 或未覆盖路径包装成“已完成 / ready / 等于成熟工具”。
+
+Linghun 应把 Verdict Evidence Gate 作为核心差异点之一：
+
+- `PASS` 必须绑定验证命令、覆盖范围和证据引用。
+- `ready` 必须说明 readiness scope，例如 mock、focused、journey、live provider 或 real Beta。
+- `等于 CCB` 这类成熟度结论必须绑定 acceptance matrix 和未覆盖项。
+- mock PASS 不能升级成 live PASS；focused PASS 不能升级成 overall PASS。
+- 未覆盖关键路径时默认降级为 `PARTIAL`，不能靠模型措辞补齐。
+- verifier 不只复跑命令，还要检查 coverage gap、verdict scope 和残余风险。
+- handoff / 阶段报告不能把“待验证”写成“已完成”。
+
+这块可以作为开源时的核心表述：
+
+> Linghun does not just ask the model to be careful. It requires readiness claims to carry evidence, scope, and uncovered paths.
+
+中文短句：
+
+> 不只防止模型编代码时幻觉，也防止模型把没验证的完成度说成 PASS。
+
 ## 可引用的实测口径
 
 这些数据只作为后续 README、发布说明和评测设计的保守依据。引用时必须标注样本来源、provider、模型、时间范围和计算口径，不得写成所有模型或所有项目的固定承诺。
@@ -52,13 +85,18 @@ Linghun 的路线是把事实层放在产品底座里：
 
 > Linghun 采用 evidence-first coding 设计：通过代码索引、工具结果、结构化记忆、验证记录和新鲜来源约束模型，让 AI 基于事实工作，而不是凭感觉猜。这样既减少幻觉，也减少 token 浪费和重复返工。
 
+> Linghun 还把完成度结论纳入反幻觉：PASS、ready、等价成熟工具等判断必须绑定证据、验证范围和未覆盖项，避免把局部验证包装成整体完成。
+
 English:
 
 > Linghun is built around evidence-first coding. It grounds model decisions in code indexes, tool results, structured memory, verification records, and freshness-checked sources, reducing hallucinations, token waste, and rework.
 
+> Linghun also treats readiness claims as evidence-bound outputs: PASS, ready, and parity claims must carry scope, validation evidence, and uncovered paths instead of turning partial checks into broad confidence.
+
 ## 边界
 
 - 不能宣传为“完全无幻觉”。
+- 不能宣传为“所有结论自动正确”；只能说通过 evidence、scope 和 coverage gate 降低完成度幻觉。
 - 不能宣传固定成本节省倍数，除非有对应 provider、模型、项目和账单证据。
 - 不能把局部工具/索引提速写成整体开发固定提升多少倍。
 - 不能把特定稳定工作流下的 90%+ cache 命中写成任意模型、任意项目的保证。

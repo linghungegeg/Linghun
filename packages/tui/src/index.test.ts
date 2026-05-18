@@ -57,6 +57,31 @@ function mockOpenAiTextFetch(finalText = "done"): unknown[] {
   return requests;
 }
 
+function mockOpenAiEmptyFetch(body = "data: [DONE]\n\n"): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      return new Response(body, { status: 200 });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiErrorFetch(): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const body = `data: ${JSON.stringify({ error: { message: "quota exceeded" } })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200 });
+    }),
+  );
+  return requests;
+}
+
 function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done"): unknown[] {
   const requests: unknown[] = [];
   vi.stubGlobal(
@@ -2399,6 +2424,166 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.hooks.projectTrusted).toBe(false);
     expect(context.skills.trustedIds).toEqual([]);
     expect(context.plugins.trustedIds).toEqual([]);
+  });
+
+  it("surfaces empty model streams as provider_empty_response instead of silent prompt return", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "empty-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "empty-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiEmptyFetch(
+      'data: {"id":"chatcmpl-empty","choices":[]}\n\ndata: {"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\ndata: [DONE]\n\n',
+    );
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我分析一下这个项目怎么部署，并生成报告在根目录下\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("模型返回空响应");
+    expect(output.text).toContain("/model doctor");
+    expect(output.text).toContain("证据记录：");
+    expect(output.text).not.toMatch(/状态：正在请求模型\.\.\.\s*[^模]*Linghun/u);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("provider_empty_response"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("provider_empty_response"),
+      ),
+    ).toBe(true);
+  });
+
+  it("shows provider stream errors as actionable model errors", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "error-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "error-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    mockOpenAiErrorFetch();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请读取项目并总结\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("模型请求失败");
+    expect(output.text).toContain("quota exceeded");
+    expect(output.text).toContain("/model doctor");
+  });
+
+  it("runs model Write tool_use through permission ask, yes, real write, and evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "write-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "write-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiToolFetch("Write", {
+      path: "deploy-report.md",
+      content: "# 部署报告\n\n通过模型 Write 生成。",
+    });
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这个项目怎么部署，并生成报告在根目录下\n",
+        "yes\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const report = await readFile(join(project, "deploy-report.md"), "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("工具已暂停");
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain("证据记录：");
+    expect(report).toContain("通过模型 Write 生成");
+    expect(
+      transcript.some((event) => event.type === "tool_result" && event.toolName === "Write"),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) => event.type === "evidence_record" && event.supportsClaims.includes("Write"),
+      ),
+    ).toBe(true);
+    expect(output.text).not.toContain("raw tool_result");
+    expect(output.text).not.toContain("systemic_gap");
+  });
+
+  it("keeps no-pending yes/no local and away from the model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleNaturalInput("yes", context, output);
+
+    expect(result).toBe("handled");
+    expect(output.text).toContain("当前没有等待确认的 Start Gate");
   });
 
   it("runs Phase 15 pre-Beta end-to-end CCB user journey smoke", async () => {

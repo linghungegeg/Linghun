@@ -6,6 +6,7 @@ export default defineConfig({
     alias: {
       "@linghun/config": resolve(__dirname, "packages/config/src/index.ts"),
       "@linghun/core": resolve(__dirname, "packages/core/src/index.ts"),
+      "@linghun/providers": resolve(__dirname, "packages/providers/src/index.ts"),
       "@linghun/shared": resolve(__dirname, "packages/shared/src/index.ts"),
     },
   },

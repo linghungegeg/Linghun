@@ -6072,6 +6072,10 @@ async function sendMessage(
     for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      let roundChunkCount = 0;
+      let roundHadUsage = false;
+      let roundFinishReason: string | undefined;
+      let roundHadThinking = false;
       const modelSupportsTools = currentModelSupportsTools(context);
       if (!modelSupportsTools && round === 0) {
         writeLine(
@@ -6106,15 +6110,39 @@ async function sendMessage(
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
+        if (event.type === "assistant_thinking_delta") {
+          roundHadThinking = true;
+          continue;
+        }
         if (event.type === "usage") {
+          roundHadUsage = true;
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
+          continue;
+        }
+        if (event.type === "message_stop") {
+          roundChunkCount = event.chunkCount;
+          roundHadUsage = roundHadUsage || event.hadUsage;
+          roundFinishReason = event.finishReason;
           continue;
         }
         if (event.type === "error") {
           writeLine(output, formatError(event.error, context.language));
           return;
         }
+      }
+
+      if (!roundAssistantText && toolCalls.length === 0) {
+        const message = await recordProviderEmptyResponse(
+          context,
+          sessionId,
+          roundChunkCount,
+          roundHadUsage,
+          roundFinishReason,
+          roundHadThinking,
+        );
+        writeLine(output, message);
+        return;
       }
 
       if (roundAssistantText || toolCalls.length > 0) {
@@ -6168,6 +6196,48 @@ async function sendMessage(
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+}
+
+async function recordProviderEmptyResponse(
+  context: TuiContext,
+  sessionId: string,
+  chunkCount: number,
+  hadUsage: boolean,
+  finishReason: string | undefined,
+  hadThinking: boolean,
+): Promise<string> {
+  const provider = getRuntimeStatusProvider(context);
+  const model = context.model;
+  const metadata = [
+    `provider=${provider}`,
+    `model=${model}`,
+    `chunkCount=${chunkCount}`,
+    `hadUsage=${hadUsage ? "yes" : "no"}`,
+    `hadThinking=${hadThinking ? "yes" : "no"}`,
+    `finishReason=${finishReason ?? "unknown"}`,
+  ].join("; ");
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `provider_empty_response: ${metadata}`,
+    `provider:${provider}:model:${model}`,
+    ["provider_empty_response", "model_empty_response", provider, model],
+  );
+  context.evidence.unshift(evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
+  if (context.language === "en-US") {
+    return [
+      "Model returned an empty response; run /model doctor, or switch provider/model and retry.",
+      `Evidence: ${evidence.id}`,
+    ].join("\n");
+  }
+  return [
+    "模型返回空响应；请运行 /model doctor，或切换 provider/model 后重试。",
+    `证据记录：${evidence.id}`,
+  ].join("\n");
 }
 
 function needsSolutionCompletenessReportClosure(

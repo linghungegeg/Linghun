@@ -126,6 +126,23 @@ describe("OpenAI compatible provider", () => {
   });
 });
 
+async function collectOpenAiEvents(chunks: string[]): Promise<LinghunEvent[]> {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+  const events: LinghunEvent[] = [];
+  for await (const event of parseOpenAiStream(body)) {
+    events.push(event);
+  }
+  return events;
+}
+
 describe("OpenAI stream parser", () => {
   it("converts text deltas and usage into Linghun events", async () => {
     const encoder = new TextEncoder();
@@ -165,6 +182,13 @@ describe("OpenAI stream parser", () => {
           endpoint: "/v1/chat/completions",
         },
       },
+      {
+        type: "message_stop",
+        id: "chatcmpl-1",
+        finishReason: undefined,
+        chunkCount: 2,
+        hadUsage: true,
+      },
     ]);
   });
 
@@ -194,7 +218,115 @@ describe("OpenAI stream parser", () => {
 
     expect(events).toEqual([
       { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
+      {
+        type: "message_stop",
+        id: "assistant",
+        finishReason: undefined,
+        chunkCount: 2,
+        hadUsage: false,
+      },
     ]);
+  });
+
+  it("converts reasoning-only deltas without treating them as assistant text", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"id":"chatcmpl-reasoning","choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    expect(events).toEqual([
+      { type: "assistant_thinking_delta", id: "chatcmpl-reasoning", text: "thinking" },
+      {
+        type: "message_stop",
+        id: "chatcmpl-reasoning",
+        finishReason: "stop",
+        chunkCount: 1,
+        hadUsage: false,
+      },
+    ]);
+  });
+
+  it("converts message.content and message.tool_calls fallback chunks", async () => {
+    const events = await collectOpenAiEvents([
+      `data: ${JSON.stringify({
+        id: "chatcmpl-message",
+        choices: [
+          {
+            message: {
+              content: "final",
+              tool_calls: [
+                {
+                  id: "call-message",
+                  type: "function",
+                  function: { name: "Write", arguments: JSON.stringify({ path: "report.md" }) },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ]);
+
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "chatcmpl-message", text: "final" },
+      { type: "tool_use", id: "call-message", name: "Write", input: { path: "report.md" } },
+      {
+        type: "message_stop",
+        id: "chatcmpl-message",
+        finishReason: "tool_calls",
+        chunkCount: 1,
+        hadUsage: false,
+      },
+    ]);
+  });
+
+  it("keeps usage-only and empty choices as non-answer chunks", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"id":"chatcmpl-empty","choices":[]}\n\n',
+      'data: {"usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    expect(events).toEqual([
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 0,
+          totalTokens: 3,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+          cacheWriteTokensRaw: null,
+          rawUsage: { prompt_tokens: 3, completion_tokens: 0, total_tokens: 3 },
+          endpoint: "/v1/chat/completions",
+        },
+      },
+      {
+        type: "message_stop",
+        id: "chatcmpl-empty",
+        finishReason: undefined,
+        chunkCount: 2,
+        hadUsage: true,
+      },
+    ]);
+  });
+
+  it("converts provider error chunks and malformed chunks into error events", async () => {
+    const providerErrorEvents = await collectOpenAiEvents([
+      'data: {"error":{"message":"bad gateway"}}\n\n',
+    ]);
+    const malformedEvents = await collectOpenAiEvents(["data: {not-json}\n\n"]);
+
+    expect(providerErrorEvents[0]).toMatchObject({
+      type: "error",
+      error: { code: "PROVIDER_STREAM_ERROR", message: expect.stringContaining("bad gateway") },
+    });
+    expect(malformedEvents[0]).toMatchObject({
+      type: "error",
+      error: { code: "PROVIDER_MALFORMED_STREAM" },
+    });
   });
 });
 
