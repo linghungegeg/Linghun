@@ -1,5 +1,5 @@
 import { LinghunError } from "@linghun/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DeepSeekProvider,
   type LinghunEvent,
@@ -95,7 +95,7 @@ describe("OpenAI compatible provider", () => {
     ]);
   });
 
-  it("constructs a responses request with reasoning effort", () => {
+  it("constructs a responses request with native tool schema and reasoning effort", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -120,12 +120,110 @@ describe("OpenAI compatible provider", () => {
       tools: [
         {
           type: "function",
-          function: { name: "Read", description: "Read a file", parameters: { type: "object" } },
+          name: "Read",
+          description: "Read a file",
+          parameters: { type: "object" },
         },
       ],
       tool_choice: "auto",
       reasoning: { effort: "Medium" },
     });
+  });
+
+  it("converts responses tool results to function_call_output input items", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-1", name: "Read", input: { path: "README.md" } }],
+        },
+        { role: "tool", tool_call_id: "call-1", content: "ok" },
+      ],
+    });
+
+    expect(request.input).toEqual([
+      {
+        type: "function_call",
+        call_id: "call-1",
+        name: "Read",
+        arguments: '{"path":"README.md"}',
+      },
+      { type: "function_call_output", call_id: "call-1", output: "ok" },
+    ]);
+  });
+
+  it("falls back to non-streaming responses when streaming responses returns server error", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.stream === true) {
+        return new Response("bad gateway", { status: 502 });
+      }
+      return Response.json({
+        id: "resp-1",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "ok" }],
+          },
+        ],
+        usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+    const events = [];
+
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(false);
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "resp-1", text: "ok" },
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 1,
+          totalTokens: 4,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+          cacheWriteTokensRaw: null,
+          rawUsage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
+          endpoint: "/v1/responses",
+        },
+      },
+      {
+        type: "message_stop",
+        id: "resp-1",
+        finishReason: undefined,
+        chunkCount: 1,
+        hadUsage: true,
+      },
+    ]);
   });
 
   it("keeps chat completions profile without reasoning payload for DeepSeek compatibility", () => {

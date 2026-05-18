@@ -885,6 +885,7 @@ describe("Phase 06 TUI slash commands", () => {
       max_output_tokens: 4_096,
       reasoning: { effort: "Medium" },
     });
+    expect(JSON.stringify(requests[0])).toContain('"tools":[{"type":"function","name":"Read"');
     expect(output.text).not.toMatch(/Status: requesting model.*ok/s);
     expect(
       resumed.transcript.some(

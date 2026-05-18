@@ -114,10 +114,10 @@ export type OpenAiChatRequest = {
 
 export type OpenAiResponsesRequest = {
   model: string;
-  input: OpenAiChatMessage[];
+  input: OpenAiResponsesInputItem[];
   stream: true;
   max_output_tokens: number;
-  tools?: OpenAiToolDefinition[];
+  tools?: OpenAiResponsesToolDefinition[];
   tool_choice?: "auto" | "none";
   reasoning?: { effort: string };
 };
@@ -127,6 +127,11 @@ type OpenAiChatMessage =
   | { role: "assistant"; content: string | null; tool_calls?: OpenAiToolCall[] }
   | { role: "tool"; content: string; tool_call_id: string };
 
+type OpenAiResponsesInputItem =
+  | { role: "system" | "user" | "assistant"; content: string }
+  | { type: "function_call"; call_id: string; name: string; arguments: string }
+  | { type: "function_call_output"; call_id: string; output: string };
+
 type OpenAiToolDefinition = {
   type: "function";
   function: {
@@ -134,6 +139,13 @@ type OpenAiToolDefinition = {
     description: string;
     parameters: unknown;
   };
+};
+
+type OpenAiResponsesToolDefinition = {
+  type: "function";
+  name: string;
+  description: string;
+  parameters: unknown;
 };
 
 type OpenAiToolCall = {
@@ -276,7 +288,7 @@ export class OpenAiCompatibleProvider implements Provider {
     const known = findKnownModel(model);
     const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
     const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
-    const tools = createOpenAiTools(request, this.config.supportsTools);
+    const tools = createOpenAiChatTools(request, this.config.supportsTools);
     return {
       model,
       messages: request.messages.map(toOpenAiMessage),
@@ -291,10 +303,10 @@ export class OpenAiCompatibleProvider implements Provider {
     const known = findKnownModel(model);
     const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
     const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
-    const tools = createOpenAiTools(request, this.config.supportsTools);
+    const tools = createOpenAiResponsesTools(request, this.config.supportsTools);
     return {
       model,
-      input: request.messages.map(toOpenAiMessage),
+      input: request.messages.flatMap(toOpenAiResponsesInputItem),
       stream: true,
       max_output_tokens: Math.min(requested, maxAllowed),
       ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
@@ -306,10 +318,9 @@ export class OpenAiCompatibleProvider implements Provider {
     this.assertReady();
     const endpointProfile =
       request.endpointProfile ?? this.config.endpointProfile ?? "chat_completions";
-    const body =
-      endpointProfile === "responses"
-        ? this.createResponsesRequest(request)
-        : this.createChatRequest(request);
+    const responsesBody =
+      endpointProfile === "responses" ? this.createResponsesRequest(request) : undefined;
+    const body = responsesBody ?? this.createChatRequest(request);
     const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
     const response = await fetch(`${this.normalizedBaseUrl()}${endpoint}`, {
       method: "POST",
@@ -322,6 +333,10 @@ export class OpenAiCompatibleProvider implements Provider {
     });
 
     if (!response.ok) {
+      if (responsesBody && response.status >= 500) {
+        yield* this.streamNonStreamingResponses(responsesBody, signal);
+        return;
+      }
       if (response.status === 401 || response.status === 403) {
         throw createApiKeyError(response.status);
       }
@@ -341,6 +356,43 @@ export class OpenAiCompatibleProvider implements Provider {
       response.body,
       endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
     );
+  }
+
+  private async *streamNonStreamingResponses(
+    body: OpenAiResponsesRequest,
+    signal: AbortSignal,
+  ): AsyncGenerator<LinghunEvent> {
+    const { stream: _stream, ...rest } = body;
+    let response = await this.fetchNonStreamingResponses(rest, signal);
+    if (!response.ok && response.status >= 500 && rest.reasoning) {
+      const { reasoning: _reasoning, ...withoutReasoning } = rest;
+      response = await this.fetchNonStreamingResponses(withoutReasoning, signal);
+    }
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw createApiKeyError(response.status);
+      }
+      throw createHttpStatusError(response.status);
+    }
+
+    const payload = (await response.json()) as OpenAiResponsesBody;
+    yield* parseOpenAiResponsesBody(payload);
+  }
+
+  private fetchNonStreamingResponses(
+    body: Omit<OpenAiResponsesRequest, "stream">,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    return fetch(`${this.normalizedBaseUrl()}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.config.apiKey}`,
+      },
+      body: JSON.stringify({ ...body, stream: false }),
+      signal,
+    });
   }
 
   private assertReady(): void {
@@ -367,7 +419,7 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 }
 
-function createOpenAiTools(
+function createOpenAiChatTools(
   request: ModelRequest,
   supportsTools: boolean | undefined,
 ): OpenAiToolDefinition[] | undefined {
@@ -381,6 +433,21 @@ function createOpenAiTools(
       description: tool.description,
       parameters: tool.inputSchema,
     },
+  }));
+}
+
+function createOpenAiResponsesTools(
+  request: ModelRequest,
+  supportsTools: boolean | undefined,
+): OpenAiResponsesToolDefinition[] | undefined {
+  if (supportsTools === false) {
+    return undefined;
+  }
+  return request.tools?.map((tool) => ({
+    type: "function" as const,
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputSchema,
   }));
 }
 
@@ -414,6 +481,34 @@ function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {
     return message;
   }
   return message;
+}
+
+function toOpenAiResponsesInputItem(message: ModelMessage): OpenAiResponsesInputItem[] {
+  if (message.role === "assistant") {
+    const items: OpenAiResponsesInputItem[] = [];
+    if (message.content) {
+      items.push({ role: "assistant", content: message.content });
+    }
+    for (const toolCall of message.toolCalls ?? []) {
+      items.push({
+        type: "function_call",
+        call_id: toolCall.id,
+        name: toolCall.name,
+        arguments: JSON.stringify(toolCall.input ?? {}),
+      });
+    }
+    return items;
+  }
+  if (message.role === "tool") {
+    return [
+      {
+        type: "function_call_output",
+        call_id: message.tool_call_id,
+        output: message.content,
+      },
+    ];
+  }
+  return [message];
 }
 
 export async function* parseOpenAiStream(
@@ -512,6 +607,19 @@ type ResponsesUsage = {
   output_tokens?: number;
   total_tokens?: number;
   input_tokens_details?: { cached_tokens?: number };
+};
+
+type OpenAiResponsesBody = {
+  id?: string;
+  output?: Array<{
+    type?: string;
+    call_id?: string;
+    id?: string;
+    name?: string;
+    arguments?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
+  usage?: ResponsesUsage;
 };
 
 function parseOpenAiStreamLine(
@@ -697,6 +805,53 @@ function parseResponsesEvent(
     ];
   }
   return [];
+}
+
+async function* parseOpenAiResponsesBody(
+  parsed: OpenAiResponsesBody,
+): AsyncGenerator<LinghunEvent> {
+  const id = parsed.id ?? "assistant";
+  let chunkCount = 0;
+  for (const item of parsed.output ?? []) {
+    if (item.type === "function_call") {
+      chunkCount += 1;
+      yield {
+        type: "tool_use",
+        id: item.call_id ?? item.id ?? "tool-1",
+        name: item.name ?? "unknown",
+        input: parseToolArguments(item.arguments ?? "{}"),
+      };
+      continue;
+    }
+    for (const content of item.content ?? []) {
+      if (content.type === "output_text" && content.text) {
+        chunkCount += 1;
+        yield { type: "assistant_text_delta", id, text: content.text };
+      }
+    }
+  }
+  if (parsed.usage) {
+    yield {
+      type: "usage",
+      usage: {
+        inputTokens: parsed.usage.input_tokens ?? 0,
+        outputTokens: parsed.usage.output_tokens ?? 0,
+        totalTokens: parsed.usage.total_tokens ?? 0,
+        cacheReadTokens: parsed.usage.input_tokens_details?.cached_tokens,
+        cacheWriteTokens: undefined,
+        cacheWriteTokensRaw: null,
+        rawUsage: parsed.usage,
+        endpoint: "/v1/responses",
+      },
+    };
+  }
+  yield {
+    type: "message_stop",
+    id,
+    finishReason: undefined,
+    chunkCount,
+    hadUsage: Boolean(parsed.usage),
+  };
 }
 
 function parseOpenAiToolCalls(
