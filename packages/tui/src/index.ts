@@ -625,10 +625,17 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/exit",
 ] as const satisfies readonly (typeof SLASH_COMMAND_REGISTRY)[number]["slash"][];
 
-type PendingLocalApproval = {
-  kind: "index_ignore_write";
-  plan: IndexSafetyRepairPlan;
-};
+type PendingLocalApproval =
+  | {
+      kind: "index_ignore_write";
+      plan: IndexSafetyRepairPlan;
+    }
+  | {
+      kind: "model_tool_use";
+      toolCall: ModelToolCall;
+      toolName: ToolName;
+      sessionId: string;
+    };
 
 export type TuiContext = {
   store: SessionStore;
@@ -3782,14 +3789,14 @@ async function handleIndexCommand(
     return;
   }
   if (action === "init" && args[1] === "fast") {
-    writeIndexActionStart(output, context, "init fast", "fast");
     await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output);
-    writeLine(output, formatIndexStatus(context));
+    if (context.index.status === "ready") {
+      writeLine(output, formatIndexRefreshSummary(context, "init fast"));
+    }
     writeStatus(output, context);
     return;
   }
   if (action === "refresh") {
-    writeIndexActionStart(output, context, "refresh", context.config.index.mode);
     await runIndexRepository(
       context,
       context.config.index.mode,
@@ -3797,7 +3804,9 @@ async function handleIndexCommand(
       args.includes("--force"),
       output,
     );
-    writeLine(output, formatIndexStatus(context));
+    if (context.index.status === "ready") {
+      writeLine(output, formatIndexRefreshSummary(context, "refresh"));
+    }
     writeStatus(output, context);
     return;
   }
@@ -4049,7 +4058,12 @@ async function runIndexRepository(
   context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
-  writeLine(output, `Index: ${actionLabel} indexing...`);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Index ${actionLabel}: running...`
+      : `索引${actionLabel === "refresh" ? "刷新" : "初始化"}：正在执行...`,
+  );
   const result = await runCodebaseMemoryCli(
     context,
     "index_repository",
@@ -4064,19 +4078,6 @@ async function runIndexRepository(
     return;
   }
   await refreshIndexStatus(context);
-  writeLine(
-    output,
-    `Index: ${context.index.status}; nodes/edges=${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
-  );
-}
-
-function writeIndexActionStart(
-  output: Writable,
-  context: TuiContext,
-  actionLabel: "init fast" | "refresh",
-  mode: "fast" | "moderate" | "full",
-): void {
-  writeLine(output, `Index: start ${actionLabel}; project=${context.projectPath}; mode=${mode}`);
 }
 
 async function runIndexQuery(
@@ -4149,19 +4150,22 @@ function formatIndexStatus(context: TuiContext): string {
   ].join("\n");
 }
 
-function formatIndexRefreshSummary(context: TuiContext): string {
+function formatIndexRefreshSummary(
+  context: TuiContext,
+  actionLabel: "init fast" | "refresh" = "refresh",
+): string {
+  const title = actionLabel === "refresh" ? "Index refresh completed" : "Index init completed";
+  const titleZh = actionLabel === "refresh" ? "索引刷新完成" : "索引初始化完成";
   if (context.language === "en-US") {
     return [
-      "Index refresh completed",
+      title,
       `- status: ${context.index.status}`,
-      `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
       "- details: run /index status for the full index status view.",
     ].join("\n");
   }
   return [
-    "索引刷新完成",
+    titleZh,
     `- 状态：${context.index.status}`,
-    `- nodes/edges：${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
     "- 详情：输入 /index status 查看完整索引状态。",
   ].join("\n");
 }
@@ -5605,6 +5609,18 @@ export async function handleNaturalInput(
         writeStatus(output, context);
         return "handled";
       }
+      if (approval.kind === "model_tool_use") {
+        await executeApprovedModelToolUse(
+          approval.toolCall,
+          approval.toolName,
+          context,
+          approval.sessionId,
+          output,
+        );
+        writeLightHints(output, context);
+        writeStatus(output, context);
+        return "handled";
+      }
     }
     if (/^(no|n|deny|cancel|取消|拒绝|不|否)$/iu.test(normalized)) {
       const approval = pendingLocalApproval;
@@ -5616,6 +5632,23 @@ export async function handleNaturalInput(
           sessionId,
           "Write",
           `permission denied by user: ${approval.plan.path}`,
+        );
+      }
+      if (approval.kind === "model_tool_use") {
+        const evidence = await recordToolFailureEvidence(
+          context,
+          approval.sessionId,
+          approval.toolName,
+          `permission denied by user: ${approval.toolName}`,
+        );
+        await appendToolResultEvent(
+          context,
+          approval.sessionId,
+          approval.toolCall.id,
+          approval.toolName,
+          "permission denied by user",
+          true,
+          evidence.id,
         );
       }
       writeLine(
@@ -5677,16 +5710,14 @@ export async function handleNaturalInput(
         output,
         context.language === "en-US"
           ? [
-              `Confirmed Start Gate ${gate.gateId}.`,
+              "Start Gate confirmed.",
               `- Exact command: ${gate.exactCommand}`,
-              `- Risk: ${gate.risk}`,
               `- Scope: ${gate.scope}`,
               "- Note: Start Gate does not replace later permission approval.",
             ].join("\n")
           : [
-              `已确认 Start Gate ${gate.gateId}。`,
+              "已确认 Start Gate。",
               `- 精确命令：${gate.exactCommand}`,
-              `- 风险：${gate.risk}`,
               `- 范围：${gate.scope}`,
               "- 注意：Start Gate 不替代后续权限审批。",
             ].join("\n"),
@@ -6097,6 +6128,9 @@ async function sendMessage(
       }
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output);
+        if (result.pendingApproval) {
+          return;
+        }
         messages.push({
           role: "tool",
           tool_call_id: toolCall.id,
@@ -6273,7 +6307,14 @@ async function executeModelToolUse(
   context: TuiContext,
   sessionId: string,
   output: Writable,
-): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  pendingApproval?: boolean;
+}> {
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
@@ -6297,6 +6338,10 @@ async function executeModelToolUse(
       output,
       formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
     );
+    if (permission.decision === "ask" && toolName === "Write") {
+      context.pendingLocalApproval = { kind: "model_tool_use", toolCall, toolName, sessionId };
+      return { ok: false, tool: toolName, text, pendingApproval: true };
+    }
     const evidence = await recordToolFailureEvidence(
       context,
       sessionId,
@@ -6306,8 +6351,26 @@ async function executeModelToolUse(
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
-  if (permission.preflight) {
-    writeLine(output, permission.preflight);
+  return executeApprovedModelToolUse(
+    toolCall,
+    toolName,
+    context,
+    sessionId,
+    output,
+    permission.preflight,
+  );
+}
+
+async function executeApprovedModelToolUse(
+  toolCall: ModelToolCall,
+  toolName: ToolName,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  preflight?: string,
+): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
+  if (preflight) {
+    writeLine(output, preflight);
   }
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
@@ -6441,8 +6504,19 @@ function updateSolutionCompletenessGate(text: string, context: TuiContext): stri
       text,
     );
   const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
-  if (!userRequestedGate && !smokeContamination && !auditFinding && !repeatedDenial) {
-    context.solutionCompleteness = createSolutionCompletenessStatus();
+  if (repeatedDenial) {
+    context.solutionCompleteness = {
+      ...createSolutionCompletenessStatus(),
+      triggerReason: "repeated_denial",
+      evidenceRefs: collectSolutionCompletenessEvidenceRefs(context),
+      nextRequiredOutput:
+        "最近同类权限拒绝已记录；普通任务继续走 model/tool loop，必要时给短 hint 或让用户查看 /permissions recent。",
+    };
+  }
+  if (!userRequestedGate && !smokeContamination && !auditFinding) {
+    if (!repeatedDenial) {
+      context.solutionCompleteness = createSolutionCompletenessStatus();
+    }
     return "";
   }
 
@@ -6450,12 +6524,10 @@ function updateSolutionCompletenessGate(text: string, context: TuiContext): stri
     ? "user_request"
     : smokeContamination
       ? "smoke_contamination"
-      : auditFinding
-        ? "audit_finding"
-        : "repeated_denial";
+      : "audit_finding";
   const impactAreas = inferSolutionCompletenessImpactAreas(text, triggerReason);
-  const classification = triggerReason === "repeated_denial" ? "systemic_gap" : "unknown";
-  const severity = triggerReason === "repeated_denial" ? "blocking_P1" : "unknown";
+  const classification = "unknown";
+  const severity = "unknown";
   const requiredBeforeAction = true;
   const nextRequiredOutput =
     "先给 single_issue/systemic_gap 判断；若 systemic_gap，再列影响面、P0/P1/P2、阶段边界、验证方式和当前阶段/后续登记。";
@@ -7096,7 +7168,7 @@ async function handleToolCommand(
       false,
       evidence?.id,
     );
-    writeLine(output, formatToolOutput(name, result.output, context.language));
+    writeLine(output, formatToolOutput(name, result.output, context.language, evidence?.id));
     writeStatus(output, context);
   } catch (error) {
     writeLine(output, formatError(error, context.language));
@@ -7555,6 +7627,8 @@ function installToolProgressHandler(
 ): { pending: Promise<void>[]; restore: () => void } {
   const previous = context.tools.onProgress;
   const pending: Promise<void>[] = [];
+  let visibleProgressLines = 0;
+  let progressSuppressed = false;
   context.tools.onProgress = (event: ToolProgressEvent) => {
     if (event.toolName !== "Bash") {
       void previous?.(event);
@@ -7577,7 +7651,20 @@ function installToolProgressHandler(
         createdAt: new Date().toISOString(),
       }),
     );
-    output.write(message);
+    const lines = message.split(/\r?\n/u).filter(Boolean);
+    const remainingLines = Math.max(0, 12 - visibleProgressLines);
+    if (remainingLines > 0) {
+      output.write(`${lines.slice(0, remainingLines).join("\n")}\n`);
+      visibleProgressLines += Math.min(lines.length, remainingLines);
+    }
+    if (lines.length > remainingLines && !progressSuppressed) {
+      output.write(
+        context.language === "en-US"
+          ? "[stdout] ... streaming output hidden from main view; full log/transcript keeps the complete output.\n"
+          : "[stdout] ... 主屏已隐藏后续流式输出；完整输出保留在日志/transcript。\n",
+      );
+      progressSuppressed = true;
+    }
   };
   return {
     pending,
@@ -7720,7 +7807,7 @@ async function recordToolEvidence(
       ? "file_read"
       : name === "Grep" || name === "Glob"
         ? "grep_result"
-        : name === "Bash"
+        : name === "Bash" || name === "Write" || name === "Edit" || name === "MultiEdit"
           ? "command_output"
           : null;
   if (!kind) {

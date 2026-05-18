@@ -531,14 +531,15 @@ describe("Phase 06 TUI slash commands", () => {
     const repeatedPrompt = createModelSystemPrompt("帮我继续修", context, {
       model: { provider: "deepseek", name: "deepseek-v4-flash" },
     });
-    expect(repeatedPrompt).toContain("最近同类权限拒绝反复出现");
+    expect(repeatedPrompt).not.toContain("SYSTEMIC_GAP_WARNING");
+    expect(repeatedPrompt).not.toContain("最近同类权限拒绝反复出现");
     expect(context.solutionCompleteness).toMatchObject({
       triggerReason: "repeated_denial",
-      classificationRequired: true,
-      classification: "systemic_gap",
-      impactAreas: ["permission_pipeline", "tool_loop"],
-      severity: "blocking_P1",
-      requiredBeforeAction: true,
+      classificationRequired: false,
+      classification: "unknown",
+      impactAreas: [],
+      severity: "unknown",
+      requiredBeforeAction: false,
     });
     expect(context.solutionCompleteness.evidenceRefs).toContain("permission_denial:Bash:plan");
 
@@ -550,11 +551,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       (handoff as { packet?: { solutionCompleteness?: { classificationRequired?: boolean } } })
         .packet?.solutionCompleteness?.classificationRequired,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       (handoff as { packet?: { solutionCompleteness?: { classification?: string } } }).packet
         ?.solutionCompleteness?.classification,
-    ).toBe("systemic_gap");
+    ).toBe("unknown");
   });
 
   it("runs Phase 12 agents with trimmed context, transcript, status, and cancel path", async () => {
@@ -760,7 +761,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
     expect(output.text).toContain("Model route doctor");
-    expect(output.text).toContain("Index: start init fast");
+    expect(output.text).toContain("索引初始化完成");
+    expect(output.text).not.toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
     expect(output.text).toContain("项目规则：");
     expect(output.text).toContain("只做最小必要改动");
@@ -859,8 +861,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("- 工具：Bash");
     expect(output.text).toContain("- 暂停原因：");
     expect(output.text).toContain("- 安全级别：高");
-    expect(output.text).toContain("- 当前模式：default");
     expect(output.text).toContain("- 影响范围：none");
+    expect(output.text).not.toContain("- 当前模式：default");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
@@ -906,6 +908,75 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("generates project analysis report through model tool_call Write after permission approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { build: "tsc" } }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-report-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-report-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const report =
+      "# 项目分析报告\n\n- 类型：Node 项目\n- 部署：运行 npm install && npm run build。";
+    const requests = mockOpenAiToolFetch("Write", { path: "project-report.md", content: report });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这个项目 看看怎么部署 把报告生成在根目录下\n",
+        "yes\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("工具已暂停，等待权限边界处理");
+    expect(output.text).toContain("- 工具：Write");
+    expect(output.text).toContain("- 影响范围：project-report.md");
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain("摘要");
+    expect(output.text).toContain("证据记录：");
+    expect(output.text).not.toContain("systemic_gap");
+    expect(output.text).not.toContain("blocking_P1");
+    expect(output.text).not.toContain("Solution Completeness Gate report");
+    expect(output.text).not.toContain("- decision:");
+    expect(output.text).not.toContain("- risk:");
+    expect(output.text).not.toContain("- mode:");
+    expect(output.text).not.toContain('"tool_result"');
+    await expect(readFile(join(project, "project-report.md"), "utf8")).resolves.toBe(report);
+
+    const sessions = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).list();
+    const transcript = await readFile(sessions[0]?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain('"type":"tool_call_start"');
+    expect(transcript).toContain('"name":"Write"');
+    expect(transcript).toContain('"type":"tool_result"');
+    expect(transcript).toContain('"toolName":"Write"');
+    expect(transcript).toContain('"isError":false');
+    expect(transcript).toContain('"evidenceId"');
   });
 
   it("records failed model tool_result evidence for follow-up prompts", async () => {
@@ -1007,7 +1078,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("索引安全修复续跑");
     expect(output.text).toContain("ignore 文件：.linghunignore");
     expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
-    expect(output.text).toContain("Index: refresh indexing...");
+    expect(output.text).toContain("索引刷新：正在执行...");
     expect(output.text.match(/索引安全门/g)).toHaveLength(1);
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
@@ -2328,6 +2399,87 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.hooks.projectTrusted).toBe(false);
     expect(context.skills.trustedIds).toEqual([]);
     expect(context.plugins.trustedIds).toEqual([]);
+  });
+
+  it("runs Phase 15 pre-Beta end-to-end CCB user journey smoke", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "LINGHUN.md"), "# 项目规则\n\n- 保持 summary-first。", "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...config,
+        defaultModel: "journey-model",
+        providers: {
+          ...config.providers,
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "journey-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch(
+      "我会进入普通 model/tool loop，并在需要写入时走权限路径。﹤DONE﹥",
+    );
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "/help\n",
+        "/index status\n",
+        "/index refresh\n",
+        "yes\n",
+        "请分析项目并生成报告\n",
+        "/write report.md draft\n",
+        "/permissions add allow Write medium\n",
+        "/write report.md final\n",
+        "/permissions add allow Bash high\n",
+        "/bash node -e \"for (let i = 0; i < 60; i += 1) console.log('journey-line-' + i)\"\n",
+        "/model route doctor\n",
+        "/mcp status\n",
+        "/cache status\n",
+        "/permissions recent\n",
+        "/index status\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("可用命令");
+    expect(output.text).toContain("索引刷新完成");
+    expect(output.text).toContain("当前没有等待确认的 Start Gate");
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("权限已拒绝");
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain("摘要");
+    expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
+    expect(output.text).toContain("工具 Bash 结果：");
+    expect(output.text).toContain("主输出已截断");
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("MCP status");
+    expect(output.text).toContain("Cache status");
+    expect(output.text).toContain("最近拒绝");
+    expect(output.text).toContain("Index status");
+    expect(output.text).toContain("证据记录：");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    expect(output.text).not.toContain("systemic_gap");
+    expect(output.text).not.toContain("blocking_P1");
+    expect(output.text).not.toContain("Solution Completeness Gate report");
+    expect(output.text).not.toContain("- decision:");
+    expect(output.text).not.toContain("- risk:");
+    expect(output.text).not.toContain("- mode:");
+    expect(output.text).not.toContain("Index: start refresh");
+    expect(output.text).not.toContain("Index refresh completed\n- status: ready\n- nodes/edges");
+    expect(output.text).not.toContain("journey-line-59");
   });
 
   it("handles Phase 14 skills, workflows, plugins, hooks, and freshness", async () => {

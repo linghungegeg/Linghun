@@ -737,6 +737,27 @@ corepack pnpm typecheck
 
 当前判定：Phase 00-14 CCB runtime/output/permission parity 对已声明能力与 Phase 15 pre-Beta handfeel gate 为 PASS；完整 CCB 式 UI 大重写、完整 permission modal、完整 deferred tools/plugin marketplace、远程/桌面/长期自治等列入 out-of-scope，不在本轮实现。
 
+## Phase 15 pre-Beta End-to-End CCB User Journey Parity Closure（done）
+
+本轮性质：Phase 15 pre-Beta end-to-end CCB user journey parity closure，只关闭 Phase 00-14 已声明能力和 Phase 15 pre-Beta 默认 CLI/TUI 手感质量门；未进入 Phase 15 real-project Beta、Phase 15.5、Phase 16+ 或 GUI/desktop。完整矩阵见 `F:\Linghun\docs\audit\phase-15-pre-beta-end-to-end-ccb-user-journey-parity-closure.md`。
+
+本轮先从本地 `F:\ccb-source` 提取 CCB user journey / output boundary / permission boundary / acceptance pattern，再映射 Linghun 源码入口并形成 J01-J24 gap matrix；只参考成熟行为边界和验收标准，未复制 CCB / Claude Code / OpenCode 源码、内部 API、变量结构、专有实现或反编译痕迹。
+
+源码级收口：
+
+- `/index init fast` 和 `/index refresh` 成功路径改为短摘要，只提示 `/index status` 查看完整状态；不再默认输出 full `Index status`、project/mode/raw nodes/edges chatter。
+- Permission primary prompt 移除 raw-like `Current mode` 主屏字段；Start Gate confirmation 移除 raw-like `Risk` 和 gate id 主屏字段。
+- Repeated permission denial 只记录 evidence/state 和短 next action，不再让普通开发任务强制输出 `systemic_gap` / `blocking_P1` Solution Completeness Gate 报告。
+- Bash live progress 主屏按行限流，后续流式输出只给一次隐藏提示；完整输出继续保留在 transcript/log/fullOutputPath，最终 Bash result 继续 summary-first 截断。
+- Slash tool result 将 evidence id 传给 tool presenter，主屏只显示短 evidence reference，不 dump raw evidence/tool_result。
+
+新增验收：
+
+- `packages/tui/src/index.test.ts` 新增 Phase 15 pre-Beta end-to-end CCB user journey smoke，连续覆盖 `/help`、`/index status`、`/index refresh`、无 pending `yes`、普通 model loop、Write permission deny/allow/success、Bash 长输出、`/model route doctor`、`/mcp status`、`/cache status`、`/permissions recent`、`/index status`、`/exit`。
+- negative assertions 覆盖：普通任务不出现 `systemic_gap` / `blocking_P1` / `Solution Completeness Gate report`，主屏不出现 raw `decision:` / `risk:` / `mode:`，refresh success 不输出 full nodes/edges 状态，Bash 长输出不把尾部 `journey-line-59` 刷到主屏。
+
+阶段口径：J01/J02/J05/J07/J08/J13/J19/J20/J23/J24 的 pre-repair FAIL/PARTIAL 已按本轮最小边界关闭；未新增 Phase 15.5 / Phase 16+ 登记项，既有后续非阻塞 polish 和未来能力仍留在原阶段。
+
 ## 已知问题
 
 - 本阶段是 preflight，不承诺真实项目 Beta 的完整自然语言命令成功率。

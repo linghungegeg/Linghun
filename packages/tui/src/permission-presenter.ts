@@ -23,7 +23,6 @@ export function formatLocalToolPermissionPrompt(
       `- Why paused: ${permission.reason}`,
       `- Safety level: ${risk}`,
       `- Scope: ${files}`,
-      `- Current mode: ${permission.mode}`,
       "- Next: type yes/confirm to allow once, or no/cancel to deny. The tool has not run yet.",
     ].join("\n");
   }
@@ -33,7 +32,6 @@ export function formatLocalToolPermissionPrompt(
     `- 暂停原因：${permission.reason}`,
     `- 安全级别：${risk}`,
     `- 影响范围：${files}`,
-    `- 当前模式：${permission.mode}`,
     "- 下一步：输入 yes/确认/继续 可本次允许；输入 no/取消 可拒绝。工具尚未执行。",
   ].join("\n");
 }
@@ -51,7 +49,6 @@ export function formatModelToolPermissionPrompt(
       `- Why paused: ${permission.reason}`,
       `- Safety level: ${risk}`,
       `- Scope: ${files}`,
-      `- Current mode: ${permission.mode}`,
       "- Result: the tool did not run; the denial was returned to the model as tool_result evidence.",
       "- Next: review /permissions recent, use an explicit slash command, or switch to a controlled execution mode and retry.",
     ].join("\n");
@@ -62,7 +59,6 @@ export function formatModelToolPermissionPrompt(
     `- 暂停原因：${permission.reason}`,
     `- 安全级别：${risk}`,
     `- 影响范围：${files}`,
-    `- 当前模式：${permission.mode}`,
     "- 结果：工具未执行；拒绝原因已作为 tool_result 证据回灌给模型。",
     "- 下一步：查看 /permissions recent，改用明确 slash command，或切换到受控执行模式后重试。",
   ].join("\n");
