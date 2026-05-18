@@ -20,6 +20,8 @@ CLI 示例默认使用 `linghun`；如本阶段涉及启动入口，必须同时
 
 ## 测试与验证
 
+每条验证必须写明命令、结果和失败/跳过原因。不得用“已验证”“verifier PASS”替代可复查命令。
+
 ## 性能结果
 
 ## 已知问题
@@ -50,6 +52,41 @@ CLI 示例默认使用 `linghun`；如本阶段涉及启动入口，必须同时
 - 长输出必须截断展示并保留完整日志路径或等价排查入口。
 - 后台任务、agent、verification、compact 等系统事件不得污染输入区。
 - Phase 07 起必须说明是否覆盖中文宽度、ANSI、resize、多行粘贴、长状态栏字段等渲染回归。
+
+## 主输出与日志分层
+
+- 主屏 `primary` 只展示短摘要、关键风险、确认选择、结果 verdict 和下一步。
+- 证据摘要、影响文件、验证命令、日志路径进入 `details`。
+- requestId、gateId、raw risk flags、schema 摘要、hash、provider raw usage、完整 stdout/stderr 等只能进入 `debug`、transcript、evidence、fullOutputPath 或 log。
+- tool_result、EvidenceSummary、完整 handoff、完整 index 结果、完整 memory、完整 transcript 不得混入普通 assistant 主文本。
+- 权限提示不得暴露内部字段名，例如 `risk=start_gate`、`readonly=no`、`permissionPipeline=false`。
+- API key、token、Authorization header、cookie、私有 baseUrl 参数必须脱敏；doctor 只能显示 present/missing/source/masked preview。
+- cache/index/status/hint 必须有行动价值且去重；同一 warning 不得每轮重复刷屏。
+
+## 阶段 Verdict
+
+- verdict：`PASS` / `FAIL` / `PARTIAL` / `CANCELLED`
+- 是否允许进入下一阶段：yes/no
+- P0/P1/P2 风险分类：
+- 阻塞项：
+- 用户下一步审核点或命令：
+
+## 真实改动文件
+
+- 代码：
+- 测试：
+- 文档：
+- 生成物：
+- 用户已有 diff / 非本轮证据：
+
+## 运行时事实
+
+- provider/model：
+- permission mode：
+- index status：
+- cache/usage 来源：
+- 配置来源：
+- 是否有脱敏/密钥风险：
 
 ## 后台/复查任务状态反馈
 

@@ -35,6 +35,7 @@ import {
   type ModelToolCall,
   type ModelToolDefinition,
   type ModelUsage,
+  OpenAiCompatibleProvider,
   findKnownModel,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
@@ -1204,9 +1205,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const config = await loadConfig(projectPath);
   const storagePaths = resolveStoragePaths(config, projectPath);
   const store = new SessionStore({ sessionRootDir: storagePaths.sessions, projectPath });
+  const initialModel = resolveInitialModel(config);
   const context: TuiContext = {
     store,
-    model: config.providers.deepseek.model,
+    model: initialModel,
     permissionMode: config.permission.defaultMode,
     projectPath,
     tools: createToolContext(projectPath),
@@ -1216,7 +1218,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
-    cache: createCacheState(projectPath, config.providers.deepseek.model),
+    cache: createCacheState(projectPath, initialModel),
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
@@ -1234,13 +1236,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     recentlyMentionedFiles: [],
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
-  const gateway = new ModelGateway([
-    new DeepSeekProvider({
-      ...config.providers.deepseek,
-      id: "deepseek",
-      displayName: "DeepSeek",
-    }),
-  ]);
+  const gateway = createModelGateway(config);
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
   writeStatus(output, context);
@@ -1891,6 +1887,12 @@ function formatModelRoutes(context: TuiContext): string {
 
 function formatModelRouteDoctor(context: TuiContext): string {
   const lines = ["Model route doctor"];
+  lines.push("- providers:");
+  for (const [providerId, provider] of Object.entries(context.config.providers)) {
+    lines.push(
+      `  - ${providerId}: type=${provider.type} baseUrl=${provider.baseUrl ? "present" : "missing"} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"} model=${provider.model || "missing"}`,
+    );
+  }
   for (const route of context.config.modelRoutes.routes) {
     const problems = diagnoseRoute(route, context);
     const level = getRouteDoctorLevel(route, problems, context);
@@ -1923,6 +1925,16 @@ function formatModelRouteDoctor(context: TuiContext): string {
     "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
   );
   return lines.join("\n");
+}
+
+function getProviderKeySource(providerId: string): string {
+  const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+  return process.env[envName] ? `env:${envName}` : ".linghun/settings.json or merged config";
+}
+
+function maskSecret(secret: string): string {
+  if (secret.length <= 8) return "****";
+  return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
 function hasOpenAiCompatibleDoctorProblem(context: TuiContext): boolean {
@@ -2074,12 +2086,44 @@ function inferProviderForRouteModel(model: string, context: TuiContext): string 
 }
 
 function getRuntimeStatusProvider(context: TuiContext): string {
-  for (const [providerId, provider] of Object.entries(context.config.providers)) {
-    if (provider.model === context.model) {
+  return resolveProviderForModel(context.config, context.model);
+}
+
+function resolveInitialModel(config: LinghunConfig): string {
+  if (config.defaultModel && config.defaultModel !== config.providers.deepseek.model) {
+    return config.defaultModel;
+  }
+  const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+  return executor?.primaryModel || config.defaultModel || config.providers.deepseek.model;
+}
+
+function resolveProviderForModel(config: LinghunConfig, model: string): string {
+  const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+  if (executor?.primaryModel === model && executor.provider) {
+    return executor.provider;
+  }
+  if (config.defaultModel === model) {
+    for (const [providerId, provider] of Object.entries(config.providers)) {
+      if (provider.model === model) return providerId;
+    }
+  }
+  for (const [providerId, provider] of Object.entries(config.providers)) {
+    if (provider.model === model) {
       return providerId;
     }
   }
   return "unknown";
+}
+
+function createModelGateway(config: LinghunConfig): ModelGateway {
+  return new ModelGateway(
+    Object.entries(config.providers).map(([id, provider]) => {
+      if (provider.type === "deepseek") {
+        return new DeepSeekProvider({ ...provider, id, displayName: "DeepSeek" });
+      }
+      return new OpenAiCompatibleProvider({ ...provider, id, displayName: "OpenAI compatible" });
+    }),
+  );
 }
 
 function resolveRoleRoute(
@@ -5428,6 +5472,17 @@ async function handleNaturalInput(
     context.pendingNaturalCommand = undefined;
   }
 
+  if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(text.trim())) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "No pending confirmation is active. Describe the task or type the exact slash command; I did not send this confirmation to the model."
+        : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
+    );
+    writeStatus(output, context);
+    return "handled";
+  }
+
   const intent = routeNaturalIntent(text, context.language);
   const fileRead = await resolveNaturalFileRead(text, context);
   if (fileRead.status === "resolved") {
@@ -5526,7 +5581,7 @@ async function sendMessage(
         );
       }
       for await (const event of gateway.stream(
-        "deepseek",
+        getRuntimeStatusProvider(context),
         {
           messages,
           model: context.model,
@@ -6604,12 +6659,10 @@ async function decidePermission(
   if (tool.isReadOnly || name === "Todo" || name === "Diff") {
     return { request, decision: "allow", reason: "default 模式允许只读或会话内工具。" };
   }
-  return {
-    request,
-    decision: "allow",
-    reason: "default 模式展示风险摘要后允许本次工作区操作。",
-    preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
-  };
+  const reason =
+    "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；当前最小 REPL 没有交互式审批 UI，请改用明确 slash 命令或切换到受控执行模式。";
+  await recordPermissionDenied(context, name, reason);
+  return { request, decision: "ask", reason };
 }
 
 function isPlanAllowedTool(name: ToolName, isReadOnly: boolean): boolean {
@@ -7268,7 +7321,7 @@ function writeStatus(output: Writable, context: TuiContext): void {
       context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
       8,
     ),
-    model: truncateDisplay(context.model, 18),
+    model: truncateDisplay(`${getRuntimeStatusProvider(context)}/${context.model}`, 26),
     mode: context.permissionMode,
     background: String(background),
     cache: formatPercent(latestHitRate),

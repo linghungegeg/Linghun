@@ -535,6 +535,40 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/model route 查看");
   });
 
+  it("uses configured default openai-compatible model in TUI status without deepseek fallback", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "gpt-5.5",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-test-openai-compatible-secret",
+            model: "gpt-5.5",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["现在是什么模型\n/model doctor\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("provider=openai-compatible model=gpt-5.5");
+    expect(output.text).toContain("openai-compatible: type=openai-compatible");
+    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).not.toContain("provider=deepseek model=gpt-5.5");
+    expect(output.text).not.toContain("sk-test-openai-compatible-secret");
+  });
+
   it("keeps exact Start Gate confirmation strict while allowing a new dangerous request to be blocked", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const output = new MemoryOutput();
@@ -613,6 +647,39 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       (await readMockCalls(callsPath)).filter((tool) => tool === "index_repository"),
     ).toHaveLength(1);
+  });
+
+  it("handles MCP index enablement as local control-plane guidance without model or Bash", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我打开 mcp 的索引功能\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("/index：代码索引");
+    expect(output.text).toContain("自然语言桥：可解释/可进入安全路径");
+    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(output.text).not.toContain("工具 Bash 结果");
+  });
+
+  it("does not execute Bash silently in default mode", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/bash echo SHOULD_NOT_RUN\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("default 模式不会静默执行 Bash");
+    expect(output.text).not.toContain("SHOULD_NOT_RUN");
+    expect(output.text).not.toContain("工具 Bash 结果");
   });
 
   it("truncates long Todo, Grep, Glob, and Read outputs in the main output", async () => {
@@ -909,7 +976,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
-    await handleSlashCommand("/mode default", context, output);
+    context.permissionMode = "bypass";
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
 
     expect(output.text).toContain("权限管道拒绝写入 agent.txt");
@@ -1093,6 +1160,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    context.permissionMode = "bypass";
 
     await handleSlashCommand("/write sample.txt beta", context, output);
     const checkpointId = context.checkpoints[0]?.id;
@@ -1110,6 +1178,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    context.permissionMode = "bypass";
 
     await handleSlashCommand("/bash node --version", context, output);
     await handleSlashCommand("/background", context, output);

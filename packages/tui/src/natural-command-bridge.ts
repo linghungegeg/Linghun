@@ -885,6 +885,18 @@ export function routeNaturalIntent(
       normalized,
     );
   }
+  if (!explicit && isMcpIndexControlRequest(normalized, capability.id)) {
+    return createIntent(
+      "answer",
+      capability,
+      Math.min(1, Math.max(0.82, topScore / 5)),
+      "mcp index control plane handled locally",
+      candidates,
+      language,
+      "usage",
+      normalized,
+    );
+  }
   if (!explicit && capability.id === "index" && classification.indexAction === "rebuild") {
     return createIntent(
       "start_gate",
@@ -1412,6 +1424,15 @@ function isDangerousNaturalTarget(id: string): boolean {
     "hooks",
     "mode",
   ].includes(id);
+}
+
+function isMcpIndexControlRequest(text: string, capabilityId: string): boolean {
+  return (
+    (capabilityId === "mcp" || capabilityId === "index") &&
+    /mcp/u.test(text) &&
+    /索引|index/u.test(text) &&
+    /打开|开启|启用|enable|turn on/u.test(text)
+  );
 }
 
 function classifyIndexAction(text: string): NaturalControlClassification["indexAction"] {

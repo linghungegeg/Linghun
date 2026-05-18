@@ -95,6 +95,28 @@ describe("OpenAI compatible provider", () => {
     ]);
   });
 
+  it("does not send OpenAI tools when provider config disables tool support", async () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+      supportsTools: false,
+    });
+
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+      toolChoice: "auto",
+    });
+    const [model] = await provider.listModels();
+
+    expect(model?.supportsTools).toBe(false);
+    expect(request.tools).toBeUndefined();
+    expect(request.tool_choice).toBeUndefined();
+  });
+
   it("uses the DeepSeek default base URL", async () => {
     const provider = new DeepSeekProvider({ model: "deepseek-v4-pro" });
     const models = await provider.listModels();
@@ -322,5 +344,14 @@ describe("ModelGateway", () => {
     expect(error.code).toBe("PROVIDER_API_KEY_ERROR");
     expect(error.message).toContain("API Key 无效或没有权限");
     expect(error.suggestion).toContain("检查当前 provider 的 api_key");
+  });
+
+  it("classifies HTTP 400 as provider request-format diagnostics", () => {
+    const error = normalizeProviderError({ status: 400, message: "Bad Request" });
+
+    expect(error.code).toBe("PROVIDER_BAD_REQUEST");
+    expect(error.message).toContain("HTTP 400");
+    expect(error.suggestion).toContain("tools/tool_choice");
+    expect(error.suggestion).toContain("tool_result");
   });
 });

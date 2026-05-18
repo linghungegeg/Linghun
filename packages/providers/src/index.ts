@@ -52,6 +52,7 @@ export type ProviderConfig = {
   apiKey?: string;
   model: string;
   maxOutputTokens?: number;
+  supportsTools?: boolean;
 };
 
 export type ModelToolCall = {
@@ -237,7 +238,7 @@ export class OpenAiCompatibleProvider implements Provider {
         providerId: this.id,
         contextWindow: 128_000,
         maxOutputTokens: this.config.maxOutputTokens ?? 4_096,
-        supportsTools: true,
+        supportsTools: this.config.supportsTools ?? true,
         supportsVision: false,
         supportsThinking: false,
         supportsPromptCache: false,
@@ -250,14 +251,17 @@ export class OpenAiCompatibleProvider implements Provider {
     const known = findKnownModel(model);
     const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
     const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
-    const tools = request.tools?.map((tool) => ({
-      type: "function" as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-      },
-    }));
+    const tools =
+      this.config.supportsTools === false
+        ? undefined
+        : request.tools?.map((tool) => ({
+            type: "function" as const,
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.inputSchema,
+            },
+          }));
     return {
       model,
       messages: request.messages.map(toOpenAiMessage),
@@ -284,12 +288,7 @@ export class OpenAiCompatibleProvider implements Provider {
       if (response.status === 401 || response.status === 403) {
         throw createApiKeyError(response.status);
       }
-      throw new LinghunError({
-        code: "PROVIDER_HTTP_ERROR",
-        message: `模型请求失败：HTTP ${response.status}。`,
-        suggestion: "请运行 /model doctor 检查 API Key、base_url 和模型名称。",
-        recoverable: response.status >= 400 && response.status < 500,
-      });
+      throw createHttpStatusError(response.status);
     }
 
     if (!response.body) {
@@ -529,6 +528,9 @@ export function normalizeProviderError(error: unknown): LinghunError {
   if (status === 401 || status === 403) {
     return createApiKeyError(status, error);
   }
+  if (typeof status === "number") {
+    return createHttpStatusError(status);
+  }
   if (error instanceof TypeError) {
     return new LinghunError({
       code: "PROVIDER_NETWORK_ERROR",
@@ -563,6 +565,41 @@ function createApiKeyError(status: number, cause?: unknown): LinghunError {
     suggestion: "请检查当前 provider 的 api_key 是否正确，或运行 /model doctor 复查配置。",
     cause,
     recoverable: true,
+  });
+}
+
+function createHttpStatusError(status: number): LinghunError {
+  if (status === 400) {
+    return new LinghunError({
+      code: "PROVIDER_BAD_REQUEST",
+      message: "模型请求失败：HTTP 400，请求格式不被 provider 接受。",
+      suggestion:
+        "请运行 /model doctor；重点检查 base_url、model、tools/tool_choice 支持、tool_result 回灌格式和 OpenAI-compatible 网关兼容性。",
+      recoverable: true,
+    });
+  }
+  if (status === 429) {
+    return new LinghunError({
+      code: "PROVIDER_RATE_LIMITED",
+      message: "模型请求失败：HTTP 429，已触发 provider 限流或额度限制。",
+      suggestion: "请稍后重试，或运行 /usage 与 /model doctor 检查当前 provider/model 配置。",
+      recoverable: true,
+    });
+  }
+  if (status >= 500) {
+    return new LinghunError({
+      code: "PROVIDER_SERVER_ERROR",
+      message: `模型请求失败：HTTP ${status}，provider 服务端异常。`,
+      suggestion:
+        "请稍后重试；如持续失败，运行 /model doctor 检查 base_url 或切换 fallback model。",
+      recoverable: true,
+    });
+  }
+  return new LinghunError({
+    code: "PROVIDER_HTTP_ERROR",
+    message: `模型请求失败：HTTP ${status}。`,
+    suggestion: "请运行 /model doctor 检查 API Key、base_url、model 和 provider 能力。",
+    recoverable: status >= 400 && status < 500,
   });
 }
 

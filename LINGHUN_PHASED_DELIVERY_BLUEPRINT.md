@@ -77,6 +77,17 @@
   - 是否可进入下一阶段
 ```
 
+阶段完成报告是给用户和后续开发者接手用的成品级交接，不是调试日志。默认只写用户判断下一步所需的信息；完整 stdout/stderr、tool_result、EvidenceSummary、trace、raw usage、完整索引结果和内部 id 必须进入 transcript、evidence、fullOutputPath、logPath 或 debug/export 入口。报告必须包含：
+
+- verdict：`PASS` / `FAIL` / `PARTIAL` / `CANCELLED`，以及是否允许进入下一阶段。
+- scope：本阶段实际做了什么、明确没做什么、是否越出阶段边界。
+- changed files：真实改动文件列表，区分代码、测试、文档、生成物和用户已有 diff。
+- validation：实际运行的命令、结果、失败原因和未运行原因。
+- risk：P0/P1/P2 分类、是否阻断 Beta 或下一阶段、建议处理阶段。
+- runtime facts：provider/model、权限模式、索引状态、cache/usage 来源、关键配置来源。
+- evidence refs：指向 transcript 事件、验证报告、日志路径、fullOutputPath 或文件路径；不得用泛泛描述替代证据。
+- next action：用户可执行的下一步命令或审核点；不得自动推进下一阶段。
+
 成品化闸门：
 
 - 每阶段必须更新 `docs/delivery/phase-XX-*.md`。
@@ -271,6 +282,27 @@ main · DeepSeek V4 Pro · strict · cache 94% · index ready · 1 agent
 ```
 
 状态栏默认只显示能稳定读取、低误导的数据。费用不默认进入状态栏，统一放到 `/usage` 和 `/stats`；只有 provider 返回真实 usage 且模型价格配置明确时，费用才以 `estimated` 标识展示。
+
+### 4.2.1 主输出与汇报口径
+
+Linghun 的终端输出必须参考 CCB 的成熟手感：主屏只放用户当前需要决策或理解的信息，复杂证据保留在底层。输出成熟度是 Phase 15 Beta 前置，不是 Phase 15.5 才补的外观优化。
+
+终端输出分三层：
+
+- `primary`：默认展示。只包含短摘要、当前动作、关键风险、下一步、确认选择和最终结果。
+- `details`：用户显式展开或运行详情命令后展示。包含证据摘要、影响文件、验证命令、日志路径和诊断来源。
+- `debug`：只在 doctor/debug/export 或交付证据中出现。包含 requestId、gateId、raw risk flags、schema 摘要、hash、raw usage、完整 stdout/stderr 路径等。
+
+成品级要求：
+
+- 权限提示必须是 human-first decision prompt，不得在主屏展示 `risk=start_gate`、`readonly=no`、`permissionPipeline=false` 这类内部字段。
+- Read/Grep/Glob/Todo/Bash/agent/index 的长输出必须截断；完整内容写入 transcript/evidence/fullOutputPath/logPath，并在主屏给出路径或详情入口。
+- Bash 成功时默认显示命令意图、exitCode、短结果和完整日志入口；失败时显示关键错误、exitCode、可能原因和下一步建议。
+- model doctor、MCP doctor、plugin/skill/hook/workflow doctor 必须 summary-first；API key、token、完整 header、私有 baseUrl 参数不得原文出现。
+- tool_result、EvidenceSummary、handoff packet、index raw result、cache raw key 和 provider raw usage 不得污染普通 assistant 主文本。
+- cache/index/status/hint 只在有行动价值时出现；同一 warning 不得每轮重复刷屏。
+- zh-CN 与 en-US 必须语义等价；不能中文成品化、英文只剩命令用法。
+- 窄终端、Windows Terminal、中文路径、长模型名、连续工具输出和多行粘贴必须有 smoke 或 snapshot 覆盖。
 
 ### 4.3 权限交互
 
@@ -1535,6 +1567,21 @@ Hooks 是高级自动化能力，默认关闭，新手模式隐藏。项目 Hook
 
 Phase 15 Beta 前还必须补一次 Solution Completeness Gate 收口。真实 TUI smoke 如果暴露“自然语言入口像命令壳”“只读查询误进 Start Gate”“模型只口头说要 /read 却不执行”“用户需要不断纠正方向”等系统性问题，不能继续按单句补丁推进 Beta。必须先基于完整交互审计和 CCB / OpenCode 等公开行为参考，定界 P0/P1/P2：P0 和阻塞 P1 在 pre-Beta 修复，非阻塞 P1/P2 登记到 Phase 15.5 或后续，不得把 Phase 15 真实项目测试建立在已经失真的入口上。
 
+Phase 15 Beta 前还必须通过 TUI output/report gate。真实项目测试前，主输出、权限提示、工具结果、错误诊断、状态栏、hint、doctor 和阶段汇报必须达到 4.2.1 的成品级口径。若实测出现长输出刷屏、内部字段泄露、权限提示不可读、tool_result/EvidenceSummary 污染主对话、doctor 泄露 key、状态栏显示错误 provider/model、重复无效 warning 或阶段报告缺少 verdict/evidence/validation/risk/next action，则按 P0 或阻塞 P1 处理，不能进入 Phase 15 Beta。
+
+Phase 15 Beta 前还必须通过 CCB handfeel gate。该 gate 只收口真实 TUI 可用性，不引入新架构，不把 Phase 15.5/16+ 能力提前塞入本阶段。必须逐项通过：
+
+1. **Provider/model 真实生效**：TUI 不得 hardcode deepseek；状态栏、`/model`、`/model doctor`、usage、stats 和 handoff 必须显示实际 provider/model；`LINGHUN_DEFAULT_MODEL`、role route、project config、env 的生效顺序必须可诊断。
+2. **默认权限不静默执行高风险工具**：`default` 模式只自动允许只读工具和会话内低风险工具；Bash、write/edit/delete、配置修改、依赖安装、联网和权限变更必须走权限管道。当前最小 REPL 没有交互式审批 UI 时，应拒绝并给下一步，不得先执行。
+3. **控制面请求本地处理**：index/mcp/model/memory/cache/permissions/features/help/doctor/status 等状态或启用询问优先由本地控制面处理；“打开 mcp 的索引功能”这类请求不得落到模型让它用 Bash 猜。普通开发请求才进入模型 tool_use/tool_result 主循环。
+4. **无 pending gate 的确认词不进模型**：`yes`、`确认`、`继续`、`ok` 在没有 pending gate 时必须本地提示“当前没有等待确认的动作”；有 pending gate 时只接受当前 gate 的确认格式；取消或过期后必须清空 gate。
+5. **tool_result 兼容和 provider 降级**：provider/model 不支持 tools 时不得发送 tools/toolChoice；支持 tools 时 `tool_call -> tool_result -> second request` 格式必须正确；HTTP 400 必须能区分 model/baseUrl/tool schema/tool_result 兼容问题。
+6. **输出保持 CCB 手感**：主屏只显示摘要、风险、结果、下一步；长输出截断并写入 fullOutputPath/log/transcript/evidence；权限提示不暴露内部字段；tool_result、EvidenceSummary、raw index/cache 不污染普通对话；hint/warning 去重。
+7. **Windows 真实可用**：RuntimeStatus 和 system prompt 暴露真实 Windows `projectPath`，不得出现 `/workspace`；中文 stdout/stderr 不乱码；路径、错误建议和命令符合当前 shell/平台。
+8. **密钥持久化简单但安全**：允许 env、本地私有配置和项目配置作为配置来源；API key/token 输出必须脱敏；doctor 显示 source + present/missing/masked preview；若支持 `settings.local.json` 必须 gitignore；若 `settings.json` 存真实 key，doctor 温和 warning，不阻断测试。
+9. **错误恢复可操作**：HTTP 400/401/403/429/5xx、provider/key/baseUrl/model、index、MCP、tool schema 和 tool_result 错误必须分类提示，并给下一步：`/model doctor`、切模型、检查 baseUrl、禁用 tools、换 provider 或查看日志。
+10. **测试不是固定句子表**：focused tests 必须覆盖意图类别：状态查询、doctor、用法、safe local action、危险动作、普通开发请求、模糊请求；中文/英文走同一行为矩阵；必须覆盖真实 TUI smoke 路径。
+
 Phase 15 pre-Beta Full Interaction Maturity Audit 已确认 6 项 P0 阻塞：P0-1 provider/tool_use/tool_result 架构缺口，P0-2 文件智能指代缺失，P0-3 新手轻引导和默认 `LINGHUN.md` 模板成熟度不足，P0-4 evidence 未注入模型上下文，P0-5 模型流不可取消，P0-6 en-US 关键提示不完整。进入 Phase 15 Beta 前必须一次性修复 P0-1 到 P0-6，不能只修 3 项，不能做“只读工具版”或“文本 hint 版”弱化方案。
 
 P0-1 的收口必须参考 CCB 的公开成熟边界：完整 tool_use / tool_result 工具协议 + 统一权限中枢。Linghun 必须让模型能通过真实工具事件发起现有核心工具：Read、Grep、Glob、Diff、Write、Edit、MultiEdit、Bash、Todo；执行层复用现有工具实现、Start Gate、decidePermission、Plan、acceptEdits、auto、bypass 和安全检查。只读工具可直接按只读路径处理；写入、编辑、Bash、Todo 等危险或变更类工具必须进入权限管道，不得因来自模型 tool_use 而绕过审批。
@@ -1591,18 +1638,19 @@ P0 收尾禁止事项：
 - acceptEdits 减少审批。
 - 多 agent 不乱。
 - P0-1 到 P0-6 全部修复并通过 focused tests / TUI smoke；尤其真实 tool_use/tool_result、EvidenceSummary、取消、文件指代、新手轻提示、默认 `LINGHUN.md` 模板成熟度和 en-US 关键路径必须可实测。
+- CCB handfeel gate 全部通过；尤其真实 provider/model、default 权限不静默 Bash、本地控制面、无 pending gate 确认词、tool_result 兼容、输出分层、Windows 路径/编码、密钥脱敏、错误分类和行为矩阵测试必须可实测。
 - Solution Completeness Gate 生效：真实测试中若出现跨能力系统性缺口，报告必须区分单点 bug / 系统性缺口，列出影响面、阶段处理边界、参考源和验证方式；不能只给单条修复命令。
 - P0 hardening 报告已被审阅，并明确是否需要执行 Deep Parity Closure；若需要，则 Deep Parity Closure 的 P0 / 阻塞 P1 已修复，P2 已登记到 Phase 15.5。
 
 本阶段完成后，Linghun 才算真正进入可用测试。
 
-## 20.5 阶段 15.5：双模型交叉审查、终端 TUI 成品级收口与开源前 hardening
+## 20.5 阶段 15.5：双模型交叉审查、终端 TUI 非阻塞 polish 与开源前 hardening
 
 ### 目标
 
-Phase 15 真实项目测试完成后，增加一次只读优先的双模型交叉审查，并把终端 TUI 的产品手感、模型接入成熟度、联网取证成熟度、输出层级、轻提示、权限/提权交互和开源前发布就绪一起收口，降低漏 bug、漏安全问题、漏产品体验问题和阶段边界偏移的概率。本阶段不新增 Phase 16+ 产品功能，不提前进入 Phase 16。
+Phase 15 真实项目测试完成后，增加一次只读优先的双模型交叉审查，并把非阻塞 TUI polish、模型接入成熟度、联网取证成熟度和开源前发布就绪一起复检收口，降低漏 bug、漏安全问题、漏产品体验问题和阶段边界偏移的概率。本阶段不新增 Phase 16+ 产品功能，不提前进入 Phase 16。
 
-Phase 15.5 必须把“终端可长期使用”作为真实 Beta 后、Phase 16 前的硬门槛。桌面端仍后置到 Phase 18；Phase 18 只验证 core/API/IPC 是否可复用，不负责补基础终端美化、帮助组织、确认交互或错误提示。
+Phase 15 Beta 前已经必须达到 CCB 手感底线：真实 provider/model、默认权限不静默跑 Bash、控制面本地处理、主输出分层、权限提示人话、tool_result 摘要、doctor/key 脱敏、状态栏准确、hint 去重、长输出落日志和阶段汇报完整。Phase 15.5 不得把这些基础能力当作“后续再补”；它只复查真实 Beta 反馈，并修确认阻塞的 P0/P1 或非阻塞 polish。桌面端仍后置到 Phase 18；Phase 18 只验证 core/API/IPC 是否可复用，不负责补基础终端交互。
 
 Phase 15.5 也必须复检 Solution Completeness Gate：双模型审查和真实项目测试报告中出现的缺陷，必须先分类为单点修复、系统性缺口、后续登记或不做。系统性缺口要给最小完整修复边界，避免把 Phase 15.5 变成无限补体验细节。
 
@@ -1719,9 +1767,9 @@ Phase 15.5 必须把“允许有边界地联网取证”做成成品级交互，
 - 本地文档存在但可能过期时，回答必须标记 “本地资料可能过期”。
 - 插件/workflow/agent 请求联网时仍触发 Start Gate 或权限管道。
 
-### 终端 TUI 成品级收口
+### 终端 TUI 非阻塞 polish 与复检
 
-Phase 15.5 必须参考 CCB 的公开终端编码体验边界和 OpenCode 的公开 output grouping / visual hierarchy 思路，但只吸收行为、层级和验收标准，不复制源码或内部实现。
+Phase 15.5 必须参考 CCB 的公开终端编码体验边界和 OpenCode 的公开 output grouping / visual hierarchy 思路，但只吸收行为、层级和验收标准，不复制源码或内部实现。下列条目中属于 Phase 15 Beta 前基础手感的部分必须已经闭合；Phase 15.5 只做复检、非阻塞 polish 和真实 Beta 反馈修复。
 
 必须收口：
 
@@ -1761,7 +1809,7 @@ Phase 15.5 必须参考 CCB 的公开终端编码体验边界和 OpenCode 的公
 - Solution Completeness Gate 有独立记录，列出本阶段发现的问题如何区分单点 bug / 系统性缺口、哪些 P0/P1 已修、哪些 P2 登记后续、哪些明确不做。
 - 模型接入成熟度有独立小节，列出 adapter/profile/capability doctor/role route/usage-cache/quota/error/fallback/config 验证结果。
 - 联网取证成熟度有独立小节，列出 Freshness Gate、授权联网、官方来源优先、web_source evidence、失败降级和 prompt 控制验证结果。
-- 终端 TUI 成品级收口有独立小节，列出首屏、状态栏、help、Start Gate、权限/提权、错误 doctor、轻提示、输出层级、自然语言状态查询、zh/en 和窄终端验证结果。
+- 终端 TUI polish / 复检有独立小节，列出首屏、状态栏、help、Start Gate、权限/提权、错误 doctor、轻提示、输出层级、自然语言状态查询、zh/en 和窄终端验证结果；若发现 Phase 15 Beta 前应已满足的基础手感缺口，必须标为回归或遗漏，不得登记成普通 Phase 15.5 新需求。
 - 本阶段不新增 Phase 16+ 功能，不改变既定阶段边界。
 
 ## 21. 阶段 16：可控学习闭环
@@ -1963,7 +2011,7 @@ Phase 15.5 必须参考 CCB 的公开终端编码体验边界和 OpenCode 的公
 
 ### 目标
 
-不做完整桌面端，但验证架构没有堵死桌面端。基础终端 TUI 的美化、帮助组织、权限/提权交互、轻提示、错误提示和输出层级必须已在 Phase 15.5 收口；Phase 18 只验证同一 core 能否被桌面壳复用。
+不做完整桌面端，但验证架构没有堵死桌面端。基础终端 TUI 的主输出分层、权限/提权交互、轻提示、错误提示和输出层级必须已在 Phase 15 Beta 前达到可真实测试手感，并在 Phase 15.5 复检/polish；Phase 18 只验证同一 core 能否被桌面壳复用。
 
 ### 产物
 

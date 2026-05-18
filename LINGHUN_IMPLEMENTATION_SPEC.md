@@ -133,6 +133,105 @@ export type LinghunEvent =
 - JSONL transcript 记录核心事件。
 - 桌面端未来也消费同一事件。
 
+## 2.1 TUI 输出层与阶段汇报协议
+
+终端输出是产品协议的一部分，不能由各模块随意 `console.log`。所有用户可见输出必须声明层级：
+
+```ts
+export type TuiOutputLayer = 'primary' | 'details' | 'debug'
+
+export type TuiOutputEnvelope = {
+  layer: TuiOutputLayer
+  title?: string
+  summary: string
+  nextAction?: string
+  evidenceRefs?: EvidenceRef[]
+  fullOutputPath?: string
+  logPath?: string
+  redacted: boolean
+}
+```
+
+层级语义：
+
+- `primary`：默认输出到主屏，只放短摘要、关键风险、确认选择、结果 verdict 和下一步。
+- `details`：用户显式查看详情、doctor、report 或 debug 时展示，包含证据摘要、影响文件、验证命令和日志路径。
+- `debug`：内部字段、requestId、gateId、expiresAt、raw flags、schema 摘要、hash、provider raw usage、完整 trace；不得默认进入主屏、普通 assistant 文本或 handoff 摘要。
+
+工具结果必须区分“给模型看的结构化 tool_result”和“给用户看的主屏摘要”：
+
+```ts
+export type UserFacingToolSummary = {
+  toolName: string
+  intent: string
+  risk: 'readonly' | 'low' | 'medium' | 'high'
+  affectedFiles: string[]
+  exitCode?: number
+  status: 'pass' | 'fail' | 'partial' | 'cancelled'
+  shortOutput: string
+  fullOutputPath?: string
+  logPath?: string
+  nextAction?: string
+}
+```
+
+要求：
+
+- Read/Grep/Glob/Todo/Bash/index/agent 的长输出默认只显示截断摘要；完整内容必须写入 `fullOutputPath`、transcript、evidence 或 log。
+- Bash 主屏摘要不得默认刷完整 stdout/stderr；成功显示工具意图、exitCode、短结果和完整路径，失败显示 exitCode、关键错误、可能原因和下一步建议。
+- 权限提示、Start Gate 和提权提示只展示动作、范围、风险、原因、继续方式、取消方式、是否还会进入权限管道；内部 raw fields 只能进入 `debug`。
+- API key、token、Authorization header、cookie、私有 baseUrl 查询参数、完整 prompt 和完整 transcript 不得进入主屏、交付文档或默认日志；doctor 只能显示 present/missing/source/masked preview。
+- provider/model、usage/cache/quota/budget 输出必须标记来源：`reported`、`zero_reported`、`estimated`、`missing` 或 `unknown`，不得把未知值说成事实。
+- cache/index/status/hint 必须去重；同一 warning 在状态未变化时不得每轮重复输出。
+- zh-CN 和 en-US 用户可见语义必须等价；命令名、配置键、provider/model id 保持原文。
+
+阶段汇报必须使用结构化口径：
+
+```ts
+export type PhaseDeliveryReport = {
+  phase: string
+  verdict: 'PASS' | 'FAIL' | 'PARTIAL' | 'CANCELLED'
+  canProceed: boolean
+  scopeDone: string[]
+  scopeExcluded: string[]
+  changedFiles: {
+    code: string[]
+    tests: string[]
+    docs: string[]
+    generated: string[]
+    preExistingDiff: string[]
+  }
+  validation: {
+    command: string
+    result: 'pass' | 'fail' | 'skipped'
+    reason?: string
+  }[]
+  risks: {
+    level: 'P0' | 'P1' | 'P2'
+    item: string
+    blocking: boolean
+    recommendation: string
+  }[]
+  runtimeFacts: {
+    provider: string
+    model: string
+    permissionMode: PermissionMode
+    indexStatus: string
+    cacheSource: string
+    usageSource: string
+  }
+  evidenceRefs: EvidenceRef[]
+  nextAction: string
+}
+```
+
+阶段汇报禁止：
+
+- 用“已验证”“应该没问题”替代具体命令和结果。
+- 把完整工具输出、完整日志、完整 tool_result 或完整 EvidenceSummary 粘到主报告。
+- 隐藏用户已有 diff、未运行验证、失败验证或 key/配置风险。
+- 自动宣布进入下一阶段；下一阶段必须等待用户明确确认。
+
 后台任务：
 
 ```ts
@@ -686,6 +785,34 @@ Beta 前 hardening 验收：
 - Gate test：pending gate 有过期、状态可见、确认时重放 exact command/risk/scope；高风险 gate 不接受普通“确认”直通。
 - Mode test：bypass 无本地 opt-in 时拒绝；auto gate 不可用时拒绝或降级；plan approval 不等于授权后续所有工具。
 - Summary test：RuntimeStatus 和 CommandCapabilitySummary 保持短、稳定排序，不包含完整 transcript/memory/index/log/skill/plugin/hook 正文。
+
+### 5.8 Phase 15 Beta CCB handfeel gate
+
+Phase 15 Beta 前必须满足 CCB handfeel gate。该 gate 只要求真实 TUI 达到成熟 coding terminal 的可用手感，不要求新增 Phase 15.5/16+ 功能，也不得用关键词补丁代替源码级修复。
+
+运行时规格：
+
+- Provider resolver：TUI 初始化、状态栏、ModelGateway、`/model`、`/model doctor`、usage/stats/handoff 必须使用同一个当前 provider/model 解析结果；不得在 TUI 入口或 `gateway.stream()` 中硬编码 deepseek。配置来源必须可诊断，至少区分 env、project settings、project local/private settings（如实现）、user/default。
+- Permission default：`default` 模式默认只自动允许 Read/Grep/Glob/Diff/Todo 等只读或会话内低风险工具；Bash、Write/Edit/MultiEdit、删除/重命名、依赖安装、联网、配置修改、权限规则必须进入权限管道。无交互式审批 UI 时返回 `ask/deny` 和下一步，不得先执行。
+- Control-plane first：index/mcp/model/memory/cache/permissions/features/help/doctor/status 等控制面请求先走本地状态函数或 slash handler。未发现/未注册/未信任/schema 未加载的 MCP/plugin/skill/workflow/hook 贡献工具必须 runtime 拒绝并提示先 discover/enable/doctor。
+- Pending confirmation：确认词必须先检查 pending gate；无 pending gate 时本地处理，不创建模型请求；有 pending gate 时只接受当前 gate 的确认格式，取消/过期后清空状态。
+- Tool loop compatibility：provider/model 不支持 tools 时，TUI 和 ModelGateway 都不得发送 tools/toolChoice；支持 tools 时，OpenAI-compatible streamed tool_calls、tool_result 回灌和 second request 必须兼容。HTTP 400 错误必须分类到 model/baseUrl/tool schema/tool_result/gateway 格式等原因。
+- User-facing output：工具结果必须通过 `UserFacingToolSummary` 或等价摘要输出；raw `tool_result`、EvidenceSummary、完整 stdout/stderr、完整 index/cache/memory/handoff 不进入普通 assistant 主文本。主屏输出遵守 `primary/details/debug` 分层。
+- Windows runtime：system prompt / RuntimeStatus 必须包含真实 Windows projectPath；不得让模型以 `/workspace` 作为项目根。工具输出必须避免中文 mojibake；路径和修复建议必须符合当前 shell/平台。
+- Secret handling：API key、token、Authorization header、cookie 和私有 baseUrl 参数不得进入主屏、transcript、交付报告、debug bundle 或默认日志。doctor 只能显示 source、present/missing 和 masked preview。若真实 key 存在于项目 settings，应给温和 warning 和迁移建议，不阻断测试。
+- Error recovery：provider 错误必须输出 `what happened`、`likely cause`、`next action`，并按 HTTP 400/401/403/429/5xx、网络超时、HTML 错误页、tool 不支持、tool_result 格式异常分类。
+
+Focused tests 至少覆盖：
+
+- env/defaultModel 或 role route 选择 openai-compatible/gpt-5.5 时，TUI 不走 deepseek，状态栏和 gateway provider/model 一致。
+- `default` 模式下模型请求 Bash 不自动执行；只读工具仍可直接执行。
+- “帮我打开 mcp 的索引功能”或等价英文请求本地返回 mcp/index 状态或 doctor 建议，不触发模型 Bash。
+- 无 pending gate 时输入 `yes` / `确认` 不进入模型；有 pending gate 时确认格式正确、过期/取消清空。
+- tools unsupported provider 不发送 tools/toolChoice；tools supported provider 的 tool_call -> tool_result -> second request 请求体合法。
+- 长 Bash/Read/Grep/Glob/Todo 输出主屏截断，完整内容进入 fullOutputPath/log/transcript/evidence。
+- `/model doctor`、错误提示和阶段报告不泄露 API key/token。
+- RuntimeStatus/projectPath 在 Windows 下使用真实路径，输出不含 `/workspace`。
+- 行为矩阵覆盖状态查询、doctor、usage_help、safe local action、dangerous action、ordinary development request、ambiguous request；中文/英文走同一 risk handler，而不是固定句子表。
 
 第一批验收样例必须覆盖中英文，但实现不能只匹配这些固定短语：
 
@@ -2411,7 +2538,7 @@ export type ReleaseReadinessReport = {
 
 ## 17.2 Terminal TUI product polish 规格
 
-Phase 15.5 必须把终端 TUI 成品级收口作为 release gate。桌面端仍属于 Phase 18；Phase 18 只复用已成熟的 core 和终端交互语义，不承担补齐基础 TUI 手感。
+Terminal TUI 成品级收口从 Phase 15 real-project Beta 前开始作为 release gate；Phase 15.5 只允许承接非阻塞 P1/P2 polish，不能补 Phase 15 Beta 已经需要的主输出、权限提示、tool_result、doctor、状态栏和阶段汇报底线。桌面端仍属于 Phase 18；Phase 18 只复用已成熟的 core 和终端交互语义，不承担补齐基础 TUI 手感。
 
 终端输出必须分为三层：
 
@@ -2787,7 +2914,7 @@ export type LinghunError = {
 13. 多模型。
 14. Skills。
 15. 真实项目测试。
-15.5. 双模型交叉审查、终端 TUI 成品级收口与开源前 hardening。
+15.5. 双模型交叉审查、终端 TUI 非阻塞 polish 与开源前 hardening。
 16. 可控学习。
 17. 长期托管。
 18. 桌面端预留。
