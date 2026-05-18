@@ -19,6 +19,7 @@ import {
   createPluginState,
   createSkillState,
   createWorkflowState,
+  handleNaturalInput,
   handleSlashCommand,
   recordModelUsage,
   runTui,
@@ -866,9 +867,128 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
     expect(output.text).toContain("large.json");
     expect(output.text).toContain(
-      "修复路径：手动编辑 .linghunignore/.cbmignore，或明确输入 /write 写入 ignore 文件",
+      "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
     );
     expect(output.text).toContain("重试命令：/index refresh");
+  });
+
+  it("continues index safety repair from Chinese natural language after permission allows Write", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/permissions add allow Write medium", context, output);
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+
+    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(output.text).toContain("索引安全修复续跑");
+    expect(output.text).toContain("ignore 文件：.linghunignore");
+    expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
+    expect(output.text).toContain("Index: refresh indexing...");
+    expect(output.text.match(/索引安全门/g)).toHaveLength(1);
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
+  it("continues index safety repair from English natural language", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.language = "en-US";
+
+    await handleSlashCommand("/permissions add allow Write medium", context, output);
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput(
+      "exclude those large files and refresh the project index",
+      context,
+      output,
+    );
+
+    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(output.text).toContain("Index safety repair continuation");
+    expect(output.text).toContain("ignore file: .linghunignore");
+    expect(output.text).toContain("Ignore write completed: .linghunignore; entries=1.");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
+  it("does not duplicate existing ignore entries before continuing refresh", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+    await writeFile(join(project, ".linghunignore"), "large.json\n", "utf8");
+    await handleNaturalInput("帮我排除这些大文件并刷新索引", context, output);
+
+    expect(await readFile(join(project, ".linghunignore"), "utf8")).toBe("large.json\n");
+    expect(output.text).toContain("ignore 写入跳过");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
+  it("does not write or refresh when index safety repair Write permission is denied", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    expect(output.text).toContain("权限阻止 ignore 写入");
+    expect(output.text).toContain("下一步：查看 /permissions recent");
+    expect(await readMockCalls(callsPath)).toEqual([]);
+  });
+
+  it("does not allow natural-language force or rebuild through index safety continuation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput("force rebuild the index", context, output);
+
+    expect(output.text).toContain("索引 force/rebuild 不能通过自然语言直通");
+    expect(await readMockCalls(callsPath)).toEqual([]);
+  });
+
+  it("leaves ordinary development requests to the model loop even after index safety pause", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    await expect(handleNaturalInput("帮我实现登录功能", context, output)).resolves.toBe("message");
   });
 
   it("does not execute Bash silently in default mode", async () => {

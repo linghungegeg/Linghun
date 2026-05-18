@@ -576,7 +576,8 @@ corepack pnpm build
 - BP1-1 composite status：`handleNaturalInput()` 增加轻量组合状态查询，覆盖 model/provider、index、permission、cache、memory、mcp、background、gate；命中组合查询时本地输出 summary，不发送给模型。
 - BP1-2 model tool permission primary prompt：`executeModelToolUse()` 在 permission 非 allow 时立即输出本地主提示，包含 tool、decision、risk、mode、reason、scope 和 next action，同时继续回灌 error tool_result 给模型。
 - BP1-3 failure evidence continuation：模型工具 permission 非 allow、模型工具失败、slash 工具 permission denial 都记录轻量 failure evidence；模型 tool_result error 附带 `evidenceId`，后续 EvidenceSummary/handoff 可引用。
-- BP1-4 index safety repair loop：index safety pause 输出阻塞原因、建议 ignore 文件 `.linghunignore` / `.cbmignore`、建议条目、手动或明确 `/write` 写入路径、`/index refresh` retry，并记录 index evidence。
+- BP1-4 index safety repair loop：index safety pause 输出阻塞原因、建议 ignore 文件 `.linghunignore` / `.cbmignore`、建议条目、自然语言 continuation 修复路径、`/index refresh` retry，并记录 index evidence。
+- BP1-5 index safety repair continuation：当已存在 index safety riskyFiles，且用户明确要求“排除/忽略大文件并更新索引”时，本地 continuation 生成 ignore 写入计划，优先 `.linghunignore`，已有 `.cbmignore` 时沿用 `.cbmignore`；追加缺失条目且避免重复；写入走现有 Write/`decidePermission()` 权限管道；允许后自动继续 `/index refresh`；权限拒绝或写入失败时输出可操作下一步；自然语言 force/rebuild 仍不直通。
 
 Focused tests：
 
@@ -584,7 +585,7 @@ Focused tests：
 - 模型 Bash default-mode permission：不执行，输出 primary prompt，error tool_result 含 `evidenceId`。
 - 模型 Write default-mode permission：不写文件，输出 scope/reason/next。
 - 模型 Read 失败：error tool_result 含 `evidenceId`。
-- index safety 大文件：输出 ignore/retry repair loop。
+- index safety 大文件：输出 ignore/retry repair loop；中英文自然语言 continuation 可写入 ignore 后继续 refresh；已存在 ignore 条目不重复追加；权限拒绝不写入不 refresh；自然语言 force/rebuild 不直通；主输出不重复整段 safety warning；普通开发请求仍回模型主循环。
 - 既有 no-pending confirmation、provider supportsTools=false、长 Read/Grep/Glob 输出、Windows path/中文输出测试继续保留并复跑。
 
 阶段口径：4 个阻塞 P1 已按最小边界关闭；可建议恢复 Phase 15 真人 smoke，但 Phase 15 Beta 仍必须用户明确确认后才能开始。

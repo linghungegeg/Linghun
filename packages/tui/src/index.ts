@@ -250,6 +250,8 @@ export type IndexState = {
   changedFiles?: number;
   staleHint?: string;
   safetyWarning?: string;
+  safetyRiskyFiles?: IndexSafetyFile[];
+  safetyAction?: "init fast" | "refresh";
   error?: string;
   lastQuery?: string;
   lastSummary?: string;
@@ -3911,12 +3913,16 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   if (!projects.ok) {
     context.index.status = projects.errorCode === "ENOENT" ? "missing" : "error";
     context.index.error = projects.summary;
+    context.index.safetyRiskyFiles = undefined;
+    context.index.safetyAction = undefined;
     return;
   }
   const project = findCurrentIndexProject(projects.data, context.projectPath);
   if (!project) {
     context.index.status = "missing";
     context.index.error = "未找到当前项目索引。请运行 /index init fast 建立索引。";
+    context.index.safetyRiskyFiles = undefined;
+    context.index.safetyAction = undefined;
     return;
   }
   context.index.projectName = project.name;
@@ -3929,6 +3935,8 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   if (!status.ok) {
     context.index.status = "error";
     context.index.error = status.summary;
+    context.index.safetyRiskyFiles = undefined;
+    context.index.safetyAction = undefined;
     return;
   }
   const data = status.data as { status?: string; nodes?: number; edges?: number };
@@ -3939,6 +3947,8 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   context.index.changedFiles = undefined;
   context.index.staleHint = undefined;
   context.index.safetyWarning = undefined;
+  context.index.safetyRiskyFiles = undefined;
+  context.index.safetyAction = undefined;
   await refreshIndexStaleHint(context, project.name);
 }
 
@@ -3980,6 +3990,8 @@ async function runIndexRepository(
   if (!force && safety.riskyFiles.length > 0) {
     context.index.status = "stale";
     context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel);
+    context.index.safetyRiskyFiles = safety.riskyFiles;
+    context.index.safetyAction = actionLabel;
     context.index.error =
       "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
     await recordIndexEvidence(context, `safety:${actionLabel}`, context.index.safetyWarning);
@@ -3988,6 +4000,8 @@ async function runIndexRepository(
   }
   context.index.safetyWarning =
     safety.riskyFiles.length > 0 ? formatIndexSafetyWarning(safety, actionLabel) : undefined;
+  context.index.safetyRiskyFiles = safety.riskyFiles.length > 0 ? safety.riskyFiles : undefined;
+  context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
   writeLine(output, `Index: ${actionLabel} indexing...`);
@@ -4082,7 +4096,7 @@ function formatIndexStatus(context: TuiContext): string {
     `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
     `- changedFiles: ${context.index.changedFiles ?? "-"}`,
     `- staleHint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
-    `- safety: ${context.index.safetyWarning ? truncateDisplay(context.index.safetyWarning, 180) : "-"}`,
+    `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files=${context.index.safetyRiskyFiles.length}` : "-"}`,
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
     `- ${suggestion}`,
@@ -4279,7 +4293,7 @@ function formatIndexSafetyWarning(
     "建议 ignore 文件：.linghunignore 或 .cbmignore",
     "建议加入条目：",
     ...ignoreEntries,
-    "修复路径：手动编辑 .linghunignore/.cbmignore，或明确输入 /write 写入 ignore 文件；不会自动替你写入。",
+    "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
     "重试命令：/index refresh",
     "如确认要继续，可显式追加 --force。",
   ]
@@ -5494,7 +5508,7 @@ function matchesCompositeStatusKey(text: string, key: string): boolean {
   return patterns[key]?.test(text) ?? false;
 }
 
-async function handleNaturalInput(
+export async function handleNaturalInput(
   text: string,
   context: TuiContext,
   output: Writable,
@@ -5563,6 +5577,11 @@ async function handleNaturalInput(
     return "handled";
   }
 
+  const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
+  if (indexRepair === "handled") {
+    return "handled";
+  }
+
   const compositeStatus = formatCompositeStatusQuery(text, context);
   if (compositeStatus) {
     writeLine(output, compositeStatus);
@@ -5616,6 +5635,206 @@ async function handleNaturalInput(
     return "handled";
   }
   return "message";
+}
+
+async function handleIndexSafetyRepairContinuation(
+  text: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<"handled" | "pass"> {
+  const riskyFiles = context.index.safetyRiskyFiles ?? [];
+  if (riskyFiles.length === 0 || !context.index.safetyWarning) {
+    return "pass";
+  }
+  if (isNaturalIndexForceRequest(text)) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Index force/rebuild is not accepted through natural language. Type the exact high-risk slash command if you really want to force it."
+        : "索引 force/rebuild 不能通过自然语言直通。如确需强制执行，请输入精确高风险 slash command。",
+    );
+    writeStatus(output, context);
+    return "handled";
+  }
+  if (!isNaturalIndexSafetyRepairRequest(text)) {
+    return "pass";
+  }
+
+  const plan = await createIndexSafetyRepairPlan(context, riskyFiles);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? [
+          "Index safety repair continuation",
+          "- action: append missing ignore entries, then refresh project index",
+          `- ignore file: ${plan.path}`,
+          `- entries: ${plan.missingEntries.length}`,
+        ].join("\n")
+      : [
+          "索引安全修复续跑",
+          "- 动作：追加缺失 ignore 条目，然后刷新项目索引",
+          `- ignore 文件：${plan.path}`,
+          `- 条目数量：${plan.missingEntries.length}`,
+        ].join("\n"),
+  );
+
+  if (plan.missingEntries.length > 0) {
+    const writeResult = await runIndexIgnoreWritePlan(plan, context, output);
+    if (!writeResult) {
+      writeStatus(output, context);
+      return "handled";
+    }
+  } else {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Ignore write skipped: all risky files are already covered by the ignore file."
+        : "ignore 写入跳过：风险文件已被 ignore 文件覆盖。",
+    );
+  }
+
+  await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
+  writeLine(output, formatIndexStatus(context));
+  writeStatus(output, context);
+  return "handled";
+}
+
+function isNaturalIndexSafetyRepairRequest(text: string): boolean {
+  return (
+    /(排除|忽略|加入\s*ignore|写入\s*ignore|处理.*大文件|大文件.*处理|exclude|ignore|add.*ignore|write.*ignore|those large files|large files)/iu.test(
+      text,
+    ) && /(索引|index|refresh|更新|刷新)/iu.test(text)
+  );
+}
+
+function isNaturalIndexForceRequest(text: string): boolean {
+  return (
+    /(force|rebuild|强制|重建|--force|confirm-rebuild)/iu.test(text) && /(索引|index)/iu.test(text)
+  );
+}
+
+type IndexSafetyRepairPlan = {
+  path: ".linghunignore" | ".cbmignore";
+  content: string;
+  missingEntries: string[];
+};
+
+async function createIndexSafetyRepairPlan(
+  context: TuiContext,
+  riskyFiles: IndexSafetyFile[],
+): Promise<IndexSafetyRepairPlan> {
+  const path = await chooseIndexIgnoreFile(context.projectPath);
+  let current = "";
+  try {
+    current = await readFile(join(context.projectPath, path), "utf8");
+  } catch {
+    current = "";
+  }
+  const existing = current
+    .split(/\r?\n/u)
+    .map((line) => normalizePath(line.trim()))
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  const missingEntries = uniqueStrings(riskyFiles.map((file) => file.path)).filter(
+    (entry) => !isIgnoredIndexPath(entry, existing),
+  );
+  const needsTrailingNewline = current.length > 0 && !current.endsWith("\n");
+  const content =
+    missingEntries.length === 0
+      ? current
+      : `${current}${needsTrailingNewline ? "\n" : ""}${missingEntries.join("\n")}\n`;
+  return { path, content, missingEntries };
+}
+
+async function chooseIndexIgnoreFile(
+  projectPath: string,
+): Promise<".linghunignore" | ".cbmignore"> {
+  const linghunPath = join(projectPath, ".linghunignore");
+  const cbmPath = join(projectPath, ".cbmignore");
+  if (!(await pathExists(linghunPath)) && (await pathExists(cbmPath))) {
+    return ".cbmignore";
+  }
+  return ".linghunignore";
+}
+
+async function runIndexIgnoreWritePlan(
+  plan: IndexSafetyRepairPlan,
+  context: TuiContext,
+  output: Writable,
+): Promise<boolean> {
+  const sessionId = await ensureSession(context);
+  const input = { path: plan.path, content: plan.content };
+  const permission = await decidePermission("Write", input, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision !== "allow") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Permission blocked ignore write: ${permission.reason}\nNext: review /permissions recent or allow Write for ${plan.path}, then repeat the natural request.`
+        : `权限阻止 ignore 写入：${permission.reason}\n下一步：查看 /permissions recent，或允许 Write 写入 ${plan.path} 后重试这条自然语言请求。`,
+    );
+    return false;
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  const callId = randomUUID();
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: callId,
+    name: "Write",
+    input,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    const result = await runTool("Write", input, context.tools);
+    await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
+    const evidence = await recordToolEvidence(context, sessionId, "Write", result.output);
+    rememberToolFiles(context, "Write", input, result.output);
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      callId,
+      "Write",
+      result.output,
+      false,
+      evidence?.id,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Ignore write completed: ${plan.path}; entries=${plan.missingEntries.length}.`
+        : `ignore 写入完成：${plan.path}；条目数量=${plan.missingEntries.length}。`,
+    );
+    return true;
+  } catch (error) {
+    const text = formatError(error, context.language);
+    const evidence = await recordToolFailureEvidence(context, sessionId, "Write", text);
+    await appendToolResultEvent(context, sessionId, callId, "Write", text, true, evidence.id);
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `${text}\nNext: fix the ignore file path or permissions, then retry the natural request.`
+        : `${text}\n下一步：修复 ignore 文件路径或权限后，重试这条自然语言请求。`,
+    );
+    return false;
+  }
 }
 
 async function sendMessage(
