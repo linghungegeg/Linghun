@@ -7,6 +7,7 @@ import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
@@ -18,6 +19,7 @@ import {
   createModelSystemPrompt,
   createPluginState,
   createSkillState,
+  createSolutionCompletenessStatus,
   createWorkflowState,
   handleNaturalInput,
   handleSlashCommand,
@@ -26,6 +28,7 @@ import {
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
+import { createLayeredToolOutput } from "./tool-output-presenter.js";
 
 class MemoryOutput extends Writable {
   text = "";
@@ -40,6 +43,19 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+function mockOpenAiTextFetch(finalText = "done"): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const body = `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200 });
+    }),
+  );
+  return requests;
+}
 
 function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done"): unknown[] {
   const requests: unknown[] = [];
@@ -177,12 +193,7 @@ async function createTestContext(
     imageResults: [],
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
-    solutionCompleteness: {
-      triggered: false,
-      triggerReason: "none",
-      classificationRequired: false,
-      checklist: [],
-    },
+    solutionCompleteness: createSolutionCompletenessStatus(),
   };
 }
 
@@ -411,7 +422,57 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(`来源 session：${session.id}`);
   });
 
-  it("records Solution Completeness Gate status in model prompt and handoff", async () => {
+  it("keeps Solution Completeness Gate quiet for normal requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt("帮我修 bug", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+
+    expect(prompt).not.toContain("SYSTEMIC_GAP_WARNING");
+    expect(context.solutionCompleteness).toEqual(createSolutionCompletenessStatus());
+  });
+
+  it("adds a short report block when triggered output omits classification", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "solution-gate-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "solution-gate-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("我会先检查。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["不要补丁，先看 CCB，全局有没有漏\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Solution Completeness Gate report");
+    expect(output.text).toContain("- classification: systemic_gap");
+    expect(output.text).toContain("- impactAreas: reference_parity, runtime_behavior");
+    expect(output.text).toContain("- phaseBoundary: stay in Phase 15 pre-Beta");
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).toContain("SYSTEMIC_GAP_WARNING");
+  });
+
+  it("records Solution Completeness Gate decision in model prompt and handoff", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -424,12 +485,25 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(prompt).toContain("SYSTEMIC_GAP_WARNING");
     expect(prompt).toContain("single_issue / systemic_gap");
-    expect(prompt).toContain("影响面");
+    expect(prompt).toContain("impactAreas=reference_parity,runtime_behavior");
     expect(prompt).toContain("P0/P1/P2");
     expect(prompt).toContain("阶段边界");
     expect(prompt).toContain("验证方式");
-    expect(context.solutionCompleteness.triggered).toBe(true);
-    expect(context.solutionCompleteness.triggerReason).toBe("user_request");
+    expect(context.solutionCompleteness).toMatchObject({
+      triggered: true,
+      triggerReason: "user_request",
+      classificationRequired: true,
+      classification: "unknown",
+      impactAreas: ["reference_parity", "runtime_behavior"],
+      severity: "unknown",
+      requiredBeforeAction: true,
+      sourceRefs: [
+        "LINGHUN_IMPLEMENTATION_SPEC.md#11.6",
+        "LINGHUN_CCB_MATURITY_COMPARISON_REPORT.md#14",
+        "docs/delivery/phase-15-natural-command-bridge.md",
+      ],
+    });
+    expect(context.solutionCompleteness.nextRequiredOutput).toContain("single_issue/systemic_gap");
 
     context.permissions.recentDenied = [
       {
@@ -458,7 +532,15 @@ describe("Phase 06 TUI slash commands", () => {
       model: { provider: "deepseek", name: "deepseek-v4-flash" },
     });
     expect(repeatedPrompt).toContain("最近同类权限拒绝反复出现");
-    expect(context.solutionCompleteness.triggerReason).toBe("repeated_denial");
+    expect(context.solutionCompleteness).toMatchObject({
+      triggerReason: "repeated_denial",
+      classificationRequired: true,
+      classification: "systemic_gap",
+      impactAreas: ["permission_pipeline", "tool_loop"],
+      severity: "blocking_P1",
+      requiredBeforeAction: true,
+    });
+    expect(context.solutionCompleteness.evidenceRefs).toContain("permission_denial:Bash:plan");
 
     await handleSlashCommand("/branch solution gate", context, output);
     const resumed = await store.resume(context.sessionId ?? "missing");
@@ -466,9 +548,13 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(handoff?.type).toBe("handoff_packet");
     expect(
-      (handoff as { packet?: { solutionCompleteness?: { triggered?: boolean } } }).packet
-        ?.solutionCompleteness?.triggered,
+      (handoff as { packet?: { solutionCompleteness?: { classificationRequired?: boolean } } })
+        .packet?.solutionCompleteness?.classificationRequired,
     ).toBe(true);
+    expect(
+      (handoff as { packet?: { solutionCompleteness?: { classification?: string } } }).packet
+        ?.solutionCompleteness?.classification,
+    ).toBe("systemic_gap");
   });
 
   it("runs Phase 12 agents with trimmed context, transcript, status, and cancel path", async () => {
@@ -609,23 +695,27 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
   });
 
-  it("keeps exact Start Gate confirmation strict while allowing a new dangerous request to be blocked", async () => {
+  it("keeps exact Start Gate confirmation strict until the exact command is typed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["帮我重建索引\n确认\nyes\n直接 npm install\n/exit\n"]),
+      stdin: Readable.from([
+        "/index init fast\nforce rebuild the index\n把这些大文件忽略掉再刷新索引\n确认\nyes\n/exit\n",
+      ]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("精确命令：/index refresh --confirm-rebuild");
+    expect(output.text).toContain("- Exact command: /index refresh --confirm-rebuild");
+    expect(output.text).toContain(
+      "需要精确确认：请输入 /index refresh --confirm-rebuild。这条输入未执行。",
+    );
     expect(output.text).toContain(
       "需要精确确认：请输入 /index refresh --confirm-rebuild。普通确认未被接受。",
     );
-    expect(output.text).toContain("已阻止自然语言直通");
-    expect(output.text).toContain("不能由自然语言直通执行");
+    expect(output.text).not.toContain("Index: start refresh");
     expect(output.text).not.toContain("gate ng-");
     expect(output.text).not.toContain("risk=");
     expect(output.text).not.toContain("readonly=");
@@ -991,6 +1081,30 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(handleNaturalInput("帮我实现登录功能", context, output)).resolves.toBe("message");
   });
 
+  it("classifies index safety continuation from active blocker state", () => {
+    const state = { hasSafetyWarning: true, riskyFileCount: 2 };
+
+    expect(
+      classifyIndexSafetyRepairContinuation("把这些文件加入 ignore 后刷新索引", state).action,
+    ).toBe("repair");
+    expect(
+      classifyIndexSafetyRepairContinuation(
+        "please skip risky files and update the codebase index",
+        state,
+      ).action,
+    ).toBe("repair");
+    expect(classifyIndexSafetyRepairContinuation("force rebuild the index", state).action).toBe(
+      "force",
+    );
+    expect(classifyIndexSafetyRepairContinuation("帮我实现登录功能", state).action).toBe("pass");
+    expect(
+      classifyIndexSafetyRepairContinuation("把这些文件加入 ignore 后刷新索引", {
+        hasSafetyWarning: false,
+        riskyFileCount: 0,
+      }).action,
+    ).toBe("pass");
+  });
+
   it("does not execute Bash silently in default mode", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const output = new MemoryOutput();
@@ -1005,6 +1119,28 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("default 模式不会静默执行 Bash");
     expect(output.text).not.toContain("SHOULD_NOT_RUN");
     expect(output.text).not.toContain("工具 Bash 结果");
+  });
+
+  it("exposes layered tool output fields for presenter callers", () => {
+    const layered = createLayeredToolOutput(
+      "Read",
+      {
+        text: Array.from({ length: 90 }, (_, index) => `line ${index + 1}`).join("\n"),
+        summary: "read summary",
+        details: "full details stay outside primary output",
+        fullOutputPath: "logs/read-full.txt",
+        evidenceId: "ev-read-1",
+      },
+      "en-US",
+    );
+
+    expect(layered.layer).toBe("primary");
+    expect(layered.summary).toBe("read summary");
+    expect(layered.details).toBe("full details stay outside primary output");
+    expect(layered.truncated).toBe(true);
+    expect(layered.fullOutputPath).toBe("logs/read-full.txt");
+    expect(layered.evidenceId).toBe("ev-read-1");
+    expect(layered.preview).not.toContain("line 90");
   });
 
   it("truncates long Todo, Grep, Glob, and Read outputs in the main output", async () => {

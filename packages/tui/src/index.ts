@@ -50,6 +50,7 @@ import {
   createToolContext,
   runTool,
 } from "@linghun/tools";
+import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type PendingNaturalCommand,
   type SLASH_COMMAND_REGISTRY,
@@ -64,6 +65,9 @@ import {
   matchesNaturalGateConfirmation,
   routeNaturalIntent,
 } from "./natural-command-bridge.js";
+import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { formatToolOutput } from "./tool-output-presenter.js";
 
 export type TuiStatus = "ready";
 
@@ -96,10 +100,33 @@ export type PermissionState = {
   recentDenied: RecentPermissionRejection[];
 };
 
+export type SolutionCompletenessClassification = "single_issue" | "systemic_gap" | "unknown";
+
+export type SolutionCompletenessSeverity =
+  | "P0"
+  | "blocking_P1"
+  | "P1"
+  | "P2"
+  | "later"
+  | "not_do"
+  | "unknown";
+
 export type SolutionCompletenessStatus = {
   triggered: boolean;
-  triggerReason: "none" | "user_request" | "repeated_denial";
+  triggerReason:
+    | "none"
+    | "user_request"
+    | "repeated_denial"
+    | "smoke_contamination"
+    | "audit_finding";
   classificationRequired: boolean;
+  classification: SolutionCompletenessClassification;
+  impactAreas: string[];
+  severity: SolutionCompletenessSeverity;
+  requiredBeforeAction: boolean;
+  evidenceRefs: string[];
+  sourceRefs: string[];
+  nextRequiredOutput: string;
   checklist: string[];
   lastWarning?: string;
 };
@@ -3357,6 +3384,8 @@ async function loadOrCreateHandoffPacket(
   parentSessionId?: string,
 ): Promise<HandoffPacket> {
   if (context.memory.lastHandoff) {
+    context.memory.lastHandoff.solutionCompleteness = context.solutionCompleteness;
+    await writeHandoffPacket(context, context.memory.lastHandoff);
     return context.memory.lastHandoff;
   }
   const sessionId = await ensureSession(context);
@@ -5538,7 +5567,14 @@ export async function handleNaturalInput(
         writeStatus(output, context);
         return "handled";
       }
-      context.pendingNaturalCommand = undefined;
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? `Exact confirmation required: type ${gate.exactCommand}. This input was not executed.`
+          : `需要精确确认：请输入 ${gate.exactCommand}。这条输入未执行。`,
+      );
+      writeStatus(output, context);
+      return "handled";
     }
     if (decision === "confirmed") {
       context.pendingNaturalCommand = undefined;
@@ -5646,7 +5682,11 @@ async function handleIndexSafetyRepairContinuation(
   if (riskyFiles.length === 0 || !context.index.safetyWarning) {
     return "pass";
   }
-  if (isNaturalIndexForceRequest(text)) {
+  const continuation = classifyIndexSafetyRepairContinuation(text, {
+    hasSafetyWarning: Boolean(context.index.safetyWarning),
+    riskyFileCount: riskyFiles.length,
+  });
+  if (continuation.action === "force") {
     writeLine(
       output,
       context.language === "en-US"
@@ -5656,7 +5696,7 @@ async function handleIndexSafetyRepairContinuation(
     writeStatus(output, context);
     return "handled";
   }
-  if (!isNaturalIndexSafetyRepairRequest(text)) {
+  if (continuation.action !== "repair") {
     return "pass";
   }
 
@@ -5697,20 +5737,6 @@ async function handleIndexSafetyRepairContinuation(
   writeLine(output, formatIndexStatus(context));
   writeStatus(output, context);
   return "handled";
-}
-
-function isNaturalIndexSafetyRepairRequest(text: string): boolean {
-  return (
-    /(排除|忽略|加入\s*ignore|写入\s*ignore|处理.*大文件|大文件.*处理|exclude|ignore|add.*ignore|write.*ignore|those large files|large files)/iu.test(
-      text,
-    ) && /(索引|index|refresh|更新|刷新)/iu.test(text)
-  );
-}
-
-function isNaturalIndexForceRequest(text: string): boolean {
-  return (
-    /(force|rebuild|强制|重建|--force|confirm-rebuild)/iu.test(text) && /(索引|index)/iu.test(text)
-  );
 }
 
 type IndexSafetyRepairPlan = {
@@ -5868,8 +5894,17 @@ async function sendMessage(
     ...context,
     provider: getRuntimeStatusProvider(context),
   });
+  const systemPrompt = createModelSystemPrompt(text, context, runtimeStatus);
+  if (context.solutionCompleteness.triggered) {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `solution_completeness_gate: ${JSON.stringify(context.solutionCompleteness)}`,
+      "warning",
+    );
+  }
   const messages: ModelMessage[] = [
-    { role: "system", content: createModelSystemPrompt(text, context, runtimeStatus) },
+    { role: "system", content: systemPrompt },
     { role: "user", content: text },
   ];
 
@@ -5962,9 +5997,40 @@ async function sendMessage(
       text: assistantText,
       createdAt: new Date().toISOString(),
     });
+    if (needsSolutionCompletenessReportClosure(context, assistantText)) {
+      const message = formatSolutionCompletenessReportBlock(context);
+      writeLine(output, message);
+      await appendSystemEvent(context, sessionId, message, "warning");
+    }
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+}
+
+function needsSolutionCompletenessReportClosure(
+  context: TuiContext,
+  assistantText: string,
+): boolean {
+  if (!context.solutionCompleteness.classificationRequired) {
+    return false;
+  }
+  return !/single_issue|systemic_gap/u.test(assistantText);
+}
+
+function formatSolutionCompletenessReportBlock(context: TuiContext): string {
+  const status = context.solutionCompleteness;
+  const classification =
+    status.classification === "unknown" ? "systemic_gap" : status.classification;
+  const impact = status.impactAreas.length > 0 ? status.impactAreas.join(", ") : "unknown";
+  const severity = status.severity === "unknown" ? "blocking_P1" : status.severity;
+  return [
+    "Solution Completeness Gate report",
+    `- classification: ${classification}`,
+    `- impactAreas: ${impact}`,
+    `- severity: ${severity}`,
+    "- phaseBoundary: stay in Phase 15 pre-Beta; do not enter Beta/15.5/16+ automatically.",
+    "- validation: list focused tests/check/typecheck/build/diff-check before claiming closure.",
+  ].join("\n");
 }
 
 function currentModelSupportsTools(context: TuiContext): boolean {
@@ -6098,7 +6164,10 @@ async function executeModelToolUse(
   });
   if (permission.decision !== "allow") {
     const text = `${permission.decision}: ${permission.reason}`;
-    writeLine(output, formatModelToolPermissionPrompt(permission));
+    writeLine(
+      output,
+      formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+    );
     const evidence = await recordToolFailureEvidence(
       context,
       sessionId,
@@ -6136,7 +6205,7 @@ async function executeModelToolUse(
       false,
       evidence?.id,
     );
-    writeLine(output, formatToolOutput(toolName, result.output, context.language));
+    writeLine(output, formatToolOutput(toolName, result.output, context.language, evidence?.id));
     return {
       ok: true,
       tool: toolName,
@@ -6161,18 +6230,15 @@ function normalizeToolName(name: string): ToolName | null {
   return found ?? null;
 }
 
-function formatModelToolPermissionPrompt(permission: PermissionCheck): string {
-  const files = permission.request.files.length > 0 ? permission.request.files.join(", ") : "none";
-  return [
-    "模型工具权限提示",
-    `- tool: ${permission.request.toolName}`,
-    `- decision: ${permission.decision}`,
-    `- risk: ${permission.request.risk}`,
-    `- mode: ${permission.request.mode}`,
-    `- reason: ${permission.reason}`,
-    `- scope: ${files}`,
-    "- next: 未执行该工具；可查看 /permissions recent，改用明确 slash command，或切换合适权限模式后重试。",
-  ].join("\n");
+function toPermissionPromptView(permission: PermissionCheck) {
+  return {
+    toolName: permission.request.toolName,
+    decision: permission.decision,
+    risk: permission.request.risk,
+    mode: permission.request.mode,
+    reason: permission.reason,
+    scope: permission.request.files,
+  };
 }
 
 async function appendToolResultEvent(
@@ -6219,44 +6285,130 @@ function createEvidenceSummaryForModel(context: TuiContext): string {
   );
 }
 
-function createSolutionCompletenessStatus(): SolutionCompletenessStatus {
+export function createSolutionCompletenessStatus(): SolutionCompletenessStatus {
   return {
     triggered: false,
     triggerReason: "none",
     classificationRequired: false,
+    classification: "unknown",
+    impactAreas: [],
+    severity: "unknown",
+    requiredBeforeAction: false,
+    evidenceRefs: [],
+    sourceRefs: [],
+    nextRequiredOutput: "none",
     checklist: [],
   };
 }
 
 function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
   const userRequestedGate =
-    /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|有没有漏|系统性|完整性|solution completeness/i.test(
+    /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|对照成熟项目|全局|有没有漏|系统性|完整性|solution completeness/i.test(
+      text,
+    );
+  const smokeContamination = /smoke.*(污染|contaminat)|真实\s*smoke.*(污染|失真)/i.test(text);
+  const auditFinding =
+    /(verifier|审计|audit).*(文字补丁|regex|正则|只改文档)|文字补丁|regex\s*补丁|只改文档/i.test(
       text,
     );
   const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
-  if (!userRequestedGate && !repeatedDenial) {
+  if (!userRequestedGate && !smokeContamination && !auditFinding && !repeatedDenial) {
     context.solutionCompleteness = createSolutionCompletenessStatus();
     return "";
   }
 
-  const triggerReason = userRequestedGate ? "user_request" : "repeated_denial";
+  const triggerReason = userRequestedGate
+    ? "user_request"
+    : smokeContamination
+      ? "smoke_contamination"
+      : auditFinding
+        ? "audit_finding"
+        : "repeated_denial";
+  const impactAreas = inferSolutionCompletenessImpactAreas(text, triggerReason);
+  const classification = triggerReason === "repeated_denial" ? "systemic_gap" : "unknown";
+  const severity = triggerReason === "repeated_denial" ? "blocking_P1" : "unknown";
+  const requiredBeforeAction = true;
+  const nextRequiredOutput =
+    "先给 single_issue/systemic_gap 判断；若 systemic_gap，再列影响面、P0/P1/P2、阶段边界、验证方式和当前阶段/后续登记。";
   const warning = [
     "SYSTEMIC_GAP_WARNING:",
-    triggerReason === "user_request"
-      ? "用户明确要求成品级/不要缝补/先对照成熟参考/检查遗漏。"
-      : "最近同类权限拒绝反复出现。",
+    formatSolutionCompletenessTrigger(triggerReason),
     "回答或修复前必须先判断 single_issue / systemic_gap。",
+    `impactAreas=${impactAreas.join(",") || "unknown"}`,
+    `severity=${severity}`,
     "必须列出：影响面、P0/P1/P2、阶段边界、验证方式。",
-    "若属于当前阶段外内容，只登记风险，不要扩大实现范围。",
+    "若属于当前阶段外内容，只登记到 Phase 15.5 / Phase 16+ / not-do，不要扩大实现范围。",
   ].join(" ");
   context.solutionCompleteness = {
     triggered: true,
     triggerReason,
     classificationRequired: true,
+    classification,
+    impactAreas,
+    severity,
+    requiredBeforeAction,
+    evidenceRefs: collectSolutionCompletenessEvidenceRefs(context),
+    sourceRefs: [
+      "LINGHUN_IMPLEMENTATION_SPEC.md#11.6",
+      "LINGHUN_CCB_MATURITY_COMPARISON_REPORT.md#14",
+      "docs/delivery/phase-15-natural-command-bridge.md",
+    ],
+    nextRequiredOutput,
     checklist: ["single_issue/systemic_gap", "影响面", "P0/P1/P2", "阶段边界", "验证方式"],
     lastWarning: warning,
   };
   return warning;
+}
+
+function inferSolutionCompletenessImpactAreas(
+  text: string,
+  triggerReason: SolutionCompletenessStatus["triggerReason"],
+): string[] {
+  const areas = new Set<string>();
+  const lower = text.toLowerCase();
+  if (/ccb|opencode|成熟项目|对照|全局|系统性|完整性/u.test(lower)) {
+    areas.add("reference_parity");
+    areas.add("runtime_behavior");
+  }
+  if (/权限|permission|denial|拒绝/u.test(lower) || triggerReason === "repeated_denial") {
+    areas.add("permission_pipeline");
+    areas.add("tool_loop");
+  }
+  if (/smoke|tui|交互|手感|污染|失真/u.test(lower) || triggerReason === "smoke_contamination") {
+    areas.add("tui_smoke");
+    areas.add("natural_command_bridge");
+  }
+  if (/文字补丁|regex|正则|只改文档|verifier|审计|audit/u.test(lower)) {
+    areas.add("implementation_scope");
+    areas.add("verification");
+  }
+  return [...areas];
+}
+
+function formatSolutionCompletenessTrigger(
+  triggerReason: SolutionCompletenessStatus["triggerReason"],
+): string {
+  if (triggerReason === "user_request") {
+    return "用户明确要求成品级/不要缝补/先对照成熟参考/全局检查遗漏。";
+  }
+  if (triggerReason === "smoke_contamination") {
+    return "真实 smoke 已出现污染或交互失真。";
+  }
+  if (triggerReason === "audit_finding") {
+    return "verifier/审计指出文字补丁、regex 补丁或只改文档风险。";
+  }
+  if (triggerReason === "repeated_denial") {
+    return "最近同类权限拒绝反复出现。";
+  }
+  return "未触发。";
+}
+
+function collectSolutionCompletenessEvidenceRefs(context: TuiContext): string[] {
+  const evidence = context.evidence.slice(0, 3).map((item) => item.id);
+  const denied = context.permissions.recentDenied
+    .slice(0, 3)
+    .map((item) => `permission_denial:${item.toolName}:${item.mode}`);
+  return [...evidence, ...denied];
 }
 
 function hasRepeatedPermissionDenial(recentDenied: RecentPermissionRejection[]): boolean {
@@ -7582,75 +7734,6 @@ function isDiffSummary(value: unknown): value is DiffSummary {
   return typeof value === "object" && value !== null && "changedFiles" in value;
 }
 
-const TODO_OUTPUT_ITEM_LIMIT = 8;
-const TOOL_OUTPUT_LINE_LIMIT = 80;
-const TOOL_OUTPUT_CHAR_LIMIT = 6_000;
-
-function formatToolOutput(name: ToolName, output: ToolOutput, language: Language): string {
-  const preview = createToolOutputPreview(name, output.text, language);
-  const lines = [
-    language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
-    preview.text,
-  ];
-  if (preview.truncated || output.truncated) {
-    lines.push(
-      output.fullOutputPath
-        ? language === "en-US"
-          ? `Full log: ${output.fullOutputPath}`
-          : `完整日志：${output.fullOutputPath}`
-        : language === "en-US"
-          ? "Full result remains in the tool_result transcript/evidence record."
-          : "完整结果仍保留在 tool_result transcript/evidence 记录中。",
-    );
-  }
-  return lines.join("\n");
-}
-
-function createToolOutputPreview(
-  name: ToolName,
-  text: string,
-  language: Language,
-): { text: string; truncated: boolean } {
-  if (name === "Todo") {
-    const lines = text.split(/\r?\n/u);
-    if (lines.length <= TODO_OUTPUT_ITEM_LIMIT) {
-      return { text, truncated: false };
-    }
-    const remaining = lines.length - TODO_OUTPUT_ITEM_LIMIT;
-    return {
-      text: [
-        ...lines.slice(0, TODO_OUTPUT_ITEM_LIMIT),
-        language === "en-US"
-          ? `... ${remaining} more todo item(s) hidden from main output.`
-          : `... 主输出已隐藏 ${remaining} 条 Todo。`,
-      ].join("\n"),
-      truncated: true,
-    };
-  }
-
-  if (name !== "Read" && name !== "Grep" && name !== "Glob") {
-    return { text, truncated: false };
-  }
-
-  const lines = text.split(/\r?\n/u);
-  const byLine = lines.length > TOOL_OUTPUT_LINE_LIMIT;
-  const byChar = text.length > TOOL_OUTPUT_CHAR_LIMIT;
-  if (!byLine && !byChar) {
-    return { text, truncated: false };
-  }
-
-  let preview = lines.slice(0, TOOL_OUTPUT_LINE_LIMIT).join("\n");
-  if (preview.length > TOOL_OUTPUT_CHAR_LIMIT) {
-    preview = preview.slice(0, TOOL_OUTPUT_CHAR_LIMIT);
-  }
-  const hiddenLines = Math.max(0, lines.length - preview.split(/\r?\n/u).length);
-  const suffix =
-    language === "en-US"
-      ? `... output truncated in main view${hiddenLines > 0 ? `; ${hiddenLines} line(s) hidden` : ""}.`
-      : `... 主输出已截断${hiddenLines > 0 ? `，隐藏 ${hiddenLines} 行` : ""}。`;
-  return { text: `${preview}\n${suffix}`, truncated: true };
-}
-
 async function ensureSession(context: TuiContext): Promise<string> {
   if (context.sessionId) {
     return context.sessionId;
@@ -7669,20 +7752,22 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter((task) => task.status === "running").length;
   const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
-  const gate = context.pendingNaturalCommand ? "waiting confirmation" : "none";
-  const status = t(context, "status", {
-    session: truncateDisplay(
-      context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
-      8,
+  writeLine(
+    output,
+    formatRuntimeStatusLine(
+      {
+        session: context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
+        provider: getRuntimeStatusProvider(context),
+        model: context.model,
+        mode: context.permissionMode,
+        background,
+        cacheHitRate: latestHitRate,
+        indexStatus: context.index.status,
+        gate: context.pendingNaturalCommand ? "waiting confirmation" : "none",
+      },
+      context.language,
     ),
-    model: truncateDisplay(`${getRuntimeStatusProvider(context)}/${context.model}`, 26),
-    mode: context.permissionMode,
-    background: String(background),
-    cache: formatPercent(latestHitRate),
-    index: context.index.status,
-    gate,
-  });
-  writeLine(output, truncateDisplay(status, 120));
+  );
 }
 
 function t(context: TuiContext, key: MessageKey, values: Record<string, string> = {}): string {

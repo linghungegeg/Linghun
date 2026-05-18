@@ -14,9 +14,13 @@ export type ToolPermissionSpec = {
 
 export type ToolOutput = {
   text: string;
+  summary?: string;
+  preview?: string;
+  details?: string;
   data?: unknown;
   truncated?: boolean;
   fullOutputPath?: string;
+  evidenceId?: string;
   changedFiles?: string[];
 };
 

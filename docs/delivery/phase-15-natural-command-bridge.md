@@ -590,6 +590,48 @@ Focused tests：
 
 阶段口径：4 个阻塞 P1 已按最小边界关闭；可建议恢复 Phase 15 真人 smoke，但 Phase 15 Beta 仍必须用户明确确认后才能开始。
 
+### Phase 15 pre-Beta CCB Maturity Baseline Closure
+
+本轮性质：Phase 15 pre-Beta CCB Maturity Baseline Closure，只做成熟度报告指出的 Phase 15 handfeel gate 最小源码级收敛；未进入 Phase 15 real-project Beta、Phase 15.5 或 Phase 16+，未复制 CCB / Claude Code / OpenCode 源码、内部 API、专有实现或反编译痕迹。
+
+修复点：
+
+- TUI 单文件减压：新增 `tool-output-presenter.ts`、`permission-presenter.ts`、`runtime-status-presenter.ts`、`index-safety-repair.ts`，只迁出本轮 handfeel gate 相关 presentation/classification 逻辑，不做 registry/dispatch 大重构。
+- Tool output 分层：`ToolOutput` 增加 `summary`、`preview`、`details`、`evidenceId` 可选字段；TUI presenter 生成 primary-layer view，保留 `fullOutputPath`、`truncated` 和 evidence id，长输出仍 summary-first、主屏截断、完整内容留 transcript/evidence/full log。
+- 权限链路产品化：模型工具 permission ask/deny 主输出由独立 presenter 生成，保留 tool/action、decision、risk、mode、reason、scope、next，并明确拒绝原因已作为 `tool_result` evidence 回灌给模型。
+- Runtime status 收敛：状态行由 `runtime-status-presenter.ts` 统一格式化，保留 session、provider/model、mode、background、cache、index、gate 的短状态，不暴露 API key 或内部 schema。
+- Index safety repair 样例：自然语言续跑改为基于 active safety blocker state 的结构化 classifier；只有存在 `safetyWarning` / risky files 且用户表达 repair intent 时才写 ignore 并 refresh；force/rebuild 仍不通过自然语言直通；普通开发请求继续进入模型主循环。
+- Command registry / NCB 边界：保留现有 `SLASH_COMMAND_REGISTRY` + dispatch coverage drift test，不新增第二套命令解释系统；普通开发请求、危险请求和 index safety repair 继续走既有 NCB / 权限边界。
+
+补测：
+
+- `classifyIndexSafetyRepairContinuation()` 覆盖中文/英文 repair intent、force/rebuild 阻断、普通开发请求 pass、无 active blocker pass。
+- `createLayeredToolOutput()` 覆盖 primary layer、summary/details/fullOutputPath/evidenceId/truncated/preview 字段。
+- 既有模型 Bash/Write default-mode permission prompt、tool_result evidence、index safety repair continuation、普通开发请求不被吞、长输出截断、provider/model/status/doctor 等 focused tests 继续复跑。
+
+### Phase 15 pre-Beta CCB Maturity Baseline Closure follow-up：Solution Completeness Gate
+
+本轮性质：只在当前 CCB Maturity Baseline Closure diff 上补齐 Solution Completeness Gate 的轻量 runtime / report 硬闸门；不是 Phase 15 Beta、不是 Phase 15.5、不是 Phase 16+，不新增第二套命令解释系统，不复制 CCB / Claude Code / OpenCode 源码。
+
+修复点：
+
+- Runtime decision：`SolutionCompletenessStatus` 升级为轻量 decision 结构，包含 `triggered`、`triggerReason`、`classificationRequired`、`classification`、`impactAreas`、`severity`、`requiredBeforeAction`、`evidenceRefs`、`sourceRefs` 和 `nextRequiredOutput`。
+- 精准触发：普通“帮我修 bug / 帮我分析项目 / 写报告”不触发；“成品级 / 不要补丁 / 不要缝缝补补 / 先看 CCB / 全局 / 有没有漏 / 系统性 / 对照成熟项目”、真实 smoke 污染、verifier/审计指出文字补丁或 regex/只改文档风险、同类 permission denial 反复出现时触发。
+- Prompt 硬闸门：触发后 system prompt 继续注入 `SYSTEMIC_GAP_WARNING`，并带上 `single_issue / systemic_gap`、影响面、P0/P1/P2、阶段边界、验证方式和当前阶段/后续登记要求。
+- Runtime / transcript / handoff：触发状态写入 `context.solutionCompleteness`；模型循环前写入 `system_event`；handoff packet 持久化当前 `solutionCompleteness`，避免下轮遗忘。
+- Report gate：阶段报告明确本 follow-up 的 single/systemic 判断口径；若 `classificationRequired=true`，最终输出必须包含 `single_issue/systemic_gap` 判断，否则视为本轮不合格。
+
+补测：
+
+- 普通请求不触发 gate，且不影响 normal model/tool loop。
+- “不要缝缝补补，先看 CCB 有没有漏”触发 gate，并写入 `context.solutionCompleteness`。
+- 连续同类 permission denial 触发 gate，并默认归类为需先停下来的 `systemic_gap` / `blocking_P1`。
+- Handoff packet 包含 `solutionCompleteness.classificationRequired` 与 `classification`。
+- System prompt 包含 single_issue/systemic_gap、影响面、P0/P1/P2、阶段边界和验证方式。
+- `createSolutionCompletenessStatus()` 默认值可序列化，新增字段不会破坏现有 context 初始化。
+
+阶段口径：Phase 15 handfeel gate 的 P0 / blocking P1 已做最小源码级闭口；Phase 15 Beta 是否恢复仍必须用户明确确认。本轮不处理非阻塞 TUI polish、完整 CCB 式 permission modal、完整 grouped renderer、远程审批、FreshnessGate/web_source runtime、Phase 15.5 或 Phase 16+。Solution Completeness Gate 的双模型复检登记到 Phase 15.5；长期学习/自动规则沉淀登记到 Phase 16+；复制第三方源码或把 gate 做成每轮弹窗属于 not-do。
+
 验证命令（本节最终验证结果以本轮最终输出为准）：
 
 ```bash
