@@ -447,6 +447,101 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(`来源 session：${session.id}`);
   });
 
+  it("adds evidence-bound Phase 15 Beta readiness verdict to handoff packets", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/branch verdict gate", context, output);
+    const resumed = await store.resume(context.sessionId ?? "missing");
+    const handoff = resumed.transcript.find((event) => event.type === "handoff_packet");
+    const verdict = (handoff as { packet?: { verdictEvidence?: Record<string, unknown> } }).packet
+      ?.verdictEvidence;
+
+    expect(verdict?.scope).toBe("beta");
+    expect(verdict?.status).toBe("PARTIAL");
+    expect(verdict?.validationCommands).toEqual(
+      expect.arrayContaining([expect.stringContaining("pnpm test")]),
+    );
+    expect(verdict?.uncoveredItems).toEqual(
+      expect.arrayContaining([expect.stringContaining("real TUI report-generation")]),
+    );
+    expect(verdict?.residualRisks).toEqual(
+      expect.arrayContaining([expect.stringContaining("mock provider PASS")]),
+    );
+    expect(output.text).not.toContain("Phase 15 Beta readiness PASS");
+  });
+
+  it("downgrades Phase 15 Beta readiness claim when live/report evidence is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check Phase 15 Beta readiness is PASS", context, output);
+
+    expect(output.text).toContain("verdict=PARTIAL");
+    expect(output.text).toContain("scope=beta");
+    expect(output.text).toContain("Evidence：missing");
+    expect(output.text).toContain("real TUI report-generation path lacks PASS evidence");
+  });
+
+  it("rejects unsupported PASS claims without evidence refs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(
+      "/claim-check focused tests PASS，mock provider PASS，所以已完成",
+      context,
+      output,
+    );
+
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).toContain("已完成");
+    expect(output.text).not.toContain("Claim Checker：通过");
+  });
+
+  it("keeps Verdict Evidence Gate internals out of ordinary development requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "ordinary-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "ordinary-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiTextFetch("可以，我会先查看相关文件。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我修一个普通 bug\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("可以，我会先查看相关文件");
+    expect(output.text).not.toContain("Verdict Evidence Gate");
+    expect(output.text).not.toContain("coverage matrix");
+    expect(output.text).not.toContain("systemic_gap");
+    expect(output.text).not.toContain("verdict=PARTIAL");
+  });
+
   it("keeps Solution Completeness Gate quiet for normal requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

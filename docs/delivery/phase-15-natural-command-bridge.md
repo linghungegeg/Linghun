@@ -621,6 +621,34 @@ corepack pnpm smoke:live-provider
 
 阶段判定：P0 silent failure gate PASS；live provider basic text smoke PASS；real report-generation tool path 仍为 PARTIAL / blocking P1 candidate。Phase 15 Beta readiness 仍为 PARTIAL；不得从 live text PASS 推断 Beta readiness PASS，也不得从 runtime silent-failure PASS 推断真实报告生成路径 PASS。若 Phase 15 Beta gate 要求真实 provider 完成该报告生成路径，必须先按 P1 修复。是否进入 Phase 15 Beta 仍必须用户明确确认。
 
+### Phase 15 pre-Beta Verdict Evidence Gate / Anti-Hallucination Readiness Closure
+
+本轮性质：Phase 15 pre-Beta verdict/readiness evidence gate，只关闭“完成度结论 evidence-first”口径；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+新增审计报告：`docs/audit/phase-15-pre-beta-verdict-evidence-gate.md`。
+
+修复点：
+
+- 新增轻量 `VerdictEvidenceScope`，表达 `scope`、`status`、`evidenceRefs`、`validationCommands`、`uncoveredItems`、`residualRisks` 和 `nextAction`。
+- Handoff packet 增加 `verdictEvidence`，在 real TUI report-generation path 缺 PASS evidence 时自动保持 `scope=beta` / `status=PARTIAL`，并列出 validation、uncovered 和 risk。
+- `/claim-check Phase 15 Beta readiness is PASS` 走只读本地裁决，在缺 real TUI report-generation PASS evidence 时返回 PARTIAL，不调用模型，不把 live basic text PASS 升级为 Beta readiness PASS。
+- 普通开发请求不显示 Verdict Evidence Gate、coverage matrix、systemic_gap 或 verdict 内部术语。
+- 文档口径更新：`docs/open-source-positioning-notes.md`、`docs/delivery/README.md`、`START_NEXT_CHAT.md` 均明确 live provider smoke 若未覆盖 real TUI report-generation path，Beta readiness 仍为 PARTIAL。
+
+降级规则：
+
+- live provider smoke SKIPPED => Phase 15 Beta readiness 不能 PASS，只能 PARTIAL。
+- mock provider PASS != live provider PASS。
+- focused tests PASS != overall readiness PASS。
+- journey smoke PASS but live provider missing => PARTIAL。
+- untested critical path exists => PARTIAL。
+- silent failure found => FAIL/PARTIAL，不能 ready。
+- no evidence refs => verdict invalid or PARTIAL。
+- P0 open => readiness FAIL。
+- blocking P1 open => readiness PARTIAL/FAIL，不能 PASS。
+
+阶段判定：Phase 15 Beta readiness 仍为 PARTIAL。原因是 live provider basic text PASS 只覆盖文本流；real TUI report-generation path 仍为 PARTIAL / blocking P1 candidate。不得把本轮 verdict gate closure 写成进入 Beta 或等于 CCB。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。

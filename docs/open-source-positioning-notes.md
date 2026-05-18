@@ -69,6 +69,8 @@ Linghun 应把 Verdict Evidence Gate 作为核心差异点之一：
 
 > 不只防止模型编代码时幻觉，也防止模型把没验证的完成度说成 PASS。
 
+当前 Phase 15 pre-Beta 口径必须保持保守：live provider basic text smoke PASS 只证明该文本路径；real TUI report-generation path 仍为 PARTIAL / blocking P1 candidate 时，Phase 15 Beta readiness 仍为 PARTIAL。任何 README、发布说明、verifier report、handoff 或阶段文档都不得把 focused PASS、mock PASS、SKIPPED live smoke、live text PASS 或 PARTIAL real TUI path 包装成整体 ready / 等于 CCB / 可以进入 Beta。
+
 ## 可引用的实测口径
 
 这些数据只作为后续 README、发布说明和评测设计的保守依据。引用时必须标注样本来源、provider、模型、时间范围和计算口径，不得写成所有模型或所有项目的固定承诺。

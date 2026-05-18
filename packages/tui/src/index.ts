@@ -287,6 +287,28 @@ export type IndexState = {
   lastSummary?: string;
 };
 
+export type VerdictScope =
+  | "focused"
+  | "full-test"
+  | "mock"
+  | "journey"
+  | "live-provider"
+  | "real-tui"
+  | "beta"
+  | "release";
+
+export type VerdictStatus = "PASS" | "PARTIAL" | "FAIL" | "SKIPPED";
+
+export type VerdictEvidenceScope = {
+  scope: VerdictScope;
+  status: VerdictStatus;
+  evidenceRefs: string[];
+  validationCommands: string[];
+  uncoveredItems: string[];
+  residualRisks: string[];
+  nextAction: string;
+};
+
 export type HandoffPacket = {
   id: string;
   sessionId: string;
@@ -303,6 +325,7 @@ export type HandoffPacket = {
   keyFiles: string[];
   changedFiles: string[];
   evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  verdictEvidence: VerdictEvidenceScope;
   verification: VerificationReport | null;
   risks: string[];
   indexStatus: Pick<
@@ -3440,29 +3463,27 @@ function createHandoffPacket(
     sessionId,
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
-    currentPhase: "Phase 14",
-    nextPhase: "Phase 15 real-project beta",
-    phaseStatus: "completed",
-    goal: "Skills 与工作流主闭环和 hardening：本地 skills、workflow templates、hooks doctor、plugin manifest loader、启停、信任、权限边界与稳定性加固。",
+    currentPhase: "Phase 15 pre-Beta readiness evidence gate",
+    nextPhase:
+      "Phase 15 real-project beta（blocked until explicit user confirmation and real TUI/provider evidence）",
+    phaseStatus: "blocked",
+    goal: "Phase 15 pre-Beta 只关闭 readiness / verdict 结论层 evidence gate；不进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。",
     completed: [
-      "local skill manifest loader and /skills commands",
-      "skill manifest failure diagnostics with lastError",
-      "workflow templates and /workflows Start Gate finish checks",
-      "local plugin manifest loader and /plugins commands",
-      "hooks disabled by default and /doctor hooks boundary diagnostics",
-      "trust notice and enable/disable persistence",
-      "extension freshness pluginListHash",
+      "Phase 15 runtime silent-failure gate is PASS for the tested runtime path",
+      "live provider basic text smoke is PASS for the temporary-env smoke only",
+      "verdict/readiness claims now require explicit scope, evidence, validation, uncovered paths, and risk",
     ],
     pending: [
-      "Phase 15 真实项目 Beta 与 provider usage / 账单抽样对账必须等待用户明确确认后才能开始",
+      "real TUI report-generation path remains PARTIAL: no report file, no observed tool_use / permission continuation / tool_result",
+      "Phase 15 Beta readiness remains PARTIAL until real provider + real TUI critical paths have PASS evidence",
     ],
     mustNotDo: [
-      "不要进入 Phase 15+，除非用户明确确认",
-      "不要实现插件市场、GitHub 安装、远程安装或自动更新",
-      "不要实现长期任务或 Remote Channels",
-      "不要执行完整 hook 脚本；Phase 14 hardening 只做诊断和边界",
-      "不要让 workflow、hook 或 plugin 绕过 Start Gate、Plan、权限审批和验证闭环",
-      "不要把完整 skill、plugin manifest、hook 日志或大输出塞进 prompt / 状态栏",
+      "不要进入 Phase 15 Beta，除非用户明确确认且 Beta readiness evidence gate 通过",
+      "不要进入 Phase 15.5 或 Phase 16+",
+      "不要把 focused PASS、mock PASS、live text PASS、SKIPPED smoke 或 PARTIAL path 写成整体 ready",
+      "不要把 Linghun 写成等于 CCB / 成熟工具，除非附 scope/evidence/validation/uncovered/risk",
+      "不要复制 CCB / Claude Code / OpenCode 源码、内部 API 或专有实现",
+      "不要让 verdict gate / coverage matrix / systemic_gap 污染普通开发请求主输出",
     ],
     todos,
     keyFiles: [
@@ -3475,10 +3496,14 @@ function createHandoffPacket(
     ],
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
+    verdictEvidence: createPhase15BetaVerdictScope(latestEvidence.map((item) => item.id)),
     verification: context.lastVerification ?? null,
     risks: context.lastVerification
       ? context.lastVerification.risk
-      : ["Phase 14 hardening 已完成；Phase 15 真实项目 Beta 尚未开始，必须等待用户明确确认"],
+      : [
+          "Phase 15 Beta readiness is PARTIAL: live provider basic text PASS does not cover real TUI report generation",
+          "blocking P1 candidate remains: real TUI report-generation path has no tool_use / permission continuation / tool_result evidence",
+        ],
     indexStatus: {
       projectName: context.index.projectName,
       status: context.index.status,
@@ -7941,22 +7966,82 @@ function checkEvidenceGate(text: string, context: TuiContext): string | null {
 type ClaimCheck = {
   status: "passed" | "needs_disclaimer" | "blocked";
   unsupportedClaims: string[];
+  verdict?: VerdictEvidenceScope;
 };
 
+function createPhase15BetaVerdictScope(evidenceRefs: string[] = []): VerdictEvidenceScope {
+  return {
+    scope: "beta",
+    status: "PARTIAL",
+    evidenceRefs,
+    validationCommands: [
+      "corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts",
+      "corepack pnpm test",
+      "corepack pnpm check",
+      "corepack pnpm typecheck",
+      "corepack pnpm build",
+      "git diff --check",
+    ],
+    uncoveredItems: [
+      "real TUI report-generation path lacks PASS evidence",
+      "no observed tool_use / permission continuation / tool_result for the report-generation smoke",
+    ],
+    residualRisks: [
+      "live provider basic text PASS is not live provider tool/report PASS",
+      "mock provider PASS and focused test PASS cannot prove Phase 15 Beta readiness",
+      "blocking P1 candidate remains open until the real report-generation path passes",
+    ],
+    nextAction:
+      "Fix or re-smoke the real provider + real TUI report-generation path before any Phase 15 Beta readiness PASS claim.",
+  };
+}
+
+function isPhase15BetaReadinessClaim(normalizedClaim: string): boolean {
+  return (
+    normalizedClaim.includes("phase 15") &&
+    normalizedClaim.includes("beta") &&
+    (normalizedClaim.includes("ready") ||
+      normalizedClaim.includes("readiness") ||
+      normalizedClaim.includes("pass") ||
+      normalizedClaim.includes("完成") ||
+      normalizedClaim.includes("就绪") ||
+      normalizedClaim.includes("通过"))
+  );
+}
+
 function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
+  const normalizedClaim = claim.toLowerCase();
+  if (isPhase15BetaReadinessClaim(normalizedClaim)) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedClaims: ["Phase 15 Beta readiness PASS"],
+      verdict: createPhase15BetaVerdictScope(context.evidence.map((item) => item.id)),
+    };
+  }
+
   const highRisk = [
+    "已完成",
     "已修复",
     "已验证",
+    "无风险",
+    "等于 ccb",
+    "成熟工具",
+    "可以进入 beta",
     "测试通过",
     "代码里",
     "调用链是",
     "不会影响",
+    "completed",
     "fixed",
     "verified",
+    "no risk",
+    "ccb parity",
+    "ready for beta",
+    "release ready",
     "tests passed",
     "in the code",
   ];
-  const unsupportedClaims = highRisk.filter((item) => claim.includes(item));
+  const unsupportedClaims = highRisk.filter((item) => normalizedClaim.includes(item.toLowerCase()));
   if (unsupportedClaims.length === 0 || context.evidence.length > 0) {
     return { status: "passed", unsupportedClaims: [] };
   }
@@ -7964,6 +8049,30 @@ function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
 }
 
 function formatClaimCheck(result: ClaimCheck, language: Language): string {
+  if (result.verdict) {
+    const evidence =
+      result.verdict.evidenceRefs.length > 0 ? result.verdict.evidenceRefs.join(", ") : "missing";
+    const validation = result.verdict.validationCommands.join("; ");
+    const uncovered = result.verdict.uncoveredItems.join("; ");
+    const risks = result.verdict.residualRisks.join("; ");
+    return language === "en-US"
+      ? [
+          `Claim Checker: verdict=${result.verdict.status}; scope=${result.verdict.scope}.`,
+          `Evidence: ${evidence}.`,
+          `Validation: ${validation}.`,
+          `Uncovered: ${uncovered}.`,
+          `Risk: ${risks}.`,
+          `Next: ${result.verdict.nextAction}`,
+        ].join("\n")
+      : [
+          `Claim Checker：verdict=${result.verdict.status}；scope=${result.verdict.scope}。`,
+          `Evidence：${evidence}。`,
+          `Validation：${validation}。`,
+          `Uncovered：${uncovered}。`,
+          `Risk：${risks}。`,
+          `Next：${result.verdict.nextAction}`,
+        ].join("\n");
+  }
   if (result.status === "passed") {
     return language === "en-US" ? "Claim check passed." : "Claim Checker：通过。";
   }
