@@ -90,6 +90,7 @@
 - Phase 15.5 已补联网取证成熟度收口：反幻觉不是禁止联网，而是本地证据优先、实时信息触发 Freshness Gate、未授权联网先询问、已授权联网优先官方来源、结果写入 `web_source` evidence、失败降级；未联网或无新鲜 web evidence 不得声称最新版本、当前价格、当前 API 行为或社区现状。
 - Phase 15 Beta 前已新增 TUI output/report gate：基础 CCB 手感必须在 Beta 前闭合，包括真实 provider/model 状态、默认权限不静默跑 Bash、控制面请求本地处理、primary/details/debug 输出分层、权限提示人话、tool_result 摘要、doctor/key 脱敏、状态栏准确、hint 去重、长输出落 fullOutputPath/log、阶段汇报 verdict/evidence/validation/risk/next action。Phase 15.5 只承接非阻塞 polish、模型接入成熟度、联网取证成熟度和开源前 hardening；Phase 18 只做桌面端壳、IPC/API 和 core 复用验证，不负责补基础终端交互。
 - Phase 15.5 已补 Solution Completeness Gate 复检：双模型审查和真实项目测试报告中的缺陷必须先分类为单点修复、系统性缺口、后续登记或不做；系统性缺口要给最小完整修复边界，避免 Phase 15.5 继续补丁化。
+- Phase 15 CCB workflow parity 是总基线对齐：先从 CCB 源码提取 workflow inventory，再映射 Linghun Phase 00-14 已声明能力和 Phase 15 Beta handfeel gate，P0 / blocking P1 必须在 Phase 15 pre-Beta 源码级闭口。Phase 16-18 后续只做 delta parity audit，审新增能力、成熟参考边界、权限/成本/幻觉/长期状态风险和是否破坏 Phase 15 默认 CCB 手感；若发现基础手感回归，按回归或遗漏处理，不得登记为普通 polish。
 - Phase 15 已补 provider quota / balance 查询设计：参考 CC Switch usage query 的公开行为和边界，区分 local_limit、provider_usage、provider_quota、billing_reconciled；官方订阅可自动查的才标记 official/oauth，第三方中转站和私有服务走 template/custom_script，查不到标记 unknown。
 - Phase 15 命中率口径已改成目标观察区间：92%-96% 是稳定样本目标，不是任意模型/项目/provider 的硬承诺；硬验收是 usage 来源、公式、endpoint 拆分、break-cache 诊断和账单/usage 抽样对账。
 - Phase 16 已补可控学习成本边界：默认不每轮学习、不自动接受长期记忆；候选优先来自 evidence/Todo/验证/handoff，必要总结走低成本 summarizer role；prompt 只注入少量相关记忆摘要，并通过 `/memory stats` 展示注入条数和估算 token。

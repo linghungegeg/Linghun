@@ -65,7 +65,10 @@ import {
   matchesNaturalGateConfirmation,
   routeNaturalIntent,
 } from "./natural-command-bridge.js";
-import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import {
+  formatLocalToolPermissionPrompt,
+  formatModelToolPermissionPrompt,
+} from "./permission-presenter.js";
 import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 
@@ -622,6 +625,11 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/exit",
 ] as const satisfies readonly (typeof SLASH_COMMAND_REGISTRY)[number]["slash"][];
 
+type PendingLocalApproval = {
+  kind: "index_ignore_write";
+  plan: IndexSafetyRepairPlan;
+};
+
 export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
@@ -655,6 +663,7 @@ export type TuiContext = {
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
   pendingNaturalCommand?: PendingNaturalCommand;
+  pendingLocalApproval?: PendingLocalApproval;
   activeAbortController?: AbortController;
   recentlyMentionedFiles: string[];
   solutionCompleteness: SolutionCompletenessStatus;
@@ -5542,6 +5551,53 @@ export async function handleNaturalInput(
   context: TuiContext,
   output: Writable,
 ): Promise<"handled" | "message"> {
+  const pendingLocalApproval = context.pendingLocalApproval;
+  if (pendingLocalApproval) {
+    const normalized = text.trim().toLowerCase();
+    if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(normalized)) {
+      const approval = pendingLocalApproval;
+      context.pendingLocalApproval = undefined;
+      if (approval.kind === "index_ignore_write") {
+        const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
+        if (written) {
+          await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
+          writeLine(output, formatIndexStatus(context));
+        }
+        writeStatus(output, context);
+        return "handled";
+      }
+    }
+    if (/^(no|n|deny|cancel|取消|拒绝|不|否)$/iu.test(normalized)) {
+      const approval = pendingLocalApproval;
+      context.pendingLocalApproval = undefined;
+      const sessionId = await ensureSession(context);
+      if (approval.kind === "index_ignore_write") {
+        await recordToolFailureEvidence(
+          context,
+          sessionId,
+          "Write",
+          `permission denied by user: ${approval.plan.path}`,
+        );
+      }
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Permission denied. No file was written and the index was not refreshed."
+          : "已拒绝权限。本轮未写入文件，也未刷新索引。",
+      );
+      writeStatus(output, context);
+      return "handled";
+    }
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "A local approval is pending. Type yes/confirm to allow once, or no/cancel to deny; this input was not sent to the model."
+        : "当前有本地权限审批待处理。输入 yes/确认/继续 可本次允许，输入 no/取消 可拒绝；这条输入不会发送给模型。",
+    );
+    writeStatus(output, context);
+    return "handled";
+  }
+
   if (context.pendingNaturalCommand) {
     const gate = context.pendingNaturalCommand;
     const decision = matchesNaturalGateConfirmation(gate, text);
@@ -5656,6 +5712,12 @@ export async function handleNaturalInput(
       return "handled";
     }
     const result = await handleSlashCommand(intent.command, context, output);
+    if (intent.capability.id === "index" && result !== "message") {
+      const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
+      if (indexRepair === "handled") {
+        return "handled";
+      }
+    }
     return result === "message" ? "message" : "handled";
   }
   if (intent.action === "permission_pipeline") {
@@ -5802,7 +5864,25 @@ async function runIndexIgnoreWritePlan(
     reason: permission.reason,
     createdAt: new Date().toISOString(),
   });
-  if (permission.decision !== "allow") {
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = { kind: "index_ignore_write", plan };
+    writeLine(
+      output,
+      formatLocalToolPermissionPrompt(
+        {
+          toolName: "Write",
+          decision: permission.decision,
+          risk: permission.request.risk,
+          mode: permission.request.mode,
+          reason: permission.reason,
+          scope: permission.request.files,
+        },
+        context.language,
+      ),
+    );
+    return false;
+  }
+  if (permission.decision === "deny") {
     await recordToolFailureEvidence(
       context,
       sessionId,
@@ -5820,6 +5900,16 @@ async function runIndexIgnoreWritePlan(
   if (permission.preflight) {
     writeLine(output, permission.preflight);
   }
+  return executeIndexIgnoreWritePlan(plan, context, output);
+}
+
+async function executeIndexIgnoreWritePlan(
+  plan: IndexSafetyRepairPlan,
+  context: TuiContext,
+  output: Writable,
+): Promise<boolean> {
+  const sessionId = await ensureSession(context);
+  const input = { path: plan.path, content: plan.content };
   const callId = randomUUID();
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",

@@ -23,6 +23,6 @@
 | Phase 15 pre-Beta deep parity | done | [phase-15-pre-beta-ccb-deep-parity-closure.md](./phase-15-pre-beta-ccb-deep-parity-closure.md) | Deep Parity Closure blocking P1 已完成；后续真实 TUI smoke 发现的 P0/阻塞 P1 已作为 Phase 15 Beta 前 CCB handfeel gate 继续收口。Phase 15 Beta 仍 pending user decision，不得自动进入 Phase 15.5 / Phase 16+ |
 | Phase 15 | pending | phase-15-real-project-beta.md | 真实项目测试版；进入前必须通过 Natural Command Bridge、tool_use/tool_result、权限管道、provider/model、TUI output/report gate 和真实 TUI smoke |
 | Phase 15.5 | pending | phase-15-5-cross-model-hardening.md | 双模型交叉审查、Solution Completeness Gate 复检、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段 |
-| Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环 |
-| Phase 17 | pending | phase-17-jobs-autonomous-sessions.md | 长期托管任务与自动会话 |
-| Phase 18 | pending | phase-18-desktop-ready.md | 桌面端预留验证；基础终端 TUI 手感不后置到本阶段 |
+| Phase 16 | pending | phase-16-learning-loop.md | 可控学习闭环；基于 Phase 15 CCB workflow parity 总基线做 delta parity audit，只审新增学习/记忆能力及其权限、成本、幻觉和长期状态风险 |
+| Phase 17 | pending | phase-17-jobs-autonomous-sessions.md | 长期托管任务与自动会话；基于 Phase 15 总基线做 delta parity audit，只审新增 job/team/remote 审批能力，不回补基础 TUI 手感 |
+| Phase 18 | pending | phase-18-desktop-ready.md | 桌面端预留验证；基于 Phase 15 总基线做 delta parity audit，验证 core/API/IPC 复用，基础终端 TUI 手感不后置到本阶段 |

@@ -962,6 +962,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("重试命令：/index refresh");
   });
 
+  it("preserves same-turn composite index repair intent after safety blocker", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleNaturalInput("帮我排除大文件更新索引", context, output);
+    await handleNaturalInput("确认", context, output);
+
+    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(output.text).toContain("索引安全门");
+    expect(output.text).toContain("索引安全修复续跑");
+    expect(output.text).toContain("需要权限审批");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
   it("continues index safety repair from Chinese natural language after permission allows Write", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
@@ -1030,7 +1050,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("does not write or refresh when index safety repair Write permission is denied", async () => {
+  it("does not write or refresh when index safety repair approval is denied", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -1042,11 +1062,33 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
     await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await handleNaturalInput("no", context, output);
 
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
-    expect(output.text).toContain("权限阻止 ignore 写入");
-    expect(output.text).toContain("下一步：查看 /permissions recent");
+    expect(output.text).toContain("需要权限审批");
+    expect(output.text).toContain("已拒绝权限。本轮未写入文件，也未刷新索引。");
     expect(await readMockCalls(callsPath)).toEqual([]);
+  });
+
+  it("continues index safety repair after default Write approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await handleNaturalInput("确认", context, output);
+
+    expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
+    expect(output.text).toContain("需要权限审批");
+    expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
   it("does not allow natural-language force or rebuild through index safety continuation", async () => {

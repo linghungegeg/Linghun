@@ -2540,6 +2540,8 @@ export type ReleaseReadinessReport = {
 
 Terminal TUI 成品级收口从 Phase 15 real-project Beta 前开始作为 release gate；Phase 15.5 只允许承接非阻塞 P1/P2 polish，不能补 Phase 15 Beta 已经需要的主输出、权限提示、tool_result、doctor、状态栏和阶段汇报底线。桌面端仍属于 Phase 18；Phase 18 只复用已成熟的 core 和终端交互语义，不承担补齐基础 TUI 手感。
 
+Phase 15 的 CCB workflow parity 是一次总基线对齐：先从 CCB 源码提取 workflow inventory，再映射 Linghun Phase 00-14 已声明能力和 Phase 15 Beta handfeel gate，P0 / blocking P1 必须当轮源码级闭口。Phase 16、Phase 17、Phase 18 只做 delta parity audit：新增学习/长期任务/远程/桌面能力必须说明参考成熟项目、增量行为边界、权限和成本风险、是否破坏 Phase 15 终端默认手感，以及对应 P0/P1/P2/not-do。任何 delta audit 发现的 Phase 15 基础手感回归都必须回补当前基线，不能作为后续 polish。
+
 终端输出必须分为三层：
 
 ```ts

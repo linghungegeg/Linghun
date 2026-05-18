@@ -285,6 +285,88 @@ Focused tests / TUI smoke 覆盖：
 
 本轮验证结果见“Natural Intent Contract hardening 验证结果”。
 
+## Phase 15 pre-Beta source-level CCB workflow parity closure
+
+本轮性质：Phase 15 pre-Beta 源码级 CCB Workflow Inventory Parity Closure，不是 Phase 15 real-project Beta，不是 Phase 15.5，也不是 Phase 16+。本轮只参考 `F:\ccb-source` 中体现出的行为链路、交互边界、权限语义、输出成熟度、错误恢复和验收标准；未复制 CCB / Claude Code / OpenCode 源码、内部 API、专有实现或反编译痕迹。
+
+### CCB Workflow Inventory 摘要
+
+| workflow id | CCB 源码路径 | CCB 行为摘要 | 用户可感知手感 | 安全/权限边界与恢复 | Phase 00-14 / Phase 15 pre-Beta |
+| --- | --- | --- | --- | --- | --- |
+| CCB-WF-01 input.text-images-attachments | `processTextPrompt.ts`、`handlePromptSubmit.ts`、`REPL.tsx` | 普通文本、图片、粘贴引用、附件合并成用户消息；空输入不查询；exit 本地处理 | 输入后只在必要时进入模型；粘贴/图片不丢上下文 | 本地命令、远程输入、普通提示分流；abort controller 绑定查询 | 必修 |
+| CCB-WF-02 prompt-submit-query-loop | `handlePromptSubmit.ts`、`REPL.tsx` | slash/local JSX command、queued command、queryGuard、onBeforeQuery、工具上下文、主循环查询分层 | 忙时排队，直接命令即时处理，普通任务进入模型 | queryGuard/abort/queue 防重入，外部 loading 特判 | 必修 |
+| CCB-WF-03 slash-command-registry | `commands.ts` | 命令集中注册，feature gate、动态 command、non-interactive variant、help/enablement 分离 | `/help` 与实际可用命令一致，隐藏/实验能力有边界 | feature flag、isCommandEnabled、skipSlashCommands 防远程误触发 | 必修 |
+| CCB-WF-04 tool-lifecycle | `Tool.ts`、`tools/`、`REPL.tsx` | 工具 schema、validate、permission、progress、render、execute、tool_result、truncate/group/interrupt | 工具调用可见、可取消、结果分层，不把长输出刷屏 | ToolUseContext 携带权限、MCP、abort、progress、worker 信息 | 必修 |
+| CCB-WF-05 permission-lifecycle | `PermissionPrompt.tsx`、`PermissionRequest.tsx`、`permissions.ts` | ask/allow/deny、反馈输入、Esc/Ctrl+C、rule source、hook/classifier、headless fallback | 用户可 allow once、持久规则、拒绝并反馈；无 UI 时 fail closed | alwaysAllow/Deny/Ask、mode、hook、classifier、sandbox、MCP tool name 边界 | 必修 |
+| CCB-WF-06 rendering-output | `components/messages/`、`sessionStorage.ts`、`docs/ccb-optimizations.md` | 流式消息、ephemeral progress、tool result 存储、重复渲染规避、长 transcript 保护 | 主屏看摘要和进度，完整输出在 transcript/log | progress 不参与 API/transcript chain；大 transcript 有上限 | 必修 |
+| CCB-WF-07 status-observability | `StatusLine.tsx` | model、permission、cwd/session、tokens/context、cost、cache、index health、rate limit/statusline command | 底部持续显示运行状态、缓存/索引健康和上下文压力 | statusLine 可配置；assistant/remote 等场景可隐藏或外部命令生成 | 必修 |
+| CCB-WF-08 error-recovery | `handlePromptSubmit.ts`、`permissions.ts`、`hooks.ts` | provider/tool/hook/permission/abort 错误分类，queued notification 与 next action | 失败可继续，不把内部异常当普通回答 | hooks timeout、permission deny、abort、non-interactive 自动拒绝 | 必修 |
+| CCB-WF-09 session-context-handoff | `sessionStorage.ts`、`REPL.tsx` | JSONL transcript、session title、resume/branch、agent transcript、compact boundary | 会话可恢复，长记录不 OOM，进度不污染上下文 | 50MB 读保护、chain participant、ephemeral progress 过滤 | 必修 |
+| CCB-WF-10 mcp-hooks-skills-plugins | `Tool.ts`、`commands.ts`、`hooks.ts` | MCP/skills/plugins/hooks 发现、注册、权限、失败隔离、异步 hook | 扩展能力可见、可诊断、失败不拖垮主对话 | trusted source、feature gate、hook timeout、async registry | Phase 14 已声明 / Phase 15 gate |
+| CCB-WF-11 cache-index-memory | `StatusLine.tsx`、`ccb-optimizations.md` | cache hit-rate/TTL、index health、大文件保护、session/memory 入口 | 缓存/索引异常有短提示和修复建议 | 大文件先 ignore，索引不默认吞成本；cache 低命中提示 | 必修 |
+| CCB-WF-12 plan-approval-auto-bypass | `PermissionRequest.tsx`、`permissions.ts`、`REPL.tsx` | plan mode、auto/classifier、bypass/yolo、sandbox override、approval feedback | 何时规划、何时执行、何时提权可见 | dangerous rule stripping、classifier fail-closed、mode-specific reject | 必修 |
+| CCB-WF-13 windows-i18n-path | `hooks.ts`、`sessionStorage.ts`、`docs/ccb-optimizations.md` | Git Bash/PowerShell/Windows path、中文设置/缓存/索引提示 | Windows 路径和中文终端输出不破坏操作 | windowsPathToPosixPath、shell detection、中文提示只改 UI | 必修 |
+
+### Linghun mapping / parity 摘要
+
+| CCB workflow | Linghun 源码路径 | 当前等价性 | 本轮根因与修复 | workflow 级测试 |
+| --- | --- | --- | --- | --- |
+| CCB-WF-01 | `packages/tui/src/index.ts`、`natural-command-bridge.ts` | PASS | 普通输入、slash、本地确认、无 pending yes 均已本地分流；本轮未改 | `index.test.ts` natural smoke |
+| CCB-WF-02 | `index.ts`、`providers/src/index.ts` | PASS | provider tools support false 不发送 tools；tool_result second request 已覆盖 | provider / TUI tests |
+| CCB-WF-03 | `natural-command-bridge.ts`、`index.ts` | PASS | Catalog/dispatch drift coverage 已有；本轮未做 registry 大重构 | `natural-command-bridge.test.ts` |
+| CCB-WF-04 | `tools/src/index.ts`、`tool-output-presenter.ts`、`index.ts` | PASS for Phase 00-14 scope | 核心工具 tool_use/tool_result、summary-first 长输出、Bash progress 已覆盖；完整 CCB UI grouping 属非阻塞 polish | focused TUI/tool tests |
+| CCB-WF-05 | `permission-presenter.ts`、`index.ts` | PASS for pre-Beta gate | 根因：index ignore Write 在 default ask 时只有 fail-closed 文案，缺 pending allow-once continuation。本轮新增 `pendingLocalApproval` 和统一 local permission presenter；允许后写 `.linghunignore` 并 refresh，拒绝则不写不刷新并记录 evidence | 新增 default Write approval / denial tests |
+| CCB-WF-06 | `tool-output-presenter.ts`、`index.ts` | PASS for pre-Beta gate | 主屏短摘要、长输出落 transcript/evidence 已覆盖；本轮确认 index safety 不再重复完整 warning + status | index safety tests |
+| CCB-WF-07 | `runtime-status-presenter.ts`、`index.ts` | PASS for pre-Beta gate | 轻量状态行已显示 provider/model/mode/bg/cache/index/gate；完整 rate-limit/statusline command 属后续高级项 | runtime/status tests |
+| CCB-WF-08 | `providers/src/index.ts`、`index.ts` | PASS | 400/429/5xx/provider/tool_result/permission denial 均有分类或 evidence；本轮补本地审批拒绝恢复路径 | focused tests |
+| CCB-WF-09 | `core/src/session-store`、`index.ts` | PASS for Phase 00-14 scope | transcript/evidence/handoff 已有；完整 CCB 多 GB transcript 优化不在 Phase 15 pre-Beta 必修 | session/evidence tests |
+| CCB-WF-10 | `skills/workflows/hooks/plugins` 相关 TUI 状态 | PASS for Phase 14 declared scope | 已保持发现、状态、权限边界和失败隔离；不进入 Phase 16/17 扩展 | existing hardening tests |
+| CCB-WF-11 | `index-safety-repair.ts`、`index.ts`、`runtime-status-presenter.ts` | PASS | 根因：同轮复合意图先触发 `/index refresh` safety blocker 后未消费原始“排除大文件”意图。本轮在 safe local index action 后复用 active blocker classifier 续跑 repair；保留 force 阻断 | 新增 same-turn composite repair test |
+| CCB-WF-12 | `index.ts`、`permission-presenter.ts` | PASS for pre-Beta gate | Start Gate 与 permission continuation 独立：Start Gate exact command 仍严格；local Write approval 仅 allow once 当前 pending action | exact gate + approval tests |
+| CCB-WF-13 | `index.ts`、`tools/src/index.ts` | PASS for pre-Beta gate | Windows 路径 normalize、中文输出、`.linghunignore` 写入路径保留相对路径；本轮未引入 `/workspace` | existing Windows/path/i18n tests |
+
+### 本轮源码级修复
+
+- `packages/tui/src/index.ts`
+  - 新增 `pendingLocalApproval`，只覆盖本轮必须的 `index_ignore_write` allow-once continuation。
+  - 本地 pending approval 优先于 Start Gate 和模型；`yes/确认/继续` 执行当前待审批写入后自动 `/index refresh`；`no/取消` 不写文件、不刷新索引并记录 failure evidence。
+  - safe local `/index refresh` 触发 safety blocker 后，同轮继续调用 `handleIndexSafetyRepairContinuation()` 消费原始自然语言中的 repair intent，避免“帮我排除大文件更新索引”丢失“排除大文件”。
+- `packages/tui/src/permission-presenter.ts`
+  - 新增 `formatLocalToolPermissionPrompt()`，本地 continuation 权限提示复用统一 permission presenter 口径，展示 action/decision/risk/mode/reason/scope/next。
+- `packages/tui/src/index.test.ts`
+  - 新增同轮复合 intent、default Write approval continuation、denial 不写不刷新回归测试。
+
+### 为什么不是关键词补丁/文案补丁
+
+- 修复入口不是固定句子表，而是复用现有 `routeNaturalIntent()` 的 index safe local action、`scanIndexSafety()` 的真实 blocker state、`classifyIndexSafetyRepairContinuation()` 的结构化 repair/force/pass 分类和 `decidePermission()` 的真实权限结果。
+- “允许/拒绝”不直接匹配某个测试句后输出文案，而是保存 `pendingLocalApproval` 状态；下一轮确认只消费该 pending action，执行真实 `Write` tool、写 transcript/tool_result/evidence，并在成功后刷新索引。
+- Start Gate exact confirmation 仍由 `pendingNaturalCommand` 处理，本轮没有把 Start Gate 与 permission approval 混成一套。
+
+### Seed cases / regression cases
+
+| # | 结果 | 证据 |
+| --- | --- | --- |
+| 1 | PASS | 新增 `preserves same-turn composite index repair intent after safety blocker` 覆盖“帮我排除大文件更新索引”。 |
+| 2 | PASS | safe local index action 后立即复用 active blocker classifier，不再依赖第二轮已有 warning。 |
+| 3 | PASS | 新增 `continues index safety repair after default Write approval`，default Write ask 有 pending allow once continuation。 |
+| 4 | PASS | approval 后真实写 `.linghunignore` 并自动 refresh index。 |
+| 5 | PASS | denial 后不写文件、不刷新 index，并记录 failure evidence。 |
+| 6 | PASS | index safety 主屏只出现一次 safety warning；status 只显示 pending risky files 摘要。 |
+| 7 | PASS | local approval 使用 `formatLocalToolPermissionPrompt()`。 |
+| 8 | PASS | ordinary development request after safety pause 仍返回 `message`。 |
+| 9 | PASS | 中英文 repair classifier 和 tests 同一 workflow。 |
+| 10 | PASS | Start Gate exact confirmation 与 pending local approval 分开处理。 |
+| 11 | PASS | 相对路径写入 `.linghunignore`，中文输出保留。 |
+| 12 | PASS | 无 pending 的 yes/确认/继续 已有本地阻断，不进模型。 |
+| 13 | PASS | providers/TUI 已在当前 focused run 覆盖 tools 支持/不支持路径。 |
+| 14 | PASS | Read/Grep/Glob/Todo 长输出 summary-first 已由 `tool-output-presenter.ts` 覆盖；Bash progress/summary 已在前序 gate 覆盖。 |
+
+### 本轮 focused 验证结果
+
+- `corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts`：PASS，11 个测试文件、233 个测试通过。
+
+其余全量验证见本轮最终报告。若后续 `check/typecheck/build/diff-check` 发现问题，必须先修复后才能建议恢复真人实测。
+
 ## 覆盖矩阵
 
 | 批次 | 能力 | 自然语言处理 |

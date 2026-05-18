@@ -10,6 +10,35 @@ export type PermissionPromptView = {
   scope: string[];
 };
 
+export function formatLocalToolPermissionPrompt(
+  permission: PermissionPromptView,
+  language: Language,
+): string {
+  const files = permission.scope.length > 0 ? permission.scope.join(", ") : "none";
+  if (language === "en-US") {
+    return [
+      "Permission approval needed",
+      `- action: ${permission.toolName}`,
+      `- decision: ${permission.decision}`,
+      `- risk: ${permission.risk}`,
+      `- mode: ${permission.mode}`,
+      `- reason: ${permission.reason}`,
+      `- scope: ${files}`,
+      "- next: type yes/confirm to allow once, or no/cancel to deny. The tool has not run yet.",
+    ].join("\n");
+  }
+  return [
+    "需要权限审批",
+    `- action: ${permission.toolName}`,
+    `- decision: ${permission.decision}`,
+    `- risk: ${permission.risk}`,
+    `- mode: ${permission.mode}`,
+    `- reason: ${permission.reason}`,
+    `- scope: ${files}`,
+    "- next: 输入 yes/确认/继续 可本次允许；输入 no/取消 可拒绝。工具尚未执行。",
+  ].join("\n");
+}
+
 export function formatModelToolPermissionPrompt(
   permission: PermissionPromptView,
   language: Language,
