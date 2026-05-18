@@ -28,7 +28,7 @@ import {
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
-import { createLayeredToolOutput } from "./tool-output-presenter.js";
+import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 
 class MemoryOutput extends Writable {
   text = "";
@@ -855,12 +855,15 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型工具权限提示");
-    expect(output.text).toContain("- tool: Bash");
-    expect(output.text).toContain("- decision: ask");
-    expect(output.text).toContain("- risk: high");
-    expect(output.text).toContain("- mode: default");
-    expect(output.text).toContain("- scope: none");
+    expect(output.text).toContain("工具已暂停，等待权限边界处理");
+    expect(output.text).toContain("- 工具：Bash");
+    expect(output.text).toContain("- 暂停原因：");
+    expect(output.text).toContain("- 安全级别：高");
+    expect(output.text).toContain("- 当前模式：default");
+    expect(output.text).toContain("- 影响范围：none");
+    expect(output.text).not.toContain("- decision:");
+    expect(output.text).not.toContain("- risk:");
+    expect(output.text).not.toContain("- mode:");
     expect(output.text).not.toContain("工具 Bash 结果");
     const second = requests[1] as { messages?: { role?: string; content?: string }[] };
     const toolMessage = second.messages?.find((message) => message.role === "tool");
@@ -896,9 +899,12 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型工具权限提示");
-    expect(output.text).toContain("- tool: Write");
-    expect(output.text).toContain("- scope: blocked.txt");
+    expect(output.text).toContain("工具已暂停，等待权限边界处理");
+    expect(output.text).toContain("- 工具：Write");
+    expect(output.text).toContain("- 影响范围：blocked.txt");
+    expect(output.text).not.toContain("- decision:");
+    expect(output.text).not.toContain("- risk:");
+    expect(output.text).not.toContain("- mode:");
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
@@ -954,8 +960,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("索引安全门");
     expect(output.text).toContain("阻塞原因");
+    expect(output.text).toContain("主屏不展开完整风险清单");
     expect(output.text).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
-    expect(output.text).toContain("large.json");
+    expect(output.text).not.toContain("- large.json");
     expect(output.text).toContain(
       "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
     );
@@ -978,7 +985,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("索引安全门");
     expect(output.text).toContain("索引安全修复续跑");
-    expect(output.text).toContain("需要权限审批");
+    expect(output.text).toContain("需要先确认权限");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
@@ -1065,7 +1072,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleNaturalInput("no", context, output);
 
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
-    expect(output.text).toContain("需要权限审批");
+    expect(output.text).toContain("需要先确认权限");
     expect(output.text).toContain("已拒绝权限。本轮未写入文件，也未刷新索引。");
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
@@ -1086,7 +1093,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleNaturalInput("确认", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
-    expect(output.text).toContain("需要权限审批");
+    expect(output.text).toContain("需要先确认权限");
     expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
@@ -1213,6 +1220,27 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("完整结果仍保留在 tool_result transcript/evidence 记录中");
     expect(output.text).not.toContain("120\tline 120");
     expect(output.text).not.toContain("match-89.txt");
+  });
+
+  it("keeps Bash output summary-first while preserving a full log path", () => {
+    const text = Array.from({ length: 50 }, (_, index) => `bash line ${index + 1}`).join("\n");
+    const formatted = formatToolOutput(
+      "Bash",
+      {
+        text,
+        fullOutputPath: ".linghun/logs/tools/bash-test.log",
+        truncated: false,
+        data: { exitCode: 0 },
+      },
+      "en-US",
+      "ev-bash-1",
+    );
+
+    expect(formatted).toContain("Tool Bash result:");
+    expect(formatted).toContain("output truncated in main view");
+    expect(formatted).toContain("Full log: .linghun/logs/tools/bash-test.log");
+    expect(formatted).toContain("Evidence: ev-bash-1");
+    expect(formatted).not.toContain("bash line 50");
   });
 
   it("does not generate LINGHUN.md when natural project-rules read is missing", async () => {
@@ -2062,9 +2090,13 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("索引安全门：/index init fast");
     expect(output.text).toContain("索引安全门：/index refresh");
-    expect(output.text).toContain("node_modules/");
-    expect(output.text).toContain("generated/dependency directory");
+    expect(output.text).toContain("主屏不展开完整风险清单");
+    expect(output.text).not.toContain("- node_modules/");
+    expect(output.text).not.toContain("generated/dependency directory");
     expect(output.text).toContain(".linghunignore 或 .cbmignore");
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("risky_file:node_modules/")),
+    ).toBe(true);
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
 

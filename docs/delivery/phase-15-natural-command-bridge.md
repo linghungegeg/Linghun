@@ -721,6 +721,22 @@ corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natu
 corepack pnpm typecheck
 ```
 
+## Phase 15 pre-Beta source-level runtime/output/permission parity closure（done）
+
+本轮性质：Phase 15 pre-Beta 源码级成熟度收口，不进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。完整 inventory / mapping / out-of-scope 表见 `F:\Linghun\docs\audit\phase-15-pre-beta-source-level-runtime-output-permission-parity.md`。
+
+本轮先从 `F:\ccb-source` 反向提取 CCB Runtime Workflow、Output Rendering、Permission & Continuation inventory，再映射 Linghun Phase 00-14 已声明能力和 Phase 15 Beta handfeel gate；只参考行为链路、输出层级、权限语义、错误恢复和验收标准，未复制 CCB / Claude Code / OpenCode 源码、内部 API、专有实现或补丁代码。
+
+源码级收口：
+
+- Permission prompt 主屏改为人话化 primary prompt，不再暴露 raw `decision:`、`risk:`、`mode:` 字段；完整 decision/risk/mode 仍保留在 transcript / permission event / evidence/debug 路径。
+- Index safety blocker 改为 primary/details 分层：主屏只显示风险数量、阻塞原因、修复路径和下一步；完整风险文件列表写入 transcript/evidence，不默认刷屏。
+- Index repair continuation 成功后只输出短成功摘要和 `/index status` 详情入口，不再默认追加完整 `Index status`。
+- Bash tool output presenter 增加主屏截断边界，确保 Bash 与 Read/Grep/Glob/Todo/Write/Edit 一样走 summary-first；完整日志路径和 evidence id 保留。
+- Tests 覆盖：permission raw 字段不进主屏、index 风险文件只进 evidence、yes 后短摘要、no 不写不刷新、Bash 长输出主屏截断、zh/en index repair continuation、ordinary development request 不被控制面抢走。
+
+当前判定：Phase 00-14 CCB runtime/output/permission parity 对已声明能力与 Phase 15 pre-Beta handfeel gate 为 PASS；完整 CCB 式 UI 大重写、完整 permission modal、完整 deferred tools/plugin marketplace、远程/桌面/长期自治等列入 out-of-scope，不在本轮实现。
+
 ## 已知问题
 
 - 本阶段是 preflight，不承诺真实项目 Beta 的完整自然语言命令成功率。

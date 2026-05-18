@@ -17,6 +17,8 @@ export type LayeredToolOutput = {
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const TOOL_OUTPUT_LINE_LIMIT = 80;
 const TOOL_OUTPUT_CHAR_LIMIT = 6_000;
+const BASH_OUTPUT_LINE_LIMIT = 20;
+const BASH_OUTPUT_CHAR_LIMIT = 2_000;
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -100,20 +102,33 @@ function createToolOutputPreview(
     };
   }
 
+  if (name === "Bash") {
+    return truncatePreview(text, BASH_OUTPUT_LINE_LIMIT, BASH_OUTPUT_CHAR_LIMIT, language);
+  }
+
   if (name !== "Read" && name !== "Grep" && name !== "Glob") {
     return { text, truncated: false };
   }
 
+  return truncatePreview(text, TOOL_OUTPUT_LINE_LIMIT, TOOL_OUTPUT_CHAR_LIMIT, language);
+}
+
+function truncatePreview(
+  text: string,
+  lineLimit: number,
+  charLimit: number,
+  language: Language,
+): { text: string; truncated: boolean } {
   const lines = text.split(/\r?\n/u);
-  const byLine = lines.length > TOOL_OUTPUT_LINE_LIMIT;
-  const byChar = text.length > TOOL_OUTPUT_CHAR_LIMIT;
+  const byLine = lines.length > lineLimit;
+  const byChar = text.length > charLimit;
   if (!byLine && !byChar) {
     return { text, truncated: false };
   }
 
-  let preview = lines.slice(0, TOOL_OUTPUT_LINE_LIMIT).join("\n");
-  if (preview.length > TOOL_OUTPUT_CHAR_LIMIT) {
-    preview = preview.slice(0, TOOL_OUTPUT_CHAR_LIMIT);
+  let preview = lines.slice(0, lineLimit).join("\n");
+  if (preview.length > charLimit) {
+    preview = preview.slice(0, charLimit);
   }
   const hiddenLines = Math.max(0, lines.length - preview.split(/\r?\n/u).length);
   const suffix =

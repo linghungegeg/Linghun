@@ -4027,17 +4027,24 @@ async function runIndexRepository(
   const safety = await scanIndexSafety(context.projectPath);
   if (!force && safety.riskyFiles.length > 0) {
     context.index.status = "stale";
-    context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel);
+    context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel, "primary");
     context.index.safetyRiskyFiles = safety.riskyFiles;
     context.index.safetyAction = actionLabel;
     context.index.error =
       "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
-    await recordIndexEvidence(context, `safety:${actionLabel}`, context.index.safetyWarning);
+    await recordIndexEvidence(
+      context,
+      `safety:${actionLabel}`,
+      formatIndexSafetyWarning(safety, actionLabel, "details"),
+      safety.riskyFiles.map((file) => `risky_file:${file.path}`),
+    );
     writeLine(output, context.index.safetyWarning);
     return;
   }
   context.index.safetyWarning =
-    safety.riskyFiles.length > 0 ? formatIndexSafetyWarning(safety, actionLabel) : undefined;
+    safety.riskyFiles.length > 0
+      ? formatIndexSafetyWarning(safety, actionLabel, "primary")
+      : undefined;
   context.index.safetyRiskyFiles = safety.riskyFiles.length > 0 ? safety.riskyFiles : undefined;
   context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
@@ -4103,6 +4110,7 @@ async function recordIndexEvidence(
   context: TuiContext,
   query: string,
   summary: string,
+  supportsClaims: string[] = [],
 ): Promise<void> {
   const sessionId = await ensureSession(context);
   const evidence: EvidenceRecord = {
@@ -4110,7 +4118,7 @@ async function recordIndexEvidence(
     kind: "index_query",
     summary: truncateDisplay(summary.replace(/\s+/g, " "), 160),
     source: `codebase-memory:${context.index.projectName ?? "unknown"}:${query}`,
-    supportsClaims: ["index_query", query],
+    supportsClaims: ["index_query", query, ...supportsClaims],
     createdAt: new Date().toISOString(),
   };
   context.evidence.unshift(evidence);
@@ -4138,6 +4146,23 @@ function formatIndexStatus(context: TuiContext): string {
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
     `- ${suggestion}`,
+  ].join("\n");
+}
+
+function formatIndexRefreshSummary(context: TuiContext): string {
+  if (context.language === "en-US") {
+    return [
+      "Index refresh completed",
+      `- status: ${context.index.status}`,
+      `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
+      "- details: run /index status for the full index status view.",
+    ].join("\n");
+  }
+  return [
+    "索引刷新完成",
+    `- 状态：${context.index.status}`,
+    `- nodes/edges：${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
+    "- 详情：输入 /index status 查看完整索引状态。",
   ].join("\n");
 }
 
@@ -4317,17 +4342,31 @@ function getIndexFileRisk(relativePath: string): string | null {
 function formatIndexSafetyWarning(
   safety: IndexSafetyResult,
   actionLabel: "init fast" | "refresh",
+  layer: "primary" | "details" = "primary",
 ): string {
+  const hiddenCount = safety.riskyFiles.length;
+  if (layer === "primary") {
+    return [
+      `索引安全门：/index ${actionLabel} 发现 ${hiddenCount} 项未排除的大文件风险，默认阻止索引。`,
+      "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
+      "主屏不展开完整风险清单；完整清单已写入 transcript/evidence。",
+      "建议 ignore 文件：.linghunignore 或 .cbmignore",
+      "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
+      "重试命令：/index refresh",
+      "如确认要继续，可显式追加 --force。",
+    ].join("\n");
+  }
+
   const files = safety.riskyFiles.map((file) => {
     const size = file.size > 0 ? `${formatBytes(file.size)}, ` : "";
     return `- ${file.path} (${size}${file.reason})`;
   });
   const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
   return [
-    `索引安全门：/index ${actionLabel} 发现未排除的大文件风险，默认阻止索引。`,
+    `索引安全门详情：/index ${actionLabel} 发现未排除的大文件风险。`,
     "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
     ...files,
-    safety.truncated ? `- 仅展示前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
+    safety.truncated ? `- 仅记录前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
     "建议 ignore 文件：.linghunignore 或 .cbmignore",
     "建议加入条目：",
     ...ignoreEntries,
@@ -5561,7 +5600,7 @@ export async function handleNaturalInput(
         const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
         if (written) {
           await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-          writeLine(output, formatIndexStatus(context));
+          writeLine(output, formatIndexRefreshSummary(context));
         }
         writeStatus(output, context);
         return "handled";
@@ -5796,7 +5835,7 @@ async function handleIndexSafetyRepairContinuation(
   }
 
   await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-  writeLine(output, formatIndexStatus(context));
+  writeLine(output, formatIndexRefreshSummary(context));
   writeStatus(output, context);
   return "handled";
 }
