@@ -296,7 +296,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/index architecture");
     expect(output.text).toContain("/usage");
     expect(output.text).toContain("/stats endpoints");
-    expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain(
+      "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
+    );
     expect(output.text).toContain("cache n/a · index");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
@@ -782,7 +784,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/model route 查看");
   });
 
-  it("uses configured default openai-compatible model in TUI status without deepseek fallback", async () => {
+  it("uses executor route for status, model output, doctor, and ordinary requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -790,30 +792,112 @@ describe("Phase 06 TUI slash commands", () => {
       JSON.stringify({
         defaultModel: "gpt-5.5",
         providers: {
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com/v1",
+            apiKey: "sk-test-deepseek-secret",
+            model: "deepseek-v4-pro",
+          },
           "openai-compatible": {
+            type: "openai-compatible",
             baseUrl: "https://example.invalid/v1",
             apiKey: "sk-test-openai-compatible-secret",
             model: "gpt-5.5",
           },
         },
+        modelRoutes: {
+          defaultModel: "gpt-5.5",
+          routes: [
+            { role: "planner", provider: "deepseek", primaryModel: "deepseek-v4-pro" },
+            { role: "executor", provider: "deepseek", primaryModel: "deepseek-v4-pro" },
+          ],
+        },
       }),
       "utf8",
     );
+    const requests = mockOpenAiTextFetch("ok");
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["现在是什么模型\n/model doctor\n/exit\n"]),
+      stdin: Readable.from(["现在是什么模型\n/model doctor\n写一个简短计划\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("provider=openai-compatible model=gpt-5.5");
-    expect(output.text).toContain("openai-compatible: type=openai-compatible");
+    expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
+    expect(output.text).toContain("defaultModel=gpt-5.5");
+    expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
+    expect(output.text).toContain("模型=deepseek-v4-pro 推理=未生效");
+    expect(output.text).toContain(
+      "deepseek: type=deepseek endpointProfile=chat_completions reasoning=not sent",
+    );
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");
     expect(output.text).not.toContain("provider=deepseek model=gpt-5.5");
+    expect(output.text).not.toContain("openai-compatible/gpt-5.5");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
+    expect(requests[0]).toMatchObject({ model: "deepseek-v4-pro" });
+  });
+
+  it("records selected runtime profile before ordinary model requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-test-openai-compatible-secret",
+            model: "gpt-5.5",
+            endpointProfile: "responses",
+            reasoningLevel: "Medium",
+          },
+        },
+        modelRoutes: {
+          routes: [{ role: "executor", provider: "openai-compatible", primaryModel: "gpt-5.5" }],
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("ok");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["普通开发请求\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    expect(session?.id).toBeTruthy();
+    const resumed = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).resume(session?.id ?? "missing");
+
+    expect(requests[0]).toMatchObject({
+      model: "gpt-5.5",
+      max_output_tokens: 4_096,
+      reasoning: { effort: "Medium" },
+    });
+    expect(output.text).not.toMatch(/Status: requesting model.*ok/s);
+    expect(
+      resumed.transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("selectedRole=executor") &&
+          event.message.includes("provider=openai-compatible") &&
+          event.message.includes("model=gpt-5.5") &&
+          event.message.includes("endpointProfile=responses") &&
+          event.message.includes("reasoningLevel=Medium") &&
+          event.message.includes("tools=yes"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps exact Start Gate confirmation strict until the exact command is typed", async () => {
@@ -879,7 +963,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("当前模型：provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain(
+      "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
+    );
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("索引初始化完成");
     expect(output.text).not.toContain("Index: start init fast");

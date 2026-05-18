@@ -95,6 +95,54 @@ describe("OpenAI compatible provider", () => {
     ]);
   });
 
+  it("constructs a responses request with reasoning effort", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "Medium",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "你好" }],
+      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+      toolChoice: "auto",
+    });
+
+    expect(request).toEqual({
+      model: "gpt-5.5",
+      input: [{ role: "user", content: "你好" }],
+      stream: true,
+      max_output_tokens: 4_096,
+      tools: [
+        {
+          type: "function",
+          function: { name: "Read", description: "Read a file", parameters: { type: "object" } },
+        },
+      ],
+      tool_choice: "auto",
+      reasoning: { effort: "Medium" },
+    });
+  });
+
+  it("keeps chat completions profile without reasoning payload for DeepSeek compatibility", () => {
+    const provider = new DeepSeekProvider({
+      apiKey: "test-key",
+      model: "deepseek-v4-pro",
+      reasoningLevel: "Medium",
+    });
+
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+
+    expect(request.max_tokens).toBe(16_384);
+    expect(request).not.toHaveProperty("reasoning");
+  });
+
   it("does not send OpenAI tools when provider config disables tool support", async () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -126,7 +174,10 @@ describe("OpenAI compatible provider", () => {
   });
 });
 
-async function collectOpenAiEvents(chunks: string[]): Promise<LinghunEvent[]> {
+async function collectOpenAiEvents(
+  chunks: string[],
+  endpoint = "/v1/chat/completions",
+): Promise<LinghunEvent[]> {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -137,7 +188,7 @@ async function collectOpenAiEvents(chunks: string[]): Promise<LinghunEvent[]> {
     },
   });
   const events: LinghunEvent[] = [];
-  for await (const event of parseOpenAiStream(body)) {
+  for await (const event of parseOpenAiStream(body, endpoint)) {
     events.push(event);
   }
   return events;
@@ -242,6 +293,50 @@ describe("OpenAI stream parser", () => {
         finishReason: "stop",
         chunkCount: 1,
         hadUsage: false,
+      },
+    ]);
+  });
+
+  it("converts responses endpoint text, tool, usage, and error events", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", call_id: "call-1", name: "Read", arguments: '{"path":"README.md"}' } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-1", usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5, input_tokens_details: { cached_tokens: 1 } } } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.failed" })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    expect(events).toEqual([
+      { type: "assistant_text_delta", id: "assistant", text: "ok" },
+      { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 2,
+          totalTokens: 5,
+          cacheReadTokens: 1,
+          cacheWriteTokens: undefined,
+          cacheWriteTokensRaw: null,
+          rawUsage: {
+            input_tokens: 3,
+            output_tokens: 2,
+            total_tokens: 5,
+            input_tokens_details: { cached_tokens: 1 },
+          },
+          endpoint: "/v1/responses",
+        },
+      },
+      expect.objectContaining({ type: "error" }),
+      {
+        type: "message_stop",
+        id: "resp-1",
+        finishReason: undefined,
+        chunkCount: 4,
+        hadUsage: true,
       },
     ]);
   });

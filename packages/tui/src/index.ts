@@ -15,6 +15,7 @@ import {
   type ModelCapability,
   type ModelRole,
   type RoleModelRoute,
+  defaultConfig,
   loadConfig,
   resolveStoragePaths,
   saveExtensionEnablement,
@@ -1853,8 +1854,17 @@ async function handleModelCommand(
     writeLine(output, formatModelRouteDoctor(context));
     return;
   }
-  const provider = getRuntimeStatusProvider(context);
-  writeLine(output, `${t(context, "currentModel")}：provider=${provider} model=${context.model}`);
+  const runtime = getSelectedModelRuntime(context);
+  writeLine(
+    output,
+    `${t(context, "currentModel")}：role=${runtime.role} provider=${runtime.provider} model=${runtime.model} reasoning=${runtime.reasoningStatus}`,
+  );
+  if (context.config.defaultModel && context.config.defaultModel !== runtime.model) {
+    writeLine(
+      output,
+      `说明：defaultModel=${context.config.defaultModel}，普通开发请求按 executor route=${runtime.provider}/${runtime.model} 执行。`,
+    );
+  }
   writeLine(output, formatModelRouteSummary(context));
   writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
   writeStatus(output, context);
@@ -1886,10 +1896,19 @@ async function handleModelRouteCommand(
     }
     context.config = await saveModelRoute(role, model, context.projectPath);
     const route = getRoleRoute(context, role);
+    if (role === "executor") {
+      context.model = route.primaryModel || context.model;
+    }
     writeLine(
       output,
       `已设置 ${role} role：provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
     );
+    if (role === "executor" && context.config.defaultModel !== route.primaryModel) {
+      writeLine(
+        output,
+        `说明：defaultModel=${context.config.defaultModel}，普通开发请求将按 executor route=${route.provider}/${route.primaryModel} 执行。`,
+      );
+    }
     if (role === "vision") {
       writeLine(output, "vision role 只输出 VisionObservation evidence，不写代码、不执行 Bash。");
     }
@@ -1957,8 +1976,15 @@ function formatModelRouteDoctor(context: TuiContext): string {
   const lines = ["Model route doctor"];
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
+    const endpointProfile = provider.endpointProfile ?? "chat_completions";
+    const reasoningLevel = provider.reasoningLevel;
+    const reasoningStatus = reasoningLevel
+      ? endpointProfile === "responses"
+        ? `sent level=${reasoningLevel}`
+        : `not sent unsupported endpointProfile=${endpointProfile}`
+      : "not sent";
     lines.push(
-      `  - ${providerId}: type=${provider.type} baseUrl=${provider.baseUrl ? "present" : "missing"} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"} model=${provider.model || "missing"}`,
+      `  - ${providerId}: type=${provider.type} endpointProfile=${endpointProfile} reasoning=${reasoningStatus} baseUrl=${provider.baseUrl ? "present" : "missing"} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"} model=${provider.model || "missing"}`,
     );
   }
   for (const route of context.config.modelRoutes.routes) {
@@ -2154,15 +2180,61 @@ function inferProviderForRouteModel(model: string, context: TuiContext): string 
 }
 
 function getRuntimeStatusProvider(context: TuiContext): string {
-  return resolveProviderForModel(context.config, context.model);
+  const runtime = getSelectedModelRuntime(context);
+  return runtime.provider;
 }
 
 function resolveInitialModel(config: LinghunConfig): string {
-  if (config.defaultModel && config.defaultModel !== config.providers.deepseek.model) {
-    return config.defaultModel;
-  }
   const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
-  return executor?.primaryModel || config.defaultModel || config.providers.deepseek.model;
+  if (executor && !isDefaultExecutorRoute(executor, config) && executor.primaryModel) {
+    return executor.primaryModel;
+  }
+  return config.defaultModel || executor?.primaryModel || config.providers.deepseek.model;
+}
+
+function isDefaultExecutorRoute(route: RoleModelRoute, _config: LinghunConfig): boolean {
+  return (
+    route.provider === "deepseek" && route.primaryModel === defaultConfig.providers.deepseek.model
+  );
+}
+
+type SelectedModelRuntime = {
+  role: ModelRole;
+  provider: string;
+  model: string;
+  endpointProfile: "chat_completions" | "responses";
+  reasoningLevel?: string;
+  reasoningStatus: string;
+  reasoningSent: boolean;
+};
+
+function getSelectedModelRuntime(
+  context: TuiContext,
+  role: ModelRole = "executor",
+): SelectedModelRuntime {
+  const route = getRoleRoute(context, role);
+  const useContextModel =
+    role === "executor" &&
+    isDefaultExecutorRoute(route, context.config) &&
+    context.model &&
+    context.model !== route.primaryModel;
+  const model = useContextModel ? context.model : route.primaryModel || context.model;
+  const provider = useContextModel
+    ? resolveProviderForModel(context.config, model)
+    : route.provider || resolveProviderForModel(context.config, model);
+  const providerConfig = context.config.providers[provider];
+  const endpointProfile = providerConfig?.endpointProfile ?? "chat_completions";
+  const reasoningLevel = providerConfig?.reasoningLevel;
+  const reasoningSent = Boolean(reasoningLevel && endpointProfile === "responses");
+  return {
+    role,
+    provider,
+    model,
+    endpointProfile,
+    reasoningLevel,
+    reasoningStatus: reasoningLevel ? (reasoningSent ? reasoningLevel : "未生效") : "未生效",
+    reasoningSent,
+  };
 }
 
 function resolveProviderForModel(config: LinghunConfig, model: string): string {
@@ -2180,7 +2252,7 @@ function resolveProviderForModel(config: LinghunConfig, model: string): string {
       return providerId;
     }
   }
-  return "unknown";
+  return model.startsWith("deepseek-") ? "deepseek" : "unknown";
 }
 
 function createModelGateway(config: LinghunConfig): ModelGateway {
@@ -6064,6 +6136,15 @@ async function sendMessage(
     writeStatus(output, context);
     return;
   }
+  const selectedRuntime = getSelectedModelRuntime(context);
+  context.model = selectedRuntime.model;
+  const selectedTools = currentModelSupportsTools(context, selectedRuntime);
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `model_request selectedRole=${selectedRuntime.role} provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoningLevel=${selectedRuntime.reasoningLevel ?? "none"} reasoningSent=${selectedRuntime.reasoningSent ? "yes" : "no"} tools=${selectedTools ? "yes" : "no"}`,
+    "info",
+  );
   writeLine(
     output,
     context.language === "en-US" ? "Status: requesting model..." : "状态：正在请求模型...",
@@ -6101,7 +6182,7 @@ async function sendMessage(
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
       let roundHadThinking = false;
-      const modelSupportsTools = currentModelSupportsTools(context);
+      const modelSupportsTools = selectedTools;
       if (!modelSupportsTools && round === 0) {
         writeLine(
           output,
@@ -6111,10 +6192,14 @@ async function sendMessage(
         );
       }
       for await (const event of gateway.stream(
-        getRuntimeStatusProvider(context),
+        selectedRuntime.provider,
         {
           messages,
-          model: context.model,
+          model: selectedRuntime.model,
+          endpointProfile: selectedRuntime.endpointProfile,
+          ...(selectedRuntime.reasoningSent
+            ? { reasoningLevel: selectedRuntime.reasoningLevel }
+            : {}),
           ...(modelSupportsTools
             ? { tools: createModelToolDefinitions(), toolChoice: "auto" as const }
             : {}),
@@ -6291,8 +6376,19 @@ function formatSolutionCompletenessReportBlock(context: TuiContext): string {
   ].join("\n");
 }
 
-function currentModelSupportsTools(context: TuiContext): boolean {
-  const known = findKnownModel(context.model);
+function currentModelSupportsTools(
+  context: TuiContext,
+  runtime = getSelectedModelRuntime(context),
+): boolean {
+  const providerConfig = context.config.providers[runtime.provider];
+  if (
+    providerConfig &&
+    "supportsTools" in providerConfig &&
+    providerConfig.supportsTools === false
+  ) {
+    return false;
+  }
+  const known = findKnownModel(runtime.model);
   return known?.supportsTools !== false;
 }
 
@@ -8153,7 +8249,8 @@ function writeStatus(output: Writable, context: TuiContext): void {
       {
         session: context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
         provider: getRuntimeStatusProvider(context),
-        model: context.model,
+        model: getSelectedModelRuntime(context).model,
+        reasoningStatus: getSelectedModelRuntime(context).reasoningStatus,
         mode: context.permissionMode,
         background,
         cacheHitRate: latestHitRate,

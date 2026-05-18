@@ -3,12 +3,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 
+export type EndpointProfile = "chat_completions" | "responses";
+
 export type ProviderConfig = {
   type: "openai-compatible" | "deepseek";
   baseUrl?: string;
   apiKey?: string;
   model: string;
   maxOutputTokens?: number;
+  supportsTools?: boolean;
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
 };
 
 export type ModelRole =
@@ -138,6 +143,10 @@ export type LinghunConfig = {
 const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
 const defaultLinghunModel = process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel;
 const openAiCompatibleModelPlaceholder = "openai-compatible-model";
+const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
+  process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
+);
+const defaultReasoningLevel = process.env.LINGHUN_INFERENCE_LEVEL;
 
 export const defaultModelRoutes: ModelRouteConfig = {
   defaultModel: defaultLinghunModel,
@@ -246,6 +255,8 @@ export const defaultConfig: LinghunConfig = {
       apiKey: process.env.LINGHUN_OPENAI_API_KEY,
       model: process.env.LINGHUN_OPENAI_MODEL ?? openAiCompatibleModelPlaceholder,
       maxOutputTokens: 4_096,
+      endpointProfile: defaultOpenAiEndpointProfile,
+      reasoningLevel: defaultReasoningLevel,
     },
   },
   modelRoutes: defaultModelRoutes,
@@ -470,6 +481,10 @@ function stableUnique(values: string[]): string[] {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
 
+function normalizeEndpointProfile(value: string | undefined): EndpointProfile {
+  return value === "responses" ? "responses" : "chat_completions";
+}
+
 async function writeConfig(projectPath: string, config: LinghunConfig): Promise<void> {
   await mkdir(getProjectConfigDir(projectPath), { recursive: true });
   await writeFile(
@@ -570,6 +585,15 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
           process.env.LINGHUN_OPENAI_MODEL ??
           openAiCompatibleProvider?.model ??
           defaultConfig.providers["openai-compatible"].model,
+        endpointProfile: normalizeEndpointProfile(
+          process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE ??
+            openAiCompatibleProvider?.endpointProfile ??
+            defaultConfig.providers["openai-compatible"].endpointProfile,
+        ),
+        reasoningLevel:
+          process.env.LINGHUN_INFERENCE_LEVEL ??
+          openAiCompatibleProvider?.reasoningLevel ??
+          defaultConfig.providers["openai-compatible"].reasoningLevel,
       },
     },
     modelRoutes: {

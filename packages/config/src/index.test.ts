@@ -160,6 +160,20 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.model).toBe("gpt-5.5");
   });
 
+  it("loads openai endpoint profile and inference level from env", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "responses");
+    vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Medium");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.endpointProfile).toBe("responses");
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Medium");
+  });
+
   it("persists Phase 14 extension enablement and trust", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 

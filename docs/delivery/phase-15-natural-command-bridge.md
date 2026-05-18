@@ -649,6 +649,41 @@ corepack pnpm smoke:live-provider
 
 阶段判定：Phase 15 Beta readiness 仍为 PARTIAL。原因是 live provider basic text PASS 只覆盖文本流；real TUI report-generation path 仍为 PARTIAL / blocking P1 candidate。不得把本轮 verdict gate closure 写成进入 Beta 或等于 CCB。
 
+### Phase 15 Beta 前 Model Runtime Profile / Routing Consistency Closure
+
+本轮性质：Phase 15 Beta 前最后一轮门口 P1 修复，只关闭会污染真人实测可信度的 runtime/profile/routing/output 串行问题；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+，未做 TUI 美化、provider 大重构、跨平台 hardening、plugin/Agent/long-running-task 后续功能。
+
+修复点：
+
+- 普通开发请求、状态栏、`/model` 和 `/model route doctor` 改为使用同一 selected runtime profile。显式设置 executor route 后，普通请求按 executor route 执行；若 `defaultModel` 不同，`/model` 与 route set 输出明确说明差异。
+- 状态栏只显示短模型名与推理状态，例如 `模型=gpt-5.5 推理=Medium` 或 `推理=未生效`；provider、baseUrl、key、endpoint 仅在 `/model doctor` / `/model route doctor` 诊断中展示，API key 继续只显示 masked/source，不泄露原值。
+- `openai-compatible` 增加 `endpointProfile: chat_completions | responses` 与 `reasoningLevel` 配置；`LINGHUN_OPENAI_ENDPOINT_PROFILE=responses` 会请求 `/v1/responses`，`LINGHUN_INFERENCE_LEVEL=Medium` 仅在 responses profile 下写入 `reasoning.effort`。
+- DeepSeek / chat completions 保持兼容：不向 chat completions 请求体发送 reasoning payload；配置了 reasoning 但 endpoint 不支持时，状态栏显示 `未生效`，doctor 说明 `not sent unsupported endpointProfile=chat_completions`。
+- OpenAI-compatible stream parser 增加 responses endpoint 的 text、reasoning summary、function_call、usage、failed/incomplete error 事件解析；原 chat completions parser 路径保留。
+- 每次普通模型请求前写入 transcript `system_event`，记录 `selectedRole/provider/model/endpointProfile/reasoningLevel/reasoningSent/tools`，用于 Phase 15 Beta 真人实测日志证据。
+- 最小输出串行修复：状态行保留为短 runtime 状态，不把 provider/baseUrl/key/endpoint 混入普通状态栏；focused test 覆盖普通请求输出不与 status/doctor/model 输出污染成同一段模型回答。
+
+补测：
+
+- executor route 为 `deepseek/deepseek-v4-pro` 时，状态栏、`/model`、`/model route doctor` 与普通请求 body 均指向 `deepseek-v4-pro`，且显式提示 `defaultModel=gpt-5.5` 差异。
+- `openai-compatible / gpt-5.5 / responses / Medium` 请求体包含 `/v1/responses` 对应的 `max_output_tokens` 与 `reasoning: { effort: "Medium" }`，并写入 selected runtime transcript event。
+- chat completions 与 DeepSeek 兼容路径不发送 reasoning payload。
+- responses stream parser 覆盖 text、tool、usage、error；chat completions 既有 text/tool/usage/error 测试继续通过。
+- `/model route doctor` 显示 endpoint profile 与 reasoning sent/not sent 状态，并继续 mask API key。
+
+验证结果（2026-05-19）：
+
+- `corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts packages/providers/src/index.test.ts packages/config/src/index.test.ts`：PASS，11 个测试文件、253 个测试通过。
+- `corepack pnpm check`：PASS。
+- `corepack pnpm test`：PASS，11 个测试文件、253 个测试通过。
+- `corepack pnpm typecheck`：PASS。
+- `corepack pnpm build`：PASS。
+- `corepack pnpm exec linghun --help`：PASS。
+- `corepack pnpm exec Linghun --help`：PASS。
+- `git diff --check`：PASS；仅 Git 在 Windows 工作区提示 LF/CRLF warning，无 whitespace error。
+
+阶段判定：本轮 P1 runtime/profile/routing/output 串行问题已按最小范围关闭。Phase 15 Beta readiness 仍为 PARTIAL，因为 real TUI report-generation path 仍缺 PASS evidence；本轮没有把 focused tests、mock provider PASS 或 basic runtime closure 升级为 Beta PASS。
+
 ## 性能结果
 
 - `RuntimeStatusForModel` 单元测试要求 JSON 序列化长度小于 500 字符，并确认不包含完整 memory 文本。

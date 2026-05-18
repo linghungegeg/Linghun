@@ -52,6 +52,8 @@ export type ProviderCapabilities = {
   usage: boolean;
 };
 
+export type EndpointProfile = "chat_completions" | "responses";
+
 export type ProviderConfig = {
   id: string;
   type: "openai-compatible" | "deepseek";
@@ -61,6 +63,8 @@ export type ProviderConfig = {
   model: string;
   maxOutputTokens?: number;
   supportsTools?: boolean;
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
 };
 
 export type ModelToolCall = {
@@ -86,6 +90,8 @@ export type ModelRequest = {
   maxOutputTokens?: number;
   tools?: ModelToolDefinition[];
   toolChoice?: "auto" | "none";
+  endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
 };
 
 export type Provider = {
@@ -103,6 +109,17 @@ export type OpenAiChatRequest = {
   max_tokens: number;
   tools?: OpenAiToolDefinition[];
   tool_choice?: "auto" | "none";
+  reasoning?: { effort: string };
+};
+
+export type OpenAiResponsesRequest = {
+  model: string;
+  input: OpenAiChatMessage[];
+  stream: true;
+  max_output_tokens: number;
+  tools?: OpenAiToolDefinition[];
+  tool_choice?: "auto" | "none";
+  reasoning?: { effort: string };
 };
 
 type OpenAiChatMessage =
@@ -259,17 +276,7 @@ export class OpenAiCompatibleProvider implements Provider {
     const known = findKnownModel(model);
     const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
     const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
-    const tools =
-      this.config.supportsTools === false
-        ? undefined
-        : request.tools?.map((tool) => ({
-            type: "function" as const,
-            function: {
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.inputSchema,
-            },
-          }));
+    const tools = createOpenAiTools(request, this.config.supportsTools);
     return {
       model,
       messages: request.messages.map(toOpenAiMessage),
@@ -279,10 +286,32 @@ export class OpenAiCompatibleProvider implements Provider {
     };
   }
 
+  createResponsesRequest(request: ModelRequest): OpenAiResponsesRequest {
+    const model = request.model ?? this.config.model;
+    const known = findKnownModel(model);
+    const maxAllowed = known?.maxOutputTokens ?? this.config.maxOutputTokens ?? 4_096;
+    const requested = request.maxOutputTokens ?? this.config.maxOutputTokens ?? maxAllowed;
+    const tools = createOpenAiTools(request, this.config.supportsTools);
+    return {
+      model,
+      input: request.messages.map(toOpenAiMessage),
+      stream: true,
+      max_output_tokens: Math.min(requested, maxAllowed),
+      ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
+      ...createReasoningPayload(request.reasoningLevel ?? this.config.reasoningLevel),
+    };
+  }
+
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<LinghunEvent> {
     this.assertReady();
-    const body = this.createChatRequest(request);
-    const response = await fetch(`${this.normalizedBaseUrl()}/chat/completions`, {
+    const endpointProfile =
+      request.endpointProfile ?? this.config.endpointProfile ?? "chat_completions";
+    const body =
+      endpointProfile === "responses"
+        ? this.createResponsesRequest(request)
+        : this.createChatRequest(request);
+    const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
+    const response = await fetch(`${this.normalizedBaseUrl()}${endpoint}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -308,7 +337,10 @@ export class OpenAiCompatibleProvider implements Provider {
       });
     }
 
-    yield* parseOpenAiStream(response.body);
+    yield* parseOpenAiStream(
+      response.body,
+      endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
+    );
   }
 
   private assertReady(): void {
@@ -333,6 +365,30 @@ export class OpenAiCompatibleProvider implements Provider {
   private normalizedBaseUrl(): string {
     return this.config.baseUrl?.replace(/\/+$/, "") ?? "";
   }
+}
+
+function createOpenAiTools(
+  request: ModelRequest,
+  supportsTools: boolean | undefined,
+): OpenAiToolDefinition[] | undefined {
+  if (supportsTools === false) {
+    return undefined;
+  }
+  return request.tools?.map((tool) => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    },
+  }));
+}
+
+function createReasoningPayload(level: string | undefined): { reasoning?: { effort: string } } {
+  if (!level) {
+    return {};
+  }
+  return { reasoning: { effort: level } };
 }
 
 function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {
@@ -362,6 +418,7 @@ function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {
 
 export async function* parseOpenAiStream(
   body: ReadableStream<Uint8Array>,
+  endpoint = "/v1/chat/completions",
 ): AsyncGenerator<LinghunEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -384,7 +441,7 @@ export async function* parseOpenAiStream(
     buffer = lines.pop() ?? "";
 
     for (const line of lines) {
-      for (const event of parseOpenAiStreamLine(line, state)) {
+      for (const event of parseOpenAiStreamLine(line, state, endpoint)) {
         yield event;
       }
     }
@@ -394,7 +451,7 @@ export async function* parseOpenAiStream(
   if (tail) {
     buffer += tail;
   }
-  for (const event of parseOpenAiStreamLine(buffer, state)) {
+  for (const event of parseOpenAiStreamLine(buffer, state, endpoint)) {
     yield event;
   }
   yield {
@@ -450,7 +507,18 @@ type OpenAiStreamUsage = {
   cache_creation_tokens?: number;
 };
 
-function parseOpenAiStreamLine(line: string, state: OpenAiStreamParseState): LinghunEvent[] {
+type ResponsesUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+};
+
+function parseOpenAiStreamLine(
+  line: string,
+  state: OpenAiStreamParseState,
+  endpoint = "/v1/chat/completions",
+): LinghunEvent[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("data:")) {
     return [];
@@ -463,6 +531,10 @@ function parseOpenAiStreamLine(line: string, state: OpenAiStreamParseState): Lin
 
   let parsed: {
     id?: string;
+    type?: string;
+    delta?: string;
+    item?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string };
+    response?: { id?: string; usage?: ResponsesUsage };
     choices?: OpenAiStreamChoice[];
     usage?: OpenAiStreamUsage;
     error?: { message?: string; type?: string; code?: string } | string;
@@ -504,6 +576,11 @@ function parseOpenAiStreamLine(line: string, state: OpenAiStreamParseState): Lin
     ];
   }
 
+  const responseEvents = parseResponsesEvent(parsed, state, endpoint);
+  if (responseEvents.length > 0) {
+    return responseEvents;
+  }
+
   const events: LinghunEvent[] = [];
   for (const choice of parsed.choices ?? []) {
     if (choice.finish_reason) {
@@ -543,11 +620,83 @@ function parseOpenAiStreamLine(line: string, state: OpenAiStreamParseState): Lin
         cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
         cacheWriteTokensRaw,
         rawUsage: parsed.usage,
-        endpoint: "/v1/chat/completions",
+        endpoint,
       },
     });
   }
   return events;
+}
+
+function parseResponsesEvent(
+  parsed: {
+    id?: string;
+    type?: string;
+    delta?: string;
+    item?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string };
+    response?: { id?: string; usage?: ResponsesUsage };
+    usage?: OpenAiStreamUsage;
+  },
+  state: OpenAiStreamParseState,
+  endpoint: string,
+): LinghunEvent[] {
+  if (!parsed.type?.startsWith("response.")) {
+    return [];
+  }
+  if (parsed.type === "response.failed" || parsed.type === "response.incomplete") {
+    return [
+      {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_STREAM_ERROR",
+          message: `模型请求失败：Responses endpoint 返回 ${parsed.type}。`,
+          suggestion:
+            "请运行 /model doctor 检查 endpoint profile、model、reasoning 和 provider 兼容性。",
+          recoverable: true,
+        }),
+      },
+    ];
+  }
+  if (parsed.response?.id) {
+    state.lastId = parsed.response.id;
+  }
+  if (parsed.type === "response.output_text.delta" && parsed.delta) {
+    return [{ type: "assistant_text_delta", id: parsed.id ?? state.lastId, text: parsed.delta }];
+  }
+  if (parsed.type === "response.reasoning_summary_text.delta" && parsed.delta) {
+    return [
+      { type: "assistant_thinking_delta", id: parsed.id ?? state.lastId, text: parsed.delta },
+    ];
+  }
+  if (parsed.type === "response.output_item.done" && parsed.item?.type === "function_call") {
+    return [
+      {
+        type: "tool_use",
+        id: parsed.item.call_id ?? parsed.item.id ?? "tool-1",
+        name: parsed.item.name ?? "unknown",
+        input: parseToolArguments(parsed.item.arguments ?? "{}"),
+      },
+    ];
+  }
+  const usage = parsed.response?.usage;
+  if (parsed.type === "response.completed" && usage) {
+    state.hadUsage = true;
+    return [
+      {
+        type: "usage",
+        usage: {
+          inputTokens: usage.input_tokens ?? 0,
+          outputTokens: usage.output_tokens ?? 0,
+          totalTokens: usage.total_tokens ?? 0,
+          cacheReadTokens: usage.input_tokens_details?.cached_tokens,
+          cacheWriteTokens: undefined,
+          cacheWriteTokensRaw: null,
+          rawUsage: usage,
+          endpoint,
+        },
+      },
+    ];
+  }
+  return [];
 }
 
 function parseOpenAiToolCalls(
