@@ -567,6 +567,35 @@ corepack pnpm check
 corepack pnpm build
 ```
 
+### Phase 15 Beta 前 Whole-System Interaction Boundary 最小完整修复
+
+本轮性质：Phase 15 Beta 前置交互边界最小完整修复，只关闭 `docs/audit/phase-15-pre-beta-whole-system-interaction-boundary-reconciliation.md` 中 4 个阻塞 P1；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+，未修非阻塞 P1/P2，未做 registry/dispatch 大重构，未新增第二套命令解释系统。
+
+修复点：
+
+- BP1-1 composite status：`handleNaturalInput()` 增加轻量组合状态查询，覆盖 model/provider、index、permission、cache、memory、mcp、background、gate；命中组合查询时本地输出 summary，不发送给模型。
+- BP1-2 model tool permission primary prompt：`executeModelToolUse()` 在 permission 非 allow 时立即输出本地主提示，包含 tool、decision、risk、mode、reason、scope 和 next action，同时继续回灌 error tool_result 给模型。
+- BP1-3 failure evidence continuation：模型工具 permission 非 allow、模型工具失败、slash 工具 permission denial 都记录轻量 failure evidence；模型 tool_result error 附带 `evidenceId`，后续 EvidenceSummary/handoff 可引用。
+- BP1-4 index safety repair loop：index safety pause 输出阻塞原因、建议 ignore 文件 `.linghunignore` / `.cbmignore`、建议条目、手动或明确 `/write` 写入路径、`/index refresh` retry，并记录 index evidence。
+
+Focused tests：
+
+- 中文/英文组合状态：本地 summary，包含多项 runtime 状态，不进入模型。
+- 模型 Bash default-mode permission：不执行，输出 primary prompt，error tool_result 含 `evidenceId`。
+- 模型 Write default-mode permission：不写文件，输出 scope/reason/next。
+- 模型 Read 失败：error tool_result 含 `evidenceId`。
+- index safety 大文件：输出 ignore/retry repair loop。
+- 既有 no-pending confirmation、provider supportsTools=false、长 Read/Grep/Glob 输出、Windows path/中文输出测试继续保留并复跑。
+
+阶段口径：4 个阻塞 P1 已按最小边界关闭；可建议恢复 Phase 15 真人 smoke，但 Phase 15 Beta 仍必须用户明确确认后才能开始。
+
+验证命令（本节最终验证结果以本轮最终输出为准）：
+
+```bash
+corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts packages/providers/src/index.test.ts packages/config/src/index.test.ts
+corepack pnpm typecheck
+```
+
 ## 已知问题
 
 - 本阶段是 preflight，不承诺真实项目 Beta 的完整自然语言命令成功率。

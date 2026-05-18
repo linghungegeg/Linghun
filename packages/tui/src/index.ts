@@ -3982,10 +3982,8 @@ async function runIndexRepository(
     context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel);
     context.index.error =
       "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
-    writeLine(
-      output,
-      "Index: paused by safety scan. Add .linghunignore/.cbmignore or use explicit --force.",
-    );
+    await recordIndexEvidence(context, `safety:${actionLabel}`, context.index.safetyWarning);
+    writeLine(output, context.index.safetyWarning);
     return;
   }
   context.index.safetyWarning =
@@ -4272,11 +4270,18 @@ function formatIndexSafetyWarning(
     const size = file.size > 0 ? `${formatBytes(file.size)}, ` : "";
     return `- ${file.path} (${size}${file.reason})`;
   });
+  const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
   return [
     `索引安全门：/index ${actionLabel} 发现未排除的大文件风险，默认阻止索引。`,
+    "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
     ...files,
     safety.truncated ? `- 仅展示前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
-    "建议：把这些路径加入 .linghunignore 或 .cbmignore 后重试；如确认要继续，可显式追加 --force。",
+    "建议 ignore 文件：.linghunignore 或 .cbmignore",
+    "建议加入条目：",
+    ...ignoreEntries,
+    "修复路径：手动编辑 .linghunignore/.cbmignore，或明确输入 /write 写入 ignore 文件；不会自动替你写入。",
+    "重试命令：/index refresh",
+    "如确认要继续，可显式追加 --force。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -5414,6 +5419,81 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function formatCompositeStatusQuery(text: string, context: TuiContext): string | null {
+  const normalized = text.trim().toLowerCase();
+  if (
+    !/(状态|正常|吗|准备好|配好|可用|ready|status|doctor|configured|available|working)/i.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+  const sections: string[] = [];
+  const add = (key: string, line: string): void => {
+    if (matchesCompositeStatusKey(normalized, key)) {
+      sections.push(line);
+    }
+  };
+
+  add(
+    "model",
+    `- model/provider: provider=${getRuntimeStatusProvider(context)} model=${context.model}`,
+  );
+  add(
+    "index",
+    `- index: status=${context.index.status} changedFiles=${context.index.changedFiles ?? "-"}`,
+  );
+  add(
+    "permission",
+    `- permissions: mode=${context.permissionMode} recentDenied=${context.permissions.recentDenied.length}`,
+  );
+  add(
+    "cache",
+    `- cache: latestHitRate=${context.cache.history[0]?.hitRate ?? "-"} changedKeys=${context.cache.lastFreshness?.changedKeys?.join(",") || "-"}`,
+  );
+  add(
+    "memory",
+    `- memory: projectRules=${context.memory.projectRulesExists ? "found" : "missing"} candidates=${context.memory.candidates.length} accepted=${context.memory.accepted.length}`,
+  );
+  add(
+    "mcp",
+    `- mcp: enabled=${context.mcp.enabled ? "yes" : "no"} servers=${context.mcp.servers.length} tools=${context.mcp.tools.length}`,
+  );
+  add(
+    "background",
+    `- background: tasks=${context.backgroundTasks.length} running=${context.backgroundTasks.filter((task) => task.status === "running").length}`,
+  );
+  add(
+    "gate",
+    `- gate: pendingNaturalCommand=${context.pendingNaturalCommand ? context.pendingNaturalCommand.exactCommand : "none"}`,
+  );
+
+  if (sections.length < 2) {
+    return null;
+  }
+  return [
+    context.language === "en-US" ? "Composite local status" : "组合本地状态",
+    ...sections,
+    context.language === "en-US"
+      ? "- next: use the exact slash command for details; this status was not sent to the model."
+      : "- 下一步：需要细节时输入对应 slash command；本次状态查询未发送给模型。",
+  ].join("\n");
+}
+
+function matchesCompositeStatusKey(text: string, key: string): boolean {
+  const patterns: Record<string, RegExp> = {
+    model: /模型|provider|route|model/,
+    index: /索引|index|codebase-memory/,
+    permission: /权限|permission|审批|mode|模式/,
+    cache: /缓存|cache|hit rate|命中/,
+    memory: /记忆|memory|linghun\.md|规则/,
+    mcp: /\bmcp\b|codebase-memory|服务器/,
+    background: /后台|background|任务|task/,
+    gate: /gate|确认|confirmation|start gate|pending/,
+  };
+  return patterns[key]?.test(text) ?? false;
+}
+
 async function handleNaturalInput(
   text: string,
   context: TuiContext,
@@ -5479,6 +5559,13 @@ async function handleNaturalInput(
         ? "No pending confirmation is active. Describe the task or type the exact slash command; I did not send this confirmation to the model."
         : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
     );
+    writeStatus(output, context);
+    return "handled";
+  }
+
+  const compositeStatus = formatCompositeStatusQuery(text, context);
+  if (compositeStatus) {
+    writeLine(output, compositeStatus);
     writeStatus(output, context);
     return "handled";
   }
@@ -5792,8 +5879,15 @@ async function executeModelToolUse(
   });
   if (permission.decision !== "allow") {
     const text = `${permission.decision}: ${permission.reason}`;
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true);
-    return { ok: false, tool: toolName, text };
+    writeLine(output, formatModelToolPermissionPrompt(permission));
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      toolName,
+      `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+    );
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
   if (permission.preflight) {
     writeLine(output, permission.preflight);
@@ -5835,8 +5929,9 @@ async function executeModelToolUse(
     progress.restore();
     await Promise.all(progress.pending);
     const text = formatError(error, context.language);
-    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true);
-    return { ok: false, tool: toolName, text };
+    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
 }
 
@@ -5845,6 +5940,20 @@ function normalizeToolName(name: string): ToolName | null {
     (item) => item.toLowerCase() === name.toLowerCase(),
   );
   return found ?? null;
+}
+
+function formatModelToolPermissionPrompt(permission: PermissionCheck): string {
+  const files = permission.request.files.length > 0 ? permission.request.files.join(", ") : "none";
+  return [
+    "模型工具权限提示",
+    `- tool: ${permission.request.toolName}`,
+    `- decision: ${permission.decision}`,
+    `- risk: ${permission.request.risk}`,
+    `- mode: ${permission.request.mode}`,
+    `- reason: ${permission.reason}`,
+    `- scope: ${files}`,
+    "- next: 未执行该工具；可查看 /permissions recent，改用明确 slash command，或切换合适权限模式后重试。",
+  ].join("\n");
 }
 
 async function appendToolResultEvent(
@@ -6418,6 +6527,12 @@ async function handleToolCommand(
     });
 
     if (permission.decision !== "allow") {
+      await recordToolFailureEvidence(
+        context,
+        sessionId,
+        name,
+        `permission ${permission.decision}: ${permission.reason}; ${permission.request.summary}`,
+      );
       writeLine(output, formatPermissionDenied(permission.reason, permission.request.summary));
       writeStatus(output, context);
       return;
@@ -7072,6 +7187,26 @@ function addRoleUsage(
     budgetStop: Boolean(latestDecision?.budgetStop),
     contributionSummary,
   });
+}
+
+async function recordToolFailureEvidence(
+  context: TuiContext,
+  sessionId: string,
+  name: ToolName,
+  summary: string,
+): Promise<EvidenceRecord> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `${name} failure: ${truncateDisplay(summary.replace(/\s+/g, " "), 140)}`,
+    `tool:${name}:failure`,
+    [name, "tool_failure"],
+  );
+  context.evidence.unshift(evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  return evidence;
 }
 
 async function recordToolEvidence(

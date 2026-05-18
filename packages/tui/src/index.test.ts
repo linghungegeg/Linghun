@@ -6,7 +6,7 @@ import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/c
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
@@ -33,6 +33,45 @@ class MemoryOutput extends Writable {
     this.text += chunk.toString();
     callback();
   }
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done"): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const isFirst = requests.length === 1;
+      const body = isFirst
+        ? [
+            `data: ${JSON.stringify({
+              id: "chatcmpl-test",
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: "call-1",
+                        type: "function",
+                        function: { name: toolName, arguments: JSON.stringify(input) },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ].join("")
+        : `data: ${JSON.stringify({ id: "chatcmpl-test-2", choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200 });
+    }),
+  );
+  return requests;
 }
 
 async function createMockCodebaseMemoryConfig(
@@ -664,6 +703,172 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("自然语言桥：可解释/可进入安全路径");
     expect(output.text).not.toContain("状态：正在请求模型");
     expect(output.text).not.toContain("工具 Bash 结果");
+  });
+
+  it("answers composite Chinese and English readiness locally", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({ language: "en-US" }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "索引和记忆 MCP 打开了吗\n",
+        "Are model, index and permissions ready?\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Composite local status");
+    expect(output.text).toContain("- index: status=");
+    expect(output.text).toContain("- memory: projectRules=");
+    expect(output.text).toContain("- mcp: enabled=");
+    expect(output.text).toContain("- model/provider: provider=");
+    expect(output.text).toContain("- permissions: mode=");
+    expect(output.text).toContain("not sent to the model");
+    expect(output.text).not.toContain("Status: requesting model");
+  });
+
+  it("shows model tool permission prompts and returns denied tool_result evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-test-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-test-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch("Bash", { command: "echo SHOULD_NOT_RUN" });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请检查当前环境\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("模型工具权限提示");
+    expect(output.text).toContain("- tool: Bash");
+    expect(output.text).toContain("- decision: ask");
+    expect(output.text).toContain("- risk: high");
+    expect(output.text).toContain("- mode: default");
+    expect(output.text).toContain("- scope: none");
+    expect(output.text).not.toContain("工具 Bash 结果");
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain('"ok":false');
+    expect(toolMessage?.content).toContain('"evidenceId"');
+  });
+
+  it("keeps model Write/Edit tool calls behind default permission prompt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-write-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-write-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiToolFetch("Write", { path: "blocked.txt", content: "no" });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请准备一个文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("模型工具权限提示");
+    expect(output.text).toContain("- tool: Write");
+    expect(output.text).toContain("- scope: blocked.txt");
+    await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("records failed model tool_result evidence for follow-up prompts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-failure-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-failure-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch("Read", { path: "missing.txt" });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请查看这个文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain('"ok":false');
+    expect(toolMessage?.content).toContain('"evidenceId"');
+  });
+
+  it("shows index safety repair loop for large files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "large.json"),
+      JSON.stringify({ data: "x".repeat(1_100_000) }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/index refresh\n/index status\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("索引安全门");
+    expect(output.text).toContain("阻塞原因");
+    expect(output.text).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
+    expect(output.text).toContain("large.json");
+    expect(output.text).toContain(
+      "修复路径：手动编辑 .linghunignore/.cbmignore，或明确输入 /write 写入 ignore 文件",
+    );
+    expect(output.text).toContain("重试命令：/index refresh");
   });
 
   it("does not execute Bash silently in default mode", async () => {
