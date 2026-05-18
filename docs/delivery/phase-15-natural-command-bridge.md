@@ -614,10 +614,12 @@ corepack pnpm smoke:live-provider
 - check/typecheck/build：PASS。
 - `git diff --check`：PASS；仅 Windows CRLF warning，无 whitespace error。
 - lowercase/uppercase help：PASS。
-- live provider smoke：SKIPPED，当前 shell 没有 `LINGHUN_DEEPSEEK_API_KEY` / `LINGHUN_OPENAI_API_KEY`；没有把 key 写入仓库、配置、文档或日志。
+- live provider smoke：initial closure run SKIPPED，当前 shell 没有 `LINGHUN_DEEPSEEK_API_KEY` / `LINGHUN_OPENAI_API_KEY`；没有把 key 写入仓库、配置、文档或日志。
+- Live provider 補验（temporary shell env only）：PASS for basic text smoke on `openai-compatible / gpt-5.5`；只证明 live basic text streaming，不得升级为 Phase 15 Beta readiness PASS，也不得推断真实 report-generation path PASS。
 - real Windows TUI stdin smoke：PASS for silent-failure ban；`F:\linghun-ceshi` 中相同中文请求得到 `模型返回空响应；请运行 /model doctor，或切换 provider/model 后重试。` 和 evidence id，而不是静默回到 prompt。
+- Real TUI report-generation 補验：PARTIAL。报告文件未写入；未观察到 `tool_use`、permission continuation 或 `tool_result`；后续 `yes` 因无 pending confirmation 被本地处理，没有发送给模型；tools + exact deployment-report prompt provider probe 返回 HTTP 400 request-format diagnostics，指向当前 `tools/tool_choice` schema 与 openai-compatible gateway 兼容性，或当前 model/gateway 对该请求未产生 text/tool delta。
 
-阶段判定：P0 silent failure gate PASS；blocking P1 runtime/parser/evidence/TUI smoke gate PASS；Phase 15 Beta readiness 仍为 PARTIAL，原因是 live provider smoke 未在当前 shell 有 key 的条件下执行为 PASS。是否进入 Phase 15 Beta 仍必须用户明确确认。
+阶段判定：P0 silent failure gate PASS；live provider basic text smoke PASS；real report-generation tool path 仍为 PARTIAL / blocking P1 candidate。Phase 15 Beta readiness 仍为 PARTIAL；不得从 live text PASS 推断 Beta readiness PASS，也不得从 runtime silent-failure PASS 推断真实报告生成路径 PASS。若 Phase 15 Beta gate 要求真实 provider 完成该报告生成路径，必须先按 P1 修复。是否进入 Phase 15 Beta 仍必须用户明确确认。
 
 ## 性能结果
 
@@ -710,7 +712,7 @@ Focused tests：
 - index safety 大文件：输出 ignore/retry repair loop；中英文自然语言 continuation 可写入 ignore 后继续 refresh；已存在 ignore 条目不重复追加；权限拒绝不写入不 refresh；自然语言 force/rebuild 不直通；主输出不重复整段 safety warning；普通开发请求仍回模型主循环。
 - 既有 no-pending confirmation、provider supportsTools=false、长 Read/Grep/Glob 输出、Windows path/中文输出测试继续保留并复跑。
 
-阶段口径：4 个阻塞 P1 已按最小边界关闭；可建议恢复 Phase 15 真人 smoke，但 Phase 15 Beta 仍必须用户明确确认后才能开始。
+阶段口径：4 个阻塞 P1 已按 2026-05-18 最小边界关闭；该旧口径当时可建议恢复 Phase 15 真人 smoke。2026-05-19 live provider / real TUI report-generation 補验后，最新口径改为：先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure，且 real report-generation path 仍为 PARTIAL / blocking P1 candidate；是否恢复真人 smoke 或进入 Phase 15 Beta 必须基于最新证据重新确认。
 
 ### Phase 15 pre-Beta CCB Maturity Baseline Closure
 

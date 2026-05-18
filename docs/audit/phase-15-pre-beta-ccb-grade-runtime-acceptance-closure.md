@@ -116,14 +116,17 @@ scope: Phase 00-14 + Phase 15 pre-Beta runtime acceptance only; not Phase 15 Bet
 - `git diff --check`：PASS；only CRLF warning lines, no whitespace errors.
 - `corepack pnpm exec linghun --help`：PASS。
 - `corepack pnpm exec Linghun --help`：PASS。
-- `corepack pnpm smoke:live-provider`：SKIPPED，no `LINGHUN_DEEPSEEK_API_KEY` / `LINGHUN_OPENAI_API_KEY` in this shell; no key was written to repo, config, docs, or logs.
+- `corepack pnpm smoke:live-provider`：initial closure run SKIPPED because no `LINGHUN_DEEPSEEK_API_KEY` / `LINGHUN_OPENAI_API_KEY` was present in that shell; no key was written to repo, config, docs, or logs.
+- Live provider補验（temporary shell env only）：PASS for basic text smoke on `openai-compatible / gpt-5.5`; this proves live basic text streaming, but must not be upgraded into Phase 15 Beta readiness PASS or real report-generation path PASS.
 - Real Windows TUI stdin smoke with built CLI in `F:\linghun-ceshi`：PASS for silent-failure ban. Output reached visible outcome: `模型返回空响应；请运行 /model doctor，或切换 provider/model 后重试。` plus evidence id, then exited normally; no silent prompt return.
+- Real TUI report-generation補验 in `F:\linghun-ceshi`：PARTIAL. Report file was not written; no `tool_use`, permission continuation, or `tool_result` was observed. Follow-up `yes` had no pending confirmation and was handled locally, not sent to the model. A tools + exact deployment-report provider probe returned HTTP 400 request-format diagnostics, indicating the provider/gateway did not accept the current tools/tool_choice shape for that path.
 - `corepack pnpm smoke:tui-stdin` exists as repeatable entry, but direct `corepack pnpm --dir` from `F:\linghun-ceshi` hit local pnpm version enforcement; built CLI smoke above is the acceptance evidence for this run.
 
 ### 6.4 Verdict
 
 - P0 verdict：PASS. R01 / R16 / R23 silent failure blocker is closed for Phase 15 pre-Beta runtime acceptance.
-- Blocking P1 verdict：PASS for provider stream compatibility, TUI permission/write path, empty-response evidence, provider stream errors, and real TUI no-silent-failure smoke. Live provider smoke is SKIPPED due to missing env key and must not be reported as PASS.
+- Blocking P1 verdict：PASS for provider stream compatibility, mocked TUI permission/write path, empty-response evidence, provider stream errors, and real TUI no-silent-failure smoke. The later live provider補验 upgraded only the basic text smoke to PASS; it did not prove the real report-generation tool path.
+- P1 candidate carried forward：real TUI report-generation path remains PARTIAL. The report file was not written, no `tool_use` / permission continuation / `tool_result` was observed, and a tools + exact deployment-report provider probe returned HTTP 400 request-format diagnostics against the current `tools/tool_choice` shape. If the Phase 15 Beta gate requires real provider report generation in this path, this must be fixed before Beta.
 - P2 / later：R13 remains registered for Phase 15.5 provider diagnostics maturity unless a Beta smoke proves it blocks safety or actionability.
-- Phase 15 real-project Beta readiness：PARTIAL until live provider smoke is run with user-provided temporary env vars in a shell where keys are present; runtime silent-failure gate itself is PASS.
+- Phase 15 real-project Beta readiness：PARTIAL. Live provider basic text is PASS, but real report-generation path is PARTIAL; runtime silent-failure gate itself is PASS. Do not upgrade this report to Beta readiness PASS.
 - Reference boundary：CCB / Claude Code / OpenCode were used only as behavior and acceptance references. No CCB / Claude Code / OpenCode source, internal API, private variable structure, proprietary telemetry, or decompiled implementation was copied.

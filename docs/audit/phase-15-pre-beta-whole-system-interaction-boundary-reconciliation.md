@@ -11,6 +11,8 @@
 
 **Verdict: PASS FOR PHASE 15 BETA SMOKE RESUME RECOMMENDATION**
 
+> 2026-05-19 supersession note：本报告是 2026-05-18 的阶段性审计结论，已被后续 `phase-15-pre-beta-ccb-grade-runtime-acceptance-closure.md` 和 live provider / real TUI report-generation 補验更新。最新口径是：silent-failure gate PASS，live provider basic text smoke PASS，但 real TUI report-generation path 仍为 PARTIAL / blocking P1 candidate；Phase 15 Beta readiness 仍为 PARTIAL。不要单独引用本报告的 “PASS FOR PHASE 15 BETA SMOKE RESUME RECOMMENDATION” 作为最新 Beta readiness 结论。
+
 当前源码相较前几轮已关闭若干 P0：真实 provider/model 路由、default 模式不静默执行 Bash/写入、无 pending confirmation 不进模型、provider tools/toolChoice 降级、tool_use/tool_result 主循环、key 脱敏和长输出截断均已有源码证据。
 
 2026-05-18 最小完整修复后，Whole-System Interaction Boundary 原 4 项阻塞 P1 已关闭：组合状态查询、本地模型工具权限 primary prompt、失败 tool_result / permission denial evidence 延续、index safety repair loop 均已有源码和 focused tests 覆盖。因此可建议恢复 Phase 15 真人 smoke；仍不得自动进入 Phase 15 Beta，必须等待用户明确确认。
@@ -24,9 +26,9 @@
 | 过度设计项 | 4 |
 | 设计不足项 | 7（其中 4 项阻塞 P1 已最小修复） |
 | 阶段错位项 | 3 |
-| 是否建议暂停真人实测 | 否，可建议恢复 Phase 15 真人 smoke |
-| 是否允许恢复 Phase 15 Beta | 可建议恢复真人 smoke；仍需用户明确确认，不能自动进入 |
-| 下一步 | 等待用户确认是否启动 Phase 15 Beta smoke；不进入 Phase 15.5 / Phase 16+ |
+| 是否建议暂停真人实测 | 历史结论：否；最新 2026-05-19 口径：先做 Verdict Evidence Gate，再决定是否修 real report-generation P1 或恢复真人 smoke |
+| 是否允许恢复 Phase 15 Beta | 历史结论：可建议恢复真人 smoke；最新口径：Phase 15 Beta readiness 仍为 PARTIAL，不能自动进入 |
+| 下一步 | 先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure；不进入 Phase 15 Beta / Phase 15.5 / Phase 16+ |
 
 ---
 
@@ -441,6 +443,8 @@
 
 **否，可建议恢复 Phase 15 真人 smoke；但仍不得自动进入 Phase 15 Beta。**
 
+> Superseded：本节是 2026-05-18 旧口径。2026-05-19 live provider / real TUI report-generation 補验后，最新口径改为先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure；real report-generation path 仍为 PARTIAL / blocking P1 candidate，是否恢复真人 smoke 需重新按最新证据判断。
+
 2026-05-18 最小完整修复后，原暂停理由已关闭：
 
 - 组合状态查询已能返回多模块本地 summary。
@@ -456,6 +460,8 @@
 
 **可建议恢复真人 Phase 15 Beta smoke，但仍不得自动进入 Phase 15 Beta。**
 
+> Superseded：本节是 2026-05-18 旧口径。2026-05-19 最新口径为 Phase 15 Beta readiness PARTIAL；live provider basic text PASS 不能推导 Beta readiness PASS。
+
 2026-05-18 最小修复后状态：
 
 1. BP1-1 到 BP1-4 已完成最小修复。
@@ -470,8 +476,8 @@
 | 字段 | 内容 |
 | --- | --- |
 | 当前阶段 | Phase 15 pre-Beta whole-system interaction boundary reconciliation minimal fix |
-| verdict | PASS FOR PHASE 15 BETA SMOKE RESUME RECOMMENDATION |
-| 下一阶段 | 可建议恢复 Phase 15 真人 smoke；是否进入 Phase 15 Beta 仍需用户明确确认 |
+| verdict | Superseded by 2026-05-19 runtime/live smoke evidence：Phase 15 Beta readiness PARTIAL |
+| 下一阶段 | 先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure；是否修复 real report-generation P1 或进入 Phase 15 Beta 仍需用户明确确认 |
 | 禁止事项 | 不自动进入 Phase 15 Beta、Phase 15.5、Phase 16+；不提交；不复制 CCB 源码；不做大重构 |
 | P0 | 0 |
 | 阻塞 P1 | 0（原 4 项已关闭） |
@@ -487,12 +493,12 @@
 ## 26. Final answer fields
 
 - 报告路径：`F:\Linghun\docs\audit\phase-15-pre-beta-whole-system-interaction-boundary-reconciliation.md`
-- verdict：PASS FOR PHASE 15 BETA SMOKE RESUME RECOMMENDATION
+- verdict：Superseded historical verdict; latest Phase 15 Beta readiness is PARTIAL
 - P0 数量：0
 - 阻塞 P1 数量：0（原 4 项已关闭）
 - 过度设计项数量：4
 - 设计不足项数量：7（其中 4 项阻塞 P1 已最小修复）
 - 阶段错位项数量：3
-- 是否建议暂停真人实测：否，可建议恢复 Phase 15 真人 smoke
-- 是否允许恢复 Phase 15 Beta：可建议恢复真人 smoke；仍需用户明确确认，不能自动进入
-- 下一步是否建议先做最小完整修复：否，最小完整修复已完成；下一步等待用户确认是否启动 Phase 15 Beta smoke
+- 是否建议暂停真人实测：最新口径为先做 Verdict Evidence Gate，再决定是否修 real report-generation P1 或恢复真人 smoke
+- 是否允许恢复 Phase 15 Beta：否，当前 readiness 仍为 PARTIAL，必须用户明确确认且补齐 gate 条件
+- 下一步是否建议先做最小完整修复：是，先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure
