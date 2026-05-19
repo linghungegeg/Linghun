@@ -162,23 +162,11 @@ describe("OpenAI compatible provider", () => {
     ]);
   });
 
-  it("falls back to non-streaming responses when streaming responses returns server error", async () => {
+  it("does not silently fallback when streaming responses returns server error", async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
-      if (body.stream === true) {
-        return new Response("bad gateway", { status: 502 });
-      }
-      return Response.json({
-        id: "resp-1",
-        output: [
-          {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "ok" }],
-          },
-        ],
-        usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
-      });
+      expect(body.stream).toBe(true);
+      return new Response("bad gateway", { status: 502 });
     });
     vi.stubGlobal("fetch", fetchMock);
     const provider = new OpenAiCompatibleProvider({
@@ -189,41 +177,20 @@ describe("OpenAI compatible provider", () => {
       model: "gpt-5.5",
       endpointProfile: "responses",
     });
-    const events = [];
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
 
-    for await (const event of provider.stream(
-      { messages: [{ role: "user", content: "hi" }] },
-      new AbortController().signal,
-    )) {
-      events.push(event);
-    }
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(false);
-    expect(events).toEqual([
-      { type: "assistant_text_delta", id: "resp-1", text: "ok" },
-      {
-        type: "usage",
-        usage: {
-          inputTokens: 3,
-          outputTokens: 1,
-          totalTokens: 4,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-          cacheWriteTokensRaw: null,
-          rawUsage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 },
-          endpoint: "/v1/responses",
-        },
-      },
-      {
-        type: "message_stop",
-        id: "resp-1",
-        finishReason: undefined,
-        chunkCount: 1,
-        hadUsage: true,
-      },
-    ]);
   });
 
   it("keeps chat completions profile without reasoning payload for DeepSeek compatibility", () => {
@@ -435,6 +402,30 @@ describe("OpenAI stream parser", () => {
         finishReason: undefined,
         chunkCount: 4,
         hadUsage: true,
+      },
+    ]);
+  });
+
+  it("converts responses streamed function call argument deltas", async () => {
+    const events = await collectOpenAiEvents(
+      [
+        `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", call_id: "call-1", name: "Read" } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"path":' })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: '"README.md"}' })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "call-1", name: "Read" } })}\n\n`,
+        "data: [DONE]\n\n",
+      ],
+      "/v1/responses",
+    );
+
+    expect(events).toEqual([
+      { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
+      {
+        type: "message_stop",
+        id: "assistant",
+        finishReason: undefined,
+        chunkCount: 4,
+        hadUsage: false,
       },
     ]);
   });
