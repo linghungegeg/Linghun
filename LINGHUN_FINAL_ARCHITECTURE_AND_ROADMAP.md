@@ -1032,7 +1032,8 @@ Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 
 - Phase 00-14 主闭环已完成。
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
-- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；下一步必须由用户明确确认：启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta；不得自动进入 Phase 15.5 或 Phase 16+。
+- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；当时的旧口径是下一步由用户确认启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta，但该口径已被 2026-05-19 全量审计后的 CCB Maturity Remediation baseline supersede。
+- 2026-05-19 Phase 00-18 Design + Runtime Overdesign Full Audit v1/v2 已 supersede 上述“下一步可能进入 Beta”的旧口径。当前唯一执行基线为 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`：Phase 15 Beta 继续暂停，历史 P0 hardening / Deep Parity / Runtime Acceptance / Verdict Evidence closure 只作为证据输入，不作为 readiness proof。下一步必须先执行 CCB Maturity Remediation，关闭会话上下文、provider profile contract、tool lifecycle、permission continuation、NCB 降级、TYPE-SHELL 可见面、config/Windows/operational reliability 和真实 report-generation path 验收后，才允许建议恢复真人实测。
 - P0 hardening 完成并输出报告后，必须先基于报告决定是否启动 Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure。该闭环用于确认 Phase 00-14 的实际使用体验、交互细节、建议/提权、错误/doctor/help、自然语言入口、cache/index/memory、多模型和 TUI 基础手感是否达到 CCB / CCB Dev Boost 公开成熟行为的核心体验等价；P0 或阻塞 P1 必须在 Beta 前修复，非阻塞 P2 才能登记到 Phase 15.5。
 - Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。终端 TUI 的基础成品手感（主输出分层、权限提示、tool_result 摘要、doctor 脱敏、状态栏准确、hint 去重、阶段汇报）是 Phase 15 Beta 前置 gate；Phase 15.5 只承接非阻塞 polish 和开源前 hardening。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。

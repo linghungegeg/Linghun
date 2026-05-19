@@ -189,7 +189,7 @@ describe("OpenAI compatible provider", () => {
     };
 
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
   });
 
@@ -427,6 +427,21 @@ describe("OpenAI stream parser", () => {
         chunkCount: 4,
         hadUsage: false,
       },
+    ]);
+  });
+
+  it("emits an error when a stream ends with an unfinished tool call", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"Read","arguments":"{\\"path\\":"}}]}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({ code: "PROVIDER_PARTIAL_TOOL_CALL" }),
+      }),
+      expect.objectContaining({ type: "message_stop" }),
     ]);
   });
 

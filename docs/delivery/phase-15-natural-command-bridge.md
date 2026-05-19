@@ -8,6 +8,21 @@
 
 ## 已完成功能
 
+### Phase 15 Beta CCB Maturity Remediation（pre-Beta，done）
+
+本轮按 `PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md` 执行 Phase 15 Beta 前成熟度补齐；未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+- Main runtime chain：普通请求继续进入模型循环；工具结果回灌后可继续请求模型，审批后的 `Write` / `Edit` / `MultiEdit` / `Bash` 不再把工具输出当最终回答。
+- Session/context：模型请求加入最近 transcript 的 `user_message` / `assistant_text_delta` / `tool_result`，并在 provider 调用前做上下文字符预算硬拦截。
+- Provider contracts：区分 `deepseek_chat_completions`、`openai_compatible_chat_completions`、`openai_responses`，避免 chat/responses schema 静默混用；加入 retry、`Retry-After`、stream idle timeout 与未完成 tool call 检测。
+- Tool lifecycle：内置工具增加 enabled/destructive/interrupt/max-result 元数据和运行时输入校验；大输出默认保留 details/fullOutputPath，主输出截断。
+- Permission continuation：写入、编辑、多编辑和 Bash 的 model tool_use 在 default ask 后保存 continuation，用户批准后写入 `tool_result` 并继续模型链路。
+- TUI/details：新增 `/details` 摘要 evidence/background/agents/checkpoints；evidence、background、agents、checkpoints、route decisions 做内存上限裁剪。
+- Config/ops：损坏 settings 可恢复到默认配置并暴露 `lastConfigRecoveryWarning`；配置写入改为 temp 文件再 rename。
+- Verification：新增/更新 focused tests 覆盖工具校验与截断、config recovery、provider partial tool-call、permission continuation 行为。
+
+验证结果（本地 shell）：`corepack pnpm check` PASS；`corepack pnpm typecheck` PASS；`corepack pnpm test` PASS（11 files / 259 tests）；`corepack pnpm build` PASS；`corepack pnpm exec linghun --version` PASS；`corepack pnpm exec Linghun --version` PASS；`corepack pnpm exec linghun --help` PASS；`printf '/details\n/exit\n' | corepack pnpm exec linghun` PASS；`corepack pnpm smoke:tui-stdin` PARTIAL（TUI 启动并到达 provider path，但当前 shell 无 provider API key，按预期输出缺少 api_key）；`corepack pnpm smoke:live-provider` SKIPPED（当前 shell 未设置临时 provider key）。
+
 - Command Capability Catalog：
   - 覆盖当前 TUI 用户可见 slash commands：`/help`、`/language`、`/model`、`/vision`、`/image`、`/skills`、`/workflows`、`/plugins`、`/doctor`、`/sessions`、`/resume`、`/branch`、`/memory`、`/mode`、`/tab`、`/plan`、`/permissions`、`/background`、`/agents`、`/fork`、`/rewind`、`/btw`、`/interrupt`、`/claim-check`、`/verify`、`/review`、`/cache-log`、`/cache`、`/break-cache`、`/mcp`、`/index`、`/usage`、`/stats`、`/read`、`/write`、`/edit`、`/multiedit`、`/grep`、`/glob`、`/bash`、`/todo`、`/diff`、`/exit`。
   - 显式标记内部隐藏入口 `/status`，并保留 `hiddenReason`。

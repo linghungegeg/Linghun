@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 
 export type EndpointProfile = "chat_completions" | "responses";
@@ -115,6 +115,14 @@ export type PluginConfig = {
   disabledIds: string[];
   trustedIds: string[];
 };
+
+export type ConfigRecoveryWarning = {
+  path: string;
+  reason: string;
+  recoveredAt: string;
+};
+
+export let lastConfigRecoveryWarning: ConfigRecoveryWarning | undefined;
 
 export type LinghunConfig = {
   language: Language;
@@ -402,12 +410,18 @@ export async function loadConfig(projectPath = process.cwd()): Promise<LinghunCo
   try {
     const raw = await readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<LinghunConfig>;
-    return mergeConfig(parsed);
+    return validateConfig(mergeConfig(parsed));
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      lastConfigRecoveryWarning = undefined;
       return defaultConfig;
     }
-    throw error;
+    lastConfigRecoveryWarning = {
+      path: settingsPath,
+      reason: error instanceof Error ? error.message : String(error),
+      recoveredAt: new Date().toISOString(),
+    };
+    return defaultConfig;
   }
 }
 
@@ -486,12 +500,56 @@ function normalizeEndpointProfile(value: string | undefined): EndpointProfile {
 }
 
 async function writeConfig(projectPath: string, config: LinghunConfig): Promise<void> {
-  await mkdir(getProjectConfigDir(projectPath), { recursive: true });
-  await writeFile(
-    getProjectSettingsPath(projectPath),
-    `${JSON.stringify(config, null, 2)}\n`,
-    "utf8",
-  );
+  const settingsPath = getProjectSettingsPath(projectPath);
+  await mkdir(dirname(settingsPath), { recursive: true });
+  const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(validateConfig(config), null, 2)}\n`, "utf8");
+  await rename(tempPath, settingsPath);
+}
+
+function validateConfig(config: LinghunConfig): LinghunConfig {
+  if (config.language !== "zh-CN" && config.language !== "en-US") {
+    throw new Error("settings.language must be zh-CN or en-US");
+  }
+  if (!config.defaultModel || typeof config.defaultModel !== "string") {
+    throw new Error("settings.defaultModel must be a non-empty string");
+  }
+  for (const [providerId, provider] of Object.entries(config.providers)) {
+    if (provider.type !== "deepseek" && provider.type !== "openai-compatible") {
+      throw new Error(`settings.providers.${providerId}.type is invalid`);
+    }
+    if (!provider.model || typeof provider.model !== "string") {
+      throw new Error(`settings.providers.${providerId}.model must be a non-empty string`);
+    }
+    if (
+      provider.endpointProfile &&
+      provider.endpointProfile !== "chat_completions" &&
+      provider.endpointProfile !== "responses"
+    ) {
+      throw new Error(`settings.providers.${providerId}.endpointProfile is invalid`);
+    }
+  }
+  if (!Array.isArray(config.modelRoutes.routes)) {
+    throw new Error("settings.modelRoutes.routes must be an array");
+  }
+  if (
+    config.permission.defaultMode !== "default" &&
+    config.permission.defaultMode !== "plan" &&
+    config.permission.defaultMode !== "acceptEdits" &&
+    config.permission.defaultMode !== "dontAsk" &&
+    config.permission.defaultMode !== "auto" &&
+    config.permission.defaultMode !== "bypass"
+  ) {
+    throw new Error("settings.permission.defaultMode is invalid");
+  }
+  if (
+    config.index.mode !== "fast" &&
+    config.index.mode !== "moderate" &&
+    config.index.mode !== "full"
+  ) {
+    throw new Error("settings.index.mode is invalid");
+  }
+  return config;
 }
 
 function inferProviderForModel(model: string, providers: Record<string, ProviderConfig>): string {

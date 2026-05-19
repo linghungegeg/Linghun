@@ -53,6 +53,10 @@ export type ProviderCapabilities = {
 };
 
 export type EndpointProfile = "chat_completions" | "responses";
+export type ProviderRuntimeProfile =
+  | "deepseek_chat_completions"
+  | "openai_compatible_chat_completions"
+  | "openai_responses";
 
 export type ProviderConfig = {
   id: string;
@@ -153,6 +157,18 @@ type PendingResponsesToolCall = {
   name: string;
   arguments: string;
 };
+
+type ProviderRuntimeContract = {
+  profile: ProviderRuntimeProfile;
+  endpointProfile: EndpointProfile;
+  endpoint: "/chat/completions" | "/responses";
+  toolResultShape: "chat_tool_message" | "responses_function_call_output";
+};
+
+const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
+const PROVIDER_MAX_ATTEMPTS = 3;
+const PROVIDER_BASE_RETRY_MS = 500;
+const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 30_000;
 
 type OpenAiToolCall = {
   id: string;
@@ -299,42 +315,43 @@ export class OpenAiCompatibleProvider implements Provider {
 
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<LinghunEvent> {
     this.assertReady();
-    const endpointProfile =
-      request.endpointProfile ?? this.config.endpointProfile ?? "chat_completions";
+    const contract = resolveProviderRuntimeContract(this.config, request);
     const body =
-      endpointProfile === "responses"
+      contract.endpointProfile === "responses"
         ? this.createResponsesRequest(request)
         : this.createChatRequest(request);
-    const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
-    const response = await fetch(`${this.normalizedBaseUrl()}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.apiKey}`,
+    const response = await fetchWithProviderRetry(
+      `${this.normalizedBaseUrl()}${contract.endpoint}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal,
       },
-      body: JSON.stringify(body),
-      signal,
-    });
+    );
 
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         throw createApiKeyError(response.status);
       }
-      throw createHttpStatusError(response.status);
+      throw createHttpStatusError(response.status, await safeReadResponseText(response));
     }
 
     if (!response.body) {
       throw new LinghunError({
         code: "PROVIDER_STREAM_EMPTY",
         message: "模型请求失败：响应中没有可读取的流。",
-        suggestion: "请确认 base_url 是 OpenAI compatible 的 chat completions 接口。",
+        suggestion: `请确认 base_url 支持 ${contract.profile} 的 ${contract.endpoint} 流式接口。`,
         recoverable: true,
       });
     }
 
     yield* parseOpenAiStream(
-      response.body,
-      endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
+      withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
+      contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
     );
   }
 
@@ -362,10 +379,138 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 }
 
+function resolveProviderRuntimeContract(
+  config: ProviderConfig,
+  request: ModelRequest,
+): ProviderRuntimeContract {
+  if (config.type === "deepseek") {
+    return {
+      profile: "deepseek_chat_completions",
+      endpointProfile: "chat_completions",
+      endpoint: "/chat/completions",
+      toolResultShape: "chat_tool_message",
+    };
+  }
+  const endpointProfile = request.endpointProfile ?? config.endpointProfile ?? "chat_completions";
+  if (endpointProfile === "responses") {
+    return {
+      profile: "openai_responses",
+      endpointProfile,
+      endpoint: "/responses",
+      toolResultShape: "responses_function_call_output",
+    };
+  }
+  return {
+    profile: "openai_compatible_chat_completions",
+    endpointProfile: "chat_completions",
+    endpoint: "/chat/completions",
+    toolResultShape: "chat_tool_message",
+  };
+}
+
+async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === PROVIDER_MAX_ATTEMPTS) {
+        return response;
+      }
+      await sleep(readRetryAfterMs(response) ?? PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1));
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof TypeError) || attempt === PROVIDER_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1));
+    }
+  }
+  throw lastError;
+}
+
+function readRetryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+  const date = Date.parse(value);
+  if (Number.isFinite(date)) {
+    return Math.max(0, date - Date.now());
+  }
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function safeReadResponseText(response: Response): Promise<string | undefined> {
+  try {
+    return await response.text();
+  } catch {
+    return undefined;
+  }
+}
+
+function withStreamIdleTimeout(
+  body: ReadableStream<Uint8Array>,
+  timeoutMs: number,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new LinghunError({
+              code: "PROVIDER_STREAM_TIMEOUT",
+              message: `模型请求失败：流式响应超过 ${timeoutMs}ms 没有新数据。`,
+              suggestion:
+                "请稍后重试，或运行 /model doctor 检查 provider/model、网络和网关稳定性。",
+              recoverable: true,
+            }),
+          );
+        }, timeoutMs);
+        signal.addEventListener(
+          "abort",
+          () => {
+            if (timer) clearTimeout(timer);
+          },
+          { once: true },
+        );
+      });
+      const result = await Promise.race([reader.read(), timeout]);
+      if (timer) clearTimeout(timer);
+      if (result.done) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(result.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 function createChatProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
 ): OpenAiChatRequest {
+  if (request.endpointProfile === "responses") {
+    throw new LinghunError({
+      code: "PROVIDER_PROFILE_MISMATCH",
+      message: "Provider profile mismatch: chat request builder received responses profile.",
+      suggestion: "请检查 endpointProfile；chat_completions 与 responses schema 不能混用。",
+      recoverable: true,
+    });
+  }
   const model = request.model ?? config.model;
   const tools = createOpenAiChatTools(request, config.supportsTools);
   return {
@@ -381,6 +526,14 @@ function createResponsesProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
 ): OpenAiResponsesRequest {
+  if (request.endpointProfile && request.endpointProfile !== "responses") {
+    throw new LinghunError({
+      code: "PROVIDER_PROFILE_MISMATCH",
+      message: "Provider profile mismatch: responses request builder received chat profile.",
+      suggestion: "请检查 endpointProfile；chat_completions 与 responses schema 不能混用。",
+      recoverable: true,
+    });
+  }
   const model = request.model ?? config.model;
   const tools = createOpenAiResponsesTools(request, config.supportsTools);
   return {
@@ -534,6 +687,18 @@ export async function* parseOpenAiStream(
   }
   for (const event of parseOpenAiStreamLine(buffer, state, endpoint)) {
     yield event;
+  }
+  if (state.pendingToolCalls.size > 0 || state.pendingResponsesToolCalls.size > 0) {
+    yield {
+      type: "error",
+      error: new LinghunError({
+        code: "PROVIDER_PARTIAL_TOOL_CALL",
+        message: "模型请求失败：流结束时仍有未完成的 tool call。",
+        suggestion:
+          "请重试；如持续出现，运行 /model doctor 检查 provider 的 tool calling 流式兼容性或切换 endpoint profile。",
+        recoverable: true,
+      }),
+    };
   }
   yield {
     type: "message_stop",
@@ -944,7 +1109,7 @@ function createApiKeyError(status: number, cause?: unknown): LinghunError {
   });
 }
 
-function createHttpStatusError(status: number): LinghunError {
+function createHttpStatusError(status: number, responseText?: string): LinghunError {
   if (status === 400) {
     return new LinghunError({
       code: "PROVIDER_BAD_REQUEST",

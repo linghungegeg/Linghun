@@ -1656,6 +1656,10 @@ Phase 15.5 也必须复检 Solution Completeness Gate：双模型审查和真实
 
 Phase 15 建立的是 CCB workflow parity 总基线：Phase 00-14 已声明完成的核心终端编码能力，必须先按 CCB 源码体现的真实工作流完成 inventory、mapping、阻塞修复和 workflow 级验证。后续 Phase 16-18 不再重复全量 CCB inventory，而是做 delta parity audit：只审新增能力、它们参考的成熟项目边界、是否破坏 Phase 15 已建立的默认 CCB 手感、是否引入新的权限/成本/幻觉/长期状态风险。若 delta audit 发现回归到 Phase 15 Beta 前基础手感缺口，必须按回归或遗漏处理，不能登记为普通后续 polish。
 
+2026-05-19 Phase 00-18 Design + Runtime Overdesign Full Audit v1/v2 已将 Phase 15 Beta 前置口径升级为 CCB Maturity Remediation。当前唯一执行基线为 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`，并 supersede 旧的“局部 closure PASS / 可恢复 Beta”叙事。进入 Phase 15 Beta 前，不仅要满足基础 handfeel，还必须关闭该 baseline 中的会话上下文、provider profile contract、tool lifecycle、permission continuation、NCB 降级、TYPE-SHELL 可见面、config/Windows/operational reliability 和真实 report-generation path 验收。历史 pre-Beta closure 文档只作为证据输入，不再作为 readiness proof。
+
+该 baseline 第 12 节 `Deferred Issue Register` 和第 13 节 `Audit Traceability Matrix` 是两份全量审计中后置问题与小类别成熟度细节的集中登记表。Phase 15.5 / 16 / 17 / 18 开工时必须从该表复制本阶段相关条目到阶段 scope，并逐项标记 DONE / DEFERRED / NOT-DO；不得依赖聊天记忆或旧 closure 文档追踪后置项与细节项。
+
 ### 审查输入
 
 - Phase 00-15 交付文档。

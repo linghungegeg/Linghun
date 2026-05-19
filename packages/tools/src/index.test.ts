@@ -73,4 +73,18 @@ describe("Phase 05 core tools", () => {
       runTool("Write", { path: "../escape.txt", content: "bad" }, context),
     ).rejects.toThrow("路径越界");
   });
+
+  it("validates tool input and preserves details when output is capped", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "large.txt"), "x".repeat(9_000), "utf8");
+
+    await expect(runTool("Read", { path: 123 }, context)).rejects.toThrow("Read.path");
+    const read = await runTool("Read", { path: "large.txt" }, context);
+
+    expect(read.input).toEqual({ path: "large.txt", offset: undefined, limit: undefined });
+    expect(read.output.truncated).toBe(true);
+    expect(read.output.text.length).toBeLessThan(read.output.details?.length ?? 0);
+    expect(read.output.details).toContain("x".repeat(100));
+  });
 });

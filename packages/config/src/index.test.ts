@@ -8,6 +8,7 @@ import {
   getProjectSettingsPath,
   getSessionRootDir,
   getUserDataDir,
+  lastConfigRecoveryWarning,
   loadConfig,
   resolveStoragePaths,
   saveDefaultModel,
@@ -187,5 +188,17 @@ describe("config directories", () => {
     expect(enabled.skills.disabledIds).toEqual([]);
     expect(enabled.skills.trustedIds).toEqual(["bug-helper"]);
     expect(enabled.plugins.trustedIds).toEqual(["local-tools"]);
+  });
+
+  it("recovers from damaged settings with a visible warning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(getProjectSettingsPath(project), "{ damaged", "utf8");
+
+    const config = await loadConfig(project);
+
+    expect(config.defaultModel).toBeTruthy();
+    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
+    expect(lastConfigRecoveryWarning?.reason).toContain("JSON");
   });
 });

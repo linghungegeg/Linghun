@@ -1036,7 +1036,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Status: requesting model");
   });
 
-  it("shows model tool permission prompts and returns denied tool_result evidence", async () => {
+  it("shows model tool permission prompts and waits for local approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -1074,10 +1074,49 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
     expect(output.text).not.toContain("工具 Bash 结果");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("continues after denied model tool permission as a tool_result", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-deny-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-deny-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "Bash",
+      { command: "echo SHOULD_NOT_RUN" },
+      "我已收到拒绝结果，将改用不执行命令的说明。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请检查当前环境\nno\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
     const second = requests[1] as { messages?: { role?: string; content?: string }[] };
     const toolMessage = second.messages?.find((message) => message.role === "tool");
     expect(toolMessage?.content).toContain('"ok":false');
-    expect(toolMessage?.content).toContain('"evidenceId"');
+    expect(toolMessage?.content).toContain("permission denied by user");
+    expect(output.text).toContain("我已收到拒绝结果，将改用不执行命令的说明。");
+    expect(output.text).not.toContain("SHOULD_NOT_RUN");
+    expect(output.text).not.toContain('"tool_result"');
   });
 
   it("keeps model Write/Edit tool calls behind default permission prompt", async () => {
@@ -1156,7 +1195,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(output.text).toContain("状态：正在请求模型");
     expect(output.text).toContain("工具已暂停，等待权限边界处理");
     expect(output.text).toContain("- 工具：Write");
@@ -1184,6 +1223,101 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"toolName":"Write"');
     expect(transcript).toContain('"isError":false');
     expect(transcript).toContain('"evidenceId"');
+  });
+
+  it("continues approved model tool results through another tool_use before final answer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-chain-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-chain-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length === 1) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-test-1",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-write",
+                      type: "function",
+                      function: {
+                        name: "Write",
+                        arguments: JSON.stringify({ path: "report.md", content: "# Report" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        if (requests.length === 2) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-test-2",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-read",
+                      type: "function",
+                      function: {
+                        name: "Read",
+                        arguments: JSON.stringify({ path: "package.json" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        const body = `data: ${JSON.stringify({
+          id: "chatcmpl-test-3",
+          choices: [{ delta: { content: "已写入报告并读取 package.json。" } }],
+        })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200 });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这个项目 看看怎么部署 把报告生成在根目录下\nyes\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    const third = requests[2] as { messages?: { role?: string; tool_call_id?: string }[] };
+    expect(third.messages?.some((message) => message.tool_call_id === "call-write")).toBe(true);
+    expect(third.messages?.some((message) => message.tool_call_id === "call-read")).toBe(true);
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain("工具 Read 结果：");
+    expect(output.text).toContain("已写入报告并读取 package.json。");
   });
 
   it("records failed model tool_result evidence for follow-up prompts", async () => {
@@ -2663,6 +2797,42 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("lets read-and-summarize requests reach the model loop", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "README.md"), "# Test\n", "utf8");
+    await writeFile(join(project, "docs-README.md"), "# Other\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "summary-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "summary-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch("README 摘要");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请读取 README 并总结\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("README 摘要");
+    expect(output.text).not.toContain("找到多个可能文件");
+  });
+
   it("shows provider stream errors as actionable model errors", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -2738,7 +2908,7 @@ describe("Phase 06 TUI slash commands", () => {
     const sessions = await store.list();
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(output.text).toContain("工具已暂停");
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain("证据记录：");

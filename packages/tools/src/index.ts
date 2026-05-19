@@ -24,6 +24,15 @@ export type ToolOutput = {
   changedFiles?: string[];
 };
 
+export type ToolInterruptBehavior = "abortable" | "best-effort" | "not-supported";
+
+export type ToolLifecycleMetadata = {
+  enabled: boolean;
+  destructive: boolean;
+  interruptBehavior: ToolInterruptBehavior;
+  maxResultSizeChars: number;
+};
+
 export type ToolDefinition<Input = unknown> = {
   name: ToolName;
   title: string;
@@ -32,6 +41,8 @@ export type ToolDefinition<Input = unknown> = {
   isReadOnly: boolean;
   isConcurrencySafe: boolean;
   isLongRunning?: boolean;
+  lifecycle: ToolLifecycleMetadata;
+  validateInput(input: unknown): Input;
   call(input: Input, context: ToolContext): Promise<ToolOutput>;
 };
 
@@ -102,8 +113,10 @@ export const toolRegistryStatus = "ready" as const;
 
 const DEFAULT_LIMIT = 200;
 const DEFAULT_SEARCH_LIMIT = 100;
+const DEFAULT_TOOL_TEXT_LIMIT = 8_000;
 const BASH_PREVIEW_LIMIT = 4_000;
 const BASH_TIMEOUT_MS = 120_000;
+const MAX_TODO_ITEMS = 100;
 
 export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
   return {
@@ -123,16 +136,20 @@ export async function runTool(
     throw new Error(`未知工具：${name}`);
   }
 
-  const output = await tool.call(input as never, context);
+  if (!tool.lifecycle.enabled) {
+    throw new Error(`工具已禁用：${name}。建议：运行 /features 或 /doctor 查看当前能力边界。`);
+  }
+  const validatedInput = tool.validateInput(input);
+  const output = await tool.call(validatedInput, context);
   return {
     id: randomUUID(),
     name,
-    input,
-    output,
+    input: validatedInput,
+    output: normalizeToolOutput(output, tool),
   };
 }
 
-export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
+export const builtInTools: Record<ToolName, ToolDefinition> = {
   Read: {
     name: "Read",
     title: "读取文件",
@@ -145,6 +162,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: true,
     isConcurrencySafe: true,
+    lifecycle: readOnlyLifecycle(),
+    validateInput: validateReadInput,
     call: readTool as ToolDefinition<never>["call"],
   },
   Write: {
@@ -159,6 +178,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: false,
     isConcurrencySafe: false,
+    lifecycle: writeLifecycle(),
+    validateInput: validateWriteInput,
     call: writeTool as ToolDefinition<never>["call"],
   },
   Edit: {
@@ -173,6 +194,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: false,
     isConcurrencySafe: false,
+    lifecycle: writeLifecycle(),
+    validateInput: validateEditInput,
     call: editTool as ToolDefinition<never>["call"],
   },
   MultiEdit: {
@@ -187,6 +210,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: false,
     isConcurrencySafe: false,
+    lifecycle: writeLifecycle(),
+    validateInput: validateMultiEditInput,
     call: multiEditTool as ToolDefinition<never>["call"],
   },
   Grep: {
@@ -201,6 +226,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: true,
     isConcurrencySafe: true,
+    lifecycle: readOnlyLifecycle(),
+    validateInput: validateGrepInput,
     call: grepTool as ToolDefinition<never>["call"],
   },
   Glob: {
@@ -215,6 +242,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: true,
     isConcurrencySafe: true,
+    lifecycle: readOnlyLifecycle(),
+    validateInput: validateGlobInput,
     call: globTool as ToolDefinition<never>["call"],
   },
   Bash: {
@@ -230,6 +259,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     isReadOnly: false,
     isConcurrencySafe: false,
     isLongRunning: true,
+    lifecycle: bashLifecycle(),
+    validateInput: validateBashInput,
     call: bashTool as ToolDefinition<never>["call"],
   },
   Todo: {
@@ -244,6 +275,8 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: false,
     isConcurrencySafe: false,
+    lifecycle: sessionLifecycle(),
+    validateInput: validateTodoInput,
     call: todoTool as ToolDefinition<never>["call"],
   },
   Diff: {
@@ -258,9 +291,207 @@ export const builtInTools: Record<ToolName, ToolDefinition<never>> = {
     },
     isReadOnly: true,
     isConcurrencySafe: true,
+    lifecycle: readOnlyLifecycle(),
+    validateInput: validateDiffInput,
     call: diffTool as ToolDefinition<never>["call"],
   },
 };
+
+function readOnlyLifecycle(): ToolLifecycleMetadata {
+  return {
+    enabled: true,
+    destructive: false,
+    interruptBehavior: "abortable",
+    maxResultSizeChars: DEFAULT_TOOL_TEXT_LIMIT,
+  };
+}
+
+function writeLifecycle(): ToolLifecycleMetadata {
+  return {
+    enabled: true,
+    destructive: true,
+    interruptBehavior: "best-effort",
+    maxResultSizeChars: DEFAULT_TOOL_TEXT_LIMIT,
+  };
+}
+
+function bashLifecycle(): ToolLifecycleMetadata {
+  return {
+    enabled: true,
+    destructive: true,
+    interruptBehavior: "abortable",
+    maxResultSizeChars: BASH_PREVIEW_LIMIT,
+  };
+}
+
+function sessionLifecycle(): ToolLifecycleMetadata {
+  return {
+    enabled: true,
+    destructive: false,
+    interruptBehavior: "not-supported",
+    maxResultSizeChars: DEFAULT_TOOL_TEXT_LIMIT,
+  };
+}
+
+function normalizeToolOutput(output: ToolOutput, tool: ToolDefinition): ToolOutput {
+  if (output.text.length <= tool.lifecycle.maxResultSizeChars) {
+    return output;
+  }
+  const preview = `${output.text.slice(0, tool.lifecycle.maxResultSizeChars)}\n...（输出已截断，完整内容见 details/fullOutputPath 或 transcript）`;
+  return {
+    ...output,
+    text: preview,
+    preview: output.preview ?? preview,
+    details: output.details ?? output.text,
+    truncated: true,
+  };
+}
+
+function validateRecord(input: unknown, toolName: ToolName): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`${toolName} 输入必须是对象。建议：按工具 schema 传入 JSON object。`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function readString(record: Record<string, unknown>, key: string, toolName: ToolName): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${toolName}.${key} 必须是非空字符串。`);
+  }
+  return value;
+}
+
+function readOptionalString(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): string | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${toolName}.${key} 必须是字符串。`);
+  }
+  return value;
+}
+
+function readOptionalPositiveInteger(
+  record: Record<string, unknown>,
+  key: string,
+  toolName: ToolName,
+): number | undefined {
+  const value = record[key];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new Error(`${toolName}.${key} 必须是非负整数。`);
+  }
+  return value as number;
+}
+
+function validateReadInput(input: unknown): ReadInput {
+  const record = validateRecord(input, "Read");
+  return {
+    path: readString(record, "path", "Read"),
+    offset: readOptionalPositiveInteger(record, "offset", "Read"),
+    limit: readOptionalPositiveInteger(record, "limit", "Read"),
+  };
+}
+
+function validateWriteInput(input: unknown): WriteInput {
+  const record = validateRecord(input, "Write");
+  return {
+    path: readString(record, "path", "Write"),
+    content: readString(record, "content", "Write"),
+  };
+}
+
+function validateEditInput(input: unknown): EditInput {
+  const record = validateRecord(input, "Edit");
+  return {
+    path: readString(record, "path", "Edit"),
+    oldText: readString(record, "oldText", "Edit"),
+    newText: readString(record, "newText", "Edit"),
+  };
+}
+
+function validateMultiEditInput(input: unknown): MultiEditInput {
+  const record = validateRecord(input, "MultiEdit");
+  const edits = record.edits;
+  if (!Array.isArray(edits) || edits.length === 0) {
+    throw new Error("MultiEdit.edits 必须是非空数组。");
+  }
+  return {
+    path: readString(record, "path", "MultiEdit"),
+    edits: edits.map((item, index) => {
+      const edit = validateRecord(item, "MultiEdit");
+      return {
+        oldText: readString(edit, "oldText", "MultiEdit"),
+        newText: readString(edit, "newText", "MultiEdit"),
+      };
+    }),
+  };
+}
+
+function validateGrepInput(input: unknown): GrepInput {
+  const record = validateRecord(input, "Grep");
+  return {
+    pattern: readString(record, "pattern", "Grep"),
+    path: readOptionalString(record, "path", "Grep"),
+    limit: readOptionalPositiveInteger(record, "limit", "Grep"),
+  };
+}
+
+function validateGlobInput(input: unknown): GlobInput {
+  const record = validateRecord(input, "Glob");
+  return {
+    pattern: readString(record, "pattern", "Glob"),
+    path: readOptionalString(record, "path", "Glob"),
+    limit: readOptionalPositiveInteger(record, "limit", "Glob"),
+  };
+}
+
+function validateBashInput(input: unknown): BashInput {
+  const record = validateRecord(input, "Bash");
+  return {
+    command: readString(record, "command", "Bash"),
+    timeoutMs: readOptionalPositiveInteger(record, "timeoutMs", "Bash"),
+  };
+}
+
+function validateTodoInput(input: unknown): TodoInput {
+  const record = validateRecord(input, "Todo");
+  const action = readString(record, "action", "Todo");
+  if (action === "list") {
+    return { action };
+  }
+  if (action === "add") {
+    return { action, content: readString(record, "content", "Todo") };
+  }
+  if (action === "start" || action === "done" || action === "block") {
+    return {
+      action,
+      id: readString(record, "id", "Todo"),
+      evidence: readOptionalString(record, "evidence", "Todo"),
+    };
+  }
+  throw new Error("Todo.action 必须是 list/add/start/done/block。");
+}
+
+function validateDiffInput(input: unknown): DiffInput {
+  const record = validateRecord(input ?? {}, "Diff");
+  const files = record.files;
+  if (files === undefined) {
+    return {};
+  }
+  if (!Array.isArray(files) || !files.every((item) => typeof item === "string")) {
+    throw new Error("Diff.files 必须是字符串数组。");
+  }
+  return { files };
+}
 
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
@@ -409,6 +640,9 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
 
 async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOutput> {
   if (input.action === "add") {
+    if (context.todos.length >= MAX_TODO_ITEMS) {
+      throw new Error(`Todo 已达到上限 ${MAX_TODO_ITEMS} 条。建议：先完成或清理旧 Todo。`);
+    }
     context.todos.push({
       id: String(context.todos.length + 1),
       content: input.content,

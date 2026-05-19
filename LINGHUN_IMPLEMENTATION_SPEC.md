@@ -790,6 +790,10 @@ Beta 前 hardening 验收：
 
 Phase 15 Beta 前必须满足 CCB handfeel gate。该 gate 只要求真实 TUI 达到成熟 coding terminal 的可用手感，不要求新增 Phase 15.5/16+ 功能，也不得用关键词补丁代替源码级修复。
 
+2026-05-19 更新：两份 Phase 00-18 Design + Runtime Overdesign Full Audit 已把本 gate 升级为 Phase 15 Beta CCB Maturity Remediation。当前唯一执行基线是 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`。因此本节下面的 handfeel 条目是必要子集，不是完整 Beta 入口条件。Beta 前还必须关闭 baseline 中的会话历史/上下文预算、tool_result continuation、provider profile contract、provider retry/stream timeout、Tool runtime validation、permission pending approval、NCB 降级、TYPE-SHELL 可见面处理、config schema/损坏恢复、Windows smoke 和真实 report-generation path。历史 focused/mock/local PASS 不得推断 Phase 15 Beta readiness PASS。
+
+后置项和小类别成熟度细节必须以 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md` 第 12 节 `Deferred Issue Register` 与第 13 节 `Audit Traceability Matrix` 为准。后续阶段不得重新凭记忆解释审计结论；必须把对应 register / traceability rows 复制进阶段交付文档并给出 DONE / DEFERRED / NOT-DO 裁决。
+
 运行时规格：
 
 - Provider resolver：TUI 初始化、状态栏、ModelGateway、`/model`、`/model doctor`、usage/stats/handoff 必须使用同一个当前 provider/model 解析结果；不得在 TUI 入口或 `gateway.stream()` 中硬编码 deepseek。配置来源必须可诊断，至少区分 env、project settings、project local/private settings（如实现）、user/default。

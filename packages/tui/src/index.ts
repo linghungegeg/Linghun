@@ -611,6 +611,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/plan",
   "/permissions",
   "/background",
+  "/details",
   "/agents",
   "/fork",
   "/rewind",
@@ -659,7 +660,17 @@ type PendingLocalApproval =
       toolCall: ModelToolCall;
       toolName: ToolName;
       sessionId: string;
+      continuation?: PendingModelContinuation;
     };
+
+type PendingModelContinuation = {
+  messages: ModelMessage[];
+  provider: string;
+  model: string;
+  endpointProfile: "chat_completions" | "responses";
+  reasoningLevel?: string;
+  reasoningSent: boolean;
+};
 
 export type TuiContext = {
   store: SessionStore;
@@ -728,6 +739,13 @@ const LARGE_INDEX_RISK_DIRS = new Set([
 const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
 const PROJECT_RULES_STATUS_WIDTH = 160;
+const MAX_CONTEXT_MESSAGES = 12;
+const MAX_CONTEXT_CHARS = 48_000;
+const MAX_EVIDENCE_RECORDS = 50;
+const MAX_BACKGROUND_TASKS = 50;
+const MAX_CHECKPOINTS = 20;
+const MAX_AGENTS = 20;
+const MAX_ROUTE_DECISIONS = 50;
 
 export function createCacheState(
   projectPath: string,
@@ -1342,7 +1360,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         return 0;
       }
       if (commandResult === "message") {
-        const naturalResult = await handleNaturalInput(text, context, output);
+        const naturalResult = await handleNaturalInput(text, context, gateway, output);
         if (naturalResult === "message") {
           await sendMessage(text, context, gateway, output);
         }
@@ -1402,6 +1420,10 @@ export async function handleSlashCommand(
   }
   if (command === "/background") {
     await handleBackgroundCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/details") {
+    await handleDetailsCommand(rest, context, output);
     return "handled";
   }
   if (command === "/agents") {
@@ -2324,6 +2346,7 @@ function resolveRoleRoute(
     createdAt: new Date().toISOString(),
   };
   context.routeDecisions.unshift(decision);
+  context.routeDecisions = context.routeDecisions.slice(0, MAX_ROUTE_DECISIONS);
   return { route: resolvedRoute, decision, usable: stopConditions.length === 0 };
 }
 
@@ -2650,6 +2673,33 @@ async function handleBackgroundCommand(
   }
 }
 
+async function handleDetailsCommand(
+  _args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const lines = [
+    "Linghun details",
+    `- evidence: ${context.evidence.length}/${MAX_EVIDENCE_RECORDS}`,
+    `- background: ${context.backgroundTasks.length}/${MAX_BACKGROUND_TASKS}`,
+    `- agents: ${context.agents.length}/${MAX_AGENTS}`,
+    `- checkpoints: ${context.checkpoints.length}/${MAX_CHECKPOINTS}`,
+  ];
+  if (context.evidence.length > 0) {
+    lines.push("- recent evidence:");
+    for (const evidence of context.evidence.slice(0, 5)) {
+      lines.push(`  - ${evidence.id} ${evidence.kind} ${evidence.source}: ${evidence.summary}`);
+    }
+  }
+  if (context.backgroundTasks.length > 0) {
+    lines.push("- recent background:");
+    for (const task of context.backgroundTasks.slice(0, 5)) {
+      lines.push(`  - ${task.id} ${task.kind} ${task.status}: ${task.userVisibleSummary}`);
+    }
+  }
+  writeLine(output, lines.join("\n"));
+}
+
 async function handleAgentsCommand(
   args: string[],
   context: TuiContext,
@@ -2729,8 +2779,10 @@ async function handleForkCommand(
     updatedAt: now,
   };
   context.agents.unshift(agent);
+  context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
   context.backgroundTasks.unshift(background);
+  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
   await context.store.appendEvent(parentSessionId, { type: "agent_start", agent, createdAt: now });
   await context.store.appendEvent(child.id, {
     type: "system_event",
@@ -4219,7 +4271,7 @@ async function recordIndexEvidence(
     supportsClaims: ["index_query", query, ...supportsClaims],
     createdAt: new Date().toISOString(),
   };
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
 }
 
@@ -5148,7 +5200,7 @@ async function handleVisionCommand(
     createdAt: evidence.createdAt,
   };
   context.visionObservations.unshift(observation);
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   addRoleUsage(
     context,
     "vision",
@@ -5225,7 +5277,7 @@ async function handleImageCommand(
   );
   result.evidenceRefs.push(pickEvidence(evidence));
   context.imageResults.unshift(result);
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   addRoleUsage(context, "image", route, Math.ceil(prompt.length / 4), 0);
   const task: BackgroundTaskState = {
     id,
@@ -5246,6 +5298,7 @@ async function handleImageCommand(
     nextAction: "查看 evidence 或把资产路径交给 executor；image role 不改代码。",
   };
   context.backgroundTasks.unshift(task);
+  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendBackgroundTaskEvent(context, sessionId, task);
   writeLine(output, `ImageGenerationResult: ${id}`);
@@ -5329,6 +5382,7 @@ async function runVerificationPlan(
     nextAction: "等待 PASS / FAIL / PARTIAL 结果，失败后按建议修复并复跑 /verify。",
   };
   context.backgroundTasks.unshift(task);
+  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
   await context.store.appendEvent(sessionId, {
     type: "verification_start",
     run: { id: runId, plan, startedAt },
@@ -5511,7 +5565,7 @@ async function recordVerificationEvidence(
     supportsClaims: ["已验证", "验证通过", "测试通过", "verified", "tests passed"],
     createdAt: new Date().toISOString(),
   };
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
@@ -5689,8 +5743,11 @@ function matchesCompositeStatusKey(text: string, key: string): boolean {
 export async function handleNaturalInput(
   text: string,
   context: TuiContext,
-  output: Writable,
+  gatewayOrOutput: ModelGateway | Writable,
+  maybeOutput?: Writable,
 ): Promise<"handled" | "message"> {
+  const gateway = maybeOutput ? (gatewayOrOutput as ModelGateway) : undefined;
+  const output = maybeOutput ?? (gatewayOrOutput as Writable);
   const pendingLocalApproval = context.pendingLocalApproval;
   if (pendingLocalApproval) {
     const normalized = text.trim().toLowerCase();
@@ -5707,13 +5764,21 @@ export async function handleNaturalInput(
         return "handled";
       }
       if (approval.kind === "model_tool_use") {
-        await executeApprovedModelToolUse(
+        const result = await executeApprovedModelToolUse(
           approval.toolCall,
           approval.toolName,
           context,
           approval.sessionId,
           output,
         );
+        if (gateway && approval.continuation) {
+          approval.continuation.messages.push({
+            role: "tool",
+            tool_call_id: approval.toolCall.id,
+            content: JSON.stringify(result),
+          });
+          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+        }
         writeLightHints(output, context);
         writeStatus(output, context);
         return "handled";
@@ -5730,6 +5795,14 @@ export async function handleNaturalInput(
           "Write",
           `permission denied by user: ${approval.plan.path}`,
         );
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "Permission denied. No file was written and the index was not refreshed."
+            : "已拒绝权限。本轮未写入文件，也未刷新索引。",
+        );
+        writeStatus(output, context);
+        return "handled";
       }
       if (approval.kind === "model_tool_use") {
         const evidence = await recordToolFailureEvidence(
@@ -5738,21 +5811,38 @@ export async function handleNaturalInput(
           approval.toolName,
           `permission denied by user: ${approval.toolName}`,
         );
+        const deniedResult = {
+          ok: false,
+          tool: approval.toolName,
+          text: "permission denied by user",
+          evidenceId: evidence.id,
+        };
         await appendToolResultEvent(
           context,
           approval.sessionId,
           approval.toolCall.id,
           approval.toolName,
-          "permission denied by user",
+          deniedResult.text,
           true,
           evidence.id,
         );
+        if (gateway && approval.continuation) {
+          approval.continuation.messages.push({
+            role: "tool",
+            tool_call_id: approval.toolCall.id,
+            content: JSON.stringify(deniedResult),
+          });
+          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+          writeLightHints(output, context);
+          writeStatus(output, context);
+          return "handled";
+        }
       }
       writeLine(
         output,
         context.language === "en-US"
-          ? "Permission denied. No file was written and the index was not refreshed."
-          : "已拒绝权限。本轮未写入文件，也未刷新索引。",
+          ? "Permission denied. No file was written and the pending action was returned as a tool_result."
+          : "已拒绝权限。本轮未写入文件；拒绝结果已作为 tool_result 返回给后续模型上下文。",
       );
       writeStatus(output, context);
       return "handled";
@@ -6169,10 +6259,23 @@ async function sendMessage(
       "warning",
     );
   }
-  const messages: ModelMessage[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: text },
-  ];
+  const messages = await buildModelMessagesWithRecentContext(
+    context,
+    sessionId,
+    systemPrompt,
+    text,
+  );
+  const budget = estimateModelMessageChars(messages);
+  if (budget > MAX_CONTEXT_CHARS) {
+    const warning =
+      context.language === "en-US"
+        ? `Context budget exceeded before provider call: ${budget}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
+        : `上下文预算超限，已在请求 provider 前停止：${budget}/${MAX_CONTEXT_CHARS} 字符。请先运行 /sessions summary 或减少最近上下文后重试。`;
+    await appendSystemEvent(context, sessionId, warning, "warning");
+    writeLine(output, warning);
+    writeStatus(output, context);
+    return;
+  }
 
   try {
     for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
@@ -6265,7 +6368,14 @@ async function sendMessage(
         output.write("\n");
       }
       for (const toolCall of toolCalls) {
-        const result = await executeModelToolUse(toolCall, context, sessionId, output);
+        const result = await executeModelToolUse(toolCall, context, sessionId, output, {
+          messages,
+          provider: selectedRuntime.provider,
+          model: selectedRuntime.model,
+          endpointProfile: selectedRuntime.endpointProfile,
+          reasoningLevel: selectedRuntime.reasoningLevel,
+          reasoningSent: selectedRuntime.reasoningSent,
+        });
         if (result.pendingApproval) {
           return;
         }
@@ -6308,6 +6418,169 @@ async function sendMessage(
   writeStatus(output, context);
 }
 
+async function buildModelMessagesWithRecentContext(
+  context: TuiContext,
+  sessionId: string,
+  systemPrompt: string,
+  currentUserText: string,
+): Promise<ModelMessage[]> {
+  const messages: ModelMessage[] = [{ role: "system", content: systemPrompt }];
+  try {
+    const resumed = await context.store.resume(sessionId);
+    const recent = resumed.transcript
+      .filter(
+        (event) =>
+          event.type === "user_message" ||
+          event.type === "assistant_text_delta" ||
+          event.type === "tool_result",
+      )
+      .slice(-MAX_CONTEXT_MESSAGES - 1);
+    const lastRecent = recent.at(-1);
+    const withoutCurrent =
+      lastRecent?.type === "user_message" && lastRecent.text === currentUserText
+        ? recent.slice(0, -1)
+        : recent;
+    for (const event of withoutCurrent.slice(-MAX_CONTEXT_MESSAGES)) {
+      if (event.type === "user_message") {
+        messages.push({ role: "user", content: event.text });
+      }
+      if (event.type === "assistant_text_delta") {
+        messages.push({ role: "assistant", content: event.text });
+      }
+      if (event.type === "tool_result") {
+        messages.push({
+          role: "tool",
+          tool_call_id: event.toolUseId,
+          content: JSON.stringify({
+            tool: event.toolName,
+            isError: event.isError ?? false,
+            evidenceId: event.evidenceId,
+            content: event.content,
+          }),
+        });
+      }
+    }
+  } catch (error) {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `recent_context_unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      "warning",
+    );
+  }
+  messages.push({ role: "user", content: currentUserText });
+  return messages;
+}
+
+function estimateModelMessageChars(messages: ModelMessage[]): number {
+  return messages.reduce((total, message) => {
+    if (message.role === "assistant") {
+      return total + message.content.length + JSON.stringify(message.toolCalls ?? []).length;
+    }
+    return total + message.content.length;
+  }, 0);
+}
+
+async function continueModelAfterToolResults(
+  continuation: PendingModelContinuation,
+  context: TuiContext,
+  gateway: ModelGateway,
+  output: Writable,
+): Promise<void> {
+  const controller = new AbortController();
+  context.activeAbortController = controller;
+  context.tools.abortSignal = controller.signal;
+  context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
+  let assistantText = "";
+  const assistantEventId = randomUUID();
+  const sessionId = await ensureSession(context);
+  try {
+    for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
+      const toolCalls: ModelToolCall[] = [];
+      let roundAssistantText = "";
+      for await (const event of gateway.stream(
+        continuation.provider,
+        {
+          messages: continuation.messages,
+          model: continuation.model,
+          endpointProfile: continuation.endpointProfile,
+          ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
+          tools: createModelToolDefinitions(),
+          toolChoice: "auto",
+        },
+        controller.signal,
+      )) {
+        if (event.type === "assistant_text_delta") {
+          assistantText += event.text;
+          roundAssistantText += event.text;
+          output.write(event.text);
+          continue;
+        }
+        if (event.type === "tool_use") {
+          toolCalls.push({ id: event.id, name: event.name, input: event.input });
+          continue;
+        }
+        if (event.type === "usage") {
+          const stats = recordModelUsage(context, event.usage);
+          await appendUsageEvents(context, sessionId, stats);
+          continue;
+        }
+        if (event.type === "error") {
+          writeLine(output, formatError(event.error, context.language));
+          return;
+        }
+      }
+      if (roundAssistantText || toolCalls.length > 0) {
+        continuation.messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
+      }
+      if (toolCalls.length === 0) {
+        break;
+      }
+      if (roundAssistantText) {
+        output.write("\n");
+      }
+      for (const toolCall of toolCalls) {
+        const result = await executeModelToolUse(
+          toolCall,
+          context,
+          sessionId,
+          output,
+          continuation,
+        );
+        if (result.pendingApproval) {
+          return;
+        }
+        continuation.messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        });
+      }
+      if (round === MAX_MODEL_TOOL_ROUNDS - 1) {
+        writeLine(
+          output,
+          context.language === "en-US"
+            ? "Tool round limit reached during continuation; stopping for safety."
+            : "续轮已达到工具轮次上限；为安全起见停止继续调用工具。",
+        );
+      }
+    }
+    if (assistantText) {
+      output.write("\n");
+      await context.store.appendEvent(sessionId, {
+        type: "assistant_text_delta",
+        id: assistantEventId,
+        text: assistantText,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  } finally {
+    context.activeAbortController = undefined;
+    context.tools.abortSignal = undefined;
+    context.interrupt = { type: "idle" };
+  }
+}
+
 async function recordProviderEmptyResponse(
   context: TuiContext,
   sessionId: string,
@@ -6332,7 +6605,7 @@ async function recordProviderEmptyResponse(
     `provider:${provider}:model:${model}`,
     ["provider_empty_response", "model_empty_response", provider, model],
   );
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
@@ -6498,6 +6771,7 @@ async function executeModelToolUse(
   context: TuiContext,
   sessionId: string,
   output: Writable,
+  continuation?: PendingModelContinuation,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -6529,8 +6803,20 @@ async function executeModelToolUse(
       output,
       formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
     );
-    if (permission.decision === "ask" && toolName === "Write") {
-      context.pendingLocalApproval = { kind: "model_tool_use", toolCall, toolName, sessionId };
+    if (
+      permission.decision === "ask" &&
+      (toolName === "Write" ||
+        toolName === "Edit" ||
+        toolName === "MultiEdit" ||
+        toolName === "Bash")
+    ) {
+      context.pendingLocalApproval = {
+        kind: "model_tool_use",
+        toolCall,
+        toolName,
+        sessionId,
+        continuation,
+      };
       return { ok: false, tool: toolName, text, pendingApproval: true };
     }
     const evidence = await recordToolFailureEvidence(
@@ -6864,6 +7150,10 @@ async function resolveNaturalFileRead(
     return { status: "resolved", path: explicit };
   }
 
+  if (hasModelSynthesisIntent(text)) {
+    return { status: "none" };
+  }
+
   const recent = context.recentlyMentionedFiles.filter(Boolean);
   if (/这个|刚才|上面|最近|this|that|previous|recent/i.test(text) && recent.length > 0) {
     return { status: "resolved", path: recent[0] };
@@ -6881,6 +7171,10 @@ async function resolveNaturalFileRead(
 
 function isNaturalReadFileRequest(text: string): boolean {
   return /(?:读|读取|打开|看看|查看|show|read|open|view)\s*(?:一下|下)?/iu.test(text);
+}
+
+function hasModelSynthesisIntent(text: string): boolean {
+  return /总结|摘要|分析|解释|归纳|summary|summari[sz]e|analy[sz]e|explain/iu.test(text);
 }
 
 function extractNaturalReadPath(text: string): string | null {
@@ -7206,6 +7500,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /permissions recent delete <id> 删除单条最近拒绝
   /permissions recent clear  清空最近拒绝
   /background           查看后台任务一行摘要
+  /details              查看 evidence/background/details 摘要
   /agents               查看 agent 状态、transcript 和 usage
   /agents show <id>     查看单个 agent 详情
   /agents cancel <id>   中断单个 agent，不影响主会话
@@ -7312,6 +7607,7 @@ async function handleToolCommand(
     const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;
     if (task) {
       context.backgroundTasks.unshift(task);
+      context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
       await appendBackgroundTaskEvent(context, sessionId, task);
       writeLine(output, formatBackgroundTask(task, context.language));
     }
@@ -7749,6 +8045,7 @@ async function maybeCreateCheckpoint(
     }
   }
   context.checkpoints.unshift(checkpoint);
+  context.checkpoints = context.checkpoints.slice(0, MAX_CHECKPOINTS);
   await context.store.appendEvent(sessionId, {
     type: "checkpoint_created",
     checkpoint: {
@@ -7881,6 +8178,11 @@ function createEvidenceRecord(
   };
 }
 
+function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
+  context.evidence.unshift(evidence);
+  context.evidence = context.evidence.slice(0, MAX_EVIDENCE_RECORDS);
+}
+
 function pickEvidence(
   evidence: EvidenceRecord,
 ): Pick<EvidenceRecord, "id" | "kind" | "source" | "summary"> {
@@ -7979,7 +8281,7 @@ async function recordToolFailureEvidence(
     `tool:${name}:failure`,
     [name, "tool_failure"],
   );
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,
@@ -8010,7 +8312,7 @@ async function recordToolEvidence(
     output.fullOutputPath ?? name,
     [name],
   );
-  context.evidence.unshift(evidence);
+  rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
     type: "evidence_record",
     ...evidence,

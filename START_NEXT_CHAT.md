@@ -68,14 +68,16 @@
 - Phase 15 pre-Beta Final Real TUI / Provider Smoke P0+blocking P1 fix 已完成本地最小实现：NCB-INDEX-1 覆盖“更新/刷新/同步/重建/重新索引/重做索引”和状态查询；OUT-1 在 `formatToolOutput()` 做 Todo 8 条和 Read/Grep/Glob 长输出主输出截断，完整结果保留在 transcript/evidence/fullOutputPath；PROV-1 在 TUI 与 ModelGateway 两层检查 `supportsTools=false` 时不发送 tools/toolChoice，并在 doctor 中暴露 tools/tool calling 能力不足；NCB-INDEX-2 更新 `/index` help/risk 文案，声明 status/search/architecture 只读、init/refresh 需确认；DOC-1 实现 `/model doctor` → `Model route doctor`。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未修非阻塞 P1/P2，未做 registry/dispatch 大重构、完整 TUI 美化、完整 output grouping/details/debug、完整 provider adapter 重构或 FreshnessGate/web_source runtime。
 - Phase 15 Beta 前 CCB handfeel gate 最小源码级修复已完成本地闭环：TUI 初始模型、gateway provider、状态栏和 `/model doctor` 不再 hardcode deepseek，按 `defaultModel` / role route / provider config 解析真实 provider/model；default 模式不再静默执行 Bash/write/edit/delete/config/install/network/permission 类工具；无 pending gate 的 `yes/确认/继续/ok` 本地提示且不进模型；`帮我打开 mcp 的索引功能` 走本地控制面说明；provider HTTP 400/429/5xx 分类给出 base_url/model/tools/tool_choice/tool_result 下一步；doctor 展示 provider source + present/missing + masked preview 且不泄露 key。已补 focused 行为测试并通过 full validation；未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未做 registry/dispatch 大重构或第二套命令解释系统。
 - Phase 15 Beta 前 Whole-System Interaction Boundary Reconciliation Audit 已完成：报告路径 `F:\Linghun\docs\audit\phase-15-pre-beta-whole-system-interaction-boundary-reconciliation.md`。本轮只读对照 Phase 00-15 已交付交互边界与 CCB / CCB Dev Boost 成熟行为，verdict 为 CONDITIONAL / BLOCKED FOR PHASE 15 BETA RESUME；P0=0，阻塞 P1=4，过度设计=4，设计不足=7，阶段错位=3。
-- Phase 15 Beta 前 Whole-System Interaction Boundary 最小完整修复已完成本地最小实现：BP1-1 composite local status 覆盖 model/provider、index、permission、cache、memory、mcp、background、gate；BP1-2 模型 tool permission ask/deny 输出本地 primary prompt（tool/decision/risk/mode/reason/scope/next）；BP1-3 失败 tool_result 和 permission denial 记录轻量 failure evidence 并回填 evidenceId；BP1-4 index safety pause 输出阻塞原因、`.linghunignore` / `.cbmignore`、建议条目、手动或明确 `/write` 路径、`/index refresh` retry，并写入 index evidence。已补 focused tests；可建议恢复 Phase 15 真人 smoke，但仍不得自动进入 Phase 15 Beta，必须用户明确确认；未进入 Phase 15.5 / Phase 16+。
+- Phase 15 Beta 前 Whole-System Interaction Boundary 最小完整修复已完成本地最小实现：BP1-1 composite local status 覆盖 model/provider、index、permission、cache、memory、mcp、background、gate；BP1-2 模型 tool permission ask/deny 输出本地 primary prompt（tool/decision/risk/mode/reason/scope/next）；BP1-3 失败 tool_result 和 permission denial 记录轻量 failure evidence 并回填 evidenceId；BP1-4 index safety pause 输出阻塞原因、`.linghunignore` / `.cbmignore`、建议条目、手动或明确 `/write` 路径、`/index refresh` retry，并写入 index evidence。已补 focused tests；当时口径曾认为可建议恢复 Phase 15 真人 smoke，但该判断已被 2026-05-19 全量审计后的 CCB Maturity Remediation baseline supersede；未进入 Phase 15.5 / Phase 16+。
 - Phase 15 pre-Beta CCB Maturity Baseline Closure 已完成本地最小源码级收敛：新增轻量 presenter/classifier 模块，避免继续把 tool output、permission prompt、runtime status 和 index safety continuation 逻辑堆进 `packages/tui/src/index.ts`；`ToolOutput` 增加 summary/preview/details/evidenceId 分层字段；模型工具权限提示保留 tool/decision/risk/mode/reason/scope/next 并明确 refusal 已回灌 tool_result evidence；runtime status 由独立 presenter 输出；index safety repair continuation 改为基于 active safety blocker state 的结构化 classifier，不再靠单个固定 regex 函数；补 focused tests 覆盖 classifier 与 layered output。随后补齐 Solution Completeness Gate follow-up：运行时状态升级为轻量 decision（trigger/classification/impact/severity/evidence/source/nextRequiredOutput），明确触发时注入 SYSTEMIC_GAP_WARNING、写入 transcript system_event、handoff packet 和交付报告；普通请求默认无感，重复同类 permission denial 判为 systemic_gap/blocking_P1。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未复制 CCB/Claude Code/OpenCode 源码。
 - Phase 15 pre-Beta Source-level Runtime/Output/Permission Parity Closure 已完成本地最小源码级收口：以 `F:\ccb-source` 为 oracle 提取 Runtime Workflow、Output Rendering、Permission & Continuation inventory，并映射 Linghun Phase 00-14 已声明能力；报告路径 `F:\Linghun\docs\audit\phase-15-pre-beta-source-level-runtime-output-permission-parity.md`。本轮修复 permission prompt 主屏 raw `decision:` / `risk:` / `mode:` 泄漏，改为人话化 primary prompt；index safety blocker 改为 primary/details/evidence 分层，主屏只显示风险数量/阻塞原因/修复路径，完整风险文件列表写入 transcript/evidence；index repair continuation 成功后只输出短成功摘要并提示 `/index status` 查看详情；Bash output presenter 增加主屏截断边界，确保 Bash 与 Read/Grep/Glob/Todo/Write/Edit 一样 summary-first。Focused tests 已覆盖 raw 字段不进主屏、风险清单只进 evidence、yes 后短摘要、no 不写不刷新、Bash 长输出截断、zh/en 关键路径。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未复制 CCB/Claude Code/OpenCode 源码。
 - Phase 15 pre-Beta End-to-End CCB User Journey Parity Closure 已完成本地最小源码级收口：报告路径 `F:\Linghun\docs\audit\phase-15-pre-beta-end-to-end-ccb-user-journey-parity-closure.md`，覆盖 J01-J24 共 24 个 CCB user journey / Linghun gap mapping。已关闭 pre-repair FAIL/PARTIAL：J01、J02、J05、J07、J08、J13、J19、J20、J23、J24；`/index init fast` 与 `/index refresh` 成功路径改为短摘要且完整状态只在 `/index status`，permission prompt / Start Gate confirmation 不再在主屏暴露 raw-like mode/risk/mode/gate id，重复 permission denial 不再让普通任务强制输出 `systemic_gap` / `blocking_P1`，Bash live progress 主屏限流并保留 fullOutputPath/log/transcript，slash tool result 显示 concise evidence reference。新增 continuous journey smoke 覆盖 startup/help/index/no-pending confirmation/model loop/Write permission/Bash long output/model-MCP-cache-permissions-index controls/exit。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未复制 CCB/Claude Code/OpenCode 源码。
 - Phase 15 pre-Beta CCB-grade Runtime Acceptance Closure 已完成本地最小源码级收口：报告路径 `F:\Linghun\docs\audit\phase-15-pre-beta-ccb-grade-runtime-acceptance-closure.md`。本轮关闭真实 Windows TUI 中“状态：正在请求模型...”后静默回到 prompt 的 P0/P1 silent failure：OpenAI-compatible parser 覆盖 `delta.content`、reasoning-only、fragmented/indexed tool calls、`message.content` / `message.tool_calls` fallback、finish reason、usage-only、empty choices、provider error object、malformed JSON/SSE，并新增 `message_stop` outcome metadata；TUI model loop 增加 empty-response invariant，空响应输出 `模型返回空响应；请运行 /model doctor，或切换 provider/model 后重试。` + evidence id，并写入 safe evidence/system_event；focused provider/TUI tests、full test/check/typecheck/build/help/diff-check 均通过；`corepack pnpm smoke:live-provider` initial closure run 因当前 shell 缺 env key 为 SKIPPED（不得记为 PASS），随后 temporary shell env only live provider 補验对 `openai-compatible / gpt-5.5` basic text smoke 为 PASS；`F:\linghun-ceshi` real stdin smoke 用 built CLI 通过 silent-failure ban。Real TUI report-generation 補验仍为 PARTIAL：报告文件未写入，未观察到 `tool_use` / permission continuation / `tool_result`；后续 `yes` 因无 pending confirmation 被本地处理，没有发送给模型；tools + exact deployment-report provider probe 返回 HTTP 400 request-format diagnostics，指向当前 `tools/tool_choice` schema 与 openai-compatible gateway 兼容性，或当前 model/gateway 对该请求未产生 text/tool delta。Phase 15 Beta readiness 仍为 PARTIAL；不得从 live text PASS 推断 Beta readiness PASS，也不得从 runtime silent-failure PASS 推断真实报告生成路径 PASS；若 Phase 15 Beta gate 要求真实 provider 完成该报告生成路径，必须先按 P1 修复。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+，未复制 CCB/Claude Code/OpenCode 源码。
 - Phase 15 pre-Beta Verdict Evidence Gate / Anti-Hallucination Readiness Closure 已完成本地最小源码级收口：报告路径 `F:\Linghun\docs\audit\phase-15-pre-beta-verdict-evidence-gate.md`。本轮把反幻觉从代码事实 evidence-first 扩展到完成度结论 evidence-first：新增 verdict scope/status/evidence/validation/uncovered/risk/nextAction 轻量结构，handoff packet 记录 `verdictEvidence`，`/claim-check Phase 15 Beta readiness is PASS` 在缺 real TUI report-generation PASS evidence 时只读返回 PARTIAL；普通开发请求不显示 Verdict Evidence Gate、coverage matrix、systemic_gap 或 verdict 内部术语。降级规则已登记：live provider smoke SKIPPED => Beta readiness 只能 PARTIAL；mock PASS != live PASS；focused PASS != overall readiness PASS；journey PASS + live provider missing => PARTIAL；未测 critical path => PARTIAL；silent failure => FAIL/PARTIAL；no evidence refs => invalid/PARTIAL；P0 open => FAIL；blocking P1 open => PARTIAL/FAIL。live provider smoke 若未 PASS 或未覆盖 real TUI report-generation path，Phase 15 Beta readiness 仍为 PARTIAL。未进入 Phase 15 Beta / Phase 15.5 / Phase 16+。
+- Phase 00-18 Design + Runtime Overdesign Full Audit 已完成两份独立全量审计并合并为当前唯一执行基线：`F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`。该基线 supersede 旧的“可恢复 Beta / 局部 closure PASS”叙事：Phase 15 Beta 继续暂停；历史 closure/PASS 只作为证据输入，不作为 readiness proof。下一轮必须执行 Phase 15 Beta CCB Maturity Remediation，把默认终端编码主链路做到 CCB 成熟度：普通输入 -> 会话上下文 -> 模型 -> tool_use -> permission -> tool_result -> continuation -> final answer。必须关闭 baseline 第 4 节 Must Complete Before Phase 15 Beta，并通过第 9 节 Acceptance Matrix；未关闭前不得进入 Phase 15 Beta / Phase 15.5 / Phase 16+。
+- Baseline 第 12 节 `Deferred Issue Register` 和第 13 节 `Audit Traceability Matrix` 是两份全量审计后置项与小类别成熟度细节的唯一集中追踪表。Phase 15.5 / 16 / 17 / 18 开工时必须复制相关 rows 到该阶段交付文档并逐项裁决 DONE / DEFERRED / NOT-DO，避免后置项和小细节散落或遗忘。
 
-当前任务：Phase 15 preflight / pre-Beta cleanup / Natural Intent Contract hardening / Phase 15 pre-Beta Interaction P1 cleanup / Interaction Maturity Fix / Full Interaction P0 hardening 均已完成本地验证；Phase 15 pre-Beta Deep Parity Closure 的 2 项阻塞 P1（SC-1 / BASH-1）已完成本地最小修复；Phase 15 pre-Beta Final Real TUI / Provider Smoke 的 3 项 P0 + 2 项阻塞 P1 已完成本地最小修复并通过本地 focused tests/test/typecheck/build/help/diff-check；独立 verifier 除真实 DeepSeek API key 缺失外全部 PASS，随后用户提供临时 key 完成 Real DeepSeek API `tool_use → tool_result → second request` smoke PASS（key 未写入仓库文件、文档或配置）。后续真实 TUI smoke 暴露的 provider/model 硬编码、default 模式 Bash 静默执行、MCP/index 控制面落入模型、无 pending gate 的 yes 进模型、Windows 路径/编码和主输出成熟度问题，已在 Phase 15 Beta 前 CCB handfeel gate 最小源码级修复中收口；Whole-System Interaction Boundary Reconciliation Audit 的 4 项阻塞 P1 已在本轮最小完整修复中关闭。最新补验口径已更新：live provider basic text smoke PASS，但 real TUI report-generation path 仍为 PARTIAL / blocking P1 candidate（未写报告、未观察到 `tool_use` / permission continuation / `tool_result`，tools + exact deployment-report provider probe 返回 HTTP 400 request-format diagnostics）。下一轮应先做 Verdict Evidence Gate / Anti-Hallucination Runtime Closure，防止把局部 PASS 升级成 Beta readiness PASS；是否随后修复 openai-compatible `tools/tool_choice` 兼容路径或进入 Phase 15 Beta，仍必须用户明确确认；不得自动进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+当前任务：执行 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md` 定义的 Phase 15 Beta CCB Maturity Remediation。目标不是继续审计，也不是进入 Phase 15.5；目标是在真实实测前把 Phase 00-14 已声明的底座能力压实到 CCB 成熟主链路。两份全量审计确认的阻塞包括：会话历史/上下文预算不足、tool_result continuation 不稳定、provider profile contract/重试/超时不足、权限审批续轮不成熟、NCB 仍有自然语言执行器倾向、MCP/Skills/Workflows/Plugins/Hooks/Agent 存在 TYPE-SHELL 表面积、config schema/Windows smoke/operational reliability 不足。下一轮实现必须按 baseline 的 Must Complete 和 Acceptance Matrix 验证；旧的 focused/mock/local PASS 不得推断 Beta readiness PASS。
 
 文档补强状态：
 - Phase 13 已补成品级角色路由验收：路由决策可审计、fallback/预算可诊断、角色贡献和成本可见、角色间只传结构化摘要和证据。
@@ -109,7 +111,7 @@
 要求：
 - 只做当前阶段范围内的事情。
 - Phase 15 preflight 已完成，交付文档为 F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md。自然语言桥已覆盖中文和英文语义变体，例如“自动记忆是否打开 / is memory enabled”“帮我建立索引 / build the index”“缓存命中怎么样 / cache hit rate”“现在什么模型 / current model”“打开 bug-fix 工作流 / start bug-fix workflow”。所有 slash 命令都能被自然语言询问用途和风险，高风险命令只能解释、Start Gate 或进入权限审批。
-- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；Interaction Maturity Fix 的“可恢复 Beta”旧结论已被后续 Full Interaction Maturity Audit 与 P0 hardening 收口覆盖。下一步必须由用户明确确认：启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta；未确认前不得进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+- Phase 15 pre-Beta P0 hardening、Deep Parity、Runtime Acceptance 和 Verdict Evidence 等历史 closure 均降级为证据输入；当前唯一 readiness 基线是 F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md。下一步必须先执行该基线，不得建议直接进入 Phase 15 真实项目 Beta；未完成前不得进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
 - 每个后续阶段完成后仍必须在 F:\Linghun\docs\delivery\ 下输出阶段交付文档；没有阶段交付文档，不视为阶段完成。
 - 每次改动后说明验证结果和剩余风险。
 - 自动工作默认只推进一个阶段；完成当前用户确认的阶段后必须停止，输出验证结果和 handoff packet。
@@ -124,27 +126,27 @@
 ```text
 你是 Linghun 项目的工程型中文助手。默认用中文回答。
 
-当前任务：Phase 15 Beta 前 CCB handfeel gate 最小源码级修复。
+当前任务：Phase 15 Beta CCB Maturity Remediation。
 
 依据：
-- Phase 15 真实 TUI smoke 暴露 provider/model 硬编码、default 模式静默 Bash、MCP/index 控制面落入模型、无 pending gate 的 yes 进模型、Windows 路径/编码和主输出成熟度问题。
+- F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md 当前唯一执行基线。
+- F:\Linghun\LINGHUN_PHASE_00_18_DESIGN_RUNTIME_OVERDESIGN_FULL_AUDIT.md。
+- F:\Linghun\PHASE_00_18_DESIGN_RUNTIME_OVERDESIGN_FULL_AUDIT.md。
 - F:\Linghun\START_NEXT_CHAT.md 当前上下文。
-- F:\Linghun\LINGHUN_PHASED_DELIVERY_BLUEPRINT.md 中 Phase 15 Beta 前 TUI output/report gate 与 CCB handfeel gate。
-- F:\Linghun\LINGHUN_IMPLEMENTATION_SPEC.md 中 TUI 输出层、阶段汇报协议和 Phase 15 Beta CCB handfeel gate。
+- F:\Linghun\LINGHUN_PHASED_DELIVERY_BLUEPRINT.md 和 F:\Linghun\LINGHUN_IMPLEMENTATION_SPEC.md 中 Phase 15 Beta 前 CCB 成熟主链路 gate。
 
 本轮目标：
-- 只修 Phase 15 Beta 前 CCB 手感 P0/阻塞 P1。
-- 让 0-14 阶段已经完成的底座能力在真实 TUI 中达到 CCB 式成熟手感。
-- 修复必须基于源码事实和测试，不接受关键词补丁或只掩盖症状。
+- 在进入真实项目 Beta 前，把默认终端编码主链路做到 CCB 成熟度：普通输入 -> 会话上下文 -> 模型 -> tool_use -> permission -> tool_result -> continuation -> final answer。
+- 关闭 baseline 第 4 节 Must Complete Before Phase 15 Beta，并按第 9 节 Acceptance Matrix 验证。
+- 允许必要的底层成熟度修复、模块拆分和文档口径同步；不接受关键词补丁、文案补丁、mock PASS 或历史 closure PASS 证明成熟。
 
 硬约束：
 - 不进入 Phase 15 Beta。
 - 不进入 Phase 15.5。
 - 不进入 Phase 16+。
-- 不修非阻塞 P1/P2。
-- 不做 registry/dispatch 大重构。
-- 不新增第二套命令解释系统。
-- 不新增复杂架构，不做无关重构。
+- 不新增产品愿景。
+- 不新增第二套自然语言执行器。
+- 不把 TYPE-SHELL 能力当 readiness 证据；可见能力必须真实最小实现、隐藏/禁用或明确后置。
 - 不复制 CCB / CCB Dev Boost / Claude Code / OpenCode 源码、内部 API、反编译痕迹或专有实现。
 - 只参考成熟工具的公开行为、交互边界和验收标准。
 
