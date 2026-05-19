@@ -18,6 +18,7 @@
 | CCB Dev Boost | 本地：`F:\ccb-source\docs\ccb-optimizations.md`；对照：`F:\Linghun\docs\delivery\ccb-dev-boost-coverage-checklist.md` | cache-first、prefix stable、break-cache、MCP tool list 稳定化、codebase-memory 索引、usage/stats、中文提示、真实账单对账思路 | 宣传固定 98% / 25x，复制实现，把 provider 字段误说成零成本 | Phase 09-10、15 |
 | Phase 15 interaction review | `F:\Linghun\docs\audit\PHASE_15_PREFLIGHT_INTERACTION_REVIEW_REPORT.md` | Natural Command Bridge、Catalog/dispatch 漂移、参数提取、Start Gate、bypass/auto/Plan、权限提权交互、OpenCode 输出边界 | 把报告当成已实现代码；把 Phase 15.5 或 Phase 16 功能塞进 preflight hardening | Phase 15 preflight hardening |
 | OpenCode | 公开：`https://github.com/opencode-ai/opencode`；本地：`F:\freecodex\opencode-source` | 多模型开放、provider 抽象、LSP/插件化方向、TUI/output 组织、视觉层级、pending 状态可见、summary-first 输出 | 照搬执行层、复制源码、牺牲 CCB 风格编码手感 | Phase 13、14、15 preflight/hardening、15.5、18 |
+| OpenSpec | 公开：`https://github.com/Fission-AI/OpenSpec`、`https://openspec.dev/`；执行阶段需联网核验最新 workflow | Spec-driven development 的 proposal/spec/design/tasks/archive 思路、复杂任务 spec delta、acceptance gates、需求冻结和审查输入 | 引入完整 OpenSpec runtime、强制所有小改动填表、把 spec 流程放到 Phase 15 Beta 前阻塞底座 gate、把 spec 当成已实现能力 | Phase 15.5 |
 | LiteLLM / OpenRouter / Vercel AI SDK 类 provider 抽象 | 公开文档当次执行需联网核验 | provider adapter、gateway profile、capability metadata、usage/cost/error/fallback 抽象、OpenAI-compatible / Anthropic-compatible 接入边界 | 把网关兼容误认为能力完全等价、复制实现、把 estimated 伪装成 reported | Phase 13、15、15.5 |
 | Hermes Agent | 公开 Hermes Agent / memory / skills 方向，当次执行需联网核验具体公开来源 | MEMORY / USER 分层、Skills 沉淀、越用越聪明的可审计记忆方向 | 后台自主演练提前实现、自动写长期记忆、把完整记忆塞进 prompt | Phase 11、14、16 |
 | codebase-memory-mcp | 工具命令：`codebase-memory-mcp`；本地索引项目名按 `/index status`；公开来源当次执行需核验 | 代码图索引、架构查询、搜索代码、detect_changes stale 检测 | 自动全量刷新、大文件无安全门、MCP 崩溃拖垮主程序 | Phase 10、11、15、17 |
@@ -40,7 +41,7 @@
 | --- | --- |
 | Phase 15 preflight hardening | CCB / Claude Code Best、Phase 15 interaction review、OpenCode、CCB Dev Boost、`F:\Linghun\PHASE_15_PRE_BETA_FULL_INTERACTION_MATURITY_AUDIT.md` |
 | Phase 15 真实项目 Beta | CCB / Claude Code Best、CCB Dev Boost、CC Switch、Aider、codebase-memory-mcp |
-| Phase 15.5 | Phase 15 交付文档、双模型审查报告、release readiness、OpenCode 输出边界与视觉层级、CCB TUI/权限/提权/Plan/help/doctor/error 交互边界、CCB v2.4.3 discovery-before-execute 工具 guard、LiteLLM/OpenRouter/Vercel AI SDK 类 provider 抽象边界、WebSearch/WebFetch Freshness Gate 与 web_source evidence 边界 |
+| Phase 15.5 | Phase 15 交付文档、双模型审查报告、release readiness、OpenSpec spec-driven workflow、OpenCode 输出边界与视觉层级、CCB TUI/权限/提权/Plan/help/doctor/error 交互边界、CCB v2.4.3 discovery-before-execute 工具 guard、LiteLLM/OpenRouter/Vercel AI SDK 类 provider 抽象边界、WebSearch/WebFetch Freshness Gate 与 web_source evidence 边界 |
 | Phase 16 | Hermes Agent、LINGHUN.md / memory 规格、CCB/CCB Dev Boost 的 summary-first 和 cache freshness 边界 |
 | Phase 17 | CCB daemon/job/agent 方向、oh-my-openagent、Feishu/Lark CLI、DingTalk CLI、WeCom CLI、Remote Channels 安全规格 |
 | Phase 18 | OpenCode、OpenHands、Ink、Tauri、Linghun core/UI 分离设计 |

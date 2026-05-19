@@ -1022,10 +1022,10 @@ F:\LinghunProject 或新仓库根目录
 | Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight、P0-1 到 P0-6 全量交互硬化、TUI output/report gate 和真实 TUI provider/permission/control-plane smoke，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
 | Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate 复检、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、终端 TUI 非阻塞产品细节、release readiness / open-source readiness；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段 |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
-| Phase 17 | 长期托管任务与自动会话 | 定时任务、自动会话、Team/job 状态表、Remote Channels 安全闸门、单阶段自动工作 |
+| Phase 17 | 长期托管任务与自动会话 | 分 17A local durable jobs 与 17B remote channels/adapters；17A 先闭合定时任务、自动会话、handoff 校验、预算/暂停、job report 和单阶段自动工作，Remote Channels 与 IM adapter 默认关闭且不阻塞本地 job 底座 |
 | Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界；不承担基础 TUI 美化和交互补课 |
 
-Phase 17 的 Remote Channels 优先使用官方或官方团队开源 CLI 作为 adapter，例如飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli。Linghun 只把结构化、脱敏的任务摘要、审批和结果报告交给 CLI，不允许外部 CLI 直接读取完整 transcript、memory、API key、账单或项目源码。CLI 缺失、未登录、权限不足、版本不兼容或输出不可解析时，通道保持关闭，并由 `/remote channels doctor` 给出中文修复建议。
+Phase 17 的 Remote Channels 只作为 17B 能力，必须在 17A 本地 durable jobs 稳定后开启。Remote Channels 优先使用官方或官方团队开源 CLI 作为 adapter，例如飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli。Linghun 只把结构化、脱敏的任务摘要、审批和结果报告交给 CLI，不允许外部 CLI 直接读取完整 transcript、memory、API key、账单或项目源码。CLI 缺失、未登录、权限不足、版本不兼容或输出不可解析时，通道保持关闭，并由 `/remote channels doctor` 给出中文修复建议。Remote Channels 不得引入完整 IM SDK、复杂分布式调度、全自动多阶段推进或第二套 agent runtime。
 
 当前进度：
 

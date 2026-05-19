@@ -847,7 +847,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
     expect(output.text).toContain("模型=deepseek-v4-pro 推理=未生效");
     expect(output.text).toContain(
-      "deepseek: type=deepseek endpointProfile=chat_completions reasoning=not sent",
+      "deepseek: type=deepseek endpointProfile=chat_completions compatibilityProfile=deepseek tools=enabled includeUsage=no reasoning=not sent",
     );
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");
@@ -1258,6 +1258,94 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
+  it("uses a local report write reminder for explicit custom report files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "report-prompt-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "report-prompt-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length === 1) {
+          const body = `data: ${JSON.stringify({ id: "chatcmpl-test-1", choices: [{ delta: { content: "我先看一下。" } }] })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        if (requests.length === 2) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-test-2",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-write",
+                      type: "function",
+                      function: {
+                        name: "Write",
+                        arguments: JSON.stringify({
+                          path: "requested-report.md",
+                          content: "# Requested Report",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-test-3", choices: [{ delta: { content: "已生成 requested-report.md。" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200 });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "请分析这个项目怎么部署，并生成报告 requested-report.md 在根目录下\n",
+        "yes\n",
+        "/details\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const firstRequest = requests[0] as { messages: Array<{ role: string; content: string }> };
+    expect(firstRequest.messages[0]?.content).not.toContain(
+      "必须最终调用 Write 工具写入指定报告文件",
+    );
+    expect(firstRequest.messages[0]?.content).not.toContain("requested-report.md");
+    const secondRequest = requests[1] as { messages: Array<{ role: string; content: string }> };
+    expect(
+      secondRequest.messages.some((message) => message.content?.includes("requested-report.md")),
+    ).toBe(true);
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain("证据记录：");
+    expect(output.text).toContain("command_output Write");
+    expect(output.text).toContain("已生成 requested-report.md");
+    await expect(readFile(join(project, "requested-report.md"), "utf8")).resolves.toBe(
+      "# Requested Report",
+    );
+  });
+
   it("generates project analysis report through model tool_call Write after permission approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -1283,7 +1371,14 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const report =
       "# 项目分析报告\n\n- 类型：Node 项目\n- 部署：运行 npm install && npm run build。";
-    const requests = mockOpenAiToolFetch("Write", { path: "project-report.md", content: report });
+    const requests = mockOpenAiToolFetch(
+      "Write",
+      {
+        path: "project-report.md",
+        content: report,
+      },
+      "已生成 project-report.md。",
+    );
     const output = new MemoryOutput();
 
     await runTui({
@@ -1397,7 +1492,7 @@ describe("Phase 06 TUI slash commands", () => {
         }
         const body = `data: ${JSON.stringify({
           id: "chatcmpl-test-3",
-          choices: [{ delta: { content: "已写入报告并读取 package.json。" } }],
+          choices: [{ delta: { content: "已写入 report.md 并读取 package.json。" } }],
         })}\n\ndata: [DONE]\n\n`;
         return new Response(body, { status: 200 });
       }),
@@ -1419,7 +1514,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(third.messages?.some((message) => message.tool_call_id === "call-read")).toBe(true);
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain("工具 Read 结果：");
-    expect(output.text).toContain("已写入报告并读取 package.json。");
+    expect(output.text).toContain("已写入 report.md 并读取 package.json。");
   });
 
   it("records failed model tool_result evidence for follow-up prompts", async () => {
@@ -2989,10 +3084,14 @@ describe("Phase 06 TUI slash commands", () => {
       "utf8",
     );
     const output = new MemoryOutput();
-    const requests = mockOpenAiToolFetch("Write", {
-      path: "deploy-report.md",
-      content: "# 部署报告\n\n通过模型 Write 生成。",
-    });
+    const requests = mockOpenAiToolFetch(
+      "Write",
+      {
+        path: "deploy-report.md",
+        content: "# 部署报告\n\n通过模型 Write 生成。",
+      },
+      "已生成 deploy-report.md。",
+    );
 
     await runTui({
       projectPath: project,

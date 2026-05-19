@@ -23,6 +23,47 @@
 
 验证结果（本地 shell）：`corepack pnpm check` PASS；`corepack pnpm typecheck` PASS；`corepack pnpm test` PASS（11 files / 259 tests）；`corepack pnpm build` PASS；`corepack pnpm exec linghun --version` PASS；`corepack pnpm exec Linghun --version` PASS；`corepack pnpm exec linghun --help` PASS；`printf '/details\n/exit\n' | corepack pnpm exec linghun` PASS；`corepack pnpm smoke:tui-stdin` PARTIAL（TUI 启动并到达 provider path，但当前 shell 无 provider API key，按预期输出缺少 api_key）；`corepack pnpm smoke:live-provider` SKIPPED（当前 shell 未设置临时 provider key）。
 
+### Phase 15 Beta 前补充 Gate I：OpenAI-compatible provider portability baseline（2026-05-19，PASS）
+
+本轮只补 Gate I，不进入 Phase 15 Beta、Phase 15.5 或 Phase 16+，不重开 A-H 全量审计。目标是确认 Linghun provider 底座不绑定 DeepSeek，并为 OpenAI-compatible endpoint 提供最小但可诊断的 portability baseline。
+
+Root-cause assessment：此前 OpenAI-compatible HTTP 400 的直接原因已由脱敏 live probe 进一步定位：默认 smoke 使用的 `gpt-4o-mini` / `gpt-4o` / `gpt-3.5-turbo` / `deepseek-chat` 在该 OpenAI-compatible endpoint 上返回 `invalid_request_error`，提示模型不受该账号/网关组合支持；改用 `/models` 返回的 `gpt-5.5` 后 basic text PASS。因此此前 400 的已证实原因是 model/profile 组合不兼容。Gate I 同时发现并修复一个真实 portability bug：该 endpoint 的 streamed tool_call 后续 delta 会带 `function.name: ""`，旧 parser 会用空 name 覆盖首个 chunk 的工具名，导致 `PROVIDER_PARTIAL_TOOL_CALL`；修复为只用非空 name 覆盖。请求字段/profile 不兼容仍是其他 OpenAI-compatible gateway 的剩余风险，但本轮不把它假装成已发生的最终原因。
+
+本轮 CCB comparison 摘要：
+
+- 对齐 CCB 的独立 endpoint/profile 思路，但只保留 `chat_completions` / `responses` 与 `strict_openai_compatible` / `permissive_openai_compatible` / `deepseek` 最小 profile，不做完整矩阵 UI。
+- 对齐 CCB 的 capability gating：`supportsTools=false` 时显式报 `MODEL_TOOLS_UNSUPPORTED`，不静默移除 `tools/toolChoice` 后伪装成功。
+- 对齐 CCB 的 profile 字段发送策略：strict OpenAI-compatible chat 默认不发送非标准 `reasoning` / `thinking`；只有 responses 或 permissive profile 确认启用时才发送 reasoning。
+- 对齐 CCB 的 stream usage 差异处理：`stream_options.include_usage` 仅在 profile/capability 显式启用 `includeUsage=true` 时发送，避免默认导致 400。
+- 对齐 CCB 的 tool_call/tool_result pairing：继续保留 chat tool message 与 responses function_call_output 两种 shape，不混用 chat/responses schema。
+- 对齐 CCB 的可见诊断：HTTP 400 suggestion 明确指向 endpointProfile、compatibilityProfile、tools/tool_choice、reasoning/thinking、tool_result schema，不吞错误、不把 FAIL 包装为 PASS。
+
+实现摘要：
+
+- `packages/providers/src/index.ts`：新增 `ProviderCompatibilityProfile`、`compatibilityProfile`、`includeUsage`；运行时 contract 增加 supportsTools/sendReasoning/includeUsage；OpenAI-compatible strict chat 默认不发送 reasoning；permissive/responses 才发送 reasoning；includeUsage 显式启用才发送 `stream_options.include_usage`；`supportsTools=false` 请求 tools/toolChoice 时抛 `MODEL_TOOLS_UNSUPPORTED`；HTTP 400 增加脱敏 hint；streamed chat tool_call parser 保留首个非空工具名，兼容后续空 name delta。
+- `packages/config/src/index.ts`：配置 schema 增加 `compatibilityProfile` 与 `includeUsage`，默认 OpenAI-compatible 为 `strict_openai_compatible`。
+- `packages/tui/src/index.ts`：`/model route doctor` 显示 endpointProfile、compatibilityProfile、tools、includeUsage、reasoning 是否发送；模型 runtime reasoningSent 与 permissive/responses profile 对齐。
+- `packages/providers/src/index.test.ts`、`packages/tui/src/index.test.ts`：增加/更新 targeted tests，覆盖 strict profile 不发非标准 reasoning/thinking、permissive profile 才发 reasoning 与 usage、supportsTools=false 可见诊断、HTTP 400 profile/schema/capability 诊断、DeepSeek chat 不发 reasoning 的非回归。
+
+验证记录：
+
+- `corepack pnpm exec vitest run packages/providers/src/index.test.ts` PASS（1 file / 26 tests）。
+- `corepack pnpm check` 首次因格式失败，修复格式后 PASS（47 files）。
+- `corepack pnpm typecheck` PASS。
+- `corepack pnpm test` 首次因 `/model doctor` 新增 profile 字段导致旧断言失败，更新断言后 PASS（11 files / 266 tests）。
+- `corepack pnpm build` PASS。
+- Live smoke（临时环境变量，未写入配置/文档/log，输出脱敏）：OpenAI-compatible `/models` probe PASS，确认该 endpoint 可用模型包含 `gpt-5.5`；不受支持模型请求返回 HTTP 400 `invalid_request_error`，诊断未泄露 key；OpenAI-compatible basic text（`gpt-5.5`，strict chat_completions）PASS，返回 `linghun-gate-i-ok`；OpenAI-compatible tool_use -> tool_result -> continuation PASS，首轮产生 `echo_tool`，回灌 `tool_result` 后 final text PASS；DeepSeek basic text（`deepseek-chat`）PASS，返回 `deepseek-gate-i-ok` 且 usage present。
+
+成品级 handoff packet（Gate I PASS）：
+
+- 下一阶段：Gate I PASS 且 DeepSeek basic smoke 未回归；可以建议进入最终独立 Beta decision verification，但仍不得自动进入 Phase 15 Beta，必须由用户明确确认。
+- 禁止事项：不得把本地 mock/unit PASS 当作 OpenAI-compatible live PASS；不得写死 sub2api/base_url；不得进入 Phase 15.5/16；不得重跑 A-H 全量审计代替 Gate I。
+- 证据引用：本节验证命令；`packages/providers/src/index.test.ts` targeted tests；`/model route doctor` 输出新增 profile/capability 字段。
+- 索引状态：`mcp__codebase-memory-mcp__index_status(project=F-Linghun)` 返回 `ready`（nodes=1259, edges=2303）。
+- 权限模式：本轮本地代码改动；live key 只允许作为用户临时 shell 环境变量使用，不写入配置或文档。
+- Provider/model：DeepSeek 主链路保持 chat_completions，live quick smoke 使用 `deepseek-chat` PASS；OpenAI-compatible 默认 strict chat_completions，live smoke 使用 endpoint `/models` 返回的 `gpt-5.5` PASS；未写死 base_url 或 model。
+- 预算/缓存/会话影响：仅 provider request shape 与 diagnostics，未新增长期会话状态；不改变缓存策略；不记录 API key。
+
 - Command Capability Catalog：
   - 覆盖当前 TUI 用户可见 slash commands：`/help`、`/language`、`/model`、`/vision`、`/image`、`/skills`、`/workflows`、`/plugins`、`/doctor`、`/sessions`、`/resume`、`/branch`、`/memory`、`/mode`、`/tab`、`/plan`、`/permissions`、`/background`、`/agents`、`/fork`、`/rewind`、`/btw`、`/interrupt`、`/claim-check`、`/verify`、`/review`、`/cache-log`、`/cache`、`/break-cache`、`/mcp`、`/index`、`/usage`、`/stats`、`/read`、`/write`、`/edit`、`/multiedit`、`/grep`、`/glob`、`/bash`、`/todo`、`/diff`、`/exit`。
   - 显式标记内部隐藏入口 `/status`，并保留 `hiddenReason`。

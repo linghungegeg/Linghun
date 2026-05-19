@@ -95,6 +95,45 @@ describe("OpenAI compatible provider", () => {
     ]);
   });
 
+  it("keeps strict OpenAI-compatible chat requests free of non-standard reasoning fields", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+      reasoningLevel: "Medium",
+    });
+
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+      reasoningLevel: "High",
+    });
+
+    expect(request).not.toHaveProperty("reasoning");
+    expect(request).not.toHaveProperty("thinking");
+  });
+
+  it("sends chat reasoning and stream usage only when profile capability enables them", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+      compatibilityProfile: "permissive_openai_compatible",
+      reasoningLevel: "Medium",
+      includeUsage: true,
+    });
+
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+
+    expect(request.reasoning).toEqual({ effort: "Medium" });
+    expect(request.stream_options).toEqual({ include_usage: true });
+  });
+
   it("constructs a responses request with native tool schema and reasoning effort", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
@@ -208,7 +247,7 @@ describe("OpenAI compatible provider", () => {
     expect(request).not.toHaveProperty("reasoning");
   });
 
-  it("does not send OpenAI tools when provider config disables tool support", async () => {
+  it("returns a visible diagnostic when provider config disables tool support", async () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -218,16 +257,16 @@ describe("OpenAI compatible provider", () => {
       supportsTools: false,
     });
 
-    const request = provider.createChatRequest({
-      messages: [{ role: "user", content: "hi" }],
-      tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
-      toolChoice: "auto",
-    });
     const [model] = await provider.listModels();
 
     expect(model?.supportsTools).toBe(false);
-    expect(request.tools).toBeUndefined();
-    expect(request.tool_choice).toBeUndefined();
+    expect(() =>
+      provider.createChatRequest({
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "Read", description: "Read a file", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+      }),
+    ).toThrow(expect.objectContaining({ code: "MODEL_TOOLS_UNSUPPORTED" }));
   });
 
   it("uses the DeepSeek default base URL", async () => {
@@ -319,7 +358,7 @@ describe("OpenAI stream parser", () => {
         );
         controller.enqueue(
           encoder.encode(
-            'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\\"README.md\\"}"}}]}}]}\n\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"","arguments":"\\"README.md\\"}"}}]}}]}\n\n',
           ),
         );
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -682,12 +721,36 @@ describe("ModelGateway", () => {
     expect(error.suggestion).toContain("检查当前 provider 的 api_key");
   });
 
-  it("classifies HTTP 400 as provider request-format diagnostics", () => {
-    const error = normalizeProviderError({ status: 400, message: "Bad Request" });
+  it("classifies HTTP 400 as provider profile and schema diagnostics", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('{"error":{"message":"Unknown field reasoning and bad tool_choice"}}', {
+          status: 400,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
 
-    expect(error.code).toBe("PROVIDER_BAD_REQUEST");
-    expect(error.message).toContain("HTTP 400");
-    expect(error.suggestion).toContain("tools/tool_choice");
-    expect(error.suggestion).toContain("tool_result");
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_BAD_REQUEST",
+      message: expect.stringContaining("provider rejected tools/tool_choice fields"),
+      suggestion: expect.stringContaining("compatibilityProfile"),
+    });
   });
 });

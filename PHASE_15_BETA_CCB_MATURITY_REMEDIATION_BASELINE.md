@@ -212,7 +212,9 @@ These are not allowed to block Phase 15 Beta if the default CCB-grade coding loo
 5. TYPE-SHELL capabilities as readiness proof.
 6. Hidden provider fallback that changes schema silently.
 7. Any hardcoded project phase verdict in runtime code.
-8. Any new feature work in Phase 15.5/16/17/18 before this baseline is closed.
+8. Any hardcoded phase/smoke artifact in user-facing runtime prompt/help/UI, such as `Phase 13/14/15/preflight`, `DEPLOY_REPORT.md`, `PHASE15_RC`, `Gate F`, or fixed smoke-only model/endpoint names. These may appear in docs/tests/fixtures only.
+9. Any MCP/deferred tool blind execution before discovery and required-argument validation, such as calling `get_code_snippet` without a discovered `qualified_name`.
+10. Any new feature work in Phase 15.5/16/17/18 before this baseline is closed.
 
 ## 8. Anti-Patterns Banned For This Closure
 
@@ -302,11 +304,11 @@ This register prevents audit findings from being lost after the Phase 15 Beta re
 | Audit finding / capability | Phase 15 Beta handling | Later owner | Required follow-up |
 | --- | --- | --- | --- |
 | Full semantic compact / summarization | Add context budget and visible overflow handling only. | Phase 15.5 or 16 | Implement mature compact only after the default coding loop is stable. |
-| Automatic learning / long-term memory loop | Do not build. Keep memory injection explicit, bounded, and relevant. | Phase 16 | Design opt-in, reversible learning with stats and user control. |
+| Automatic learning / long-term memory loop | Do not build. Keep memory injection explicit, bounded, and relevant. | Phase 16 | Design opt-in, reversible learning with stats, user control, and a Cost Guard: default no foreground learning call, no full memory injection, no cache-breaking unstable hashes, and disable/skip learning when it cannot reduce repeated reads, repeated explanations, errors, or later token use. |
 | Long-session automatic summarize | Do not build before Beta beyond visible overflow handling. | Phase 15.5 or 16 | Add automatic summarization only after context budget and default loop are stable. |
 | Hierarchical history compaction | Do not build before Beta. | Phase 16 | Design layered history summaries with clear source/evidence boundaries. |
 | Multi-stage summary merge | Do not build before Beta. | Phase 16 | Define merge rules, conflict handling, and stale-summary invalidation. |
-| Memory candidate extraction | Do not build as automatic learning before Beta. | Phase 16 | Extract only from verified evidence/Todo/handoff with user control. |
+| Memory candidate extraction | Do not build as automatic learning before Beta. | Phase 16 | Extract only from verified evidence/Todo/handoff with user control; ordinary chat, temporary side notes, failed intermediate attempts, and unverified guesses must not become long-term memory candidates by default. |
 | Compact quality evaluation | Do not build before Beta. | Phase 16 | Add validation that summaries preserve task state, decisions, open risks, and evidence refs. |
 | Memory evidence validation | Do not build as automatic learning before Beta. | Phase 16 | A memory candidate must cite verified evidence/Todo/handoff/user confirmation before acceptance. |
 | Summary faithfulness check | Do not build before Beta. | Phase 16 | Validate compact/handoff/job summaries against source events and flag dropped decisions, risks, or evidence refs. |
@@ -360,6 +362,7 @@ Legend:
 | `tool_use -> permission -> tool_result -> continuation -> final answer` | PRE-BETA | Sections 4A, 4D, 4E, 9 |
 | Tool result mistaken for final answer | PRE-BETA | Sections 4A, 4H, 9 |
 | Real report-generation path still PARTIAL | PRE-BETA | Sections 4J, 9 |
+| Runtime phase/smoke artifact leakage into prompt/help/UI | PRE-BETA | Sections 7, 8, 9 |
 | NCB keyword scoring / capability boost | PRE-BETA | Sections 4F, 7, 8 |
 | NCB ordinary task execution | PRE-BETA | Sections 4F, 9 |
 | Control-plane status/help/doctor local handling | PRE-BETA | Sections 4F, 4H, 9 |
@@ -378,6 +381,7 @@ Legend:
 | Memory evidence validation | DEFER / NOT-DO before Phase 16 | Section 12 |
 | Summary faithfulness check | DEFER | Section 12 |
 | Long-term memory drift detection | DEFER / NOT-DO before Phase 16 | Section 12 |
+| MCP/deferred tool discovery-before-execute and required-args guard (`get_code_snippet` / `qualified_name`) | PRE-BETA for visible runtime blind calls; Phase 15.5 for broader tool matrix | Sections 7, 8, 12 |
 | Memory injection unbounded or irrelevant | PRE-BETA | Sections 4B, 9 |
 | Automatic learning loop | DEFER / NOT-DO before Phase 16 | Section 12 |
 | Provider profile mixing: chat vs responses | PRE-BETA | Sections 4C, 9 |

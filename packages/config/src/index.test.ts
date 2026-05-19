@@ -125,6 +125,12 @@ describe("config directories", () => {
 
     expect(envDefaultConfig.providers.deepseek.model).toBe("deepseek-v4-pro");
     expect(config.providers.deepseek.model).toBe("deepseek-v4-pro");
+    expect(
+      envDefaultConfig.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel,
+    ).toBe("deepseek-v4-pro");
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel).toBe(
+      "deepseek-v4-pro",
+    );
     expect(envDefaultConfig.defaultModel).toBe("gpt-5.5");
     expect(config.defaultModel).toBe("gpt-5.5");
   });

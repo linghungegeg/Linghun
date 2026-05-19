@@ -4,6 +4,10 @@ import { dirname, join } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 
 export type EndpointProfile = "chat_completions" | "responses";
+export type ProviderCompatibilityProfile =
+  | "deepseek"
+  | "strict_openai_compatible"
+  | "permissive_openai_compatible";
 
 export type ProviderConfig = {
   type: "openai-compatible" | "deepseek";
@@ -13,7 +17,9 @@ export type ProviderConfig = {
   maxOutputTokens?: number;
   supportsTools?: boolean;
   endpointProfile?: EndpointProfile;
+  compatibilityProfile?: ProviderCompatibilityProfile;
   reasoningLevel?: string;
+  includeUsage?: boolean;
 };
 
 export type ModelRole =
@@ -162,7 +168,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
     {
       role: "planner",
       provider: "deepseek",
-      primaryModel: "deepseek-v4-flash",
+      primaryModel: defaultDeepSeekModel,
       fallbackModels: ["deepseek-v4-pro"],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
@@ -175,7 +181,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
     {
       role: "executor",
       provider: "deepseek",
-      primaryModel: "deepseek-v4-flash",
+      primaryModel: defaultDeepSeekModel,
       fallbackModels: ["deepseek-v4-pro"],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
@@ -187,7 +193,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
     {
       role: "reviewer",
       provider: "deepseek",
-      primaryModel: "deepseek-v4-flash",
+      primaryModel: defaultDeepSeekModel,
       fallbackModels: ["deepseek-v4-pro"],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
@@ -199,7 +205,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
     {
       role: "verifier",
       provider: "deepseek",
-      primaryModel: "deepseek-v4-flash",
+      primaryModel: defaultDeepSeekModel,
       fallbackModels: ["deepseek-v4-pro"],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
@@ -264,7 +270,9 @@ export const defaultConfig: LinghunConfig = {
       model: process.env.LINGHUN_OPENAI_MODEL ?? openAiCompatibleModelPlaceholder,
       maxOutputTokens: 4_096,
       endpointProfile: defaultOpenAiEndpointProfile,
+      compatibilityProfile: "strict_openai_compatible",
       reasoningLevel: defaultReasoningLevel,
+      includeUsage: process.env.LINGHUN_OPENAI_INCLUDE_USAGE === "true",
     },
   },
   modelRoutes: defaultModelRoutes,
@@ -548,10 +556,19 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
     ) {
       throw new Error(`settings.providers.${providerId}.endpointProfile is invalid`);
     }
+    if (
+      provider.compatibilityProfile !== undefined &&
+      provider.compatibilityProfile !== "deepseek" &&
+      provider.compatibilityProfile !== "strict_openai_compatible" &&
+      provider.compatibilityProfile !== "permissive_openai_compatible"
+    ) {
+      throw new Error(`settings.providers.${providerId}.compatibilityProfile is invalid`);
+    }
     assertOptionalString(
       provider.reasoningLevel,
       `settings.providers.${providerId}.reasoningLevel`,
     );
+    assertOptionalBoolean(provider.includeUsage, `settings.providers.${providerId}.includeUsage`);
   }
 }
 

@@ -53,9 +53,14 @@ export type ProviderCapabilities = {
 };
 
 export type EndpointProfile = "chat_completions" | "responses";
+export type ProviderCompatibilityProfile =
+  | "deepseek"
+  | "strict_openai_compatible"
+  | "permissive_openai_compatible";
 export type ProviderRuntimeProfile =
   | "deepseek_chat_completions"
-  | "openai_compatible_chat_completions"
+  | "strict_openai_compatible_chat_completions"
+  | "permissive_openai_compatible_chat_completions"
   | "openai_responses";
 
 export type ProviderConfig = {
@@ -68,7 +73,9 @@ export type ProviderConfig = {
   maxOutputTokens?: number;
   supportsTools?: boolean;
   endpointProfile?: EndpointProfile;
+  compatibilityProfile?: ProviderCompatibilityProfile;
   reasoningLevel?: string;
+  includeUsage?: boolean;
 };
 
 export type ModelToolCall = {
@@ -114,6 +121,7 @@ export type OpenAiChatRequest = {
   tools?: OpenAiToolDefinition[];
   tool_choice?: "auto" | "none";
   reasoning?: { effort: string };
+  stream_options?: { include_usage: true };
 };
 
 export type OpenAiResponsesRequest = {
@@ -162,6 +170,10 @@ type ProviderRuntimeContract = {
   profile: ProviderRuntimeProfile;
   endpointProfile: EndpointProfile;
   endpoint: "/chat/completions" | "/responses";
+  compatibilityProfile: ProviderCompatibilityProfile;
+  supportsTools: boolean;
+  sendReasoning: boolean;
+  includeUsage: boolean;
   toolResultShape: "chat_tool_message" | "responses_function_call_output";
 };
 
@@ -387,27 +399,46 @@ function resolveProviderRuntimeContract(
   config: ProviderConfig,
   request: ModelRequest,
 ): ProviderRuntimeContract {
+  const supportsTools = config.supportsTools !== false;
   if (config.type === "deepseek") {
     return {
       profile: "deepseek_chat_completions",
       endpointProfile: "chat_completions",
       endpoint: "/chat/completions",
+      compatibilityProfile: "deepseek",
+      supportsTools,
+      sendReasoning: false,
+      includeUsage: config.includeUsage === true,
       toolResultShape: "chat_tool_message",
     };
   }
   const endpointProfile = request.endpointProfile ?? config.endpointProfile ?? "chat_completions";
+  const compatibilityProfile = config.compatibilityProfile ?? "strict_openai_compatible";
   if (endpointProfile === "responses") {
     return {
       profile: "openai_responses",
       endpointProfile,
       endpoint: "/responses",
+      compatibilityProfile,
+      supportsTools,
+      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
+      includeUsage: config.includeUsage === true,
       toolResultShape: "responses_function_call_output",
     };
   }
   return {
-    profile: "openai_compatible_chat_completions",
+    profile:
+      compatibilityProfile === "permissive_openai_compatible"
+        ? "permissive_openai_compatible_chat_completions"
+        : "strict_openai_compatible_chat_completions",
     endpointProfile: "chat_completions",
     endpoint: "/chat/completions",
+    compatibilityProfile,
+    supportsTools,
+    sendReasoning:
+      compatibilityProfile === "permissive_openai_compatible" &&
+      Boolean(request.reasoningLevel ?? config.reasoningLevel),
+    includeUsage: config.includeUsage === true,
     toolResultShape: "chat_tool_message",
   };
 }
@@ -515,14 +546,19 @@ function createChatProfileRequest(
       recoverable: true,
     });
   }
+  const contract = resolveProviderRuntimeContract(config, request);
   const model = request.model ?? config.model;
-  const tools = createOpenAiChatTools(request, config.supportsTools);
+  const tools = createOpenAiChatTools(request, contract);
   return {
     model,
     messages: request.messages.map(toOpenAiMessage),
     stream: true,
     max_tokens: resolveMaxOutputTokens(model, request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
+    ...(contract.sendReasoning
+      ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
+      : {}),
+    ...(contract.includeUsage ? { stream_options: { include_usage: true as const } } : {}),
   };
 }
 
@@ -538,15 +574,18 @@ function createResponsesProfileRequest(
       recoverable: true,
     });
   }
+  const contract = resolveProviderRuntimeContract(config, request);
   const model = request.model ?? config.model;
-  const tools = createOpenAiResponsesTools(request, config.supportsTools);
+  const tools = createOpenAiResponsesTools(request, contract);
   return {
     model,
     input: request.messages.flatMap(toOpenAiResponsesInputItem),
     stream: true,
     max_output_tokens: resolveMaxOutputTokens(model, request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
-    ...createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel),
+    ...(contract.sendReasoning
+      ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
+      : {}),
   };
 }
 
@@ -563,11 +602,9 @@ function resolveMaxOutputTokens(
 
 function createOpenAiChatTools(
   request: ModelRequest,
-  supportsTools: boolean | undefined,
+  contract: ProviderRuntimeContract,
 ): OpenAiToolDefinition[] | undefined {
-  if (supportsTools === false) {
-    return undefined;
-  }
+  assertToolCapability(request, contract);
   return request.tools?.map((tool) => ({
     type: "function" as const,
     function: {
@@ -580,17 +617,28 @@ function createOpenAiChatTools(
 
 function createOpenAiResponsesTools(
   request: ModelRequest,
-  supportsTools: boolean | undefined,
+  contract: ProviderRuntimeContract,
 ): OpenAiResponsesToolDefinition[] | undefined {
-  if (supportsTools === false) {
-    return undefined;
-  }
+  assertToolCapability(request, contract);
   return request.tools?.map((tool) => ({
     type: "function" as const,
     name: tool.name,
     description: tool.description,
     parameters: tool.inputSchema,
   }));
+}
+
+function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeContract): void {
+  if (contract.supportsTools || (!request.tools?.length && !request.toolChoice)) {
+    return;
+  }
+  throw new LinghunError({
+    code: "MODEL_TOOLS_UNSUPPORTED",
+    message: `模型/provider profile 不支持工具调用：${contract.profile}`,
+    suggestion:
+      "请切换到 supportsTools=true 的 provider/model，或不要发送 tools/toolChoice；Linghun 不会静默移除工具字段后伪装成功。",
+    recoverable: true,
+  });
 }
 
 function createReasoningPayload(level: string | undefined): { reasoning?: { effort: string } } {
@@ -998,7 +1046,7 @@ function parseOpenAiToolCalls(
     };
     const next = {
       id: toolCall.id ?? existing.id,
-      name: toolCall.function?.name ?? existing.name,
+      name: toolCall.function?.name || existing.name,
       arguments: existing.arguments + (toolCall.function?.arguments ?? ""),
     };
     state.pendingToolCalls.set(index, next);
@@ -1113,13 +1161,41 @@ function createApiKeyError(status: number, cause?: unknown): LinghunError {
   });
 }
 
+function sanitizeProviderBadRequestHint(responseText?: string): string | undefined {
+  if (!responseText) {
+    return undefined;
+  }
+  const compact = responseText
+    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-***")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!compact) {
+    return undefined;
+  }
+  const lower = compact.toLowerCase();
+  if (lower.includes("tool_choice") || lower.includes("tools")) {
+    return "provider rejected tools/tool_choice fields";
+  }
+  if (lower.includes("reasoning") || lower.includes("thinking")) {
+    return "provider rejected reasoning/thinking fields";
+  }
+  if (lower.includes("message") || lower.includes("tool_call") || lower.includes("tool result")) {
+    return "provider rejected message/tool_result schema";
+  }
+  if (lower.includes("model")) {
+    return "provider rejected model/profile combination";
+  }
+  return compact.slice(0, 160);
+}
+
 function createHttpStatusError(status: number, responseText?: string): LinghunError {
   if (status === 400) {
+    const hint = sanitizeProviderBadRequestHint(responseText);
     return new LinghunError({
       code: "PROVIDER_BAD_REQUEST",
-      message: "模型请求失败：HTTP 400，请求格式不被 provider 接受。",
+      message: `模型请求失败：HTTP 400，请求格式不被 provider 接受${hint ? `（${hint}）` : "。"}`,
       suggestion:
-        "请运行 /model doctor；重点检查 base_url、model、tools/tool_choice 支持、tool_result 回灌格式和 OpenAI-compatible 网关兼容性。",
+        "请运行 /model doctor；重点检查 endpointProfile、compatibilityProfile、model、tools/tool_choice 支持、reasoning/thinking 字段、tool_result 回灌格式和 OpenAI-compatible 网关兼容性。",
       recoverable: true,
     });
   }
