@@ -672,6 +672,22 @@ type PendingModelContinuation = {
   reasoningSent: boolean;
 };
 
+function createSingleToolCallContinuation(
+  continuation: PendingModelContinuation,
+  toolCall: ModelToolCall,
+): PendingModelContinuation {
+  return {
+    ...continuation,
+    messages: continuation.messages.map((message) => {
+      if (message.role !== "assistant" || !message.toolCalls?.length) {
+        return message;
+      }
+      const toolCalls = message.toolCalls.filter((item) => item.id === toolCall.id);
+      return toolCalls.length > 0 ? { ...message, toolCalls } : message;
+    }),
+  };
+}
+
 export type TuiContext = {
   store: SessionStore;
   sessionId?: string;
@@ -7060,7 +7076,9 @@ async function executeModelToolUse(
         toolCall,
         toolName,
         sessionId,
-        continuation,
+        continuation: continuation
+          ? createSingleToolCallContinuation(continuation, toolCall)
+          : undefined,
       };
       return { ok: false, tool: toolName, text, pendingApproval: true };
     }

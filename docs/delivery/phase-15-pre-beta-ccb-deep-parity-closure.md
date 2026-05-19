@@ -142,3 +142,69 @@ Phase 15 是真实项目 Beta。进入 Beta 前，Phase 00-14 不能只是“功
 - SC-1 当前是最小 workflow/prompt/handoff check，不是完整 runtime 强制中断；完整 runtime guard 仍登记到 Phase 15.5 或后续，必须用户确认后才可做。
 - BASH-1 当前只覆盖 Bash chunk streaming；Grep/Glob 进度、完整 output grouping、长任务 heartbeat 美化仍为 Phase 15.5 范围。
 - 仍禁止自动进入 Phase 15 Beta、Phase 15.5 或 Phase 16+；Phase 15 Beta 即使 blocking P1 全部关闭，也必须用户明确确认后才可启动。
+
+## Gate F blocking failure 修复记录（RC smoke）
+
+本轮性质：只处理 Phase 15 RC smoke Gate F blocking failure；未重开 A-H 全量验证，未进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+
+### Root cause
+
+真实 TUI provider-backed report-generation path 中，模型可能一次返回多个 `tool_calls`。当其中一个工具因 default 权限边界进入 pending approval / deny 路径时，TUI continuation 曾保留 assistant message 里的 sibling `tool_calls`，但只追加当前工具的一个 `role: "tool"` 结果。
+
+该 request shape 会形成未成对的 tool call / tool result：
+
+- assistant message 仍包含多个 `tool_calls`。
+- 后续只存在当前处理工具的 `tool_call_id` 对应 `role: "tool"` message。
+- sibling tool call 没有对应 tool result。
+
+DeepSeek chat completions 会拒绝该 schema，并返回 HTTP 400。provider-level 单工具 continuation smoke 已通过；问题只出现在真实 TUI multi-tool + permission continuation 组合路径。
+
+### 最小修复
+
+已完成：
+
+- `packages/tui/src/index.ts`：新增 `createSingleToolCallContinuation(...)`，当某个模型工具调用进入本地审批 pending 状态时，只为该 pending 工具保留匹配的 assistant `toolCalls`，避免 sibling tool calls 没有对应 `tool_result`。
+- `packages/tui/src/index.test.ts`：新增回归测试 `continues denied model tool permission without orphaning sibling tool calls`，覆盖 assistant 同时返回 `Bash` + `Glob`、用户拒绝当前 `Bash` 后，continuation request 只包含匹配 `call-bash` 的 assistant tool call 和 tool message。
+
+明确未做：不修改 provider schema，不重构 TUI 大文件，不扩展 OpenAI-compatible endpoint 400 调查，不进入后续阶段。
+
+### Gate F 真实重跑证据
+
+使用临时项目和临时环境变量重跑 DeepSeek 主 provider Gate F；API key 未写入配置、文档、日志或提交。
+
+- temp project: `C:/Users/Admin/AppData/Local/Temp/tmp.mnCjCZf3CC`
+- expected report: `C:/Users/Admin/AppData/Local/Temp/tmp.mnCjCZf3CC/rc-report.txt`
+- provider/model/base_url: DeepSeek / `deepseek-chat` / `https://api.deepseek.com`
+- TUI 启动：PASS
+- 进入模型路径：PASS（出现 `状态：正在请求模型...`）
+- 实际工具链：`Bash` → `Read` → `Write` → `Read`
+- permission approval：PASS（`Write` 对 `rc-report.txt` 进入权限边界，approval 后写入成功）
+- tool_result 回灌：PASS（拒绝/暂停结果回灌后 continuation 未再 HTTP 400）
+- continuationSuccess: true
+- reportExists: true
+- reportHasMarker: true
+- finalReferencesReport: true
+- detailsEvidenceAvailable: true（`/details` 显示 4 条 evidence，包含 Write 和回读报告 evidence）
+
+报告文件内容包含：
+
+```text
+PHASE15_RC_REPORT_SOURCE
+```
+
+### 验证
+
+已执行并通过：
+
+- `corepack pnpm check`
+- `corepack pnpm typecheck`
+- `corepack pnpm test`：11 个测试文件、264 个测试通过。
+- `corepack pnpm build`
+- targeted regression：`corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "continues denied model tool permission without orphaning sibling tool calls"`
+- targeted Gate F live smoke：DeepSeek 主 provider 真实 TUI report-generation path PASS。
+
+Independent verifier 已确认代码 diff、`check`、`typecheck`、`test`、`build` 和 targeted regression PASS；由于 verifier 子进程无临时 live key，未能独立重跑真实 Gate F live smoke。
+
+### 结论
+
+Gate F blocking failure 已关闭。Phase 15 RC smoke required gates 对 DeepSeek 主 provider 已达到 PASS，可进入 Beta decision 前的最终独立验证；是否进入 Phase 15 Beta 仍必须由用户明确确认。

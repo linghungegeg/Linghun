@@ -1136,6 +1136,91 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain('"tool_result"');
   });
 
+  it("continues denied model tool permission without orphaning sibling tool calls", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-deny-sibling-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-deny-sibling-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        const isFirst = requests.length === 1;
+        const body = isFirst
+          ? [
+              `data: ${JSON.stringify({
+                id: "chatcmpl-test",
+                choices: [
+                  {
+                    delta: {
+                      content: "先查看目录。",
+                      tool_calls: [
+                        {
+                          id: "call-bash",
+                          type: "function",
+                          function: {
+                            name: "Bash",
+                            arguments: JSON.stringify({ command: "ls -la" }),
+                          },
+                        },
+                        {
+                          id: "call-glob",
+                          type: "function",
+                          function: {
+                            name: "Glob",
+                            arguments: JSON.stringify({ pattern: "**/*" }),
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              })}\n\n`,
+              "data: [DONE]\n\n",
+            ].join("")
+          : `data: ${JSON.stringify({ id: "chatcmpl-test-2", choices: [{ delta: { content: "已收到拒绝结果。" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200 });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请检查当前环境\nno\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const second = requests[1] as {
+      messages?: {
+        role?: string;
+        tool_call_id?: string;
+        tool_calls?: { id?: string }[];
+      }[];
+    };
+    const assistant = second.messages?.find((message) => message.role === "assistant");
+    const toolMessage = second.messages?.find((message) => message.role === "tool");
+    expect(assistant?.tool_calls).toHaveLength(1);
+    expect(assistant?.tool_calls?.[0]?.id).toBe("call-bash");
+    expect(toolMessage?.tool_call_id).toBe("call-bash");
+    expect(output.text).toContain("已收到拒绝结果。");
+  });
+
   it("keeps model Write/Edit tool calls behind default permission prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
