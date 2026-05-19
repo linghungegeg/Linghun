@@ -2674,16 +2674,60 @@ async function handleBackgroundCommand(
 }
 
 async function handleDetailsCommand(
-  _args: string[],
+  args: string[],
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  const action = args[0];
+  const id = args[1];
+  if (action === "evidence") {
+    const evidence = findEvidence(context, id);
+    writeLine(
+      output,
+      evidence ? formatEvidenceDetails(evidence) : "未找到 evidence。用法：/details evidence <id>",
+    );
+    return;
+  }
+  if (action === "background") {
+    const task = findBackgroundTask(context, id);
+    writeLine(
+      output,
+      task
+        ? formatBackgroundDetails(task, context.language)
+        : "未找到 background。用法：/details background <id>",
+    );
+    return;
+  }
+  if (action === "output") {
+    const task = findBackgroundTask(context, id);
+    if (task) {
+      writeLine(output, formatBackgroundOutputDetails(task, context.language));
+      return;
+    }
+    const evidence = findEvidence(context, id);
+    writeLine(
+      output,
+      evidence
+        ? formatEvidenceDetails(evidence)
+        : "未找到 output。用法：/details output <backgroundId|evidenceId>",
+    );
+    return;
+  }
+  if (action && action !== "list") {
+    writeLine(
+      output,
+      "用法：/details | /details evidence <id> | /details background <id> | /details output <id>",
+    );
+    return;
+  }
+
   const lines = [
     "Linghun details",
     `- evidence: ${context.evidence.length}/${MAX_EVIDENCE_RECORDS}`,
     `- background: ${context.backgroundTasks.length}/${MAX_BACKGROUND_TASKS}`,
     `- agents: ${context.agents.length}/${MAX_AGENTS}`,
     `- checkpoints: ${context.checkpoints.length}/${MAX_CHECKPOINTS}`,
+    "- full output: /details evidence <id> | /details background <id> | /details output <id>",
   ];
   if (context.evidence.length > 0) {
     lines.push("- recent evidence:");
@@ -2698,6 +2742,72 @@ async function handleDetailsCommand(
     }
   }
   writeLine(output, lines.join("\n"));
+}
+
+function findEvidence(context: TuiContext, id: string | undefined): EvidenceRecord | undefined {
+  if (!id) {
+    return context.evidence[0];
+  }
+  return context.evidence.find((evidence) => evidence.id === id || evidence.id.endsWith(id));
+}
+
+function findBackgroundTask(
+  context: TuiContext,
+  id: string | undefined,
+): BackgroundTaskState | undefined {
+  if (!id) {
+    return context.backgroundTasks[0];
+  }
+  return context.backgroundTasks.find((task) => task.id === id || task.id.endsWith(id));
+}
+
+function formatEvidenceDetails(evidence: EvidenceRecord): string {
+  return [
+    `Evidence ${evidence.id}`,
+    `- kind: ${evidence.kind}`,
+    `- source: ${evidence.source}`,
+    `- summary: ${evidence.summary}`,
+    `- supportsClaims: ${evidence.supportsClaims.join(", ") || "none"}`,
+    `- createdAt: ${evidence.createdAt}`,
+  ].join("\n");
+}
+
+function formatBackgroundDetails(task: BackgroundTaskState, language: Language): string {
+  const progress = task.progress
+    ? `${task.progress.completed}/${task.progress.total ?? "?"} ${task.progress.label ?? ""}`.trim()
+    : "none";
+  return [
+    language === "en-US" ? `Background ${task.id}` : `Background ${task.id}`,
+    `- kind: ${task.kind}`,
+    `- title: ${task.title}`,
+    `- status: ${task.status}`,
+    `- currentStep: ${task.currentStep ?? "-"}`,
+    `- progress: ${progress}`,
+    `- logPath: ${task.logPath ?? "-"}`,
+    `- outputPath: ${task.outputPath ?? "-"}`,
+    `- hasOutput: ${task.hasOutput}`,
+    `- result: ${task.result ?? "-"}`,
+    `- summary: ${task.userVisibleSummary}`,
+    `- nextAction: ${task.nextAction ?? "-"}`,
+    `- startedAt: ${task.startedAt}`,
+    `- updatedAt: ${task.updatedAt}`,
+  ].join("\n");
+}
+
+function formatBackgroundOutputDetails(task: BackgroundTaskState, language: Language): string {
+  const location = task.outputPath ?? task.logPath;
+  if (!location) {
+    return language === "en-US"
+      ? `Background ${task.id} has no output path yet.`
+      : `Background ${task.id} 尚无输出路径。`;
+  }
+  return [
+    `Background output ${task.id}`,
+    `- path: ${location}`,
+    `- hasOutput: ${task.hasOutput}`,
+    `- status: ${task.status}`,
+    `- summary: ${task.userVisibleSummary}`,
+  ].join("\n");
 }
 
 async function handleAgentsCommand(
@@ -2797,10 +2907,10 @@ async function handleForkCommand(
   if (task.includes("--background")) {
     writeLine(
       output,
-      `agent ${agent.id} 已在后台运行；可用 /agents show ${agent.id} 查看，/agents cancel ${agent.id} 中断。`,
+      context.language === "en-US"
+        ? "Background agent execution is not available in this runtime; running synchronously instead so no fake running state is created."
+        : "当前 runtime 不支持真实后台 agent 执行；已降级为同步执行，避免生成假的 running 状态。",
     );
-    writeStatus(output, context);
-    return;
   }
 
   await completeAgent(agent, background, context, output);
@@ -6389,9 +6499,25 @@ async function sendMessage(
         writeLine(
           output,
           context.language === "en-US"
-            ? "Tool round limit reached; stopping tool recursion for safety."
-            : "已达到工具轮次上限；为安全起见停止继续递归调用工具。",
+            ? "Tool round limit reached; requesting one final model answer without tools."
+            : "已达到工具轮次上限；将不再调用工具，并请求模型给出最终回答。",
         );
+        const finalText = await streamFinalModelAnswerWithoutTools(
+          {
+            messages,
+            provider: selectedRuntime.provider,
+            model: selectedRuntime.model,
+            endpointProfile: selectedRuntime.endpointProfile,
+            reasoningLevel: selectedRuntime.reasoningLevel,
+            reasoningSent: selectedRuntime.reasoningSent,
+          },
+          context,
+          gateway,
+          sessionId,
+          output,
+          controller.signal,
+        );
+        assistantText += finalText;
       }
     }
   } finally {
@@ -6432,15 +6558,35 @@ async function buildModelMessagesWithRecentContext(
         (event) =>
           event.type === "user_message" ||
           event.type === "assistant_text_delta" ||
+          event.type === "tool_call_start" ||
           event.type === "tool_result",
       )
-      .slice(-MAX_CONTEXT_MESSAGES - 1);
+      .slice(-MAX_CONTEXT_MESSAGES * 2 - 1);
     const lastRecent = recent.at(-1);
     const withoutCurrent =
       lastRecent?.type === "user_message" && lastRecent.text === currentUserText
         ? recent.slice(0, -1)
         : recent;
-    for (const event of withoutCurrent.slice(-MAX_CONTEXT_MESSAGES)) {
+    const toolCalls = new Map<string, ModelToolCall>();
+    let added = 0;
+    for (const event of withoutCurrent.slice().reverse()) {
+      if (added >= MAX_CONTEXT_MESSAGES) {
+        break;
+      }
+      if (event.type === "tool_call_start") {
+        toolCalls.set(event.id, { id: event.id, name: event.name, input: event.input });
+        continue;
+      }
+      if (event.type === "user_message" || event.type === "assistant_text_delta") {
+        added += 1;
+        continue;
+      }
+      if (event.type === "tool_result" && toolCalls.has(event.toolUseId)) {
+        added += 2;
+      }
+    }
+    const selected = withoutCurrent.slice(-Math.max(MAX_CONTEXT_MESSAGES, added + toolCalls.size));
+    for (const event of selected) {
       if (event.type === "user_message") {
         messages.push({ role: "user", content: event.text });
       }
@@ -6448,6 +6594,19 @@ async function buildModelMessagesWithRecentContext(
         messages.push({ role: "assistant", content: event.text });
       }
       if (event.type === "tool_result") {
+        const toolCall = toolCalls.get(event.toolUseId);
+        if (!toolCall) {
+          messages.push({
+            role: "assistant",
+            content: `Previous ${event.toolName} tool_result summary: ${JSON.stringify({
+              isError: event.isError ?? false,
+              evidenceId: event.evidenceId,
+              content: event.content,
+            })}`,
+          });
+          continue;
+        }
+        messages.push({ role: "assistant", content: "", toolCalls: [toolCall] });
         messages.push({
           role: "tool",
           tool_call_id: event.toolUseId,
@@ -6479,6 +6638,83 @@ function estimateModelMessageChars(messages: ModelMessage[]): number {
     }
     return total + message.content.length;
   }, 0);
+}
+
+async function streamFinalModelAnswerWithoutTools(
+  continuation: PendingModelContinuation,
+  context: TuiContext,
+  gateway: ModelGateway,
+  sessionId: string,
+  output: Writable,
+  signal: AbortSignal,
+): Promise<string> {
+  let assistantText = "";
+  let chunkCount = 0;
+  let hadUsage = false;
+  let finishReason: string | undefined;
+  let hadThinking = false;
+  for await (const event of gateway.stream(
+    continuation.provider,
+    {
+      messages: continuation.messages,
+      model: continuation.model,
+      endpointProfile: continuation.endpointProfile,
+      ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
+      toolChoice: "none",
+    },
+    signal,
+  )) {
+    if (signal.aborted) {
+      writeLine(output, t(context, "toolInterrupted"));
+      return assistantText;
+    }
+    if (event.type === "assistant_text_delta") {
+      assistantText += event.text;
+      output.write(event.text);
+      continue;
+    }
+    if (event.type === "assistant_thinking_delta") {
+      hadThinking = true;
+      continue;
+    }
+    if (event.type === "usage") {
+      hadUsage = true;
+      const stats = recordModelUsage(context, event.usage);
+      await appendUsageEvents(context, sessionId, stats);
+      continue;
+    }
+    if (event.type === "message_stop") {
+      chunkCount = event.chunkCount;
+      hadUsage = hadUsage || event.hadUsage;
+      finishReason = event.finishReason;
+      continue;
+    }
+    if (event.type === "tool_use") {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `final_no_tools_ignored_tool_use: ${event.name}`,
+        "warning",
+      );
+      continue;
+    }
+    if (event.type === "error") {
+      writeLine(output, formatError(event.error, context.language));
+      return assistantText;
+    }
+  }
+  if (!assistantText) {
+    const message = await recordProviderEmptyResponse(
+      context,
+      sessionId,
+      chunkCount,
+      hadUsage,
+      finishReason,
+      hadThinking,
+    );
+    writeLine(output, message);
+  }
+  return assistantText;
 }
 
 async function continueModelAfterToolResults(
@@ -6560,9 +6796,18 @@ async function continueModelAfterToolResults(
         writeLine(
           output,
           context.language === "en-US"
-            ? "Tool round limit reached during continuation; stopping for safety."
-            : "续轮已达到工具轮次上限；为安全起见停止继续调用工具。",
+            ? "Tool round limit reached during continuation; requesting one final model answer without tools."
+            : "续轮已达到工具轮次上限；将不再调用工具，并请求模型给出最终回答。",
         );
+        const finalText = await streamFinalModelAnswerWithoutTools(
+          continuation,
+          context,
+          gateway,
+          sessionId,
+          output,
+          controller.signal,
+        );
+        assistantText += finalText;
       }
     }
     if (assistantText) {

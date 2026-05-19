@@ -508,48 +508,272 @@ async function writeConfig(projectPath: string, config: LinghunConfig): Promise<
 }
 
 function validateConfig(config: LinghunConfig): LinghunConfig {
+  assertRecord(config, "settings");
   if (config.language !== "zh-CN" && config.language !== "en-US") {
     throw new Error("settings.language must be zh-CN or en-US");
   }
-  if (!config.defaultModel || typeof config.defaultModel !== "string") {
-    throw new Error("settings.defaultModel must be a non-empty string");
-  }
-  for (const [providerId, provider] of Object.entries(config.providers)) {
+  assertNonEmptyString(config.defaultModel, "settings.defaultModel");
+  validateProviders(config.providers);
+  validateModelRoutes(config.modelRoutes);
+  validatePermission(config.permission);
+  validateMcp(config.mcp);
+  validateStorage(config.storage);
+  validateIndex(config.index);
+  validateExtensions(config.skills, "settings.skills", true);
+  validateExtensions(config.plugins, "settings.plugins", true);
+  validateExtensions(config.workflows, "settings.workflows", false);
+  validateHooks(config.hooks);
+  return config;
+}
+
+function validateProviders(providers: Record<string, ProviderConfig>): void {
+  assertRecord(providers, "settings.providers");
+  for (const [providerId, provider] of Object.entries(providers)) {
+    assertRecord(provider, `settings.providers.${providerId}`);
     if (provider.type !== "deepseek" && provider.type !== "openai-compatible") {
       throw new Error(`settings.providers.${providerId}.type is invalid`);
     }
-    if (!provider.model || typeof provider.model !== "string") {
-      throw new Error(`settings.providers.${providerId}.model must be a non-empty string`);
-    }
+    assertNonEmptyString(provider.model, `settings.providers.${providerId}.model`);
+    assertOptionalString(provider.baseUrl, `settings.providers.${providerId}.baseUrl`);
+    assertOptionalString(provider.apiKey, `settings.providers.${providerId}.apiKey`);
+    assertOptionalPositiveNumber(
+      provider.maxOutputTokens,
+      `settings.providers.${providerId}.maxOutputTokens`,
+    );
+    assertOptionalBoolean(provider.supportsTools, `settings.providers.${providerId}.supportsTools`);
     if (
-      provider.endpointProfile &&
+      provider.endpointProfile !== undefined &&
       provider.endpointProfile !== "chat_completions" &&
       provider.endpointProfile !== "responses"
     ) {
       throw new Error(`settings.providers.${providerId}.endpointProfile is invalid`);
     }
+    assertOptionalString(
+      provider.reasoningLevel,
+      `settings.providers.${providerId}.reasoningLevel`,
+    );
   }
-  if (!Array.isArray(config.modelRoutes.routes)) {
+}
+
+function validateModelRoutes(modelRoutes: ModelRouteConfig): void {
+  assertRecord(modelRoutes, "settings.modelRoutes");
+  assertNonEmptyString(modelRoutes.defaultModel, "settings.modelRoutes.defaultModel");
+  if (!Array.isArray(modelRoutes.routes)) {
     throw new Error("settings.modelRoutes.routes must be an array");
   }
+  for (const [index, route] of modelRoutes.routes.entries()) {
+    const path = `settings.modelRoutes.routes.${index}`;
+    assertRecord(route, path);
+    assertModelRole(route.role, `${path}.role`);
+    assertString(route.provider, `${path}.provider`);
+    assertString(route.primaryModel, `${path}.primaryModel`);
+    assertStringArray(route.fallbackModels, `${path}.fallbackModels`);
+    if (!Array.isArray(route.requiredCapabilities)) {
+      throw new Error(`${path}.requiredCapabilities must be an array`);
+    }
+    for (const [capabilityIndex, capability] of route.requiredCapabilities.entries()) {
+      assertCapability(capability, `${path}.requiredCapabilities.${capabilityIndex}`);
+    }
+    assertOptionalPositiveNumber(route.maxInputTokens, `${path}.maxInputTokens`);
+    assertOptionalPositiveNumber(route.maxOutputTokens, `${path}.maxOutputTokens`);
+    assertOptionalNonNegativeNumber(route.maxCostCny, `${path}.maxCostCny`);
+    assertBoolean(route.allowTools, `${path}.allowTools`);
+    assertBoolean(route.allowWrite, `${path}.allowWrite`);
+    assertBoolean(route.allowBash, `${path}.allowBash`);
+    assertBoolean(route.requireApprovalBeforeRun, `${path}.requireApprovalBeforeRun`);
+  }
+}
+
+function validatePermission(permission: LinghunConfig["permission"]): void {
+  assertRecord(permission, "settings.permission");
   if (
-    config.permission.defaultMode !== "default" &&
-    config.permission.defaultMode !== "plan" &&
-    config.permission.defaultMode !== "acceptEdits" &&
-    config.permission.defaultMode !== "dontAsk" &&
-    config.permission.defaultMode !== "auto" &&
-    config.permission.defaultMode !== "bypass"
+    permission.defaultMode !== "default" &&
+    permission.defaultMode !== "plan" &&
+    permission.defaultMode !== "acceptEdits" &&
+    permission.defaultMode !== "dontAsk" &&
+    permission.defaultMode !== "auto" &&
+    permission.defaultMode !== "bypass"
   ) {
     throw new Error("settings.permission.defaultMode is invalid");
   }
-  if (
-    config.index.mode !== "fast" &&
-    config.index.mode !== "moderate" &&
-    config.index.mode !== "full"
-  ) {
+}
+
+function validateMcp(mcp: LinghunConfig["mcp"]): void {
+  assertRecord(mcp, "settings.mcp");
+  assertStringArray(mcp.enabledServers, "settings.mcp.enabledServers");
+  assertRecord(mcp.servers, "settings.mcp.servers");
+  for (const [serverId, server] of Object.entries(mcp.servers)) {
+    const path = `settings.mcp.servers.${serverId}`;
+    assertRecord(server, path);
+    assertNonEmptyString(server.command, `${path}.command`);
+    if (server.args !== undefined) {
+      assertStringArray(server.args, `${path}.args`);
+    }
+    if (server.env !== undefined) {
+      assertStringRecord(server.env, `${path}.env`);
+    }
+    assertOptionalBoolean(server.disabled, `${path}.disabled`);
+  }
+}
+
+function validateStorage(storage: StorageConfig): void {
+  assertRecord(storage, "settings.storage");
+  validateStorageLocation(storage.projectData, "settings.storage.projectData");
+  validateStorageLocation(storage.userData, "settings.storage.userData");
+  validateStorageLocation(storage.sessions, "settings.storage.sessions");
+  assertRecord(storage.memory, "settings.storage.memory");
+  validateStorageLocation(storage.memory.project, "settings.storage.memory.project");
+  validateStorageLocation(storage.memory.user, "settings.storage.memory.user");
+  validateStorageLocation(storage.memory.session, "settings.storage.memory.session");
+  validateStorageLocation(storage.index, "settings.storage.index");
+  validateStorageLocation(storage.logs, "settings.storage.logs");
+  validateStorageLocation(storage.jobs, "settings.storage.jobs");
+  validateStorageLocation(storage.cache, "settings.storage.cache");
+}
+
+function validateStorageLocation(location: StorageLocation, path: string): void {
+  assertRecord(location, path);
+  if (location.scope !== "project" && location.scope !== "user" && location.scope !== "custom") {
+    throw new Error(`${path}.scope is invalid`);
+  }
+  if (location.scope === "custom") {
+    assertNonEmptyString(location.path, `${path}.path`);
+    return;
+  }
+  assertOptionalString(location.path, `${path}.path`);
+}
+
+function validateIndex(index: LinghunConfig["index"]): void {
+  assertRecord(index, "settings.index");
+  assertBoolean(index.enabled, "settings.index.enabled");
+  if (index.mode !== "fast" && index.mode !== "moderate" && index.mode !== "full") {
     throw new Error("settings.index.mode is invalid");
   }
-  return config;
+  if (index.ignoreFile !== ".linghunignore" && index.ignoreFile !== ".cbmignore") {
+    throw new Error("settings.index.ignoreFile is invalid");
+  }
+}
+
+function validateExtensions(
+  section: SkillConfig | WorkflowConfig | PluginConfig,
+  path: string,
+  hasDirs: boolean,
+): void {
+  assertRecord(section, path);
+  assertBoolean(section.enabled, `${path}.enabled`);
+  if (hasDirs) {
+    const withDirs = section as SkillConfig | PluginConfig;
+    assertNonEmptyString(withDirs.projectDir, `${path}.projectDir`);
+    assertNonEmptyString(withDirs.userDir, `${path}.userDir`);
+    assertStringArray(withDirs.trustedIds, `${path}.trustedIds`);
+  }
+  assertStringArray(section.disabledIds, `${path}.disabledIds`);
+}
+
+function validateHooks(hooks: HookConfig): void {
+  assertRecord(hooks, "settings.hooks");
+  assertBoolean(hooks.enabled, "settings.hooks.enabled");
+  assertPositiveNumber(hooks.timeoutMs, "settings.hooks.timeoutMs");
+  assertPositiveNumber(hooks.outputLimitBytes, "settings.hooks.outputLimitBytes");
+  assertBoolean(hooks.projectTrusted, "settings.hooks.projectTrusted");
+  assertStringArray(hooks.disabledIds, "settings.hooks.disabledIds");
+  assertStringArray(hooks.trustedIds, "settings.hooks.trustedIds");
+}
+
+function assertRecord(value: unknown, path: string): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+}
+
+function assertString(value: unknown, path: string): asserts value is string {
+  if (typeof value !== "string") {
+    throw new Error(`${path} must be a string`);
+  }
+}
+
+function assertNonEmptyString(value: unknown, path: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${path} must be a non-empty string`);
+  }
+}
+
+function assertOptionalString(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== "string") {
+    throw new Error(`${path} must be a string`);
+  }
+}
+
+function assertBoolean(value: unknown, path: string): asserts value is boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${path} must be a boolean`);
+  }
+}
+
+function assertOptionalBoolean(value: unknown, path: string): void {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new Error(`${path} must be a boolean`);
+  }
+}
+
+function assertPositiveNumber(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${path} must be a positive number`);
+  }
+}
+
+function assertOptionalPositiveNumber(value: unknown, path: string): void {
+  if (value !== undefined) {
+    assertPositiveNumber(value, path);
+  }
+}
+
+function assertOptionalNonNegativeNumber(value: unknown, path: string): void {
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+    throw new Error(`${path} must be a non-negative number`);
+  }
+}
+
+function assertStringArray(value: unknown, path: string): asserts value is string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${path} must be a string array`);
+  }
+}
+
+function assertStringRecord(value: unknown, path: string): asserts value is Record<string, string> {
+  assertRecord(value, path);
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== "string") {
+      throw new Error(`${path}.${key} must be a string`);
+    }
+  }
+}
+
+function assertModelRole(value: unknown, path: string): asserts value is ModelRole {
+  if (
+    value !== "planner" &&
+    value !== "executor" &&
+    value !== "reviewer" &&
+    value !== "verifier" &&
+    value !== "summarizer" &&
+    value !== "vision" &&
+    value !== "image"
+  ) {
+    throw new Error(`${path} is invalid`);
+  }
+}
+
+function assertCapability(value: unknown, path: string): asserts value is ModelCapability {
+  if (
+    value !== "text" &&
+    value !== "tools" &&
+    value !== "vision" &&
+    value !== "image" &&
+    value !== "thinking" &&
+    value !== "promptCache"
+  ) {
+    throw new Error(`${path} is invalid`);
+  }
 }
 
 function inferProviderForModel(model: string, providers: Record<string, ProviderConfig>): string {

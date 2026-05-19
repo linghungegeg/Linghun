@@ -308,6 +308,9 @@ This register prevents audit findings from being lost after the Phase 15 Beta re
 | Multi-stage summary merge | Do not build before Beta. | Phase 16 | Define merge rules, conflict handling, and stale-summary invalidation. |
 | Memory candidate extraction | Do not build as automatic learning before Beta. | Phase 16 | Extract only from verified evidence/Todo/handoff with user control. |
 | Compact quality evaluation | Do not build before Beta. | Phase 16 | Add validation that summaries preserve task state, decisions, open risks, and evidence refs. |
+| Memory evidence validation | Do not build as automatic learning before Beta. | Phase 16 | A memory candidate must cite verified evidence/Todo/handoff/user confirmation before acceptance. |
+| Summary faithfulness check | Do not build before Beta. | Phase 16 | Validate compact/handoff/job summaries against source events and flag dropped decisions, risks, or evidence refs. |
+| Long-term memory drift detection | Do not build before Beta. | Phase 16 | Detect stale or contradicted memories and require user-visible review before reuse. |
 | Full hook ecosystem | Hide/disable enforcement claims unless minimal PreToolUse/PostToolUse works. | Phase 15.5 | Build complete hook execution, timeout, trust, and failure isolation. |
 | Workflow state machine | Do not use as Beta readiness proof. | Phase 15.5 | Implement real workflow lifecycle only after CLI main loop passes Beta gate. |
 | Plugin contribution registry | Do not expose immature contributions as runtime-ready. | Phase 15.5 | Add contribution registration, trust boundary, and discovery-before-execute guard. |
@@ -322,6 +325,12 @@ This register prevents audit findings from being lost after the Phase 15 Beta re
 | Deep provider compat matrix UI | Profile contract and doctor are required before Beta; UI can wait. | Phase 15.5 | Add provider registry/compat matrix UI after profile contracts are stable. |
 | Provider quota/balance reconciliation | Do not block default coding loop unless status lies. | Phase 15.5 | Add official/custom usage source boundaries and reconciliation diagnostics. |
 | Freshness Gate / web_source runtime | Do not build in Phase 15 Beta remediation unless needed for a verified task. | Phase 15.5 | Implement official-source-first web evidence, failure downgrade, and source records. |
+| Web claim freshness validation | Do not build in Phase 15 Beta remediation unless needed for a verified task. | Phase 15.5 | Claims about latest/current external facts require fresh `web_source` evidence or an explicit disclaimer/block. |
+| Cost/cache/usage claim validation | Do not block default coding loop unless status lies. | Phase 15.5 | Usage, cache hit, quota, and cost claims must state source, formula, scope, and unknowns. |
+| Multi-agent claim consistency | Do not build before single-session Beta readiness. | Phase 15.5+ | Agent conclusions must carry evidence refs and conflict markers; adopted conclusions need verification status. |
+| Job/report evidence integrity | Do not build before local CLI maturity. | Phase 17 | Long-running job reports must include task graph, adopted outputs, rejected outputs, evidence refs, and validation status. |
+| Remote approval evidence integrity | Do not build or enable. | Phase 17 | Remote approvals must be idempotent and auditable with redacted command/risk/decision records, not full context. |
+| Phase delta drift detection | Do not run future phases before this baseline closes. | Phase 15.5+ | Each future phase must check whether it regresses Phase 15 CCB main-loop maturity or reintroduces TYPE-SHELL claims. |
 | Open-source release hardening | Do not block main loop fixes except config/Windows/build basics named in this baseline. | Phase 15.5 | Complete packaging, audit, debug bundle, install, upgrade/rollback, and docs sync. |
 | Full concurrent tool scheduler | Sequential loop is acceptable if continuation is correct. | Phase 15.5 | Add safe concurrency, progress, cancellation, and sibling cancellation later. |
 | IDE diff / rich permission modal / allow-always rules editor | Beta needs usable pending approval, not the full UI. | Phase 15.5 | Add richer diff approval and persistent permission rules after default approval loop works. |
@@ -366,6 +375,9 @@ Legend:
 | Multi-stage summary merge | DEFER | Section 12 |
 | Memory candidate extraction | DEFER / NOT-DO before Phase 16 | Section 12 |
 | Compact quality evaluation | DEFER | Section 12 |
+| Memory evidence validation | DEFER / NOT-DO before Phase 16 | Section 12 |
+| Summary faithfulness check | DEFER | Section 12 |
+| Long-term memory drift detection | DEFER / NOT-DO before Phase 16 | Section 12 |
 | Memory injection unbounded or irrelevant | PRE-BETA | Sections 4B, 9 |
 | Automatic learning loop | DEFER / NOT-DO before Phase 16 | Section 12 |
 | Provider profile mixing: chat vs responses | PRE-BETA | Sections 4C, 9 |
@@ -495,6 +507,12 @@ Legend:
 | Desktop app shell | DEFER / NOT-DO before Phase 18 | Section 12 |
 | Vision/image routing | DEFER | Section 12 |
 | Freshness Gate / `web_source` runtime | DEFER | Section 12 |
+| Web claim freshness validation | DEFER | Section 12 |
+| Cost/cache/usage claim validation | DEFER | Section 12 |
+| Multi-agent claim consistency | DEFER | Section 12 |
+| Job/report evidence integrity | DEFER | Section 12 |
+| Remote approval evidence integrity | DEFER / NOT-DO before Phase 17 | Section 12 |
+| Phase delta drift detection | DEFER until future phase starts; then mandatory | Section 12 |
 | Cache reasoning effort hash hardcoded/default | SAME-CLOSURE if cache touched; otherwise Phase 15.5 cache hardening | Sections 5, 12 |
 | Cache TTL pill/countdown UI | DEFER to Phase 15.5 polish | Section 12 |
 | Index Safety Repair keyword classifier | KEEP for safety but do not expand as maturity strategy; semantic repair DEFER | Sections 4F, 12 |

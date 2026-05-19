@@ -574,7 +574,7 @@ describe("ModelGateway", () => {
     ]);
   });
 
-  it("does not send tools or toolChoice when the selected model lacks tool calling", async () => {
+  it("returns a visible error when the selected model lacks tool calling", async () => {
     let captured: ModelRequest | undefined;
     const provider: Provider = {
       id: "mock",
@@ -601,8 +601,9 @@ describe("ModelGateway", () => {
       },
     };
     const gateway = new ModelGateway([provider]);
+    const events: LinghunEvent[] = [];
 
-    for await (const _event of gateway.stream(
+    for await (const event of gateway.stream(
       "mock",
       {
         model: "mock-no-tools",
@@ -612,11 +613,15 @@ describe("ModelGateway", () => {
       },
       new AbortController().signal,
     )) {
-      // drain stream
+      events.push(event);
     }
 
-    expect(captured?.tools).toBeUndefined();
-    expect(captured?.toolChoice).toBeUndefined();
+    expect(captured).toBeUndefined();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: { code: "MODEL_TOOLS_UNSUPPORTED", recoverable: true },
+    });
   });
 
   it("normalizes provider errors to LinghunError events", async () => {

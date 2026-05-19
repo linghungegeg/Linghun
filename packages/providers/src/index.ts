@@ -257,8 +257,12 @@ export class ModelGateway {
     if (info?.supportsTools !== false) {
       return request;
     }
-    const { tools: _tools, toolChoice: _toolChoice, ...rest } = request;
-    return rest;
+    throw new LinghunError({
+      code: "MODEL_TOOLS_UNSUPPORTED",
+      message: `模型不支持工具调用：${model}`,
+      suggestion: "请切换到支持 tools 的模型，或在本轮请求中不要发送 tools/toolChoice。",
+      recoverable: true,
+    });
   }
 
   private findProvider(providerId: string): Provider {

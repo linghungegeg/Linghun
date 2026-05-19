@@ -693,8 +693,22 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/agents", context, output);
     await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, output);
     await handleSlashCommand("/fork explorer cancellable --background", context, output);
-    const running = context.agents[0];
-    await handleSlashCommand(`/agents cancel ${running?.id}`, context, output);
+    await handleSlashCommand("/details", context, output);
+    await handleSlashCommand(
+      `/details background ${context.backgroundTasks[0]?.id}`,
+      context,
+      output,
+    );
+    context.evidence.unshift({
+      id: "evidence-test-1",
+      kind: "command_output",
+      source: "test",
+      summary: "details evidence summary",
+      supportsClaims: ["details full access"],
+      createdAt: new Date().toISOString(),
+    });
+    await handleSlashCommand("/details evidence evidence-test-1", context, output);
+    await handleSlashCommand("/details output evidence-test-1", context, output);
 
     const parentTranscript = (await store.resume(session.id)).transcript;
     const agentTranscript = (
@@ -708,7 +722,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("verifier 摘要");
     expect(output.text).toContain("Agents:");
     expect(output.text).toContain("transcript:");
-    expect(output.text).toContain("已取消；主会话可继续");
+    expect(output.text).toContain("已降级为同步执行");
+    expect(output.text).toContain("- full output: /details evidence <id>");
+    expect(output.text).toContain("Background agent-");
+    expect(output.text).toContain("Evidence evidence-test-1");
     expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(0);
     expect(context.agents.length).toBe(4);
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);

@@ -149,8 +149,12 @@ export async function runTool(
   };
 }
 
-export const builtInTools: Record<ToolName, ToolDefinition> = {
-  Read: {
+function defineTool<Input>(definition: ToolDefinition<Input>): ToolDefinition<Input> {
+  return definition;
+}
+
+const toolDefinitions = {
+  Read: defineTool<ReadInput>({
     name: "Read",
     title: "读取文件",
     description: "读取工作区文件内容。",
@@ -164,9 +168,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: true,
     lifecycle: readOnlyLifecycle(),
     validateInput: validateReadInput,
-    call: readTool as ToolDefinition<never>["call"],
-  },
-  Write: {
+    call: readTool,
+  }),
+  Write: defineTool<WriteInput>({
     name: "Write",
     title: "写入文件",
     description: "在工作区内写入完整文件内容。",
@@ -180,9 +184,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: false,
     lifecycle: writeLifecycle(),
     validateInput: validateWriteInput,
-    call: writeTool as ToolDefinition<never>["call"],
-  },
-  Edit: {
+    call: writeTool,
+  }),
+  Edit: defineTool<EditInput>({
     name: "Edit",
     title: "编辑文件",
     description: "在工作区内做唯一字符串替换。",
@@ -196,9 +200,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: false,
     lifecycle: writeLifecycle(),
     validateInput: validateEditInput,
-    call: editTool as ToolDefinition<never>["call"],
-  },
-  MultiEdit: {
+    call: editTool,
+  }),
+  MultiEdit: defineTool<MultiEditInput>({
     name: "MultiEdit",
     title: "批量编辑文件",
     description: "在同一文件内按顺序做多个唯一字符串替换。",
@@ -212,9 +216,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: false,
     lifecycle: writeLifecycle(),
     validateInput: validateMultiEditInput,
-    call: multiEditTool as ToolDefinition<never>["call"],
-  },
-  Grep: {
+    call: multiEditTool,
+  }),
+  Grep: defineTool<GrepInput>({
     name: "Grep",
     title: "搜索文本",
     description: "在工作区内按正则搜索文本。",
@@ -228,9 +232,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: true,
     lifecycle: readOnlyLifecycle(),
     validateInput: validateGrepInput,
-    call: grepTool as ToolDefinition<never>["call"],
-  },
-  Glob: {
+    call: grepTool,
+  }),
+  Glob: defineTool<GlobInput>({
     name: "Glob",
     title: "匹配文件",
     description: "在工作区内按 glob 模式匹配文件。",
@@ -244,9 +248,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: true,
     lifecycle: readOnlyLifecycle(),
     validateInput: validateGlobInput,
-    call: globTool as ToolDefinition<never>["call"],
-  },
-  Bash: {
+    call: globTool,
+  }),
+  Bash: defineTool<BashInput>({
     name: "Bash",
     title: "执行命令",
     description: "在工作区内执行 shell 命令并保存完整日志。",
@@ -261,9 +265,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isLongRunning: true,
     lifecycle: bashLifecycle(),
     validateInput: validateBashInput,
-    call: bashTool as ToolDefinition<never>["call"],
-  },
-  Todo: {
+    call: bashTool,
+  }),
+  Todo: defineTool<TodoInput>({
     name: "Todo",
     title: "任务列表",
     description: "维护当前会话任务、完成项和阻塞项。",
@@ -277,9 +281,9 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: false,
     lifecycle: sessionLifecycle(),
     validateInput: validateTodoInput,
-    call: todoTool as ToolDefinition<never>["call"],
-  },
-  Diff: {
+    call: todoTool,
+  }),
+  Diff: defineTool<DiffInput>({
     name: "Diff",
     title: "改动摘要",
     description: "输出本轮工具改动文件列表和摘要。",
@@ -293,9 +297,11 @@ export const builtInTools: Record<ToolName, ToolDefinition> = {
     isConcurrencySafe: true,
     lifecycle: readOnlyLifecycle(),
     validateInput: validateDiffInput,
-    call: diffTool as ToolDefinition<never>["call"],
-  },
-};
+    call: diffTool,
+  }),
+} satisfies Record<ToolName, ToolDefinition>;
+
+export const builtInTools: Record<ToolName, ToolDefinition> = toolDefinitions;
 
 function readOnlyLifecycle(): ToolLifecycleMetadata {
   return {

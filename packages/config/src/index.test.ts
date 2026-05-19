@@ -201,4 +201,23 @@ describe("config directories", () => {
     expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
     expect(lastConfigRecoveryWarning?.reason).toContain("JSON");
   });
+
+  it("recovers from invalid nested settings shape with a visible warning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: { deepseek: { type: "deepseek", model: "deepseek-v4-flash" } },
+        modelRoutes: { routes: [{ role: "executor", allowTools: "yes" }] },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.defaultModel).toBeTruthy();
+    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
+    expect(lastConfigRecoveryWarning?.reason).toContain("settings.modelRoutes");
+  });
 });
