@@ -6060,16 +6060,18 @@ export async function handleNaturalInput(
         return "handled";
       }
     }
-    if (/^(no|n|deny|cancel|取消|拒绝|不|否)$/iu.test(normalized)) {
+    if (/^(no|n|deny|取消|拒绝|不|否|cancel)$/iu.test(normalized)) {
       const approval = pendingLocalApproval;
       context.pendingLocalApproval = undefined;
       const sessionId = await ensureSession(context);
+      const cancelled = /^(cancel|取消)$/iu.test(normalized);
+      const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
       if (approval.kind === "index_ignore_write") {
         await recordToolFailureEvidence(
           context,
           sessionId,
           "Write",
-          `permission denied by user: ${approval.plan.path}`,
+          `${outcomeText}: ${approval.plan.path}`,
         );
         writeLine(
           output,
@@ -6085,12 +6087,13 @@ export async function handleNaturalInput(
           context,
           approval.sessionId,
           approval.toolName,
-          `permission denied by user: ${approval.toolName}`,
+          `${outcomeText}: ${approval.toolName}`,
         );
         const deniedResult = {
           ok: false,
           tool: approval.toolName,
-          text: "permission denied by user",
+          text: outcomeText,
+          outcome: cancelled ? "cancelled" : "denied",
           evidenceId: evidence.id,
         };
         await appendToolResultEvent(
@@ -7347,18 +7350,19 @@ async function executeApprovedModelToolUse(
     await appendDerivedToolEvents(context, sessionId, toolName, result.output);
     const evidence = await recordToolEvidence(context, sessionId, toolName, result.output);
     rememberToolFiles(context, toolName, toolCall.input, result.output);
+    const isError = isToolOutputFailure(toolName, result.output);
     await appendToolResultEvent(
       context,
       sessionId,
       toolCall.id,
       toolName,
       result.output,
-      false,
+      isError,
       evidence?.id,
     );
     writeLine(output, formatToolOutput(toolName, result.output, context.language, evidence?.id));
     return {
-      ok: true,
+      ok: !isError,
       tool: toolName,
       text: result.output.text,
       data: result.output.data,
@@ -8271,7 +8275,7 @@ async function handleToolCommand(
       callId,
       name,
       result.output,
-      false,
+      isToolOutputFailure(name, result.output),
       evidence?.id,
     );
     writeLine(output, formatToolOutput(name, result.output, context.language, evidence?.id));
@@ -9294,6 +9298,14 @@ function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
   };
 }
 
+function isToolOutputFailure(name: ToolName, output: ToolOutput): boolean {
+  if (name === "Bash") {
+    const exitCode = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
+    return typeof exitCode === "number" && exitCode !== 0;
+  }
+  return false;
+}
+
 async function appendDerivedToolEvents(
   context: TuiContext,
   sessionId: string,
@@ -9351,7 +9363,11 @@ function writeStatus(output: Writable, context: TuiContext): void {
         background,
         cacheHitRate: latestHitRate,
         indexStatus: context.index.status,
-        gate: context.pendingNaturalCommand ? "waiting confirmation" : "none",
+        gate: context.pendingLocalApproval
+          ? "waiting approval"
+          : context.pendingNaturalCommand
+            ? "waiting confirmation"
+            : "none",
       },
       context.language,
     ),

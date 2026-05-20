@@ -1295,6 +1295,88 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain('"tool_result"');
   });
 
+  it("continues after cancelled model tool permission as a distinct tool_result", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-cancel-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-cancel-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "Write",
+      { path: "cancelled.txt", content: "no" },
+      "我已收到取消结果，不会继续写文件。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请准备一个文件\ncancel\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain('"ok":false');
+    expect(toolMessage?.content).toContain('"outcome":"cancelled"');
+    expect(toolMessage?.content).toContain("permission cancelled by user");
+    expect(output.text).toContain("我已收到取消结果，不会继续写文件。");
+    await expect(readFile(join(project, "cancelled.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps pending approval across ordinary follow-up and slash status queries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-pending-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-pending-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "Write",
+      { path: "allowed-after-pending.txt", content: "ok" },
+      "已写入 allowed-after-pending.txt。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请准备一个文件\n这期间能解释一下吗？\n/status\n/mode\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(output.text).toContain("这条输入不会发送给模型");
+    expect(output.text).toContain("gate=approval");
+    expect(output.text).toContain("当前权限模式：default");
+    expect(output.text).toContain("已写入 allowed-after-pending.txt。");
+    await expect(readFile(join(project, "allowed-after-pending.txt"), "utf8")).resolves.toBe("ok");
+  });
+
   it("continues denied model tool permission without orphaning sibling tool calls", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -1716,6 +1798,55 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain("工具 Read 结果：");
     expect(output.text).toContain("已写入 report.md 并读取 package.json。");
+  });
+
+  it("returns Bash non-zero exits as failed model-visible tool_results", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-bash-failure-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-bash-failure-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "Bash",
+      { command: 'node -e "process.exit(7)"' },
+      "Bash 失败结果已收到，我会改用现有证据说明。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请运行检查命令\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain('"ok":false');
+    expect(toolMessage?.content).toContain('"exitCode":7');
+    expect(output.text).toContain("工具 Bash 结果：");
+    expect(output.text).toContain("Bash 失败结果已收到");
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain('"type":"tool_result"');
+    expect(transcript).toContain('"toolName":"Bash"');
+    expect(transcript).toContain('"isError":true');
   });
 
   it("records failed model tool_result evidence for follow-up prompts", async () => {
