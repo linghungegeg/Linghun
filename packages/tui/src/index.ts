@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
   stdin as defaultStdin,
@@ -268,6 +268,10 @@ export type McpState = {
   lastDoctor?: string;
 };
 
+type CodebaseMemoryBinarySource = "env" | "managed" | "path" | "missing";
+type CodebaseMemoryBinaryStatus = "ready" | "missing" | "corrupt" | "unsupported" | "unknown";
+type CodebaseMemoryArtifactStatus = "ready" | "missing" | "stale" | "corrupt" | "unknown";
+
 export type IndexState = {
   enabled: boolean;
   projectName?: string;
@@ -283,6 +287,13 @@ export type IndexState = {
   error?: string;
   lastQuery?: string;
   lastSummary?: string;
+  binarySource?: CodebaseMemoryBinarySource;
+  binaryStatus?: CodebaseMemoryBinaryStatus;
+  binaryVersion?: string;
+  binaryCommand?: string;
+  artifactStatus?: CodebaseMemoryArtifactStatus;
+  artifactPath?: string;
+  runtime?: string;
 };
 
 export type VerdictScope =
@@ -801,6 +812,8 @@ const LARGE_INDEX_RISK_DIRS = new Set([
   "venv",
 ]);
 const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
+const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
+const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
 const PROJECT_RULES_STATUS_WIDTH = 160;
 const MAX_CONTEXT_MESSAGES = 12;
@@ -4179,7 +4192,19 @@ async function handleIndexCommand(
 ): Promise<void> {
   const action = args[0] ?? "status";
   if (action === "status") {
-    await refreshIndexStatus(context);
+    await refreshIndexStatus(context, args.includes("--fresh"));
+    writeLine(output, formatIndexStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "doctor") {
+    await refreshIndexStatus(context, true);
+    writeLine(output, formatIndexStatus(context));
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "check") {
+    await refreshIndexStatus(context, true);
     writeLine(output, formatIndexStatus(context));
     writeStatus(output, context);
     return;
@@ -4227,7 +4252,7 @@ async function handleIndexCommand(
   }
   writeLine(
     output,
-    "用法：/index status | /index search <query> | /index architecture（只读） | /index init fast | /index refresh（需确认）",
+    "用法：/index status [--fresh] | /index doctor | /index check | /index search <query> | /index architecture（只读） | /index init fast | /index refresh（需确认）",
   );
 }
 
@@ -4284,12 +4309,225 @@ async function appendUsageEvents(
   await context.store.appendEvent(sessionId, { type: "cache_update", stats, createdAt });
 }
 
-function getCodebaseMemoryCommand(context: TuiContext): string {
-  return context.config.mcp.servers["codebase-memory"]?.command ?? "codebase-memory-mcp";
+type CodebaseMemoryResolution = {
+  command: string;
+  args: string[];
+  source: CodebaseMemoryBinarySource;
+  status: CodebaseMemoryBinaryStatus;
+  version?: string;
+  detailPath?: string;
+  summary: string;
+};
+
+async function resolveCodebaseMemoryBinary(context: TuiContext): Promise<CodebaseMemoryResolution> {
+  const configured = context.config.mcp.servers["codebase-memory"];
+  const configuredCommand = configured?.command?.trim();
+  const configuredArgs = configured?.args ?? [];
+  const envCommand = process.env[CODEBASE_MEMORY_ENV]?.trim();
+  if (envCommand) {
+    const spec = codebaseMemoryCommandSpec(envCommand, []);
+    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
+  }
+  if (configuredCommand && configuredCommand !== CODEBASE_MEMORY_COMMAND) {
+    const spec = codebaseMemoryCommandSpec(configuredCommand, configuredArgs);
+    return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
+  }
+
+  const managed = await findManagedCodebaseMemoryBinary(context);
+  if (managed) {
+    return probeCodebaseMemoryBinary(
+      managed.command,
+      managed.args,
+      "managed",
+      context,
+      managed.detailPath,
+    );
+  }
+
+  const pathBinary = await findPathCodebaseMemoryBinary();
+  if (pathBinary) {
+    return probeCodebaseMemoryBinary(
+      pathBinary.command,
+      pathBinary.args,
+      "path",
+      context,
+      pathBinary.detailPath,
+    );
+  }
+
+  const pathProbe = await probeCodebaseMemoryBinary(CODEBASE_MEMORY_COMMAND, [], "path", context);
+  if (pathProbe.status === "missing") {
+    return { ...pathProbe, source: "missing" };
+  }
+  return pathProbe;
 }
 
-function getCodebaseMemoryCommandArgs(context: TuiContext): string[] {
-  return context.config.mcp.servers["codebase-memory"]?.args ?? [];
+function codebaseMemoryCommandSpec(
+  command: string,
+  args: string[],
+): { command: string; args: string[]; detailPath: string } {
+  const lowerCommand = command.toLowerCase();
+  if (lowerCommand.endsWith(".cjs")) {
+    return { command: process.execPath, args: [command, ...args], detailPath: command };
+  }
+  if (
+    process.platform === "win32" &&
+    (lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat"))
+  ) {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/c", "call", command, ...args],
+      detailPath: command,
+    };
+  }
+  if (process.platform === "win32" && lowerCommand.endsWith(".ps1")) {
+    return {
+      command: "powershell.exe",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", command, ...args],
+      detailPath: command,
+    };
+  }
+  return { command, args, detailPath: command };
+}
+
+async function findManagedCodebaseMemoryBinary(
+  context: TuiContext,
+): Promise<{ command: string; args: string[]; detailPath: string } | undefined> {
+  const paths = resolveStoragePaths(context.config, context.projectPath);
+  const candidates = [
+    join(context.projectPath, ".linghun", "bin", CODEBASE_MEMORY_COMMAND),
+    join(paths.index, "bin", CODEBASE_MEMORY_COMMAND),
+    join(paths.userData, "bin", CODEBASE_MEMORY_COMMAND),
+  ];
+  return findCodebaseMemoryBinaryCandidate(candidates);
+}
+
+async function findPathCodebaseMemoryBinary(): Promise<
+  { command: string; args: string[]; detailPath: string } | undefined
+> {
+  const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  const candidates = pathDirs.map((dir) => join(dir, CODEBASE_MEMORY_COMMAND));
+  return findCodebaseMemoryBinaryCandidate(candidates);
+}
+
+async function findCodebaseMemoryBinaryCandidate(
+  candidates: string[],
+): Promise<{ command: string; args: string[]; detailPath: string } | undefined> {
+  const suffixes =
+    process.platform === "win32" ? [".cmd", ".exe", ".ps1", ".cjs", ""] : [".cjs", ""];
+  for (const candidate of candidates) {
+    for (const suffix of suffixes) {
+      const path = `${candidate}${suffix}`;
+      if (!(await pathExists(path))) {
+        continue;
+      }
+      return codebaseMemoryCommandSpec(path, []);
+    }
+  }
+  return undefined;
+}
+
+async function probeCodebaseMemoryBinary(
+  command: string,
+  args: string[],
+  source: Exclude<CodebaseMemoryBinarySource, "missing">,
+  context: TuiContext,
+  detailPath = command,
+): Promise<CodebaseMemoryResolution> {
+  const result = await runCommandCapture(
+    command,
+    [...args, "--version"],
+    context.projectPath,
+    5_000,
+  );
+  if (result.errorCode === "ENOENT") {
+    return {
+      command,
+      args,
+      source,
+      status: "missing",
+      detailPath,
+      summary: "codebase-memory binary not found",
+    };
+  }
+  if (result.exitCode !== 0) {
+    return {
+      command,
+      args,
+      source,
+      status: "corrupt",
+      detailPath,
+      summary: `codebase-memory --version failed: ${result.summary}`,
+    };
+  }
+  const version = extractCodebaseMemoryVersion(result.stdout || result.stderr);
+  if (!version) {
+    return {
+      command,
+      args,
+      source,
+      status: "unsupported",
+      detailPath,
+      summary: "codebase-memory --version did not return a supported version string",
+    };
+  }
+  return {
+    command,
+    args,
+    source,
+    status: "ready",
+    version,
+    detailPath,
+    summary: "codebase-memory binary ready",
+  };
+}
+
+function extractCodebaseMemoryVersion(output: string): string | undefined {
+  const compact = output.replace(/\s+/g, " ").trim();
+  const version = compact.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0];
+  if (!version) {
+    return undefined;
+  }
+  return version;
+}
+
+function rememberCodebaseMemoryResolution(
+  context: TuiContext,
+  resolution: CodebaseMemoryResolution,
+): void {
+  context.index.binarySource = resolution.source;
+  context.index.binaryStatus = resolution.status;
+  context.index.binaryVersion = resolution.version;
+  context.index.binaryCommand = redactedPath(resolution.detailPath);
+  context.index.runtime =
+    resolution.source === "managed"
+      ? "Linghun-managed codebase-memory"
+      : resolution.source === "path"
+        ? "external fallback from PATH"
+        : resolution.source === "env"
+          ? "explicit codebase-memory override"
+          : "missing codebase-memory runtime";
+}
+
+function sanitizeDiagnosticText(text: string): string {
+  return text
+    .replace(/prompt=[^\s&]+/giu, "prompt=***")
+    .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
+}
+
+function redactedPath(path: string | undefined): string {
+  if (!path) {
+    return "-";
+  }
+  return `present:${sanitizeDiagnosticText(basename(path))}`;
+}
+
+async function getCodebaseMemoryResolution(context: TuiContext): Promise<CodebaseMemoryResolution> {
+  const resolution = await resolveCodebaseMemoryBinary(context);
+  rememberCodebaseMemoryResolution(context, resolution);
+  return resolution;
 }
 
 async function runMcpDoctor(context: TuiContext): Promise<void> {
@@ -4297,19 +4535,31 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
     if (server.status === "disabled") {
       continue;
     }
-    const result = await runCommandCapture(
-      server.command,
-      ["--version"],
-      context.projectPath,
-      5_000,
-    );
-    if (result.exitCode === 0) {
-      server.status = "configured";
-      server.error = undefined;
+    if (server.name !== "codebase-memory") {
+      const result = await runCommandCapture(
+        server.command,
+        ["--version"],
+        context.projectPath,
+        5_000,
+      );
+      if (result.exitCode === 0) {
+        server.status = "configured";
+        server.error = undefined;
+        continue;
+      }
+      server.status = result.errorCode === "ENOENT" ? "missing" : "error";
+      server.error = result.summary;
       continue;
     }
-    server.status = result.errorCode === "ENOENT" ? "missing" : "error";
-    server.error = result.summary;
+    const resolution = await getCodebaseMemoryResolution(context);
+    server.command = redactedPath(resolution.detailPath);
+    server.status =
+      resolution.status === "ready"
+        ? "configured"
+        : resolution.status === "missing"
+          ? "missing"
+          : "error";
+    server.error = resolution.status === "ready" ? undefined : resolution.summary;
   }
   context.mcp.lastDoctor = new Date().toISOString();
   context.mcp.tools = stabilizeMcpToolList(
@@ -4328,7 +4578,7 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
 function formatMcpStatus(context: TuiContext): string {
   const servers = context.mcp.servers.map((server) => {
     const suffix = server.error ? ` (${truncateDisplay(server.error, 80)})` : "";
-    return `- ${server.name}: ${server.status} command=${server.command}${suffix}`;
+    return `- ${server.name}: ${server.status} command=${redactedPath(server.command)}${suffix}`;
   });
   return [
     "MCP status",
@@ -4337,8 +4587,10 @@ function formatMcpStatus(context: TuiContext): string {
     `- tools(stable): ${context.mcp.tools.length}`,
     `- lastDoctor: ${context.mcp.lastDoctor ?? "not run"}`,
     ...servers,
-    "- runtime: external MCP server/CLI; codebase-memory is not bundled/internal.",
-    "- note: MCP 启动/检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
+    `- codebase-memory source=${context.index.binarySource ?? "unknown"}`,
+    `- codebase-memory binary=${context.index.binaryStatus ?? "unknown"} version=${context.index.binaryVersion ?? "-"}`,
+    `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
+    "- note: MCP/codebase-memory 启动或检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
   ].join("\n");
 }
 
@@ -4352,10 +4604,21 @@ function formatMcpTools(context: TuiContext): string {
   ].join("\n");
 }
 
-async function refreshIndexStatus(context: TuiContext): Promise<void> {
+async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<void> {
+  const resolution = await getCodebaseMemoryResolution(context);
+  if (resolution.status !== "ready") {
+    context.index.status = "missing";
+    context.index.artifactStatus = "unknown";
+    context.index.error = `${resolution.summary}。普通聊天不受影响；如需索引，请配置 ${CODEBASE_MEMORY_ENV} 或安装 Linghun-managed codebase-memory。`;
+    context.index.safetyRiskyFiles = undefined;
+    context.index.safetyAction = undefined;
+    return;
+  }
+
   const projects = await runCodebaseMemoryCli(context, "list_projects", {}, context.projectPath);
   if (!projects.ok) {
     context.index.status = projects.errorCode === "ENOENT" ? "missing" : "error";
+    context.index.artifactStatus = projects.errorCode === "ENOENT" ? "missing" : "corrupt";
     context.index.error = projects.summary;
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
@@ -4364,12 +4627,15 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   const project = findCurrentIndexProject(projects.data, context.projectPath);
   if (!project) {
     context.index.status = "missing";
+    context.index.artifactStatus = "missing";
+    context.index.artifactPath = undefined;
     context.index.error = "未找到当前项目索引。请运行 /index init fast 建立索引。";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
     return;
   }
   context.index.projectName = project.name;
+  context.index.artifactPath = project.rootPath;
   const status = await runCodebaseMemoryCli(
     context,
     "index_status",
@@ -4378,6 +4644,7 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   );
   if (!status.ok) {
     context.index.status = "error";
+    context.index.artifactStatus = "corrupt";
     context.index.error = status.summary;
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
@@ -4385,15 +4652,20 @@ async function refreshIndexStatus(context: TuiContext): Promise<void> {
   }
   const data = status.data as { status?: string; nodes?: number; edges?: number };
   context.index.status = data.status === "ready" ? "ready" : "stale";
+  context.index.artifactStatus = data.status === "ready" ? "ready" : "stale";
   context.index.nodes = data.nodes;
   context.index.edges = data.edges;
   context.index.error = undefined;
   context.index.changedFiles = undefined;
-  context.index.staleHint = undefined;
+  context.index.staleHint = fresh
+    ? undefined
+    : "fast status：未运行 detect_changes；需要新鲜度检查请用 /index status --fresh 或 /index check。";
   context.index.safetyWarning = undefined;
   context.index.safetyRiskyFiles = undefined;
   context.index.safetyAction = undefined;
-  await refreshIndexStaleHint(context, project.name);
+  if (fresh) {
+    await refreshIndexStaleHint(context, project.name);
+  }
 }
 
 async function refreshIndexStaleHint(context: TuiContext, projectName: string): Promise<void> {
@@ -4418,8 +4690,11 @@ async function refreshIndexStaleHint(context: TuiContext, projectName: string): 
   context.index.changedFiles = changedCount;
   if (changedCount > 0) {
     context.index.status = "stale";
+    context.index.artifactStatus = "stale";
     context.index.staleHint = `detect_changes 发现 ${changedCount} 个变更文件，建议运行 /index refresh；不会自动刷新。`;
+    return;
   }
+  context.index.staleHint = "detect_changes 未发现变更；/index refresh 仍只在用户显式执行时运行。";
 }
 
 async function runIndexRepository(
@@ -4525,28 +4800,36 @@ async function recordIndexEvidence(
 
 function formatIndexStatus(context: TuiContext): string {
   const suggestion =
-    context.index.status === "missing"
-      ? context.index.error
-        ? "建议：确认 codebase-memory-mcp 可执行，或安装/配置外部 CLI 后重试；普通聊天不受影响。"
-        : "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
-      : context.index.status === "stale"
-        ? "建议：运行 /index refresh 刷新索引；不会自动重建。"
-        : context.index.status === "error"
-          ? "建议：确认 codebase-memory-mcp 可执行，或修复索引错误后重试 /index status。"
-          : "建议：可用 /index search <query> 或 /index architecture 获取短结果。";
+    context.index.binaryStatus && context.index.binaryStatus !== "ready"
+      ? `建议：配置 ${CODEBASE_MEMORY_ENV}，或安装/修复 Linghun-managed codebase-memory；普通聊天不受影响。`
+      : context.index.status === "missing"
+        ? context.index.error
+          ? "建议：确认 codebase-memory artifact 是否存在；可显式运行 /index init fast。普通聊天不受影响。"
+          : "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
+        : context.index.status === "stale"
+          ? "建议：运行 /index refresh 刷新索引；不会自动重建。"
+          : context.index.status === "error"
+            ? "建议：修复 codebase-memory runtime/artifact 后重试 /index doctor 或 /index status。"
+            : "建议：可用 /index search <query> 或 /index architecture 获取短结果；新鲜度检查用 /index status --fresh 或 /index check。";
   return [
     "Index status",
     `- enabled: ${context.index.enabled ? "yes" : "no"}`,
     `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
     `- status: ${context.index.status}`,
+    `- source=${context.index.binarySource ?? "unknown"}`,
+    `- binary status: ${context.index.binaryStatus ?? "unknown"}`,
+    `- binary command: ${context.index.binaryCommand ?? "-"}`,
+    `- version: ${context.index.binaryVersion ?? "-"}`,
+    `- artifact status: ${context.index.artifactStatus ?? "unknown"}`,
+    `- artifactPath(details): ${redactedPath(context.index.artifactPath)}`,
+    `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
     `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
     `- changedFiles: ${context.index.changedFiles ?? "-"}`,
     `- staleHint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
     `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files=${context.index.safetyRiskyFiles.length}` : "-"}`,
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
-    "- runtime: external codebase-memory-mcp CLI; not bundled/internal indexer.",
-    `- ${suggestion}`,
+    `- next action: ${suggestion}`,
   ].join("\n");
 }
 
@@ -4806,7 +5089,10 @@ function formatBytes(bytes: number): string {
   return `${Math.round(bytes / 1_000)} KB`;
 }
 
-function findCurrentIndexProject(data: unknown, projectPath: string): { name: string } | null {
+function findCurrentIndexProject(
+  data: unknown,
+  projectPath: string,
+): { name: string; rootPath?: string } | null {
   if (!isRecord(data) || !Array.isArray(data.projects)) {
     return null;
   }
@@ -4818,7 +5104,8 @@ function findCurrentIndexProject(data: unknown, projectPath: string): { name: st
     return normalizePath(String(project.root_path ?? "")) === normalizedProjectPath;
   });
   if (isRecord(match) && typeof match.name === "string") {
-    return { name: match.name };
+    const rootPath = typeof match.root_path === "string" ? match.root_path : undefined;
+    return { name: match.name, rootPath };
   }
   return null;
 }
@@ -4834,10 +5121,13 @@ async function runCodebaseMemoryCli(
   if (!guard.ok) {
     return { ok: false, summary: guard.summary };
   }
-  const command = getCodebaseMemoryCommand(context);
+  const resolution = await getCodebaseMemoryResolution(context);
+  if (resolution.status !== "ready") {
+    return { ok: false, summary: resolution.summary, errorCode: resolution.status };
+  }
   const result = await runCommandCapture(
-    command,
-    [...getCodebaseMemoryCommandArgs(context), "cli", tool, JSON.stringify(input)],
+    resolution.command,
+    [...resolution.args, "cli", tool, JSON.stringify(input)],
     cwd,
     timeoutMs,
   );
@@ -4904,7 +5194,20 @@ async function runCommandCapture(
   errorCode?: string;
 }> {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      resolvePromise({
+        exitCode: 127,
+        stdout: "",
+        stderr: "",
+        summary: sanitizeDiagnosticText(nodeError.message),
+        errorCode: nodeError.code,
+      });
+      return;
+    }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     const timer = setTimeout(() => {
@@ -4913,18 +5216,18 @@ async function runCommandCapture(
         exitCode: 124,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
-        summary: `命令超时：${command}`,
+        summary: `命令超时：${redactedPath(command)}`,
       });
     }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
       resolvePromise({
         exitCode: 127,
         stdout: "",
         stderr: "",
-        summary: error.message,
+        summary: sanitizeDiagnosticText(error.message),
         errorCode: error.code,
       });
     });
@@ -4936,7 +5239,10 @@ async function runCommandCapture(
         exitCode: exitCode ?? 1,
         stdout: out,
         stderr: err,
-        summary: truncateDisplay((err || out || `exit ${exitCode}`).replace(/\s+/g, " "), 200),
+        summary: truncateDisplay(
+          sanitizeDiagnosticText(err || out || `exit ${exitCode}`).replace(/\s+/g, " "),
+          200,
+        ),
       });
     });
   });
@@ -8111,7 +8417,9 @@ function formatHelp(language: Language): string {
   /mcp [status]         Show MCP server status
   /mcp tools            Show stable MCP tool summary
   /mcp doctor           Diagnose MCP server availability
-  /index status         Show codebase-memory index status
+  /index status [--fresh] Show fast codebase-memory status; --fresh runs detect_changes
+  /index doctor         Diagnose bundled/managed codebase-memory runtime
+  /index check          Run explicit freshness check with detect_changes
   /index init fast      Build a fast local index on explicit request
   /index refresh        Refresh the current project index
   /index search <query> Query codebase-memory and record evidence
@@ -8198,7 +8506,9 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /mcp status           查看 MCP server 状态
   /mcp tools            查看稳定排序的 MCP tool 摘要
   /mcp doctor           诊断 MCP server 可用性
-  /index status         查看 codebase-memory 索引状态
+  /index status [--fresh] 查看 fast 索引状态；--fresh 才运行 detect_changes
+  /index doctor         诊断 bundled/managed codebase-memory runtime
+  /index check          显式运行 detect_changes 新鲜度检查
   /index init fast      显式建立 fast 索引
   /index refresh        显式刷新当前项目索引
   /index search <query> 查询索引并写入 evidence

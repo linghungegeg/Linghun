@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
@@ -118,19 +118,24 @@ function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done
   return requests;
 }
 
-async function createMockCodebaseMemoryConfig(
+async function createMockCodebaseMemoryBinary(
   project: string,
   mockDir: string,
   changes: { changed_count?: number; changed_files?: string[] } = { changed_count: 0 },
-): Promise<{ config: LinghunConfig; callsPath: string }> {
-  const callsPath = join(mockDir, "codebase-memory-calls.jsonl");
-  const mockPath = join(mockDir, "codebase-memory-mock.cjs");
+  options: {
+    versionOutput?: string;
+    versionExitCode?: number;
+    status?: string;
+    fileName?: string;
+  } = {},
+): Promise<{ callsPath: string; mockPath: string }> {
+  const callsPath = join(mockDir, `${options.fileName ?? "codebase-memory-mock"}-calls.jsonl`);
+  const mockPath = join(mockDir, `${options.fileName ?? "codebase-memory-mock"}.cjs`);
   await writeFile(
     mockPath,
     `const fs = require("node:fs");
 if (process.argv.includes("--version")) {
-  console.log("codebase-memory-mcp mock 0.0.0");
-  process.exit(0);
+  ${options.versionExitCode && options.versionExitCode !== 0 ? `console.error(${JSON.stringify(options.versionOutput ?? "broken mock")});\n  process.exit(${options.versionExitCode});` : `console.log(${JSON.stringify(options.versionOutput ?? "codebase-memory-mcp mock 0.0.0")});\n  process.exit(0);`}
 }
 const tool = process.argv[3];
 const input = JSON.parse(process.argv[4] || "{}");
@@ -138,7 +143,7 @@ fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ tool, input }) 
 if (tool === "list_projects") {
   console.log(JSON.stringify({ projects: [{ name: "test-project", root_path: ${JSON.stringify(project)} }] }));
 } else if (tool === "index_status") {
-  console.log(JSON.stringify({ status: "ready", nodes: 2, edges: 1 }));
+  console.log(JSON.stringify({ status: ${JSON.stringify(options.status ?? "ready")}, nodes: 2, edges: 1 }));
 } else if (tool === "detect_changes") {
   console.log(JSON.stringify(${JSON.stringify(changes)}));
 } else if (tool === "index_repository") {
@@ -168,8 +173,29 @@ if (tool === "list_projects") {
 `,
     "utf8",
   );
+  return { callsPath, mockPath };
+}
+
+async function createMockCodebaseMemoryConfig(
+  project: string,
+  mockDir: string,
+  changes: { changed_count?: number; changed_files?: string[] } = { changed_count: 0 },
+  options: {
+    versionOutput?: string;
+    versionExitCode?: number;
+    status?: string;
+    fileName?: string;
+  } = {},
+): Promise<{ config: LinghunConfig; callsPath: string; mockPath: string }> {
+  const { callsPath, mockPath } = await createMockCodebaseMemoryBinary(
+    project,
+    mockDir,
+    changes,
+    options,
+  );
   return {
     callsPath,
+    mockPath,
     config: {
       ...defaultConfig,
       mcp: {
@@ -177,8 +203,8 @@ if (tool === "list_projects") {
         servers: {
           ...defaultConfig.mcp.servers,
           "codebase-memory": {
-            command: process.execPath,
-            args: [mockPath],
+            command: mockPath,
+            args: [],
           },
         },
       },
@@ -197,6 +223,8 @@ async function readMockCalls(callsPath: string): Promise<string[]> {
     return [];
   }
 }
+
+const windowsIt = process.platform === "win32" ? it : it.skip;
 
 async function createTestContext(
   project: string,
@@ -1182,6 +1210,188 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("工具 Bash 结果");
   });
 
+  it("resolves codebase-memory from env before managed path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun", "bin"), { recursive: true });
+    const envDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-env-"));
+    const managedDir = join(project, ".linghun", "bin");
+    const envMock = await createMockCodebaseMemoryBinary(
+      project,
+      envDir,
+      { changed_count: 0 },
+      {
+        fileName: "env-codebase-memory",
+        versionOutput: "codebase-memory-mcp 1.2.3",
+      },
+    );
+    const managedMock = await createMockCodebaseMemoryBinary(
+      project,
+      managedDir,
+      { changed_count: 0 },
+      {
+        fileName: "codebase-memory-mcp",
+        versionOutput: "codebase-memory-mcp 9.9.9",
+      },
+    );
+    vi.stubEnv("LINGHUN_CODEBASE_MEMORY_MCP", envMock.mockPath);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/index doctor", context, output);
+
+    expect(output.text).toContain("source=env");
+    expect(output.text).toContain("binary status: ready");
+    expect(output.text).toContain("binary command: present:env-codebase-memory.cjs");
+    expect(output.text).toContain("version: 1.2.3");
+    expect(output.text).toContain("runtime: explicit codebase-memory override");
+    expect(output.text).not.toContain(envDir);
+    expect(await readMockCalls(envMock.callsPath)).toEqual([
+      "list_projects",
+      "index_status",
+      "detect_changes",
+    ]);
+    expect(await readMockCalls(managedMock.callsPath)).toEqual([]);
+  });
+
+  it("resolves Linghun-managed codebase-memory before PATH fallback with Windows-safe paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "灵魂 项目 with spaces-"));
+    await mkdir(join(project, ".linghun", "bin"), { recursive: true });
+    const managedDir = join(project, ".linghun", "bin");
+    const pathDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-path-"));
+    const managedMock = await createMockCodebaseMemoryBinary(
+      project,
+      managedDir,
+      { changed_count: 0 },
+      {
+        fileName: "codebase-memory-mcp",
+        versionOutput: "codebase-memory-mcp 2.0.0",
+      },
+    );
+    const pathMock = await createMockCodebaseMemoryBinary(
+      project,
+      pathDir,
+      { changed_count: 0 },
+      {
+        fileName: "codebase-memory-mcp",
+        versionOutput: "codebase-memory-mcp 3.0.0",
+      },
+    );
+    vi.stubEnv("PATH", `${pathDir}${delimiter}${process.env.PATH ?? ""}`);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain("source=managed");
+    expect(output.text).toContain("binary command: present:codebase-memory-mcp.cjs");
+    expect(output.text).toContain("version: 2.0.0");
+    expect(output.text).toContain("runtime: Linghun-managed codebase-memory");
+    expect(output.text).toContain("fast status：未运行 detect_changes");
+    expect(output.text).not.toContain(managedDir);
+    expect(output.text).not.toContain(pathDir);
+    expect(await readMockCalls(managedMock.callsPath)).toEqual(["list_projects", "index_status"]);
+    expect(await readMockCalls(pathMock.callsPath)).toEqual([]);
+  });
+
+  it("falls back to PATH codebase-memory when env and managed paths are absent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const pathDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-path-"));
+    const pathMock = await createMockCodebaseMemoryBinary(
+      project,
+      pathDir,
+      { changed_count: 0 },
+      {
+        fileName: "codebase-memory-mcp",
+        versionOutput: "codebase-memory-mcp 4.0.0",
+      },
+    );
+    vi.stubEnv("PATH", `${pathDir}${delimiter}${process.env.PATH ?? ""}`);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain("source=path");
+    expect(output.text).toContain("version: 4.0.0");
+    expect(output.text).toContain("runtime: external fallback from PATH");
+    expect(await readMockCalls(pathMock.callsPath)).toEqual(["list_projects", "index_status"]);
+  });
+
+  windowsIt(
+    "wraps Windows PATH .cmd codebase-memory shim without leaking private paths",
+    async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const pathDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-cmd path-"));
+      const pathMock = await createMockCodebaseMemoryBinary(
+        project,
+        pathDir,
+        { changed_count: 0 },
+        {
+          fileName: "codebase-memory-worker",
+          versionOutput: "codebase-memory-mcp 5.0.0",
+        },
+      );
+      const shimPath = join(pathDir, "codebase-memory-mcp.cmd");
+      await writeFile(
+        shimPath,
+        `@echo off\r\n"${process.execPath}" "${pathMock.mockPath}" %*\r\n`,
+        "utf8",
+      );
+      vi.stubEnv("PATH", `${pathDir}${delimiter}${process.env.PATH ?? ""}`);
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session);
+
+      await handleSlashCommand("/index status", context, output);
+
+      expect(output.text).toContain("source=path");
+      expect(output.text).toContain("binary status: ready");
+      expect(output.text).toContain("binary command: present:codebase-memory-mcp.cmd");
+      expect(output.text).toContain("version: 5.0.0");
+      expect(output.text).toContain("status: ready");
+      expect(output.text).not.toContain(pathDir);
+      expect(await readMockCalls(pathMock.callsPath)).toEqual(["list_projects", "index_status"]);
+    },
+  );
+
+  it("degrades unsupported and corrupt codebase-memory versions without crashing", async () => {
+    for (const [versionOutput, versionExitCode, expected] of [
+      ["codebase-memory-mcp dev-build", undefined, "unsupported"],
+      ["broken binary", 1, "corrupt"],
+    ] as const) {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-bad-"));
+      const { config, callsPath } = await createMockCodebaseMemoryConfig(
+        project,
+        mockDir,
+        { changed_count: 0 },
+        {
+          versionOutput,
+          versionExitCode,
+        },
+      );
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session, config);
+
+      await handleSlashCommand("/index status", context, output);
+
+      expect(output.text).toContain(`binary status: ${expected}`);
+      expect(output.text).toContain("status: missing");
+      expect(output.text).toContain("普通聊天不受影响");
+      expect(output.text).toContain("next action: 建议：配置 LINGHUN_CODEBASE_MEMORY_MCP");
+      expect(await readMockCalls(callsPath)).toEqual([]);
+    }
+  });
+
   it("summarizes current MCP/index runtime without bundled or raw graph claims", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -1201,17 +1411,18 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("codebase-memory: configured");
-    expect(output.text).toContain("runtime: external MCP server/CLI");
-    expect(output.text).toContain("runtime: external codebase-memory-mcp CLI");
+    expect(output.text).toContain("codebase-memory source=env");
+    expect(output.text).toContain("runtime: explicit codebase-memory override");
+    expect(output.text).toContain("fast status：未运行 detect_changes");
     expect(output.text).toContain("Index search（短摘要");
     expect(output.text).toContain("Index architecture（短摘要）");
     expect(output.text).toContain("nodes/edges: 12/8");
-    expect(output.text).not.toContain("Bundled codebase-memory Lite");
     expect(output.text).not.toContain("RAW_SOURCE_TAIL_SHOULD_NOT_DUMP");
     expect(output.text).not.toContain("FULL_GRAPH_SHOULD_NOT_DUMP");
     expect(await readMockCalls(callsPath)).toEqual(
       expect.arrayContaining(["list_projects", "index_status", "search_code", "get_architecture"]),
     );
+    expect(await readMockCalls(callsPath)).not.toContain("detect_changes");
   });
 
   it("degrades clearly when codebase-memory is missing without blocking normal chat", async () => {
@@ -1252,9 +1463,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("codebase-memory: missing");
     expect(output.text).toContain("status: missing");
-    expect(output.text).toContain("确认 codebase-memory-mcp 可执行");
+    expect(output.text).toContain("配置 LINGHUN_CODEBASE_MEMORY_MCP");
     expect(output.text).toContain("普通聊天仍然可继续");
-    expect(output.text).toContain("runtime: external codebase-memory-mcp CLI");
+    expect(output.text).toContain("binary status: missing");
+    expect(output.text).toContain("runtime: explicit codebase-memory override");
     expect(output.text).not.toContain("bundled 内置");
   });
 
@@ -3368,17 +3580,37 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥");
   });
 
-  it("marks index status stale from detect_changes without refreshing", async () => {
-    for (const changes of [{ changed_count: 2 }, { changed_files: ["src/a.ts", "src/b.ts"] }]) {
+  it("keeps index status fast by default without detect_changes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, {
+      changed_count: 2,
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain("status: ready");
+    expect(output.text).toContain("fast status：未运行 detect_changes");
+    expect(await readMockCalls(callsPath)).toEqual(["list_projects", "index_status"]);
+  });
+
+  it("marks index status stale from explicit fresh check without refreshing", async () => {
+    for (const command of ["/index status --fresh", "/index check"]) {
       const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
       const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
-      const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, changes);
+      const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, {
+        changed_files: ["src/a.ts", "src/b.ts"],
+      });
       const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
       const session = await store.create({ model: "deepseek-v4-flash" });
       const output = new MemoryOutput();
       const context = await createTestContext(project, store, session, config);
 
-      await handleSlashCommand("/index status", context, output);
+      await handleSlashCommand(command, context, output);
 
       expect(output.text).toContain("status: stale");
       expect(output.text).toContain("changedFiles: 2");

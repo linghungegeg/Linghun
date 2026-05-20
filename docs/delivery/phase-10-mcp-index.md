@@ -4,7 +4,7 @@
 
 完成 Linghun Phase 10 MCP 与 codebase-memory 最小闭环，在 Phase 09 cache/cost/freshness 基础上接入 MCP server 配置读取、MCP 状态查看、稳定 MCP tool list 摘要、codebase-memory 索引状态/查询/架构摘要，以及 transcript evidence 记录。
 
-当前口径覆盖说明（2026-05-20）：本阶段的 `done` 只表示“依赖本机 `codebase-memory-mcp` CLI / MCP 配置的最小闭环”已经完成，不表示 codebase-memory 已经随 Linghun 打包内置、固定版本、免安装、license/NOTICE 收口或达到开源发布成熟度。Bundled codebase-memory Lite 必须作为 Phase 15 real-project Beta 前尾项或 Phase 15.5 开源前 hardening 独立验收，不能回填到 Phase 10 旧完成口径里。
+当前口径覆盖说明（2026-05-21）：本阶段的 `done` 只表示“外部 CLI / MCP 配置的最小闭环”已经完成。Phase 15 Batch 3.5 在 Phase 10 之外新增 Linghun-managed codebase-memory Lite runtime resolution（env override → Linghun managed path → PATH fallback）和 fast/diagnostic status，但仍不表示 Linghun 已经内置自研索引引擎、MCP marketplace、自动全量重建、后台常驻重索引或完整开源发布成熟度；未引入 vendored binary，因此 license/NOTICE 收口仍按后续真实打包 artifact 单独验收。
 
 本阶段只实现 Phase 10 MCP/index 最小闭环，不进入 Phase 11 完整会话交接、长期记忆或 handoff 自动生成；不实现 Agent、多模型协作、Plugins、Hooks、长期任务、Remote Channels 或桌面端。
 
