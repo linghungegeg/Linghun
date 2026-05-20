@@ -25,6 +25,7 @@ import {
   handleSlashCommand,
   recordModelUsage,
   runTui,
+  validateCodebaseMemoryToolExecution,
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
@@ -449,7 +450,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(`来源 session：${session.id}`);
   });
 
-  it("adds evidence-bound Phase 15 Beta readiness verdict to handoff packets", async () => {
+  it("adds evidence-bound Beta readiness verdict to handoff packets", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -473,22 +474,63 @@ describe("Phase 06 TUI slash commands", () => {
     expect(verdict?.residualRisks).toEqual(
       expect.arrayContaining([expect.stringContaining("mock provider PASS")]),
     );
-    expect(output.text).not.toContain("Phase 15 Beta readiness PASS");
+    expect(output.text).not.toContain("Beta readiness PASS");
   });
 
-  it("downgrades Phase 15 Beta readiness claim when live/report evidence is missing", async () => {
+  it("downgrades Beta readiness claim when live/report evidence is missing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand("/claim-check Phase 15 Beta readiness is PASS", context, output);
+    await handleSlashCommand("/claim-check Beta readiness is PASS", context, output);
 
     expect(output.text).toContain("verdict=PARTIAL");
     expect(output.text).toContain("scope=beta");
     expect(output.text).toContain("Evidence：missing");
     expect(output.text).toContain("real TUI report-generation path lacks PASS evidence");
+  });
+
+  it("keeps Beta readiness partial when only Write evidence exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.evidence.push({
+      id: "write-only",
+      kind: "command_output",
+      source: "Write",
+      summary: "Write: 已写入文件：report.md",
+      supportsClaims: ["Write"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand("/claim-check Beta readiness is PASS", context, output);
+
+    expect(output.text).toContain("verdict=PARTIAL");
+    expect(output.text).toContain("DeepSeek dual-provider live report evidence is missing");
+    expect(output.text).not.toContain("verdict=PASS");
+  });
+
+  it("guards deferred codebase-memory tools before blind execution", () => {
+    expect(validateCodebaseMemoryToolExecution("get_code_snippet", { project: "test" })).toEqual({
+      ok: false,
+      summary:
+        "MCP deferred tool guard: get_code_snippet 缺少 required args：qualified_name。已拒绝盲执行。",
+    });
+    expect(validateCodebaseMemoryToolExecution("unknown_tool", {})).toEqual({
+      ok: false,
+      summary:
+        "MCP deferred tool guard: unknown_tool 尚未经过 discovery/schema 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现的工具入口。",
+    });
+    expect(
+      validateCodebaseMemoryToolExecution("get_code_snippet", {
+        project: "test",
+        qualified_name: "packages/tui/src/index.ts#createMcpState",
+      }),
+    ).toEqual({ ok: true });
   });
 
   it("rejects unsupported PASS claims without evidence refs", async () => {
@@ -589,7 +631,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Solution Completeness Gate report");
     expect(output.text).toContain("- classification: systemic_gap");
     expect(output.text).toContain("- impactAreas: reference_parity, runtime_behavior");
-    expect(output.text).toContain("- phaseBoundary: stay in Phase 15 pre-Beta");
+    expect(output.text).toContain("- phaseBoundary: stay in the current approved scope");
     expect(requests).toHaveLength(1);
     expect(JSON.stringify(requests[0])).toContain("SYSTEMIC_GAP_WARNING");
   });
@@ -758,7 +800,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/usage", context, output);
     await handleSlashCommand("/stats", context, output);
 
-    expect(output.text).toContain("Model routes（Phase 13");
+    expect(output.text).toContain("Model routes（多模型按角色触发");
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("已设置 planner role");
     expect(output.text).toContain("已设置 verifier role");
@@ -797,7 +839,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
     expect(output.text).toContain("角色路由摘要");
     expect(output.text).not.toContain("Start Gate：");
-    expect(output.text).not.toContain("Model routes（Phase 13");
+    expect(output.text).not.toContain("Model routes（多模型按角色触发");
     expect(output.text).not.toContain("/model route 查看");
   });
 
@@ -3283,7 +3325,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/skills enable ghost-skill", orphanContext, orphanOutput);
     await handleSlashCommand("/plugins enable ghost-plugin", orphanContext, orphanOutput);
 
-    expect(output.text).toContain("Skills（Phase 14");
+    expect(output.text).toContain("Skills（summary-first");
     expect(output.text).toContain("summary-first / load-on-demand");
     expect(output.text).toContain("broken-skill");
     expect(output.text).toContain("manifest load failed; skill isolated from prompt and tools");
@@ -3291,7 +3333,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("skill manifest 加载失败，不能启用：broken-skill");
     expect(output.text).toContain("Trust notice：即将启用 skill bug-helper");
     expect(output.text).toContain("已禁用 skill：bug-helper");
-    expect(output.text).toContain("Workflows（Phase 14");
+    expect(output.text).toContain("Workflows（本地模板");
     expect(output.text).toContain("bug-fix");
     expect(output.text).toContain("Workflow Start Gate：bug-fix");
     expect(output.text).toContain("recommended validation");
@@ -3303,7 +3345,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("timeoutMs");
     expect(output.text).toContain("outputLimitBytes");
     expect(output.text).toContain("logPath");
-    expect(output.text).toContain("只诊断 hook 边界，不执行完整 hook 脚本");
+    expect(output.text).toContain("hook 诊断只检查来源、边界和可见状态");
     expect(output.text).toContain("pluginListHash");
     expect(output.text).not.toContain("完整 skill 正文");
     expect(orphanOutput.text).toContain("未知 skill：ghost-skill");

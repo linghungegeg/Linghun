@@ -6,7 +6,7 @@ import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
 
 用法：
-  ${LINGHUN_CLI_NAME}                                   进入 Phase 15 preflight 交互式终端
+  ${LINGHUN_CLI_NAME}                                   进入交互式终端
   ${LINGHUN_CLI_NAME} --version                         显示版本号
   ${LINGHUN_CLI_NAME} --help                            显示帮助信息
   ${LINGHUN_CLI_NAME} sessions list [--json]            列出当前项目会话
@@ -15,9 +15,9 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   ${LINGHUN_CLI_NAME} sessions resume <id> [--json]     恢复并读取会话 transcript
   ${LINGHUN_CLI_NAME} sessions summary <id> [--text 文本]  查看或更新会话摘要
   ${LINGHUN_CLI_NAME} model                         查看当前模型配置
-  ${LINGHUN_CLI_NAME} model set deepseek-v4-pro      切换当前 headless 模型
+  ${LINGHUN_CLI_NAME} model set <model>             切换当前 headless 模型
   ${LINGHUN_CLI_NAME} model doctor                   诊断模型配置
-  TUI /model route                                  查看 Phase 13 角色模型路由
+  TUI /model route                                  查看角色模型路由
   TUI /model route doctor                           诊断角色 provider/model/capability/budget
   TUI /model route set <role> <model>               设置 planner/executor/reviewer/verifier/summarizer/vision/image
   TUI /vision <path>                                记录 VisionObservation evidence
@@ -37,12 +37,12 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /sessions resume <id>
   ${LINGHUN_CLI_NAME} /sessions summary <id>
   ${LINGHUN_CLI_NAME} /model
-  ${LINGHUN_CLI_NAME} /model set deepseek-v4-pro
+  ${LINGHUN_CLI_NAME} /model set <model>
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  Phase 15 preflight 在 TUI 中提供 Natural Command Bridge：普通中英文输入先经 Command Capability Catalog 与本地风险裁决。
-  Phase 14 主闭环提供本地 skills/workflows/hooks/plugins loader、doctor、启停、信任和权限边界。
+  交互式终端提供 Natural Command Bridge：普通中英文输入先经 Command Capability Catalog 与本地风险裁决。
+  本地扩展系统提供 skills/workflows/hooks/plugins loader、doctor、启停、信任和权限边界。
   --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器、插件或 cache 统计系统。
 
 Windows 兼容：

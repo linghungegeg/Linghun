@@ -376,7 +376,7 @@ export class OpenAiCompatibleProvider implements Provider {
       throw new LinghunError({
         code: "MODEL_BASE_URL_MISSING",
         message: "模型配置缺少 base_url。",
-        suggestion: "请为当前 provider 设置 base_url，例如 https://api.deepseek.com/v1。",
+        suggestion: "请为当前 provider 设置兼容的 base_url，然后运行 /model doctor 复查。",
         recoverable: true,
       });
     }

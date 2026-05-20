@@ -794,13 +794,13 @@ export function createCacheState(
   mcpToolList: McpToolState[] = [],
 ): CacheState {
   const freshness = createCacheFreshness({
-    systemPrompt: "Linghun Phase 14 skills/workflow engineering assistant",
+    systemPrompt: "Linghun interactive terminal with local extensions and workflows",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
     provider: "deepseek",
     projectRules: "local CLAUDE.md rules loaded by harness",
-    memory: "Phase 14 memory/handoff not loaded yet",
+    memory: "memory/handoff context not loaded yet",
     compact: "not compacted",
     plugins: [],
   });
@@ -1644,7 +1644,7 @@ function formatFeaturePolicy(context: TuiContext): string {
 
 function formatSkills(context: TuiContext): string {
   const lines = [
-    "Skills（Phase 14，summary-first / load-on-demand）",
+    "Skills（summary-first / load-on-demand）",
     `- projectDir: ${context.skills.projectDir}`,
     `- userDir: ${context.skills.userDir}`,
     `- enabled: ${context.skills.enabled ? "yes" : "no"}`,
@@ -1669,7 +1669,7 @@ function formatSkills(context: TuiContext): string {
 
 function formatWorkflows(context: TuiContext): string {
   return [
-    "Workflows（Phase 14，本地模板，启动前必须 Start Gate）",
+    "Workflows（本地模板，启动前必须 Start Gate）",
     ...context.workflows.templates.map(
       (item) =>
         `- ${item.id}: purpose=${item.purpose} risk=${item.risk} writesFiles=${item.writesFiles ? "yes" : "no"} validation=${item.recommendedValidation.join(" | ")}`,
@@ -1680,7 +1680,7 @@ function formatWorkflows(context: TuiContext): string {
 
 function formatPlugins(context: TuiContext): string {
   const lines = [
-    "Plugins（Phase 14，本地 manifest loader）",
+    "Plugins（本地 manifest loader）",
     `- projectDir: ${context.plugins.projectDir}`,
     `- userDir: ${context.plugins.userDir}`,
     `- enabled: ${context.plugins.enabled ? "yes" : "no"}`,
@@ -1737,7 +1737,7 @@ function formatHooksDoctor(context: TuiContext): string {
     );
   }
   lines.push(
-    "- boundary: Phase 14 hardening 只诊断 hook 边界，不执行完整 hook 脚本；hook 不能绕过权限系统；失败隔离；显示输出按 outputLimitBytes 截断，完整输出只能写 logPath。",
+    "- boundary: hook 诊断只检查来源、边界和可见状态，不执行完整 hook 脚本；hook 不能绕过权限系统；失败隔离；显示输出按 outputLimitBytes 截断，完整输出只能写 logPath。",
   );
   return lines.join("\n");
 }
@@ -2019,7 +2019,7 @@ function formatModelRouteSummary(context: TuiContext): string {
 
 function formatModelRoutes(context: TuiContext): string {
   return [
-    "Model routes（Phase 13，多模型按角色触发，不默认乱开）",
+    "Model routes（多模型按角色触发，不默认乱开）",
     ...context.config.modelRoutes.routes.map((route) =>
       [
         `- ${route.role}: provider=${route.provider || "未配置"}`,
@@ -3747,20 +3747,20 @@ function createHandoffPacket(
     sessionId,
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
-    currentPhase: "Phase 15 pre-Beta readiness evidence gate",
+    currentPhase: "Runtime readiness evidence guard",
     nextPhase:
-      "Phase 15 real-project beta（blocked until explicit user confirmation and real TUI/provider evidence）",
+      "Real-project Beta（blocked until explicit user confirmation and real TUI/provider evidence）",
     phaseStatus: "blocked",
-    goal: "Phase 15 pre-Beta 只关闭 readiness / verdict 结论层 evidence gate；不进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。",
+    goal: "只关闭 readiness / verdict 结论层 evidence guard；不进入 Beta 或后续路线图阶段。",
     completed: [
-      "Phase 15 runtime silent-failure gate is PASS for the tested runtime path",
+      "runtime silent-failure guard is PASS for the tested runtime path",
       "live provider basic text smoke is PASS for the temporary-env smoke only",
       "verdict/readiness claims now require explicit scope, evidence, validation, uncovered paths, and risk",
     ],
     pending: createHandoffPendingItems(context.evidence),
     mustNotDo: [
-      "不要进入 Phase 15 Beta，除非用户明确确认且 Beta readiness evidence gate 通过",
-      "不要进入 Phase 15.5 或 Phase 16+",
+      "不要进入 Beta，除非用户明确确认且 Beta readiness evidence guard 通过",
+      "不要进入后续路线图阶段",
       "不要把 focused PASS、mock PASS、live text PASS、SKIPPED smoke 或 PARTIAL path 写成整体 ready",
       "不要把 Linghun 写成等于 CCB / 成熟工具，除非附 scope/evidence/validation/uncovered/risk",
       "不要复制 CCB / Claude Code / OpenCode 源码、内部 API 或专有实现",
@@ -3777,7 +3777,7 @@ function createHandoffPacket(
     ],
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
-    verdictEvidence: createPhase15BetaVerdictScope(context.evidence),
+    verdictEvidence: createPhase15BetaVerdictScope(context.evidence, transcript),
     verification: context.lastVerification ?? null,
     risks: context.lastVerification
       ? context.lastVerification.risk
@@ -3796,7 +3796,7 @@ function createHandoffPacket(
     budgetUsage:
       "local validation only; no external provider calls; status bar does not show money",
     createdAt: new Date().toISOString(),
-    generatedBy: "Linghun Phase 14 HandoffPacket",
+    generatedBy: "Linghun HandoffPacket",
     solutionCompleteness: context.solutionCompleteness,
   };
 }
@@ -4716,6 +4716,10 @@ async function runCodebaseMemoryCli(
   cwd: string,
   timeoutMs = 30_000,
 ): Promise<{ ok: true; data: unknown } | { ok: false; summary: string; errorCode?: string }> {
+  const guard = validateCodebaseMemoryToolExecution(tool, input);
+  if (!guard.ok) {
+    return { ok: false, summary: guard.summary };
+  }
   const command = getCodebaseMemoryCommand(context);
   const result = await runCommandCapture(
     command,
@@ -4737,6 +4741,40 @@ async function runCodebaseMemoryCli(
   } catch (error) {
     return { ok: false, summary: `无法解析 codebase-memory-mcp 输出：${formatError(error)}` };
   }
+}
+
+export function validateCodebaseMemoryToolExecution(
+  tool: string,
+  input: Record<string, unknown>,
+): { ok: true } | { ok: false; summary: string } {
+  const requiredArgs: Record<string, string[]> = {
+    list_projects: [],
+    index_status: ["project"],
+    detect_changes: ["project"],
+    index_repository: ["repo_path"],
+    search_code: ["project", "pattern"],
+    get_architecture: ["project"],
+    get_code_snippet: ["project", "qualified_name"],
+    query_graph: ["project", "query"],
+    trace_path: ["project", "from", "to"],
+    search_graph: ["project", "query"],
+  };
+  if (!(tool in requiredArgs)) {
+    return {
+      ok: false,
+      summary: `MCP deferred tool guard: ${tool} 尚未经过 discovery/schema 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现的工具入口。`,
+    };
+  }
+  const missing = requiredArgs[tool]?.filter(
+    (key) => input[key] === undefined || input[key] === null || input[key] === "",
+  );
+  if (missing && missing.length > 0) {
+    return {
+      ok: false,
+      summary: `MCP deferred tool guard: ${tool} 缺少 required args：${missing.join(", ")}。已拒绝盲执行。`,
+    };
+  }
+  return { ok: true };
 }
 
 async function runCommandCapture(
@@ -4837,9 +4875,7 @@ function trimCacheHistory(cache: CacheState): void {
 function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
-      context.language === "en-US"
-        ? "Linghun Phase 14 EN system prompt"
-        : "Linghun Phase 14 ZH system prompt",
+      context.language === "en-US" ? "Linghun EN system prompt" : "Linghun ZH system prompt",
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(context.mcp.tools),
     model: context.model,
@@ -5345,7 +5381,7 @@ async function handleVisionCommand(
     source: "image",
     provider: route.provider,
     model: route.primaryModel,
-    summary: `Phase 13 minimal vision observation recorded for ${sourcePath}.`,
+    summary: `Vision observation metadata recorded for ${sourcePath}.`,
     extractedText: [],
     uiRegions: [],
     suspectedFiles: [],
@@ -5416,7 +5452,7 @@ async function handleImageCommand(
         prompt,
         provider: route.provider,
         model: route.primaryModel,
-        note: "Phase 13 minimal async image result metadata; no size/quality/format was fixed unless user specified it.",
+        note: "Image result metadata recorded; no size/quality/format was fixed unless user specified it.",
       },
       null,
       2,
@@ -6997,7 +7033,7 @@ function formatSolutionCompletenessReportBlock(context: TuiContext): string {
     `- classification: ${classification}`,
     `- impactAreas: ${impact}`,
     `- severity: ${severity}`,
-    "- phaseBoundary: stay in Phase 15 pre-Beta; do not enter Beta/15.5/16+ automatically.",
+    "- phaseBoundary: stay in the current approved scope; do not enter Beta or later roadmap stages automatically.",
     "- validation: list focused tests/check/typecheck/build/diff-check before claiming closure.",
   ].join("\n");
 }
@@ -7386,7 +7422,7 @@ function updateSolutionCompletenessGate(text: string, context: TuiContext): stri
     `impactAreas=${impactAreas.join(",") || "unknown"}`,
     `severity=${severity}`,
     "必须列出：影响面、P0/P1/P2、阶段边界、验证方式。",
-    "若属于当前阶段外内容，只登记到 Phase 15.5 / Phase 16+ / not-do，不要扩大实现范围。",
+    "若属于当前批准范围外内容，只登记到后续路线图或 not-do，不要扩大实现范围。",
   ].join(" ");
   context.solutionCompleteness = {
     triggered: true,
@@ -7864,7 +7900,7 @@ function formatHelp(language: Language): string {
   /language zh-CN|en-US Switch UI language
   /model                Show current model
   /model doctor         Alias of /model route doctor
-  /model route          Show Phase 13 role model routes
+  /model route          Show role-based model routes
   /model route doctor   Diagnose role provider/model/capability/budget
   /model route set <role> <model>  Set one role route
   /vision <path>        Record VisionObservation evidence through vision role
@@ -7943,7 +7979,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
   /model doctor         等价于 /model route doctor
-  /model route          查看 Phase 13 角色模型路由
+  /model route          查看角色模型路由
   /model route doctor   诊断角色 provider/model/capability/budget
   /model route set <role> <model>  设置单个角色路由
   /vision <path>        通过 vision role 记录 VisionObservation evidence
@@ -8848,51 +8884,70 @@ type ClaimCheck = {
   verdict?: VerdictEvidenceScope;
 };
 
-function hasWriteEvidence(evidence: EvidenceRecord[]): boolean {
-  return evidence.some((item) => item.kind === "command_output" && item.source === "Write");
-}
-
 function createHandoffPendingItems(evidence: EvidenceRecord[]): string[] {
-  if (hasWriteEvidence(evidence)) {
-    return [];
-  }
-  return [
-    "report-generation path lacks Write evidence in this session",
-    "Beta readiness remains PARTIAL until real provider critical paths have PASS evidence",
-  ];
+  return createPhase15BetaVerdictScope(evidence).uncoveredItems;
 }
 
 function createHandoffRiskItems(evidence: EvidenceRecord[]): string[] {
-  if (hasWriteEvidence(evidence)) {
-    return ["mock provider PASS and focused test PASS alone cannot prove full Beta readiness"];
-  }
-  return [
-    "live provider basic text PASS does not cover real TUI report generation",
-    "report-generation path has no tool_use / permission continuation / tool_result evidence",
-  ];
+  return createPhase15BetaVerdictScope(evidence).residualRisks;
 }
 
-function createPhase15BetaVerdictScope(evidence: EvidenceRecord[] = []): VerdictEvidenceScope {
-  const hasReportWriteEvidence = evidence.some(
-    (item) => item.kind === "command_output" && item.source === "Write",
-  );
-  const uncoveredItems: string[] = [];
+function createPhase15BetaVerdictScope(
+  evidence: EvidenceRecord[] = [],
+  transcript: TranscriptEvent[] = [],
+): VerdictEvidenceScope {
+  const requiredEvidence = [
+    {
+      key: "real-tui-report-generation",
+      missing: "real TUI report-generation path lacks PASS evidence",
+      present: hasEvidenceClaim(
+        evidence,
+        /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass/iu,
+      ),
+    },
+    {
+      key: "deepseek-dual-provider-pass",
+      missing: "DeepSeek dual-provider live report evidence is missing",
+      present: hasEvidenceClaim(evidence, /deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass/iu),
+    },
+    {
+      key: "openai-compatible-dual-provider-pass",
+      missing: "OpenAI-compatible dual-provider live report evidence is missing",
+      present: hasEvidenceClaim(
+        evidence,
+        /openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass/iu,
+      ),
+    },
+    {
+      key: "write-evidence",
+      missing: "report Write evidence is missing",
+      present: hasReportWriteEvidence(evidence),
+    },
+    {
+      key: "final-answer-report-reference",
+      missing: "final answer does not reference the generated report",
+      present: hasFinalAnswerReportReference(evidence, transcript),
+    },
+  ];
+  const hasBlockingGate = hasBlockingGateEvidence(evidence, transcript);
+  const uncoveredItems = requiredEvidence
+    .filter((item) => !item.present)
+    .map((item) => item.missing);
   const residualRisks: string[] = [];
-  if (!hasReportWriteEvidence) {
-    uncoveredItems.push(
-      "real TUI report-generation path lacks PASS evidence",
-      "no observed tool_use / permission continuation / tool_result for the report-generation smoke",
-    );
+  if (uncoveredItems.length > 0) {
     residualRisks.push(
       "live provider basic text PASS is not live provider tool/report PASS",
-      "mock provider PASS and focused test PASS cannot prove Phase 15 Beta readiness",
-      "blocking P1 candidate remains open until the real report-generation path passes",
+      "mock provider PASS and focused test PASS cannot prove Beta readiness",
     );
+  }
+  if (hasBlockingGate) {
+    uncoveredItems.push("blocking gate evidence still contains SKIPPED, PARTIAL, or BLOCKED");
+    residualRisks.push("blocking gate is not fully closed");
   }
   return {
     scope: "beta",
     status: uncoveredItems.length === 0 ? "PASS" : "PARTIAL",
-    evidenceRefs: evidence.map((item) => item.id),
+    evidenceRefs: evidence.filter((item) => isBetaVerdictEvidence(item)).map((item) => item.id),
     validationCommands: [
       "corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts",
       "corepack pnpm test",
@@ -8903,15 +8958,80 @@ function createPhase15BetaVerdictScope(evidence: EvidenceRecord[] = []): Verdict
     ],
     uncoveredItems,
     residualRisks,
-    nextAction: hasReportWriteEvidence
-      ? "Report-generation evidence present. Proceed to Phase 15 Beta readiness review if user confirms."
-      : "Fix or re-smoke the real provider + real TUI report-generation path before any Phase 15 Beta readiness PASS claim.",
+    nextAction:
+      uncoveredItems.length === 0
+        ? "All required Beta readiness evidence is present. User confirmation is still required before Beta."
+        : "Fix or re-smoke the real provider + real TUI report-generation path before any Beta readiness PASS claim.",
   };
 }
 
-function isPhase15BetaReadinessClaim(normalizedClaim: string): boolean {
+function hasEvidenceClaim(evidence: EvidenceRecord[], pattern: RegExp): boolean {
+  return evidence.some((item) =>
+    pattern.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
+  );
+}
+
+function hasReportWriteEvidence(evidence: EvidenceRecord[]): boolean {
+  return evidence.some(
+    (item) =>
+      item.kind === "command_output" &&
+      (item.source === "Write" || item.supportsClaims.includes("Write")) &&
+      /report|报告|\.md\b/iu.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
+  );
+}
+
+function hasFinalAnswerReportReference(
+  evidence: EvidenceRecord[],
+  transcript: TranscriptEvent[],
+): boolean {
+  if (hasEvidenceClaim(evidence, /final answer.*report|最终回答.*报告|reference.*report/iu)) {
+    return true;
+  }
+  return [...transcript]
+    .reverse()
+    .some(
+      (event) =>
+        event.type === "assistant_text_delta" &&
+        /(?:report[\w./\\-]*\.md|报告文件|生成的报告|saved report)/iu.test(event.text),
+    );
+}
+
+function hasBlockingGateEvidence(
+  evidence: EvidenceRecord[],
+  transcript: TranscriptEvent[],
+): boolean {
+  const blockingStatusPattern =
+    /(?:blocking|阻塞|gate|闸门).{0,80}(?:SKIPPED|PARTIAL|BLOCKED|跳过|部分|阻塞)|(?:SKIPPED|PARTIAL|BLOCKED).{0,80}(?:blocking|阻塞|gate|闸门)/iu;
+  if (hasEvidenceClaim(evidence, blockingStatusPattern)) {
+    return true;
+  }
+  return transcript.some((event) => {
+    if (event.type === "verification_end") {
+      return (
+        event.report.status === "partial" ||
+        event.report.commands.some(
+          (command) => command.status === "partial" || command.status === "skipped",
+        )
+      );
+    }
+    if (event.type === "system_event" || event.type === "assistant_text_delta") {
+      const text = event.type === "system_event" ? event.message : event.text;
+      return blockingStatusPattern.test(text);
+    }
+    return false;
+  });
+}
+
+function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
   return (
-    normalizedClaim.includes("phase 15") &&
+    /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass|deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass|openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass|final answer.*report|最终回答.*报告/iu.test(
+      [item.summary, item.source, ...item.supportsClaims].join(" "),
+    ) || hasReportWriteEvidence([item])
+  );
+}
+
+function isBetaReadinessClaim(normalizedClaim: string): boolean {
+  return (
     normalizedClaim.includes("beta") &&
     (normalizedClaim.includes("ready") ||
       normalizedClaim.includes("readiness") ||
@@ -8924,10 +9044,10 @@ function isPhase15BetaReadinessClaim(normalizedClaim: string): boolean {
 
 function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
   const normalizedClaim = claim.toLowerCase();
-  if (isPhase15BetaReadinessClaim(normalizedClaim)) {
+  if (isBetaReadinessClaim(normalizedClaim)) {
     return {
       status: "needs_disclaimer",
-      unsupportedClaims: ["Phase 15 Beta readiness PASS"],
+      unsupportedClaims: ["Beta readiness PASS"],
       verdict: createPhase15BetaVerdictScope(context.evidence),
     };
   }

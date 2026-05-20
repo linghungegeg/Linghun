@@ -15,10 +15,11 @@ Linghun 的正确定位是：
 - 核心编码能力必须先到位，工具、权限、上下文、缓存、Agent 是底座。
 - 参考 CCB 的行为与交互，不复制可疑源码。
 - 参考 OpenCode 的多模型开放，不牺牲 CCB 的执行体验。
+- 参考 Warp 的现代终端 block/panel、命令发现和 runbook 手感，但不做重 GUI、云同步工作台或为美观增加 prompt 成本。
 - 参考 Hermes 的记忆与技能沉淀，但第一阶段不做后台自治。
 - 保留 CCB Dev Boost 已验证的缓存、索引、MCP 稳定、中文化和成本观测能力。
 - 默认简单，新手可用；高级能力通过 `/features` 和首次向导打开。
-- 先 TUI，后桌面端；但从第一天就把核心引擎和 UI 分离，给桌面端留路。
+- 先 TUI，后桌面端；桌面端只在终端成熟、真实项目实测稳定、核心 API 边界清楚之后再讨论。当前只保持 core/UI 分离，不提前做桌面产品。
 
 ## 1. 设计来源
 
@@ -98,6 +99,7 @@ Linghun 的正确定位是：
 | --- | --- | --- |
 | CCB / Claude Code | 编码工作流、工具闭环、TUI、Plan、Agent、缓存组织 | 可疑源码、内部 API、反编译产物、专有遥测 |
 | OpenCode | 多模型开放、provider 抽象、LSP/插件思路 | 如果执行体验弱于 CCB，不照搬执行层 |
+| Warp | 现代终端 block/panel、Command Palette、workflow/runbook、命令输出可扫读状态 | 云同步 Drive、重 GUI、常驻侧边栏、动画/鼠标重交互、为美观增加模型调用或破坏 cache prefix |
 | Hermes Agent | MEMORY / USER / Skills / 经验固化 | 后台自主演练第一阶段不做 |
 | codebase-memory-mcp | 代码图索引、调用链、架构查询 | 不强制自动全量索引，不让 MCP 崩溃拖垮主程序 |
 | AI Sessions MCP | 跨工具会话检索 | 不承诺全自动接管所有工具上下文 |
@@ -828,6 +830,13 @@ OpenCode 值得吸收：
 - LSP 思路后置吸收，用于更精准的符号理解。
 - 插件生态的开放边界，但不牺牲 CCB 风格执行体验。
 
+Warp 值得吸收：
+
+- 命令和输出按 block 组织，用户能扫到状态、耗时、失败和下一步。
+- Command Palette 的命令发现手感，但 Linghun 只复用 slash command catalog / 自然语言用途查询，不新增第二套命令注册表。
+- workflow / runbook / notebook 的“可复用操作说明”思路，但 Phase 15.5 只做轻量 run block、报告路径和可展开 details，不做云同步工作台。
+- block/panel 必须只消费已有事件、evidence、logPath、fullOutputPath、RuntimeStatus 和 Command Capability Catalog；不得额外调用模型、注入 raw details 或破坏 cache prefix。
+
 Hermes 值得吸收：
 
 - MEMORY / USER 分层记忆。
@@ -1020,10 +1029,10 @@ F:\LinghunProject 或新仓库根目录
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
 | Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight、P0-1 到 P0-6 全量交互硬化、TUI output/report gate 和真实 TUI provider/permission/control-plane smoke，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
-| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate 复检、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、终端 TUI 非阻塞产品细节、release readiness / open-source readiness；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段 |
+| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate 复检、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、参考 Warp/OpenCode/CCB 的轻量 block/panel 终端产品细节、release readiness / open-source readiness；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段 |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 分 17A local durable jobs 与 17B remote channels/adapters；17A 先闭合定时任务、自动会话、handoff 校验、预算/暂停、job report 和单阶段自动工作，Remote Channels 与 IM adapter 默认关闭且不阻塞本地 job 底座 |
-| Phase 18 | 桌面端预留验证 | 终端核心可复用到桌面端，验证 IPC/API 边界；不承担基础 TUI 美化和交互补课 |
+| Phase 18 | 桌面端预留验证 | 终端成熟后再验证核心可复用到桌面端、IPC/API 边界和安全模型；不承诺立即做完整桌面端，不承担基础 TUI 美化和交互补课 |
 
 Phase 17 的 Remote Channels 只作为 17B 能力，必须在 17A 本地 durable jobs 稳定后开启。Remote Channels 优先使用官方或官方团队开源 CLI 作为 adapter，例如飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli。Linghun 只把结构化、脱敏的任务摘要、审批和结果报告交给 CLI，不允许外部 CLI 直接读取完整 transcript、memory、API key、账单或项目源码。CLI 缺失、未登录、权限不足、版本不兼容或输出不可解析时，通道保持关闭，并由 `/remote channels doctor` 给出中文修复建议。Remote Channels 不得引入完整 IM SDK、复杂分布式调度、全自动多阶段推进或第二套 agent runtime。
 
