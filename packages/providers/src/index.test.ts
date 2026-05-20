@@ -1,4 +1,5 @@
 import { LinghunError } from "@linghun/core";
+import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 import { describe, expect, it, vi } from "vitest";
 import {
   DeepSeekProvider,
@@ -11,6 +12,8 @@ import {
   normalizeProviderError,
   parseOpenAiStream,
 } from "./index.js";
+
+const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
 
 describe("DeepSeek model capabilities", () => {
   it("records DeepSeek V4 Flash and V4 Pro 1M limits", () => {
@@ -230,6 +233,93 @@ describe("OpenAI compatible provider", () => {
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
+  });
+
+  it("sends safe Linghun request identity headers without leaking request secrets", async () => {
+    const promptContent = "secret prompt content should stay in body only";
+    const privateBaseUrl = "https://example.com/v1?api_key=private-query-token";
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: privateBaseUrl,
+      apiKey: "sk-test-openai-compatible-secret",
+      model: "gpt-5.5",
+    });
+
+    for await (const _event of provider.stream(
+      { messages: [{ role: "user", content: promptContent }] },
+      new AbortController().signal,
+    )) {
+      // consume stream
+    }
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init).toBeDefined();
+    expect(init?.headers).toMatchObject({
+      "User-Agent": EXPECTED_REQUEST_USER_AGENT,
+      "X-Title": LINGHUN_NAME,
+      "X-OpenRouter-Title": LINGHUN_NAME,
+    });
+    expect(init?.headers).not.toHaveProperty("HTTP-Referer");
+
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer sk-test-openai-compatible-secret");
+    const publicHeadersJson = JSON.stringify({ ...headers, authorization: undefined });
+    expect(publicHeadersJson).toContain(LINGHUN_NAME);
+    expect(publicHeadersJson).not.toContain("sk-");
+    expect(publicHeadersJson).not.toContain("api_key");
+    expect(publicHeadersJson).not.toContain("Bearer sk-test-openai-compatible-secret");
+    expect(publicHeadersJson).not.toContain("F:\\\\Linghun");
+    expect(publicHeadersJson).not.toContain("C:\\\\Users");
+    expect(publicHeadersJson).not.toContain("/workspace/");
+    expect(publicHeadersJson).not.toContain(promptContent);
+    expect(publicHeadersJson).not.toContain("private-query-token");
+  });
+
+  it("sends the same safe identity headers for DeepSeek requests", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new DeepSeekProvider({
+      apiKey: "sk-test-deepseek-secret",
+      model: "deepseek-v4-pro",
+    });
+
+    for await (const _event of provider.stream(
+      { messages: [{ role: "user", content: "do not leak this prompt" }] },
+      new AbortController().signal,
+    )) {
+      // consume stream
+    }
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.headers).toMatchObject({
+      "User-Agent": EXPECTED_REQUEST_USER_AGENT,
+      "X-Title": LINGHUN_NAME,
+      "X-OpenRouter-Title": LINGHUN_NAME,
+    });
+    const headers = init?.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer sk-test-deepseek-secret");
+    expect(JSON.stringify({ ...headers, authorization: undefined })).not.toContain(
+      "sk-test-deepseek-secret",
+    );
   });
 
   it("keeps chat completions profile without reasoning payload for DeepSeek compatibility", () => {

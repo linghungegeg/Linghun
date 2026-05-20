@@ -1,4 +1,5 @@
 import { LinghunError } from "@linghun/core";
+import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 
 export type ModelUsage = {
   inputTokens: number;
@@ -181,6 +182,12 @@ const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 30_000;
+const LINGHUN_REQUEST_PACKAGE_NAME = `@linghun/${LINGHUN_CLI_NAME}`;
+const LINGHUN_REQUEST_IDENTITY_HEADERS = {
+  "User-Agent": `${LINGHUN_NAME}/${LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
+  "X-Title": LINGHUN_NAME,
+  "X-OpenRouter-Title": LINGHUN_NAME,
+};
 
 type OpenAiToolCall = {
   id: string;
@@ -342,6 +349,7 @@ export class OpenAiCompatibleProvider implements Provider {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
           authorization: `Bearer ${this.config.apiKey}`,
         },
         body: JSON.stringify(body),

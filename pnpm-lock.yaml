@@ -63,6 +63,9 @@ importers:
       '@linghun/core':
         specifier: workspace:*
         version: link:../core
+      '@linghun/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/shared: {}
 
