@@ -15,7 +15,7 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 
 - Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口。
 - Phase 15 pre-Beta Full Interaction Maturity Audit 后，Phase 15 Beta 暂停；必须先完成 P0-1~P0-6 全量阻塞修复：完整 tool_use/tool_result 工具闭环、文件智能指代、新手轻引导和默认 `LINGHUN.md` 模板成熟度、EvidenceSummary 入模型、模型流可取消、en-US 关键提示。
-- Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；下一步必须由用户明确确认：启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta；未确认前不得进入 Phase 15 Beta、Phase 15.5 或 Phase 16+。
+- Phase 15 Batch 1/2/3 focused/mock/local verification guard 已通过；Batch 3.5 以最新 Batch 3.5 报告和开发窗口验证结果为准。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED，等待真实 provider + 真实项目 smoke；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke 或 silent-failure ban PASS 推断 Beta PASS。当前唯一下一步：完成 Batch 3.5 收尾后，先完成 Active Docs Source-of-Truth Hardening，再进入真实项目 smoke。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认、bypass/auto/Plan 边界；高风险命令不得自然语言直通；Beta 前还需确保状态查询、doctor 查询、用法询问、动作请求、配置变更和高风险请求不会互相退化。
 - Linghun 的低学习成本原则是渐进披露：默认首屏、状态栏和 `/help` 简洁；完整能力必须通过 `/help all`、`/features`、`/config advanced`、doctor 详情和自然语言用途询问可发现；隐藏高级入口不能降低功能完整性。
