@@ -1472,9 +1472,7 @@ function isNaturalControlPlaneIntent(
   if (["status", "doctor", "usage", "risk", "read"].includes(inquiry)) return true;
   if (id === "read") return classification.projectRulesRead;
   if (id === "index") return classification.indexAction === "safe";
-  return (
-    ["model", "index", "cache", "memory", "mode"].includes(id) && !classification.actionRequest
-  );
+  return ["model", "cache", "memory", "mode"].includes(id) && !classification.actionRequest;
 }
 
 function isFirstBatchStatusCapability(id: string): boolean {

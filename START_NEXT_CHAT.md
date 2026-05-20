@@ -48,7 +48,7 @@
 - Phase 07 工程行为控制闭环已完成。
 - Phase 08 代码自检与验证增强闭环已完成。
 - Phase 09 缓存与成本闭环已完成。
-- Phase 10 MCP 与 codebase-memory 闭环已完成。
+- Phase 10 MCP 与 codebase-memory 外部 CLI 最小闭环已完成；这不代表 codebase-memory 已随 Linghun 内置、固定版本、免安装或达到开源发布成熟度。Bundled codebase-memory Lite 必须作为 Phase 15 Beta 前尾项或 Phase 15.5 开源前 hardening 独立验收。
 - Phase 11 会话交接与记忆闭环已完成。
 - Phase 12 Agent 闭环已完成。
 - Phase 13 多模型协作闭环已完成。

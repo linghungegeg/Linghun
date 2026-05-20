@@ -82,7 +82,7 @@ Linghun 的正确定位是：
 - 并行工具调用指引。
 - 去除不必要云端 MCP 启动延迟。
 - 消息重复渲染修复经验。
-- 内置 codebase-memory-mcp 推荐接入。
+- codebase-memory-mcp 推荐接入；当前 Phase 10 只完成本机 CLI/MCP 最小闭环，随包内置固定版本和免安装体验必须在 Bundled codebase-memory Lite / 开源前 hardening 单独验收。
 - AI sessions 会话历史检索。
 - DeepSeek V4 / V4 Pro 1M 上下文能力表。
 - 缓存破坏定位器。
@@ -1023,13 +1023,13 @@ F:\LinghunProject 或新仓库根目录
 | Phase 07 | 工程行为控制闭环 | 反幻觉、最小改动、方案完整性闸门、基础 i18n、TUI 渲染稳定性、后台状态反馈、checkpoint/rewind、输入队列与中断 |
 | Phase 08 | 代码自检与验证增强闭环 | verifier、验证计划、验证进度、PASS/FAIL/PARTIAL 结果归档、review |
 | Phase 09 | 缓存与成本闭环 | cache history、cache break、`/usage`、`/stats`、轻提示 |
-| Phase 10 | MCP 与 codebase-memory 闭环 | MCP 面板、索引、索引过期提醒、大文件保护 |
+| Phase 10 | MCP 与 codebase-memory 外部 CLI 最小闭环 | MCP 面板、索引、索引过期提醒、大文件保护；不代表 codebase-memory 已随包内置、固定版本或免安装 |
 | Phase 11 | 会话交接与记忆闭环 | `/resume`、`/branch`、`LINGHUN.md`、handoff packet、跨会话导入 |
 | Phase 12 | Agent 闭环 | explorer、worker、verifier、planner、`/fork`、agent transcript |
 | Phase 13 | 多模型协作闭环 | planner/executor/verifier 多角色模型、路由与预算 |
 | Phase 14 | Skills 与工作流闭环 | Skills、Workflows、Hooks、本地 Plugin 底座；主闭环和 hardening 分段交付，不把 GitHub 安装/插件市场塞进主闭环 |
 | Phase 15 | 真实项目测试版 | 先完成 Natural Command Bridge preflight、P0-1 到 P0-6 全量交互硬化、TUI output/report gate 和真实 TUI provider/permission/control-plane smoke，再用真实老项目验证完整开发闭环；命中率是目标观察区间，硬验收是来源、公式、endpoint、诊断和账单/usage 对账 |
-| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI polish 清零与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate 复检、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、参考 Warp/OpenCode/CCB 的轻量 block/panel 终端产品细节、release readiness / open-source readiness；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段；终端开源前 terminal-scope P0/P1/P2 必须清零、降级为 NOT-DO，或证明不属于终端发布范围 |
+| Phase 15.5 | 双模型交叉审查、模型接入成熟度、联网取证成熟度、Bundled codebase-memory Lite、终端 TUI polish 清零与开源前 hardening | GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，并补 Solution Completeness Gate 复检、provider adapter/capability doctor/usage-cache/quota/error/fallback/config、Freshness Gate/web_source evidence、随包 codebase-memory 固定版本/doctor/license 降级、参考 Warp/OpenCode/CCB 的轻量 block/panel 终端产品细节、release readiness / open-source readiness；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段；终端开源前 terminal-scope P0/P1/P2 必须清零、降级为 NOT-DO，或证明不属于终端发布范围 |
 | Phase 16 | 可控学习闭环 | 越用越聪明，但学习内容可审计、可撤销、可关闭 |
 | Phase 17 | 长期托管任务与自动会话 | 分 17A local durable jobs 与 17B remote channels/adapters；17A 先闭合定时任务、自动会话、handoff 校验、预算/暂停、job report 和单阶段自动工作，Remote Channels 与 IM adapter 默认关闭且不阻塞本地 job 底座 |
 | Phase 18 | 桌面端预留验证 | 终端成熟后再验证核心可复用到桌面端、IPC/API 边界和安全模型；不承诺立即做完整桌面端，不承担基础 TUI 美化和交互补课 |

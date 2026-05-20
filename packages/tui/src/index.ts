@@ -4337,6 +4337,7 @@ function formatMcpStatus(context: TuiContext): string {
     `- tools(stable): ${context.mcp.tools.length}`,
     `- lastDoctor: ${context.mcp.lastDoctor ?? "not run"}`,
     ...servers,
+    "- runtime: external MCP server/CLI; codebase-memory is not bundled/internal.",
     "- note: MCP 启动/检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
   ].join("\n");
 }
@@ -4525,7 +4526,9 @@ async function recordIndexEvidence(
 function formatIndexStatus(context: TuiContext): string {
   const suggestion =
     context.index.status === "missing"
-      ? "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
+      ? context.index.error
+        ? "建议：确认 codebase-memory-mcp 可执行，或安装/配置外部 CLI 后重试；普通聊天不受影响。"
+        : "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
       : context.index.status === "stale"
         ? "建议：运行 /index refresh 刷新索引；不会自动重建。"
         : context.index.status === "error"
@@ -4542,6 +4545,7 @@ function formatIndexStatus(context: TuiContext): string {
     `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files=${context.index.safetyRiskyFiles.length}` : "-"}`,
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
+    "- runtime: external codebase-memory-mcp CLI; not bundled/internal indexer.",
     `- ${suggestion}`,
   ].join("\n");
 }
@@ -4580,7 +4584,7 @@ function summarizeIndexResult(tool: "search_code" | "get_architecture", data: un
     const raw = Array.isArray(data.results) ? data.results : [];
     const matches = raw
       .slice(0, 5)
-      .map((item, index) => `- #${index + 1} ${truncateDisplay(stableStringify(item), 180)}`);
+      .map((item, index) => `- #${index + 1} ${summarizeIndexSearchItem(item)}`);
     return [
       "Index search（短摘要，最多 5 条）",
       `- total: ${String(data.total_results ?? raw.length)}`,
@@ -4591,6 +4595,23 @@ function summarizeIndexResult(tool: "search_code" | "get_architecture", data: un
     ].join("\n");
   }
   return `Index result: ${truncateDisplay(stableStringify(data), 500)}`;
+}
+
+function summarizeIndexSearchItem(item: unknown): string {
+  if (!isRecord(item)) {
+    return truncateDisplay(String(item), 120);
+  }
+  const path = String(item.path ?? item.file ?? item.file_path ?? "unknown");
+  const symbol = item.symbol ?? item.name ?? item.qualified_name;
+  const kind = item.kind ?? item.type ?? item.label;
+  const parts = [`path=${truncateDisplay(path, 80)}`];
+  if (symbol !== undefined) {
+    parts.push(`symbol=${truncateDisplay(String(symbol), 60)}`);
+  }
+  if (kind !== undefined) {
+    parts.push(`kind=${truncateDisplay(String(kind), 40)}`);
+  }
+  return parts.join(" ");
 }
 
 function summarizeNamedCounts(value: unknown): string {
@@ -7714,6 +7735,10 @@ function isReportFileWriteRequest(text: string): boolean {
 }
 
 function extractRequestedReportPath(text: string): string | undefined {
+  const quotedMarkdownPath = text.match(/["“”'‘’`]([^"“”'‘’`]+\.md)["“”'‘’`]/iu)?.[1];
+  if (quotedMarkdownPath) {
+    return normalizeReportPath(quotedMarkdownPath.trim());
+  }
   const markdownPath = text.match(
     /(?:^|[\s`"'“”‘’：:，,。；;()（）])([\w./\\-]*report[\w./\\-]*\.md)\b/iu,
   )?.[1];

@@ -128,6 +128,10 @@ async function createMockCodebaseMemoryConfig(
   await writeFile(
     mockPath,
     `const fs = require("node:fs");
+if (process.argv.includes("--version")) {
+  console.log("codebase-memory-mcp mock 0.0.0");
+  process.exit(0);
+}
 const tool = process.argv[3];
 const input = JSON.parse(process.argv[4] || "{}");
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ tool, input }) + "\\n");
@@ -139,6 +143,24 @@ if (tool === "list_projects") {
   console.log(JSON.stringify(${JSON.stringify(changes)}));
 } else if (tool === "index_repository") {
   console.log(JSON.stringify({ ok: true }));
+} else if (tool === "search_code") {
+  console.log(JSON.stringify({
+    total_results: 7,
+    results: [{
+      path: "src/入口.ts",
+      symbol: "main",
+      raw_source: "RAW_SOURCE_HEAD " + "x".repeat(1000) + " RAW_SOURCE_TAIL_SHOULD_NOT_DUMP"
+    }]
+  }));
+} else if (tool === "get_architecture") {
+  console.log(JSON.stringify({
+    project: "test-project",
+    total_nodes: 12,
+    total_edges: 8,
+    node_labels: [{ label: "File", count: 3 }, { label: "Function", count: 9 }],
+    edge_types: [{ type: "CALLS", count: 4 }, { type: "IMPORTS", count: 4 }],
+    graph: "FULL_GRAPH_SHOULD_NOT_DUMP " + "x".repeat(1000)
+  }));
 } else {
   console.error("unexpected tool " + tool);
   process.exit(2);
@@ -1160,6 +1182,82 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("工具 Bash 结果");
   });
 
+  it("summarizes current MCP/index runtime without bundled or raw graph claims", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "/mcp doctor\n/index status\n/index search main\n/index architecture\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("MCP status");
+    expect(output.text).toContain("codebase-memory: configured");
+    expect(output.text).toContain("runtime: external MCP server/CLI");
+    expect(output.text).toContain("runtime: external codebase-memory-mcp CLI");
+    expect(output.text).toContain("Index search（短摘要");
+    expect(output.text).toContain("Index architecture（短摘要）");
+    expect(output.text).toContain("nodes/edges: 12/8");
+    expect(output.text).not.toContain("Bundled codebase-memory Lite");
+    expect(output.text).not.toContain("RAW_SOURCE_TAIL_SHOULD_NOT_DUMP");
+    expect(output.text).not.toContain("FULL_GRAPH_SHOULD_NOT_DUMP");
+    expect(await readMockCalls(callsPath)).toEqual(
+      expect.arrayContaining(["list_projects", "index_status", "search_code", "get_architecture"]),
+    );
+  });
+
+  it("degrades clearly when codebase-memory is missing without blocking normal chat", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "missing-index-chat-model",
+        mcp: {
+          ...defaultConfig.mcp,
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "codebase-memory": { command: "definitely-missing-codebase-memory-mcp" },
+          },
+        },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "missing-index-chat-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch("普通聊天仍然可继续。");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/mcp doctor\n/index status\n普通聊天\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("codebase-memory: missing");
+    expect(output.text).toContain("status: missing");
+    expect(output.text).toContain("确认 codebase-memory-mcp 可执行");
+    expect(output.text).toContain("普通聊天仍然可继续");
+    expect(output.text).toContain("runtime: external codebase-memory-mcp CLI");
+    expect(output.text).not.toContain("bundled 内置");
+  });
+
   it("returns message for real-project Beta ordinary project/deploy/index requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -1670,6 +1768,47 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "requested-report.md"), "utf8")).resolves.toBe(
       "# Requested Report",
     );
+  });
+
+  it("generates Chinese report paths with spaces through Write after permission approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "windows-path-report-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "windows-path-report-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const reportPath = "中文 目录/部署 报告.md";
+    const report = "# 中文报告\n\n- Windows 中文路径与空格路径 smoke。";
+    const requests = mockOpenAiToolFetch(
+      "Write",
+      { path: reportPath, content: report },
+      `已生成 ${reportPath}。`,
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([`请生成报告 "${reportPath}" 在根目录下\nyes\n/exit\n`]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(output.text).toContain("工具已暂停，等待权限边界处理");
+    expect(output.text).toContain("工具 Write 结果：");
+    expect(output.text).toContain(`已生成 ${reportPath}`);
+    await expect(readFile(join(project, reportPath), "utf8")).resolves.toBe(report);
   });
 
   it("generates project analysis report through model tool_call Write after permission approval", async () => {

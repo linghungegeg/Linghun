@@ -243,6 +243,8 @@ describe("Phase 15 Natural Intent Router", () => {
   it.each([
     "帮我分析一下这个是什么项目，要怎么部署，将报告输出在根目录下",
     "分析这个 repo 并写一份报告",
+    "项目有索引，可以先看看索引，再分析这个项目",
+    "请先看索引再分析项目并输出报告",
     "help me understand this project and deploy it",
     "please inspect the code and create a root report",
   ])("leaves ordinary development request to the model loop: %s", (phrase) => {

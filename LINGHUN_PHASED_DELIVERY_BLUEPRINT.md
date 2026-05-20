@@ -1137,6 +1137,8 @@ cancel 取消
 
 让索引和 MCP 真正可用，但不拖垮主程序。
 
+当前口径覆盖说明（2026-05-20）：阶段 10 的 `done` 只覆盖本机 `codebase-memory-mcp` CLI / MCP 配置的最小闭环，不代表 codebase-memory 已随 Linghun 内置、固定版本、免安装、license/NOTICE 或发布成熟。Bundled codebase-memory Lite 必须作为 Phase 15 Beta 前尾项或 Phase 15.5 开源前 hardening 独立验收，不能回填到旧阶段 10 完成口径。
+
 ### 参考
 
 - CCB MCP 客户端：`src/services/mcp`
@@ -1772,6 +1774,8 @@ Phase 15 Pre-Beta Red Flag Sweep 进入后续阶段的登记规则：
 Phase 15.5 还必须补一次 release readiness / open-source readiness 审查，目标是确认项目可以被个人开发者安全安装、配置、排查和回滚，而不是只在作者机器上可用。
 
 Phase 15.5 必须拆出独立的 **MCP / Skills / Plugins Connect Lite** 小阶段。该小阶段只对齐 CCB 的成熟安装与管理闭环：本地/GitHub/URL 来源安装、manifest / SKILL.md 验证、enable/disable/remove/update、trust notice、doctor、来源/commit/权限记录、失败隔离和 discovery-before-execute。它不得扩展成插件市场、技能市场、评分推荐、自动更新、云同步或复杂沙箱；若审查发现需要市场化能力，只登记到后续，不阻塞 Connect Lite。
+
+Phase 15.5 还必须拆出 **Bundled codebase-memory Lite** 小阶段或在 Phase 15 Beta 前尾项单独完成。它只做“用户不用手装索引器”的成熟底座：随包固定版本或受控本地安装、binary path/version doctor、artifact/status doctor、缺失/损坏清晰降级、license/NOTICE、`/index status` 默认 fast/local、`/index status --fresh` 或 `/index check` 才做慢 detect_changes。不得做自研索引引擎、完整 MCP 市场、自动全量重建或后台常驻重索引。
 
 必须检查：
 

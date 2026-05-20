@@ -2217,6 +2217,8 @@ export type McpServerConfig = {
 - AI sessions MCP。
 - web search MCP。
 
+当前口径覆盖说明（2026-05-20）：Phase 10 的 MCP / codebase-memory `done` 只覆盖本机 `codebase-memory-mcp` CLI 的最小闭环。它不代表 Linghun 已经内置 codebase-memory binary、固定随包版本、免安装、license/NOTICE、binary path/version doctor 或缺失/损坏 fallback 矩阵。Bundled codebase-memory Lite 必须在 Phase 15 Beta 前尾项或 Phase 15.5 开源前 hardening 独立验收，不能回填到 Phase 10 旧完成状态。
+
 ## 14. Codebase Index 规格
 
 ```ts
@@ -2241,6 +2243,7 @@ export type IndexHealth = {
 - 用户显式执行 `/index init fast --force` 或 `/index refresh --force` 时才允许继续。
 - 变更超过阈值或 `detect_changes` 发现明显变更时提示刷新。
 - 不自动强制重建。
+- Bundled codebase-memory Lite 验收：Linghun 应能随包固定 codebase-memory 版本或管理受控本地安装；`/index status` 默认走 fast/local artifact 状态，不做慢 `detect_changes`；`/index status --fresh` 或 `/index check` 才执行慢检测；`/index doctor` 显示 binary path、version、artifact path、ready/stale/missing/corrupt 和下一步；缺失或损坏时清晰降级，不影响普通聊天；发布材料包含 license/NOTICE。该验收不得扩展为自研索引引擎或完整 MCP 市场。
 - break-cache 深度诊断（last break 前后 cache read、工具增删、diff 路径等）记录为后续增强，不作为 Phase 10 hardening 实现范围。
 
 ## 15. Memory 规格
