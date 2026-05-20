@@ -16,6 +16,7 @@ import {
   type ModelRole,
   type RoleModelRoute,
   defaultConfig,
+  getProjectSettingsPath,
   loadConfig,
   resolveStoragePaths,
   saveExtensionEnablement,
@@ -1916,7 +1917,7 @@ async function handleModelCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, formatModelRouteDoctor(context));
+    writeLine(output, await formatModelRouteDoctor(context));
     return;
   }
   const runtime = getSelectedModelRuntime(context);
@@ -1946,7 +1947,7 @@ async function handleModelRouteCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, formatModelRouteDoctor(context));
+    writeLine(output, await formatModelRouteDoctor(context));
     return;
   }
   if (action === "set") {
@@ -2037,8 +2038,11 @@ function formatModelRoutes(context: TuiContext): string {
   ].join("\n");
 }
 
-function formatModelRouteDoctor(context: TuiContext): string {
+async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
   const lines = ["Model route doctor"];
+  const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
+    context.projectPath,
+  );
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
     const endpointProfile = provider.endpointProfile ?? "chat_completions";
@@ -2055,9 +2059,17 @@ function formatModelRouteDoctor(context: TuiContext): string {
       provider.baseUrl,
       endpointProfile as EndpointProfile,
     );
+    const keySource = provider.apiKey
+      ? getProviderKeySource(providerId, projectSettingsApiKeyProviders)
+      : undefined;
     lines.push(
-      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
+      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
     );
+    if (keySource === "project-settings") {
+      lines.push(
+        `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或用户级私有配置。`,
+      );
+    }
     if (baseUrlDiagnostic.fullEndpointSuffix) {
       lines.push(
         `    warning: baseUrl 包含完整 endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}；已按 root baseUrl 诊断，最终 endpointPath=${baseUrlDiagnostic.endpointPath}`,
@@ -2104,9 +2116,28 @@ function formatModelRouteDoctor(context: TuiContext): string {
   return lines.join("\n");
 }
 
-function getProviderKeySource(providerId: string): string {
+async function readProjectSettingsApiKeyProviders(projectPath: string): Promise<Set<string>> {
+  try {
+    const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");
+    const parsed = JSON.parse(raw) as { providers?: Record<string, { apiKey?: unknown }> };
+    return new Set(
+      Object.entries(parsed.providers ?? {})
+        .filter(([, provider]) => typeof provider.apiKey === "string" && provider.apiKey.length > 0)
+        .map(([providerId]) => providerId),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function getProviderKeySource(
+  providerId: string,
+  projectSettingsApiKeyProviders: Set<string>,
+): string {
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
-  return process.env[envName] ? `env:${envName}` : ".linghun/settings.json or merged config";
+  if (process.env[envName]) return "env";
+  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
+  return "user-settings";
 }
 
 function maskSecret(secret: string): string {

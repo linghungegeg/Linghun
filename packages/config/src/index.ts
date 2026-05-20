@@ -511,8 +511,24 @@ async function writeConfig(projectPath: string, config: LinghunConfig): Promise<
   const settingsPath = getProjectSettingsPath(projectPath);
   await mkdir(dirname(settingsPath), { recursive: true });
   const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(validateConfig(config), null, 2)}\n`, "utf8");
+  await writeFile(
+    tempPath,
+    `${JSON.stringify(removeSensitiveProjectSettings(validateConfig(config)), null, 2)}\n`,
+    "utf8",
+  );
   await rename(tempPath, settingsPath);
+}
+
+function removeSensitiveProjectSettings(config: LinghunConfig): LinghunConfig {
+  return {
+    ...config,
+    providers: Object.fromEntries(
+      Object.entries(config.providers).map(([providerId, provider]) => {
+        const { apiKey: _apiKey, ...safeProvider } = provider;
+        return [providerId, safeProvider];
+      }),
+    ),
+  };
 }
 
 function validateConfig(config: LinghunConfig): LinghunConfig {

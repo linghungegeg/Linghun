@@ -181,6 +181,48 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Medium");
   });
 
+  it("keeps legacy project apiKey readable but strips apiKey on settings writes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com/v1",
+            apiKey: "sk-project-legacy-secret",
+            model: "deepseek-v4-flash",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const legacy = await loadConfig(project);
+    await saveModelRoute("planner", "deepseek-v4-flash", project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(legacy.providers.deepseek.apiKey).toBe("sk-project-legacy-secret");
+    expect(raw).not.toContain("sk-project-legacy-secret");
+    expect(raw).not.toContain('"apiKey"');
+  });
+
+  it("does not write env apiKey into project settings", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-env-openai-secret");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const { getProjectSettingsPath: envGetProjectSettingsPath, saveModelRoute: envSaveModelRoute } =
+      await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    await envSaveModelRoute("planner", "gpt-5.5", project);
+    const raw = await readFile(envGetProjectSettingsPath(project), "utf8");
+
+    expect(raw).not.toContain("sk-env-openai-secret");
+    expect(raw).not.toContain('"apiKey"');
+  });
+
   it("persists Phase 14 extension enablement and trust", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 

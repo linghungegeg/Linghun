@@ -1,8 +1,12 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCli } from "./cli.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("CLI", () => {
   it("prints the version without help text", async () => {
@@ -61,8 +65,83 @@ describe("CLI", () => {
       expect(switched.stdout).toContain("deepseek-v4-pro");
       expect(switched.stdout).toContain("上下文窗口：1048576");
       expect(switched.stdout).toContain("最大输出：16384");
+      expect(doctor.stdout).toContain("apiKey=missing");
       expect(doctor.stdout).toContain("缺少 api_key");
       expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
+      expect(doctor.exitCode).toBe(0);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("warns when headless model doctor reads apiKey from project settings", async () => {
+    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", undefined);
+    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com/v1",
+            apiKey: "sk-cli-project-secret",
+            model: "deepseek-v4-flash",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const previousCwd = process.cwd();
+
+    try {
+      process.chdir(project);
+      const doctor = await runCli(["/model", "doctor"]);
+
+      expect(doctor.stdout).toContain("apiKey=present source=project-settings");
+      expect(doctor.stdout).toContain("masked=sk-…cret");
+      expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
+      expect(doctor.stdout).toContain("环境变量或用户级私有配置");
+      expect(doctor.stdout).not.toContain("sk-cli-project-secret");
+      expect(doctor.stdout).not.toContain(project);
+      expect(doctor.exitCode).toBe(0);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("shows env source when headless model doctor env apiKey overrides project settings", async () => {
+    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-cli-env-secret");
+    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com/v1",
+            apiKey: "sk-cli-project-overridden-secret",
+            model: "deepseek-v4-flash",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const previousCwd = process.cwd();
+
+    try {
+      process.chdir(project);
+      const doctor = await runCli(["/model", "doctor"]);
+
+      expect(doctor.stdout).toContain("apiKey=present source=env");
+      expect(doctor.stdout).toContain("masked=sk-…cret");
+      expect(doctor.stdout).not.toContain(
+        "WARN: project-settings provider=deepseek contains apiKey",
+      );
+      expect(doctor.stdout).not.toContain("sk-cli-project-overridden-secret");
+      expect(doctor.stdout).not.toContain("sk-cli-env-secret");
+      expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
     } finally {
       process.chdir(previousCwd);

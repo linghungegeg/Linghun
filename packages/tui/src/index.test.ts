@@ -43,6 +43,7 @@ class MemoryOutput extends Writable {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function mockOpenAiTextFetch(finalText = "done"): unknown[] {
@@ -2140,6 +2141,85 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");
     expect(output.text).not.toContain("sk-test-openai-secret");
+  });
+
+  it("warns when doctor reads apiKey from project settings without leaking it", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", undefined);
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-project-doctor-secret",
+            model: "gpt-5.5",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["模型 key 配好了吗\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("apiKey=present source=project-settings");
+    expect(output.text).toContain(
+      "WARN: project-settings provider=openai-compatible contains apiKey",
+    );
+    expect(output.text).toContain("建议保存 apiKey");
+    expect(output.text).toContain("环境变量或用户级私有配置");
+    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).not.toContain("sk-project-doctor-secret");
+    expect(output.text).not.toContain(project);
+    expect(output.text).not.toContain("模型 key 配好了吗");
+  });
+
+  it("shows env source when env apiKey overrides project settings", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-env-doctor-secret");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-project-overridden-secret",
+            model: "openai-compatible-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/model doctor\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("apiKey=present source=env");
+    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).not.toContain(
+      "WARN: project-settings provider=openai-compatible contains apiKey",
+    );
+    expect(output.text).not.toContain("sk-project-overridden-secret");
+    expect(output.text).not.toContain("sk-env-doctor-secret");
+    expect(output.text).not.toContain(project);
+    expect(output.text).not.toContain("/model doctor");
   });
 
   it("pauses openai-compatible routes when model is still unconfirmed", async () => {

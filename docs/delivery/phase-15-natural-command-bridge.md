@@ -475,7 +475,8 @@ Focused tests / TUI smoke 覆盖：
 
 ## 配置项
 
-本阶段不新增持久化配置 schema；为避免自然语言、workflow、agent、plugin 或 hook 静默提权，preflight hardening 仅使用本地显式环境开关：
+本阶段不新增持久化配置 schema；为避免自然语言、workflow、agent、plugin 或 hook 静默提权，preflight hardening 仅使用本地显式环境开关。
+项目级 settings 可保存 provider/model/baseUrl/endpointProfile 等非敏感配置；apiKey 应优先使用 env 或用户级私有配置；项目级 apiKey 仅兼容读取并在 doctor 中警告。
 
 - `LINGHUN_ENABLE_BYPASS=1`：允许用户本地显式切换 `/mode bypass`。未设置时拒绝切换。
 - `LINGHUN_ENABLE_AUTO_PERMISSION=1`：表示本地 auto gate/classifier 已可用，允许 `/mode auto`。未设置时拒绝切换。

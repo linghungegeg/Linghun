@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelInfo } from "@linghun/providers";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
@@ -88,10 +89,8 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {
   const [subcommand, ...rest] = argv;
-  const [{ loadConfig, saveDefaultModel }, { deepSeekModels }] = await Promise.all([
-    import("@linghun/config"),
-    import("@linghun/providers"),
-  ]);
+  const [{ getProjectSettingsPath, loadConfig, saveDefaultModel }, { deepSeekModels }] =
+    await Promise.all([import("@linghun/config"), import("@linghun/providers")]);
   const config = await loadConfig();
   const provider = config.providers.deepseek;
   const modelId = provider.model;
@@ -126,7 +125,14 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
   }
 
   if (subcommand === "doctor") {
+    const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
+      getProjectSettingsPath(process.cwd()),
+    );
+    const keySource = provider.apiKey
+      ? getProviderKeySource("deepseek", projectSettingsApiKeyProviders)
+      : undefined;
     const problems: string[] = [];
+    const warnings: string[] = [];
     if (!provider.baseUrl) {
       problems.push("- 缺少 base_url：请设置 LINGHUN_DEEPSEEK_BASE_URL 或配置 provider.baseUrl。");
     }
@@ -135,12 +141,22 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
         "- 缺少 api_key：请设置 LINGHUN_DEEPSEEK_API_KEY，或在本地配置中填写 api_key。",
       );
     }
-    const header = `模型诊断：${model.id}\nbase_url：${provider.baseUrl ?? "未配置"}\n`;
+    if (keySource === "project-settings") {
+      warnings.push(
+        "WARN: project-settings provider=deepseek contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或用户级私有配置。",
+      );
+    }
+    const apiKeyStatus =
+      provider.apiKey && keySource
+        ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}`
+        : "missing";
+    const header = `模型诊断：${model.id}\nbase_url：${provider.baseUrl ?? "未配置"}\napiKey=${apiKeyStatus}\n`;
+    const warningText = warnings.length > 0 ? `${warnings.join("\n")}\n` : "";
     if (problems.length === 0) {
-      return { stdout: `${header}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
+      return { stdout: `${header}${warningText}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
     }
     return {
-      stdout: `${header}状态：发现 ${problems.length} 个问题。\n${problems.join("\n")}\n建议：修复后重新运行 /model doctor。\n`,
+      stdout: `${header}${warningText}状态：发现 ${problems.length} 个问题。\n${problems.join("\n")}\n建议：修复后重新运行 /model doctor。\n`,
       stderr: "",
       exitCode: 0,
     };
@@ -157,6 +173,35 @@ function formatModelInfo(
 ): string {
   const model = models.find((item) => item.id === modelId) ?? models[0];
   return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ?? "未配置"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
+}
+
+async function readProjectSettingsApiKeyProviders(settingsPath: string): Promise<Set<string>> {
+  try {
+    const raw = await readFile(settingsPath, "utf8");
+    const parsed = JSON.parse(raw) as { providers?: Record<string, { apiKey?: unknown }> };
+    return new Set(
+      Object.entries(parsed.providers ?? {})
+        .filter(([, provider]) => typeof provider.apiKey === "string" && provider.apiKey.length > 0)
+        .map(([providerId]) => providerId),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function getProviderKeySource(
+  providerId: string,
+  projectSettingsApiKeyProviders: Set<string>,
+): string {
+  const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+  if (process.env[envName]) return "env";
+  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
+  return "user-settings";
+}
+
+function maskSecret(secret: string): string {
+  if (secret.length <= 8) return "****";
+  return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
 async function runSessionsCommand(argv: string[]): Promise<CliResult> {
