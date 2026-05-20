@@ -42,7 +42,7 @@ Slash 兼容：
   ${LINGHUN_CLI_NAME} /model doctor
 
 说明：
-  交互式终端提供 Natural Command Bridge：普通中英文输入先经 Command Capability Catalog 与本地风险裁决。
+  交互式终端中普通中英文输入默认进入模型/工具链路；slash 命令和确认等结构化入口走本地前置。
   本地扩展系统提供 skills/workflows/hooks/plugins loader、doctor、启停、信任和权限边界。
   --version / --help 快速路径不会加载 TUI、模型、MCP、索引、验证器、插件或 cache 统计系统。
 

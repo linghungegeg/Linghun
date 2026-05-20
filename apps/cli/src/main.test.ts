@@ -32,6 +32,8 @@ describe("CLI", () => {
     expect(result.stdout).toContain("/workflows <name>");
     expect(result.stdout).toContain("/plugins doctor");
     expect(result.stdout).toContain("/doctor hooks");
+    expect(result.stdout).toContain("普通中英文输入默认进入模型/工具链路");
+    expect(result.stdout).not.toContain("普通中英文输入先经 Command Capability Catalog");
     expect(result.exitCode).toBe(0);
   });
 

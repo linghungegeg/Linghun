@@ -827,9 +827,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥--");
   });
 
-  it("handles natural model status as readonly status output", async () => {
+  it("sends ordinary natural model-status wording to the model loop", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "status-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "status-model",
+          },
+        },
+      }),
+      "utf8",
+    );
     const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch("当前模型信息应由模型主链路回答。");
 
     await runTui({
       projectPath: project,
@@ -838,12 +855,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
-    expect(output.text).toContain("endpointProfile=chat_completions");
-    expect(output.text).toContain("角色路由摘要");
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("当前模型信息应由模型主链路回答");
     expect(output.text).not.toContain("Start Gate：");
     expect(output.text).not.toContain("Model routes（多模型按角色触发");
-    expect(output.text).not.toContain("/model route 查看");
   });
 
   it("uses executor route for status, model output, doctor, and ordinary requests", async () => {
@@ -882,7 +898,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["现在是什么模型\n/model doctor\n写一个简短计划\n/exit\n"]),
+      stdin: Readable.from(["/model\n/model doctor\n写一个简短计划\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -971,20 +987,40 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
-  it("keeps exact Start Gate confirmation strict until the exact command is typed", async () => {
+  it("keeps exact Start Gate confirmation strict when a gate is pending", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
     const output = new MemoryOutput();
+    context.pendingNaturalCommand = {
+      gateId: "ng-test",
+      capabilityId: "index",
+      source: "natural",
+      exactCommand: "/index refresh --confirm-rebuild",
+      command: "/index refresh --confirm-rebuild",
+      risk: "start_gate",
+      scope: "index refresh",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: true,
+    };
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from([
-        "/index init fast\nforce rebuild the index\n把这些大文件忽略掉再刷新索引\n确认\nyes\n/exit\n",
-      ]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+    await handleNaturalInput("把这些大文件忽略掉再刷新索引", context, output);
+    context.pendingNaturalCommand = {
+      gateId: "ng-test",
+      capabilityId: "index",
+      source: "natural",
+      exactCommand: "/index refresh --confirm-rebuild",
+      command: "/index refresh --confirm-rebuild",
+      risk: "start_gate",
+      scope: "index refresh",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: true,
+    };
+    await handleNaturalInput("确认", context, output);
 
-    expect(output.text).toContain("- Exact command: /index refresh --confirm-rebuild");
     expect(output.text).toContain(
       "需要精确确认：请输入 /index refresh --confirm-rebuild。这条输入未执行。",
     );
@@ -999,7 +1035,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("permissionPipeline");
   });
 
-  it("covers Phase 15 pre-Beta natural readonly and action smoke inputs", async () => {
+  it("keeps slash control-plane paths and direct file reads outside ordinary catalog routing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "LINGHUN.md"), "# 项目规则\n\n- 只做最小必要改动。", "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -1011,23 +1047,14 @@ describe("Phase 06 TUI slash commands", () => {
     await runTui({
       projectPath: project,
       stdin: Readable.from([
-        "当前是什么模型\n",
-        "你现在用的哪个模型\n",
-        "模型 key 配好了吗\n",
-        "帮我给这个项目建立索引\n",
-        "索引已经建立了是吧\n",
-        "索引状态怎么样\n",
-        "项目规则是什么\n",
-        "本仓库规则是什么\n",
+        "/model\n",
+        "/model doctor\n",
+        "/index init fast\n",
+        "/index status\n",
         "读一下 LINGHUN.md\n",
         "看看这个文件\n",
-        "缓存状态怎么样\n",
-        "自动记忆是否打开\n",
-        "/model\n",
-        "/index status\n",
+        "/cache status\n",
         "/memory\n",
-        "直接 npm install\n",
-        "开启 bypass\n",
         "/exit\n",
       ]),
       stdout: output,
@@ -1041,13 +1068,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("索引初始化完成");
     expect(output.text).not.toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
-    expect(output.text).toContain("项目规则：");
     expect(output.text).toContain("只做最小必要改动");
     expect(output.text.match(/工具 Read 结果/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
     expect(output.text).toContain("Cache status");
     expect(output.text).toContain("Memory status");
-    expect(output.text).toContain("已阻止自然语言直通：Shell 命令");
-    expect(output.text).toContain("已阻止自然语言直通：权限模式");
     expect(output.text).not.toContain("I can prepare this action");
     expect(output.text).not.toContain("gateId");
     expect(output.text).not.toContain("expiresAt");
@@ -1058,9 +1082,26 @@ describe("Phase 06 TUI slash commands", () => {
     ).toHaveLength(1);
   });
 
-  it("handles MCP index enablement as local control-plane guidance without model or Bash", async () => {
+  it("sends ordinary MCP/index enablement wording to the model loop", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "mcp-request-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "mcp-request-model",
+          },
+        },
+      }),
+      "utf8",
+    );
     const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch("我会通过主模型链路解释索引能力。");
 
     await runTui({
       projectPath: project,
@@ -1069,10 +1110,75 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("/index：代码索引");
-    expect(output.text).toContain("自然语言桥：可解释/可进入安全路径");
-    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("我会通过主模型链路解释索引能力");
+    expect(output.text).not.toContain("/index：代码索引");
     expect(output.text).not.toContain("工具 Bash 结果");
+  });
+
+  it("returns message for real-project Beta ordinary project/deploy/index requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await expect(
+      handleNaturalInput(
+        "帮我看看这是什么项目 该怎么部署 把报告更新在根目录下 有索引 优先使用索引",
+        context,
+        output,
+      ),
+    ).resolves.toBe("message");
+    await expect(
+      handleNaturalInput("分析这个项目并输出部署报告，优先使用索引", context, output),
+    ).resolves.toBe("message");
+    await expect(
+      handleNaturalInput(
+        "use the index if available and tell me how to deploy this project",
+        context,
+        output,
+      ),
+    ).resolves.toBe("message");
+    expect(output.text).not.toContain("/index：代码索引");
+  });
+
+  it("sends real-project Beta deploy/index stdin smoke input to provider path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "beta-smoke-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "beta-smoke-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiTextFetch("我会先按模型主链路分析项目部署。");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我看看这是什么项目 该怎么部署 把报告更新在根目录下 有索引 优先使用索引\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("我会先按模型主链路分析项目部署");
+    expect(output.text).not.toContain("/index：代码索引");
   });
 
   it("answers composite Chinese and English readiness locally", async () => {
@@ -1673,7 +1779,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("重试命令：/index refresh");
   });
 
-  it("preserves same-turn composite index repair intent after safety blocker", async () => {
+  it("continues index safety repair after an active safety blocker", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -1683,6 +1789,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
 
+    await handleSlashCommand("/index refresh", context, output);
     await handleNaturalInput("帮我排除大文件更新索引", context, output);
     await handleNaturalInput("确认", context, output);
 
@@ -1947,18 +2054,19 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).not.toContain("bash line 50");
   });
 
-  it("does not generate LINGHUN.md when natural project-rules read is missing", async () => {
+  it("does not generate LINGHUN.md when direct project-rules file read is missing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["项目规则是什么\n/exit\n"]),
+      stdin: Readable.from(["读一下 LINGHUN.md\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("项目规则文件不存在");
+    expect(output.text).toContain("ENOENT");
+    expect(output.text).toContain("LINGHUN.md");
     expect(output.text).toContain("/memory init");
     expect(output.text).not.toContain("已生成基础 LINGHUN.md");
     await expect(readFile(join(project, "LINGHUN.md"), "utf8")).rejects.toThrow();
@@ -2017,7 +2125,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).not.toContain("api_key=private");
   });
 
-  it("handles natural model doctor without leaking API keys", async () => {
+  it("handles slash model doctor without leaking API keys", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -2040,7 +2148,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["模型 key 配好了吗\n/exit\n"]),
+      stdin: Readable.from(["/model doctor\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -2270,7 +2378,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["模型 key 配好了吗\n/exit\n"]),
+      stdin: Readable.from(["/model doctor\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });

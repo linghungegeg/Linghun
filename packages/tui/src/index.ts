@@ -60,14 +60,8 @@ import {
   type SLASH_COMMAND_REGISTRY,
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
-  createPendingNaturalCommand,
-  formatCapabilityAnswer,
-  formatNaturalClarification,
-  formatNaturalPermissionBlock,
-  formatNaturalStartGate,
   getCommandCapabilityCatalog,
   matchesNaturalGateConfirmation,
-  routeNaturalIntent,
 } from "./natural-command-bridge.js";
 import {
   formatLocalToolPermissionPrompt,
@@ -6220,7 +6214,6 @@ export async function handleNaturalInput(
     return "handled";
   }
 
-  const intent = routeNaturalIntent(text, context.language);
   const fileRead = await resolveNaturalFileRead(text, context);
   if (fileRead.status === "resolved") {
     await handleToolCommand("Read", [fileRead.path], context, output);
@@ -6231,46 +6224,6 @@ export async function handleNaturalInput(
     return "handled";
   }
 
-  if (intent.action === "model") {
-    return "message";
-  }
-  if (intent.action === "ask_clarify") {
-    writeLine(output, formatNaturalClarification(intent));
-    return "handled";
-  }
-  if (!intent.capability) {
-    return "message";
-  }
-  if (intent.action === "answer") {
-    writeLine(output, formatCapabilityAnswer(intent));
-    return "handled";
-  }
-  if (["execute_readonly", "safe_local_action"].includes(intent.action) && intent.command) {
-    if (intent.inquiry === "read" && intent.command === "/read LINGHUN.md") {
-      writeLine(output, await formatProjectRulesRead(context));
-      return "handled";
-    }
-    const result = await handleSlashCommand(intent.command, context, output);
-    if (intent.capability.id === "index" && result !== "message") {
-      const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
-      if (indexRepair === "handled") {
-        return "handled";
-      }
-    }
-    return result === "message" ? "message" : "handled";
-  }
-  if (intent.action === "permission_pipeline") {
-    writeLine(output, formatNaturalPermissionBlock(intent));
-    return "handled";
-  }
-  if (intent.action === "start_gate" && intent.command) {
-    const gate = createPendingNaturalCommand(intent, context);
-    if (!gate) return "message";
-    context.pendingNaturalCommand = gate;
-    writeLine(output, formatNaturalStartGate(intent, context, gate));
-    writeStatus(output, context);
-    return "handled";
-  }
   return "message";
 }
 
