@@ -910,7 +910,7 @@ describe("Phase 06 TUI slash commands", () => {
       "模型=deepseek-v4-pro endpointProfile=chat_completions 推理=未生效",
     );
     expect(output.text).toContain(
-      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not sent",
+      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not configured/未生效",
     );
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");
@@ -919,6 +919,49 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
     expect(requests[0]).toMatchObject({ model: "deepseek-v4-pro" });
     expect(output.text).not.toContain("source=user-settings");
+  });
+
+  it("marks strict chat reasoning ignored before ordinary model requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://example.invalid/v1",
+            apiKey: "sk-test-openai-compatible-secret",
+            model: "gpt-5.5",
+            endpointProfile: "chat_completions",
+            reasoningLevel: "Medium",
+          },
+        },
+        modelRoutes: {
+          routes: [{ role: "executor", provider: "openai-compatible", primaryModel: "gpt-5.5" }],
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("ok");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/model doctor\n普通开发请求\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests[0]).not.toHaveProperty("reasoning");
+    expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).toContain(
+      "reasoning=ignored/unsupported/未生效 compatibilityProfile=strict_openai_compatible",
+    );
+    expect(output.text).toContain(
+      "状态：正在请求模型 provider=openai-compatible model=gpt-5.5 endpointProfile=chat_completions reasoning=ignored/unsupported/未生效",
+    );
+    expect(output.text).not.toContain("sk-test-openai-compatible-secret");
   });
 
   it("records selected runtime profile before ordinary model requests", async () => {
@@ -968,7 +1011,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
     expect(JSON.stringify(requests[0])).toContain('"tools":[{"type":"function","name":"Read"');
     expect(output.text).toContain(
-      "状态：正在请求模型 provider=openai-compatible model=gpt-5.5 endpointProfile=responses reasoning=Medium",
+      "状态：正在请求模型 provider=openai-compatible model=gpt-5.5 endpointProfile=responses reasoning=effective/sent Medium",
     );
     expect(output.text).not.toContain("baseUrl=");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
@@ -1676,6 +1719,12 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(2);
+    const firstRequest = requests[0] as {
+      tools?: Array<{ name?: string; function?: { name?: string } }>;
+    };
+    const toolNames = firstRequest.tools?.map((tool) => tool.name ?? tool.function?.name);
+    expect(toolNames).toContain("Write");
+    expect(toolNames).not.toContain("Bash");
     expect(output.text).toContain("状态：正在请求模型");
     expect(output.text).toContain("工具已暂停，等待权限边界处理");
     expect(output.text).toContain("- 工具：Write");
@@ -2134,7 +2183,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(layered.preview).not.toContain("line 90");
   });
 
-  it("truncates long Todo, Grep, Glob, and Read outputs in the main output", async () => {
+  it("keeps Read, Grep, and Glob primary output summary-first without raw result floods", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, "src"), { recursive: true });
     await writeFile(
@@ -2158,9 +2207,13 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/glob *.txt src", context, output);
 
     expect(output.text).toContain("主输出已隐藏 2 条 Todo");
-    expect(output.text).toContain("主输出已截断");
+    expect(output.text).toContain("主屏为 summary-first");
+    expect(output.text).toContain("行数=120");
+    expect(output.text).toContain("数量=90");
     expect(output.text).toContain("完整结果仍保留在 tool_result transcript/evidence 记录中");
+    expect(output.text).not.toContain("1\tline 1");
     expect(output.text).not.toContain("120\tline 120");
+    expect(output.text).not.toContain("needle 0");
     expect(output.text).not.toContain("match-89.txt");
   });
 
@@ -2179,10 +2232,29 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(formatted).toContain("Tool Bash result:");
-    expect(formatted).toContain("output truncated in main view");
+    expect(formatted).toContain("lines=50");
+    expect(formatted).toContain("truncated=no");
+    expect(formatted).toContain("Primary output is summary-first");
     expect(formatted).toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).toContain("Evidence: ev-bash-1");
+    expect(formatted).not.toContain("bash line 1");
     expect(formatted).not.toContain("bash line 50");
+  });
+
+  it("summarizes possible Windows Bash mojibake without dumping garbled stdout", () => {
+    const formatted = formatToolOutput(
+      "Bash",
+      {
+        text: "Ã¤Â¸Â­Ã¦Â–Â‡ output should stay out of primary",
+        fullOutputPath: ".linghun/logs/tools/bash-mojibake.log",
+        data: { exitCode: 0 },
+      },
+      "zh-CN",
+    );
+
+    expect(formatted).toContain("编码=疑似乱码");
+    expect(formatted).toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
+    expect(formatted).not.toContain("Ã¤Â¸Â­Ã¦Â–Â‡");
   });
 
   it("does not generate LINGHUN.md when direct project-rules file read is missing", async () => {
@@ -3703,7 +3775,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("摘要");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
     expect(output.text).toContain("工具 Bash 结果：");
-    expect(output.text).toContain("主输出已截断");
+    expect(output.text).toContain("主屏为 summary-first");
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");

@@ -15,10 +15,6 @@ export type LayeredToolOutput = {
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
-const TOOL_OUTPUT_LINE_LIMIT = 80;
-const TOOL_OUTPUT_CHAR_LIMIT = 6_000;
-const BASH_OUTPUT_LINE_LIMIT = 20;
-const BASH_OUTPUT_CHAR_LIMIT = 2_000;
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -26,7 +22,7 @@ export function createLayeredToolOutput(
   language: Language,
   evidenceId?: string,
 ): LayeredToolOutput {
-  const preview = createToolOutputPreview(name, output.preview ?? output.text, language);
+  const preview = createToolOutputPreview(name, output.preview ?? output.text, language, output);
   const truncated = Boolean(preview.truncated || output.truncated);
   return {
     layer: "primary",
@@ -50,8 +46,17 @@ export function formatToolOutput(
   const lines = [
     language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
     `- ${language === "en-US" ? "summary" : "摘要"}: ${layered.summary}`,
-    layered.preview,
   ];
+  if (layered.preview) {
+    lines.push(layered.preview);
+  }
+  if (layered.details) {
+    lines.push(
+      language === "en-US"
+        ? "Details: available outside primary output."
+        : "详情：可在 primary output 之外查看。",
+    );
+  }
   if (layered.truncated) {
     lines.push(
       layered.fullOutputPath
@@ -84,7 +89,12 @@ function createToolOutputPreview(
   name: ToolName,
   text: string,
   language: Language,
+  output?: ToolOutput,
 ): { text: string; truncated: boolean } {
+  if (isSummaryFirstTool(name)) {
+    return createSummaryFirstPreview(name, text, language, output);
+  }
+
   if (name === "Todo") {
     const lines = text.split(/\r?\n/u);
     if (lines.length <= TODO_OUTPUT_ITEM_LIMIT) {
@@ -102,38 +112,56 @@ function createToolOutputPreview(
     };
   }
 
-  if (name === "Bash") {
-    return truncatePreview(text, BASH_OUTPUT_LINE_LIMIT, BASH_OUTPUT_CHAR_LIMIT, language);
-  }
-
-  if (name !== "Read" && name !== "Grep" && name !== "Glob") {
-    return { text, truncated: false };
-  }
-
-  return truncatePreview(text, TOOL_OUTPUT_LINE_LIMIT, TOOL_OUTPUT_CHAR_LIMIT, language);
+  return { text, truncated: false };
 }
 
-function truncatePreview(
-  text: string,
-  lineLimit: number,
-  charLimit: number,
-  language: Language,
-): { text: string; truncated: boolean } {
-  const lines = text.split(/\r?\n/u);
-  const byLine = lines.length > lineLimit;
-  const byChar = text.length > charLimit;
-  if (!byLine && !byChar) {
-    return { text, truncated: false };
-  }
+function isSummaryFirstTool(name: ToolName): boolean {
+  return name === "Read" || name === "Glob" || name === "Grep" || name === "Bash";
+}
 
-  let preview = lines.slice(0, lineLimit).join("\n");
-  if (preview.length > charLimit) {
-    preview = preview.slice(0, charLimit);
-  }
-  const hiddenLines = Math.max(0, lines.length - preview.split(/\r?\n/u).length);
-  const suffix =
+function createSummaryFirstPreview(
+  name: ToolName,
+  text: string,
+  language: Language,
+  output?: ToolOutput,
+): { text: string; truncated: boolean } {
+  const lines = text.length > 0 ? text.split(/\r?\n/u) : [];
+  const metadata = output?.data && typeof output.data === "object" ? output.data : undefined;
+  const count = readNumber(metadata, "count");
+  const dataLines = readNumber(metadata, "lines");
+  const exitCode = readNumber(metadata, "exitCode");
+  const stats = [
     language === "en-US"
-      ? `... output truncated in main view${hiddenLines > 0 ? `; ${hiddenLines} line(s) hidden` : ""}.`
-      : `... 主输出已截断${hiddenLines > 0 ? `，隐藏 ${hiddenLines} 行` : ""}。`;
-  return { text: `${preview}\n${suffix}`, truncated: true };
+      ? `lines=${dataLines ?? lines.length}`
+      : `行数=${dataLines ?? lines.length}`,
+  ];
+  if (count !== undefined) {
+    stats.push(language === "en-US" ? `count=${count}` : `数量=${count}`);
+  }
+  if (name === "Bash" && exitCode !== undefined) {
+    stats.push(`exitCode=${exitCode}`);
+    if (looksLikeMojibake(text)) {
+      stats.push(language === "en-US" ? "encoding=possible-mojibake" : "编码=疑似乱码");
+    }
+  }
+  stats.push(
+    language === "en-US"
+      ? `truncated=${output?.truncated ? "yes" : "no"}`
+      : `截断=${output?.truncated ? "是" : "否"}`,
+  );
+  const hint =
+    language === "en-US"
+      ? "Primary output is summary-first; bounded content remains in tool_result/evidence."
+      : "主屏为 summary-first；bounded 内容仍保留在 tool_result/evidence。";
+  return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
+}
+
+function readNumber(value: object | undefined, key: string): number | undefined {
+  if (!value) return undefined;
+  const item = (value as Record<string, unknown>)[key];
+  return typeof item === "number" ? item : undefined;
+}
+
+function looksLikeMojibake(text: string): boolean {
+  return /(?:�|Ã.|Â.|Ð.|Ñ.|Ž|¤|¦|µ|¥|¡|¿|乱码|mojibake)/u.test(text);
 }

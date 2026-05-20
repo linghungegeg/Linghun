@@ -2315,6 +2315,51 @@ export type HandoffPacket = {
 }
 ```
 
+## 15.6 Compact Lite 规格
+
+阶段归属：Compact Lite 是 Phase 15.5 开源前 hardening 项，不是 Phase 11 返工。它复用 Phase 11 的 `HandoffPacket`、transcript 和 evidence 底座，但实现和验收必须在 Phase 15.5 收口。
+
+Linghun 的上下文压缩优先做成熟、轻量、可追溯的 Compact Lite，不做复杂语义压缩系统。目标是让长会话可继续、少 token、不丢证据，而不是把完整历史重新包装进 prompt。
+
+参考边界：CCB / Claude Code 的成熟行为可抽象为 microcompact、manual `/compact`、compact boundary、post-compact bounded restore 和 session/handoff 恢复。Linghun 只吸收这些行为边界，不复制实现。
+
+```ts
+export type CompactKind = 'micro' | 'manual' | 'auto-suggested'
+
+export type CompactBoundary = {
+  id: string
+  kind: CompactKind
+  createdAt: string
+  preCompactTokenEstimate?: number
+  postCompactTokenEstimate?: number
+  compactedToolResultIds: string[]
+  preservedEvidenceRefs: string[]
+  preservedFiles: string[]
+  handoffPacketId?: string
+}
+```
+
+必须实现或保持的边界：
+
+- `/context` 或等价诊断显示上下文组成短摘要：conversation、tool results、project rules、memory、index、MCP/tools 和 estimated tokens；不调用模型。
+- `/compact` 为手动入口，生成结构化 handoff 风格摘要，并写入 `CompactBoundary`。
+- 接近上下文阈值时只做轻提示建议 `/compact`，不得静默打断当前输入。
+- MicroCompact 只清除旧的大工具结果在模型上下文中的内容，原始结果必须继续保留在 transcript / evidence / fullOutputPath / logPath。
+- 压缩期间禁止工具调用、写文件、Bash、配置修改、联网和权限变更；compact agent 或 summarizer 只能产出摘要。
+- 压缩摘要必须保留目标、已完成、待办、禁止事项、关键文件、证据引用、验证结果、风险、provider/model、permission、index/cache 状态和最新用户裁决。
+- 压缩摘要不得包含 API key、token、完整 prompt、完整 transcript、完整日志、完整 index graph、完整 tool schema、私有 baseUrl query、用户 home path 或项目私有大文件内容。
+- 压缩失败不得丢会话；必须保留原消息和 transcript，并提示用户可重试 `/compact`、生成 handoff，或用 `/clear` 开新会话。
+- 压缩后只恢复 bounded attachments：少量关键文件摘要、必要 skill/plugin metadata、plan/agent 状态和 handoff packet；不得把完整 history 重新塞回上下文。
+- compact 状态进入 cache freshness / break-cache 诊断，但普通请求不应因 compact 增加前台模型调用。
+
+禁止事项：
+
+- 不做每几轮自动模型总结。
+- 不做后台频繁 summarizer 调用。
+- 不做多层复杂语义树或全量记忆重写。
+- 不把完整索引、完整 MCP schema、完整 transcript 或完整 tool result 压回 prompt。
+- 不让模型在 compact 中自行决定执行工具。
+
 要求：
 
 - 长期记忆写入前默认确认。
@@ -2657,6 +2702,7 @@ Phase 15.5 的 TUI 验收必须至少覆盖：
 - decision prompts：Start Gate、权限审批、提权、Plan、acceptEdits、auto、bypass。
 - long-running hints：index、verification、agent、cross-review、build/test。
 - diagnostics：model doctor、MCP doctor、plugin/skill/hook/workflow doctor。
+- editing UX：`Write` / `Edit` / `MultiEdit` 已有工具底座，但 Phase 15.5 开源前必须验收 CCB-grade 编辑体验，包括 read-before-edit、唯一匹配/未找到 oldText 的可操作错误、权限审批 diff preview、成功 changedFiles/patch 摘要、rejected edit 可恢复反馈、stale file / Windows 路径 / 编码换行边界。该项不得因“工具已存在”而跳过。
 - rendering：窄宽度、中文路径、长模型名、长状态栏、连续工具输出和后台刷新。
 
 ## 17.3 Provider integration maturity 规格

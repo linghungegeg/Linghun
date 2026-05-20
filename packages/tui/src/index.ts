@@ -686,11 +686,10 @@ function runtimeFromContinuation(continuation: PendingModelContinuation): Select
     model: continuation.model,
     endpointProfile: continuation.endpointProfile,
     reasoningLevel: continuation.reasoningLevel,
-    reasoningStatus: continuation.reasoningLevel
-      ? continuation.reasoningSent
-        ? continuation.reasoningLevel
-        : "未生效"
-      : "未生效",
+    reasoningStatus: formatReasoningEffectiveState(
+      continuation.reasoningLevel,
+      continuation.reasoningSent,
+    ),
     reasoningSent: continuation.reasoningSent,
   };
 }
@@ -2073,10 +2072,12 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
       (provider.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
     const reasoningLevel = provider.reasoningLevel;
     const reasoningStatus = reasoningLevel
-      ? endpointProfile === "responses" || compatibilityProfile === "permissive_openai_compatible"
-        ? `sent level=${reasoningLevel}`
-        : `not sent compatibilityProfile=${compatibilityProfile}`
-      : "not sent";
+      ? endpointProfile === "responses"
+        ? `effective/sent level=${reasoningLevel}`
+        : compatibilityProfile === "permissive_openai_compatible"
+          ? `effective/sent level=${reasoningLevel}`
+          : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
+      : "not configured/未生效";
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       provider.baseUrl,
       endpointProfile as EndpointProfile,
@@ -2386,9 +2387,19 @@ function getSelectedModelRuntime(
     model,
     endpointProfile,
     reasoningLevel,
-    reasoningStatus: reasoningLevel ? (reasoningSent ? reasoningLevel : "未生效") : "未生效",
+    reasoningStatus: formatReasoningEffectiveState(reasoningLevel, reasoningSent),
     reasoningSent,
   };
+}
+
+function formatReasoningEffectiveState(
+  reasoningLevel: string | undefined,
+  reasoningSent: boolean,
+): string {
+  if (!reasoningLevel) {
+    return "未生效";
+  }
+  return reasoningSent ? `effective/sent ${reasoningLevel}` : "ignored/unsupported/未生效";
 }
 
 function resolveProviderForModel(config: LinghunConfig, model: string): string {
@@ -7133,27 +7144,35 @@ function currentModelSupportsTools(
 }
 
 function createModelToolDefinitions(): ModelToolDefinition[] {
-  return (Object.values(builtInTools) as (typeof builtInTools)[ToolName][]).map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: createToolInputSchema(tool.name),
-  }));
+  return createModelToolDefinitionsForTools(
+    Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
+  );
 }
 
 function createModelToolDefinitionsForReportGuard(
   guard: ReportWriteGuard | undefined,
 ): ModelToolDefinition[] {
-  if (!guard || guard.completed || guard.nonWriteToolRounds < 1) {
+  if (!guard || guard.completed) {
     return createModelToolDefinitions();
   }
-  const writeTool = builtInTools.Write;
-  return [
-    {
-      name: writeTool.name,
-      description: writeTool.description,
-      inputSchema: createToolInputSchema(writeTool.name),
-    },
-  ];
+  if (guard.nonWriteToolRounds < 1) {
+    return createModelToolDefinitionsForTools(
+      (Object.values(builtInTools) as (typeof builtInTools)[ToolName][]).filter(
+        (tool) => tool.name !== "Bash",
+      ),
+    );
+  }
+  return createModelToolDefinitionsForTools([builtInTools.Write]);
+}
+
+function createModelToolDefinitionsForTools(
+  tools: (typeof builtInTools)[ToolName][],
+): ModelToolDefinition[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: createToolInputSchema(tool.name),
+  }));
 }
 
 function createToolInputSchema(name: ToolName): unknown {
@@ -7266,6 +7285,15 @@ async function executeModelToolUse(
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
+  }
+  if (continuation?.reportWriteGuard && toolName === "Bash") {
+    const text =
+      context.language === "en-US"
+        ? "Bash is not available for report file generation; use Write/Edit so shell output cannot pollute the report body."
+        : "报告文件生成不开放 Bash；请使用 Write/Edit，避免 shell 输出污染报告正文。";
+    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
   const permission = await decidePermission(toolName, toolCall.input, context, sessionId);
   await context.store.appendEvent(sessionId, {

@@ -90,7 +90,7 @@
 - Natural Intent Contract 已写入规格和 Phase 15 交付文档：同一 capability 下必须继续区分状态查询、doctor 查询、用法/风险询问、安全动作、配置变更、高风险动作和模糊请求。例如“现在是什么模型”必须返回真实 provider/model 状态和角色路由短摘要，不得只返回 `/model route` 用法；“模型 key 配好了吗”必须进入 doctor 诊断；“/model 怎么用”才返回用法说明。
 - Phase 15 preflight 交互审查后的成品级补强要求已写入蓝图/规格/路线图：进入 Phase 15 真实项目 Beta 前，必须先闭环 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明和测试矩阵；这属于 Phase 15 preflight hardening，不是 Phase 16+。
 - 权限/提权交互必须显示 exact action、risk、scope、reason、rollback 和 choices；Start Gate 不替代权限审批。`bypass` 必须本地显式 opt-in，`auto` 必须有可用 gate/classifier，Plan approval 必须区分手动确认编辑、acceptEdits 边界和拒绝反馈。
-- Phase 15 后新增 Phase 15.5：双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening。GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查，交叉复核后只修 P0/P1，P2 记录后续；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段。
+- Phase 15 后新增 Phase 15.5：双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI polish 清零与开源前 hardening。GPT-5.5/Claude 做产品架构审查，DeepSeek V4 Pro 做代码安全审查；实测期间 P2 可排期，但终端开源前 terminal-scope P0/P1/P2 必须清零、降级为 NOT-DO，或证明不属于终端发布范围；不得把 Phase 15 Beta 已需的基础 TUI 手感留到本阶段。
 - Phase 15.5 已补 release readiness / open-source readiness：安装、CLI 入口、Windows 大小写 shim、doctor、keychain/密钥脱敏、debug bundle、配置 schema、升级回滚、文档同步和 discovery-before-execute 工具 guard 都要检查；CCB / Claude Code Best v2.4.3 只作为公开行为参考，吸收“未发现/未加载 schema 的延迟工具不得执行”的 runtime guard，不复制实现。
 - Phase 15.5 已补模型接入成熟度收口：provider adapter 不能只验证返回文本，必须覆盖 native/gateway/custom profile、capability doctor、role route doctor、usage/cache 来源、quota/balance 来源、provider error classifier、fallback/retry 审计、配置优先级和 key 脱敏；OpenAI-compatible / Claude-compatible 中转站只能降低接入门槛，不能假装能力、usage、cache、quota 和 tool calling 与官方 native provider 完全等价。
 - Phase 15.5 已补联网取证成熟度收口：反幻觉不是禁止联网，而是本地证据优先、实时信息触发 Freshness Gate、未授权联网先询问、已授权联网优先官方来源、结果写入 `web_source` evidence、失败降级；未联网或无新鲜 web evidence 不得声称最新版本、当前价格、当前 API 行为或社区现状。
@@ -115,7 +115,7 @@
 - 每个后续阶段完成后仍必须在 F:\Linghun\docs\delivery\ 下输出阶段交付文档；没有阶段交付文档，不视为阶段完成。
 - 每次改动后说明验证结果和剩余风险。
 - 自动工作默认只推进一个阶段；完成当前用户确认的阶段后必须停止，输出验证结果和 handoff packet。
-- Phase 15 完成后不得直接进入 Phase 16，必须先执行 Phase 15.5 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI 非阻塞 polish 与开源前 hardening，除非用户明确决定跳过并记录风险；但 Phase 15 Beta 已需的基础 TUI 手感不能留到 Phase 15.5。
+- Phase 15 完成后不得直接进入 Phase 16，必须先执行 Phase 15.5 双模型交叉审查、模型接入成熟度、联网取证成熟度、终端 TUI polish 清零与开源前 hardening，除非用户明确决定跳过并记录风险；但 Phase 15 Beta 已需的基础 TUI 手感不能留到 Phase 15.5，终端开源发布也不能带 terminal-scope P2。
 - 如果用户只是讨论、评估或问方案，必须先通过 Start Gate 询问是否开始执行。
 - CLI 主命令统一为 linghun；Windows 下必须兼容 Linghun 大小写入口。
 
