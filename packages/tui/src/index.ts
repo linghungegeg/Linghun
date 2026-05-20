@@ -31,6 +31,7 @@ import {
 } from "@linghun/core";
 import {
   DeepSeekProvider,
+  type EndpointProfile,
   ModelGateway,
   type ModelMessage,
   type ModelToolCall,
@@ -38,6 +39,7 @@ import {
   type ModelUsage,
   OpenAiCompatibleProvider,
   findKnownModel,
+  resolveProviderBaseUrlDiagnostic,
 } from "@linghun/providers";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
@@ -2049,9 +2051,24 @@ function formatModelRouteDoctor(context: TuiContext): string {
         ? `sent level=${reasoningLevel}`
         : `not sent compatibilityProfile=${compatibilityProfile}`
       : "not sent";
-    lines.push(
-      `  - ${providerId}: type=${provider.type} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} baseUrl=${provider.baseUrl ? "present" : "missing"} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"} model=${provider.model || "missing"}`,
+    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
+      provider.baseUrl,
+      endpointProfile as EndpointProfile,
     );
+    lines.push(
+      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey ? `present source=${getProviderKeySource(providerId)} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
+    );
+    if (baseUrlDiagnostic.fullEndpointSuffix) {
+      lines.push(
+        `    warning: baseUrl 包含完整 endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}；已按 root baseUrl 诊断，最终 endpointPath=${baseUrlDiagnostic.endpointPath}`,
+      );
+      lines.push(`    recommendation: ${baseUrlDiagnostic.recommendation}`);
+      if (baseUrlDiagnostic.profileMismatch) {
+        lines.push(
+          `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${endpointProfile}`,
+        );
+      }
+    }
   }
   for (const route of context.config.modelRoutes.routes) {
     const problems = diagnoseRoute(route, context);

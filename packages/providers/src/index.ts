@@ -178,6 +178,17 @@ type ProviderRuntimeContract = {
   toolResultShape: "chat_tool_message" | "responses_function_call_output";
 };
 
+export type ProviderBaseUrlEndpointSuffix = "chat_completions" | "responses";
+
+export type ProviderBaseUrlDiagnostic = {
+  originalBaseUrl?: string;
+  normalizedBaseUrl: string;
+  fullEndpointSuffix?: ProviderBaseUrlEndpointSuffix;
+  endpointPath: string;
+  profileMismatch: boolean;
+  recommendation?: string;
+};
+
 const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
@@ -298,6 +309,44 @@ export class ModelGateway {
   }
 }
 
+export function resolveProviderBaseUrlDiagnostic(
+  baseUrl: string | undefined,
+  endpointProfile: EndpointProfile = "chat_completions",
+): ProviderBaseUrlDiagnostic {
+  const originalBaseUrl = baseUrl;
+  let normalizedBaseUrl = baseUrl?.replace(/\/+$/, "") ?? "";
+  let fullEndpointSuffix: ProviderBaseUrlEndpointSuffix | undefined;
+  if (normalizedBaseUrl.endsWith("/chat/completions")) {
+    normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/chat/completions".length);
+    fullEndpointSuffix = "chat_completions";
+  } else if (normalizedBaseUrl.endsWith("/responses")) {
+    normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/responses".length);
+    fullEndpointSuffix = "responses";
+  }
+  const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
+  const endpointPath = resolveFinalEndpointPath(normalizedBaseUrl, endpoint);
+  const profileMismatch = Boolean(fullEndpointSuffix && fullEndpointSuffix !== endpointProfile);
+  const recommendation = fullEndpointSuffix
+    ? "baseUrl 应填根路径，例如 https://example.com/v1；endpointProfile 使用 chat_completions 或 responses，不要把完整 endpoint 写进 baseUrl。"
+    : undefined;
+  return {
+    originalBaseUrl,
+    normalizedBaseUrl,
+    fullEndpointSuffix,
+    endpointPath,
+    profileMismatch,
+    recommendation,
+  };
+}
+
+function resolveFinalEndpointPath(baseUrl: string, endpoint: string): string {
+  try {
+    return new URL(`${baseUrl}${endpoint}`).pathname;
+  } catch {
+    return endpoint;
+  }
+}
+
 export class OpenAiCompatibleProvider implements Provider {
   readonly id: string;
   readonly displayName: string;
@@ -343,8 +392,12 @@ export class OpenAiCompatibleProvider implements Provider {
       contract.endpointProfile === "responses"
         ? this.createResponsesRequest(request)
         : this.createChatRequest(request);
+    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
+      this.config.baseUrl,
+      contract.endpointProfile,
+    );
     const response = await fetchWithProviderRetry(
-      `${this.normalizedBaseUrl()}${contract.endpoint}`,
+      `${baseUrlDiagnostic.normalizedBaseUrl}${contract.endpoint}`,
       {
         method: "POST",
         headers: {
@@ -361,7 +414,11 @@ export class OpenAiCompatibleProvider implements Provider {
       if (response.status === 401 || response.status === 403) {
         throw createApiKeyError(response.status);
       }
-      throw createHttpStatusError(response.status, await safeReadResponseText(response));
+      throw createHttpStatusError(
+        response.status,
+        await safeReadResponseText(response),
+        this.config.type,
+      );
     }
 
     if (!response.body) {
@@ -396,10 +453,6 @@ export class OpenAiCompatibleProvider implements Provider {
         recoverable: true,
       });
     }
-  }
-
-  private normalizedBaseUrl(): string {
-    return this.config.baseUrl?.replace(/\/+$/, "") ?? "";
   }
 }
 
@@ -1193,10 +1246,14 @@ function sanitizeProviderBadRequestHint(responseText?: string): string | undefin
   if (lower.includes("model")) {
     return "provider rejected model/profile combination";
   }
-  return compact.slice(0, 160);
+  return "provider rejected request body; check schema/profile/model";
 }
 
-function createHttpStatusError(status: number, responseText?: string): LinghunError {
+function createHttpStatusError(
+  status: number,
+  responseText?: string,
+  providerType?: ProviderConfig["type"],
+): LinghunError {
   if (status === 400) {
     const hint = sanitizeProviderBadRequestHint(responseText);
     return new LinghunError({
@@ -1220,7 +1277,9 @@ function createHttpStatusError(status: number, responseText?: string): LinghunEr
       code: "PROVIDER_SERVER_ERROR",
       message: `模型请求失败：HTTP ${status}，provider 服务端异常。`,
       suggestion:
-        "请稍后重试；如持续失败，运行 /model doctor 检查 base_url 或切换 fallback model。",
+        providerType === "openai-compatible"
+          ? "请稍后重试；如持续失败，运行 /model doctor 检查 provider/baseUrl/model、endpointProfile 是否被网关支持，以及 base_url 是否误填了完整 endpoint。"
+          : "请稍后重试；如持续失败，运行 /model doctor 检查 base_url 或切换 fallback model。",
       recoverable: true,
     });
   }

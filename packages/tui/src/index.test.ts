@@ -889,7 +889,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
     expect(output.text).toContain("模型=deepseek-v4-pro 推理=未生效");
     expect(output.text).toContain(
-      "deepseek: type=deepseek endpointProfile=chat_completions compatibilityProfile=deepseek tools=enabled includeUsage=no reasoning=not sent",
+      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not sent",
     );
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");
@@ -2104,6 +2104,42 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("recent route decisions");
     expect(context.routeDecisions[0]?.stopConditions.length).toBeGreaterThan(0);
     expect(context.visionObservations).toHaveLength(0);
+  });
+
+  it("warns when openai-compatible baseUrl contains a mismatched full endpoint", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.com/v1/responses",
+          apiKey: "sk-test-openai-secret",
+          model: "gpt-5.5",
+          endpointProfile: "chat_completions",
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/model route doctor", context, output);
+
+    expect(output.text).toContain("provider=openai-compatible");
+    expect(output.text).toContain("model=gpt-5.5");
+    expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).toContain("compatibilityProfile=strict_openai_compatible");
+    expect(output.text).toContain("baseUrl=present");
+    expect(output.text).toContain("endpointPath=/v1/chat/completions");
+    expect(output.text).toContain("warning: baseUrl 包含完整 endpoint suffix=responses");
+    expect(output.text).toContain("profile/baseUrl 不匹配");
+    expect(output.text).toContain("baseUrl 应填根路径，例如 https://example.com/v1");
+    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).not.toContain("sk-test-openai-secret");
   });
 
   it("pauses openai-compatible routes when model is still unconfirmed", async () => {

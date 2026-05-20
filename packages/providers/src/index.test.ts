@@ -11,6 +11,7 @@ import {
   deepSeekModels,
   normalizeProviderError,
   parseOpenAiStream,
+  resolveProviderBaseUrlDiagnostic,
 } from "./index.js";
 
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
@@ -233,6 +234,56 @@ describe("OpenAI compatible provider", () => {
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
+  });
+
+  it.each([
+    ["https://example.com/v1", "chat_completions", "https://example.com/v1/chat/completions"],
+    ["https://example.com/v1", "responses", "https://example.com/v1/responses"],
+    ["https://example.com/v1/responses", "responses", "https://example.com/v1/responses"],
+  ] as const)(
+    "normalizes endpoint URL for %s with %s",
+    async (baseUrl, endpointProfile, expectedUrl) => {
+      const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return new Response(body, { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const provider = new OpenAiCompatibleProvider({
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl,
+        apiKey: "test-key",
+        model: "gpt-5.5",
+        endpointProfile,
+      });
+
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        // consume stream
+      }
+
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(expectedUrl);
+    },
+  );
+
+  it("detects full endpoint baseUrl mismatch without changing endpointProfile", () => {
+    const diagnostic = resolveProviderBaseUrlDiagnostic(
+      "https://example.com/v1/responses",
+      "chat_completions",
+    );
+
+    expect(diagnostic.normalizedBaseUrl).toBe("https://example.com/v1");
+    expect(diagnostic.endpointPath).toBe("/v1/chat/completions");
+    expect(diagnostic.fullEndpointSuffix).toBe("responses");
+    expect(diagnostic.profileMismatch).toBe(true);
+    expect(diagnostic.recommendation).toContain("baseUrl 应填根路径");
   });
 
   it("sends safe Linghun request identity headers without leaking request secrets", async () => {
@@ -811,12 +862,13 @@ describe("ModelGateway", () => {
     expect(error.suggestion).toContain("检查当前 provider 的 api_key");
   });
 
-  it("classifies HTTP 400 as provider profile and schema diagnostics", async () => {
+  it("classifies HTTP 400 as provider profile and schema diagnostics without leaking secrets", async () => {
     const fetchMock = vi.fn(
       async () =>
-        new Response('{"error":{"message":"Unknown field reasoning and bad tool_choice"}}', {
-          status: 400,
-        }),
+        new Response(
+          '{"error":{"message":"Unknown field reasoning and bad tool_choice sk-test-secret C:/Users/Admin/project prompt text"}}',
+          { status: 400 },
+        ),
     );
     vi.stubGlobal("fetch", fetchMock);
     const provider = new OpenAiCompatibleProvider({
@@ -841,6 +893,44 @@ describe("ModelGateway", () => {
       code: "PROVIDER_BAD_REQUEST",
       message: expect.stringContaining("provider rejected tools/tool_choice fields"),
       suggestion: expect.stringContaining("compatibilityProfile"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
+      suggestion: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
+    });
+  });
+
+  it("classifies OpenAI-compatible HTTP 502 with endpoint profile guidance", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response("bad gateway sk-test-secret prompt", { status: 502 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/responses",
+      apiKey: "test-key",
+      model: "custom-model",
+      endpointProfile: "chat_completions",
+    });
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_SERVER_ERROR",
+      suggestion: expect.stringContaining("endpointProfile"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret|prompt/),
+      suggestion: expect.stringMatching(/sk-test-secret|prompt/),
     });
   });
 });
