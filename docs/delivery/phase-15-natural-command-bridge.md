@@ -477,6 +477,7 @@ Focused tests / TUI smoke 覆盖：
 
 本阶段不新增持久化配置 schema；为避免自然语言、workflow、agent、plugin 或 hook 静默提权，preflight hardening 仅使用本地显式环境开关。
 项目级 settings 可保存 provider/model/baseUrl/endpointProfile 等非敏感配置；apiKey 应优先使用 env 或用户级私有配置；项目级 apiKey 仅兼容读取并在 doctor 中警告。
+Phase 15 Pre-Beta Red Flag Sweep reconciliation 将 RF-B01、RF-B04、RF-B05、RF-B06、RF-B07、RF-B08 和 RF-W05 尾项归入 real-project Beta 前最小红线修复；RF-W01、RF-W02、RF-W03、RF-W04、RF-W06、RF-W07 归入 Beta-watch；RF-B03、RF-P01、RF-P02 归入 Phase 15.5 / release hardening；RF-N01 到 RF-N05 保持 no-action，除非后续出现当前 runtime 污染证据。
 
 - `LINGHUN_ENABLE_BYPASS=1`：允许用户本地显式切换 `/mode bypass`。未设置时拒绝切换。
 - `LINGHUN_ENABLE_AUTO_PERMISSION=1`：表示本地 auto gate/classifier 已可用，允许 `/mode auto`。未设置时拒绝切换。
@@ -927,6 +928,8 @@ corepack pnpm typecheck
 - 高风险命令的真实审批、工具执行与权限细节仍由已有 slash/tool 权限管道负责。
 - OpenAI-compatible stream parser 已支持常见分片 `tool_calls` 聚合；不同 provider 若返回非标准 tool call delta，需要在真实 Beta 中补 provider-specific adapter 测试。
 - 未实现 Phase 15.5 双模型交叉审查与开源前 hardening。
+- `docs/audit/phase-15-pre-beta-red-flag-sweep.md` 是数据面红线扫描，不是新的无限审计入口。已由后续 reconciliation/closure/live report 关闭的项以后续报告为准；仍需当轮修复的只限会污染真实项目 Beta 数据的 runtime/doctor/report gate 红线。
+- Beta-watch 项需要在真实项目测试中观察，不提前做复杂系统：multi-tool sibling evidence 完整性、无人值守脚本如何处理 Write approval、报告 final answer 是否稳定引用路径、无显式报告文件名时的安全默认、env 覆盖时是否仍提示项目 settings 残留 key、advanced endpointProfile/reasoning 的可理解性、baseUrl query/fragment 诊断。
 
 ## 不在本阶段处理的内容
 
@@ -936,10 +939,11 @@ corepack pnpm typecheck
 - Phase 17 长期托管任务、Remote Channels、job 状态表。
 - Phase 18 桌面端。
 - 插件市场、GitHub 安装、远程安装、自动更新、依赖联网安装。
+- durable artifact 统一脱敏边界、完整 provider maturity、TUI 非阻塞 polish、Claude/Anthropic native provider、MCP/Skills/Plugins Connect Lite、学习/长期任务/Remote Channels 均按蓝图后续阶段登记；除非真实 Beta 发现当前 runtime 污染证据，不回流当前阶段阻塞项。
 
 ## 下一阶段衔接
 
-Phase 15 pre-Beta P0 hardening 已完成本地闭环。下一步只能在用户明确确认后进入：
+Phase 15 pre-Beta P0 hardening 已完成本地闭环。若 Red Flag Sweep 当前红线已由最新 reconciliation / closure / independent verification 关闭，下一步只能在用户明确确认后进入：
 
 1. Phase 15 真实项目 Beta；
 2. Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure；

@@ -220,6 +220,7 @@ async function createTestContext(
     imageResults: [],
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
+    lastProviderFailure: undefined,
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
 }
@@ -838,6 +839,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain("endpointProfile=chat_completions");
     expect(output.text).toContain("角色路由摘要");
     expect(output.text).not.toContain("Start Gate：");
     expect(output.text).not.toContain("Model routes（多模型按角色触发");
@@ -888,7 +890,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
     expect(output.text).toContain("defaultModel=gpt-5.5");
     expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
-    expect(output.text).toContain("模型=deepseek-v4-pro 推理=未生效");
+    expect(output.text).toContain(
+      "模型=deepseek-v4-pro endpointProfile=chat_completions 推理=未生效",
+    );
     expect(output.text).toContain(
       "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not sent",
     );
@@ -898,6 +902,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("openai-compatible/gpt-5.5");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
     expect(requests[0]).toMatchObject({ model: "deepseek-v4-pro" });
+    expect(output.text).not.toContain("source=user-settings");
   });
 
   it("records selected runtime profile before ordinary model requests", async () => {
@@ -946,6 +951,11 @@ describe("Phase 06 TUI slash commands", () => {
       reasoning: { effort: "Medium" },
     });
     expect(JSON.stringify(requests[0])).toContain('"tools":[{"type":"function","name":"Read"');
+    expect(output.text).toContain(
+      "状态：正在请求模型 provider=openai-compatible model=gpt-5.5 endpointProfile=responses reasoning=Medium",
+    );
+    expect(output.text).not.toContain("baseUrl=");
+    expect(output.text).not.toContain("sk-test-openai-compatible-secret");
     expect(output.text).not.toMatch(/Status: requesting model.*ok/s);
     expect(
       resumed.transcript.some(
@@ -1299,6 +1309,48 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("marks explicit report generation incomplete when Write evidence is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "report-missing-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "report-missing-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiTextFetch("我已经整理好了报告内容。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成报告 missing-report.md 在根目录下\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("报告生成 incomplete/BLOCKED");
+    expect(output.text).toContain("missing-report.md");
+    expect(output.text).toContain("证据记录：");
+    await expect(readFile(join(project, "missing-report.md"), "utf8")).rejects.toThrow();
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("report_incomplete");
+    expect(transcript).toContain("missing_write_evidence");
+    expect(transcript).toContain('"type":"evidence_record"');
+    expect(transcript).toContain('"type":"system_event"');
   });
 
   it("uses a local report write reminder for explicit custom report files", async () => {
@@ -1912,6 +1964,59 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "LINGHUN.md"), "utf8")).rejects.toThrow();
   });
 
+  it("persists provider failure evidence and shows last failure in doctor", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "failure-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "failure-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = `data: ${JSON.stringify({ error: { message: "quota exceeded sk-provider-secret C:/Users/Admin/Linghun api_key=private" } })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200 });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["普通开发请求\n/model doctor\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Evidence:");
+    expect(output.text).toContain("last provider failure: code=PROVIDER_STREAM_ERROR");
+    expect(output.text).toContain("provider=openai-compatible model=failure-model");
+    expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).not.toContain("sk-provider-secret");
+    expect(output.text).not.toContain("C:/Users/Admin/Linghun");
+    expect(output.text).not.toContain("api_key=private");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("provider_failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain('"type":"evidence_record"');
+    expect(transcript).toContain('"type":"system_event"');
+    expect(transcript).not.toContain("sk-provider-secret");
+    expect(transcript).not.toContain("C:/Users/Admin/Linghun");
+    expect(transcript).not.toContain("api_key=private");
+  });
+
   it("handles natural model doctor without leaking API keys", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -2176,7 +2281,7 @@ describe("Phase 06 TUI slash commands", () => {
       "WARN: project-settings provider=openai-compatible contains apiKey",
     );
     expect(output.text).toContain("建议保存 apiKey");
-    expect(output.text).toContain("环境变量或用户级私有配置");
+    expect(output.text).toContain("环境变量或私有配置");
     expect(output.text).toContain("masked=sk-…cret");
     expect(output.text).not.toContain("sk-project-doctor-secret");
     expect(output.text).not.toContain(project);
@@ -2213,7 +2318,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("apiKey=present source=env");
     expect(output.text).toContain("masked=sk-…cret");
-    expect(output.text).not.toContain(
+    expect(output.text).toContain(
       "WARN: project-settings provider=openai-compatible contains apiKey",
     );
     expect(output.text).not.toContain("sk-project-overridden-secret");

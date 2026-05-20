@@ -65,7 +65,12 @@ describe("CLI", () => {
       expect(switched.stdout).toContain("deepseek-v4-pro");
       expect(switched.stdout).toContain("上下文窗口：1048576");
       expect(switched.stdout).toContain("最大输出：16384");
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-pro");
+      expect(doctor.stdout).toContain("endpointProfile=chat_completions");
+      expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("baseUrl=present");
       expect(doctor.stdout).toContain("apiKey=missing");
+      expect(doctor.stdout).not.toContain("base_url：");
       expect(doctor.stdout).toContain("缺少 api_key");
       expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
       expect(doctor.exitCode).toBe(0);
@@ -101,7 +106,12 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain("apiKey=present source=project-settings");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
-      expect(doctor.stdout).toContain("环境变量或用户级私有配置");
+      expect(doctor.stdout).toContain("环境变量或私有配置");
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-flash");
+      expect(doctor.stdout).toContain("endpointProfile=chat_completions");
+      expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("baseUrl=present");
+      expect(doctor.stdout).not.toContain("base_url：https://api.deepseek.com/v1");
       expect(doctor.stdout).not.toContain("sk-cli-project-secret");
       expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
@@ -136,9 +146,12 @@ describe("CLI", () => {
 
       expect(doctor.stdout).toContain("apiKey=present source=env");
       expect(doctor.stdout).toContain("masked=sk-…cret");
-      expect(doctor.stdout).not.toContain(
-        "WARN: project-settings provider=deepseek contains apiKey",
-      );
+      expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-flash");
+      expect(doctor.stdout).toContain("endpointProfile=chat_completions");
+      expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("baseUrl=present");
+      expect(doctor.stdout).not.toContain("base_url：https://api.deepseek.com/v1");
       expect(doctor.stdout).not.toContain("sk-cli-project-overridden-secret");
       expect(doctor.stdout).not.toContain("sk-cli-env-secret");
       expect(doctor.stdout).not.toContain(project);

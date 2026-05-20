@@ -42,6 +42,7 @@
 | --- | --- |
 | Phase 15 preflight hardening | CCB / Claude Code Best、Phase 15 interaction review、OpenCode、CCB Dev Boost、`F:\Linghun\PHASE_15_PRE_BETA_FULL_INTERACTION_MATURITY_AUDIT.md` |
 | Phase 15 Pre-Beta Non-Real-Test Completeness Audit | CCB / Claude Code Best、OpenCode、Warp、Hermes Agent、CCB skillLearning、MCP 官方生态、LiteLLM / OpenRouter / Vercel AI SDK 类 provider 抽象、CC Switch、CCB Dev Boost、oh-my-openagent；每项必须输出 Reference / Reference behavior / Linghun current evidence / Gap / Decision / Required evidence |
+| Phase 15 Pre-Beta Red Flag Sweep | `docs/audit/phase-15-pre-beta-red-flag-sweep.md`；仅作为 real-project Beta 前数据面红线扫描和 Beta-watch 登记，不替代最新 reconciliation / closure / live report；已关闭项以后续验证报告为准 |
 | Phase 15 真实项目 Beta | CCB / Claude Code Best、CCB Dev Boost、CC Switch、Aider、codebase-memory-mcp |
 | Phase 15.5 | Phase 15 交付文档、双模型审查报告、release readiness、OpenSpec spec-driven workflow、OpenCode 输出边界与视觉层级、Warp block/panel 现代终端交互、CCB TUI/权限/提权/Plan/help/doctor/error 交互边界、CCB v2.4.3 discovery-before-execute 工具 guard、LiteLLM/OpenRouter/Vercel AI SDK 类 provider 抽象边界、WebSearch/WebFetch Freshness Gate 与 web_source evidence 边界 |
 | Phase 16 | Hermes Agent、LINGHUN.md / memory 规格、CCB/CCB Dev Boost 的 summary-first 和 cache freshness 边界 |

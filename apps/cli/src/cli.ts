@@ -89,8 +89,10 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {
   const [subcommand, ...rest] = argv;
-  const [{ getProjectSettingsPath, loadConfig, saveDefaultModel }, { deepSeekModels }] =
-    await Promise.all([import("@linghun/config"), import("@linghun/providers")]);
+  const [
+    { getProjectSettingsPath, loadConfig, saveDefaultModel },
+    { deepSeekModels, resolveProviderBaseUrlDiagnostic },
+  ] = await Promise.all([import("@linghun/config"), import("@linghun/providers")]);
   const config = await loadConfig();
   const provider = config.providers.deepseek;
   const modelId = provider.model;
@@ -141,16 +143,28 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
         "- 缺少 api_key：请设置 LINGHUN_DEEPSEEK_API_KEY，或在本地配置中填写 api_key。",
       );
     }
-    if (keySource === "project-settings") {
+    if (projectSettingsApiKeyProviders.has("deepseek")) {
       warnings.push(
-        "WARN: project-settings provider=deepseek contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或用户级私有配置。",
+        "WARN: project-settings provider=deepseek contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。",
+      );
+    }
+    const endpointProfile = provider.endpointProfile ?? "chat_completions";
+    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(provider.baseUrl, endpointProfile);
+    if (baseUrlDiagnostic.hasQueryOrFragment) {
+      warnings.push(
+        "WARN: baseUrl contains query/fragment; doctor hides raw value，请改为不含 query/fragment 的 root baseUrl。",
+      );
+    }
+    if (baseUrlDiagnostic.fullEndpointSuffix) {
+      warnings.push(
+        `WARN: baseUrl contains full endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}; endpointPath=${baseUrlDiagnostic.endpointPath}`,
       );
     }
     const apiKeyStatus =
       provider.apiKey && keySource
         ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}`
         : "missing";
-    const header = `模型诊断：${model.id}\nbase_url：${provider.baseUrl ?? "未配置"}\napiKey=${apiKeyStatus}\n`;
+    const header = `模型诊断：${model.id}\nprovider=deepseek model=${model.id} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nbaseUrl=${provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli-deepseek-only; full route diagnostics: TUI /model doctor\n`;
     const warningText = warnings.length > 0 ? `${warnings.join("\n")}\n` : "";
     if (problems.length === 0) {
       return { stdout: `${header}${warningText}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
@@ -196,7 +210,7 @@ function getProviderKeySource(
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
   if (process.env[envName]) return "env";
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
-  return "user-settings";
+  return "merged-config";
 }
 
 function maskSecret(secret: string): string {

@@ -685,6 +685,22 @@ type PendingModelContinuation = {
   reportWriteGuard?: ReportWriteGuard;
 };
 
+function runtimeFromContinuation(continuation: PendingModelContinuation): SelectedModelRuntime {
+  return {
+    role: "executor",
+    provider: continuation.provider,
+    model: continuation.model,
+    endpointProfile: continuation.endpointProfile,
+    reasoningLevel: continuation.reasoningLevel,
+    reasoningStatus: continuation.reasoningLevel
+      ? continuation.reasoningSent
+        ? continuation.reasoningLevel
+        : "未生效"
+      : "未生效",
+    reasoningSent: continuation.reasoningSent,
+  };
+}
+
 function createSingleToolCallContinuation(
   continuation: PendingModelContinuation,
   toolCall: ModelToolCall,
@@ -752,7 +768,18 @@ export type TuiContext = {
   pendingLocalApproval?: PendingLocalApproval;
   activeAbortController?: AbortController;
   recentlyMentionedFiles: string[];
+  lastProviderFailure?: ProviderFailureSummary;
   solutionCompleteness: SolutionCompletenessStatus;
+};
+
+type ProviderFailureSummary = {
+  code: string;
+  provider: string;
+  model: string;
+  endpointProfile: string;
+  summary: string;
+  evidenceId: string;
+  createdAt: string;
 };
 
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
@@ -1365,6 +1392,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     imageResults: [],
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
+    lastProviderFailure: undefined,
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
   const gateway = createModelGateway(config);
@@ -2065,10 +2093,16 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
     lines.push(
       `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
     );
-    if (keySource === "project-settings") {
+    if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
-        `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或用户级私有配置。`,
+        `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
       );
+    }
+    if (baseUrlDiagnostic.hasQueryOrFragment) {
+      lines.push(
+        "    warning: baseUrl 包含 query/fragment；doctor 不显示原值，请改为不含 query/fragment 的 root baseUrl。",
+      );
+      lines.push(`    recommendation: ${baseUrlDiagnostic.recommendation}`);
     }
     if (baseUrlDiagnostic.fullEndpointSuffix) {
       lines.push(
@@ -2096,6 +2130,12 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
         `  - ${decision.role}: trigger=${decision.triggerReason} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} stop=${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
       );
     }
+  }
+  if (context.lastProviderFailure) {
+    const failure = context.lastProviderFailure;
+    lines.push(
+      `- last provider failure: code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile} evidence=${failure.evidenceId}`,
+    );
   }
   if (hasOpenAiCompatibleDoctorProblem(context)) {
     lines.push(
@@ -2137,7 +2177,7 @@ function getProviderKeySource(
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
   if (process.env[envName]) return "env";
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
-  return "user-settings";
+  return "merged-config";
 }
 
 function maskSecret(secret: string): string {
@@ -6479,7 +6519,9 @@ async function sendMessage(
   );
   writeLine(
     output,
-    context.language === "en-US" ? "Status: requesting model..." : "状态：正在请求模型...",
+    context.language === "en-US"
+      ? `Status: requesting model provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoning=${selectedRuntime.reasoningStatus}`
+      : `状态：正在请求模型 provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoning=${selectedRuntime.reasoningStatus}`,
   );
 
   const assistantEventId = randomUUID();
@@ -6589,7 +6631,16 @@ async function sendMessage(
           continue;
         }
         if (event.type === "error") {
-          writeLine(output, formatError(event.error, context.language));
+          const evidence = await recordProviderFailureEvidence(
+            context,
+            sessionId,
+            event.error,
+            selectedRuntime,
+          );
+          writeLine(
+            output,
+            `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
+          );
           return;
         }
       }
@@ -6689,6 +6740,11 @@ async function sendMessage(
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
+  }
+
+  if (reportWriteGuard && !reportWriteGuard.completed) {
+    const message = await recordReportIncompleteEvidence(context, sessionId, reportWriteGuard);
+    writeLine(output, message);
   }
 
   if (assistantText) {
@@ -6864,7 +6920,16 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "error") {
-      writeLine(output, formatError(event.error, context.language));
+      const evidence = await recordProviderFailureEvidence(
+        context,
+        sessionId,
+        event.error,
+        runtimeFromContinuation(continuation),
+      );
+      writeLine(
+        output,
+        `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
+      );
       return assistantText;
     }
   }
@@ -6927,7 +6992,16 @@ async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "error") {
-          writeLine(output, formatError(event.error, context.language));
+          const evidence = await recordProviderFailureEvidence(
+            context,
+            sessionId,
+            event.error,
+            runtimeFromContinuation(continuation),
+          );
+          writeLine(
+            output,
+            `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
+          );
           return;
         }
       }
@@ -7700,6 +7774,33 @@ function createReportWriteReminder(guard: ReportWriteGuard, context: TuiContext)
   return context.language === "en-US"
     ? `The user explicitly asked you to generate and save a report file. No Write evidence exists yet. Call the Write tool now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
     : `用户明确要求生成并保存报告文件，但当前还没有 Write evidence。现在请调用 Write 工具写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
+}
+
+async function recordReportIncompleteEvidence(
+  context: TuiContext,
+  sessionId: string,
+  guard: ReportWriteGuard,
+): Promise<string> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `report_incomplete blocked missing Write evidence requestedPath=${guard.requestedPath}`,
+    `report:${guard.requestedPath}`,
+    ["report_incomplete", "missing_write_evidence", guard.requestedPath],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `report_incomplete: missing Write evidence for ${guard.requestedPath}; evidence=${evidence.id}`,
+    "warning",
+  );
+  return context.language === "en-US"
+    ? `Report generation incomplete/BLOCKED: no matching Write evidence for ${guard.requestedPath}. Evidence: ${evidence.id}`
+    : `报告生成 incomplete/BLOCKED：没有 ${guard.requestedPath} 的 matching Write evidence。证据记录：${evidence.id}`;
 }
 
 function doesWriteSatisfyReportGuard(
@@ -8834,6 +8935,62 @@ function addRoleUsage(
   });
 }
 
+async function recordProviderFailureEvidence(
+  context: TuiContext,
+  sessionId: string,
+  error: unknown,
+  runtime: SelectedModelRuntime,
+): Promise<EvidenceRecord> {
+  const code =
+    error instanceof Error && "code" in error && typeof error.code === "string"
+      ? error.code
+      : "PROVIDER_ERROR";
+  const message = error instanceof Error ? error.message : String(error);
+  const summary = `provider_failure code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
+  const evidence = createEvidenceRecord(
+    "command_output",
+    summary,
+    `provider:${runtime.provider}:failure`,
+    ["provider_failure", code, runtime.provider, runtime.model, runtime.endpointProfile],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  await appendSystemEvent(context, sessionId, summary, "warning");
+  context.lastProviderFailure = {
+    code,
+    provider: runtime.provider,
+    model: runtime.model,
+    endpointProfile: runtime.endpointProfile,
+    summary: evidence.summary,
+    evidenceId: evidence.id,
+    createdAt: evidence.createdAt,
+  };
+  return evidence;
+}
+
+function sanitizeProviderFailureError(error: unknown): unknown {
+  if (!(error instanceof Error)) {
+    return sanitizeProviderFailureText(String(error));
+  }
+  const sanitized = new Error(sanitizeProviderFailureText(error.message));
+  if ("suggestion" in error && typeof error.suggestion === "string") {
+    Object.assign(sanitized, { suggestion: error.suggestion });
+  }
+  return sanitized;
+}
+
+function sanitizeProviderFailureText(text: string): string {
+  return text
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***")
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
+    .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
+    .replace(/[A-Z]:[\\/][^\s]+/gu, "[local-path]")
+    .replace(/\/[^\s]*?(?:Linghun|linghun)[^\s]*/gu, "[local-path]");
+}
+
 async function recordToolFailureEvidence(
   context: TuiContext,
   sessionId: string,
@@ -9235,6 +9392,7 @@ function writeStatus(output: Writable, context: TuiContext): void {
         session: context.sessionId ?? (context.language === "en-US" ? "new" : "未创建"),
         provider: getRuntimeStatusProvider(context),
         model: getSelectedModelRuntime(context).model,
+        endpointProfile: getSelectedModelRuntime(context).endpointProfile,
         reasoningStatus: getSelectedModelRuntime(context).reasoningStatus,
         mode: context.permissionMode,
         background,

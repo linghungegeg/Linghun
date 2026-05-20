@@ -186,6 +186,7 @@ export type ProviderBaseUrlDiagnostic = {
   fullEndpointSuffix?: ProviderBaseUrlEndpointSuffix;
   endpointPath: string;
   profileMismatch: boolean;
+  hasQueryOrFragment: boolean;
   recommendation?: string;
 };
 
@@ -193,6 +194,7 @@ const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
 const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 30_000;
+const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
 const LINGHUN_REQUEST_PACKAGE_NAME = `@linghun/${LINGHUN_CLI_NAME}`;
 const LINGHUN_REQUEST_IDENTITY_HEADERS = {
   "User-Agent": `${LINGHUN_NAME}/${LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
@@ -326,15 +328,19 @@ export function resolveProviderBaseUrlDiagnostic(
   const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
   const endpointPath = resolveFinalEndpointPath(normalizedBaseUrl, endpoint);
   const profileMismatch = Boolean(fullEndpointSuffix && fullEndpointSuffix !== endpointProfile);
+  const hasQueryOrFragment = hasBaseUrlQueryOrFragment(normalizedBaseUrl);
   const recommendation = fullEndpointSuffix
     ? "baseUrl 应填根路径，例如 https://example.com/v1；endpointProfile 使用 chat_completions 或 responses，不要把完整 endpoint 写进 baseUrl。"
-    : undefined;
+    : hasQueryOrFragment
+      ? "baseUrl 应填不含 query/fragment 的根路径，例如 https://example.com/v1；私有 token 或路由参数不要放进 baseUrl。"
+      : undefined;
   return {
     originalBaseUrl,
     normalizedBaseUrl,
     fullEndpointSuffix,
     endpointPath,
     profileMismatch,
+    hasQueryOrFragment,
     recommendation,
   };
 }
@@ -344,6 +350,15 @@ function resolveFinalEndpointPath(baseUrl: string, endpoint: string): string {
     return new URL(`${baseUrl}${endpoint}`).pathname;
   } catch {
     return endpoint;
+  }
+}
+
+function hasBaseUrlQueryOrFragment(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl);
+    return Boolean(parsed.search || parsed.hash);
+  } catch {
+    return false;
   }
 }
 
@@ -508,7 +523,7 @@ async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<R
   let lastError: unknown;
   for (let attempt = 1; attempt <= PROVIDER_MAX_ATTEMPTS; attempt += 1) {
     try {
-      const response = await fetch(url, init);
+      const response = await fetchWithRequestTimeout(url, init, PROVIDER_REQUEST_TIMEOUT_MS);
       if (!PROVIDER_RETRY_STATUSES.has(response.status) || attempt === PROVIDER_MAX_ATTEMPTS) {
         return response;
       }
@@ -522,6 +537,53 @@ async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<R
     }
   }
   throw lastError;
+}
+
+async function fetchWithRequestTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  const timeoutError = createProviderRequestTimeoutError(timeoutMs);
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+  const request = fetch(url, { ...init, signal: controller.signal }).catch((error: unknown) => {
+    if (timedOut) {
+      throw timeoutError;
+    }
+    throw error;
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+function createProviderRequestTimeoutError(timeoutMs: number): LinghunError {
+  return new LinghunError({
+    code: "PROVIDER_REQUEST_TIMEOUT",
+    message: `模型请求失败：等待 provider 响应头超过 ${timeoutMs}ms。`,
+    suggestion:
+      "请检查网络、provider/baseUrl/model 是否可用；如持续超时，运行 /model doctor 或切换 provider/model 后重试。",
+    recoverable: true,
+  });
 }
 
 function readRetryAfterMs(response: Response): number | undefined {

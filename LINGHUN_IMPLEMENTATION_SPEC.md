@@ -1930,9 +1930,12 @@ export type ReferenceMappedAuditItem = {
 - Phase 15 真实项目 Beta 前必须运行 **Pre-Beta Non-Real-Test Completeness Audit**。该审计必须逐项使用 `ReferenceMappedAuditItem`，并按 `Reference -> Reference behavior -> Linghun current evidence -> Gap -> Decision -> Required evidence` 输出；没有参考源和 Linghun 证据的项不得标为 `DONE`。
 - 审计覆盖面至少包括：Agent / multi-agent lifecycle、Learning / Memory / Skill evolution、MCP / Skills / Plugins Connect Lite、Provider / gateway request identity、TUI / help / doctor / hints、Provider usage/cache/quota、Freshness / Web evidence、hardcoded artifact sweep。
 - `DOC-ONLY` 表示只有文档约束或计划，不能冒充 runtime 已实现；`PARTIAL` 必须说明剩余风险是否阻塞；`BLOCKING` 必须在 Phase 15 real-project Beta 前修复；`DEFERRED` 必须写入明确后续阶段；`NOT-DO` 必须写不做原因。
+- Phase 15 Pre-Beta Red Flag Sweep reconciliation 只补阶段归属和边界：RF-B01、RF-B04、RF-B05、RF-B06、RF-B07、RF-B08 属于 real-project Beta 前最小红线修复；RF-B02 属于已覆盖 safety reconciliation；RF-W05 若仍缺 residual project key warning，则作为当前尾项；RF-W01、RF-W02、RF-W03、RF-W04、RF-W06、RF-W07 属于 Beta-watch；RF-B03、RF-P01、RF-P02 属于 Phase 15.5 / release hardening；RF-N01 到 RF-N05 保持 NOT-DO。该归属不得扩展为 Phase 15.5 / 16+ runtime 承诺，也不得自动宣布 Beta PASS。
 - Provider / gateway request identity 审计必须检查 OpenAI-compatible、DeepSeek 和 native/mock adapter 的请求 header/body/metadata，确认是否有 `User-Agent`、`X-Title`、`HTTP-Referer`、SDK app/name 或类似字段；修复时只能写稳定产品身份，不得泄露 API key、本地路径、项目名、用户名、私有 baseUrl 参数或完整 prompt。
 - Agent 审计必须对照 CCB Agent 生命周期、OpenCode build/plan/general agent 和 oh-my-openagent team 状态表，检查 agent 定义、选择、状态、取消、恢复、结果采纳/拒绝、权限/模型/预算、日志路径和 verifier 证据。
 - Learning 审计必须对照 Hermes MEMORY / USER / Skills 与 CCB skillLearning observation / instinct / candidate / review 生命周期，检查候选阈值、重复证据、accept/reject/disable/retire/stale/conflict、回滚、成本 guard、summary-first 和 cache 稳定性。
+- Phase 15 Pre-Beta Red Flag Sweep 只作为最后一轮数据面红线扫描。当前 Beta 前必须闭口的项只包括会污染实测数据或误导配置诊断的 runtime/doctor/report gate 问题；已由最新 closure/live report 关闭的项不得重复阻塞。非阻塞观察项必须登记为 Beta-watch，后续由真实项目数据决定是否升级为 P0/P1。
+- Red Flag Sweep 的后置项必须落入明确阶段：durable artifact 脱敏、provider maturity、baseUrl query/fragment 诊断、TUI 非阻塞 polish 放 Phase 15.5；learning/memory/skill evolution 放 Phase 16；unattended scripts、durable jobs、remote approvals 放 Phase 17；桌面壳/API/IPC 复用验证放 Phase 18；MCP/技能/插件市场化、云同步、长期自治在对应阶段仍默认 not-do，除非用户明确启动。
 
 典型例子：
 
@@ -2603,6 +2606,8 @@ export type ReleaseReadinessReport = {
 - 正式版密钥必须支持系统 keychain 或等价安全存储；阶段内仍使用环境变量/本地配置时必须标记限制。
 - 密钥、原始账单、完整 prompt、完整 transcript 和私有大文件内容不得写入 transcript、日志、交付文档、debug bundle 或公开样例。
 - debug bundle 只能包含脱敏摘要、版本、平台、错误码、命令摘要、必要日志路径和复现步骤。
+- transcript、tool_result、report、handoff、verification report 和 debug bundle 必须共享同一类 secret redaction 规则或等价边界；不得只在 doctor 中 mask key，却把同一 key、Authorization header、私有 baseUrl query、用户 home path、完整 prompt 或项目私有路径写入 durable artifact。
+- Red Flag Sweep 中的持久化脱敏项在 Phase 15.5 作为 release/security hardening 收口；如果 Phase 15 Beta 实测已经发现 raw secret/path/prompt 泄漏，则必须按 P0 回补到当前阶段。
 - 配置 schema 必须有版本号；升级、降级和回滚失败必须有说明和恢复路径。
 - Phase 15.5 必须补齐 discovery-before-execute 工具执行不变量：MCP tool、plugin command、skill action、workflow/hook 贡献工具或任何延迟加载工具，必须先完成 discover/register/trust/schema load，执行层才能调用；未发现、未注册、未信任、schema 未加载或版本不兼容时必须拒绝执行并提示先发现/启用/诊断，不能只依赖 prompt 提醒模型。
 - 上述 guard 必须在 runtime 执行层兜底，并写入 focused tests；测试至少覆盖“模型试图直接执行未发现的延迟工具时被拒绝”“已发现且 schema 已加载后才进入权限管道”“拒绝消息不泄露完整 schema 或敏感配置”。
@@ -2635,6 +2640,7 @@ export type TuiOutputLayer = 'primary' | 'details' | 'debug'
 - Plan、acceptEdits、auto、bypass 的提示必须说明边界：是否只读、是否可写、是否仍需工具权限、是否本地显式 opt-in。
 - 错误必须包含 `what happened`、`likely cause`、`next action`。provider/key/baseUrl/model、index、MCP、plugin、skill、hook、workflow 的错误不得只返回 slash 用法。
 - 长任务轻提示必须包含预计时间范围、是否需要值守、完成产物、查看方式、取消方式和等待确认状态；时间只能是范围或保守估计，不承诺精确分钟。
+- 报告生成相关 polish 只补非阻塞用户闭合感：成功 Write 后若模型 final answer 未引用路径，可由本地追加确定性短行并记录 system event；没有显式报告文件名时优先澄清或提出非覆盖路径建议。该项不得替代 Phase 15 Beta 前的本地 Write evidence gate。
 - 自然语言状态查询必须先读本地 RuntimeStatus / CommandCapability / storage 状态。包含动作词的完成度问题，例如“索引已经建立了吗”，必须走 status 查询，不得误开 Start Gate。
 - cache/index/memory/model/agent/multi-model 的默认输出必须 summary-first；大输出、完整日志、完整 memory、完整 handoff、完整 transcript 和完整 index 结果只能通过 details/debug 或文件路径查看。
 - provider usage、cache、quota、budget、balance 必须标记来源：`reported`、`zero_reported`、`estimated`、`missing` 或 `unknown`；状态栏不显示金额。
@@ -2698,6 +2704,8 @@ export type ProviderQuotaSource =
 - Usage/cache 字段必须按 source 标记。`cache_creation_tokens=0` 只能解释为 `zero_reported`，不得说成零成本或缓存一定新鲜。
 - Quota/balance 查询必须区分官方 OAuth/订阅、gateway reported、自定义脚本、模板查询和 unknown；不同单位不能混成一个余额数字。
 - Provider error classifier 必须把 key 缺失、baseUrl 错误、model 不存在、quota 不足、rate limit、tool 不支持、gateway 格式异常、网络超时、HTML 错误页转成可操作 doctor 输出。
+- `baseUrl` 必须诊断 full endpoint suffix、query 和 fragment。full endpoint suffix 只能用于 warning/recommendation，不得静默切换 `endpointProfile`；query/fragment 默认视为配置风险，doctor 必须提示使用 root URL，例如 `https://host/v1`，且错误输出不得回显私有 query token。
+- `endpointProfile`、`compatibilityProfile`、`reasoningLevel`、`includeUsage` 等高级项必须在 doctor 中解释为 profile/capability 诊断，不应成为普通用户第一步配置负担；默认 OpenAI-compatible 接入仍以 baseUrl、apiKey、model 为主。
 - Fallback/retry 必须可审计：记录原 provider/model、fallback provider/model、触发原因、是否保留工具能力、是否影响 usage/cache/quota；不得静默切模型。
 - 配置优先级必须明确：环境变量、本地 config、系统 keychain 或等价安全存储的读取顺序、脱敏展示和删除/回滚方式必须可诊断。
 - API key、token、原始账单、完整 prompt、完整 transcript、私有 baseUrl 参数不得进入 transcript、日志、debug bundle 或交付文档。

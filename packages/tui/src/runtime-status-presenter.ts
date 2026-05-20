@@ -4,6 +4,7 @@ export type RuntimeStatusView = {
   session: string;
   provider: string;
   model: string;
+  endpointProfile: string;
   reasoningStatus: string;
   mode: PermissionMode;
   background: number;
@@ -14,13 +15,18 @@ export type RuntimeStatusView = {
 
 export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Language): string {
   const cache = formatPercent(view.cacheHitRate);
-  const model = truncateDisplay(view.model, 24);
-  const reasoning = truncateDisplay(view.reasoningStatus, 12);
+  const provider = truncateDisplay(view.provider, 14);
+  const model = truncateDisplay(view.model, 20);
+  const endpointProfile = truncateDisplay(view.endpointProfile, 16);
+  const reasoning = truncateDisplay(view.reasoningStatus, 8);
   const session = truncateDisplay(view.session, 8);
+  const mode = truncateDisplay(view.mode, 8);
+  const index = truncateDisplay(view.indexStatus, 10);
+  const gate = view.gate === "waiting confirmation" ? "waiting" : "none";
   const line =
     language === "en-US"
-      ? `Status: session=${session} model=${model} reasoning=${reasoning} mode=${view.mode} bg=${view.background} cache ${cache} · index ${view.indexStatus} · gate ${view.gate}`
-      : `[Linghun] 会话=${session} 模型=${model} 推理=${reasoning} 模式=${view.mode} 后台=${view.background} cache ${cache} · index ${view.indexStatus} · gate ${view.gate}`;
+      ? `Status: session=${session} provider=${provider} model=${model} endpointProfile=${endpointProfile} reasoning=${reasoning} cache ${cache} · index ${index} · mode=${mode} bg=${view.background} gate=${gate}`
+      : `[Linghun] 会话=${session} provider=${provider} 模型=${model} endpointProfile=${endpointProfile} 推理=${reasoning} cache ${cache} · index ${index} · 模式=${mode} 后台=${view.background} gate=${gate}`;
   return truncateDisplay(line, 120);
 }
 

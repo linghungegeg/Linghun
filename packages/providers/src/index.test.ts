@@ -283,7 +283,92 @@ describe("OpenAI compatible provider", () => {
     expect(diagnostic.endpointPath).toBe("/v1/chat/completions");
     expect(diagnostic.fullEndpointSuffix).toBe("responses");
     expect(diagnostic.profileMismatch).toBe(true);
+    expect(diagnostic.hasQueryOrFragment).toBe(false);
     expect(diagnostic.recommendation).toContain("baseUrl 应填根路径");
+  });
+
+  it("detects query or fragment in provider baseUrl diagnostics", () => {
+    const diagnostic = resolveProviderBaseUrlDiagnostic(
+      "https://example.com/v1?api_key=private-token#route",
+      "chat_completions",
+    );
+
+    expect(diagnostic.hasQueryOrFragment).toBe(true);
+    expect(diagnostic.endpointPath).toBe("/v1");
+    expect(diagnostic.recommendation).toContain("不含 query/fragment");
+  });
+
+  it("fails with PROVIDER_REQUEST_TIMEOUT when response headers never arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
+      vi.stubGlobal("fetch", fetchMock);
+      const provider = new OpenAiCompatibleProvider({
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl: "https://example.com/v1/",
+        apiKey: "test-key",
+        model: "custom-model",
+      });
+      const collect = async () => {
+        const events = [];
+        for await (const event of provider.stream(
+          { messages: [{ role: "user", content: "hi" }] },
+          new AbortController().signal,
+        )) {
+          events.push(event);
+        }
+        return events;
+      };
+
+      const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await result;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("maps abort-aware fetch timeout rejection to PROVIDER_REQUEST_TIMEOUT", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("This operation was aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const provider = new OpenAiCompatibleProvider({
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl: "https://example.com/v1/",
+        apiKey: "test-key",
+        model: "custom-model",
+      });
+      const collect = async () => {
+        const events = [];
+        for await (const event of provider.stream(
+          { messages: [{ role: "user", content: "hi" }] },
+          new AbortController().signal,
+        )) {
+          events.push(event);
+        }
+        return events;
+      };
+
+      const result = expect(collect()).rejects.toMatchObject({ code: "PROVIDER_REQUEST_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await result;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends safe Linghun request identity headers without leaking request secrets", async () => {
