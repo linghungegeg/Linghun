@@ -178,11 +178,18 @@ export type PlanProposal = {
   options: { id: string; title: string; steps: string[]; risks: string[] }[];
 };
 
-export type BackgroundTaskStatus = "running" | "paused" | "completed" | "failed" | "cancelled";
+export type BackgroundTaskStatus =
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timeout"
+  | "stale";
 
 export type BackgroundTaskState = {
   id: string;
-  kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp";
+  kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
   title: string;
   status: BackgroundTaskStatus;
   currentStep?: string;
@@ -196,7 +203,7 @@ export type BackgroundTaskState = {
   logPath?: string;
   outputPath?: string;
   hasOutput: boolean;
-  result?: "pass" | "fail" | "partial" | "cancelled";
+  result?: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
   userVisibleSummary: string;
   nextAction?: string;
 };
@@ -239,8 +246,17 @@ export type VerificationStep = {
 
 const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 
+export type VerificationRuntimeStatus =
+  | "pass"
+  | "fail"
+  | "partial"
+  | "skipped"
+  | "cancelled"
+  | "timeout"
+  | "stale";
+
 export type VerificationCommandResult = VerificationStep & {
-  status: "pass" | "fail" | "partial" | "skipped";
+  status: VerificationRuntimeStatus;
   exitCode?: number;
   durationMs: number;
   logPath?: string;
@@ -250,7 +266,7 @@ export type VerificationCommandResult = VerificationStep & {
 
 export type VerificationReport = {
   id: string;
-  status: "pass" | "fail" | "partial";
+  status: Exclude<VerificationRuntimeStatus, "skipped">;
   summary: string;
   commands: VerificationCommandResult[];
   unverified: string[];
@@ -836,6 +852,7 @@ export type TuiContext = {
   activePlan?: PlanProposal;
   planAccepted?: boolean;
   interrupt?: { type: "idle" } | { type: "running"; taskId: string; canCancel: boolean };
+  activeVerificationAbortController?: AbortController;
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;
   activeAbortController?: AbortController;
@@ -891,6 +908,13 @@ const MAX_CONTEXT_CHARS = 48_000;
 const REQUEST_SLOW_HINT_MS = 20_000;
 const MAX_EVIDENCE_RECORDS = 50;
 const MAX_BACKGROUND_TASKS = 50;
+const BACKGROUND_RUNNING_GLOBAL_CAP = 4;
+const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>> = {
+  bash: 1,
+  verification: 1,
+  index: 1,
+  agent: 3,
+};
 const MAX_CHECKPOINTS = 20;
 const MAX_AGENTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
@@ -1484,10 +1508,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   }
 
   const sigintHandler = () => {
-    if (!context.activeAbortController) {
+    const controller = context.activeAbortController ?? context.activeVerificationAbortController;
+    if (!controller) {
       return;
     }
-    context.activeAbortController.abort();
+    controller.abort();
     writeLine(output, t(context, "toolInterrupted"));
   };
   process.once("SIGINT", sigintHandler);
@@ -2888,6 +2913,7 @@ async function handleBackgroundCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  refreshBackgroundLifecycle(context);
   if (context.backgroundTasks.length === 0) {
     writeLine(output, t(context, "backgroundNone"));
     return;
@@ -2985,6 +3011,131 @@ function findBackgroundTask(
   return context.backgroundTasks.find((task) => task.id === id || task.id.endsWith(id));
 }
 
+function isActiveBackgroundStatus(status: BackgroundTaskStatus): boolean {
+  return status === "running" || status === "stale";
+}
+
+function refreshBackgroundLifecycle(context: TuiContext): void {
+  const now = Date.now();
+  for (const task of context.backgroundTasks) {
+    if (!isActiveBackgroundStatus(task.status)) {
+      continue;
+    }
+    const lastActivity = Date.parse(task.lastOutputAt ?? task.updatedAt ?? task.startedAt);
+    if (Number.isNaN(lastActivity)) {
+      continue;
+    }
+    if (task.status === "running" && now - lastActivity > task.staleAfterMs) {
+      task.status = "stale";
+      task.result = "partial";
+      task.updatedAt = new Date(now).toISOString();
+      task.userVisibleSummary = `${task.userVisibleSummary}（可能卡住或长时间无输出）`;
+      task.nextAction =
+        context.language === "en-US"
+          ? `Open /details background ${task.id}, inspect logs, or use /interrupt.`
+          : `可用 /details background ${task.id} 查看日志，或用 /interrupt 取消。`;
+    }
+  }
+}
+
+function checkResourceGuard(
+  context: TuiContext,
+  kind: BackgroundTaskState["kind"] | "model" | "heavy",
+): string | null {
+  refreshBackgroundLifecycle(context);
+  if (kind === "model") {
+    return context.activeAbortController
+      ? "已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。"
+      : null;
+  }
+  const activeTasks = context.backgroundTasks.filter((task) =>
+    isActiveBackgroundStatus(task.status),
+  );
+  if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
+    return `后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。`;
+  }
+  if (kind === "heavy") {
+    const heavy = activeTasks.find(
+      (task) =>
+        task.kind === "verification" ||
+        task.kind === "index" ||
+        task.kind === "agent" ||
+        task.kind === "bash",
+    );
+    return heavy
+      ? `已有重任务正在运行：${heavy.kind} ${heavy.id}。请等待完成、查看 /background，或先 /interrupt。`
+      : null;
+  }
+  const cap = BACKGROUND_KIND_CAPS[kind];
+  if (cap !== undefined && activeTasks.filter((task) => task.kind === kind).length >= cap) {
+    return `${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。`;
+  }
+  return null;
+}
+
+function checkBackgroundStartGuard(
+  context: TuiContext,
+  kind: BackgroundTaskState["kind"],
+  heavy = false,
+): string | null {
+  return checkResourceGuard(context, kind) ?? (heavy ? checkResourceGuard(context, "heavy") : null);
+}
+
+function rememberBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {
+  context.backgroundTasks.unshift(task);
+  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
+}
+
+function finishBackgroundTaskFromToolOutput(
+  task: BackgroundTaskState,
+  output: ToolOutput,
+  context: TuiContext,
+): void {
+  const data = output.data as { exitCode?: unknown; outcome?: unknown } | undefined;
+  const exitCode = typeof data?.exitCode === "number" ? data.exitCode : 0;
+  const outcome = data?.outcome;
+  const now = new Date().toISOString();
+  if (outcome === "cancelled") {
+    task.status = "cancelled";
+    task.result = "cancelled";
+    task.currentStep = context.language === "en-US" ? "cancelled" : "已取消";
+  } else if (outcome === "timeout") {
+    task.status = "timeout";
+    task.result = "timeout";
+    task.currentStep = context.language === "en-US" ? "timeout" : "已超时";
+  } else if (exitCode !== 0) {
+    task.status = "failed";
+    task.result = "fail";
+    task.currentStep = context.language === "en-US" ? "command failed" : "命令失败";
+  } else {
+    task.status = "completed";
+    task.result = "pass";
+    task.currentStep = context.language === "en-US" ? "command completed" : "命令完成";
+  }
+  task.updatedAt = now;
+  task.lastOutputAt = now;
+  task.hasOutput = Boolean(output.text.trim() || output.fullOutputPath);
+  task.logPath = output.fullOutputPath;
+  task.outputPath = output.fullOutputPath;
+  task.progress = { completed: 1, total: 1, label: "Bash" };
+  task.userVisibleSummary =
+    task.status === "completed"
+      ? context.language === "en-US"
+        ? "Command completed; full output is in the log."
+        : "命令已完成；完整输出已写入日志。"
+      : context.language === "en-US"
+        ? `Command ended with ${task.status}; do not claim it passed.`
+        : `命令以 ${task.status} 结束；不得声称已通过。`;
+  task.nextAction =
+    task.status === "completed"
+      ? context.language === "en-US"
+        ? "Review the summarized output or open the log."
+        : "可查看摘要输出或打开完整日志。"
+      : context.language === "en-US"
+        ? "Inspect the log, fix the issue, then rerun if needed."
+        : "先查看日志并修复问题，必要时重跑。";
+}
+
 function formatEvidenceDetails(evidence: EvidenceRecord): string {
   return [
     `Evidence ${evidence.id}`,
@@ -3072,6 +3223,11 @@ async function handleForkCommand(
     writeLine(output, "用法：/fork explorer|planner|verifier|worker <task>");
     return;
   }
+  const guard = checkBackgroundStartGuard(context, "agent", true);
+  if (guard) {
+    writeLine(output, guard);
+    return;
+  }
   const runningCount = context.agents.filter((agent) => agent.status === "running").length;
   if (runningCount >= 3) {
     writeLine(output, "最多同时运行 3 个 agent；请先 /agents cancel <id> 或等待完成。");
@@ -3115,8 +3271,7 @@ async function handleForkCommand(
   context.agents.unshift(agent);
   context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
-  context.backgroundTasks.unshift(background);
-  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
+  rememberBackgroundTask(context, background);
   await context.store.appendEvent(parentSessionId, { type: "agent_start", agent, createdAt: now });
   await context.store.appendEvent(child.id, {
     type: "system_event",
@@ -3490,6 +3645,33 @@ async function handleBtwCommand(
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
   const running = context.backgroundTasks.find((task) => task.status === "running");
   const sessionId = await ensureSession(context);
+  if (context.activeVerificationAbortController) {
+    context.activeVerificationAbortController.abort();
+    context.activeVerificationAbortController = undefined;
+    context.interrupt = { type: "idle" };
+    const verificationTask = context.backgroundTasks.find(
+      (task) => task.kind === "verification" && isActiveBackgroundStatus(task.status),
+    );
+    if (verificationTask) {
+      verificationTask.status = "cancelled";
+      verificationTask.result = "cancelled";
+      verificationTask.updatedAt = new Date().toISOString();
+      verificationTask.nextAction =
+        context.language === "en-US"
+          ? "Review the verification log, then rerun /verify if needed."
+          : "先查看验证日志，必要时复跑 /verify。";
+      await appendBackgroundTaskEvent(context, sessionId, verificationTask);
+    }
+    await context.store.appendEvent(sessionId, {
+      type: "interrupt",
+      id: randomUUID(),
+      status: "cancelled",
+      message: t(context, "toolInterrupted"),
+      createdAt: new Date().toISOString(),
+    });
+    writeLine(output, t(context, "toolInterrupted"));
+    return;
+  }
   if (context.activeAbortController) {
     context.activeAbortController.abort();
     clearRequestActivity(context);
@@ -4327,6 +4509,11 @@ async function handleIndexCommand(
     return;
   }
   if (action === "init" && args[1] === "fast") {
+    const guard = checkBackgroundStartGuard(context, "index", true);
+    if (guard) {
+      writeLine(output, guard);
+      return;
+    }
     await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output);
     if (context.index.status === "ready") {
       writeLine(output, formatIndexRefreshSummary(context, "init fast"));
@@ -4335,6 +4522,11 @@ async function handleIndexCommand(
     return;
   }
   if (action === "refresh") {
+    const guard = checkBackgroundStartGuard(context, "index", true);
+    if (guard) {
+      writeLine(output, guard);
+      return;
+    }
     await runIndexRepository(
       context,
       context.config.index.mode,
@@ -4847,6 +5039,25 @@ async function runIndexRepository(
   context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
+  const now = new Date().toISOString();
+  const task: BackgroundTaskState = {
+    id: `index-${randomUUID().slice(0, 8)}`,
+    kind: "index",
+    title: `Index ${actionLabel}`,
+    status: "running",
+    currentStep: "index_repository",
+    progress: { completed: 0, total: 1, label: "index" },
+    startedAt: now,
+    updatedAt: now,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    userVisibleSummary: `索引${actionLabel === "refresh" ? "刷新" : "初始化"}正在执行。`,
+    nextAction: "等待完成，或用 /interrupt 标记取消后检查 /index status。",
+  };
+  const sessionId = await ensureSession(context);
+  rememberBackgroundTask(context, task);
+  await appendBackgroundTaskEvent(context, sessionId, task);
   writeLine(
     output,
     context.language === "en-US"
@@ -4860,13 +5071,31 @@ async function runIndexRepository(
     context.projectPath,
     120_000,
   );
+  const endedAt = new Date().toISOString();
+  task.updatedAt = endedAt;
+  task.lastOutputAt = endedAt;
+  task.hasOutput = Boolean(result.ok || result.summary);
   if (!result.ok) {
     context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
     context.index.error = `${result.summary}。请确认已安装 codebase-memory-mcp，或检查 .linghunignore 排除大 JSON/SQL/XML/min.js/生成物后重试。`;
+    task.status = result.summary.includes("命令超时") ? "timeout" : "failed";
+    task.result = task.status === "timeout" ? "timeout" : "fail";
+    task.currentStep = task.status === "timeout" ? "timeout" : "index failed";
+    task.progress = { completed: 1, total: 1, label: "index" };
+    task.userVisibleSummary = `Index ${task.status}: ${context.index.error}`;
+    task.nextAction = "查看 /index status，修复 runtime/artifact 后重试；不得声称索引刷新成功。";
+    await appendBackgroundTaskEvent(context, sessionId, task);
     writeLine(output, `Index: ${context.index.status}. ${context.index.error}`);
     return;
   }
   await refreshIndexStatus(context);
+  task.status = "completed";
+  task.result = "pass";
+  task.currentStep = "index finished";
+  task.progress = { completed: 1, total: 1, label: "index" };
+  task.userVisibleSummary = `Index ${actionLabel} completed: ${context.index.status}`;
+  task.nextAction = "用 /index status 查看详情；需要新鲜度检查时用 /index status --fresh。";
+  await appendBackgroundTaskEvent(context, sessionId, task);
 }
 
 async function runIndexQuery(
@@ -5954,6 +6183,12 @@ async function handleVerifyCommand(
     return;
   }
 
+  const guard = checkBackgroundStartGuard(context, "verification", true);
+  if (guard) {
+    writeLine(output, guard);
+    return;
+  }
+
   const sessionId = await ensureSession(context);
   const report = await runVerificationPlan(plan, context, sessionId, output);
   context.lastVerification = report;
@@ -6108,6 +6343,11 @@ async function handleImageCommand(
     assetPath,
     ["image_result", "生图结果", "image generated"],
   );
+  const guard = checkBackgroundStartGuard(context, "agent");
+  if (guard) {
+    writeLine(output, guard);
+    return;
+  }
   result.evidenceRefs.push(pickEvidence(evidence));
   context.imageResults.unshift(result);
   rememberEvidence(context, evidence);
@@ -6130,8 +6370,7 @@ async function handleImageCommand(
     userVisibleSummary: `image 结果已落盘：${assetPath}`,
     nextAction: "查看 evidence 或把资产路径交给 executor；image role 不改代码。",
   };
-  context.backgroundTasks.unshift(task);
-  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
+  rememberBackgroundTask(context, task);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   await appendBackgroundTaskEvent(context, sessionId, task);
   writeLine(output, `ImageGenerationResult: ${id}`);
@@ -6198,6 +6437,9 @@ async function runVerificationPlan(
   const startedAt = new Date().toISOString();
   const logRoot = join(context.projectPath, ".linghun", "logs", "verification");
   await mkdir(logRoot, { recursive: true });
+  const controller = new AbortController();
+  context.activeVerificationAbortController = controller;
+  context.interrupt = { type: "running", taskId: runId, canCancel: true };
   const task: BackgroundTaskState = {
     id: runId,
     kind: "verification",
@@ -6214,8 +6456,7 @@ async function runVerificationPlan(
     userVisibleSummary: `验证已启动：${plan.length} 个步骤。可用 /background 查看详情。`,
     nextAction: "等待 PASS / FAIL / PARTIAL 结果，失败后按建议修复并复跑 /verify。",
   };
-  context.backgroundTasks.unshift(task);
-  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
+  rememberBackgroundTask(context, task);
   await context.store.appendEvent(sessionId, {
     type: "verification_start",
     run: { id: runId, plan, startedAt },
@@ -6227,114 +6468,221 @@ async function runVerificationPlan(
   const results: VerificationCommandResult[] = [];
   const unverified: string[] = [];
   const risk: string[] = [];
-  for (const [index, step] of plan.entries()) {
-    const stepStarted = Date.now();
-    task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
-    task.progress = { completed: index, total: plan.length, label: step.kind };
-    task.updatedAt = new Date().toISOString();
-    await appendBackgroundTaskEvent(context, sessionId, task);
-    writeLine(output, `验证步骤：${task.currentStep} · ${step.command}`);
+  try {
+    for (const [index, step] of plan.entries()) {
+      const stepStarted = Date.now();
+      task.currentStep = `${step.kind} ${index + 1}/${plan.length}`;
+      task.progress = { completed: index, total: plan.length, label: step.kind };
+      task.updatedAt = new Date().toISOString();
+      await appendBackgroundTaskEvent(context, sessionId, task);
+      writeLine(output, `验证步骤：${task.currentStep} · ${step.command}`);
 
-    const logPath = join(logRoot, `${runId}-${index + 1}-${step.kind}.log`);
-    const result = await runVerificationCommand(step.command, context.projectPath);
-    const durationMs = Date.now() - stepStarted;
-    const runnerErrorLine = result.runnerError ? `runnerError=${result.runnerError}\n` : "";
-    const fullLog = `$ ${step.command}\nexitCode=${result.exitCode}\n${runnerErrorLine}durationMs=${durationMs}\n\n${result.output}`;
-    await writeFile(logPath, fullLog, "utf8");
-    const summary = summarizeVerificationOutput(result.output, result.exitCode, result.runnerError);
-    const commandStatus = result.runnerError ? "partial" : result.exitCode === 0 ? "pass" : "fail";
-    if (commandStatus === "fail") {
-      risk.push(`${step.kind} 失败：${summary}`);
+      const logPath = join(logRoot, `${runId}-${index + 1}-${step.kind}.log`);
+      const result = await runVerificationCommand(
+        step.command,
+        context.projectPath,
+        controller.signal,
+      );
+      const durationMs = Date.now() - stepStarted;
+      const runnerErrorLine = result.runnerError ? `runnerError=${result.runnerError}\n` : "";
+      const fullLog = `$ ${step.command}\nexitCode=${result.exitCode}\noutcome=${result.outcome}\n${runnerErrorLine}durationMs=${durationMs}\n\n${result.output}`;
+      await writeFile(logPath, fullLog, "utf8");
+      const summary = summarizeVerificationOutput(
+        result.output,
+        result.exitCode,
+        result.runnerError,
+      );
+      const wasMarkedStale = task.status === "stale";
+      const commandStatus: VerificationRuntimeStatus =
+        result.outcome === "cancelled"
+          ? "cancelled"
+          : result.outcome === "timeout"
+            ? "timeout"
+            : wasMarkedStale
+              ? "stale"
+              : result.runnerError
+                ? "partial"
+                : result.exitCode === 0
+                  ? "pass"
+                  : "fail";
+      if (commandStatus === "fail") {
+        risk.push(`${step.kind} 失败：${summary}`);
+      }
+      if (commandStatus === "partial") {
+        unverified.push(`${step.kind} runner error：${summary}`);
+        risk.push(`${step.kind} runner/toolchain 兼容风险：${summary}`);
+      }
+      if (commandStatus === "cancelled" || commandStatus === "timeout") {
+        unverified.push(`${step.kind} ${commandStatus}：${summary}`);
+        risk.push(`${step.kind} 未完成：${commandStatus}；不得生成 PASS 证据。`);
+      }
+      if (commandStatus === "stale") {
+        unverified.push(`${step.kind} stale：${summary}`);
+        risk.push(`${step.kind} 曾被标记为 stale；即使命令随后结束，也不得生成 PASS 证据。`);
+      }
+      results.push({
+        ...step,
+        status: commandStatus,
+        exitCode: result.exitCode,
+        durationMs,
+        logPath,
+        summary,
+        runnerError: result.runnerError,
+      });
+      task.lastOutputAt = new Date().toISOString();
+      task.hasOutput = Boolean(result.output.trim());
+      if (
+        commandStatus === "cancelled" ||
+        commandStatus === "timeout" ||
+        commandStatus === "stale"
+      ) {
+        break;
+      }
     }
-    if (commandStatus === "partial") {
-      unverified.push(`${step.kind} runner error：${summary}`);
-      risk.push(`${step.kind} runner/toolchain 兼容风险：${summary}`);
-    }
-    results.push({
-      ...step,
-      status: commandStatus,
-      exitCode: result.exitCode,
-      durationMs,
-      logPath,
-      summary,
-      runnerError: result.runnerError,
-    });
-    task.lastOutputAt = new Date().toISOString();
-    task.hasOutput = Boolean(result.output.trim());
-  }
 
-  const endedAt = new Date().toISOString();
-  const failed = results.filter((item) => item.status === "fail");
-  const partial = results.filter((item) => item.status === "partial");
-  const hasRunnerError = partial.some((item) => item.runnerError);
-  const status: VerificationReport["status"] =
-    failed.length > 0 ? "fail" : partial.length > 0 || unverified.length > 0 ? "partial" : "pass";
-  const report: VerificationReport = {
-    id: runId,
-    status,
-    summary:
-      status === "pass"
-        ? `PASS：${results.length} 个验证步骤通过。`
-        : status === "fail"
-          ? `FAIL：${failed.length}/${results.length} 个验证步骤失败。`
+    const endedAt = new Date().toISOString();
+    const failed = results.filter((item) => item.status === "fail");
+    const partial = results.filter((item) => item.status === "partial");
+    const cancelled = results.filter((item) => item.status === "cancelled");
+    const timedOut = results.filter((item) => item.status === "timeout");
+    const stale = results.filter((item) => item.status === "stale");
+    const hasRunnerError = partial.some((item) => item.runnerError);
+    const status: VerificationReport["status"] =
+      cancelled.length > 0
+        ? "cancelled"
+        : timedOut.length > 0
+          ? "timeout"
+          : stale.length > 0
+            ? "stale"
+            : failed.length > 0
+              ? "fail"
+              : partial.length > 0 || unverified.length > 0
+                ? "partial"
+                : "pass";
+    const report: VerificationReport = {
+      id: runId,
+      status,
+      summary:
+        status === "pass"
+          ? `PASS：${results.length} 个验证步骤通过。`
+          : status === "fail"
+            ? `FAIL：${failed.length}/${results.length} 个验证步骤失败。`
+            : status === "cancelled"
+              ? "CANCELLED：验证已取消，未生成 PASS 证据。"
+              : status === "timeout"
+                ? "TIMEOUT：验证超时，未生成 PASS 证据。"
+                : status === "stale"
+                  ? "STALE：验证任务疑似卡住，未生成 PASS 证据。"
+                  : hasRunnerError
+                    ? "PARTIAL：验证命令已运行，但 runner/toolchain 退出清理异常。"
+                    : `PARTIAL：${unverified.length} 项未验证。`,
+      commands: results,
+      unverified,
+      risk,
+      logPath: logRoot,
+      startedAt,
+      endedAt,
+      durationMs: Date.parse(endedAt) - Date.parse(startedAt),
+      nextAction:
+        status === "pass"
+          ? "可继续审查结果或进入交付总结。"
           : hasRunnerError
-            ? "PARTIAL：验证命令已运行，但 runner/toolchain 退出清理异常。"
-            : `PARTIAL：${unverified.length} 项未验证。`,
-    commands: results,
-    unverified,
-    risk,
-    logPath: logRoot,
-    startedAt,
-    endedAt,
-    durationMs: Date.parse(endedAt) - Date.parse(startedAt),
-    nextAction:
-      status === "pass"
-        ? "可继续审查结果或进入交付总结。"
-        : hasRunnerError
-          ? "查看 runner error 日志，记录 Node 版本，并建议用 Node 22 LTS 复核。"
-          : "先查看失败命令与日志，修复后复跑 /verify。",
-  };
-  task.status = status === "fail" ? "failed" : "completed";
-  task.result = status;
-  task.currentStep = "verification finished";
-  task.progress = { completed: plan.length, total: plan.length, label: "verify" };
-  task.updatedAt = endedAt;
-  task.nextAction = report.nextAction;
-  task.userVisibleSummary = report.summary;
-  await appendBackgroundTaskEvent(context, sessionId, task);
-  await context.store.appendEvent(sessionId, {
-    type: "verification_end",
-    report,
-    createdAt: endedAt,
-  });
-  return report;
+            ? "查看 runner error 日志，记录 Node 版本，并建议用 Node 22 LTS 复核。"
+            : "先查看失败命令与日志，修复后复跑 /verify。",
+    };
+    task.status =
+      status === "fail"
+        ? "failed"
+        : status === "cancelled" || status === "timeout" || status === "stale"
+          ? status
+          : "completed";
+    task.result = status;
+    task.currentStep = status === "pass" ? "verification finished" : `verification ${status}`;
+    task.progress = { completed: results.length, total: plan.length, label: "verify" };
+    task.updatedAt = endedAt;
+    task.nextAction = report.nextAction;
+    task.userVisibleSummary = report.summary;
+    await appendBackgroundTaskEvent(context, sessionId, task);
+    await context.store.appendEvent(sessionId, {
+      type: "verification_end",
+      report,
+      createdAt: endedAt,
+    });
+    return report;
+  } finally {
+    if (context.activeVerificationAbortController === controller) {
+      context.activeVerificationAbortController = undefined;
+    }
+    context.interrupt = { type: "idle" };
+  }
 }
 
 async function runVerificationCommand(
   command: string,
   cwd: string,
-): Promise<{ exitCode: number; output: string; runnerError?: string }> {
+  signal?: AbortSignal,
+): Promise<{
+  exitCode: number;
+  output: string;
+  outcome: "completed" | "timeout" | "cancelled";
+  runnerError?: string;
+}> {
   return new Promise((resolveCommand) => {
-    const child = spawn(command, { cwd, shell: true });
+    const child = spawn(command, { cwd, shell: true, windowsHide: true });
     let output = "";
     let settled = false;
-    const timeout = setTimeout(() => {
-      const runnerError = `runner timeout after ${VERIFICATION_COMMAND_TIMEOUT_MS}ms`;
-      child.kill("SIGTERM");
-      settle({
-        exitCode: 1,
-        output: output ? `${output}\n${runnerError}` : runnerError,
-        runnerError,
-      });
-    }, VERIFICATION_COMMAND_TIMEOUT_MS);
-    const settle = (result: { exitCode: number; output: string; runnerError?: string }) => {
+    let forceTimer: NodeJS.Timeout | undefined;
+    const requestStop = (force: boolean) => {
+      if (process.platform === "win32" && child.pid) {
+        const args = ["/pid", String(child.pid), "/t"];
+        if (force) {
+          args.push("/f");
+        }
+        const killer = spawn("taskkill", args, { windowsHide: true });
+        killer.on("error", () => child.kill(force ? "SIGKILL" : "SIGTERM"));
+        return;
+      }
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    };
+    const scheduleForceStop = () => {
+      forceTimer = setTimeout(() => requestStop(true), 1_000);
+    };
+    const settle = (result: {
+      exitCode: number;
+      output: string;
+      outcome?: "completed" | "timeout" | "cancelled";
+      runnerError?: string;
+    }) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timeout);
-      resolveCommand(result);
+      if (forceTimer && result.outcome === undefined) {
+        clearTimeout(forceTimer);
+      }
+      signal?.removeEventListener("abort", onAbort);
+      resolveCommand({ ...result, outcome: result.outcome ?? "completed" });
     };
+    const onAbort = () => {
+      const runnerError = "runner cancelled by interrupt";
+      output = output ? `${output}\n${runnerError}` : runnerError;
+      requestStop(false);
+      scheduleForceStop();
+      settle({ exitCode: 1, output, outcome: "cancelled", runnerError });
+    };
+    const timeout = setTimeout(() => {
+      const runnerError = `runner timeout after ${VERIFICATION_COMMAND_TIMEOUT_MS}ms`;
+      output = output ? `${output}\n${runnerError}` : runnerError;
+      requestStop(false);
+      scheduleForceStop();
+      settle({ exitCode: 1, output, outcome: "timeout", runnerError });
+    }, VERIFICATION_COMMAND_TIMEOUT_MS);
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
       output += chunk.toString("utf8");
     });
@@ -6349,9 +6697,9 @@ async function runVerificationCommand(
         runnerError,
       });
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code, childSignal) => {
       const exitCode = code ?? 1;
-      const runnerError = detectRunnerCompatibilityError(output, exitCode, signal);
+      const runnerError = detectRunnerCompatibilityError(output, exitCode, childSignal);
       settle({ exitCode, output, runnerError });
     });
   });
@@ -6390,12 +6738,16 @@ async function recordVerificationEvidence(
   sessionId: string,
   report: VerificationReport,
 ): Promise<void> {
+  const supportsClaims =
+    report.status === "pass"
+      ? ["已验证", "验证通过", "测试通过", "verified", "tests passed"]
+      : ["verification attempted", `verification:${report.status}`, "未通过验证", "需要复核"];
   const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind: "test_result",
-    summary: `${report.summary} 日志：${report.logPath ?? "无日志"}`,
+    summary: `${report.status.toUpperCase()} ${report.summary} 日志：${report.logPath ?? "无日志"}`,
     source: report.logPath ?? "Verification Runner",
-    supportsClaims: ["已验证", "验证通过", "测试通过", "verified", "tests passed"],
+    supportsClaims,
     createdAt: new Date().toISOString(),
   };
   rememberEvidence(context, evidence);
@@ -6409,25 +6761,47 @@ function createReviewReport(context: TuiContext): string {
   const changedFiles =
     context.tools.changedFiles.length > 0 ? context.tools.changedFiles : ["未记录改动"];
   const verification = context.lastVerification;
-  const priority = verification?.status === "fail" ? "P0" : verification ? "P2" : "P1";
+  const conservativeStatuses: VerificationReport["status"][] = [
+    "fail",
+    "partial",
+    "cancelled",
+    "timeout",
+    "stale",
+  ];
+  const conservative = verification ? conservativeStatuses.includes(verification.status) : true;
+  const priority =
+    verification?.status === "fail" ||
+    verification?.status === "timeout" ||
+    verification?.status === "stale"
+      ? "P0"
+      : conservative
+        ? "P1"
+        : "P2";
   const risk = verification
     ? verification.risk.length > 0
       ? verification.risk.join("; ")
       : `最近验证为 ${verification.status.toUpperCase()}`
-    : "尚未运行 /verify，不能声称已验证。";
+    : "尚未运行 /verify，不能声称 PASS 或已验证。";
   const suggestion =
     verification?.status === "fail"
       ? "先按失败命令日志修复，再复跑 /verify。"
       : verification?.status === "partial"
         ? "先查看 runner error 日志；如为 Node/工具链退出清理异常，建议用 Node 22 LTS 复核。"
-        : verification
-          ? "结合 diff 人工确认需求覆盖；如有新改动请复跑 /verify。"
-          : "先运行 /verify 或 /verify plan，形成 test_result evidence。";
+        : verification?.status === "cancelled"
+          ? "验证已取消；先确认取消原因，再复跑 /verify，当前不得给 PASS verdict。"
+          : verification?.status === "timeout"
+            ? "验证超时；先查看日志和进程清理情况，缩小命令或修复卡住点后复跑。"
+            : verification?.status === "stale"
+              ? "验证任务疑似卡住；先查看 /background 和日志，必要时 /interrupt 后复跑。"
+              : verification
+                ? "结合 diff 人工确认需求覆盖；如有新改动请复跑 /verify。"
+                : "先运行 /verify 或 /verify plan，形成 test_result evidence。";
   return [
     "Review Report",
     `- Priority: ${priority}`,
     `- Files: ${changedFiles.join(", ")}`,
     `- Risk: ${risk}`,
+    `- Verdict: ${verification?.status === "pass" ? "SCOPED_PASS_WITH_EVIDENCE" : "CONSERVATIVE_NO_PASS"}`,
     `- Suggestion: ${suggestion}`,
   ].join("\n");
 }
@@ -6833,6 +7207,11 @@ export async function handleNaturalInput(
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
+  const modelGuard = checkResourceGuard(context, "model");
+  if (modelGuard) {
+    writeLine(output, modelGuard);
+    return "handled";
+  }
   return "message";
 }
 
@@ -7230,6 +7609,11 @@ async function sendMessage(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  const modelGuard = checkResourceGuard(context, "model");
+  if (modelGuard) {
+    writeLine(output, modelGuard);
+    return;
+  }
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
@@ -8214,6 +8598,28 @@ async function executeApprovedModelToolUse(
   if (preflight) {
     writeLine(output, preflight);
   }
+  if (toolName === "Bash") {
+    const guard = checkBackgroundStartGuard(context, "bash", true);
+    if (guard) {
+      const evidence = await recordToolFailureEvidence(context, sessionId, toolName, guard);
+      await appendToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        toolName,
+        guard,
+        true,
+        evidence.id,
+      );
+      return { ok: false, tool: toolName, text: guard, evidenceId: evidence.id };
+    }
+  }
+  const task =
+    toolName === "Bash" ? createBackgroundTask(toolName, toolCall.input, context) : undefined;
+  if (task) {
+    rememberBackgroundTask(context, task);
+    await appendBackgroundTaskEvent(context, sessionId, task);
+  }
   startRequestActivity(output, context, "tool_running", { toolName });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
@@ -8222,7 +8628,7 @@ async function executeApprovedModelToolUse(
     input: toolCall.input,
     createdAt: new Date().toISOString(),
   });
-  const progress = installToolProgressHandler(context, sessionId, toolCall.id, output);
+  const progress = installToolProgressHandler(context, sessionId, toolCall.id, output, task);
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
     progress.restore();
@@ -8236,6 +8642,10 @@ async function executeApprovedModelToolUse(
     }
     rememberToolFiles(context, toolName, toolCall.input, result.output);
     const isError = isToolOutputFailure(toolName, result.output);
+    if (task) {
+      finishBackgroundTaskFromToolOutput(task, result.output, context);
+      await appendBackgroundTaskEvent(context, sessionId, task);
+    }
     await appendToolResultEvent(
       context,
       sessionId,
@@ -9178,14 +9588,22 @@ async function handleToolCommand(
       writeLine(output, permission.preflight);
     }
 
+    if (name === "Bash") {
+      const guard = checkBackgroundStartGuard(context, "bash", true);
+      if (guard) {
+        writeLine(output, guard);
+        writeStatus(output, context);
+        return;
+      }
+    }
+
     const checkpoint = await maybeCreateCheckpoint(name, input, context, sessionId);
     if (checkpoint) {
       writeLine(output, `${t(context, "checkpointCreated")}：${checkpoint.id}`);
     }
     const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;
     if (task) {
-      context.backgroundTasks.unshift(task);
-      context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
+      rememberBackgroundTask(context, task);
       await appendBackgroundTaskEvent(context, sessionId, task);
       writeLine(output, formatBackgroundTask(task, context.language));
     }
@@ -9207,17 +9625,7 @@ async function handleToolCommand(
       await Promise.all(progress.pending);
     }
     if (task) {
-      task.status = "completed";
-      task.result = "pass";
-      task.updatedAt = new Date().toISOString();
-      task.lastOutputAt = task.updatedAt;
-      task.hasOutput = Boolean(result.output.text.trim());
-      task.logPath = result.output.fullOutputPath;
-      task.outputPath = result.output.fullOutputPath;
-      task.nextAction =
-        context.language === "en-US"
-          ? "Review the summarized output or open the log."
-          : "可查看摘要输出或打开完整日志。";
+      finishBackgroundTaskFromToolOutput(task, result.output, context);
       await appendBackgroundTaskEvent(context, sessionId, task);
     }
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));

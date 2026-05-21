@@ -95,9 +95,9 @@ export type TranscriptEvent =
       type: "background_task_update";
       task: {
         id: string;
-        kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp";
+        kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
         title: string;
-        status: "running" | "paused" | "completed" | "failed" | "cancelled";
+        status: "running" | "paused" | "completed" | "failed" | "cancelled" | "timeout" | "stale";
         currentStep?: string;
         progress?: { completed: number; total?: number; label?: string };
         startedAt: string;
@@ -109,7 +109,7 @@ export type TranscriptEvent =
         logPath?: string;
         outputPath?: string;
         hasOutput: boolean;
-        result?: "pass" | "fail" | "partial" | "cancelled";
+        result?: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
         userVisibleSummary: string;
         nextAction?: string;
       };
@@ -143,12 +143,12 @@ export type TranscriptEvent =
       type: "verification_end";
       report: {
         id: string;
-        status: "pass" | "fail" | "partial";
+        status: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
         summary: string;
         commands: {
           kind: string;
           command: string;
-          status: "pass" | "fail" | "partial" | "skipped";
+          status: "pass" | "fail" | "partial" | "skipped" | "cancelled" | "timeout" | "stale";
           exitCode?: number;
           durationMs: number;
           logPath?: string;

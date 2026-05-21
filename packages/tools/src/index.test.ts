@@ -58,7 +58,40 @@ describe("Phase 05 core tools", () => {
     expect(progress.join("")).toContain("stderr:warn");
     expect(bash.output.text).toContain("first");
     expect(bash.output.text).toContain("warn");
-    expect(bash.output.data).toEqual({ exitCode: 0 });
+    expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
+  it("marks Bash timeout and cancellation outcomes without pass evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+
+    const timeout = await runTool(
+      "Bash",
+      {
+        command: 'node -e "setTimeout(()=>{}, 2000)"',
+        timeoutMs: 50,
+      },
+      context,
+    );
+
+    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    expect(timeout.output.text).toContain("命令超时");
+
+    const controller = new AbortController();
+    context.abortSignal = controller.signal;
+    const running = runTool(
+      "Bash",
+      {
+        command: 'node -e "setTimeout(()=>{}, 2000)"',
+        timeoutMs: 5_000,
+      },
+      context,
+    );
+    controller.abort();
+    const cancelled = await running;
+
+    expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
+    expect(cancelled.output.text).toContain("工具调用已取消");
   });
 
   it("rejects non-unique edits and workspace escape writes", async () => {

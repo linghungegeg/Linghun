@@ -9,8 +9,10 @@ import { createToolContext } from "@linghun/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
+  type BackgroundTaskState,
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
+  type VerificationReport,
   createCacheState,
   createHookState,
   createIndexState,
@@ -284,6 +286,70 @@ async function createTestContext(
     lastProviderFailure: undefined,
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
+}
+
+function createBackgroundTaskFixture(
+  kind: BackgroundTaskState["kind"],
+  overrides: Partial<BackgroundTaskState> = {},
+): BackgroundTaskState {
+  const now = new Date().toISOString();
+  return {
+    id: `${kind}-${Math.random().toString(16).slice(2, 8)}`,
+    kind,
+    title: `${kind} fixture`,
+    status: "running",
+    currentStep: "running",
+    progress: { completed: 0, total: 1, label: kind },
+    startedAt: now,
+    updatedAt: now,
+    lastOutputAt: now,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    logPath: join(tmpdir(), `${kind}.log`),
+    outputPath: join(tmpdir(), `${kind}.log`),
+    hasOutput: true,
+    userVisibleSummary: `${kind} is running`,
+    nextAction: "wait or interrupt",
+    ...overrides,
+  };
+}
+
+function createVerificationReportFixture(status: VerificationReport["status"]): VerificationReport {
+  const now = new Date().toISOString();
+  return {
+    id: `verify-${status}`,
+    status,
+    summary: `${status.toUpperCase()} fixture`,
+    commands: [
+      {
+        kind: "smoke",
+        command: "node --version",
+        reason: "fixture",
+        status,
+        exitCode: status === "pass" ? 0 : 1,
+        durationMs: 1,
+        logPath: join(tmpdir(), `verify-${status}.log`),
+        summary: `${status} command`,
+      },
+    ],
+    unverified: status === "pass" ? [] : [`${status} not verified`],
+    risk: status === "pass" ? [] : [`${status} risk`],
+    logPath: join(tmpdir(), `verify-${status}`),
+    startedAt: now,
+    endedAt: now,
+    durationMs: 1,
+    nextAction: status === "pass" ? "review" : "rerun /verify",
+  };
+}
+
+async function waitForTestCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error("Timed out waiting for test condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 describe("Phase 06 TUI slash commands", () => {
@@ -3606,6 +3672,96 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks[0]?.logPath).toBeTruthy();
   });
 
+  it("guards foreground model requests and background resource caps", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    context.activeAbortController = new AbortController();
+    await expect(handleNaturalInput("普通模型请求", context, output)).resolves.toBe("handled");
+    expect(output.text).toContain("已有前台模型请求正在运行");
+    context.activeAbortController = undefined;
+
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("mcp"),
+      createBackgroundTaskFixture("job"),
+      createBackgroundTaskFixture("compact"),
+      createBackgroundTaskFixture("bash"),
+    ];
+    await handleSlashCommand("/verify smoke", context, output);
+    expect(output.text).toContain("后台任务已达到全局上限 4");
+
+    context.backgroundTasks = [createBackgroundTaskFixture("bash")];
+    await handleSlashCommand("/bash node --version", context, output);
+    expect(output.text).toContain("bash 后台任务已达到上限 1");
+
+    context.backgroundTasks = [createBackgroundTaskFixture("verification")];
+    await handleSlashCommand("/verify smoke", context, output);
+    expect(output.text).toContain("verification 后台任务已达到上限 1");
+
+    context.backgroundTasks = [createBackgroundTaskFixture("index")];
+    await handleSlashCommand("/index refresh", context, output);
+    expect(output.text).toContain("index 后台任务已达到上限 1");
+
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent"),
+      createBackgroundTaskFixture("agent"),
+      createBackgroundTaskFixture("agent"),
+    ];
+    await handleSlashCommand("/fork explorer inspect cache", context, output);
+    expect(output.text).toContain("agent 后台任务已达到上限 3");
+
+    context.backgroundTasks = [createBackgroundTaskFixture("verification")];
+    await handleSlashCommand("/bash node --version", context, output);
+    expect(output.text).toContain("已有重任务正在运行：verification");
+    expect(context.permissionMode).toBe("full-access");
+  });
+
+  it("marks stale background tasks and preserves log traceability", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const old = new Date(Date.now() - 10_000).toISOString();
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("bash", {
+        id: "bash-stale",
+        updatedAt: old,
+        lastOutputAt: old,
+        staleAfterMs: 1,
+        logPath: join(project, ".linghun", "logs", "bash-stale.log"),
+      }),
+      createBackgroundTaskFixture("verification", {
+        id: "verify-timeout",
+        status: "timeout",
+        result: "timeout",
+        userVisibleSummary: "TIMEOUT：验证超时，未生成 PASS 证据。",
+      }),
+      createBackgroundTaskFixture("agent", {
+        id: "agent-cancelled",
+        status: "cancelled",
+        result: "cancelled",
+        userVisibleSummary: "agent cancelled",
+      }),
+    ];
+
+    await handleSlashCommand("/background", context, output);
+    await handleSlashCommand("/details background bash-stale", context, output);
+    await handleSlashCommand("/details output bash-stale", context, output);
+
+    expect(context.backgroundTasks.find((task) => task.id === "bash-stale")?.status).toBe("stale");
+    expect(output.text).toContain("stale");
+    expect(output.text).toContain("timeout");
+    expect(output.text).toContain("cancelled");
+    expect(output.text).toContain("bash-stale.log");
+    expect(output.text).toContain("Background output bash-stale");
+    expect(output.text).toContain("- path:");
+  });
+
   it("blocks code-fact answers without evidence and downgrades unsupported claims", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3648,6 +3804,97 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
 
     expect(output.text).toContain("状态为 idle");
+  });
+
+  it("/interrupt cancels active verification without pass evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { smoke: 'node -e "setTimeout(()=>{}, 2000)"' } }),
+      "utf8",
+    );
+    const sessionRoot = await mkdtemp(join(tmpdir(), "linghun-tui-sessions-"));
+    const store = new SessionStore({ sessionRootDir: sessionRoot, projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const running = handleSlashCommand("/verify", context, output);
+    await waitForTestCondition(
+      () => Boolean(context.activeVerificationAbortController) && output.text.includes("验证步骤"),
+    );
+    await handleSlashCommand("/interrupt", context, output);
+    await running;
+
+    expect(context.lastVerification?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(context.evidence[0]?.supportsClaims).not.toContain("已验证");
+    expect(context.evidence[0]?.supportsClaims).toContain("verification:cancelled");
+    expect(output.text).toContain("CANCELLED");
+    expect(output.text).toContain("未生成 PASS 证据");
+  });
+
+  it("keeps stale verification conservative even if the command later succeeds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        scripts: { smoke: 'node -e "setTimeout(()=>{console.log(\\"eventual pass\\")}, 500)"' },
+      }),
+      "utf8",
+    );
+    const sessionRoot = await mkdtemp(join(tmpdir(), "linghun-tui-sessions-"));
+    const store = new SessionStore({ sessionRootDir: sessionRoot, projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const backgroundOutput = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const running = handleSlashCommand("/verify", context, output);
+    await waitForTestCondition(
+      () => Boolean(context.activeVerificationAbortController) && output.text.includes("验证步骤"),
+    );
+    const task = context.backgroundTasks[0];
+    const old = new Date(Date.now() - 5_000).toISOString();
+    task.staleAfterMs = 1;
+    task.lastOutputAt = old;
+    task.updatedAt = old;
+    await handleSlashCommand("/background", context, backgroundOutput);
+    await running;
+
+    expect(backgroundOutput.text).toContain("stale");
+    expect(context.lastVerification?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.result).toBe("stale");
+    expect(context.evidence[0]?.supportsClaims).not.toContain("已验证");
+    expect(context.evidence[0]?.supportsClaims).toContain("verification:stale");
+    expect(output.text).toContain("STALE");
+    expect(output.text).toContain("未生成 PASS 证据");
+  });
+
+  it("keeps review and evidence conservative for non-pass verification outcomes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/review", context, output);
+    expect(output.text).toContain("CONSERVATIVE_NO_PASS");
+    expect(output.text).toContain("尚未运行 /verify");
+
+    for (const status of ["fail", "partial", "cancelled", "timeout", "stale"] as const) {
+      context.lastVerification = createVerificationReportFixture(status);
+      await handleSlashCommand("/review", context, output);
+      await handleSlashCommand("/claim-check 已验证", context, output);
+      expect(output.text).toContain("CONSERVATIVE_NO_PASS");
+      expect(output.text).toContain("缺少证据");
+    }
+
+    context.lastVerification = createVerificationReportFixture("pass");
+    await handleSlashCommand("/review", context, output);
+    expect(output.text).toContain("SCOPED_PASS_WITH_EVIDENCE");
   });
 
   it("generates and runs verification plans with transcript evidence", async () => {

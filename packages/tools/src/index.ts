@@ -630,7 +630,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     context.abortSignal,
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
   );
-  const fullText = `$ ${input.command}\nexitCode=${result.exitCode}\n\n${result.output}`;
+  const fullText = `$ ${input.command}\nexitCode=${result.exitCode}\noutcome=${result.outcome}\n\n${result.output}`;
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
   const preview = truncated
@@ -638,7 +638,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     : fullText;
   return {
     text: preview,
-    data: { exitCode: result.exitCode },
+    data: { exitCode: result.exitCode, outcome: result.outcome },
     truncated,
     fullOutputPath,
   };
@@ -787,31 +787,58 @@ function runShell(
   timeoutMs: number,
   signal?: AbortSignal,
   onProgress?: (stream: "stdout" | "stderr" | "system", text: string) => void,
-): Promise<{ exitCode: number; output: string }> {
+): Promise<{ exitCode: number; output: string; outcome: "completed" | "timeout" | "cancelled" }> {
   return new Promise((resolvePromise) => {
     const child = spawn(command, { cwd, shell: true, windowsHide: true });
     let output = "";
     let settled = false;
-    const finish = (exitCode: number, nextOutput = output) => {
+    let forcedKillTimer: NodeJS.Timeout | undefined;
+    const finish = (
+      exitCode: number,
+      nextOutput = output,
+      outcome: "completed" | "timeout" | "cancelled" = "completed",
+    ) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      if (forcedKillTimer && outcome === "completed") {
+        clearTimeout(forcedKillTimer);
+      }
       signal?.removeEventListener("abort", onAbort);
-      resolvePromise({ exitCode, output: nextOutput });
+      resolvePromise({ exitCode, output: nextOutput, outcome });
+    };
+    const requestStop = (force: boolean) => {
+      if (process.platform === "win32" && child.pid) {
+        const args = ["/pid", String(child.pid), "/t"];
+        if (force) {
+          args.push("/f");
+        }
+        const killer = spawn("taskkill", args, { windowsHide: true });
+        killer.on("error", () => child.kill(force ? "SIGKILL" : "SIGTERM"));
+        return;
+      }
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    };
+    const scheduleForceStop = () => {
+      forcedKillTimer = setTimeout(() => requestStop(true), 1_000);
     };
     const onAbort = () => {
-      child.kill();
-      output += "\n工具调用已取消。";
-      onProgress?.("system", "工具调用已取消。\n");
-      finish(1);
-    };
-    const timer = setTimeout(() => {
-      child.kill();
-      const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止。`;
+      const message = "\n工具调用已取消，正在终止子进程。";
       output += message;
       onProgress?.("system", `${message}\n`);
+      requestStop(false);
+      scheduleForceStop();
+      finish(1, output, "cancelled");
+    };
+    const timer = setTimeout(() => {
+      const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止子进程。`;
+      output += message;
+      onProgress?.("system", `${message}\n`);
+      requestStop(false);
+      scheduleForceStop();
+      finish(1, output, "timeout");
     }, timeoutMs);
     if (signal?.aborted) {
       onAbort();

@@ -108,13 +108,16 @@
 - Phase 15 已补 provider quota / balance 查询设计：参考 CC Switch usage query 的公开行为和边界，区分 local_limit、provider_usage、provider_quota、billing_reconciled；官方订阅可自动查的才标记 official/oauth，第三方中转站和私有服务走 template/custom_script，查不到标记 unknown。
 - Phase 15 命中率口径已改成目标观察区间：92%-96% 是稳定样本目标，不是任意模型/项目/provider 的硬承诺；硬验收是 usage 来源、公式、endpoint 拆分、break-cache 诊断和账单/usage 抽样对账。
 - Phase 16 已补可控学习成本边界：默认不每轮学习、不自动接受长期记忆；候选优先来自 evidence/Todo/验证/handoff，必要总结走低成本 summarizer role；prompt 只注入少量相关记忆摘要，并通过 `/memory stats` 展示注入条数和估算 token。
-- Phase 17 已补 Team/job 状态表设计：任务图、agent 分工、预算、暂停原因和结构化报告可见；原始长输出只进日志，不混入主消息流。
+- Phase 17 已补 Team/job 状态表设计和 Virtual Agent Concurrency 边界：任务图、agent 分工、预算、暂停原因和结构化报告可见；多 agent 可以对用户表现为并行，但底层必须共享索引/cache/evidence、短摘要传递、懒加载上下文、资源 cap、重任务互斥、sleeping/blocked/running/stale 状态和 owner/heartbeat 恢复；原始长输出只进日志，不混入主消息流。Phase 15.5B 只做资源/任务生命周期地基，不提前做第二套 agent/job runtime。
 - Phase 17 已补 Remote Channels 安全硬化：默认关闭，必须校验绑定用户/设备、过期时间、nonce/消息 id、签名或等价来源证明，审批幂等，支持设备解绑和审计日志；远程端只发摘要/审批/报告，不发送完整上下文。
 - Phase 17 已补官方 CLI adapter 方向：飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli 等只作为公开 adapter 边界参考；优先用 official_cli 发送脱敏摘要/审批/报告，CLI 缺失、未登录、权限不足或输出不可解析时保持 disabled，并通过 `/remote channels doctor` 诊断。
+- Phase 15.5F 已补实测前 Lite 能力边界：Project Doctor Lite、Context Picker Lite、Verification Command Discovery Lite、Source-of-Truth Drift Linter Lite、Rollback Coach、Task Cost Preview Lite 和 Problems panel Lite。全部复用现有 runtime / evidence / cache / verification / checkpoint，不新增 onboarding wizard、完整 LSP、sandbox 平台、recipe/runbook 平台或大型审计平台。
 - oh-my-openagent 只作为公开行为、交互和验收边界参考，不复制实现，不提前堆功能。
 - 参考源总表已补到 F:\Linghun\docs\audit\reference-map.md；后续阶段开工前必须先看该表，确认公开地址/本地路径、可参考内容和禁止事项。需要联网核验公开项目时按需联网，不得虚造，不得复制第三方源码或内部实现。
 
 新对话恢复上下文时，优先使用结构化 HandoffPacket、agent transcript 摘要、codebase-memory 索引、阶段交付文档和 transcript evidence，避免一上来全量读取文件；索引缺失或过期时先提示用户运行 /index init fast 或 /index refresh。
+
+后续每个实现阶段开工前必须先做 Source-Level Reality Check：读取本阶段 source-of-truth 后，优先用 codebase-memory 索引项目 `F-Linghun` 定位现有实现，再用 `rg` / 精读关键源码交叉确认；输出 existing implementation、gaps、minimal touch points、forbidden duplicate systems。没有这份源码事实清单，不允许直接实现。若发现已有 runtime 基础，必须优先复用和补齐，不得新造第二套系统；若发现参考源或历史审计中本阶段相关细节遗漏，必须在阶段 scope 中逐项裁决 DONE / DEFERRED / NOT-DO，尽量当轮补齐 terminal-scope 成熟度，减少最后审计才补技术债。
 
 要求：
 - 只做当前阶段范围内的事情。

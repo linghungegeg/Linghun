@@ -177,6 +177,14 @@ export type TuiDisplayBlock = {
 - Warp 的 block、Command Palette、workflow/runbook 只作为现代终端交互参考；Linghun 不实现重 GUI、云同步 notebook、常驻侧边栏、动画或鼠标重交互。
 - OpenCode 的 tool part / pending / visual hierarchy 可作为组织方式参考；CCB 的权限、提权、Plan、doctor、状态栏和轻提示仍是编码手感基线。
 
+用户可见标准输出契约：
+
+- `primary` 必须 summary-first、human-first、action-first：先说发生了什么、影响什么、用户现在能做什么、详情在哪里；不得先抛内部分类、审计标签或大段工程解释。
+- 普通主屏和最终回复必须说人话，不说 AI 话；禁止使用“作为 AI”“全面深入分析后”“根据我的推理”等空泛句式，也不得用模型自我声明替代事实、命令、路径、验证结果和下一步。
+- Anti-Hallucination、Architecture Runtime、Source-Level Reality Check、Evidence、gate、risk flag、internal verdict 等底层机制默认回归底层；只有用户需要决策、存在真实风险或需要查看详情时，才以自然语言摘要露出。
+- `systemic_gap`、`blocking_P1`、`DOC-ONLY`、`Architecture Card`、`Source-Level Reality Check`、`ReferenceMappedAuditItem`、raw evidence JSON、raw tool_result、raw flags、gateId 等内部词不得进入普通用户主屏；可进入 details/debug/report。
+- 报告和审计文件可以保留结构化字段；TUI 主屏、普通 assistant 回复和阶段收口摘要只给 verdict、影响范围、验证结果、未完成项、下一步和详情路径。
+
 层级语义：
 
 - `primary`：默认输出到主屏，只放短摘要、关键风险、确认选择、结果 verdict 和下一步。
@@ -264,7 +272,16 @@ export type BackgroundTask = {
   id: string
   kind: 'bash' | 'agent' | 'job' | 'mcp' | 'verification' | 'compact'
   title: string
-  status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+  status:
+    | 'queued'
+    | 'running'
+    | 'sleeping'
+    | 'blocked'
+    | 'paused'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'stale'
   currentStep?: string
   progress?: {
     completed: number
@@ -290,6 +307,7 @@ export type BackgroundTask = {
 
 - 长 Bash、agent、job、verification、compact 都进入统一后台任务表。
 - TUI 状态栏只显示摘要，详情通过 `/background` 打开。
+- 多 agent / 多 job 不得各自创建孤立任务表；必须复用 `BackgroundTask`、evidence、handoff 和 Local Resource Guard。
 - 后台任务必须可取消；可恢复能力按 kind 声明。
 - 后台任务启动后必须立即产生一条用户可见摘要，说明任务名称、当前步骤、预计范围和查看详情命令。
 - 后台任务运行期间必须定期 heartbeat。超过 `heartbeatIntervalMs` 没有输出时，TUI 应提示“仍在运行”和当前步骤；超过 `staleAfterMs` 时提示可能较慢，并提供查看日志、后台运行或取消入口。
@@ -298,6 +316,17 @@ export type BackgroundTask = {
 - 主任务不得在必要 verification / verifier task 未结束前宣称阶段完成。
 - 用户询问“现在在干嘛 / 还要多久 / 卡住了吗”时，必须读取 `BackgroundTask` 状态表回答，不得靠猜。
 - 后台任务状态事件必须进入 transcript 或等价任务日志，便于新会话 handoff。
+- Phase 17A 的 Virtual Agent Concurrency 必须在本结构上实现：`queued/running/sleeping/blocked/stale` 是调度状态，不是用户可见噱头；真实并发由资源 cap、heavy-task mutex、预算、权限和 owner/heartbeat 决定。
+
+Virtual Agent Concurrency 规格：
+
+- 用户可以请求多个 agent 或长期 job，但 runtime 可以只让有限数量真实运行，其余保持 `queued` / `sleeping` / `blocked`。
+- agent 输入必须使用短摘要、Architecture Card / project facts、evidence refs、workspace reference cache refs、codebase-memory refs 和必要文件摘要；禁止复制完整聊天、完整源码、完整日志或完整索引结果。
+- agent 间共享索引状态、Workspace Reference Cache、tool result summary、verification evidence 和 known facts；同一文件/同一索引/同一验证结果命中共享摘要时，不重复扫全仓。
+- 前台模型请求默认并发 1；后台 agent/job 的模型请求、工具调用、bash、verify、index refresh、full test/build 必须分别有 cap，并受 heavy-task mutex 管理。
+- agent 取消、超时、stale、owner 死亡或 heartbeat 失联必须进入 `BackgroundTask` 和 evidence；这些状态不得产生 `pass` 结论。
+- 主消息流只接收 agent/job 的结构化摘要、采纳状态、风险和 evidence refs；原始 agent 对话和长输出只进 transcript/log/fullOutputPath。
+- 该能力属于 Phase 17A。Phase 15.5B 只实现资源/任务生命周期地基，不提前实现多 agent 调度器或 durable job 图。
 
 ## 3. Session 规格
 
@@ -978,6 +1007,7 @@ Phase 07 开始，TUI 必须建立稳定渲染模型：
 - Verification / Review Runtime Lite 必须参考 CCB 的任务生命周期行为边界，而不是只加提示词。可参考行为包括：`TaskOutput(block=false)` 非阻塞读取、`TaskOutput(block=true, timeout)` 有界等待、`TaskStop` 统一停止 running task、terminal status 先于慢 cleanup/classifier 更新、完成通知防重、output file 优先于把长结果塞进主屏。Linghun 可以用自己的轻量 background task 结构实现，但必须有 focused tests 覆盖 cancel、timeout、stale、long-output、review-no-pass-without-evidence 和 runner partial；禁止复制 CCB 源码或引入完整 agent/team 系统。
 - Local Resource Guard Lite 属于 Phase 15.5 开源前 hardening；若 Phase 15 真实项目 smoke 暴露系统卡顿、后台任务堆积、子进程残留、长输出占内存或普通请求链路被重任务阻塞，则按 Phase 15 遗漏回补。它不是 Architecture Runtime、不是新 agent 系统、不是 OS 级资源管理器。参考取舍：CCB / Claude Code 提供 task lifecycle 手感边界（TaskOutput / TaskStop、output file、background status、timeout/cancel/stale、terminal status 先于慢 cleanup），OpenAI Codex / Codex CLI 提供 sandbox / approval profile / subagent max_threads / 并行资源压力的克制边界。实现必须补齐：前台模型请求并发 1、后台任务全局 cap、bash / verify / index / agent 分类型 cap、index refresh / verify / full test-build / agent batch 重任务互斥或确认、输出流式落日志且主屏限流、timeout/cancel/stale 状态真实更新、Windows 进程树 grace kill、`/background` 非阻塞查看、cancelled / timeout / stale 不得生成 PASS evidence。
 - Pre-Open-Source Terminal Product Completion Gate 将终端候选产品所需能力统一放到真实全量实测前完成。Phase 15.5 必须拆成可验收小阶段：15.5A Performance & Context（Workspace Reference Cache / Virtual Workspace Cache、Compact、cache/status/index fast path）、15.5B Resource & Task Lifecycle、15.5C Editing & Tool UX、15.5D Connect Lite、15.5E Provider & Freshness、15.5F Terminal Product Readiness；再推进 Phase 16 可控学习、Phase 17A local durable jobs、Phase 17B 企业微信/飞书/钉钉 remote channels 第一版。15.5A 的 Workspace Reference Cache / Virtual Workspace Cache 只能缓存有界、可失效、可重建的工作区引用摘要和状态，例如文件 stat、目录摘要、索引状态、RuntimeStatus、工具/能力摘要、evidence/log 路径引用和小型哈希；失效必须基于 mtime/size/hash、配置、tool schema、provider/model、index freshness、compact boundary、plugin/skill/hook 列表等稳定维度；不得缓存完整源码、完整聊天、完整日志、完整索引结果、密钥、token 或 provider raw request；缓存失败必须降级为原始读/索引路径，不得阻断主对话。Phase 18 桌面端完整实现、开源发布物料、插件/skill 市场、自动更新、云同步、商业化账号、个人微信和完整远程工作台继续后置。该门禁必须源码级实现和 focused tests，不能是 prompt-only / 文档补丁。
+- Phase 15.5 / 16 / 17 每个实现阶段开工前必须先做 Source-Level Reality Check。执行顺序是：读取本阶段 source-of-truth 与 `docs/audit/reference-map.md`，优先用 codebase-memory 索引项目 `F-Linghun` 定位实现，随后用 `rg` / 精读关键源码确认；输出 existing implementation、gaps、minimal touch points、forbidden duplicate systems。实现必须基于源码事实而不是只基于文档设想；已有 runtime 基础必须优先复用和补齐，不得新造第二套系统。阶段交付文档必须记录本阶段从 reference-map、reconciliation pull-forward / keep-deferred、baseline 第 12/13 节复制进来的细节项，并逐项裁决 DONE / DEFERRED / NOT-DO。
 - TUI runtime maintainability hardening 属于 Phase 15.5：`packages/tui/src/index.ts` 接近或超过万行时必须分批拆分。优先抽出 provider/model resolver、index/MCP runtime、doctor/status/help presenter、tool output presenter、background task presenter、permission prompt 和 compact/context helper；拆分必须行为保持、测试先行、小 diff，不得在同一批次混入新功能、UI 重写、权限语义变化或 Phase 16+ 能力。
 - Phase 15.5 block/panel polish 必须保持轻量：一行状态 + 短摘要 + details 入口优先；不得为了好看引入跨模块 UI 状态机、常驻复杂面板或需要未来桌面端才能理解的交互。
 - Command Palette Lite 可以复用 slash command catalog 和自然语言用途查询；不得新增第二套命令注册表。
@@ -1609,6 +1639,17 @@ export type Checkpoint = {
 - 非 Git 项目使用本地 snapshot，只保存受影响文件。
 - `/rewind` 列出 checkpoint，用户确认后恢复。
 - rewind 本身必须记录到 transcript。
+- Rollback Coach 必须在创建 checkpoint 后提示 checkpoint id、changedFiles 和恢复命令；高风险编辑完成后提示是否建议人工 commit。不得自动 commit，不得自动丢弃用户已有 diff。
+
+### 9.4.1 Source-of-Truth Drift Linter Lite
+
+最终真实全量实测前必须运行轻量 source-of-truth drift 检查：
+
+- 检查 active docs 中旧 `READY` / `PASS` / `READY_TO_FIX` 是否被当前 source-of-truth supersede。
+- 检查 `DOC-ONLY` 是否被写成 runtime DONE。
+- 检查 Phase 00-14 done 是否被后续成熟度项污染。
+- 检查 `START_NEXT_CHAT.md`、蓝图、规格书、`docs/delivery/README.md`、`pre-open-source-terminal-product-completion-gate.md` 和 `reference-map.md` 是否对当前下一步一致。
+- 输出只需 PASS / PARTIAL / FAIL、冲突文件、最小修正文案和是否阻塞；不得生成大型审计报告或复制完整文档内容。
 
 ## 9.5 输入队列、中断与临时插问
 
@@ -1636,6 +1677,39 @@ export type BtwQuestion = {
 
 ## 10. 验证增强规格
 
+### 10.0 Project Doctor / Context Picker Lite
+
+Project Doctor Lite 是 Project Facts 的轻量来源，不是 onboarding wizard：
+
+```ts
+export type ProjectFacts = {
+  techStack: string[]
+  packageManagers: string[]
+  runCommands: VerificationCandidate[]
+  configFiles: string[]
+  ciFiles: string[]
+  riskDirs: string[]
+  unknown: string[]
+  evidenceRefs: EvidenceRef[]
+}
+
+export type ContextPick =
+  | { kind: 'changed_files'; files: string[]; evidenceRefs: EvidenceRef[] }
+  | { kind: 'diff'; files: string[]; evidenceRefs: EvidenceRef[] }
+  | { kind: 'verification'; reportId?: string; logPath?: string; evidenceRefs: EvidenceRef[] }
+  | { kind: 'background_log'; taskId: string; logPath?: string; evidenceRefs: EvidenceRef[] }
+  | { kind: 'project_facts'; facts: ProjectFacts }
+  | { kind: 'index_refs'; refs: string[]; freshness: 'fresh' | 'stale' | 'unknown' }
+```
+
+要求：
+
+- Project Facts 只来自 README、package/config、CI、项目规则、Workspace Reference Cache、codebase-memory、tool/evidence 结果；无证据写 unknown。
+- 触发点是首次进入项目、`/doctor`、`/status`、`/index status`、Architecture Runtime facts 不足，或用户自然语言询问“项目怎么跑/怎么验证/是什么技术栈”。
+- Context Picker Lite 只选择已有上下文来源和短摘要，不能复制完整源码、完整日志、完整索引结果或完整 transcript 到 prompt。
+- “刚才报错”优先选 lastVerification / background log；“这次改动”优先选 changedFiles / diff；“这个模块”优先选 codebase-memory refs / grep refs；“项目怎么跑”优先选 Project Facts / VerificationCandidate。
+- 该能力不得新增长期数据库，不得常驻扫描；缓存失败降级为按需读取。
+
 ### 10.1 验证命令识别
 
 ```ts
@@ -1659,6 +1733,14 @@ export type VerificationCandidate = {
 - `Makefile`：test、check。
 - `CMakeLists.txt`：项目规则优先。
 - `LINGHUN.md` / `AGENTS.md` / `CLAUDE.md`：用户指定优先级最高。
+- Phase 15.5F 必须复检 JS/TS repo 的最小成熟路径：`package.json` scripts、`tsconfig`、Vitest、Biome、pnpm/corepack、CI workflow 和项目规则文件；无法确定时给候选，不盲跑重命令。
+
+Problems panel Lite：
+
+- Problems 只从 Verification Runner、typecheck、lint、test、build 和 doctor 输出中提取，不接完整 LSP。
+- Problems 记录字段至少包括 source、file、line、severity、message、command、logPath、evidenceRefs。
+- `/problems`、`/verify last` 或 `/details verification` 可查看问题面板；Architecture Runtime / Review 只能引用 problem refs，不得把完整日志塞入 prompt。
+- 不做常驻诊断、IDE 实时同步或 problem database。
 
 ### 10.2 Verification Runner
 
@@ -2196,6 +2278,13 @@ export type ProviderQuotaSnapshot = {
 - 不同 provider 的单位必须保留原语义，例如 tokens、credits、CNY、USD、requests、interactions，不得混成一个统一余额。
 - 查询失败时标记 `unknown` 并保留最近成功快照；不得用本地估算冒充 provider 余额。
 
+Task Cost Preview Lite：
+
+- 触发于 Start Gate、Architecture Card、长任务轻提示和 agent/job 启动前。
+- 输出只分 `light` / `medium` / `heavy`，并说明来源：预计读取上下文、是否运行验证、是否启动 agent、是否联网、是否触发重任务互斥。
+- 不额外调用模型，不预测真实账单，不显示没有来源的金额。
+- 如果用户已配置预算或 provider quota，只能显示来源标记后的 budget/quota 状态；unknown 必须写 unknown。
+
 ### 12.1 缓存命中率计算口径
 
 ```ts
@@ -2693,6 +2782,8 @@ export type RemoteChannelDoctorReport = {
 Phase 15.5 必须增加发布就绪检查，确认 Linghun 可以被个人开发者安全安装、配置、诊断和回滚。
 
 Phase 15.5 必须把 MCP / Skills / Plugins Connect Lite 拆成独立验收项，避免 release readiness 膨胀成市场或生态工程。Connect Lite 只覆盖 CCB 成熟工具已有的基础闭环：显式 add/install、validate、enable/disable、remove/update、trust notice、doctor、来源/commit/权限记录、失败隔离和 discovery-before-execute；不覆盖插件市场、技能市场、评分推荐、自动更新、云同步、商业化账号或完整沙箱。
+
+服务器交付纪律：Linghun 第一版不做 Sandbox profile / 容器化执行环境平台，也不把服务器环境伪装成本机等价环境。涉及部署或服务器同步时，默认流程必须是本地仓库改动、本地验证、生成可追踪 diff / 报告，再由用户确认同步或部署到服务器。不得默认通过 SSH、远程 shell、远程编辑器或远程自动任务直接改服务器文件；如果用户明确要求远程执行，必须先展示动作、路径、影响范围、回滚方式和本地 diff 状态，并继续走权限管道。
 
 ```ts
 export type ReleaseReadinessReport = {

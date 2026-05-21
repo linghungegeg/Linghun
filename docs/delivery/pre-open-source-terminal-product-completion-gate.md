@@ -26,9 +26,9 @@
 | Phase 15.5C Editing & Tool UX | Write/Edit/MultiEdit CCB-grade UX、MCP Runtime、Bundled codebase-memory | read-before-edit、diff preview、stale file、changedFiles/patch 摘要；MCP discovery-before-execute、schema/trust/runtime doctor；codebase-memory 随包/受控安装、fast status、doctor、license/NOTICE |
 | Phase 15.5D Connect Lite | MCP / Skills / Plugins Connect Lite | 显式 add/install、validate、enable/disable、remove/update、trust notice、doctor、来源/commit/权限记录、失败隔离、discovery-before-execute；支持本地路径、Git URL、GitHub 安装 skills/plugins；不做市场、评分推荐、云同步或自动更新 |
 | Phase 15.5E Provider & Freshness | OpenAI-compatible + DeepSeek provider maturity、Freshness/Web Evidence | 第一版只要求 OpenAI-compatible + DeepSeek 成熟接入；其他 provider 标记 future / unsupported / experimental。实时外部事实必须能触发 Freshness/Web Evidence，未联网或失败标记 unknown/stale |
-| Phase 15.5F Terminal Product Readiness | Terminal TUI polish、help/doctor/status/error/report gate、release readiness 的终端运行部分 | 只做终端候选产品所需成熟度：安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步；完整发布物料后置 |
+| Phase 15.5F Terminal Product Readiness | Terminal TUI polish、help/doctor/status/error/report gate、CCB-grade standard output、release readiness 的终端运行部分 | 只做终端候选产品所需成熟度：安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步；补齐 Project Doctor Lite、Context Picker Lite、Source-of-Truth Drift Linter Lite、Rollback Coach、Task Cost Preview Lite、Problems panel Lite 和用户可见标准输出；完整发布物料后置 |
 | Phase 16 | 可控学习、memory / skill evolution | 默认不每轮学习、不自动接受长期记忆；候选来自 evidence/Todo/验证/handoff；可审计、可撤销、可关闭 |
-| Phase 17A | Local durable jobs | 本地 job、handoff、预算、暂停、报告、状态可见、取消/超时/失败降级；默认不做无限自治 |
+| Phase 17A | Local durable jobs + Virtual Agent Concurrency | 本地 job、handoff、预算、暂停、报告、状态可见、取消/超时/失败降级；补齐低资源多 agent 调度成熟度：用户可发起多个 agent / job，但 runtime 必须用共享索引/cache/evidence、短摘要传递、懒加载上下文、前台模型请求 cap、工具/重任务 cap、sleeping/blocked/running 状态和 stale recovery 控制真实并发；默认不做无限自治 |
 | Phase 17B | Remote channels 第一版 | 只做企业微信 / 飞书 / 钉钉 official_cli 或官方 webhook adapter；默认关闭；只发送脱敏摘要、审批和结果报告；必须有 doctor、幂等、过期、用户/设备绑定和脱敏审计 |
 | Terminal release readiness | 安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步 | 只做终端运行与开源前候选产品所需边界；完整发布物料可后置 |
 
@@ -40,15 +40,34 @@
 - 个人微信。
 - 完整远程工作台。
 - 多 provider 全矩阵商业级支持；第一版只要求 OpenAI-compatible + DeepSeek 成熟接入，其他 provider 标记 future / unsupported / experimental。
+- Sandbox profile / 容器化执行环境管理；第一版只要求本地权限、路径边界、服务器同步提醒和 doctor 说明，不做跨环境 sandbox 平台。
+- Recipe / Runbook 平台；第一版由 Architecture Runtime、Natural Command Bridge 和现有 workflow/help 承接，不新增模板市场或复杂 runbook runtime。
 
 ## 阶段规则
 
 - 每个阶段做每个阶段的事，不再用真实项目实测替底座还债。
+- Phase 15.5B 只做资源与任务生命周期地基：前台请求守门、后台任务 cap、重任务互斥、取消/超时/stale、输出落盘和非 PASS 边界；不得提前实现第二套 agent/job runtime。
+- Phase 17A 才承接 Virtual Agent Concurrency：多 agent 可以对用户表现为并行，但底层必须按资源预算和证据边界调度，不能让每个 agent 复制完整上下文、重复扫全仓、并发跑重任务或把本机拖卡。
 - Phase 00-14 done 不回写、不污染。
 - 历史 A-C、D-H、focused/mock/local PASS 只作为 evidence，不作为 readiness proof。
 - 任何 `DOC-ONLY` 不能冒充 runtime DONE。
 - 任何单项 PASS 不能推断整体终端产品 ready。
 - 真实全量实测前必须有综合验收记录。
+- 用户可见主屏必须 summary-first、human-first、action-first：只说发生了什么、影响范围、用户选择、验证状态、下一步和详情路径。
+- 完整日志、完整聊天、完整索引、完整报告、raw tool_result、raw evidence、raw flags、gateId 和内部审计/架构字段不得进入普通主屏；需要时进入 details/debug/report。
+- 反幻觉、架构、Source-Level Reality Check、Evidence、risk flag 等底层机制默认回归底层；普通用户只看到成熟的人话摘要和可执行下一步。
+
+## 阶段开工硬门槛
+
+每个实现阶段开工前必须先完成 Source-Level Reality Check，不允许只按文档或审计报告直接实现：
+
+- 先读取本文件、`START_NEXT_CHAT.md`、`docs/audit/reference-map.md`、蓝图、规格书和本阶段相关交付/审计报告。
+- 优先使用 codebase-memory 索引定位现有实现；Linghun 仓库索引项目名为 `F-Linghun`。索引缺失或过期时先降级为 `rg` / 文件读取，并在报告里标记。
+- 必须输出 existing implementation / gaps / minimal touch points / forbidden duplicate systems。
+- 若现有 runtime 已有基础能力，优先复用和补齐，不得新造第二套系统。
+- 若源码事实与文档设计冲突，以源码事实、最小修正文档口径和用户确认后的阶段边界为准。
+- 必须把 `reference-map.md`、历史 reconciliation 的 pull-forward / keep-deferred、baseline 第 12/13 节中与本阶段相关的小细节复制进阶段 scope，并逐项裁决 DONE / DEFERRED / NOT-DO。
+- 发现本阶段应补的成熟度遗漏时，优先在本阶段以最小 runtime 修复补齐；若超出阶段边界，必须明确登记到后续阶段，不得依赖聊天记忆或最后审计兜底。
 
 ## 验收要求
 
@@ -56,6 +75,8 @@
 
 - 修改文件清单。
 - 关键实现边界。
+- Source-Level Reality Check 摘要。
+- 参考源 delta catch-up 裁决。
 - focused tests。
 - 必要的 check/typecheck/test/build。
 - 未完成项与后置项。
