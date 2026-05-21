@@ -87,6 +87,14 @@ import {
   formatLocalToolPermissionPrompt,
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
+import {
+  type RequestActivityPhase,
+  formatProviderEmptyResponsePrimary,
+  formatProviderFailurePrimary,
+  formatReportEvidenceRequired,
+  formatReportIncompletePrimary,
+  formatRequestActivity,
+} from "./request-lifecycle-presenter.js";
 import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 
@@ -608,6 +616,20 @@ type MessageKey =
   | "intro"
   | "currentModel"
   | "unknownCommand"
+  | "languageSwitchedZh"
+  | "languageSwitchedEn"
+  | "modeCurrent"
+  | "modeOptions"
+  | "modeBoundary"
+  | "modeUnknown"
+  | "modeFullAccessPlanBlocked"
+  | "modeFullAccessOptInBlocked"
+  | "modeSwitched"
+  | "modePlanBoundary"
+  | "startGateConfirmed"
+  | "startGateExpired"
+  | "startGateExactRequired"
+  | "startGatePlainConfirmationRejected"
   | "exit"
   | "status"
   | "statusShort"
@@ -705,8 +727,10 @@ type ReportWriteGuard = {
   pathExplicit: boolean;
   completed: boolean;
   reminderSent: boolean;
+  evidenceReminderSent: boolean;
   finalReferenceReminderSent: boolean;
   nonWriteToolRounds: number;
+  evidenceRead: boolean;
 };
 
 type PendingModelContinuation = {
@@ -804,6 +828,7 @@ export type TuiContext = {
   lastProviderFailure?: ProviderFailureSummary;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
+  requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
 };
 
 type ProviderFailureSummary = {
@@ -848,6 +873,7 @@ const PROJECT_RULES_SUMMARY_WIDTH = 600;
 const PROJECT_RULES_STATUS_WIDTH = 160;
 const MAX_CONTEXT_MESSAGES = 12;
 const MAX_CONTEXT_CHARS = 48_000;
+const REQUEST_SLOW_HINT_MS = 20_000;
 const MAX_EVIDENCE_RECORDS = 50;
 const MAX_BACKGROUND_TASKS = 50;
 const MAX_CHECKPOINTS = 20;
@@ -2570,17 +2596,14 @@ async function handleModeCommand(
 ): Promise<void> {
   const rawMode = args[0] === "set" ? args[1] : args[0];
   if (!rawMode) {
-    writeLine(output, `当前权限模式：${context.permissionMode}`);
-    writeLine(output, "可选：default / auto-review / plan / full-access");
-    writeLine(
-      output,
-      "边界：full-access 需要本地显式 opt-in；auto-review 只自动允许低风险工作区编辑。Plan approval 不授权所有工具。",
-    );
+    writeLine(output, t(context, "modeCurrent", { mode: context.permissionMode }));
+    writeLine(output, t(context, "modeOptions"));
+    writeLine(output, t(context, "modeBoundary"));
     return;
   }
   const nextMode = parsePermissionModeInput(rawMode);
   if (!nextMode) {
-    writeLine(output, "未知模式。可选：default / auto-review / plan / full-access");
+    writeLine(output, t(context, "modeUnknown"));
     return;
   }
   const guard = getModeChangeGuard(nextMode, context);
@@ -2603,15 +2626,14 @@ async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
     return;
   }
   await setPermissionMode(context, output, nextMode, "tab mode cycle");
-  writeLine(output, `已切换模式：${context.permissionMode}（/tab 等价 Shift+Tab）`);
 }
 
 function getModeChangeGuard(nextMode: PermissionMode, context: TuiContext): string | null {
   if (context.permissionMode === "plan" && nextMode === "full-access" && !context.planAccepted) {
-    return "Plan 模式不能直接切到 full-access 执行写入。请先批准计划的明确边界，或切回 default。";
+    return t(context, "modeFullAccessPlanBlocked");
   }
   if (nextMode === "full-access" && process.env.LINGHUN_ENABLE_FULL_ACCESS !== "1") {
-    return "已拒绝切换 full-access：full-access 必须本地显式 opt-in（设置 LINGHUN_ENABLE_FULL_ACCESS=1 后重新启动），不能由自然语言、workflow、agent、plugin 或 hook 静默开启。";
+    return t(context, "modeFullAccessOptInBlocked");
   }
   return null;
 }
@@ -2632,12 +2654,9 @@ async function setPermissionMode(
     `permission_mode_change: ${previousMode} -> ${nextMode}; reason=${reason}; boundary=Start Gate and permission pipeline remain active`,
     "info",
   );
-  writeLine(output, `已切换权限模式：${nextMode}`);
+  writeLine(output, t(context, "modeSwitched", { mode: nextMode }));
   if (nextMode === "plan") {
-    writeLine(
-      output,
-      "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后仍不等于授权所有工具。",
-    );
+    writeLine(output, t(context, "modePlanBoundary"));
   }
   writeStatus(output, context);
 }
@@ -2761,7 +2780,7 @@ async function handleLanguageCommand(
     return;
   }
   context.language = language;
-  writeLine(output, language === "zh-CN" ? "语言已切换为中文。" : "Language switched to English.");
+  writeLine(output, t(context, language === "zh-CN" ? "languageSwitchedZh" : "languageSwitchedEn"));
   writeStatus(output, context);
 }
 
@@ -3452,6 +3471,7 @@ async function handleInterruptCommand(context: TuiContext, output: Writable): Pr
   const sessionId = await ensureSession(context);
   if (context.activeAbortController) {
     context.activeAbortController.abort();
+    clearRequestActivity(context);
     context.interrupt = { type: "idle" };
     await context.store.appendEvent(sessionId, {
       type: "interrupt",
@@ -6576,53 +6596,24 @@ export async function handleNaturalInput(
     const decision = matchesNaturalGateConfirmation(gate, text);
     if (decision === "expired") {
       context.pendingNaturalCommand = undefined;
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? `Start Gate expired: ${gate.gateId}. Reissue the request before running ${gate.exactCommand}.`
-          : `Start Gate 已过期：${gate.gateId}。请重新发起请求后再执行 ${gate.exactCommand}。`,
-      );
+      writeLine(output, t(context, "startGateExpired"));
       writeStatus(output, context);
       return "handled";
     }
     if (decision === "exact_required") {
       if (/^(yes|y|confirm|确认|是|执行|继续)$/iu.test(text.trim())) {
-        writeLine(
-          output,
-          context.language === "en-US"
-            ? `Exact confirmation required: type ${gate.exactCommand}. Plain confirmation was not accepted.`
-            : `需要精确确认：请输入 ${gate.exactCommand}。普通确认未被接受。`,
-        );
+        writeLine(output, t(context, "startGatePlainConfirmationRejected"));
         writeStatus(output, context);
         return "handled";
       }
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? `Exact confirmation required: type ${gate.exactCommand}. This input was not executed.`
-          : `需要精确确认：请输入 ${gate.exactCommand}。这条输入未执行。`,
-      );
+      writeLine(output, t(context, "startGateExactRequired"));
       writeStatus(output, context);
       return "handled";
     }
     if (decision === "confirmed") {
       context.pendingNaturalCommand = undefined;
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? [
-              "Start Gate confirmed.",
-              `- Exact command: ${gate.exactCommand}`,
-              `- Scope: ${gate.scope}`,
-              "- Note: Start Gate does not replace later permission approval.",
-            ].join("\n")
-          : [
-              "已确认 Start Gate。",
-              `- 精确命令：${gate.exactCommand}`,
-              `- 范围：${gate.scope}`,
-              "- 注意：Start Gate 不替代后续权限审批。",
-            ].join("\n"),
-      );
+      writeLine(output, t(context, "startGateConfirmed"));
+      await appendNaturalGateDebugEvent(context, gate, "confirmed");
       const result = await handleSlashCommand(gate.exactCommand, context, output);
       return result === "message" ? "message" : "handled";
     }
@@ -6735,6 +6726,7 @@ async function handleLocalControlPlaneInput(
       return "pass";
     }
     context.pendingNaturalCommand = gate;
+    await appendNaturalGateDebugEvent(context, gate, "created");
     writeLine(output, formatNaturalStartGate(intent, context, gate));
     writeStatus(output, context);
     return "handled";
@@ -6781,7 +6773,7 @@ function isAllowedModeStartGate(
     intent.action === "start_gate" &&
     intent.capability?.id === "mode" &&
     typeof intent.command === "string" &&
-    /^\/mode (?:default|auto-review|plan)$/u.test(intent.command)
+    /^\/mode (?:default|auto-review|plan|full-access)$/u.test(intent.command)
   );
 }
 
@@ -7011,6 +7003,55 @@ async function executeIndexIgnoreWritePlan(
   }
 }
 
+function clearRequestActivity(context: TuiContext): void {
+  const timer = context.requestActivity?.slowTimer;
+  if (timer) {
+    clearTimeout(timer);
+  }
+  context.requestActivity = undefined;
+}
+
+function startRequestActivity(
+  output: Writable,
+  context: TuiContext,
+  phase: RequestActivityPhase,
+  values: { reportPath?: string; toolName?: string } = {},
+): void {
+  clearRequestActivity(context);
+  writeLine(output, formatRequestActivity(phase, context.language, values));
+  if (
+    phase !== "request_started" &&
+    phase !== "request_started_report" &&
+    phase !== "continuing_after_tool"
+  ) {
+    context.requestActivity = { slowHintShown: false };
+    return;
+  }
+  const slowTimer = setTimeout(() => {
+    const activity = context.requestActivity;
+    if (!activity || activity.slowHintShown) {
+      return;
+    }
+    context.requestActivity = { slowHintShown: true };
+    writeLine(output, formatRequestActivity("waiting_first_delta", context.language, values));
+  }, REQUEST_SLOW_HINT_MS);
+  context.requestActivity = { slowHintShown: false, slowTimer };
+}
+
+async function appendNaturalGateDebugEvent(
+  context: TuiContext,
+  gate: PendingNaturalCommand,
+  status: "created" | "confirmed",
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `natural_gate_${status}: capability=${gate.capabilityId} command=${gate.exactCommand} scope=${gate.scope} risk=${gate.risk} requiresExactConfirmation=${gate.requiresExactConfirmation ? "yes" : "no"}`,
+    "info",
+  );
+}
+
 async function sendMessage(
   text: string,
   context: TuiContext,
@@ -7037,14 +7078,20 @@ async function sendMessage(
     `model_request selectedRole=${selectedRuntime.role} provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoningLevel=${selectedRuntime.reasoningLevel ?? "none"} reasoningSent=${selectedRuntime.reasoningSent ? "yes" : "no"} tools=${selectedTools ? "yes" : "no"}`,
     "info",
   );
-  writeLine(output, formatModelRequestStart(reportWriteGuard, context.language));
-
   const assistantEventId = randomUUID();
   let assistantText = "";
   const controller = new AbortController();
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
   context.interrupt = { type: "running", taskId: "model-stream", canCancel: true };
+  startRequestActivity(
+    output,
+    context,
+    reportWriteGuard ? "request_started_report" : "request_started",
+    {
+      reportPath: reportWriteGuard?.requestedPath,
+    },
+  );
   const runtimeStatus = buildRuntimeStatusForModel({
     ...context,
     provider: getRuntimeStatusProvider(context),
@@ -7081,6 +7128,10 @@ async function sendMessage(
         ? `Context budget exceeded before provider call: ${budget}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
         : `上下文预算超限，已在请求 provider 前停止：${budget}/${MAX_CONTEXT_CHARS} 字符。请先运行 /sessions summary 或减少最近上下文后重试。`;
     await appendSystemEvent(context, sessionId, warning, "warning");
+    clearRequestActivity(context);
+    context.activeAbortController = undefined;
+    context.tools.abortSignal = undefined;
+    context.interrupt = { type: "idle" };
     writeLine(output, warning);
     writeStatus(output, context);
     return;
@@ -7125,16 +7176,19 @@ async function sendMessage(
         controller.signal,
       )) {
         if (controller.signal.aborted) {
+          clearRequestActivity(context);
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
         if (event.type === "assistant_text_delta") {
+          clearRequestActivity(context);
           assistantText += event.text;
           roundAssistantText += event.text;
           output.write(event.text);
           continue;
         }
         if (event.type === "tool_use") {
+          clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
@@ -7155,6 +7209,7 @@ async function sendMessage(
           continue;
         }
         if (event.type === "error") {
+          clearRequestActivity(context);
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
           writeLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
@@ -7162,6 +7217,7 @@ async function sendMessage(
       }
 
       if (!roundAssistantText && toolCalls.length === 0) {
+        clearRequestActivity(context);
         const message = await recordProviderEmptyResponse(
           context,
           sessionId,
@@ -7178,6 +7234,14 @@ async function sendMessage(
         messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
       }
       if (toolCalls.length === 0) {
+        if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
+          messages.push({
+            role: "user",
+            content: formatReportEvidenceRequired(context.language),
+          });
+          reportWriteGuard.evidenceReminderSent = true;
+          continue;
+        }
         if (reportWriteGuard && shouldSendReportWriteReminder(reportWriteGuard)) {
           messages.push({
             role: "user",
@@ -7253,6 +7317,7 @@ async function sendMessage(
       }
     }
   } finally {
+    clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
@@ -7402,10 +7467,12 @@ async function streamFinalModelAnswerWithoutTools(
     signal,
   )) {
     if (signal.aborted) {
+      clearRequestActivity(context);
       writeLine(output, t(context, "toolInterrupted"));
       return assistantText;
     }
     if (event.type === "assistant_text_delta") {
+      clearRequestActivity(context);
       assistantText += event.text;
       output.write(event.text);
       continue;
@@ -7436,6 +7503,7 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "error") {
+      clearRequestActivity(context);
       await recordProviderFailureEvidence(
         context,
         sessionId,
@@ -7447,6 +7515,7 @@ async function streamFinalModelAnswerWithoutTools(
     }
   }
   if (!assistantText) {
+    clearRequestActivity(context);
     const message = await recordProviderEmptyResponse(
       context,
       sessionId,
@@ -7470,6 +7539,7 @@ async function continueModelAfterToolResults(
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
   context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
+  startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   const assistantEventId = randomUUID();
   const sessionId = await ensureSession(context);
@@ -7490,12 +7560,14 @@ async function continueModelAfterToolResults(
         controller.signal,
       )) {
         if (event.type === "assistant_text_delta") {
+          clearRequestActivity(context);
           assistantText += event.text;
           roundAssistantText += event.text;
           output.write(event.text);
           continue;
         }
         if (event.type === "tool_use") {
+          clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
         }
@@ -7505,6 +7577,7 @@ async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "error") {
+          clearRequestActivity(context);
           await recordProviderFailureEvidence(
             context,
             sessionId,
@@ -7520,6 +7593,14 @@ async function continueModelAfterToolResults(
       }
       if (toolCalls.length === 0) {
         const reportWriteGuard = continuation.reportWriteGuard;
+        if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
+          continuation.messages.push({
+            role: "user",
+            content: formatReportEvidenceRequired(context.language),
+          });
+          reportWriteGuard.evidenceReminderSent = true;
+          continue;
+        }
         if (reportWriteGuard && shouldSendReportWriteReminder(reportWriteGuard)) {
           continuation.messages.push({
             role: "user",
@@ -7596,6 +7677,7 @@ async function continueModelAfterToolResults(
       });
     }
   } finally {
+    clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
@@ -7632,15 +7714,7 @@ async function recordProviderEmptyResponse(
     ...evidence,
   });
   await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
-  return context.language === "en-US"
-    ? "Model returned an empty response. Run /model doctor to check provider/baseUrl/model/endpointProfile, or switch provider/model and retry."
-    : "模型返回空响应。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，或切换 provider/model 后重试。";
-}
-
-function formatProviderFailurePrimary(_error: unknown, language: Language): string {
-  return language === "en-US"
-    ? "Model request failed. Run /model doctor to check provider/baseUrl/model/endpointProfile, then retry."
-    : "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。";
+  return formatProviderEmptyResponsePrimary(context.language);
 }
 
 function needsSolutionCompletenessReportClosure(
@@ -7696,6 +7770,13 @@ function createModelToolDefinitionsForReportGuard(
 ): ModelToolDefinition[] {
   if (!guard || guard.completed) {
     return createModelToolDefinitions();
+  }
+  if (!guard.evidenceRead) {
+    return createModelToolDefinitionsForTools([
+      builtInTools.Read,
+      builtInTools.Grep,
+      builtInTools.Glob,
+    ]);
   }
   if (guard.nonWriteToolRounds < 1) {
     return createModelToolDefinitionsForTools(
@@ -7830,6 +7911,7 @@ async function executeModelToolUse(
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
   }
   if (!architectureDriftConfirmed && context.currentArchitectureCard) {
+    clearRequestActivity(context);
     const drift = detectArchitectureDrift(context.currentArchitectureCard, {
       toolName,
       input: toolCall.input,
@@ -7841,7 +7923,12 @@ async function executeModelToolUse(
           ? `Architecture drift requires confirmation before this tool use: ${drift.warnings.join("; ")}`
           : `Architecture drift 需要确认后才能执行本次工具调用：${drift.warnings.join("；")}`;
       await appendSystemEvent(context, sessionId, warning, "warning");
-      writeLine(output, warning);
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Architecture drift detected. Confirm before running this tool."
+          : "检测到 Architecture drift。确认后才会运行本工具。",
+      );
       context.pendingLocalApproval = {
         kind: "architecture_drift",
         toolCall,
@@ -7864,6 +7951,17 @@ async function executeModelToolUse(
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
+  if (
+    continuation?.reportWriteGuard &&
+    !continuation.reportWriteGuard.evidenceRead &&
+    (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit")
+  ) {
+    const text = formatReportEvidenceRequired(context.language);
+    continuation.reportWriteGuard.evidenceReminderSent = true;
+    const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
+    await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    return { ok: false, tool: toolName, text, evidenceId: evidence.id };
+  }
   const permission = await decidePermission(toolName, toolCall.input, context, sessionId);
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
@@ -7878,6 +7976,7 @@ async function executeModelToolUse(
     createdAt: new Date().toISOString(),
   });
   if (permission.decision !== "allow") {
+    clearRequestActivity(context);
     const text = `${permission.decision}: ${permission.reason}`;
     writeLine(
       output,
@@ -7933,6 +8032,7 @@ async function executeApprovedModelToolUse(
   if (preflight) {
     writeLine(output, preflight);
   }
+  startRequestActivity(output, context, "tool_running", { toolName });
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -7945,9 +8045,13 @@ async function executeApprovedModelToolUse(
     const result = await runTool(toolName, toolCall.input, context.tools);
     progress.restore();
     await Promise.all(progress.pending);
+    clearRequestActivity(context);
     await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
     await appendDerivedToolEvents(context, sessionId, toolName, result.output);
     const evidence = await recordToolEvidence(context, sessionId, toolName, result.output);
+    if (reportWriteGuard && (toolName === "Read" || toolName === "Glob" || toolName === "Grep")) {
+      reportWriteGuard.evidenceRead = true;
+    }
     rememberToolFiles(context, toolName, toolCall.input, result.output);
     const isError = isToolOutputFailure(toolName, result.output);
     await appendToolResultEvent(
@@ -7979,6 +8083,7 @@ async function executeApprovedModelToolUse(
   } catch (error) {
     progress.restore();
     await Promise.all(progress.pending);
+    clearRequestActivity(context);
     const text = formatError(error, context.language);
     const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
@@ -8278,18 +8383,11 @@ function createReportWriteGuard(text: string): ReportWriteGuard | undefined {
     pathExplicit: Boolean(requestedPath),
     completed: false,
     reminderSent: false,
+    evidenceReminderSent: false,
     finalReferenceReminderSent: false,
     nonWriteToolRounds: 0,
+    evidenceRead: false,
   };
-}
-
-function formatModelRequestStart(guard: ReportWriteGuard | undefined, language: Language): string {
-  if (guard) {
-    return language === "en-US"
-      ? `I will inspect the project evidence briefly, then save the analysis report to ${guard.requestedPath}.`
-      : `我会先简要检查项目证据，然后把分析报告保存到 ${guard.requestedPath}。`;
-  }
-  return language === "en-US" ? "Status: requesting model" : "状态：正在请求模型";
 }
 
 function isReportFileWriteRequest(text: string): boolean {
@@ -8322,8 +8420,12 @@ function normalizeReportPath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//u, "");
 }
 
+function shouldSendReportEvidenceReminder(guard: ReportWriteGuard | undefined): boolean {
+  return Boolean(guard && !guard.completed && !guard.evidenceRead && !guard.evidenceReminderSent);
+}
+
 function shouldSendReportWriteReminder(guard: ReportWriteGuard | undefined): boolean {
-  return Boolean(guard && !guard.completed && !guard.reminderSent);
+  return Boolean(guard?.evidenceRead && !guard.completed && !guard.reminderSent);
 }
 
 function shouldSendReportFinalReferenceReminder(
@@ -8424,9 +8526,7 @@ async function recordReportIncompleteEvidence(
     `report_incomplete: missing Write evidence for ${guard.requestedPath}; evidence=${evidence.id}`,
     "warning",
   );
-  return context.language === "en-US"
-    ? `Report generation incomplete/BLOCKED: no saved report file matched ${guard.requestedPath}. See details for the saved record.`
-    : `报告生成 incomplete/BLOCKED：没有匹配 ${guard.requestedPath} 的已保存报告。可在详情中查看记录。`;
+  return formatReportIncompletePrimary(guard.requestedPath, context.language);
 }
 
 function doesWriteSatisfyReportGuard(
@@ -10072,6 +10172,24 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
     currentModel: "当前模型",
     unknownCommand: "未知命令",
+    languageSwitchedZh: "语言已切换为中文。",
+    languageSwitchedEn: "Language switched to English.",
+    modeCurrent: "当前权限模式：{mode}",
+    modeOptions: "可选：default / auto-review / plan / full-access",
+    modeBoundary:
+      "边界：full-access 需要本地显式 opt-in；auto-review 只自动允许低风险工作区编辑。Plan approval 不授权所有工具。",
+    modeUnknown: "未知模式。可选：default / auto-review / plan / full-access",
+    modeFullAccessPlanBlocked:
+      "Plan 模式不能直接切到 full-access 执行写入。请先批准计划的明确边界，或切回 default。",
+    modeFullAccessOptInBlocked:
+      "已拒绝切换 full-access：full-access 必须本地显式 opt-in，不能由自然语言、workflow、agent、plugin 或 hook 静默开启。",
+    modeSwitched: "已切换权限模式：{mode}",
+    modePlanBoundary:
+      "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后仍不等于授权所有工具。",
+    startGateConfirmed: "已确认，正在进入本地动作路径；后续受保护操作仍会单独审批。",
+    startGateExpired: "确认已过期。请重新发起请求。",
+    startGateExactRequired: "该动作需要输入精确 slash command 才能继续；这条输入未执行。",
+    startGatePlainConfirmationRejected: "该动作需要精确确认；普通 yes/确认 未放行。",
     exit: "已退出 Linghun。",
     status:
       "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",
@@ -10103,6 +10221,27 @@ const messages: Record<Language, Record<MessageKey, string>> = {
     intro: "Type a message to chat; use /help for commands; use /exit to quit.",
     currentModel: "Current model",
     unknownCommand: "Unknown command",
+    languageSwitchedZh: "语言已切换为中文。",
+    languageSwitchedEn: "Language switched to English.",
+    modeCurrent: "Current permission mode: {mode}",
+    modeOptions: "Options: default / auto-review / plan / full-access",
+    modeBoundary:
+      "Boundary: full-access requires local opt-in; auto-review only allows low-risk workspace edits automatically. Plan approval does not authorize every tool.",
+    modeUnknown: "Unknown mode. Options: default / auto-review / plan / full-access",
+    modeFullAccessPlanBlocked:
+      "Plan mode cannot switch directly to full-access for writes. Approve a clear plan boundary first, or switch back to default.",
+    modeFullAccessOptInBlocked:
+      "Refused to switch to full-access: full-access requires local opt-in and cannot be silently enabled by natural language, workflow, agent, plugin, or hook.",
+    modeSwitched: "Permission mode switched: {mode}",
+    modePlanBoundary:
+      "Plan mode only allows Read / Grep / Glob / Diff / Todo and session-scoped actions. Accepting a plan still does not authorize every tool.",
+    startGateConfirmed:
+      "Confirmed; entering the local action path. Protected follow-up actions still require separate approval.",
+    startGateExpired: "Confirmation expired. Reissue the request.",
+    startGateExactRequired:
+      "This action requires the exact slash command before it can continue. This input was not executed.",
+    startGatePlainConfirmationRejected:
+      "This action requires exact confirmation; plain yes/confirm was not accepted.",
     exit: "Exited Linghun.",
     status:
       "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",

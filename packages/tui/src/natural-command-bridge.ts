@@ -354,6 +354,9 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
       "自动审查",
       "自动模式",
       "bypass",
+      "dontAsk",
+      "don't ask",
+      "免确认",
     ],
     "权限模式",
     "Permission mode",
@@ -935,6 +938,18 @@ export function routeNaturalIntent(
       normalized,
     );
   }
+  if (capability.id === "mode" && extractPermissionMode(normalized) === "full-access") {
+    return createIntent(
+      "start_gate",
+      capability,
+      0.95,
+      "full-access requires exact confirmation",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
   if (dangerous && isDangerousNaturalTarget(capability.id)) {
     return createIntent(
       "permission_pipeline",
@@ -1171,34 +1186,23 @@ export function formatNaturalStartGate(
   gate = createPendingNaturalCommand(intent, context),
 ): string {
   const c = intent.capability;
-  const command =
-    gate?.exactCommand ?? intent.command ?? (c ? createNaturalEquivalentCommand(c, "") : "");
-  const scope = gate?.scope ?? `current project ${context.projectPath}`;
   const exactHint = gate?.requiresExactConfirmation
     ? intent.language === "en-US"
-      ? `To continue, reply with exactly \`${command}\`. Plain \`yes\` is not accepted for this action.`
-      : `如要继续，请原样回复 \`${command}\`。这个动作不能只回复“确认”或 yes。`
+      ? "To continue, type the exact slash command; plain `yes` is not accepted for this action."
+      : "如要继续，请输入精确 slash command；这个动作不能只回复“确认”或 yes。"
     : intent.language === "en-US"
-      ? "Reply `yes` to run the equivalent slash command, or type anything else to cancel."
-      : "回复 `确认` 执行等价 slash command；输入其他内容则取消。";
+      ? "Reply `yes` to continue, or type anything else to cancel."
+      : "回复 `确认` 继续；输入其他内容则取消。";
   if (intent.language === "en-US") {
     return [
-      `I can prepare this action: ${c?.titleEn ?? "command"}`,
-      `- Exact command: ${command}`,
-      `- Scope: ${scope}`,
-      `- Risk: ${formatHumanRisk(c, intent.language)}`,
-      "- Safety: this only opens the action path; any later file writes, Bash, network access, config changes, or tool permissions still require their own approval.",
-      "- Cancel: type anything other than the required confirmation, or use /interrupt if a later long-running task has started.",
+      `Ready to prepare: ${c?.titleEn ?? "command"}.`,
+      "Protected follow-up actions still require their own approval.",
       exactHint,
     ].join("\n");
   }
   return [
-    `我可以准备执行：${c?.titleZh ?? "命令"}`,
-    `- 精确命令：${command}`,
-    `- 范围：${scope}`,
-    `- 风险：${formatHumanRisk(c, intent.language)}`,
-    "- 安全边界：这里只打开动作路径；后续如需写文件、Bash、联网、改配置或工具权限，仍会单独审批。",
-    "- 取消方式：输入任何非确认内容即可取消；如果后续长任务已开始，可用 /interrupt。",
+    `可以准备执行：${c?.titleZh ?? "命令"}。`,
+    "后续受保护操作仍会单独审批。",
     exactHint,
   ].join("\n");
 }
@@ -1226,7 +1230,7 @@ function requiresExactNaturalConfirmation(c: CommandCapability, command: string)
     c.writesConfig ||
     c.entersPermissionPipeline ||
     ["workflows", "fork"].includes(c.id) ||
-    /\b(refresh|init|enable|accept|delete|restore|bypass|add|remove|install|job|remote|hook)\b|刷新|建立|启用|接受|删除|恢复|安装依赖/u.test(
+    /\b(refresh|init|enable|accept|delete|restore|bypass|full-access|dontask|dontAsk|add|remove|install|job|remote|hook)\b|刷新|建立|启用|接受|删除|恢复|完全访问|免确认|安装依赖/u.test(
       command,
     )
   );

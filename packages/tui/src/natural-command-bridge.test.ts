@@ -189,12 +189,11 @@ describe("Phase 15 Natural Intent Router", () => {
       expect(intent.inquiry).toBe("read");
       expect(intent.action).toBe("execute_readonly");
     }
-    if (
-      phrase.includes("npm install") ||
-      phrase.includes("bypass") ||
-      phrase.includes("完全访问")
-    ) {
+    if (phrase.includes("npm install")) {
       expect(intent.action).toBe("permission_pipeline");
+    }
+    if (phrase.includes("bypass") || phrase.includes("完全访问")) {
+      expect(intent.action).toBe("start_gate");
     }
   });
 
@@ -214,7 +213,6 @@ describe("Phase 15 Natural Intent Router", () => {
 
   it.each([
     ["帮我直接运行 npm install", "bash"],
-    ["直接开启 bypass", "mode"],
     ["直接接受所有记忆", "memory"],
     ["force refresh index", "index"],
     ["直接帮我写文件", "write"],
@@ -390,18 +388,43 @@ describe("Phase 15 pending natural gate hardening", () => {
     ).toBe("expired");
   });
 
+  it("keeps full-access mode behind exact Start Gate confirmation", () => {
+    const intent = routeNaturalIntent("直接开启 bypass");
+    const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
+
+    expect(intent.action).toBe("start_gate");
+    expect(gate).toMatchObject({
+      capabilityId: "mode",
+      exactCommand: "/mode full-access",
+      requiresExactConfirmation: true,
+    });
+    expect(gate).toBeTruthy();
+    if (!gate) return;
+    expect(matchesNaturalGateConfirmation(gate, "yes", new Date("2026-05-17T00:00:30.000Z"))).toBe(
+      "exact_required",
+    );
+    expect(
+      matchesNaturalGateConfirmation(
+        gate,
+        "/mode full-access",
+        new Date("2026-05-17T00:00:30.000Z"),
+      ),
+    ).toBe("confirmed");
+  });
+
   it("formats Chinese index rebuild Start Gate as a human-first decision prompt", () => {
     const intent = routeNaturalIntent("帮我重建索引");
     const gate = createPendingNaturalCommand(intent, runtime, new Date("2026-05-17T00:00:00.000Z"));
     const text = formatNaturalStartGate(intent, runtime, gate);
 
-    expect(text).toContain("我可以准备执行");
-    expect(text).toContain("精确命令：/index refresh --confirm-rebuild");
-    expect(text).toContain("范围：current project /tmp/project");
-    expect(text).toContain("带安全扫描的本地安全动作");
-    expect(text).toContain("不应修改源码");
-    expect(text).toContain("取消方式");
+    expect(text).toContain("可以准备执行");
+    expect(text).toContain("后续受保护操作仍会单独审批");
     expect(text).toContain("不能只回复“确认”或 yes");
+    expect(text).not.toContain("精确命令：/index refresh --confirm-rebuild");
+    expect(text).not.toContain("范围：current project /tmp/project");
+    expect(text).not.toContain("带安全扫描的本地安全动作");
+    expect(text).not.toContain("不应修改源码");
+    expect(text).not.toContain("取消方式");
     expect(text).not.toContain("gateId");
     expect(text).not.toContain("expiresAt");
     expect(text).not.toContain("risk=");
@@ -422,11 +445,12 @@ describe("Phase 15 pending natural gate hardening", () => {
     );
     const text = formatNaturalStartGate({ ...intent, language: "en-US" }, englishRuntime, gate);
 
-    expect(text).toContain("I can prepare this action");
-    expect(text).toContain("Exact command: /index refresh --confirm-rebuild");
-    expect(text).toContain("Scope: current project /tmp/project");
-    expect(text).toContain("safe local actions that run a safety scan");
-    expect(text).toContain("Plain `yes` is not accepted");
+    expect(text).toContain("Ready to prepare");
+    expect(text).toContain("Protected follow-up actions still require their own approval");
+    expect(text).toContain("plain `yes` is not accepted");
+    expect(text).not.toContain("Exact command: /index refresh --confirm-rebuild");
+    expect(text).not.toContain("Scope: current project /tmp/project");
+    expect(text).not.toContain("safe local actions that run a safety scan");
     expect(text).not.toContain("gateId");
     expect(text).not.toContain("expiresAt");
     expect(text).not.toContain("risk=");

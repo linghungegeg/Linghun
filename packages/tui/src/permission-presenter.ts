@@ -42,34 +42,17 @@ export function formatModelToolPermissionPrompt(
 ): string {
   const files = permission.scope.length > 0 ? permission.scope.join(", ") : "none";
   const action = formatPermissionAction(permission);
-  const risk = formatRisk(permission.risk, language);
   const isReportWrite = isReportWritePrompt(permission);
   if (language === "en-US") {
     if (isReportWrite) {
       return [`Write ${files}`, "Allow this write? yes / no"].join("\n");
     }
-    return [
-      `Linghun wants to run ${action}. Allow this action once?`,
-      `- action: ${action}`,
-      `- scope: ${files}`,
-      `- risk: ${risk}`,
-      `- reason: ${permission.reason}`,
-      "- choices: type yes/confirm to allow this pending tool once; type no/cancel to deny.",
-      "- boundary: the tool has not run yet, and allowing once does not change the permission mode.",
-    ].join("\n");
+    return [`Linghun wants to run ${action}.`, "Allow this action once? yes / no"].join("\n");
   }
   if (isReportWrite) {
     return [`写入 ${files}`, "允许本次写入？yes / no"].join("\n");
   }
-  return [
-    `Linghun 想执行 ${action}，是否允许本次执行？`,
-    `- action：${action}`,
-    `- scope：${files}`,
-    `- risk：${risk}`,
-    `- reason：${permission.reason}`,
-    "- choices：输入 yes/确认/继续 可本次允许当前工具；输入 no/取消 可拒绝。",
-    "- boundary：工具尚未执行；本次允许只适用于当前 pending tool，不会切换权限模式。",
-  ].join("\n");
+  return [`Linghun 想执行 ${action}。`, "允许本次执行？yes / no"].join("\n");
 }
 
 function formatPermissionAction(permission: PermissionPromptView): string {

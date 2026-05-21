@@ -223,9 +223,7 @@ export function detectArchitectureDrift(
   );
 
   if (addsDependencyOrConfig(toolName, actionText, files)) {
-    warnings.push(
-      "Architecture drift: next action adds or changes dependency/config not confirmed by the Architecture Card.",
-    );
+    warnings.push("Architecture drift: dependency/config changed.");
   }
 
   const unmentionedFiles = files.filter(
@@ -233,7 +231,7 @@ export function detectArchitectureDrift(
   );
   if (unmentionedFiles.length > 0 && mutatesProject(toolName, actionText)) {
     warnings.push(
-      `Architecture drift: next action expands to unmentioned module/file scope (${unmentionedFiles.slice(0, 3).join(", ")}).`,
+      `Architecture drift: scope expanded (${unmentionedFiles.slice(0, 3).join(", ")}).`,
     );
   }
 
@@ -241,32 +239,26 @@ export function detectArchitectureDrift(
     nextAction.skipVerification ||
     /skip\s+(test|verification)|不(运行|做).{0,8}(测试|验证)/i.test(summary)
   ) {
-    warnings.push(
-      "Architecture drift: next action skips verification required by the Architecture Card.",
-    );
+    warnings.push("Architecture drift: verification skipped.");
   }
 
   if (
     nextAction.recommendedApproach &&
     normalizeText(nextAction.recommendedApproach) !== normalizeText(card.recommendedApproach)
   ) {
-    warnings.push(
-      "Architecture drift: next action changes the recommended approach without updating the card.",
-    );
+    warnings.push("Architecture drift: approach changed.");
   }
 
   const reportArtifactWrite = isReportArtifactWrite(card, toolName, files);
   const reportActionText = normalizeText([summary, toolName, files.join("\n")].join("\n"));
   const factActionText = reportArtifactWrite ? reportActionText : actionText;
   if (nextAction.treatsUnknownOrStaleAsFact || treatsUnknownOrStaleAsFact(card, factActionText)) {
-    warnings.push(
-      "Architecture drift: next action treats unknown/stale external facts as confirmed facts.",
-    );
+    warnings.push("Architecture drift: stale facts treated as confirmed.");
   }
 
   const nonGoalActionText = reportArtifactWrite ? reportActionText : actionText;
   if (violatesNonGoals(card, nonGoalActionText)) {
-    warnings.push("Architecture drift: next action appears to violate card nonGoals.");
+    warnings.push("Architecture drift: non-goal crossed.");
   }
 
   return { drift: warnings.length > 0, warnings, requiresConfirmation: warnings.length > 0 };

@@ -50,22 +50,11 @@ export function formatToolOutput(
   if (layered.preview) {
     lines.push(layered.preview);
   }
-  if (layered.details) {
+  if (layered.details || layered.truncated) {
     lines.push(
       language === "en-US"
-        ? "Details are available outside the main screen."
-        : "详情可在主屏之外查看。",
-    );
-  }
-  if (layered.truncated) {
-    lines.push(
-      layered.fullOutputPath
-        ? language === "en-US"
-          ? `Full log: ${layered.fullOutputPath}`
-          : `完整日志：${layered.fullOutputPath}`
-        : language === "en-US"
-          ? "Full result is saved outside the main screen."
-          : "完整结果已保存在主屏之外。",
+        ? "More details are available with /details."
+        : "更多详情可通过 /details 查看。",
     );
   }
   return lines.join("\n");
@@ -127,27 +116,22 @@ function createSummaryFirstPreview(
   const exitCode = readNumber(metadata, "exitCode");
   const stats = [
     language === "en-US"
-      ? `lines=${dataLines ?? lines.length}`
-      : `行数=${dataLines ?? lines.length}`,
+      ? `${dataLines ?? lines.length} line(s)`
+      : `${dataLines ?? lines.length} 行`,
   ];
   if (count !== undefined) {
-    stats.push(language === "en-US" ? `count=${count}` : `数量=${count}`);
+    stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
   if (name === "Bash" && exitCode !== undefined) {
-    stats.push(`exitCode=${exitCode}`);
+    stats.push(language === "en-US" ? `exit code ${exitCode}` : `退出码 ${exitCode}`);
     if (looksLikeMojibake(text)) {
-      stats.push(language === "en-US" ? "encoding=possible-mojibake" : "编码=疑似乱码");
+      stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
     }
   }
-  stats.push(
-    language === "en-US"
-      ? `truncated=${output?.truncated ? "yes" : "no"}`
-      : `截断=${output?.truncated ? "是" : "否"}`,
-  );
   const hint =
     language === "en-US"
-      ? "Primary output is summary-first; full bounded content is saved outside the main screen."
-      : "主屏为 summary-first；完整 bounded 内容已保存在主屏之外。";
+      ? "Output summarized; use /details for the full result."
+      : "输出已摘要；完整结果可通过 /details 查看。";
   return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
 }
 

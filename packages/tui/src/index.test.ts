@@ -86,24 +86,34 @@ function mockOpenAiErrorFetch(): unknown[] {
 }
 
 function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done"): unknown[] {
+  return mockOpenAiToolSequence([{ toolName, input }], finalText);
+}
+
+function mockOpenAiToolSequence(
+  toolCalls: Array<{ toolName: string; input: unknown }>,
+  finalText = "done",
+): unknown[] {
   const requests: unknown[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
-      const isFirst = requests.length === 1;
-      const body = isFirst
+      const toolCall = toolCalls[requests.length - 1];
+      const body = toolCall
         ? [
             `data: ${JSON.stringify({
-              id: "chatcmpl-test",
+              id: `chatcmpl-test-${requests.length}`,
               choices: [
                 {
                   delta: {
                     tool_calls: [
                       {
-                        id: "call-1",
+                        id: `call-${requests.length}`,
                         type: "function",
-                        function: { name: toolName, arguments: JSON.stringify(input) },
+                        function: {
+                          name: toolCall.toolName,
+                          arguments: JSON.stringify(toolCall.input),
+                        },
                       },
                     ],
                   },
@@ -112,7 +122,7 @@ function mockOpenAiToolFetch(toolName: string, input: unknown, finalText = "done
             })}\n\n`,
             "data: [DONE]\n\n",
           ].join("")
-        : `data: ${JSON.stringify({ id: "chatcmpl-test-2", choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+        : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
       return new Response(body, { status: 200 });
     }),
   );
@@ -914,7 +924,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "当前模型：role=executor provider=openai-compatible model=status-model",
     );
-    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(output.text).not.toContain("正在思考…");
     expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
     expect(output.text).not.toContain("Start Gate：");
   });
@@ -963,8 +973,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
     expect(output.text).toContain("defaultModel=gpt-5.5");
     expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
-    expect(output.text).toContain("状态：正在请求模型");
-    expect(output.text).not.toContain("状态：正在请求模型 provider=");
+    expect(output.text).toContain("正在思考…");
+    expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).toContain(
       "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not configured/未生效",
     );
@@ -1014,8 +1024,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "reasoning=ignored/unsupported/未生效 compatibilityProfile=strict_openai_compatible",
     );
-    expect(output.text).toContain("状态：正在请求模型");
-    expect(output.text).not.toContain("状态：正在请求模型 provider=");
+    expect(output.text).toContain("正在思考…");
+    expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
   });
 
@@ -1065,8 +1075,8 @@ describe("Phase 06 TUI slash commands", () => {
       reasoning: { effort: "Medium" },
     });
     expect(JSON.stringify(requests[0])).toContain('"tools":[{"type":"function","name":"Read"');
-    expect(output.text).toContain("状态：正在请求模型");
-    expect(output.text).not.toContain("状态：正在请求模型 provider=");
+    expect(output.text).toContain("正在思考…");
+    expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).not.toContain("baseUrl=");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
     expect(output.text).not.toMatch(/Status: requesting model.*ok/s);
@@ -1118,12 +1128,8 @@ describe("Phase 06 TUI slash commands", () => {
     };
     await handleNaturalInput("确认", context, output);
 
-    expect(output.text).toContain(
-      "需要精确确认：请输入 /index refresh --confirm-rebuild。这条输入未执行。",
-    );
-    expect(output.text).toContain(
-      "需要精确确认：请输入 /index refresh --confirm-rebuild。普通确认未被接受。",
-    );
+    expect(output.text).toContain("该动作需要输入精确 slash command 才能继续；这条输入未执行。");
+    expect(output.text).toContain("该动作需要精确确认；普通 yes/确认 未放行。");
     expect(output.text).not.toContain("Index: start refresh");
     expect(output.text).not.toContain("gate ng-");
     expect(output.text).not.toContain("risk=");
@@ -1208,7 +1214,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("我会通过主模型链路解释索引能力");
     expect(output.text).not.toContain("/index：代码索引");
     expect(output.text).not.toContain("工具 Bash 结果");
@@ -1523,12 +1529,13 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(0);
-    expect(output.text).toContain("/mode auto-review");
+    expect(output.text).toContain("可以准备执行：权限模式。");
+    expect(output.text).toContain("后续受保护操作仍会单独审批。");
     expect(output.text).toContain("当前权限模式：default");
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("Index status");
     expect(output.text).toContain("Cache status");
-    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(output.text).not.toContain("正在思考…");
     expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
   });
 
@@ -1604,7 +1611,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("我会先按模型主链路分析项目部署");
     expect(output.text).not.toContain("/index：代码索引");
   });
@@ -1668,11 +1675,12 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Linghun 想执行 Bash，是否允许本次执行？");
-    expect(output.text).toContain("- action：Bash");
-    expect(output.text).toContain("- reason：");
-    expect(output.text).toContain("- risk：高");
-    expect(output.text).toContain("- scope：none");
+    expect(output.text).toContain("Linghun 想执行 Bash。");
+    expect(output.text).toContain("允许本次执行？yes / no");
+    expect(output.text).not.toContain("- action：Bash");
+    expect(output.text).not.toContain("- reason：");
+    expect(output.text).not.toContain("- risk：高");
+    expect(output.text).not.toContain("- scope：none");
     expect(output.text).not.toContain("- 当前模式：default");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
@@ -1931,9 +1939,10 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Linghun 想执行 Write blocked.txt，是否允许本次执行？");
-    expect(output.text).toContain("- action：Write blocked.txt");
-    expect(output.text).toContain("- scope：blocked.txt");
+    expect(output.text).toContain("Linghun 想执行 Write blocked.txt。");
+    expect(output.text).toContain("允许本次执行？yes / no");
+    expect(output.text).not.toContain("- action：Write blocked.txt");
+    expect(output.text).not.toContain("- scope：blocked.txt");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
@@ -2014,9 +2023,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("报告生成 incomplete/BLOCKED");
-    expect(output.text).toContain("missing-report.md");
-    expect(output.text).toContain("可在详情中查看记录");
+    expect(output.text).toContain("报告生成受阻：尚未在 missing-report.md 生成报告文件。");
+    expect(output.text).not.toContain("报告生成 incomplete/BLOCKED");
+    expect(output.text).not.toContain("可在详情中查看记录");
     await expect(readFile(join(project, "missing-report.md"), "utf8")).rejects.toThrow();
     const session = (
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
@@ -2046,6 +2055,11 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { build: "tsc" } }),
+      "utf8",
+    );
     const requests: unknown[] = [];
     vi.stubGlobal(
       "fetch",
@@ -2058,6 +2072,28 @@ describe("Phase 06 TUI slash commands", () => {
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
             id: "chatcmpl-test-2",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-read",
+                      type: "function",
+                      function: {
+                        name: "Read",
+                        arguments: JSON.stringify({ path: "package.json" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        if (requests.length === 3) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-test-3",
             choices: [
               {
                 delta: {
@@ -2080,7 +2116,7 @@ describe("Phase 06 TUI slash commands", () => {
           })}\n\ndata: [DONE]\n\n`;
           return new Response(body, { status: 200 });
         }
-        const body = `data: ${JSON.stringify({ id: "chatcmpl-test-3", choices: [{ delta: { content: "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开报告复核。" } }] })}\n\ndata: [DONE]\n\n`;
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-test-4", choices: [{ delta: { content: "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开报告复核。" } }] })}\n\ndata: [DONE]\n\n`;
         return new Response(body, { status: 200 });
       }),
     );
@@ -2107,7 +2143,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       secondRequest.messages.some((message) => message.content?.includes("requested-report.md")),
     ).toBe(true);
+    expect(requests).toHaveLength(4);
     expect(output.text).toContain("报告已保存：requested-report.md");
+    expect(output.text).toContain("file_read Read");
     expect(output.text).toContain("command_output Write");
     expect(output.text).toContain("已生成 requested-report.md");
     expect(output.text).toContain("结论：报告已保存");
@@ -2134,11 +2172,18 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ name: "中文路径测试" }),
+      "utf8",
+    );
     const reportPath = "中文 目录/部署 报告.md";
     const report = "# 中文报告\n\n- Windows 中文路径与空格路径 smoke。";
-    const requests = mockOpenAiToolFetch(
-      "Write",
-      { path: reportPath, content: report },
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "package.json" } },
+        { toolName: "Write", input: { path: reportPath, content: report } },
+      ],
       `已生成 ${reportPath}。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开报告复核。`,
     );
     const output = new MemoryOutput();
@@ -2150,7 +2195,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(output.text).toContain(`写入 ${reportPath}`);
     expect(output.text).toContain("允许本次写入？yes / no");
     expect(output.text).not.toContain("需要写入");
@@ -2185,12 +2230,11 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const report =
       "# 项目分析报告\n\n- 类型：Node 项目\n- 部署：运行 npm install && npm run build。";
-    const requests = mockOpenAiToolFetch(
-      "Write",
-      {
-        path: "report.md",
-        content: report,
-      },
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "package.json" } },
+        { toolName: "Write", input: { path: "report.md", content: report } },
+      ],
       "已生成 report.md。\n结论：这是 Node 项目；部署依赖 package.json 脚本。\n推断/未确认：运行环境变量需实机核对。\n下一步：打开 report.md 复核部署命令。",
     );
     const output = new MemoryOutput();
@@ -2206,14 +2250,18 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     const firstRequest = requests[0] as {
       tools?: Array<{ name?: string; function?: { name?: string } }>;
     };
     const toolNames = firstRequest.tools?.map((tool) => tool.name ?? tool.function?.name);
-    expect(toolNames).toContain("Write");
+    expect(toolNames).toContain("Read");
+    expect(toolNames).toContain("Grep");
+    expect(toolNames).toContain("Glob");
+    expect(toolNames).not.toContain("Write");
     expect(toolNames).not.toContain("Bash");
-    expect(output.text).toContain("我会先简要检查项目证据，然后把分析报告保存到 report.md。");
+    expect(output.text).toContain("正在检查项目证据，随后把报告保存到 report.md。");
+    expect(output.text).toContain("Read 已完成，继续整理报告分析。");
     expect(output.text).toContain("写入 report.md");
     expect(output.text).toContain("允许本次写入？yes / no");
     expect(output.text).not.toContain("需要写入 report.md");
@@ -2282,11 +2330,11 @@ describe("Phase 06 TUI slash commands", () => {
                 delta: {
                   tool_calls: [
                     {
-                      id: "call-write",
+                      id: "call-read",
                       type: "function",
                       function: {
-                        name: "Write",
-                        arguments: JSON.stringify({ path: "report.md", content: "# Report" }),
+                        name: "Read",
+                        arguments: JSON.stringify({ path: "package.json" }),
                       },
                     },
                   ],
@@ -2304,11 +2352,11 @@ describe("Phase 06 TUI slash commands", () => {
                 delta: {
                   tool_calls: [
                     {
-                      id: "call-read",
+                      id: "call-write",
                       type: "function",
                       function: {
-                        name: "Read",
-                        arguments: JSON.stringify({ path: "package.json" }),
+                        name: "Write",
+                        arguments: JSON.stringify({ path: "report.md", content: "# Report" }),
                       },
                     },
                   ],
@@ -2710,10 +2758,14 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/glob *.txt src", context, output);
 
     expect(output.text).toContain("主输出已隐藏 2 条 Todo");
-    expect(output.text).toContain("主屏为 summary-first");
-    expect(output.text).toContain("行数=120");
-    expect(output.text).toContain("数量=90");
-    expect(output.text).toContain("完整结果已保存在主屏之外");
+    expect(output.text).toContain("输出已摘要");
+    expect(output.text).toContain("120 行");
+    expect(output.text).toContain("90 条结果");
+    expect(output.text).toContain("更多详情可通过 /details 查看");
+    expect(output.text).not.toContain("主屏为 summary-first");
+    expect(output.text).not.toContain("完整结果已保存在主屏之外");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("1\tline 1");
     expect(output.text).not.toContain("120\tline 120");
     expect(output.text).not.toContain("needle 0");
@@ -2735,10 +2787,12 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(formatted).toContain("Tool Bash completed");
-    expect(formatted).toContain("lines=50");
-    expect(formatted).toContain("truncated=no");
-    expect(formatted).toContain("Primary output is summary-first");
-    expect(formatted).toContain("Full log: .linghun/logs/tools/bash-test.log");
+    expect(formatted).toContain("50 line(s)");
+    expect(formatted).toContain("exit code 0");
+    expect(formatted).toContain("Output summarized; use /details for the full result.");
+    expect(formatted).toContain("More details are available with /details.");
+    expect(formatted).not.toContain("Primary output is summary-first");
+    expect(formatted).not.toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).not.toContain("Evidence: ev-bash-1");
     expect(formatted).not.toContain("bash line 1");
     expect(formatted).not.toContain("bash line 50");
@@ -2755,8 +2809,9 @@ describe("Phase 06 TUI slash commands", () => {
       "zh-CN",
     );
 
-    expect(formatted).toContain("编码=疑似乱码");
-    expect(formatted).toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
+    expect(formatted).toContain("疑似编码问题");
+    expect(formatted).toContain("更多详情可通过 /details 查看。");
+    expect(formatted).not.toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
     expect(formatted).not.toContain("Ã¤Â¸Â­Ã¦Â–Â‡");
   });
 
@@ -2812,9 +2867,7 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain(
-      "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。",
-    );
+    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -2861,9 +2914,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain(
-      "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。",
-    );
+    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -4192,7 +4243,7 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("模型返回空响应");
+    expect(output.text).toContain("模型没有返回有效回答。可运行 /model doctor 查看详情后重试。");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("Evidence:");
@@ -4201,7 +4252,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(output.text).not.toMatch(/状态：正在请求模型\.\.\.\s*[^模]*Linghun/u);
+    expect(output.text).not.toMatch(/正在思考…\.\.\.\s*[^模]*Linghun/u);
     expect(
       transcript.some(
         (event) =>
@@ -4282,7 +4333,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("请求模型失败");
+    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("quota exceeded");
     expect(output.text).not.toContain("Evidence:");
@@ -4357,9 +4408,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests).toHaveLength(3);
     expect(output.text).not.toContain("Architecture drift");
-    expect(output.text).toContain(
-      "Linghun 想执行 Write packages/other/src/small.ts，是否允许本次执行？",
-    );
+    expect(output.text).toContain("Linghun 想执行 Write packages/other/src/small.ts。");
+    expect(output.text).toContain("允许本次执行？yes / no");
     expect(output.text).toContain("工具 Write 已完成");
     await expect(readFile(join(project, "packages/other/src/small.ts"), "utf8")).resolves.toBe(
       "// typo fix\n",
@@ -4385,13 +4435,23 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { build: "tsc" } }),
+      "utf8",
+    );
     const output = new MemoryOutput();
-    const requests = mockOpenAiToolFetch(
-      "Write",
-      {
-        path: "deploy-report.md",
-        content: "# 部署报告\n\n通过模型 Write 生成。",
-      },
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "package.json" } },
+        {
+          toolName: "Write",
+          input: {
+            path: "deploy-report.md",
+            content: "# 部署报告\n\n通过模型 Write 生成。",
+          },
+        },
+      ],
       "已生成 deploy-report.md。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开 deploy-report.md 复核。",
     );
 
@@ -4411,7 +4471,7 @@ describe("Phase 06 TUI slash commands", () => {
     const sessions = await store.list();
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(output.text).toContain("写入 deploy-report.md");
     expect(output.text).toContain("允许本次写入？yes / no");
     expect(output.text).not.toContain("需要写入 deploy-report.md");
@@ -4502,13 +4562,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("索引刷新完成");
     expect(output.text).toContain("当前没有等待确认的 Start Gate");
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("状态：正在请求模型");
+    expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("权限已拒绝");
     expect(output.text).toContain("工具 Write 已完成");
     expect(output.text).toContain("摘要");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
     expect(output.text).toContain("工具 Bash 已完成");
-    expect(output.text).toContain("主屏为 summary-first");
+    expect(output.text).toContain("输出已摘要");
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");

@@ -132,7 +132,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("unmentioned module/file scope");
+    expect(drift.warnings.join("\n")).toContain("scope expanded");
   });
 
   it("detects skipped verification", () => {
@@ -142,7 +142,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("skips verification");
+    expect(drift.warnings.join("\n")).toContain("verification skipped");
   });
 
   it("detects nonGoal violations", () => {
@@ -151,7 +151,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("nonGoals");
+    expect(drift.warnings.join("\n")).toContain("non-goal");
   });
 
   it("does not treat report body DB/deploy/current uncertainty analysis as drift when writing markdown report", () => {
@@ -185,7 +185,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("nonGoals");
+    expect(drift.warnings.join("\n")).toContain("non-goal");
   });
 
   it("still detects real dependency and config file changes", () => {
@@ -202,13 +202,13 @@ describe("architecture drift detection", () => {
     expect(drift.warnings.join("\n")).toContain("dependency/config");
   });
 
-  it("detects recommended approach drift", () => {
+  it("detects approach changed drift", () => {
     const drift = detectArchitectureDrift(baseCard, {
       recommendedApproach: "改成完整 ADR DB 平台。",
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("recommended approach");
+    expect(drift.warnings.join("\n")).toContain("approach changed");
   });
 
   it("detects unknown or stale external facts treated as confirmed", () => {
@@ -217,7 +217,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("unknown/stale");
+    expect(drift.warnings.join("\n")).toContain("stale facts");
   });
 
   it("still detects confirmed latest/current facts in report write summary", () => {
@@ -236,7 +236,7 @@ describe("architecture drift detection", () => {
     });
 
     expect(drift.drift).toBe(true);
-    expect(drift.warnings.join("\n")).toContain("unknown/stale");
+    expect(drift.warnings.join("\n")).toContain("stale facts");
   });
 
   it("does not drift for a covered local small fix", () => {
