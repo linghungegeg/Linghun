@@ -154,7 +154,7 @@ describe("architecture drift detection", () => {
     expect(drift.warnings.join("\n")).toContain("nonGoals");
   });
 
-  it("does not treat report body DB analysis as nonGoal drift when writing the requested report", () => {
+  it("does not treat report body DB/deploy/current uncertainty analysis as drift when writing markdown report", () => {
     const card: ArchitectureCard = {
       ...baseCard,
       target: "利用索引分析项目怎么部署，将报告写入 report.md",
@@ -166,7 +166,7 @@ describe("architecture drift detection", () => {
       input: {
         file_path: "report.md",
         content:
-          "# 部署分析\n\n数据库导入建议：先备份数据。\n\nDB 配置说明：按现有环境变量检查。\n\n部署步骤：运行现有脚本。",
+          "# 部署分析\n\n当前项目证据：有 package.json。\n\n数据库导入建议：不确定是否需要 DB，先备份数据。\n\nDB 配置说明：按现有环境变量检查。\n\n部署步骤：运行现有脚本。",
       },
       verificationPlanned: true,
     });
@@ -188,6 +188,20 @@ describe("architecture drift detection", () => {
     expect(drift.warnings.join("\n")).toContain("nonGoals");
   });
 
+  it("still detects real dependency and config file changes", () => {
+    const drift = detectArchitectureDrift(baseCard, {
+      toolName: "Edit",
+      input: {
+        file_path: "package.json",
+        content: "add deployment database dependency",
+      },
+      verificationPlanned: true,
+    });
+
+    expect(drift.drift).toBe(true);
+    expect(drift.warnings.join("\n")).toContain("dependency/config");
+  });
+
   it("detects recommended approach drift", () => {
     const drift = detectArchitectureDrift(baseCard, {
       recommendedApproach: "改成完整 ADR DB 平台。",
@@ -200,7 +214,25 @@ describe("architecture drift detection", () => {
   it("detects unknown or stale external facts treated as confirmed", () => {
     const drift = detectArchitectureDrift(baseCard, {
       summary: "已确认当前最新 provider API 行为，可以直接依赖。",
-      treatsUnknownOrStaleAsFact: true,
+    });
+
+    expect(drift.drift).toBe(true);
+    expect(drift.warnings.join("\n")).toContain("unknown/stale");
+  });
+
+  it("still detects confirmed latest/current facts in report write summary", () => {
+    const card: ArchitectureCard = {
+      ...baseCard,
+      target: "分析项目并写入 report.md",
+      recommendedApproach: "保存报告到 report.md。",
+    };
+    const drift = detectArchitectureDrift(card, {
+      toolName: "Write",
+      summary: "已确认当前最新 provider API 行为并写入报告。",
+      input: {
+        file_path: "report.md",
+        content: "# 报告\n\n这里可以描述不确定的部署和数据库情况。",
+      },
     });
 
     expect(drift.drift).toBe(true);

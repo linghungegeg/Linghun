@@ -41,27 +41,53 @@ export function formatModelToolPermissionPrompt(
   language: Language,
 ): string {
   const files = permission.scope.length > 0 ? permission.scope.join(", ") : "none";
+  const action = formatPermissionAction(permission);
   const risk = formatRisk(permission.risk, language);
+  const isReportWrite = isReportWritePrompt(permission);
   if (language === "en-US") {
     return [
-      "Tool paused for permission",
-      `- Tool: ${permission.toolName}`,
-      `- Why paused: ${permission.reason}`,
-      `- Safety level: ${risk}`,
-      `- Scope: ${files}`,
-      "- Result: the tool did not run; the denial was returned to the model as tool_result evidence.",
-      "- Next: review /permissions recent, use an explicit slash command, or switch to a controlled execution mode and retry.",
+      isReportWrite
+        ? `Linghun wants to write ${files}. This is the report file for this request. Allow this write once?`
+        : `Linghun wants to run ${action}. Allow this action once?`,
+      `- action: ${action}`,
+      `- scope: ${files}`,
+      `- risk: ${risk}`,
+      `- reason: ${permission.reason}`,
+      "- choices: type yes/confirm to allow this pending tool once; type no/cancel to deny.",
+      "- boundary: the tool has not run yet, and allowing once does not change the permission mode.",
     ].join("\n");
   }
   return [
-    "工具已暂停，等待权限边界处理",
-    `- 工具：${permission.toolName}`,
-    `- 暂停原因：${permission.reason}`,
-    `- 安全级别：${risk}`,
-    `- 影响范围：${files}`,
-    "- 结果：工具未执行；拒绝原因已作为 tool_result 证据回灌给模型。",
-    "- 下一步：查看 /permissions recent，改用明确 slash command，或切换到受控执行模式后重试。",
+    isReportWrite
+      ? `Linghun 想写入 ${files}，这是本次报告文件，是否允许本次写入？`
+      : `Linghun 想执行 ${action}，是否允许本次执行？`,
+    `- action：${action}`,
+    `- scope：${files}`,
+    `- risk：${risk}`,
+    `- reason：${permission.reason}`,
+    "- choices：输入 yes/确认/继续 可本次允许当前工具；输入 no/取消 可拒绝。",
+    "- boundary：工具尚未执行；本次允许只适用于当前 pending tool，不会切换权限模式。",
   ].join("\n");
+}
+
+function formatPermissionAction(permission: PermissionPromptView): string {
+  const files = permission.scope.length > 0 ? permission.scope.join(", ") : "none";
+  if (permission.toolName === "Write") {
+    return `Write ${files}`;
+  }
+  if (permission.toolName === "Edit" || permission.toolName === "MultiEdit") {
+    return `${permission.toolName} ${files}`;
+  }
+  return permission.toolName;
+}
+
+function isReportWritePrompt(permission: PermissionPromptView): boolean {
+  if (permission.toolName !== "Write" || permission.scope.length !== 1) {
+    return false;
+  }
+  const file = permission.scope[0].replace(/\\/g, "/").toLowerCase();
+  const fileName = file.split("/").pop() ?? file;
+  return /\.md$/.test(fileName) && (/report|报告/.test(fileName) || fileName === "report.md");
 }
 
 function formatRisk(risk: PermissionPromptView["risk"], language: Language): string {

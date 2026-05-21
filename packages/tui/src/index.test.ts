@@ -1593,11 +1593,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("工具已暂停，等待权限边界处理");
-    expect(output.text).toContain("- 工具：Bash");
-    expect(output.text).toContain("- 暂停原因：");
-    expect(output.text).toContain("- 安全级别：高");
-    expect(output.text).toContain("- 影响范围：none");
+    expect(output.text).toContain("Linghun 想执行 Bash，是否允许本次执行？");
+    expect(output.text).toContain("- action：Bash");
+    expect(output.text).toContain("- reason：");
+    expect(output.text).toContain("- risk：高");
+    expect(output.text).toContain("- scope：none");
     expect(output.text).not.toContain("- 当前模式：default");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
@@ -1843,9 +1843,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("工具已暂停，等待权限边界处理");
-    expect(output.text).toContain("- 工具：Write");
-    expect(output.text).toContain("- 影响范围：blocked.txt");
+    expect(output.text).toContain("Linghun 想执行 Write blocked.txt，是否允许本次执行？");
+    expect(output.text).toContain("- action：Write blocked.txt");
+    expect(output.text).toContain("- scope：blocked.txt");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
@@ -2017,7 +2017,11 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(2);
-    expect(output.text).toContain("工具已暂停，等待权限边界处理");
+    expect(output.text).toContain(
+      `Linghun 想写入 ${reportPath}，这是本次报告文件，是否允许本次写入？`,
+    );
+    expect(output.text).toContain(`- action：Write ${reportPath}`);
+    expect(output.text).toContain(`- scope：${reportPath}`);
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain(`已生成 ${reportPath}`);
     await expect(readFile(join(project, reportPath), "utf8")).resolves.toBe(report);
@@ -2051,10 +2055,10 @@ describe("Phase 06 TUI slash commands", () => {
     const requests = mockOpenAiToolFetch(
       "Write",
       {
-        path: "project-report.md",
+        path: "report.md",
         content: report,
       },
-      "已生成 project-report.md。",
+      "已生成 report.md。",
     );
     const output = new MemoryOutput();
 
@@ -2077,20 +2081,28 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolNames).toContain("Write");
     expect(toolNames).not.toContain("Bash");
     expect(output.text).toContain("状态：正在请求模型");
-    expect(output.text).toContain("工具已暂停，等待权限边界处理");
-    expect(output.text).toContain("- 工具：Write");
-    expect(output.text).toContain("- 影响范围：project-report.md");
+    expect(output.text).toContain("Linghun 想写入 report.md，这是本次报告文件，是否允许本次写入？");
+    expect(output.text).toContain("- action：Write report.md");
+    expect(output.text).toContain("- scope：report.md");
+    expect(output.text).toContain(
+      "- choices：输入 yes/确认/继续 可本次允许当前工具；输入 no/取消 可拒绝。",
+    );
+    expect(output.text).toContain(
+      "- boundary：工具尚未执行；本次允许只适用于当前 pending tool，不会切换权限模式。",
+    );
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain("摘要");
     expect(output.text).toContain("证据记录：");
     expect(output.text).not.toContain("systemic_gap");
     expect(output.text).not.toContain("blocking_P1");
     expect(output.text).not.toContain("Solution Completeness Gate report");
+    expect(output.text).not.toContain("当前最小 REPL 没有交互式审批 UI");
+    expect(output.text).not.toContain("改用明确 slash command");
     expect(output.text).not.toContain("- decision:");
     expect(output.text).not.toContain("- risk:");
     expect(output.text).not.toContain("- mode:");
     expect(output.text).not.toContain('"tool_result"');
-    await expect(readFile(join(project, "project-report.md"), "utf8")).resolves.toBe(report);
+    await expect(readFile(join(project, "report.md"), "utf8")).resolves.toBe(report);
 
     const sessions = await new SessionStore({
       sessionRootDir: getSessionRootDir(),
@@ -3245,7 +3257,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand(`/permissions recent delete ${recentId}`, context, output);
 
     expect(output.text).toContain("命中 ask 规则");
-    expect(output.text).toContain("当前最小 REPL 没有交互式审批选择");
+    expect(output.text).toContain("需要用户确认后才会执行本次工具");
     expect(output.text).toContain("Write  default");
     expect(output.text).toContain("已删除最近拒绝");
     expect(context.permissions.recentDenied).toHaveLength(0);
@@ -4134,7 +4146,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests).toHaveLength(3);
     expect(output.text).not.toContain("Architecture drift");
-    expect(output.text).toContain("工具已暂停");
+    expect(output.text).toContain(
+      "Linghun 想执行 Write packages/other/src/small.ts，是否允许本次执行？",
+    );
     expect(output.text).toContain("工具 Write 结果：");
     await expect(readFile(join(project, "packages/other/src/small.ts"), "utf8")).resolves.toBe(
       "// typo fix\n",
@@ -4187,7 +4201,9 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
 
     expect(requests).toHaveLength(2);
-    expect(output.text).toContain("工具已暂停");
+    expect(output.text).toContain(
+      "Linghun 想写入 deploy-report.md，这是本次报告文件，是否允许本次写入？",
+    );
     expect(output.text).toContain("工具 Write 结果：");
     expect(output.text).toContain("证据记录：");
     expect(report).toContain("通过模型 Write 生成");

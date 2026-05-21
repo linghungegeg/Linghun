@@ -8891,7 +8891,7 @@ async function decidePermission(
       return { request, decision: "deny", reason };
     }
     if (rule.effect === "ask") {
-      const reason = `命中 ask 规则：${rule.id}。当前最小 REPL 没有交互式审批选择，因此本次不会自动执行。`;
+      const reason = `命中 ask 规则：${rule.id}。需要用户确认后才会执行本次工具。`;
       await recordPermissionDenied(context, name, reason);
       return { request, decision: "ask", reason };
     }
@@ -8930,7 +8930,7 @@ async function decidePermission(
     return { request, decision: "allow", reason: "default 模式允许只读或会话内工具。" };
   }
   const reason =
-    "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；当前最小 REPL 没有交互式审批 UI，请改用明确 slash 命令或切换到受控执行模式。";
+    "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；需要用户确认后才会执行本次工具。";
   await recordPermissionDenied(context, name, reason);
   return { request, decision: "ask", reason };
 }

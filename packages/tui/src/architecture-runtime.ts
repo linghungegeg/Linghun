@@ -254,15 +254,16 @@ export function detectArchitectureDrift(
     );
   }
 
-  if (nextAction.treatsUnknownOrStaleAsFact || treatsUnknownOrStaleAsFact(card, actionText)) {
+  const reportArtifactWrite = isReportArtifactWrite(card, toolName, files);
+  const reportActionText = normalizeText([summary, toolName, files.join("\n")].join("\n"));
+  const factActionText = reportArtifactWrite ? reportActionText : actionText;
+  if (nextAction.treatsUnknownOrStaleAsFact || treatsUnknownOrStaleAsFact(card, factActionText)) {
     warnings.push(
       "Architecture drift: next action treats unknown/stale external facts as confirmed facts.",
     );
   }
 
-  const nonGoalActionText = isReportArtifactWrite(card, toolName, files)
-    ? normalizeText([summary, toolName, files.join("\n")].join("\n"))
-    : actionText;
+  const nonGoalActionText = reportArtifactWrite ? reportActionText : actionText;
   if (violatesNonGoals(card, nonGoalActionText)) {
     warnings.push("Architecture drift: next action appears to violate card nonGoals.");
   }
@@ -391,11 +392,7 @@ function isReportArtifactWrite(card: ArchitectureCard, toolName: string, files: 
   const file = normalizePath(files[0]);
   const fileName = file.split("/").pop() ?? "";
   const cardText = normalizeText([card.target, card.recommendedApproach].join("\n"));
-  return (
-    /\.md$/.test(file) &&
-    /report|报告/.test(cardText) &&
-    (cardText.includes(file) || Boolean(fileName && cardText.includes(fileName)))
-  );
+  return /\.md$/.test(file) && /report|报告/.test([cardText, fileName].join("\n"));
 }
 
 function violatesNonGoals(card: ArchitectureCard, actionText: string): boolean {
