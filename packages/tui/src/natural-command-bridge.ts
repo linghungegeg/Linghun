@@ -1537,7 +1537,7 @@ function scoreCapability(
   if (capability.id === "hooks" && /hook|钩子/u.test(normalized)) score += 3;
   if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
     score += 3;
-  if (capability.id === "cache" && /命中|hit rate|cache/u.test(normalized)) score += 3;
+  if (capability.id === "cache" && /缓存|命中|hit rate|cache/u.test(normalized)) score += 3;
   if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
   if (
     capability.id === "index" &&

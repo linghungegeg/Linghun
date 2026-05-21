@@ -878,7 +878,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥--");
   });
 
-  it("sends ordinary natural model-status wording to the model loop", async () => {
+  it("preprocesses high-confidence natural model-status wording locally", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -897,7 +897,7 @@ describe("Phase 06 TUI slash commands", () => {
       "utf8",
     );
     const output = new MemoryOutput();
-    const requests = mockOpenAiTextFetch("当前模型信息应由模型主链路回答。");
+    const requests = mockOpenAiTextFetch("SHOULD_NOT_CALL_PROVIDER");
 
     await runTui({
       projectPath: project,
@@ -906,11 +906,13 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(1);
-    expect(output.text).toContain("状态：正在请求模型");
-    expect(output.text).toContain("当前模型信息应由模型主链路回答");
+    expect(requests).toHaveLength(0);
+    expect(output.text).toContain(
+      "当前模型：role=executor provider=openai-compatible model=status-model",
+    );
+    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
     expect(output.text).not.toContain("Start Gate：");
-    expect(output.text).not.toContain("Model routes（多模型按角色触发");
   });
 
   it("uses executor route for status, model output, doctor, and ordinary requests", async () => {
@@ -1493,6 +1495,77 @@ describe("Phase 06 TUI slash commands", () => {
       ),
     ).resolves.toBe("message");
     expect(output.text).not.toContain("/index：代码索引");
+  });
+
+  it("preprocesses high-confidence control-plane natural inputs locally before provider", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const requests = mockOpenAiTextFetch("SHOULD_NOT_CALL_PROVIDER");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我切到自动模式\n",
+        "切到自动审查\n",
+        "switch to auto mode\n",
+        "当前权限模式是什么\n",
+        "模型配置正常吗\n",
+        "索引状态怎么样\n",
+        "缓存状态怎么样\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(0);
+    expect(output.text).toContain("/mode auto-review");
+    expect(output.text).toContain("当前权限模式：default");
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("Index status");
+    expect(output.text).toContain("Cache status");
+    expect(output.text).not.toContain("状态：正在请求模型");
+    expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
+  });
+
+  it("keeps ordinary report deploy feature and bug-fix requests on provider path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "ordinary-routing-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "ordinary-routing-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("普通任务进入模型主链路。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这是什么项目，技术栈是什么，怎么部署，输出报告在根目录\n",
+        "有索引，优先使用索引，帮我分析项目并生成报告\n",
+        "修复这个 bug\n",
+        "帮我实现导出报表功能\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(4);
+    expect(output.text).toContain("普通任务进入模型主链路");
+    expect(output.text).not.toContain("/index：代码索引");
+    expect(output.text).not.toContain("我可以准备执行：权限模式");
   });
 
   it("sends real-project Beta deploy/index stdin smoke input to provider path", async () => {
@@ -2688,6 +2761,55 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "LINGHUN.md"), "utf8")).rejects.toThrow();
   });
 
+  it("keeps provider failure primary output clean while preserving evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "failure-primary-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "failure-primary-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiErrorFetch();
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["普通开发请求\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain(
+      "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。",
+    );
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("证据记录：");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
+    );
+    expect(transcript).toContain("provider_failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain('"type":"evidence_record"');
+    expect(transcript).toContain('"type":"system_event"');
+  });
+
   it("persists provider failure evidence and shows last failure in doctor", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -2722,7 +2844,13 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Evidence:");
+    expect(output.text).toContain(
+      "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。",
+    );
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("证据记录：");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("EvidenceSummary");
     expect(output.text).toContain("last provider failure: code=PROVIDER_STREAM_ERROR");
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
@@ -4041,7 +4169,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("模型返回空响应");
     expect(output.text).toContain("/model doctor");
-    expect(output.text).toContain("证据记录：");
+    expect(output.text).not.toContain("证据记录：");
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
+    );
     expect(output.text).not.toMatch(/状态：正在请求模型\.\.\.\s*[^模]*Linghun/u);
     expect(
       transcript.some(
@@ -4123,9 +4257,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型请求失败");
-    expect(output.text).toContain("quota exceeded");
+    expect(output.text).toContain("请求模型失败");
     expect(output.text).toContain("/model doctor");
+    expect(output.text).not.toContain("quota exceeded");
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("证据记录：");
   });
 
   it("clears a previous Architecture Card before a non-triggering small task tool_use", async () => {

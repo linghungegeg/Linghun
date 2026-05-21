@@ -71,12 +71,17 @@ import {
 } from "./architecture-runtime.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
+  type NaturalIntent,
   type PendingNaturalCommand,
   type SLASH_COMMAND_REGISTRY,
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
+  createPendingNaturalCommand,
+  formatCapabilityAnswer,
+  formatNaturalStartGate,
   getCommandCapabilityCatalog,
   matchesNaturalGateConfirmation,
+  routeNaturalIntent,
 } from "./natural-command-bridge.js";
 import {
   formatLocalToolPermissionPrompt,
@@ -6654,10 +6659,135 @@ export async function handleNaturalInput(
     return "handled";
   }
 
+  const localPreprocess = await handleLocalControlPlaneInput(text, context, output);
+  if (localPreprocess === "handled") {
+    return "handled";
+  }
+
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
   return "message";
+}
+
+const LOCAL_CONTROL_PLANE_CAPABILITY_IDS = new Set([
+  "help",
+  "features",
+  "status",
+  "mode",
+  "model",
+  "index",
+  "cache",
+  "permissions",
+  "hooks",
+]);
+
+const LOCAL_READONLY_COMMANDS = new Set([
+  "/help",
+  "/features",
+  "/status",
+  "/mode",
+  "/model",
+  "/model route",
+  "/model doctor",
+  "/model route doctor",
+  "/index status",
+  "/index architecture",
+  "/cache status",
+  "/permissions",
+  "/doctor hooks",
+]);
+
+async function handleLocalControlPlaneInput(
+  text: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<"handled" | "pass"> {
+  if (looksLikeOrdinaryDevelopmentRequest(text)) {
+    return "pass";
+  }
+
+  const intent = routeNaturalIntent(text, context.language);
+  const capabilityId = intent.capability?.id;
+  if (!capabilityId || !LOCAL_CONTROL_PLANE_CAPABILITY_IDS.has(capabilityId)) {
+    return "pass";
+  }
+  if (intent.confidence < 0.75 || intent.riskHandler === "model") {
+    return "pass";
+  }
+
+  if (shouldDispatchLocalReadonlyIntent(intent)) {
+    const result = await handleSlashCommand(intent.command, context, output);
+    return result === "message" ? "pass" : "handled";
+  }
+
+  if (isReadonlyPermissionsStatus(intent)) {
+    await handleSlashCommand("/permissions", context, output);
+    return "handled";
+  }
+
+  if (isAllowedModeStartGate(intent)) {
+    const gate = createPendingNaturalCommand(intent, context);
+    if (!gate) {
+      return "pass";
+    }
+    context.pendingNaturalCommand = gate;
+    writeLine(output, formatNaturalStartGate(intent, context, gate));
+    writeStatus(output, context);
+    return "handled";
+  }
+
+  if (intent.action === "answer" && isAllowedLocalCapabilityAnswer(intent)) {
+    writeLine(output, formatCapabilityAnswer(intent));
+    writeStatus(output, context);
+    return "handled";
+  }
+
+  return "pass";
+}
+
+function looksLikeOrdinaryDevelopmentRequest(text: string): boolean {
+  return /分析|实现|修复|部署|报告|生成|输出|项目|技术栈|代码|开发|写|改|新增|导出|bug|analy[sz]e|implement|fix|deploy|report|generate|project|tech stack|code|write|export/iu.test(
+    text,
+  );
+}
+
+function shouldDispatchLocalReadonlyIntent(
+  intent: NaturalIntent,
+): intent is NaturalIntent & { command: string } {
+  return intent.action === "execute_readonly" && isAllowedLocalReadonlyCommand(intent.command);
+}
+
+function isAllowedLocalReadonlyCommand(command: string | undefined): command is string {
+  return Boolean(command && LOCAL_READONLY_COMMANDS.has(command));
+}
+
+function isReadonlyPermissionsStatus(intent: NaturalIntent): boolean {
+  return (
+    intent.capability?.id === "permissions" &&
+    intent.inquiry === "status" &&
+    intent.confidence >= 0.8 &&
+    intent.command === "/permissions"
+  );
+}
+
+function isAllowedModeStartGate(
+  intent: NaturalIntent,
+): intent is NaturalIntent & { command: string } {
+  return (
+    intent.action === "start_gate" &&
+    intent.capability?.id === "mode" &&
+    typeof intent.command === "string" &&
+    /^\/mode (?:default|auto-review|plan)$/u.test(intent.command)
+  );
+}
+
+function isAllowedLocalCapabilityAnswer(intent: NaturalIntent): boolean {
+  return (
+    intent.confidence >= 0.85 &&
+    (intent.capability?.id === "help" || intent.capability?.id === "features") &&
+    (intent.inquiry === "usage" || intent.inquiry === "howto" || intent.inquiry === "status")
+  );
 }
 
 async function handleIndexSafetyRepairContinuation(
@@ -7022,16 +7152,8 @@ async function sendMessage(
           continue;
         }
         if (event.type === "error") {
-          const evidence = await recordProviderFailureEvidence(
-            context,
-            sessionId,
-            event.error,
-            selectedRuntime,
-          );
-          writeLine(
-            output,
-            `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
-          );
+          await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
+          writeLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
       }
@@ -7311,16 +7433,13 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "error") {
-      const evidence = await recordProviderFailureEvidence(
+      await recordProviderFailureEvidence(
         context,
         sessionId,
         event.error,
         runtimeFromContinuation(continuation),
       );
-      writeLine(
-        output,
-        `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
-      );
+      writeLine(output, formatProviderFailurePrimary(event.error, context.language));
       return assistantText;
     }
   }
@@ -7383,16 +7502,13 @@ async function continueModelAfterToolResults(
           continue;
         }
         if (event.type === "error") {
-          const evidence = await recordProviderFailureEvidence(
+          await recordProviderFailureEvidence(
             context,
             sessionId,
             event.error,
             runtimeFromContinuation(continuation),
           );
-          writeLine(
-            output,
-            `${formatError(sanitizeProviderFailureError(event.error), context.language)}\nEvidence: ${evidence.id}`,
-          );
+          writeLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
       }
@@ -7513,16 +7629,15 @@ async function recordProviderEmptyResponse(
     ...evidence,
   });
   await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
-  if (context.language === "en-US") {
-    return [
-      "Model returned an empty response; run /model doctor, or switch provider/model and retry.",
-      `Evidence: ${evidence.id}`,
-    ].join("\n");
-  }
-  return [
-    "模型返回空响应；请运行 /model doctor，或切换 provider/model 后重试。",
-    `证据记录：${evidence.id}`,
-  ].join("\n");
+  return context.language === "en-US"
+    ? "Model returned an empty response. Run /model doctor to check provider/baseUrl/model/endpointProfile, or switch provider/model and retry."
+    : "模型返回空响应。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，或切换 provider/model 后重试。";
+}
+
+function formatProviderFailurePrimary(_error: unknown, language: Language): string {
+  return language === "en-US"
+    ? "Model request failed. Run /model doctor to check provider/baseUrl/model/endpointProfile, then retry."
+    : "请求模型失败。运行 /model doctor 检查 provider/baseUrl/model/endpointProfile，然后重试。";
 }
 
 function needsSolutionCompletenessReportClosure(
