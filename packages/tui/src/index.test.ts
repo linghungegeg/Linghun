@@ -352,6 +352,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/cache-log export [path]");
     expect(output.text).toContain("/cache status");
     expect(output.text).toContain("/cache warmup|refresh");
+    expect(output.text).toContain("/compact");
     expect(output.text).toContain("/break-cache status");
     expect(output.text).toContain("/mcp status");
     expect(output.text).toContain("/mcp tools");
@@ -366,6 +367,39 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("模式=default");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
+  });
+
+  it("reports Compact Lite boundaries without running tools or provider calls", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    context.evidence.push({
+      id: "ev-compact",
+      kind: "user_provided",
+      source: "test",
+      summary: "compact evidence",
+      supportsClaims: ["compact"],
+      createdAt: new Date().toISOString(),
+    });
+    context.recentlyMentionedFiles.push("README.md");
+
+    await handleSlashCommand("/compact status", context, output);
+    await handleSlashCommand("/compact auto", context, output);
+    await handleSlashCommand("/compact manual", context, output);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output.text).toContain("Compact Lite status");
+    expect(output.text).toContain("无工具、无文件写入、无额外模型调用");
+    expect(output.text).toContain("不执行工具、不写项目文件、不写长期记忆、不启动后台任务");
+    expect(context.cache.compactBoundaries).toHaveLength(1);
+    expect(context.cache.compactBoundaries[0]?.kind).toBe("manual");
+    expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(["ev-compact"]);
+    expect(context.cache.compactBoundaries[0]?.preservedFiles).toEqual(["README.md"]);
+    expect(context.permissionMode).toBe("default");
   });
 
   it("resumes a previous session through structured handoff", async () => {

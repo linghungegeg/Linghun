@@ -69,6 +69,12 @@ import {
   shouldTriggerArchitectureRuntime,
   summarizeArchitectureCard,
 } from "./architecture-runtime.js";
+import {
+  type CompactBoundary,
+  compactBoundaryHash,
+  createManualCompactBoundary,
+  microCompactMessages,
+} from "./compact-context.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type NaturalIntent,
@@ -97,6 +103,12 @@ import {
 } from "./request-lifecycle-presenter.js";
 import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
+import {
+  type WorkspaceReferenceCache,
+  createWorkspaceReferenceCache,
+  getWorkspaceReferenceSnapshot,
+  workspaceReferenceHash,
+} from "./workspace-reference-cache.js";
 
 export type TuiStatus = "ready";
 
@@ -273,6 +285,8 @@ export type CacheState = {
   lastFreshness?: CacheFreshness;
   hintLastShownAt: Record<string, number>;
   compacted: boolean;
+  compactBoundaries: CompactBoundary[];
+  workspaceReference: WorkspaceReferenceCache;
   startedAt: number;
 };
 
@@ -675,6 +689,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/image",
   "/cache-log",
   "/cache",
+  "/compact",
   "/break-cache",
   "/mcp",
   "/index",
@@ -908,6 +923,8 @@ export function createCacheState(
     lastFreshness: freshness,
     hintLastShownAt: {},
     compacted: false,
+    compactBoundaries: [],
+    workspaceReference: createWorkspaceReferenceCache(),
     startedAt: Date.now(),
   };
 }
@@ -1606,6 +1623,10 @@ export async function handleSlashCommand(
   }
   if (command === "/cache") {
     await handleCacheCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/compact") {
+    await handleCompactCommand(rest, context, output);
     return "handled";
   }
   if (command === "/break-cache") {
@@ -3581,18 +3602,63 @@ async function handleCacheCommand(
     return;
   }
   if (action === "warmup" || action === "refresh") {
+    const runtimeStatus = buildRuntimeStatusForModel({
+      ...context,
+      provider: getRuntimeStatusProvider(context),
+    });
+    const snapshot = await refreshWorkspaceReferenceCache(context, runtimeStatus);
     const freshness = getCurrentFreshness(context);
     const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
     context.cache.lastFreshness = { ...freshness, changedKeys };
     writeLine(
       output,
       action === "warmup"
-        ? "已尝试预热 cache。该最小路径不保证 provider 一定写入缓存；请用 /cache status 或 provider usage 对账。"
-        : "已尝试刷新 cache。该最小路径不保证 provider 一定写入缓存；请用 /cache status 或 provider usage 对账。",
+        ? `已尝试预热 cache。workspace reference=${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`
+        : `已尝试刷新 cache。workspace reference=${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`,
     );
     return;
   }
   writeLine(output, "用法：/cache status | /cache warmup | /cache refresh");
+}
+
+async function handleCompactCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    writeLine(output, formatCompactStatus(context));
+    return;
+  }
+  if (action === "manual" || action === "run") {
+    const sessionId = await ensureSession(context);
+    const resumed = await context.store.resume(sessionId);
+    const preChars = estimateTranscriptContextChars(resumed.transcript);
+    const boundary = createManualCompactBoundary({
+      preCompactChars: preChars,
+      postCompactChars: Math.min(preChars, MAX_CONTEXT_CHARS),
+      preservedEvidenceRefs: context.evidence.map((item) => item.id),
+      preservedFiles: context.recentlyMentionedFiles,
+      handoffPacketId: context.memory.lastHandoff?.id,
+    });
+    recordCompactBoundary(context, boundary);
+    refreshCacheFreshness(context);
+    writeLine(
+      output,
+      `Compact Lite manual boundary recorded: ${boundary.id}；不执行工具、不写项目文件、不写长期记忆、不启动后台任务。`,
+    );
+    writeStatus(output, context);
+    return;
+  }
+  if (action === "auto") {
+    writeLine(
+      output,
+      "Compact Lite auto：受控最小实现仅在 provider 请求前、本地上下文超过预算时执行 MicroCompact；有阈值、无工具、无文件写入、无额外模型调用。",
+    );
+    return;
+  }
+  writeLine(output, "用法：/compact status | /compact manual | /compact auto");
 }
 
 async function handleBreakCacheCommand(
@@ -5343,6 +5409,91 @@ function trimCacheHistory(cache: CacheState): void {
   }
 }
 
+function recordCompactBoundary(context: TuiContext, boundary: CompactBoundary): void {
+  context.cache.compacted = true;
+  context.cache.compactBoundaries.push(boundary);
+  if (context.cache.compactBoundaries.length > MAX_CHECKPOINTS) {
+    context.cache.compactBoundaries.shift();
+  }
+}
+
+function estimateTranscriptContextChars(transcript: TranscriptEvent[]): number {
+  return transcript.reduce((total, event) => {
+    if (event.type === "user_message") return total + event.text.length;
+    if (event.type === "assistant_text_delta") return total + event.text.length;
+    if (event.type === "tool_call_start") return total + JSON.stringify(event.input).length;
+    if (event.type === "tool_result") return total + JSON.stringify(event.content).length;
+    return total;
+  }, 0);
+}
+
+async function refreshWorkspaceReferenceCache(
+  context: TuiContext,
+  runtimeStatus: unknown,
+): Promise<Awaited<ReturnType<typeof getWorkspaceReferenceSnapshot>>> {
+  return getWorkspaceReferenceSnapshot(context.cache.workspaceReference, {
+    projectPath: context.projectPath,
+    dimensions: createWorkspaceReferenceDimensions(context),
+    runtimeStatus,
+    toolCapabilitySummary: createModelCapabilitySummary(24),
+    evidenceRefs: context.evidence.map((item) => item.id),
+    logRefs: context.backgroundTasks
+      .flatMap((task) => [task.logPath, task.outputPath])
+      .filter(isString),
+  });
+}
+
+function createWorkspaceReferenceDimensions(context: TuiContext) {
+  const runtime = getSelectedModelRuntime(context);
+  return {
+    configHash: stableHash(createConfigFreshnessSummary(context.config)),
+    toolSchemaHash: stableHash(builtInTools),
+    providerModelHash: stableHash({ provider: runtime.provider, model: runtime.model }),
+    mcpToolListHash: stableHash(stabilizeMcpToolList(context.mcp.tools)),
+    indexFreshnessHash: stableHash({
+      projectName: context.index.projectName,
+      status: context.index.status,
+      nodes: context.index.nodes,
+      edges: context.index.edges,
+      changedFiles: context.index.changedFiles,
+      artifactStatus: context.index.artifactStatus,
+    }),
+    compactBoundaryHash: compactBoundaryHash(context.cache.compactBoundaries),
+    extensionListHash: stableHash(createExtensionFreshnessSummary(context)),
+  };
+}
+
+function createConfigFreshnessSummary(config: LinghunConfig): unknown {
+  return {
+    language: config.language,
+    permission: config.permission,
+    index: config.index,
+    defaultModel: config.defaultModel,
+    modelRoutes: config.modelRoutes,
+    providers: Object.fromEntries(
+      Object.entries(config.providers)
+        .map(([id, provider]) => ({
+          id,
+          summary: {
+            type: provider.type,
+            model: provider.model,
+            baseUrl: provider.baseUrl ? "configured" : "missing",
+            apiKey: provider.apiKey ? "configured" : "missing",
+            endpointProfile: provider.endpointProfile,
+            compatibilityProfile: provider.compatibilityProfile,
+            supportsTools: provider.supportsTools,
+          },
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((entry) => [entry.id, entry.summary]),
+    ),
+  };
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 function getCurrentFreshness(context: TuiContext): CacheFreshness {
   return createCacheFreshness({
     systemPrompt:
@@ -5354,8 +5505,14 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     reasoningEffort: "default",
     projectRules: createProjectRulesFreshnessSummary(context),
     memory: createMemoryFreshnessSummary(context),
-    compact: context.cache.compacted ? "compacted" : "not compacted",
-    plugins: createExtensionFreshnessSummary(context),
+    compact: {
+      compacted: context.cache.compacted,
+      boundaryHash: compactBoundaryHash(context.cache.compactBoundaries),
+    },
+    plugins: {
+      ...createExtensionFreshnessSummary(context),
+      workspaceReferenceHash: workspaceReferenceHash(context.cache.workspaceReference.latest),
+    },
   });
 }
 
@@ -5385,7 +5542,7 @@ function createMemoryFreshnessSummary(context: TuiContext): string {
   });
 }
 
-function createExtensionFreshnessSummary(context: TuiContext): unknown {
+function createExtensionFreshnessSummary(context: TuiContext): Record<string, unknown> {
   return {
     skills: context.skills.skills
       .map((skill) => ({
@@ -5521,8 +5678,23 @@ function formatCacheStatus(context: TuiContext): string {
     `- read/write tokens: ${latest?.cacheReadTokens ?? 0}/${latest?.cacheWriteTokens ?? 0}`,
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
+    `- workspace reference: hits=${context.cache.workspaceReference.hits} misses=${context.cache.workspaceReference.misses} failures=${context.cache.workspaceReference.failures} latest=${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
     `- note: ${zeroNote}`,
+  ].join("\n");
+}
+
+function formatCompactStatus(context: TuiContext): string {
+  const latest = context.cache.compactBoundaries.at(-1);
+  return [
+    "Compact Lite status",
+    `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
+    `- boundaries: ${context.cache.compactBoundaries.length}`,
+    `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
+    `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}->${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
+    `- preserved evidence refs: ${latest?.preservedEvidenceRefs.length ?? 0}`,
+    `- preserved files: ${latest?.preservedFiles.length ?? 0}`,
+    "- boundary: no tools, no file writes, no long-term memory writes, no background task starts, no extra model calls.",
   ].join("\n");
 }
 
@@ -7106,6 +7278,7 @@ async function sendMessage(
   const architectureDirective = architectureCard
     ? createArchitectureRuntimeDirective(architectureCard)
     : undefined;
+  await refreshWorkspaceReferenceCache(context, runtimeStatus);
   const systemPrompt = createModelSystemPrompt(text, context, runtimeStatus, architectureDirective);
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
@@ -7430,7 +7603,16 @@ async function buildModelMessagesWithRecentContext(
     );
   }
   messages.push({ role: "user", content: currentUserText });
-  return messages;
+  const compacted = microCompactMessages(messages, {
+    maxChars: MAX_CONTEXT_CHARS,
+    preserveRecentMessages: MAX_CONTEXT_MESSAGES,
+    kind: "micro",
+  });
+  if (compacted.changed && compacted.boundary) {
+    recordCompactBoundary(context, compacted.boundary);
+    refreshCacheFreshness(context);
+  }
+  return compacted.messages;
 }
 
 function estimateModelMessageChars(messages: ModelMessage[]): number {
