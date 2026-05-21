@@ -811,6 +811,16 @@ Beta 前 hardening 验收：
 - Mode test：`full-access` 无本地 opt-in 时拒绝；`auto-review` gate 不可用时拒绝或降级；legacy mode alias 必须 normalize；plan approval 不等于授权后续所有工具。
 - Summary test：RuntimeStatus 和 CommandCapabilitySummary 保持短、稳定排序，不包含完整 transcript/memory/index/log/skill/plugin/hook 正文。
 
+Architecture Runtime v1 source-of-truth（Batch B）：
+
+- 位置：普通输入经过 Natural Command Bridge / Behavior Guard 后、`Context Builder` 和模型主请求前，作为轻量工程判断 guard；它不接管 slash/control-plane 请求，不替代 Plan Mode、权限管道、Verification Runner 或 Freshness/Web Evidence。
+- 触发：跨文件/跨模块、公共接口、依赖或配置、部署/性能/安全、新系统/新功能、系统性缺口，以及用户明确要求 mature / complete / reference-aligned / no omissions 时触发；typo、单文件小修、只读状态查询、简单解释、用户明确只改一处或直接修本地小问题时不触发。
+- 最小函数边界：`shouldTriggerArchitectureRuntime(input, context)` 只判断是否需要 card；`collectArchitectureFacts(context)` 只收集有证据的项目事实，缺证据写 `unknown`；`formatArchitectureCard(card)` 输出一屏内短卡；`detectArchitectureDrift(card, nextAction)` 在执行偏离时给 warning 并要求确认或更新 card。
+- Architecture Card 字段固定为 `target`、`projectFacts`、`recommendedApproach`、`rejectedApproaches`、`stagedBreakdown`、`risks`、`verification`、`nonGoals`。`projectFacts` 只能来自 README/package/config/当前源码风格/索引/evidence/tool result；涉及最新版本、provider/API 当前行为、模型价格、安全公告、部署规则或第三方方案对比时必须写 `web_source` evidence，未授权联网、联网失败或来源冲突时写 `unknown` / `stale`。
+- 持久化：可追加 transcript `system_event`，可写短 `evidence_record`，handoff latest 可保存 `currentArchitectureCard` 摘要；不新增 DB、不写长期 memory，除非用户明确接受；普通模型 prompt 只注入短摘要或 evidence id，不反复塞完整 card，也不污染 cache prefix/stable context。
+- Drift：后续动作若修改 `nonGoals` 覆盖内容、增加未提及依赖/配置、扩散到未提及模块、跳过 verification、改变 recommendedApproach，或把 unknown/stale 外部事实当确定事实，必须提示 drift 并要求用户确认或更新 card。
+- Batch C focused tests 必须覆盖：小任务不触发、跨模块触发、公共 API 触发、依赖/配置触发、部署/性能/安全触发、mature/complete/reference-aligned/no omissions 触发、无证据 projectFacts 为 unknown、最新外部事实需要 Freshness/Web Evidence、card 字段完整且短、drift 检出新增依赖/扩散模块/跳过验证/nonGoals 违反/unknown 或 stale 当事实、Architecture Runtime 不改变权限模式、不绕过 Start Gate/permission pipeline、不替代 Plan approval、小修仍走原默认路径。
+
 ### 5.8 Phase 15 Beta CCB handfeel gate
 
 Phase 15 Beta 前必须满足 CCB handfeel gate。该 gate 只要求真实 TUI 达到成熟 coding terminal 的可用手感，不要求新增 Phase 15.5/16+ 功能，也不得用关键词补丁代替源码级修复。

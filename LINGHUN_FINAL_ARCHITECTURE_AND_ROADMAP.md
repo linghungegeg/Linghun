@@ -211,6 +211,7 @@ UserInput
   -> Session 接收
   -> Natural Command Bridge 识别程序状态查询/控制意图
   -> Behavior Guard 判断任务类型和风险
+  -> Architecture Runtime 对系统性工程任务生成短 Architecture Card
   -> Context Builder 组装上下文
   -> Cache Planner 稳定静态/半稳定层
   -> Model Gateway 发起流式请求
@@ -254,6 +255,8 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 - 第三批：高风险命令只解释和审批，不直通；必须保留 Start Gate 和权限管道。
 
 模型请求前可注入短 `RuntimeStatus`，包含 memory/index/cache/model/mode/extensions 的摘要，帮助模型回答当前状态问题；禁止注入完整 memory、完整 transcript、完整索引结果和大日志。
+
+Architecture Runtime v1 只在系统性工程任务上介入普通对话链路：跨文件/公共接口/依赖配置/部署性能安全/新系统或用户要求成品级时生成短 Architecture Card；小修、状态查询和简单解释仍走原路径。Card 只记录 target、projectFacts、recommendedApproach、rejectedApproaches、stagedBreakdown、risks、verification、nonGoals，可通过 transcript `system_event`、短 evidence 和 handoff 摘要留痕；后续执行偏离 card、扩散范围或把 unknown/stale 当事实时必须 drift warning 并重新确认。
 
 非弱化验收：
 
@@ -1044,7 +1047,7 @@ Phase 17 的 Remote Channels 只作为 17B 能力，必须在 17A 本地 durable
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
 - Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；当时的旧口径是下一步由用户确认启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta，但该口径已被 2026-05-19 全量审计后的 CCB Maturity Remediation baseline supersede。
-- 2026-05-21 Phase 15 Pre-Smoke Full Reference Parity Audit + Permission / Architecture Runtime Feasibility + Source-of-Truth Reset 已成为当前 pre-smoke 执行基线：`F:\Linghun\docs\audit\phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md`。该报告 supersede “Active Docs hardening 后直接 smoke”的旧下一步；verdict 为 `READY_TO_IMPLEMENT`，不是 Beta PASS。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke、silent-failure ban PASS 或本报告 `READY_TO_IMPLEMENT` 推断 Beta readiness PASS。当前唯一下一步只能是：先完成 active docs 同步，再执行 Batch A-C（四权限模式收口、Architecture Runtime source-of-truth 设计、Architecture Runtime 最小成熟实现）；完成前不得进入真实项目 smoke。历史 P0 hardening / Deep Parity / Runtime Acceptance / Verdict Evidence closure 只作为证据输入，不作为 readiness proof。
+- 2026-05-21 Phase 15 Pre-Smoke Full Reference Parity Audit + Permission / Architecture Runtime Feasibility + Source-of-Truth Reset 已成为当前 pre-smoke 执行基线：`F:\Linghun\docs\audit\phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md`。该报告 supersede “Active Docs hardening 后直接 smoke”的旧下一步；verdict 为 `READY_TO_IMPLEMENT`，不是 Beta PASS。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke、silent-failure ban PASS 或本报告 `READY_TO_IMPLEMENT` 推断 Beta readiness PASS。Batch A 四权限模式收口和 Batch B Architecture Runtime source-of-truth 设计已完成；当前下一步只能在用户明确确认后进入 Batch C：Architecture Runtime 最小成熟实现。Batch C 完成并重新验收前不得进入真实项目 smoke，也不得宣布 Beta PASS。历史 P0 hardening / Deep Parity / Runtime Acceptance / Verdict Evidence closure 只作为证据输入，不作为 readiness proof。
 - P0 hardening 完成并输出报告后，必须先基于报告决定是否启动 Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure。该闭环用于确认 Phase 00-14 的实际使用体验、交互细节、建议/提权、错误/doctor/help、自然语言入口、cache/index/memory、多模型和 TUI 基础手感是否达到 CCB / CCB Dev Boost 公开成熟行为的核心体验等价；P0 或阻塞 P1 必须在 Beta 前修复，非阻塞 P2 才能登记到 Phase 15.5。
 - Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。终端 TUI 的基础成品手感（主输出分层、权限提示、tool_result 摘要、doctor 脱敏、状态栏准确、hint 去重、阶段汇报）是 Phase 15 Beta 前置 gate；Phase 15.5 承接实测反馈、终端 TUI polish 清零和开源前 hardening，不能把 terminal-scope P2 带过开源发布门。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
