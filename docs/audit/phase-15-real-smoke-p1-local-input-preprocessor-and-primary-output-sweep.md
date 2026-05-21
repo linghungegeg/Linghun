@@ -134,6 +134,72 @@ Empty response primary 现在只输出：
 
 同时 transcript 仍保留 `evidence_record` 与 `system_event`。
 
+## 2026-05-21 追加：primary vocabulary leak sweep
+
+### Targeted grep sweep 结论
+
+本轮按 primary/details/debug 分层只收口用户主屏路径，没有修改模型上下文协议、transcript/evidence/system_event 事件类型或 provider tool protocol。
+
+保留的 model-visible/internal 命中：
+
+- `buildModelMessagesWithRecentContext(...)` / `createModelSystemPrompt(...)` 中的 `tool_result` 与 `EvidenceSummary`：给模型恢复工具上下文和证据摘要使用，未进入普通主屏。
+- `appendToolResultEvent(...)` 与 transcript `type: "tool_result"`：结构化 transcript/model continuation 必需，未改事件类型。
+- `appendSystemEvent(...)` 中的 `evidence=<id>`：用于 debug/evidence/system_event 追踪，未进入 primary。
+- handoff/agent context 中的 `evidence=...`：属于 trimmed internal package / handoff 语义，不是普通用户主屏输出路径。
+- focused tests 中对 `tool_result`、`Evidence:`、`EvidenceSummary` 的 negative assertions 或 transcript assertions：用于防回归，保留。
+
+已修的 primary leak：
+
+- `/features`：移除主屏文案中的 `EvidenceSummary`，改为说明 evidence 与长输出保留在 details，可用 `/details` 查看。
+- `/model doctor` / `/model route doctor`：`last provider failure` 不再显示 `evidence=<uuid>`；primary 保留 `code/provider/model/endpointProfile` 和 `details: /details evidence`。
+- permission denial/cancel：主屏不再显示 `tool_result`；改为人话提示“已拒绝。本轮未写入文件，模型会收到拒绝结果并继续调整。”/“Denied. No file was written; the assistant will receive the denial and adjust.”。model-visible denial result 与 transcript `tool_result` 保留。
+- `/claim-check` Beta verdict：primary 不再显示 `Evidence: <id>` / `Evidence：<id>`，改为“证据已记录；详情用 /details evidence。”；具体 evidence id 仍保留在 evidence/transcript/debug 路径。
+- 普通 report-generation path：继续保持主屏不含 `Evidence:` / `证据记录：` / `tool_result`。
+
+### 本轮验证结果
+
+已运行：
+
+```text
+corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts
+```
+
+结果：PASS，2 files passed，249 tests passed。
+
+```text
+corepack pnpm typecheck
+```
+
+结果：PASS。
+
+```text
+corepack pnpm check
+```
+
+结果：PASS，Biome checked 49 files，no fixes applied。
+
+```text
+corepack pnpm build
+```
+
+结果：PASS，workspace build completed。
+
+```text
+git diff --check
+```
+
+结果：PASS；仅输出 Windows 工作区 LF→CRLF 提示，无 whitespace error。
+
+### 本轮明确未做
+
+- 未进入真实项目 smoke。
+- 未宣布 Beta PASS。
+- 未宣布 smoke-ready。
+- 未进入 Phase 15.5 / Phase 16+。
+- 未提交 commit。
+- 未修改模型上下文协议、provider tool protocol、transcript/evidence/system_event 事件类型或权限语义。
+- 未做全局 TUI rewrite。
+
 ## 验证结果
 
 已运行：

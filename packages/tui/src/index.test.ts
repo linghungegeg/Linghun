@@ -541,7 +541,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("verdict=PARTIAL");
     expect(output.text).toContain("scope=beta");
-    expect(output.text).toContain("Evidence：missing");
+    expect(output.text).toContain("证据已缺失；详情用 /details evidence。");
+    expect(output.text).not.toContain("Evidence:");
     expect(output.text).toContain("real TUI report-generation path lacks PASS evidence");
   });
 
@@ -552,7 +553,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
     context.evidence.push({
-      id: "write-only",
+      id: "123e4567-e89b-12d3-a456-426614174000",
       kind: "command_output",
       source: "Write",
       summary: "Write: 已写入文件：report.md",
@@ -563,7 +564,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/claim-check Beta readiness is PASS", context, output);
 
     expect(output.text).toContain("verdict=PARTIAL");
+    expect(output.text).toContain("证据已记录；详情用 /details evidence。");
     expect(output.text).toContain("DeepSeek dual-provider live report evidence is missing");
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("123e4567-e89b-12d3-a456-426614174000");
     expect(output.text).not.toContain("verdict=PASS");
   });
 
@@ -1714,9 +1718,15 @@ describe("Phase 06 TUI slash commands", () => {
     const toolMessage = second.messages?.find((message) => message.role === "tool");
     expect(toolMessage?.content).toContain('"ok":false');
     expect(toolMessage?.content).toContain("permission denied by user");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(output.text).toContain("已拒绝。本轮未写入文件，模型会收到拒绝结果并继续调整。");
     expect(output.text).toContain("我已收到拒绝结果，将改用不执行命令的说明。");
     expect(output.text).not.toContain("SHOULD_NOT_RUN");
-    expect(output.text).not.toContain('"tool_result"');
+    expect(output.text).not.toContain("tool_result");
+    expect(transcript).toContain('"type":"tool_result"');
   });
 
   it("continues after cancelled model tool permission as a distinct tool_result", async () => {
@@ -1757,7 +1767,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolMessage?.content).toContain('"ok":false');
     expect(toolMessage?.content).toContain('"outcome":"cancelled"');
     expect(toolMessage?.content).toContain("permission cancelled by user");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(output.text).toContain("已拒绝。本轮未写入文件，模型会收到拒绝结果并继续调整。");
     expect(output.text).toContain("我已收到取消结果，不会继续写文件。");
+    expect(output.text).not.toContain("tool_result");
+    expect(transcript).toContain('"type":"tool_result"');
     await expect(readFile(join(project, "cancelled.txt"), "utf8")).rejects.toThrow();
   });
 
@@ -2851,9 +2868,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
     expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toContain("evidence=");
+    expect(output.text).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
+    );
     expect(output.text).toContain("last provider failure: code=PROVIDER_STREAM_ERROR");
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).toContain("details: /details evidence");
     expect(output.text).not.toContain("sk-provider-secret");
     expect(output.text).not.toContain("C:/Users/Admin/Linghun");
     expect(output.text).not.toContain("api_key=private");
@@ -4124,6 +4146,9 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
     expect(output.text).toContain("continuous phase progression=no");
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("Evidence:");
     expect(context.config.permission.defaultMode).toBe("default");
     expect(context.hooks.enabled).toBe(false);
     expect(context.hooks.projectTrusted).toBe(false);
@@ -4393,6 +4418,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- 安全级别：");
     expect(output.text).toContain("报告已保存：deploy-report.md");
     expect(output.text).not.toContain("证据记录：");
+    expect(output.text).not.toContain("Evidence:");
+    expect(output.text).not.toContain("tool_result");
     expect(report).toContain("通过模型 Write 生成");
     expect(
       transcript.some((event) => event.type === "tool_result" && event.toolName === "Write"),

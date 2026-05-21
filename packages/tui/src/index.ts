@@ -1687,7 +1687,7 @@ function formatFeaturePolicy(context: TuiContext): string {
     "Feature policy（default CCB-style posture）",
     "Recommended foundation（default on / visible）",
     `- language: ${context.config.language}; en-US available via /language en-US`,
-    `- model/tool loop: enabled through provider tools=${context.config.modelRoutes.routes.find((route) => route.role === "executor")?.allowTools ? "yes" : "no"}; EvidenceSummary and long output fullOutputPath stay visible`,
+    `- model/tool loop: enabled through provider tools=${context.config.modelRoutes.routes.find((route) => route.role === "executor")?.allowTools ? "yes" : "no"}; evidence and long output are kept in details, available via /details`,
     `- cache/stats: /cache status, /break-cache status, /usage, /stats; history=${context.cache.history.length}`,
     `- model doctor: /model doctor and /model route doctor; provider=${getRuntimeStatusProvider(context)} model=${context.model}`,
     "- index: status/search/architecture are readonly; init fast/refresh are safe local actions with safety scan; auto full-repo index on startup=no",
@@ -2172,7 +2172,7 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
   if (context.lastProviderFailure) {
     const failure = context.lastProviderFailure;
     lines.push(
-      `- last provider failure: code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile} evidence=${failure.evidenceId}`,
+      `- last provider failure: code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
     );
   }
   if (hasOpenAiCompatibleDoctorProblem(context)) {
@@ -6381,6 +6381,12 @@ function matchesCompositeStatusKey(text: string, key: string): boolean {
   return patterns[key]?.test(text) ?? false;
 }
 
+function formatPermissionDenialPrimary(language: Language): string {
+  return language === "en-US"
+    ? "Denied. No file was written; the assistant will receive the denial and adjust."
+    : "已拒绝。本轮未写入文件，模型会收到拒绝结果并继续调整。";
+}
+
 export async function handleNaturalInput(
   text: string,
   context: TuiContext,
@@ -6503,6 +6509,7 @@ export async function handleNaturalInput(
           evidence.id,
         );
         if (gateway && approval.continuation) {
+          writeLine(output, formatPermissionDenialPrimary(context.language));
           approval.continuation.messages.push({
             role: "tool",
             tool_call_id: approval.toolCall.id,
@@ -6538,6 +6545,7 @@ export async function handleNaturalInput(
           evidence.id,
         );
         if (gateway && approval.continuation) {
+          writeLine(output, formatPermissionDenialPrimary(context.language));
           approval.continuation.messages.push({
             role: "tool",
             tool_call_id: approval.toolCall.id,
@@ -6549,12 +6557,7 @@ export async function handleNaturalInput(
           return "handled";
         }
       }
-      writeLine(
-        output,
-        context.language === "en-US"
-          ? "Permission denied. No file was written and the pending action was returned as a tool_result."
-          : "已拒绝权限。本轮未写入文件；拒绝结果已作为 tool_result 返回给后续模型上下文。",
-      );
+      writeLine(output, formatPermissionDenialPrimary(context.language));
       writeStatus(output, context);
       return "handled";
     }
@@ -9927,15 +9930,14 @@ function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
 
 function formatClaimCheck(result: ClaimCheck, language: Language): string {
   if (result.verdict) {
-    const evidence =
-      result.verdict.evidenceRefs.length > 0 ? result.verdict.evidenceRefs.join(", ") : "missing";
+    const evidenceStatus = result.verdict.evidenceRefs.length > 0 ? "recorded" : "missing";
     const validation = result.verdict.validationCommands.join("; ");
     const uncovered = result.verdict.uncoveredItems.join("; ");
     const risks = result.verdict.residualRisks.join("; ");
     return language === "en-US"
       ? [
           `Claim Checker: verdict=${result.verdict.status}; scope=${result.verdict.scope}.`,
-          `Evidence: ${evidence}.`,
+          `Evidence is ${evidenceStatus}; use /details evidence for details.`,
           `Validation: ${validation}.`,
           `Uncovered: ${uncovered}.`,
           `Risk: ${risks}.`,
@@ -9943,7 +9945,7 @@ function formatClaimCheck(result: ClaimCheck, language: Language): string {
         ].join("\n")
       : [
           `Claim Checker：verdict=${result.verdict.status}；scope=${result.verdict.scope}。`,
-          `Evidence：${evidence}。`,
+          `证据已${evidenceStatus === "recorded" ? "记录" : "缺失"}；详情用 /details evidence。`,
           `Validation：${validation}。`,
           `Uncovered：${uncovered}。`,
           `Risk：${risks}。`,
