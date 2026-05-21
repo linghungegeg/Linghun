@@ -154,6 +154,40 @@ describe("architecture drift detection", () => {
     expect(drift.warnings.join("\n")).toContain("nonGoals");
   });
 
+  it("does not treat report body DB analysis as nonGoal drift when writing the requested report", () => {
+    const card: ArchitectureCard = {
+      ...baseCard,
+      target: "利用索引分析项目怎么部署，将报告写入 report.md",
+      recommendedApproach: "保存部署分析报告到 report.md。",
+    };
+
+    const drift = detectArchitectureDrift(card, {
+      toolName: "Write",
+      input: {
+        file_path: "report.md",
+        content:
+          "# 部署分析\n\n数据库导入建议：先备份数据。\n\nDB 配置说明：按现有环境变量检查。\n\n部署步骤：运行现有脚本。",
+      },
+      verificationPlanned: true,
+    });
+
+    expect(drift.drift).toBe(false);
+  });
+
+  it("still detects actual database additions as nonGoal drift", () => {
+    const drift = detectArchitectureDrift(baseCard, {
+      toolName: "Write",
+      input: {
+        file_path: "packages/tui/src/database-layer.ts",
+        content: "create DB and add database dependency/config for architecture runtime",
+      },
+      verificationPlanned: true,
+    });
+
+    expect(drift.drift).toBe(true);
+    expect(drift.warnings.join("\n")).toContain("nonGoals");
+  });
+
   it("detects recommended approach drift", () => {
     const drift = detectArchitectureDrift(baseCard, {
       recommendedApproach: "改成完整 ADR DB 平台。",

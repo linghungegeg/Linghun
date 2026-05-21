@@ -260,7 +260,10 @@ export function detectArchitectureDrift(
     );
   }
 
-  if (violatesNonGoals(card, actionText)) {
+  const nonGoalActionText = isReportArtifactWrite(card, toolName, files)
+    ? normalizeText([summary, toolName, files.join("\n")].join("\n"))
+    : actionText;
+  if (violatesNonGoals(card, nonGoalActionText)) {
     warnings.push("Architecture drift: next action appears to violate card nonGoals.");
   }
 
@@ -380,11 +383,29 @@ function treatsUnknownOrStaleAsFact(card: ArchitectureCard, actionText: string):
   return /confirmed|certain|definitely|已确认|确定|当前最新|latest/.test(actionText);
 }
 
+function isReportArtifactWrite(card: ArchitectureCard, toolName: string, files: string[]): boolean {
+  if (!["Write", "Edit", "MultiEdit"].includes(toolName) || files.length !== 1) {
+    return false;
+  }
+
+  const file = normalizePath(files[0]);
+  const fileName = file.split("/").pop() ?? "";
+  const cardText = normalizeText([card.target, card.recommendedApproach].join("\n"));
+  return (
+    /\.md$/.test(file) &&
+    /report|报告/.test(cardText) &&
+    (cardText.includes(file) || Boolean(fileName && cardText.includes(fileName)))
+  );
+}
+
 function violatesNonGoals(card: ArchitectureCard, actionText: string): boolean {
   const nonGoalText = normalizeText(card.nonGoals.join("\n"));
   const checks: Array<[RegExp, RegExp]> = [
     [/agent/, /新增|创建|add|create|agent/],
-    [/db|数据库/, /新增|创建|add|create|db|database|数据库/],
+    [
+      /db|数据库/,
+      /(?:新增|创建|引入|安装|配置|add|create|introduce|install|configure).{0,32}(?:db|database|数据库)/,
+    ],
     [/长期 memory|long[-\s]?term memory/, /长期\s*memory|long[-\s]?term memory/],
     [/权限模式|permission mode/, /新增.{0,12}权限模式|fifth permission|new permission mode/],
     [
