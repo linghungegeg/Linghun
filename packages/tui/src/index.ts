@@ -60,6 +60,15 @@ import {
   createToolContext,
   runTool,
 } from "@linghun/tools";
+import {
+  type ArchitectureCard,
+  type ArchitectureCardSummary,
+  createArchitectureCard,
+  createArchitectureRuntimeDirective,
+  detectArchitectureDrift,
+  shouldTriggerArchitectureRuntime,
+  summarizeArchitectureCard,
+} from "./architecture-runtime.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type PendingNaturalCommand,
@@ -354,6 +363,7 @@ export type HandoffPacket = {
   createdAt: string;
   generatedBy: string;
   solutionCompleteness?: SolutionCompletenessStatus;
+  currentArchitectureCard?: ArchitectureCardSummary;
 };
 
 export type AgentType = "explorer" | "worker" | "verifier" | "planner";
@@ -675,6 +685,14 @@ type PendingLocalApproval =
       toolName: ToolName;
       sessionId: string;
       continuation?: PendingModelContinuation;
+    }
+  | {
+      kind: "architecture_drift";
+      toolCall: ModelToolCall;
+      toolName: ToolName;
+      sessionId: string;
+      warnings: string[];
+      continuation?: PendingModelContinuation;
     };
 
 type ReportWriteGuard = {
@@ -780,6 +798,7 @@ export type TuiContext = {
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
   solutionCompleteness: SolutionCompletenessStatus;
+  currentArchitectureCard?: ArchitectureCard;
 };
 
 type ProviderFailureSummary = {
@@ -3908,6 +3927,9 @@ function createHandoffPacket(
     createdAt: new Date().toISOString(),
     generatedBy: "Linghun HandoffPacket",
     solutionCompleteness: context.solutionCompleteness,
+    ...(context.currentArchitectureCard
+      ? { currentArchitectureCard: summarizeArchitectureCard(context.currentArchitectureCard) }
+      : {}),
   };
 }
 
@@ -6377,6 +6399,31 @@ export async function handleNaturalInput(
         writeStatus(output, context);
         return "handled";
       }
+      if (approval.kind === "architecture_drift") {
+        const result = await executeModelToolUse(
+          approval.toolCall,
+          context,
+          approval.sessionId,
+          output,
+          approval.continuation,
+          true,
+        );
+        const reportWriteGuard = approval.continuation?.reportWriteGuard;
+        if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
+          reportWriteGuard.completed = true;
+        }
+        if (gateway && approval.continuation && !result.pendingApproval) {
+          approval.continuation.messages.push({
+            role: "tool",
+            tool_call_id: approval.toolCall.id,
+            content: JSON.stringify(result),
+          });
+          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+        }
+        writeLightHints(output, context);
+        writeStatus(output, context);
+        return "handled";
+      }
       if (approval.kind === "model_tool_use") {
         const result = await executeApprovedModelToolUse(
           approval.toolCall,
@@ -6423,6 +6470,42 @@ export async function handleNaturalInput(
         );
         writeStatus(output, context);
         return "handled";
+      }
+      if (approval.kind === "architecture_drift") {
+        const evidence = await recordToolFailureEvidence(
+          context,
+          approval.sessionId,
+          approval.toolName,
+          `${outcomeText}: architecture drift confirmation required`,
+        );
+        const deniedResult = {
+          ok: false,
+          tool: approval.toolName,
+          text: outcomeText,
+          outcome: cancelled ? "cancelled" : "denied",
+          evidenceId: evidence.id,
+          architectureDrift: approval.warnings,
+        };
+        await appendToolResultEvent(
+          context,
+          approval.sessionId,
+          approval.toolCall.id,
+          approval.toolName,
+          deniedResult.text,
+          true,
+          evidence.id,
+        );
+        if (gateway && approval.continuation) {
+          approval.continuation.messages.push({
+            role: "tool",
+            tool_call_id: approval.toolCall.id,
+            content: JSON.stringify(deniedResult),
+          });
+          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+          writeLightHints(output, context);
+          writeStatus(output, context);
+          return "handled";
+        }
       }
       if (approval.kind === "model_tool_use") {
         const evidence = await recordToolFailureEvidence(
@@ -6569,6 +6652,9 @@ export async function handleNaturalInput(
     return "handled";
   }
 
+  if (!shouldTriggerArchitectureRuntime(text, context)) {
+    context.currentArchitectureCard = undefined;
+  }
   return "message";
 }
 
@@ -6832,7 +6918,17 @@ async function sendMessage(
     ...context,
     provider: getRuntimeStatusProvider(context),
   });
-  const systemPrompt = createModelSystemPrompt(text, context, runtimeStatus);
+  const architectureCard = shouldTriggerArchitectureRuntime(text, context)
+    ? createArchitectureCard(text, context)
+    : undefined;
+  if (architectureCard) {
+    context.currentArchitectureCard = architectureCard;
+    await recordArchitectureRuntimeCard(context, sessionId, architectureCard);
+  }
+  const architectureDirective = architectureCard
+    ? createArchitectureRuntimeDirective(architectureCard)
+    : undefined;
+  const systemPrompt = createModelSystemPrompt(text, context, runtimeStatus, architectureDirective);
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
       context,
@@ -7605,6 +7701,7 @@ async function executeModelToolUse(
   sessionId: string,
   output: Writable,
   continuation?: PendingModelContinuation,
+  architectureDriftConfirmed = false,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -7616,6 +7713,32 @@ async function executeModelToolUse(
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
+  }
+  if (!architectureDriftConfirmed && context.currentArchitectureCard) {
+    const drift = detectArchitectureDrift(context.currentArchitectureCard, {
+      toolName,
+      input: toolCall.input,
+      summary: `${toolName}: ${JSON.stringify(toolCall.input ?? {})}`,
+    });
+    if (drift.drift) {
+      const warning =
+        context.language === "en-US"
+          ? `Architecture drift requires confirmation before this tool use: ${drift.warnings.join("; ")}`
+          : `Architecture drift 需要确认后才能执行本次工具调用：${drift.warnings.join("；")}`;
+      await appendSystemEvent(context, sessionId, warning, "warning");
+      writeLine(output, warning);
+      context.pendingLocalApproval = {
+        kind: "architecture_drift",
+        toolCall,
+        toolName,
+        sessionId,
+        warnings: drift.warnings,
+        continuation: continuation
+          ? createSingleToolCallContinuation(continuation, toolCall)
+          : undefined,
+      };
+      return { ok: false, tool: toolName, text: warning, pendingApproval: true };
+    }
   }
   if (continuation?.reportWriteGuard && toolName === "Bash") {
     const text =
@@ -7779,13 +7902,14 @@ export function createModelSystemPrompt(
   text: string,
   context: TuiContext,
   runtimeStatus: unknown,
+  architectureDirective?: string,
 ): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   return `${
     context.language === "en-US"
       ? "You are Linghun, a coding assistant with tool-use capabilities. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
       : "你是 Linghun 工程型中文助手，具备工具调用能力。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 function createEvidenceSummaryForModel(context: TuiContext): string {
@@ -9315,6 +9439,35 @@ async function recordToolFailureEvidence(
     type: "evidence_record",
     ...evidence,
   });
+  return evidence;
+}
+
+async function recordArchitectureRuntimeCard(
+  context: TuiContext,
+  sessionId: string,
+  card: ArchitectureCard,
+): Promise<EvidenceRecord> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `architecture_runtime target=${card.target}; facts=${card.projectFacts.length}; verification=${card.verification.length}`,
+    "architecture-runtime:v1",
+    ["architecture_runtime", "architecture_card", card.target],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `architecture_runtime_triggered evidence=${evidence.id} target=${card.target}`,
+    "info",
+  );
+  if (context.memory.lastHandoff) {
+    context.memory.lastHandoff.currentArchitectureCard = summarizeArchitectureCard(card);
+    await writeHandoffPacket(context, context.memory.lastHandoff);
+  }
   return evidence;
 }
 

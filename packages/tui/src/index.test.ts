@@ -4066,6 +4066,81 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/model doctor");
   });
 
+  it("clears a previous Architecture Card before a non-triggering small task tool_use", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "architecture-card-scope-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "architecture-card-scope-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length === 1) {
+          const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-1", choices: [{ delta: { content: "已记录 Architecture Card。" } }] })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        if (requests.length === 2) {
+          const body = `data: ${JSON.stringify({
+            id: "chatcmpl-architecture-2",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-small-write",
+                      type: "function",
+                      function: {
+                        name: "Write",
+                        arguments: JSON.stringify({
+                          path: "packages/other/src/small.ts",
+                          content: "// typo fix\n",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\ndata: [DONE]\n\n`;
+          return new Response(body, { status: 200 });
+        }
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-3", choices: [{ delta: { content: "小修已完成。" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200 });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["加一个导出报表功能\n", "修一个 typo\n", "yes\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(output.text).not.toContain("Architecture drift");
+    expect(output.text).toContain("工具已暂停");
+    expect(output.text).toContain("工具 Write 结果：");
+    await expect(readFile(join(project, "packages/other/src/small.ts"), "utf8")).resolves.toBe(
+      "// typo fix\n",
+    );
+  });
+
   it("runs model Write tool_use through permission ask, yes, real write, and evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
