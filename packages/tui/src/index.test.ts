@@ -690,7 +690,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(validateCodebaseMemoryToolExecution("unknown_tool", {})).toEqual({
       ok: false,
       summary:
-        "MCP deferred tool guard: unknown_tool 尚未经过 discovery/schema 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现的工具入口。",
+        "MCP deferred tool guard: unknown_tool 尚未经过 discovery/schema/trust/runtime 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现且可信的工具入口。",
     });
     expect(
       validateCodebaseMemoryToolExecution("get_code_snippet", {
@@ -1523,6 +1523,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("codebase-memory: configured");
     expect(output.text).toContain("codebase-memory source=env");
     expect(output.text).toContain("runtime: explicit codebase-memory override");
+    expect(output.text).toContain(
+      "guard: deferred MCP tools require discovery + trusted server + schemaLoaded + compatible runtime",
+    );
+    expect(output.text).toContain(
+      "license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata",
+    );
     expect(output.text).toContain("fast status：未运行 detect_changes");
     expect(output.text).toContain("Index search（短摘要");
     expect(output.text).toContain("Index architecture（短摘要）");
@@ -2872,6 +2878,34 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("match-89.txt");
   });
 
+  it("keeps editing output summary-first with patch metadata outside raw details", () => {
+    const formatted = formatToolOutput(
+      "Edit",
+      {
+        text: "raw edit preview should stay summarized\nline 2",
+        summary: "Edit sample.txt: +1 -1; changedFiles=1",
+        details: "operation: Edit\n- before\n+ after",
+        data: {
+          changedFiles: ["sample.txt"],
+          addedLines: 1,
+          removedLines: 1,
+          readGuard: "expectedHash",
+        },
+        changedFiles: ["sample.txt"],
+      },
+      "zh-CN",
+      "ev-edit-1",
+    );
+
+    expect(formatted).toContain("工具 Edit 已完成");
+    expect(formatted).toContain("补丁 +1 -1");
+    expect(formatted).toContain("读取保护 expectedHash");
+    expect(formatted).toContain("更多详情可通过 /details 查看。");
+    expect(formatted).not.toContain("raw edit preview");
+    expect(formatted).not.toContain("operation: Edit");
+    expect(formatted).not.toContain("ev-edit-1");
+  });
+
   it("keeps Bash output summary-first while preserving a full log path", () => {
     const text = Array.from({ length: 50 }, (_, index) => `bash line ${index + 1}`).join("\n");
     const formatted = formatToolOutput(
@@ -3548,6 +3582,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/mode acceptEdits", context, output);
+    await handleSlashCommand("/read sample.txt", context, output);
     await handleSlashCommand("/edit sample.txt alpha => beta", context, output);
     await handleSlashCommand("/write medium.txt should-not-write", context, output);
     await handleSlashCommand("/bash node --version", context, output);

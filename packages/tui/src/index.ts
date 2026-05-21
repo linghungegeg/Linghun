@@ -317,6 +317,10 @@ export type McpToolState = {
   server: string;
   name: string;
   description: string;
+  discovery?: "discovered" | "placeholder";
+  trusted?: boolean;
+  schemaLoaded?: boolean;
+  runtimeVersion?: "compatible" | "unknown";
 };
 
 export type McpState = {
@@ -975,6 +979,10 @@ export function createMcpState(config: LinghunConfig): McpState {
           name: `${server.name}.status`,
           description:
             "MCP server health and tool discovery placeholder; real tool schemas are not dumped.",
+          discovery: "placeholder" as const,
+          trusted: false,
+          schemaLoaded: false,
+          runtimeVersion: "unknown" as const,
         })),
     ),
   };
@@ -4879,6 +4887,10 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
         name: `${server.name}.status`,
         description:
           "MCP server is available; full tool schemas are intentionally omitted for cache stability.",
+        discovery: "discovered" as const,
+        trusted: true,
+        schemaLoaded: true,
+        runtimeVersion: "compatible" as const,
       })),
   );
   refreshCacheFreshness(context);
@@ -4899,6 +4911,8 @@ function formatMcpStatus(context: TuiContext): string {
     `- codebase-memory source=${context.index.binarySource ?? "unknown"}`,
     `- codebase-memory binary=${context.index.binaryStatus ?? "unknown"} version=${context.index.binaryVersion ?? "-"}`,
     `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
+    "- guard: deferred MCP tools require discovery + trusted server + schemaLoaded + compatible runtime before execution.",
+    "- license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata; external fallback is reported as external, not bundled.",
     "- note: MCP/codebase-memory 启动或检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
   ].join("\n");
 }
@@ -4909,7 +4923,10 @@ function formatMcpTools(context: TuiContext): string {
   }
   return [
     "MCP tools（稳定排序摘要，不输出完整 schema）",
-    ...context.mcp.tools.map((tool) => `- ${tool.server} :: ${tool.name} — ${tool.description}`),
+    ...context.mcp.tools.map(
+      (tool) =>
+        `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery=${tool.discovery ?? "placeholder"}; trusted=${tool.trusted ? "yes" : "no"}; schemaLoaded=${tool.schemaLoaded ? "yes" : "no"}; runtime=${tool.runtimeVersion ?? "unknown"}`,
+    ),
   ].join("\n");
 }
 
@@ -5512,7 +5529,7 @@ export function validateCodebaseMemoryToolExecution(
   if (!(tool in requiredArgs)) {
     return {
       ok: false,
-      summary: `MCP deferred tool guard: ${tool} 尚未经过 discovery/schema 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现的工具入口。`,
+      summary: `MCP deferred tool guard: ${tool} 尚未经过 discovery/schema/trust/runtime 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现且可信的工具入口。`,
     };
   }
   const missing = requiredArgs[tool]?.filter(
@@ -5608,12 +5625,20 @@ function stabilizeMcpToolList(tools: McpToolState[]): McpToolState[] {
       server: tool.server,
       name: tool.name,
       description: truncateDisplay(tool.description.replace(/\s+/g, " "), 120),
+      discovery: tool.discovery ?? "placeholder",
+      trusted: tool.trusted ?? false,
+      schemaLoaded: tool.schemaLoaded ?? false,
+      runtimeVersion: tool.runtimeVersion ?? "unknown",
     }))
     .sort((a, b) => `${a.server}:${a.name}`.localeCompare(`${b.server}:${b.name}`));
 }
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
+}
+
+function hashFileContent(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSource {
@@ -7405,6 +7430,7 @@ async function handleIndexSafetyRepairContinuation(
 type IndexSafetyRepairPlan = {
   path: ".linghunignore" | ".cbmignore";
   content: string;
+  expectedHash?: string;
   missingEntries: string[];
 };
 
@@ -7414,10 +7440,12 @@ async function createIndexSafetyRepairPlan(
 ): Promise<IndexSafetyRepairPlan> {
   const path = await chooseIndexIgnoreFile(context.projectPath);
   let current = "";
+  let currentExists = true;
   try {
     current = await readFile(join(context.projectPath, path), "utf8");
   } catch {
     current = "";
+    currentExists = false;
   }
   const existing = current
     .split(/\r?\n/u)
@@ -7431,7 +7459,12 @@ async function createIndexSafetyRepairPlan(
     missingEntries.length === 0
       ? current
       : `${current}${needsTrailingNewline ? "\n" : ""}${missingEntries.join("\n")}\n`;
-  return { path, content, missingEntries };
+  return {
+    path,
+    content,
+    expectedHash: currentExists ? hashFileContent(current) : undefined,
+    missingEntries,
+  };
 }
 
 async function chooseIndexIgnoreFile(
@@ -7451,7 +7484,7 @@ async function runIndexIgnoreWritePlan(
   output: Writable,
 ): Promise<boolean> {
   const sessionId = await ensureSession(context);
-  const input = { path: plan.path, content: plan.content };
+  const input = { path: plan.path, content: plan.content, expectedHash: plan.expectedHash };
   const permission = await decidePermission("Write", input, context, sessionId);
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
@@ -7510,7 +7543,7 @@ async function executeIndexIgnoreWritePlan(
   output: Writable,
 ): Promise<boolean> {
   const sessionId = await ensureSession(context);
-  const input = { path: plan.path, content: plan.content };
+  const input = { path: plan.path, content: plan.content, expectedHash: plan.expectedHash };
   const callId = randomUUID();
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",

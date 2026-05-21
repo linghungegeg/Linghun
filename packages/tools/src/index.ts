@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
@@ -52,11 +52,20 @@ export type ToolProgressEvent = {
   text: string;
 };
 
+export type ReadSnapshot = {
+  path: string;
+  hash: string;
+  mtimeMs: number;
+  size: number;
+};
+
 export type ToolContext = {
   workspaceRoot: string;
   logRoot?: string;
   changedFiles: string[];
   todos: TodoItem[];
+  readSnapshots?: Record<string, ReadSnapshot>;
+  patchSummaries?: Record<string, DiffSummary>;
   abortSignal?: AbortSignal;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
 };
@@ -90,9 +99,13 @@ export type DiffSummary = {
 };
 
 export type ReadInput = { path: string; offset?: number; limit?: number };
-export type WriteInput = { path: string; content: string };
-export type EditInput = { path: string; oldText: string; newText: string };
-export type MultiEditInput = { path: string; edits: { oldText: string; newText: string }[] };
+export type WriteInput = { path: string; content: string; expectedHash?: string };
+export type EditInput = { path: string; oldText: string; newText: string; expectedHash?: string };
+export type MultiEditInput = {
+  path: string;
+  edits: { oldText: string; newText: string }[];
+  expectedHash?: string;
+};
 export type GrepInput = { pattern: string; path?: string; limit?: number };
 export type GlobInput = { pattern: string; path?: string; limit?: number };
 export type BashInput = { command: string; timeoutMs?: number };
@@ -123,6 +136,8 @@ export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
     workspaceRoot: resolve(workspaceRoot),
     changedFiles: [],
     todos: [],
+    readSnapshots: {},
+    patchSummaries: {},
   };
 }
 
@@ -412,6 +427,7 @@ function validateWriteInput(input: unknown): WriteInput {
   return {
     path: readString(record, "path", "Write"),
     content: readString(record, "content", "Write"),
+    expectedHash: readOptionalString(record, "expectedHash", "Write"),
   };
 }
 
@@ -421,6 +437,7 @@ function validateEditInput(input: unknown): EditInput {
     path: readString(record, "path", "Edit"),
     oldText: readString(record, "oldText", "Edit"),
     newText: readString(record, "newText", "Edit"),
+    expectedHash: readOptionalString(record, "expectedHash", "Edit"),
   };
 }
 
@@ -432,7 +449,8 @@ function validateMultiEditInput(input: unknown): MultiEditInput {
   }
   return {
     path: readString(record, "path", "MultiEdit"),
-    edits: edits.map((item, index) => {
+    expectedHash: readOptionalString(record, "expectedHash", "MultiEdit"),
+    edits: edits.map((item) => {
       const edit = validateRecord(item, "MultiEdit");
       return {
         oldText: readString(edit, "oldText", "MultiEdit"),
@@ -502,6 +520,8 @@ function validateDiffInput(input: unknown): DiffInput {
 async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
   const content = await readFile(filePath, "utf8");
+  const info = await stat(filePath);
+  rememberReadSnapshot(context, filePath, content, info);
   const lines = content.split(/\r?\n/);
   const offset = Math.max(input.offset ?? 0, 0);
   const limit = Math.max(input.limit ?? DEFAULT_LIMIT, 1);
@@ -509,33 +529,56 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
   const text = selected.map((line, index) => `${offset + index + 1}\t${line}`).join("\n");
   return {
     text,
-    data: { path: relativePath(context.workspaceRoot, filePath), lines: selected.length },
+    data: {
+      path: relativePath(context.workspaceRoot, filePath),
+      lines: selected.length,
+      hash: hashText(content),
+      newline: detectNewlineStyle(content),
+    },
     truncated: offset + limit < lines.length,
   };
 }
 
 async function writeTool(input: WriteInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
+  const before = await readExistingFile(filePath);
+  const readGuard = ensureReadBeforeEdit(context, filePath, before, input.expectedHash);
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, input.content, "utf8");
+  const afterInfo = await stat(filePath);
+  rememberReadSnapshot(context, filePath, input.content, afterInfo);
   recordChangedFile(context, filePath);
-  return {
-    text: `已写入文件：${relativePath(context.workspaceRoot, filePath)}`,
-    changedFiles: [relativePath(context.workspaceRoot, filePath)],
-  };
+  return createEditOutput(
+    context,
+    "Write",
+    filePath,
+    before?.content ?? "",
+    input.content,
+    readGuard,
+  );
 }
 
 async function editTool(input: EditInput, context: ToolContext): Promise<ToolOutput> {
   const filePath = resolveWorkspacePath(context.workspaceRoot, input.path);
-  const content = await readFile(filePath, "utf8");
-  ensureUnique(content, input.oldText);
-  const next = content.replace(input.oldText, input.newText);
+  const before = await readExistingFile(filePath);
+  if (!before) {
+    throw new Error(
+      `文件不存在：${relativePath(context.workspaceRoot, filePath)}。建议：确认路径或改用 Write 创建新文件。`,
+    );
+  }
+  const readGuard = ensureReadBeforeEdit(context, filePath, before, input.expectedHash);
+  try {
+    ensureUnique(before.content, input.oldText);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "唯一性检查失败。";
+    throw new Error(`${message} 建议：重新 Read 文件，确认最新内容后再提交可唯一匹配的编辑。`);
+  }
+  const next = before.content.replace(input.oldText, input.newText);
   await writeFile(filePath, next, "utf8");
+  const afterInfo = await stat(filePath);
+  rememberReadSnapshot(context, filePath, next, afterInfo);
   recordChangedFile(context, filePath);
-  return {
-    text: `已编辑文件：${relativePath(context.workspaceRoot, filePath)}`,
-    changedFiles: [relativePath(context.workspaceRoot, filePath)],
-  };
+  return createEditOutput(context, "Edit", filePath, before.content, next, readGuard);
 }
 
 async function multiEditTool(input: MultiEditInput, context: ToolContext): Promise<ToolOutput> {
@@ -544,23 +587,39 @@ async function multiEditTool(input: MultiEditInput, context: ToolContext): Promi
     throw new Error("MultiEdit 需要至少 1 个 edits 项。建议：传入 edits=[{oldText,newText}]。");
   }
 
-  let content = await readFile(filePath, "utf8");
+  const before = await readExistingFile(filePath);
+  if (!before) {
+    throw new Error(
+      `文件不存在：${relativePath(context.workspaceRoot, filePath)}。建议：确认路径或改用 Write 创建新文件。`,
+    );
+  }
+  const readGuard = ensureReadBeforeEdit(context, filePath, before, input.expectedHash);
+  let content = before.content;
   for (const [index, edit] of input.edits.entries()) {
     try {
       ensureUnique(content, edit.oldText);
     } catch (error) {
       const message = error instanceof Error ? error.message : "唯一性检查失败。";
-      throw new Error(`第 ${index + 1} 个编辑失败：${message}`);
+      throw new Error(
+        `第 ${index + 1} 个编辑失败：${message} 建议：重新 Read 文件，确认最新内容后再按顺序提交唯一匹配片段。`,
+      );
     }
     content = content.replace(edit.oldText, edit.newText);
   }
 
   await writeFile(filePath, content, "utf8");
+  const afterInfo = await stat(filePath);
+  rememberReadSnapshot(context, filePath, content, afterInfo);
   recordChangedFile(context, filePath);
-  return {
-    text: `已批量编辑文件：${relativePath(context.workspaceRoot, filePath)}，共 ${input.edits.length} 项。`,
-    changedFiles: [relativePath(context.workspaceRoot, filePath)],
-  };
+  return createEditOutput(
+    context,
+    "MultiEdit",
+    filePath,
+    before.content,
+    content,
+    readGuard,
+    input.edits.length,
+  );
 }
 
 async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOutput> {
@@ -684,17 +743,26 @@ async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOut
 
 async function diffTool(input: DiffInput, context: ToolContext): Promise<ToolOutput> {
   const changedFiles = unique(input.files ?? context.changedFiles);
+  const patchSummaries = context.patchSummaries ?? {};
+  const addedLines = changedFiles.reduce(
+    (total, file) => total + (patchSummaries[file]?.addedLines ?? 0),
+    0,
+  );
+  const removedLines = changedFiles.reduce(
+    (total, file) => total + (patchSummaries[file]?.removedLines ?? 0),
+    0,
+  );
   const riskyFiles = changedFiles.filter(
     (file) => file.includes(".env") || file.startsWith(".git/"),
   );
   const summary: DiffSummary = {
     changedFiles,
-    addedLines: 0,
-    removedLines: 0,
+    addedLines,
+    removedLines,
     summary:
       changedFiles.length === 0
         ? "本轮暂无工具写入改动。"
-        : `本轮工具改动 ${changedFiles.length} 个文件。`,
+        : `本轮工具改动 ${changedFiles.length} 个文件，+${addedLines} -${removedLines}。`,
     riskyFiles,
   };
   return {
@@ -702,6 +770,18 @@ async function diffTool(input: DiffInput, context: ToolContext): Promise<ToolOut
     data: summary,
   };
 }
+
+type ExistingFile = {
+  content: string;
+  hash: string;
+  mtimeMs: number;
+  size: number;
+};
+
+type EditReadGuard = {
+  source: "read-snapshot" | "expectedHash" | "new-file";
+  beforeHash?: string;
+};
 
 function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string {
   if (!inputPath) {
@@ -737,6 +817,183 @@ function recordChangedFile(context: ToolContext, filePath: string): void {
     ...context.changedFiles,
     relativePath(context.workspaceRoot, filePath),
   ]);
+}
+
+async function readExistingFile(filePath: string): Promise<ExistingFile | null> {
+  try {
+    const [content, info] = await Promise.all([readFile(filePath, "utf8"), stat(filePath)]);
+    return { content, hash: hashText(content), mtimeMs: info.mtimeMs, size: info.size };
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined;
+    if (code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function ensureReadBeforeEdit(
+  context: ToolContext,
+  filePath: string,
+  before: ExistingFile | null,
+  expectedHash?: string,
+): EditReadGuard {
+  if (!before) {
+    return { source: "new-file" };
+  }
+  const rel = relativePath(context.workspaceRoot, filePath);
+  if (expectedHash) {
+    if (expectedHash !== before.hash) {
+      throw new Error(
+        `文件已变化：${rel} 当前 hash 与 expectedHash 不一致。建议：重新 Read 文件后按最新内容重试，避免覆盖外部修改。`,
+      );
+    }
+    return { source: "expectedHash", beforeHash: before.hash };
+  }
+  const snapshot = context.readSnapshots?.[rel];
+  if (!snapshot) {
+    throw new Error(
+      `编辑前未读取：${rel}。建议：先运行 Read 获取最新内容，或传入 expectedHash 后再执行写入。`,
+    );
+  }
+  if (
+    snapshot.hash !== before.hash ||
+    snapshot.mtimeMs !== before.mtimeMs ||
+    snapshot.size !== before.size
+  ) {
+    throw new Error(
+      `文件已变化：${rel} 自上次 Read 后被修改。建议：重新 Read 文件后按最新内容重试，避免静默覆盖。`,
+    );
+  }
+  return { source: "read-snapshot", beforeHash: before.hash };
+}
+
+function rememberReadSnapshot(
+  context: ToolContext,
+  filePath: string,
+  content: string,
+  info: { mtimeMs: number; size: number },
+): void {
+  const rel = relativePath(context.workspaceRoot, filePath);
+  context.readSnapshots = {
+    ...(context.readSnapshots ?? {}),
+    [rel]: { path: rel, hash: hashText(content), mtimeMs: info.mtimeMs, size: info.size },
+  };
+}
+
+function createEditOutput(
+  context: ToolContext,
+  operation: "Write" | "Edit" | "MultiEdit",
+  filePath: string,
+  before: string,
+  after: string,
+  readGuard: EditReadGuard,
+  editCount = 1,
+): ToolOutput {
+  const rel = relativePath(context.workspaceRoot, filePath);
+  const summary = createPatchSummary([rel], before, after);
+  context.patchSummaries = { ...(context.patchSummaries ?? {}), [rel]: summary };
+  const newlineBefore = detectNewlineStyle(before);
+  const newlineAfter = detectNewlineStyle(after);
+  const text = [
+    `${operation} 已完成：${rel}`,
+    `- patch: +${summary.addedLines} -${summary.removedLines}`,
+    `- changedFiles: ${rel}`,
+    `- readGuard: ${readGuard.source}`,
+    `- newline: ${newlineBefore} -> ${newlineAfter}`,
+    "- 下一步：用 Diff 或 /details 查看补丁摘要；需要继续编辑请基于最新内容。",
+  ].join("\n");
+  return {
+    text,
+    summary: `${operation} ${rel}: +${summary.addedLines} -${summary.removedLines}; changedFiles=1`,
+    preview: text,
+    details: createPatchDetails(operation, rel, before, after, readGuard, editCount),
+    data: {
+      ...summary,
+      operation,
+      editCount,
+      readGuard: readGuard.source,
+      beforeHash: readGuard.beforeHash,
+      afterHash: hashText(after),
+      newlineBefore,
+      newlineAfter,
+      encoding: "utf8",
+    },
+    changedFiles: [rel],
+  };
+}
+
+function createPatchSummary(changedFiles: string[], before: string, after: string): DiffSummary {
+  const beforeLines = before.length > 0 ? before.split(/\r?\n/u) : [];
+  const afterLines = after.length > 0 ? after.split(/\r?\n/u) : [];
+  const common = new Map<string, number>();
+  for (const line of beforeLines) {
+    common.set(line, (common.get(line) ?? 0) + 1);
+  }
+  let unchanged = 0;
+  for (const line of afterLines) {
+    const count = common.get(line) ?? 0;
+    if (count > 0) {
+      unchanged += 1;
+      common.set(line, count - 1);
+    }
+  }
+  const addedLines = Math.max(afterLines.length - unchanged, 0);
+  const removedLines = Math.max(beforeLines.length - unchanged, 0);
+  return {
+    changedFiles,
+    addedLines,
+    removedLines,
+    summary: `编辑改动 ${changedFiles.length} 个文件，+${addedLines} -${removedLines}。`,
+    riskyFiles: changedFiles.filter((file) => file.includes(".env") || file.startsWith(".git/")),
+  };
+}
+
+function createPatchDetails(
+  operation: "Write" | "Edit" | "MultiEdit",
+  rel: string,
+  before: string,
+  after: string,
+  readGuard: EditReadGuard,
+  editCount: number,
+): string {
+  const beforeLines = before.split(/\r?\n/u);
+  const afterLines = after.split(/\r?\n/u);
+  return [
+    `operation: ${operation}`,
+    `file: ${rel}`,
+    `editCount: ${editCount}`,
+    `readGuard: ${readGuard.source}`,
+    "encoding: utf8",
+    `newline: ${detectNewlineStyle(before)} -> ${detectNewlineStyle(after)}`,
+    "--- before (first changed context)",
+    ...previewChangedLines(beforeLines, afterLines, "-"),
+    "+++ after (first changed context)",
+    ...previewChangedLines(afterLines, beforeLines, "+"),
+  ].join("\n");
+}
+
+function previewChangedLines(primary: string[], other: string[], marker: "-" | "+"): string[] {
+  const limit = 12;
+  const changed = primary.filter((line, index) => other[index] !== line).slice(0, limit);
+  if (changed.length === 0) {
+    return [`${marker} <no line-level preview; content hash changed or unchanged>`];
+  }
+  return changed.map((line) => `${marker} ${line}`);
+}
+
+function hashText(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function detectNewlineStyle(content: string): "lf" | "crlf" | "mixed" | "none" {
+  const crlf = (content.match(/\r\n/gu) ?? []).length;
+  const lf = (content.match(/(?<!\r)\n/gu) ?? []).length;
+  if (crlf > 0 && lf > 0) return "mixed";
+  if (crlf > 0) return "crlf";
+  if (lf > 0) return "lf";
+  return "none";
 }
 
 async function listFiles(root: string): Promise<string[]> {

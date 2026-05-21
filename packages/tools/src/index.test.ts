@@ -98,6 +98,7 @@ describe("Phase 05 core tools", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "sample.txt"), "same\nsame\n", "utf8");
     const context = createToolContext(project);
+    await runTool("Read", { path: "sample.txt" }, context);
 
     await expect(
       runTool("Edit", { path: "sample.txt", oldText: "same", newText: "next" }, context),
@@ -105,6 +106,62 @@ describe("Phase 05 core tools", () => {
     await expect(
       runTool("Write", { path: "../escape.txt", content: "bad" }, context),
     ).rejects.toThrow("路径越界");
+  });
+
+  it("guards edits with read-before-edit and stale file detection", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const filePath = join(project, "sample.txt");
+    await writeFile(filePath, "alpha\nbeta\n", "utf8");
+    const context = createToolContext(project);
+
+    await expect(
+      runTool("Edit", { path: "sample.txt", oldText: "beta", newText: "gamma" }, context),
+    ).rejects.toThrow("编辑前未读取");
+
+    const read = await runTool("Read", { path: "sample.txt" }, context);
+    expect(read.output.data).toMatchObject({ path: "sample.txt", newline: "lf" });
+
+    await writeFile(filePath, "alpha\nexternal\n", "utf8");
+    await expect(
+      runTool("Edit", { path: "sample.txt", oldText: "external", newText: "gamma" }, context),
+    ).rejects.toThrow("自上次 Read 后被修改");
+  });
+
+  it("records editing patch summaries, details, and expectedHash guard", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const filePath = join(project, "sample.txt");
+    await writeFile(filePath, "alpha\nbeta\n", "utf8");
+    const context = createToolContext(project);
+    const read = await runTool("Read", { path: "sample.txt" }, context);
+    const expectedHash = (read.output.data as { hash: string }).hash;
+
+    const edit = await runTool(
+      "Edit",
+      { path: "sample.txt", oldText: "beta", newText: "gamma", expectedHash },
+      context,
+    );
+    const multi = await runTool(
+      "MultiEdit",
+      {
+        path: "sample.txt",
+        edits: [
+          { oldText: "alpha", newText: "ALPHA" },
+          { oldText: "gamma", newText: "GAMMA" },
+        ],
+      },
+      context,
+    );
+    const diff = await runTool("Diff", {}, context);
+
+    expect(edit.output.summary).toContain("+1 -1");
+    expect(edit.output.details).toContain("readGuard: expectedHash");
+    expect(multi.output.data).toMatchObject({ operation: "MultiEdit", editCount: 2 });
+    expect(diff.output.data).toMatchObject({
+      changedFiles: ["sample.txt"],
+      addedLines: 2,
+      removedLines: 2,
+    });
+    expect(await readFile(filePath, "utf8")).toBe("ALPHA\nGAMMA\n");
   });
 
   it("validates tool input and preserves details when output is capped", async () => {

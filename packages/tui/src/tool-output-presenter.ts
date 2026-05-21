@@ -100,7 +100,15 @@ function createToolOutputPreview(
 }
 
 function isSummaryFirstTool(name: ToolName): boolean {
-  return name === "Read" || name === "Glob" || name === "Grep" || name === "Bash";
+  return (
+    name === "Read" ||
+    name === "Glob" ||
+    name === "Grep" ||
+    name === "Bash" ||
+    name === "Write" ||
+    name === "Edit" ||
+    name === "MultiEdit"
+  );
 }
 
 function createSummaryFirstPreview(
@@ -128,6 +136,27 @@ function createSummaryFirstPreview(
       stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
     }
   }
+  if (isEditingTool(name)) {
+    const addedLines = readNumber(metadata, "addedLines") ?? 0;
+    const removedLines = readNumber(metadata, "removedLines") ?? 0;
+    const changedFiles = readStringList(metadata, "changedFiles");
+    const readGuard = readStringValue(metadata, "readGuard");
+    stats.push(
+      language === "en-US"
+        ? `patch +${addedLines} -${removedLines}`
+        : `补丁 +${addedLines} -${removedLines}`,
+    );
+    if (changedFiles.length > 0) {
+      stats.push(
+        language === "en-US"
+          ? `changedFiles ${changedFiles.length}`
+          : `changedFiles ${changedFiles.length}`,
+      );
+    }
+    if (readGuard) {
+      stats.push(language === "en-US" ? `read guard ${readGuard}` : `读取保护 ${readGuard}`);
+    }
+  }
   const hint =
     language === "en-US"
       ? "Output summarized; use /details for the full result."
@@ -139,6 +168,24 @@ function readNumber(value: object | undefined, key: string): number | undefined 
   if (!value) return undefined;
   const item = (value as Record<string, unknown>)[key];
   return typeof item === "number" ? item : undefined;
+}
+
+function readStringValue(value: object | undefined, key: string): string | undefined {
+  if (!value) return undefined;
+  const item = (value as Record<string, unknown>)[key];
+  return typeof item === "string" ? item : undefined;
+}
+
+function readStringList(value: object | undefined, key: string): string[] {
+  if (!value) return [];
+  const item = (value as Record<string, unknown>)[key];
+  return Array.isArray(item)
+    ? item.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function isEditingTool(name: ToolName): boolean {
+  return name === "Write" || name === "Edit" || name === "MultiEdit";
 }
 
 function looksLikeMojibake(text: string): boolean {
