@@ -6431,6 +6431,8 @@ export async function handleNaturalInput(
           context,
           approval.sessionId,
           output,
+          undefined,
+          approval.continuation?.reportWriteGuard,
         );
         const reportWriteGuard = approval.continuation?.reportWriteGuard;
         if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
@@ -6895,18 +6897,14 @@ async function sendMessage(
   const selectedRuntime = getSelectedModelRuntime(context);
   context.model = selectedRuntime.model;
   const selectedTools = currentModelSupportsTools(context, selectedRuntime);
+  const reportWriteGuard = createReportWriteGuard(text);
   await appendSystemEvent(
     context,
     sessionId,
     `model_request selectedRole=${selectedRuntime.role} provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoningLevel=${selectedRuntime.reasoningLevel ?? "none"} reasoningSent=${selectedRuntime.reasoningSent ? "yes" : "no"} tools=${selectedTools ? "yes" : "no"}`,
     "info",
   );
-  writeLine(
-    output,
-    context.language === "en-US"
-      ? `Status: requesting model provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoning=${selectedRuntime.reasoningStatus}`
-      : `状态：正在请求模型 provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoning=${selectedRuntime.reasoningStatus}`,
-  );
+  writeLine(output, formatModelRequestStart(reportWriteGuard, context.language));
 
   const assistantEventId = randomUUID();
   let assistantText = "";
@@ -6955,7 +6953,6 @@ async function sendMessage(
     return;
   }
 
-  const reportWriteGuard = createReportWriteGuard(text);
   if (reportWriteGuard) {
     messages.push({ role: "user", content: createReportTaskGuard(reportWriteGuard, context) });
   }
@@ -7718,7 +7715,7 @@ async function executeModelToolUse(
     const drift = detectArchitectureDrift(context.currentArchitectureCard, {
       toolName,
       input: toolCall.input,
-      summary: `${toolName}: ${JSON.stringify(toolCall.input ?? {})}`,
+      summary: createToolUseDriftSummary(toolName, toolCall.input),
     });
     if (drift.drift) {
       const warning =
@@ -7802,6 +7799,7 @@ async function executeModelToolUse(
     sessionId,
     output,
     permission.preflight,
+    continuation?.reportWriteGuard,
   );
 }
 
@@ -7812,6 +7810,7 @@ async function executeApprovedModelToolUse(
   sessionId: string,
   output: Writable,
   preflight?: string,
+  reportWriteGuard?: ReportWriteGuard,
 ): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
   if (preflight) {
     writeLine(output, preflight);
@@ -7842,7 +7841,16 @@ async function executeApprovedModelToolUse(
       isError,
       evidence?.id,
     );
-    writeLine(output, formatToolOutput(toolName, result.output, context.language, evidence?.id));
+    writeLine(
+      output,
+      formatModelToolOutput(
+        toolName,
+        result.output,
+        context.language,
+        evidence?.id,
+        reportWriteGuard,
+      ),
+    );
     return {
       ok: !isError,
       tool: toolName,
@@ -8157,6 +8165,15 @@ function createReportWriteGuard(text: string): ReportWriteGuard | undefined {
   };
 }
 
+function formatModelRequestStart(guard: ReportWriteGuard | undefined, language: Language): string {
+  if (guard) {
+    return language === "en-US"
+      ? `I will inspect the project evidence briefly, then save the analysis report to ${guard.requestedPath}.`
+      : `我会先简要检查项目证据，然后把分析报告保存到 ${guard.requestedPath}。`;
+  }
+  return language === "en-US" ? "Status: requesting model" : "状态：正在请求模型";
+}
+
 function isReportFileWriteRequest(text: string): boolean {
   const asksForReport = /报告|report/iu.test(text);
   const asksToWrite = /生成|写入|创建|保存|输出|写到|写在|generate|write|create|save|output/iu.test(
@@ -8198,26 +8215,73 @@ function shouldSendReportFinalReferenceReminder(
   return (
     guard.completed &&
     !guard.finalReferenceReminderSent &&
-    !assistantText.includes(guard.requestedPath)
+    (!assistantText.includes(guard.requestedPath) || !hasReportFinalAnswerShape(assistantText))
+  );
+}
+
+function hasReportFinalAnswerShape(text: string): boolean {
+  return (
+    /结论|conclusion|发现|findings/iu.test(text) && /下一步|next step|建议|recommend/iu.test(text)
   );
 }
 
 function createReportFinalReferenceReminder(guard: ReportWriteGuard, context: TuiContext): string {
   return context.language === "en-US"
-    ? `The report file has been written. Give the final answer now and explicitly reference ${guard.requestedPath}. Do not call another tool unless necessary.`
-    : `报告文件已经写入。现在请给出最终回答，并明确引用 ${guard.requestedPath}。除非必要，不要再调用工具。`;
+    ? `The report file has been written. Give the final answer now: reference ${guard.requestedPath}, include 2-4 evidence-based conclusions, separate inferred/unconfirmed items, and list next steps. Do not call another tool unless necessary.`
+    : `报告文件已经写入。现在请给出最终回答：引用 ${guard.requestedPath}，列出 2-4 条基于证据的核心结论，单独说明推断/未确认项，并给出下一步。除非必要，不要再调用工具。`;
 }
 
 function createReportTaskGuard(guard: ReportWriteGuard, context: TuiContext): string {
   return context.language === "en-US"
-    ? `Task-specific completion requirement for this turn only: the user explicitly asked for a saved report file. Before final answer, call Write with path ${guard.requestedPath}. If you inspect the project first, keep it minimal and still finish by writing ${guard.requestedPath}. The final answer must reference ${guard.requestedPath}.`
-    : `仅本轮任务的完成要求：用户明确要求保存报告文件。最终回答前必须调用 Write，path 使用 ${guard.requestedPath}。如需先检查项目，请保持最小必要检查，并仍以写入 ${guard.requestedPath} 收口。最终回答必须引用 ${guard.requestedPath}。`;
+    ? `Task-specific completion requirement for this turn only: the user explicitly asked for a saved report file. Before final answer, call Write with path ${guard.requestedPath}. If you inspect the project first, keep it minimal and still finish by writing ${guard.requestedPath}. The final answer must reference ${guard.requestedPath}, include 2-4 evidence-based conclusions, separate inferred/unconfirmed items, and list next steps.`
+    : `仅本轮任务的完成要求：用户明确要求保存报告文件。最终回答前必须调用 Write，path 使用 ${guard.requestedPath}。如需先检查项目，请保持最小必要检查，并仍以写入 ${guard.requestedPath} 收口。最终回答必须引用 ${guard.requestedPath}，列出 2-4 条基于证据的核心结论，单独说明推断/未确认项，并给出下一步。`;
 }
 
 function createReportWriteReminder(guard: ReportWriteGuard, context: TuiContext): string {
   return context.language === "en-US"
-    ? `The user explicitly asked you to generate and save a report file. No Write evidence exists yet. Call the Write tool now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
-    : `用户明确要求生成并保存报告文件，但当前还没有 Write evidence。现在请调用 Write 工具写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
+    ? `The user explicitly asked you to generate and save a report file. No saved report exists yet. Call the Write tool now with path ${guard.requestedPath}, then give a final answer that references ${guard.requestedPath}.`
+    : `用户明确要求生成并保存报告文件，但当前还没有保存报告。现在请调用 Write 工具写入 ${guard.requestedPath}，然后在最终回答中引用 ${guard.requestedPath}。`;
+}
+
+function formatModelToolOutput(
+  toolName: ToolName,
+  output: ToolOutput,
+  language: Language,
+  evidenceId: string | undefined,
+  reportWriteGuard: ReportWriteGuard | undefined,
+): string {
+  if (!reportWriteGuard) {
+    return formatToolOutput(toolName, output, language, evidenceId);
+  }
+  const changedFile = output.changedFiles?.[0];
+  if (toolName === "Write" && changedFile) {
+    return language === "en-US" ? `Report saved: ${changedFile}` : `报告已保存：${changedFile}`;
+  }
+  if (toolName === "Write") {
+    return language === "en-US" ? "Report file write completed." : "报告文件写入已完成。";
+  }
+  if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") {
+    return language === "en-US"
+      ? `${toolName} completed; continuing the report analysis.`
+      : `${toolName} 已完成，继续整理报告分析。`;
+  }
+  return formatToolOutput(toolName, output, language, evidenceId);
+}
+
+function createToolUseDriftSummary(toolName: ToolName, input: unknown): string {
+  const path = readToolInputString(input, "path") ?? readToolInputString(input, "file_path");
+  if ((toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") && path) {
+    return `${toolName}: ${path}`;
+  }
+  return `${toolName}: ${JSON.stringify(input ?? {})}`;
+}
+
+function readToolInputString(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 async function recordReportIncompleteEvidence(
@@ -8243,8 +8307,8 @@ async function recordReportIncompleteEvidence(
     "warning",
   );
   return context.language === "en-US"
-    ? `Report generation incomplete/BLOCKED: no matching Write evidence for ${guard.requestedPath}. Evidence: ${evidence.id}`
-    : `报告生成 incomplete/BLOCKED：没有 ${guard.requestedPath} 的 matching Write evidence。证据记录：${evidence.id}`;
+    ? `Report generation incomplete/BLOCKED: no saved report file matched ${guard.requestedPath}. See details for the saved record.`
+    : `报告生成 incomplete/BLOCKED：没有匹配 ${guard.requestedPath} 的已保存报告。可在详情中查看记录。`;
 }
 
 function doesWriteSatisfyReportGuard(

@@ -45,10 +45,16 @@ export function formatModelToolPermissionPrompt(
   const risk = formatRisk(permission.risk, language);
   const isReportWrite = isReportWritePrompt(permission);
   if (language === "en-US") {
+    if (isReportWrite) {
+      return [
+        `Need to write ${files} to save this analysis report. Allow this write once?`,
+        `- File: ${files}`,
+        `- Safety: ${risk}`,
+        "- Type yes/confirm to allow once; type no/cancel to deny.",
+      ].join("\n");
+    }
     return [
-      isReportWrite
-        ? `Linghun wants to write ${files}. This is the report file for this request. Allow this write once?`
-        : `Linghun wants to run ${action}. Allow this action once?`,
+      `Linghun wants to run ${action}. Allow this action once?`,
       `- action: ${action}`,
       `- scope: ${files}`,
       `- risk: ${risk}`,
@@ -57,10 +63,16 @@ export function formatModelToolPermissionPrompt(
       "- boundary: the tool has not run yet, and allowing once does not change the permission mode.",
     ].join("\n");
   }
+  if (isReportWrite) {
+    return [
+      `需要写入 ${files} 来保存本次分析报告。允许这次写入吗？`,
+      `- 文件：${files}`,
+      `- 安全级别：${risk}`,
+      "- 输入 yes/确认 允许一次；输入 no/取消 拒绝。",
+    ].join("\n");
+  }
   return [
-    isReportWrite
-      ? `Linghun 想写入 ${files}，这是本次报告文件，是否允许本次写入？`
-      : `Linghun 想执行 ${action}，是否允许本次执行？`,
+    `Linghun 想执行 ${action}，是否允许本次执行？`,
     `- action：${action}`,
     `- scope：${files}`,
     `- risk：${risk}`,

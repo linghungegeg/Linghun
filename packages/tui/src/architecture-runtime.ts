@@ -148,7 +148,7 @@ export function createArchitectureCard(
     target,
     projectFacts,
     recommendedApproach:
-      "先给出一屏内 Architecture Card，再按现有 Start Gate、Plan、权限和工具链路做最小分阶段实现。",
+      "先在主屏给出 1-2 行行动摘要，完整 Architecture Card 仅保留在内部记录；再按现有 Start Gate、Plan、权限和工具链路做最小分阶段实现。",
     rejectedApproaches: [
       "不把 Architecture Runtime 变成第五权限模式、agent、ADR DB 或完整 spec 平台。",
       "不为小修、状态查询或简单解释强制进入 Plan。",
@@ -203,7 +203,8 @@ export function summarizeArchitectureCard(card: ArchitectureCard): ArchitectureC
 export function createArchitectureRuntimeDirective(card: ArchitectureCard): string {
   return [
     "ArchitectureRuntime=triggered",
-    "在继续执行前，先用一屏内中文输出短 Architecture Card；后续动作必须保持与该 card 一致。",
+    "主屏只输出 1-2 行面向用户的行动摘要；不要把 Architecture Card、字段名或内部审计结构输出到主屏。",
+    "后续动作必须保持与该 card 一致；完整 Architecture Card 仅用于内部记录、details/debug 或验证。",
     "Architecture Runtime 不授权写入、不改变权限模式、不替代 Plan approval、Freshness/Web Evidence 或 verifier。",
     formatArchitectureCard(card),
   ].join("\n");

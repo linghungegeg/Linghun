@@ -14,30 +14,25 @@ export type RuntimeStatusView = {
 };
 
 export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Language): string {
-  const cache = formatPercent(view.cacheHitRate);
-  const provider = truncateDisplay(view.provider, 14);
-  const model = truncateDisplay(view.model, 20);
-  const endpointProfile = truncateDisplay(view.endpointProfile, 16);
-  const reasoning = truncateDisplay(view.reasoningStatus, 8);
   const session = truncateDisplay(view.session, 8);
   const mode = truncateDisplay(view.mode, 8);
-  const index = truncateDisplay(view.indexStatus, 10);
   const gate =
     view.gate === "waiting approval"
-      ? "approval"
+      ? language === "en-US"
+        ? "approval"
+        : "待批准"
       : view.gate === "waiting confirmation"
-        ? "waiting"
-        : "none";
+        ? language === "en-US"
+          ? "waiting"
+          : "待确认"
+        : language === "en-US"
+          ? "none"
+          : "无";
   const line =
     language === "en-US"
-      ? `Status: session=${session} gate=${gate} cache ${cache} · index ${index} provider=${provider} model=${model} endpointProfile=${endpointProfile} reasoning=${reasoning} · mode=${mode} bg=${view.background}`
-      : `[Linghun] 会话=${session} gate=${gate} cache ${cache} · index ${index} provider=${provider} 模型=${model} endpointProfile=${endpointProfile} 推理=${reasoning} · 模式=${mode} 后台=${view.background}`;
-  return truncateDisplay(line, 160);
-}
-
-function formatPercent(value: number | null): string {
-  if (value === null || Number.isNaN(value)) return "n/a";
-  return `${Math.round(value * 100)}%`;
+      ? `Status: session=${session} · mode=${mode} · gate=${gate} · bg=${view.background}`
+      : `[Linghun] 会话=${session} · 模式=${mode} · 确认=${gate} · 后台=${view.background}`;
+  return truncateDisplay(line, 100);
 }
 
 function truncateDisplay(value: string, max: number): string {

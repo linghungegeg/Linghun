@@ -44,7 +44,7 @@ export function formatToolOutput(
 ): string {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
   const lines = [
-    language === "en-US" ? `Tool ${name} result:` : `工具 ${name} 结果：`,
+    language === "en-US" ? `Tool ${name} completed` : `工具 ${name} 已完成`,
     `- ${language === "en-US" ? "summary" : "摘要"}: ${layered.summary}`,
   ];
   if (layered.preview) {
@@ -53,8 +53,8 @@ export function formatToolOutput(
   if (layered.details) {
     lines.push(
       language === "en-US"
-        ? "Details: available outside primary output."
-        : "详情：可在 primary output 之外查看。",
+        ? "Details are available outside the main screen."
+        : "详情可在主屏之外查看。",
     );
   }
   if (layered.truncated) {
@@ -64,13 +64,8 @@ export function formatToolOutput(
           ? `Full log: ${layered.fullOutputPath}`
           : `完整日志：${layered.fullOutputPath}`
         : language === "en-US"
-          ? "Full result remains in the tool_result transcript/evidence record."
-          : "完整结果仍保留在 tool_result transcript/evidence 记录中。",
-    );
-  }
-  if (layered.evidenceId) {
-    lines.push(
-      language === "en-US" ? `Evidence: ${layered.evidenceId}` : `证据记录：${layered.evidenceId}`,
+          ? "Full result is saved outside the main screen."
+          : "完整结果已保存在主屏之外。",
     );
   }
   return lines.join("\n");
@@ -151,8 +146,8 @@ function createSummaryFirstPreview(
   );
   const hint =
     language === "en-US"
-      ? "Primary output is summary-first; bounded content remains in tool_result/evidence."
-      : "主屏为 summary-first；bounded 内容仍保留在 tool_result/evidence。";
+      ? "Primary output is summary-first; full bounded content is saved outside the main screen."
+      : "主屏为 summary-first；完整 bounded 内容已保存在主屏之外。";
   return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
 }
 

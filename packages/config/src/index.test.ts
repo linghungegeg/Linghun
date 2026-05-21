@@ -168,6 +168,7 @@ describe("config directories", () => {
   });
 
   it("loads openai endpoint profile and inference level from env", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://sub2api.toioto.org/v1");
     vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "responses");
     vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Medium");
     vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
@@ -177,6 +178,7 @@ describe("config directories", () => {
 
     const config = await envLoadConfig(project);
 
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://sub2api.toioto.org/v1");
     expect(config.providers["openai-compatible"]?.endpointProfile).toBe("responses");
     expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Medium");
   });
