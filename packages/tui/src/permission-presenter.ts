@@ -46,12 +46,7 @@ export function formatModelToolPermissionPrompt(
   const isReportWrite = isReportWritePrompt(permission);
   if (language === "en-US") {
     if (isReportWrite) {
-      return [
-        `Need to write ${files} to save this analysis report. Allow this write once?`,
-        `- File: ${files}`,
-        `- Safety: ${risk}`,
-        "- Type yes/confirm to allow once; type no/cancel to deny.",
-      ].join("\n");
+      return [`Write ${files}`, "Allow this write? yes / no"].join("\n");
     }
     return [
       `Linghun wants to run ${action}. Allow this action once?`,
@@ -64,12 +59,7 @@ export function formatModelToolPermissionPrompt(
     ].join("\n");
   }
   if (isReportWrite) {
-    return [
-      `需要写入 ${files} 来保存本次分析报告。允许这次写入吗？`,
-      `- 文件：${files}`,
-      `- 安全级别：${risk}`,
-      "- 输入 yes/确认 允许一次；输入 no/取消 拒绝。",
-    ].join("\n");
+    return [`写入 ${files}`, "允许本次写入？yes / no"].join("\n");
   }
   return [
     `Linghun 想执行 ${action}，是否允许本次执行？`,

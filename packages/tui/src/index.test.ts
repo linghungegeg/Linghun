@@ -29,6 +29,7 @@ import {
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
+import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 
 class MemoryOutput extends Writable {
@@ -1849,6 +1850,52 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
+  it("formats report Write prompts with the actual pending target path", () => {
+    for (const reportPath of ["report.md", "docs/deploy-report.md"] as const) {
+      const prompt = formatModelToolPermissionPrompt(
+        {
+          toolName: "Write",
+          decision: "ask",
+          risk: "medium",
+          mode: "default",
+          reason: "model requested report write",
+          scope: [reportPath],
+        },
+        "zh-CN",
+      );
+
+      expect(prompt).toBe(`写入 ${reportPath}\n允许本次写入？yes / no`);
+      expect(prompt).not.toContain("Linghun 想");
+      expect(prompt).not.toContain("permission pipeline");
+      expect(prompt).not.toContain("risk=");
+      expect(prompt).not.toContain("tool_result");
+      expect(prompt).not.toContain("证据记录");
+      if (reportPath !== "report.md") {
+        expect(prompt).not.toContain("写入 report.md");
+      }
+
+      const englishPrompt = formatModelToolPermissionPrompt(
+        {
+          toolName: "Write",
+          decision: "ask",
+          risk: "medium",
+          mode: "default",
+          reason: "model requested report write",
+          scope: [reportPath],
+        },
+        "en-US",
+      );
+      expect(englishPrompt).toBe(`Write ${reportPath}\nAllow this write? yes / no`);
+      expect(englishPrompt).not.toContain("Linghun wants");
+      expect(englishPrompt).not.toContain("permission pipeline");
+      expect(englishPrompt).not.toContain("risk=");
+      expect(englishPrompt).not.toContain("tool_result");
+      if (reportPath !== "report.md") {
+        expect(englishPrompt).not.toContain("Write report.md");
+      }
+    }
+  });
+
   it("marks explicit report generation incomplete when Write evidence is missing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -2014,9 +2061,10 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(2);
-    expect(output.text).toContain(`需要写入 ${reportPath} 来保存本次分析报告。允许这次写入吗？`);
-    expect(output.text).toContain(`- 文件：${reportPath}`);
-    expect(output.text).toContain("- 输入 yes/确认 允许一次；输入 no/取消 拒绝。");
+    expect(output.text).toContain(`写入 ${reportPath}`);
+    expect(output.text).toContain("允许本次写入？yes / no");
+    expect(output.text).not.toContain("需要写入");
+    expect(output.text).not.toContain("- 安全级别：");
     expect(output.text).toContain(`报告已保存：${reportPath}`);
     expect(output.text).toContain(`已生成 ${reportPath}`);
     await expect(readFile(join(project, reportPath), "utf8")).resolves.toBe(report);
@@ -2076,9 +2124,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolNames).toContain("Write");
     expect(toolNames).not.toContain("Bash");
     expect(output.text).toContain("我会先简要检查项目证据，然后把分析报告保存到 report.md。");
-    expect(output.text).toContain("需要写入 report.md 来保存本次分析报告。允许这次写入吗？");
-    expect(output.text).toContain("- 文件：report.md");
-    expect(output.text).toContain("- 输入 yes/确认 允许一次；输入 no/取消 拒绝。");
+    expect(output.text).toContain("写入 report.md");
+    expect(output.text).toContain("允许本次写入？yes / no");
+    expect(output.text).not.toContain("需要写入 report.md");
+    expect(output.text).not.toContain("- 文件：report.md");
+    expect(output.text).not.toContain("- 安全级别：");
     expect(output.text).toContain("报告已保存：report.md");
     expect(output.text).toContain("结论：这是 Node 项目");
     expect(output.text).toContain("推断/未确认：运行环境变量需实机核对");
@@ -4201,7 +4251,10 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
 
     expect(requests).toHaveLength(2);
-    expect(output.text).toContain("需要写入 deploy-report.md 来保存本次分析报告。允许这次写入吗？");
+    expect(output.text).toContain("写入 deploy-report.md");
+    expect(output.text).toContain("允许本次写入？yes / no");
+    expect(output.text).not.toContain("需要写入 deploy-report.md");
+    expect(output.text).not.toContain("- 安全级别：");
     expect(output.text).toContain("报告已保存：deploy-report.md");
     expect(output.text).not.toContain("证据记录：");
     expect(report).toContain("通过模型 Write 生成");
