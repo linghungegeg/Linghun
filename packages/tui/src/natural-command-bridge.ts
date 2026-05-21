@@ -341,11 +341,24 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "mode",
     "/mode",
-    ["mode", "权限模式", "permission mode", "bypass"],
+    [
+      "mode",
+      "权限模式",
+      "permission mode",
+      "full-access",
+      "full access",
+      "完全访问",
+      "auto-review",
+      "auto review",
+      "auto mode",
+      "自动审查",
+      "自动模式",
+      "bypass",
+    ],
     "权限模式",
     "Permission mode",
-    "查看或切换权限模式；bypass 不能自然语言直通。",
-    "Shows or switches permission mode; bypass is never natural-language direct.",
+    "查看或切换权限模式；full-access 不能自然语言直通。",
+    "Shows or switches permission mode; full-access is never natural-language direct.",
     "询问当前权限模式或想切换模式。",
     "Use for current permission mode or switching mode.",
     "start_gate",
@@ -1412,7 +1425,7 @@ function detectInquiry(text: string): NaturalIntent["inquiry"] {
 
 function classifyDangerousReason(text: string): string | null {
   if (
-    /直接|force|强制|bypass|npm install|pnpm add|install dependency|安装依赖|接受所有|accept all|delete memory|restore|hook|remote|job/u.test(
+    /直接|force|强制|full-access|full access|完全访问|bypass|npm install|pnpm add|install dependency|安装依赖|接受所有|accept all|delete memory|restore|hook|remote|job/u.test(
       text,
     )
   ) {
@@ -1472,6 +1485,7 @@ function isNaturalControlPlaneIntent(
   if (["status", "doctor", "usage", "risk", "read"].includes(inquiry)) return true;
   if (id === "read") return classification.projectRulesRead;
   if (id === "index") return classification.indexAction === "safe";
+  if (id === "mode" && extractPermissionMode(text)) return true;
   return ["model", "cache", "memory", "mode"].includes(id) && !classification.actionRequest;
 }
 
@@ -1541,7 +1555,7 @@ function scoreCapability(
     score += 4;
   if (
     capability.id === "mode" &&
-    /权限模式|permission mode|bypass|accept edits|acceptedits|auto|dontask|don't ask|plan mode/u.test(
+    /权限模式|permission mode|full-access|full access|完全访问|bypass|auto-review|auto review|自动审查|自动模式|accept edits|acceptedits|auto|dontask|don't ask|plan mode/u.test(
       normalized,
     )
   )
@@ -1594,6 +1608,7 @@ function isAmbiguousCapabilityList(text: string, candidates: CommandCapability[]
     inquiry === "doctor" ||
     inquiry === "read" ||
     isActionRequest(text) ||
+    Boolean(extractPermissionMode(text)) ||
     isUsageOrRiskQuestion(text, inquiry) ||
     !/^[\u4e00-\u9fff]{4,}$/u.test(text)
   ) {
@@ -1670,10 +1685,14 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
 }
 
 function extractPermissionMode(text: string): PermissionMode | null {
-  if (/acceptedits|accept edits|接受编辑/u.test(text)) return "acceptEdits";
-  if (/dontask|don't ask|dont ask|不询问/u.test(text)) return "dontAsk";
-  if (/bypass|绕过/u.test(text)) return "bypass";
-  if (/auto|自动审批/u.test(text)) return "auto";
+  if (/full-access|full access|完全访问|bypass|绕过/u.test(text)) return "full-access";
+  if (
+    /auto-review|auto review|自动审查|自动模式|自动审批|acceptedits|accept edits|接受编辑|\bauto\b/u.test(
+      text,
+    )
+  )
+    return "auto-review";
+  if (/dontask|don't ask|dont ask|不询问/u.test(text)) return "default";
   if (/plan|计划/u.test(text)) return "plan";
   if (/default|默认/u.test(text)) return "default";
   return null;

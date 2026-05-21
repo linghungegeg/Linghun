@@ -3041,7 +3041,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
-    context.permissionMode = "bypass";
+    context.permissionMode = "full-access";
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
 
     expect(output.text).toContain("权限管道拒绝写入 agent.txt");
@@ -3123,7 +3123,46 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
   });
 
-  it("gates bypass and auto modes before local opt-in", async () => {
+  it("shows only canonical modes and normalizes legacy aliases", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/mode", context, output);
+    await handleSlashCommand("/mode acceptEdits", context, output);
+    await handleSlashCommand("/mode dontAsk", context, output);
+    await handleSlashCommand("/mode auto", context, output);
+
+    expect(output.text).toContain("可选：default / auto-review / plan / full-access");
+    expect(output.text).not.toContain(
+      "可选：default / plan / acceptEdits / dontAsk / auto / bypass",
+    );
+    expect(output.text).toContain("已切换权限模式：auto-review");
+    expect(output.text).toContain("已切换权限模式：default");
+    expect(context.permissionMode).toBe("auto-review");
+  });
+
+  it("cycles canonical common modes and excludes legacy modes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("auto-review");
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("plan");
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("default");
+    expect(output.text).not.toContain("acceptEdits");
+    expect(output.text).not.toContain("dontAsk");
+    expect(output.text).not.toContain("bypass");
+  });
+
+  it("gates full-access aliases before local opt-in", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3131,14 +3170,13 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/mode bypass", context, output);
-    await handleSlashCommand("/mode auto", context, output);
+    await handleSlashCommand("/mode full-access", context, output);
 
-    expect(output.text).toContain("bypass 必须本地显式 opt-in");
-    expect(output.text).toContain("当前没有可用的本地 gate/classifier");
+    expect(output.text).toContain("full-access 必须本地显式 opt-in");
     expect(context.permissionMode).toBe("default");
   });
 
-  it("allows acceptEdits low-risk edits but denies bash and medium writes", async () => {
+  it("allows auto-review low-risk edits but denies bash and medium writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3151,12 +3189,29 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/write medium.txt should-not-write", context, output);
     await handleSlashCommand("/bash node --version", context, output);
 
+    expect(output.text).toContain("已切换权限模式：auto-review");
     expect(output.text).toContain("写入前摘要");
     expect(output.text).toContain("工具 Edit 结果");
-    expect(output.text).toContain("acceptEdits 不自动允许 Bash");
+    expect(output.text).toContain("auto-review 不自动允许 Bash");
     expect(output.text).toContain("风险：low");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
     await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps full-access behind hard denies", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    await handleSlashCommand("/write .env secret", context, output);
+    await handleSlashCommand("/bash rm -rf tmp", context, output);
+
+    expect(output.text).toContain("安全保护：疑似密钥或敏感路径");
+    expect(output.text).toContain("安全保护：拒绝高风险删除");
+    await expect(readFile(join(project, ".env"), "utf8")).rejects.toThrow();
   });
 
   it("persists permission rules", async () => {
@@ -3225,7 +3280,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
-    context.permissionMode = "bypass";
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/write sample.txt beta", context, output);
     const checkpointId = context.checkpoints[0]?.id;
@@ -3243,7 +3298,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
-    context.permissionMode = "bypass";
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/bash node --version", context, output);
     await handleSlashCommand("/background", context, output);
@@ -3874,7 +3929,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "plugins: discover manifests=yes; autoExecute=no; trustedIds=none",
     );
-    expect(output.text).toContain("bypass requires LINGHUN_ENABLE_BYPASS=1");
+    expect(output.text).toContain(
+      "full-access permission: default off; requires LINGHUN_ENABLE_FULL_ACCESS=1",
+    );
     expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
     expect(output.text).toContain("continuous phase progression=no");
     expect(context.config.permission.defaultMode).toBe("default");

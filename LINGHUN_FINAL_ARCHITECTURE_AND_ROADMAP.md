@@ -241,9 +241,10 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 - Start Gate 是执行门，只确认“是否开始这个动作”；它不替代工具权限审批、配置写入审批、第三方扩展信任确认或远程审批。
 - pending gate 必须在 UI 可见，带过期时间，确认时重放 exact command、risk、scope；高风险动作不能只靠普通“确认”直通。
 - 权限请求必须展示 exact action、risk、scope、reason、rollback 和 choices，并记录可审计事件。
-- `bypass` 必须本地显式 opt-in，不能由模型、自然语言桥、remote channel、workflow、agent、plugin 或 hook 静默开启。
-- `auto` 必须依赖可用的本地 classifier/gate；不可用时拒绝或降级，不得默认放行。
-- Plan 不是“批准后任意执行”。计划批准至少区分手动确认编辑、进入 acceptEdits 边界、拒绝并反馈；具体写入、Bash、联网、依赖和权限规则仍走权限管道。
+- 用户可见权限模式收口为 `default` / `auto-review` / `plan` / `full-access`；历史 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据。
+- `full-access` 必须本地显式 opt-in，不能由模型、自然语言桥、remote channel、workflow、agent、plugin 或 hook 静默开启。
+- `auto-review` 合并历史低风险编辑自动审查和受本地 gate 限制的 auto 行为；不得自动通过 Bash、联网、依赖、权限、第三方扩展、越界路径、hook/job/remote。
+- Plan 不是“批准后任意执行”。计划批准至少区分手动确认编辑、进入 auto-review 边界、拒绝并反馈；具体写入、Bash、联网、依赖和权限规则仍走权限管道。
 - OpenCode 的 expand-collapse 视觉细节可以后置到体验 hardening；但 CCB 手感要求的 primary/details/debug 输出分层、summary-first、pending gate 可见、权限提示人话、doctor 脱敏、长输出落日志、大输出不进 prompt 是 Phase 15 Beta 前安全边界。
 
 覆盖分三批：
@@ -262,7 +263,7 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 - 自然语言桥支持状态问句、动作祈使句、用途/风险询问、参数提取和低置信度候选。
 - 参数提取必须覆盖 mode、workflow、fork/agent role、index action/query、model route/set candidate、branch purpose；低置信度时给候选。
 - 中文、英文和同义表达必须落到同一个风险处理路径，不能因为语言不同绕过 Start Gate 或权限管道。
-- 如果只能匹配少数固定短句、不能解释所有 slash 命令、不能给出来源真实的 RuntimeStatus，或不能保证 Start Gate / bypass / auto / permission escalation 边界，视为 preflight 未达到进入真实项目 Beta 的硬度。
+- 如果只能匹配少数固定短句、不能解释所有 slash 命令、不能给出来源真实的 RuntimeStatus，或不能保证 Start Gate / `full-access` / `auto-review` / permission escalation 边界和 legacy alias normalization，视为 preflight 未达到进入真实项目 Beta 的硬度。
 
 ### 4.2 上下文分层
 
@@ -314,13 +315,14 @@ Natural Command Bridge 是 Linghun 的人性化入口，不是模型自由猜测
 
 | 模式 | 用途 | 工具权限 | 默认 |
 | --- | --- | --- | --- |
-| strict | 日常开发、修 bug | 最小必要工具 | 是 |
+| strict / default | 日常开发、修 bug | 最小必要工具；写入和 Bash 仍走权限管道 | 是 |
 | plan | 只规划 | 禁止写入和高危命令 | 否 |
-| acceptEdits | 少审批开发 | 低风险编辑自动通过 | 否 |
-| auto | 分类器辅助选择权限 | 受规则限制 | 否 |
-| bypass | 高权限执行 | 高危仍保护 | 否 |
+| auto-review | 少审批开发 | 只允许低风险工作区编辑或本地 gate 明确允许路径；高风险仍审批 | 否 |
+| full-access | 高权限执行 | 必须本地显式 opt-in；硬拒绝仍优先 | 否 |
 | creative | 产品方案、头脑风暴 | 默认不执行工具 | 否 |
 | autonomous | 长任务自主推进 | 需要用户明确开启 | 否 |
+
+历史 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据，不再作为用户可见主模式。Architecture Runtime 不在本表中，因为它不是权限/行为模式，而是底层工程判断 capability。
 
 ### 5.3 反幻觉协议
 
@@ -436,16 +438,16 @@ Phase 15 Beta 前必须补齐当前真实 TUI 已暴露的 discovery-before-exec
 
 | 模式 | 说明 |
 | --- | --- |
-| default | 正常询问 |
+| default | 默认审慎模式；写入和 Bash 仍走权限管道 |
+| auto-review | 低风险工作区编辑可减少审批；不得自动通过 Bash、联网、依赖、权限、第三方扩展、越界路径、hook/job/remote |
 | plan | 只读规划 |
-| acceptEdits | 工作区内低风险编辑自动通过 |
-| dontAsk | 无法询问时自动拒绝需要审批的操作 |
-| auto | 分类器辅助，但不得绕过硬规则 |
-| bypass | 高权限，仅用户明确打开 |
+| full-access | 高权限，仅本地用户显式 opt-in；硬拒绝仍优先 |
+
+Legacy alias：`acceptEdits` / `auto` -> `auto-review`，`bypass` -> `full-access`，`dontAsk` -> `default` 或 legacy alias。
 
 ### 7.2 不可绕过规则
 
-即使 bypass 也必须保护：
+即使 `full-access` 或 legacy `bypass` alias 已本地 opt-in，也必须保护：
 
 - `.git`、`.ssh`、密钥目录。
 - 系统目录。
@@ -1019,7 +1021,7 @@ F:\LinghunProject 或新仓库根目录
 | Phase 03 | 模型网关最小闭环 | Provider、ModelGateway、DeepSeek/OpenAI-compatible、模型能力表、usage 事件 |
 | Phase 04 | TUI / REPL 最小闭环 | 无参数进入 REPL、状态栏、slash 命令、对话写入 transcript |
 | Phase 05 | 核心工具闭环 | Read / Write / Edit / MultiEdit / Grep / Glob / Bash / Todo / Diff |
-| Phase 06 | 权限与 Plan 闭环 | 权限规则、Plan 方案选择、acceptEdits、模式切换 |
+| Phase 06 | 权限与 Plan 闭环 | 权限规则、Plan 方案选择、`auto-review`、模式切换；历史 `acceptEdits` 仅作为 legacy alias |
 | Phase 07 | 工程行为控制闭环 | 反幻觉、最小改动、方案完整性闸门、基础 i18n、TUI 渲染稳定性、后台状态反馈、checkpoint/rewind、输入队列与中断 |
 | Phase 08 | 代码自检与验证增强闭环 | verifier、验证计划、验证进度、PASS/FAIL/PARTIAL 结果归档、review |
 | Phase 09 | 缓存与成本闭环 | cache history、cache break、`/usage`、`/stats`、轻提示 |
@@ -1042,7 +1044,7 @@ Phase 17 的 Remote Channels 只作为 17B 能力，必须在 17A 本地 durable
 - Phase 14 hardening 已完成：Skills / Workflows / Hooks / Plugins 稳定性、安全边界、缓存 changedKeys 和 workflow 验收已加固。
 - Phase 15 preflight 已完成：Natural Command Bridge / 自然语言控制桥已接入 Command Capability Catalog、本地 intent router、RuntimeStatusForModel 与高风险自然语言阻断。
 - Phase 15 pre-Beta P0 hardening 已完成并通过 independent verification gate；当时的旧口径是下一步由用户确认启动 Deep Parity Closure 或进入 Phase 15 真实项目 Beta，但该口径已被 2026-05-19 全量审计后的 CCB Maturity Remediation baseline supersede。
-- 2026-05-19 Phase 00-18 Design + Runtime Overdesign Full Audit v1/v2 已 supersede 上述“下一步可能进入 Beta”的旧口径。该 baseline 已作为 Phase 15 Batch 1/2/3 的执行输入之一。2026-05-21 之后的当前状态是：Batch 1/2/3 focused/mock/local verification guard 与当前 MCP/index runtime smoke 已通过本地/focused 验证；Batch 3.5 以最新 Batch 3.5 报告和开发窗口验证结果为准；Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED，等待真实 provider + 真实项目 smoke；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke 或 silent-failure ban PASS 推断 Beta readiness PASS。当前唯一下一步只能是：完成 Batch 3.5 收尾后，先完成 Active Docs Source-of-Truth Hardening，再进入真实项目 smoke。历史 P0 hardening / Deep Parity / Runtime Acceptance / Verdict Evidence closure 只作为证据输入，不作为 readiness proof。
+- 2026-05-21 Phase 15 Pre-Smoke Full Reference Parity Audit + Permission / Architecture Runtime Feasibility + Source-of-Truth Reset 已成为当前 pre-smoke 执行基线：`F:\Linghun\docs\audit\phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md`。该报告 supersede “Active Docs hardening 后直接 smoke”的旧下一步；verdict 为 `READY_TO_IMPLEMENT`，不是 Beta PASS。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke、silent-failure ban PASS 或本报告 `READY_TO_IMPLEMENT` 推断 Beta readiness PASS。当前唯一下一步只能是：先完成 active docs 同步，再执行 Batch A-C（四权限模式收口、Architecture Runtime source-of-truth 设计、Architecture Runtime 最小成熟实现）；完成前不得进入真实项目 smoke。历史 P0 hardening / Deep Parity / Runtime Acceptance / Verdict Evidence closure 只作为证据输入，不作为 readiness proof。
 - P0 hardening 完成并输出报告后，必须先基于报告决定是否启动 Phase 15 pre-Beta CCB / CCB Dev Boost Deep Parity Closure。该闭环用于确认 Phase 00-14 的实际使用体验、交互细节、建议/提权、错误/doctor/help、自然语言入口、cache/index/memory、多模型和 TUI 基础手感是否达到 CCB / CCB Dev Boost 公开成熟行为的核心体验等价；P0 或阻塞 P1 必须在 Beta 前修复，非阻塞 P2 才能登记到 Phase 15.5。
 - Phase 15 preflight 不等于 Phase 15 真实项目 Beta；真实项目完整闭环、provider quota/balance 对账、模型接入成熟度、联网取证成熟度、release readiness 和双模型交叉审查仍必须按 Phase 15 / Phase 15.5 边界执行。终端 TUI 的基础成品手感（主输出分层、权限提示、tool_result 摘要、doctor 脱敏、状态栏准确、hint 去重、阶段汇报）是 Phase 15 Beta 前置 gate；Phase 15.5 承接实测反馈、终端 TUI polish 清零和开源前 hardening，不能把 terminal-scope P2 带过开源发布门。
 - Phase 15 preflight 交互审查发现的 Beta 前硬化项必须先闭环：Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期和风险重放、bypass/auto gating、权限提权说明与测试矩阵；这些属于 Phase 15 Beta 前置 hardening，不等于进入 Phase 16+。
@@ -1166,13 +1168,13 @@ Linghun 要想“不输 CCB”，不是靠堆 100 个功能，而是要把这五
 
 方案完整性闸门也必须在 Phase 15 Beta 前开始生效，并在 Phase 15.5 收口。它不是新功能堆叠，而是工作质量门：当用户连续指出“这不是成品级”“不要缝缝补补”“先看成熟参考怎么做”，或实测暴露同类问题反复出现时，Linghun 必须先判断是否系统性缺口，再决定本轮修 P0/P1、登记 P2 或明确不做。这样既压住模型靠猜，也压住模型只会局部补丁化处理问题。
 
-Phase 15 Beta 前的工具闭环不能弱化。CCB 的可参考成熟点不是“少量只读工具”，而是模型通过真实 tool_use 发起完整工具集、执行层统一走权限中枢、tool_result 回灌模型继续推理。Linghun 必须自研同等边界：核心工具 schema 覆盖 Read/Grep/Glob/Diff/Write/Edit/MultiEdit/Bash/Todo，危险工具继续受 Plan、Start Gate、decidePermission、acceptEdits、auto、bypass 和安全检查约束。
+Phase 15 Beta 前的工具闭环不能弱化。CCB 的可参考成熟点不是“少量只读工具”，而是模型通过真实 tool_use 发起完整工具集、执行层统一走权限中枢、tool_result 回灌模型继续推理。Linghun 必须自研同等边界：核心工具 schema 覆盖 Read/Grep/Glob/Diff/Write/Edit/MultiEdit/Bash/Todo，危险工具继续受 `plan`、Start Gate、decidePermission、`auto-review`、`full-access`、legacy alias normalization 和安全检查约束。
 
 社区项目如 oh-my-openagent 证明 team mode、skills、hooks、角色路由和后台生命周期是有价值的方向，但 Linghun 只吸收公开行为和验收边界：角色可审计、状态表可见、预算可控、失败可诊断、输出摘要化。它们不能替代 Linghun 的 clean rewrite 原则，也不能成为提前堆功能、绕过权限或复制实现的理由。
 
 如果按本文路线执行，Linghun 的第一阶段目标不是堆功能数量超越 CCB，而是在 Phase 15 P0 hardening 后，让真实项目测试的核心编码链路达到 CCB 级可用手感：
 
-- 模型能通过真实 `tool_use` / `tool_result` 使用核心工具，并由统一权限中枢守住写入、Bash、Plan、auto、bypass 和 Start Gate 边界。
+- 模型能通过真实 `tool_use` / `tool_result` 使用核心工具，并由统一权限中枢守住写入、Bash、`plan`、`auto-review`、`full-access`、legacy alias normalization 和 Start Gate 边界。
 - 自然语言状态查询、文件指代、项目规则读取、新手轻引导、取消长任务、中英文关键提示和 EvidenceSummary 入模型必须在真实 TUI 中可实测。
 - 中文体验、安装配置、成本可见性、模型中立、反幻觉证据链和 clean rewrite 可维护性应成为 Linghun 的差异化优势。
 - Phase 15.5 再补实测期间登记的非阻塞 P1/P2、终端 TUI polish 清零、模型接入成熟度、联网取证成熟度和开源前 release hardening；Phase 15 Beta 已需的基础 TUI 手感不能后置，终端开源发布也不能带 terminal-scope P2。

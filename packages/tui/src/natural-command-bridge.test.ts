@@ -148,7 +148,10 @@ describe("Phase 15 Natural Intent Router", () => {
     ["缓存状态怎么样", "cache", "/cache status"],
     ["自动记忆是否打开", "memory", "/memory"],
     ["直接 npm install", "bash", "/bash npm install"],
-    ["开启 bypass", "mode", "/mode bypass"],
+    ["开启 bypass", "mode", "/mode full-access"],
+    ["切到自动审查", "mode", "/mode auto-review"],
+    ["switch to auto mode", "mode", "/mode auto-review"],
+    ["切到完全访问", "mode", "/mode full-access"],
   ])("classifies Natural Intent Contract sample %s", (phrase, id, command) => {
     const intent = routeNaturalIntent(phrase);
     expect(intent.capability?.id).toBe(id);
@@ -186,7 +189,11 @@ describe("Phase 15 Natural Intent Router", () => {
       expect(intent.inquiry).toBe("read");
       expect(intent.action).toBe("execute_readonly");
     }
-    if (phrase.includes("npm install") || phrase.includes("bypass")) {
+    if (
+      phrase.includes("npm install") ||
+      phrase.includes("bypass") ||
+      phrase.includes("完全访问")
+    ) {
       expect(intent.action).toBe("permission_pipeline");
     }
   });
@@ -226,7 +233,10 @@ describe("Phase 15 Natural Intent Router", () => {
   });
 
   it.each([
-    ["直接开启 bypass", "mode", "/mode bypass"],
+    ["直接开启 bypass", "mode", "/mode full-access"],
+    ["切到自动审查", "mode", "/mode auto-review"],
+    ["auto mode", "mode", "/mode auto-review"],
+    ["切到完全访问", "mode", "/mode full-access"],
     ["model route doctor", "model", "/model route doctor"],
   ])("extracts key natural parameters for %s", (phrase, id, command) => {
     const intent = routeNaturalIntent(phrase);
@@ -259,6 +269,21 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(capability?.descriptionEn).toContain("safe local actions");
     expect(capability?.whenToUseZh).toContain("重建或 force 需精确确认");
     expect(capability?.whenToUseEn).toContain("rebuild or force needs exact confirmation");
+  });
+
+  it("keeps permission status queries readonly without changing modes", () => {
+    const intent = routeNaturalIntent("当前权限模式是什么");
+    expect(intent.capability?.id).toBe("mode");
+    expect(intent.command).toBe("/mode");
+    expect(intent.inquiry).toBe("status");
+    expect(intent.action).toBe("execute_readonly");
+  });
+
+  it("routes clear permission mode aliases without ambiguous clarification", () => {
+    const intent = routeNaturalIntent("切到自动审查");
+    expect(intent.capability?.id).toBe("mode");
+    expect(intent.command).toBe("/mode auto-review");
+    expect(intent.action).toBe("start_gate");
   });
 
   it("asks for clarification on ambiguous capability lists", () => {

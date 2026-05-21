@@ -238,6 +238,57 @@ describe("config directories", () => {
     expect(enabled.plugins.trustedIds).toEqual(["local-tools"]);
   });
 
+  it.each([
+    ["acceptEdits", "auto-review"],
+    ["auto", "auto-review"],
+    ["bypass", "full-access"],
+    ["dontAsk", "default"],
+  ])("normalizes legacy permission mode %s on load", async (legacyMode, canonicalMode) => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({ permission: { defaultMode: legacyMode } }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.permission.defaultMode).toBe(canonicalMode);
+  });
+
+  it("writes canonical permission modes after loading legacy settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({ permission: { defaultMode: "acceptEdits" } }),
+      "utf8",
+    );
+
+    await saveModelRoute("planner", "deepseek-v4-flash", project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(raw).toContain('"defaultMode": "auto-review"');
+    expect(raw).not.toContain("acceptEdits");
+  });
+
+  it("recovers invalid permission modes without escalating", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({ permission: { defaultMode: "superuser" } }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.permission.defaultMode).toBe("default");
+    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
+    expect(lastConfigRecoveryWarning?.reason).toContain("settings.permission.defaultMode");
+  });
+
   it("recovers from damaged settings with a visible warning", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     await mkdir(getProjectConfigDir(project), { recursive: true });

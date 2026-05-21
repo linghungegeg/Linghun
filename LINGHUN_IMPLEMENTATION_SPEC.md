@@ -752,7 +752,7 @@ export type PermissionEscalationProposal = {
 - `usage_help` 只用于用户明确询问“怎么用/能做什么/风险是什么/这个命令是什么意思”的场景；所有 slash 命令都必须可解释用途、风险和边界。
 - `safe_action_request` 只能生成 Start Gate，例如建立索引、启动 workflow、resume/branch/fork/verifier 等安全启动请求；确认后仍走等价 slash command 和后续权限管道。
 - `config_change_request` 必须展示将修改的配置键、旧值/新值摘要、风险、scope 和回滚方式；模型切换、mode 切换、role route 设置不能静默写配置。
-- `dangerous_action_request` 必须阻断或进入权限管道，例如 Bash、依赖安装、write/edit、permission 规则、bypass、force refresh、memory accept/delete、第三方 enable、hook/job/remote；不得自然语言直通。
+- `dangerous_action_request` 必须阻断或进入权限管道，例如 Bash、依赖安装、write/edit、permission 规则、`full-access` 切换、force refresh、memory accept/delete、第三方 enable、hook/job/remote；不得自然语言直通。
 - `ambiguous_request` 必须列候选或追问，不得猜测执行。候选应包含 capability、可能的等价命令和风险摘要。
 - `readonly` 意图直接调用本地状态函数或等价 slash handler，返回短摘要。
 - `start_gate` 意图只输出确认门；用户确认后再调用等价 slash command。
@@ -761,7 +761,7 @@ export type PermissionEscalationProposal = {
 - `unsupported` 意图交给普通模型对话，但模型请求必须带短 `RuntimeStatusForModel`。
 - 自然语言桥确认路径必须生成 `PendingStartGate`。pending gate 必须短时间过期；确认时必须重放 exact command、risk、scope；高风险 gate 必须要求 exact command/明确选项或进入权限管道。
 - `PendingStartGate.requiresPermissionPipeline=true` 时，Start Gate 只能作为任务启动确认，不能直接执行底层工具或配置写入。
-- 自然语言请求 `mode bypass`、权限规则、第三方 enable、`cache refresh`、`index refresh --force`、Bash、依赖安装、记忆接受/删除、rewind restore、hook/job/remote 时，必须生成 `PermissionEscalationProposal` 或阻断说明，不得直接执行。
+- 自然语言请求 `mode full-access`、legacy `mode bypass` alias、权限规则、第三方 enable、`cache refresh`、`index refresh --force`、Bash、依赖安装、记忆接受/删除、rewind restore、hook/job/remote 时，必须生成 `PermissionEscalationProposal` 或阻断说明，不得直接执行。
 - pending gate 存在时，TUI 状态栏或 footer 必须显示待确认状态；用户输入非确认内容时取消或重新选择，不得让旧 gate 在后台继续等待。
 
 语义识别要求：
@@ -779,10 +779,10 @@ export type PermissionEscalationProposal = {
 
 模式和提权硬边界：
 
-- `bypass` 必须有本地显式 opt-in 配置，例如 `permission.allowBypass=true` 或等价交互确认；模型、自然语言桥、remote channel、workflow、agent、plugin、hook 不得静默打开。
-- `auto` 必须检查本地 classifier/gate 可用性；不可用时拒绝或降级到 `default`，并记录 reason。
-- `plan` 模式禁止写文件和高危命令；计划批准必须生成结构化决策：`approve_manual_edits`、`approve_accept_edits`、`reject_with_feedback` 或等价值。
-- `acceptEdits` 只自动允许工作区内低风险编辑；Bash、联网、依赖、权限、越界路径、第三方扩展、hook/job/remote 仍必须审批或拒绝。
+- `full-access` 必须有本地显式 opt-in 配置，例如 `permission.allowFullAccess=true` 或等价交互确认；模型、自然语言桥、remote channel、workflow、agent、plugin、hook 不得静默打开。
+- `auto-review` 必须检查本地 classifier/gate 可用性；不可用时拒绝或降级到 `default`，并记录 reason。
+- `plan` 模式禁止写文件和高危命令；计划批准必须生成结构化决策：`approve_manual_edits`、`approve_auto_review`、`reject_with_feedback` 或等价值。
+- legacy `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为兼容输入 normalize 到 canonical mode；不得作为用户可见主模式。
 - mode change 必须写入 session-visible event，避免状态栏、transcript 和权限管道状态漂移。
 
 三批覆盖：
@@ -791,7 +791,7 @@ export type PermissionEscalationProposal = {
 | --- | --- | --- |
 | 第一批 | memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions、resume、branch | Phase 15 preflight 必须完整实现；中英文自然语言可查询状态或进入安全启动门 |
 | 第二批 | read、grep、glob、todo、verify、review、diff、fork、agents、background | Phase 15 preflight 必须纳入 Catalog、自然语言发现、用途/风险解释、参数提取、确认门和 focused tests；P0-1 到 P0-6 全量闭环前不得进入 Phase 15 Beta；Phase 15.5 只承接非阻塞 P1/P2 和 release hardening；长任务必须显示范围、预算、日志和取消方式 |
-| 第三批 | write、edit、multiedit、bash、permissions add/remove、mode bypass、cache refresh、index force、skills enable、plugins enable、memory accept/delete、rewind restore、hook/job/remote | 不允许自然语言直通；只允许解释风险、生成 Start Gate 或进入权限审批 |
+| 第三批 | write、edit、multiedit、bash、permissions add/remove、mode full-access、legacy mode bypass alias、cache refresh、index force、skills enable、plugins enable、memory accept/delete、rewind restore、hook/job/remote | 不允许自然语言直通；只允许解释风险、生成 Start Gate 或进入权限审批 |
 
 Beta 前 hardening 验收：
 
@@ -808,20 +808,20 @@ Beta 前 hardening 验收：
 - Request-kind test：每个第一批 capability 至少覆盖 `status_query`、`usage_help` 和动作请求；有 doctor 能力的 capability 必须覆盖 `doctor_query`；高风险 capability 必须覆盖 `dangerous_action_request`；模糊请求必须覆盖 `ambiguous_request`。
 - Slot test：mode/workflow/agentRole/indexAction/model/branchPurpose 能提取常见参数；模糊时给候选，不猜。
 - Gate test：pending gate 有过期、状态可见、确认时重放 exact command/risk/scope；高风险 gate 不接受普通“确认”直通。
-- Mode test：bypass 无本地 opt-in 时拒绝；auto gate 不可用时拒绝或降级；plan approval 不等于授权后续所有工具。
+- Mode test：`full-access` 无本地 opt-in 时拒绝；`auto-review` gate 不可用时拒绝或降级；legacy mode alias 必须 normalize；plan approval 不等于授权后续所有工具。
 - Summary test：RuntimeStatus 和 CommandCapabilitySummary 保持短、稳定排序，不包含完整 transcript/memory/index/log/skill/plugin/hook 正文。
 
 ### 5.8 Phase 15 Beta CCB handfeel gate
 
 Phase 15 Beta 前必须满足 CCB handfeel gate。该 gate 只要求真实 TUI 达到成熟 coding terminal 的可用手感，不要求新增 Phase 15.5/16+ 功能，也不得用关键词补丁代替源码级修复。
 
-2026-05-19 更新：两份 Phase 00-18 Design + Runtime Overdesign Full Audit 已把本 gate 升级为 Phase 15 Beta CCB Maturity Remediation。当前唯一执行基线是 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`。因此本节下面的 handfeel 条目是必要子集，不是完整 Beta 入口条件。Beta 前还必须关闭 baseline 中的会话历史/上下文预算、tool_result continuation、provider profile contract、provider retry/stream timeout、Tool runtime validation、permission pending approval、NCB 降级、TYPE-SHELL 可见面处理、config schema/损坏恢复、Windows smoke 和真实 report-generation path。历史 focused/mock/local PASS 不得推断 Phase 15 Beta readiness PASS。
+2026-05-19 更新：两份 Phase 00-18 Design + Runtime Overdesign Full Audit 曾把本 gate 升级为 Phase 15 Beta CCB Maturity Remediation，并形成历史基线 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md`。该历史基线只作为 evidence / traceability，不再作为当前执行入口；当前 pre-smoke 执行基线已由 `F:\Linghun\docs\audit\phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md` 覆盖。因此本节下面的 handfeel 条目是必要子集，不是完整 Beta 入口条件。Beta 前还必须结合最新 pre-smoke 报告和历史 baseline 中的会话历史/上下文预算、tool_result continuation、provider profile contract、provider retry/stream timeout、Tool runtime validation、permission pending approval、NCB 降级、TYPE-SHELL 可见面处理、config schema/损坏恢复、Windows smoke 和真实 report-generation path。历史 focused/mock/local PASS 不得推断 Phase 15 Beta readiness PASS。
 
 2026-05-20 状态口径：上述 baseline 是问题清单和执行基线，不是永久 open list；具体条目的 DONE / PARTIAL / FAIL 必须以后续独立 closure、live smoke 与 `F:\Linghun\docs\audit\phase-15-gate-f-dual-provider-live-report.md` 等最新报告为准。已闭合项不得被重新当作未修复问题，但 Gate F 或局部 PASS 也不得自动升级为 Phase 15 Beta readiness PASS。
 
 后置项和小类别成熟度细节必须以 `F:\Linghun\PHASE_15_BETA_CCB_MATURITY_REMEDIATION_BASELINE.md` 第 12 节 `Deferred Issue Register` 与第 13 节 `Audit Traceability Matrix` 为准。后续阶段不得重新凭记忆解释审计结论；必须把对应 register / traceability rows 复制进阶段交付文档并给出 DONE / DEFERRED / NOT-DO 裁决。
 
-2026-05-21 补充口径：`F:\Linghun\docs\audit\phase-15-pre-beta-verification-guard-and-index-runtime-smoke.md` 记录 Phase 15 Batch 1/2/3 focused/mock/local verification guard 与当前 MCP/index runtime smoke 已通过本地/focused 验证；Batch 3.5 以最新 Batch 3.5 报告和开发窗口验证结果为准；`F:\Linghun\docs\audit\phase-15-ccb-grade-default-runtime-reconciliation.md` 不再是最新执行状态，只作为历史 reconciliation 输入、pull-forward / keep-deferred 依据和回归门来源。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED，等待真实 provider + 真实项目 smoke；不得从 focused PASS、mock PASS、local PASS、scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke 或 silent-failure ban PASS 推断 Beta readiness PASS。当前唯一下一步只能是：完成 Batch 3.5 收尾后，先完成 Active Docs Source-of-Truth Hardening，再进入真实项目 smoke。Phase 15.5/16/17/18 开工和任何 delta audit 仍必须读取 reconciliation 的 `Explicit pull-forward list`、`Explicit keep-deferred list` 和 baseline 第 12/13 节；已拉回的默认编码链路问题不得再登记为普通 polish，保留后置的 rich UI、完整 compact、workflow/plugin/agent team、Freshness、desktop/remote/vision 等不得回流到 Phase 15 必做范围，除非新的真实证据证明它们直接污染默认编码链路。Bundled codebase-memory Lite / Batch 3.5 仍按独立任务推进，不能因本口径同步假设 `docs/audit/phase-15-bundled-codebase-memory-lite.md` 已完成。
+2026-05-21 pre-smoke 补充口径：`F:\Linghun\docs\audit\phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md` 是当前 pre-smoke 执行基线，verdict 为 `READY_TO_IMPLEMENT`，不是 Beta PASS，也不是 smoke-ready。该报告 supersede “Active Docs Source-of-Truth Hardening 后直接进入真实项目 smoke”的旧下一步。Phase 15 Beta readiness 仍为 PARTIAL/BLOCKED；不得从 focused/mock/local/scoped PASS、Batch 3.5 PASS、单个 live text PASS、SKIPPED/PENDING smoke、silent-failure ban PASS 或本报告 `READY_TO_IMPLEMENT` 推断 Beta readiness PASS。当前唯一下一步只能是：先完成 active docs 同步，再执行 Batch A-C：四权限模式收口、Architecture Runtime source-of-truth 设计、Architecture Runtime 最小成熟实现；完成前不得进入真实项目 smoke。Phase 15.5/16/17/18 开工和任何 delta audit 仍必须读取最新 pre-smoke 报告、reconciliation 的 `Explicit pull-forward list`、`Explicit keep-deferred list` 和 baseline 第 12/13 节；已拉回的默认编码链路问题不得再登记为普通 polish，保留后置的 rich UI、完整 compact、workflow/plugin/agent team、Freshness、desktop/remote/vision 等不得回流到 Phase 15 必做范围，除非新的真实证据证明它们直接污染默认编码链路。Bundled codebase-memory Lite / Batch 3.5 仍按独立任务推进，不能因本口径同步假设 `docs/audit/phase-15-bundled-codebase-memory-lite.md` 已完成。
 
 运行时规格：
 
@@ -879,12 +879,12 @@ Focused tests 至少覆盖：
 | 自动记忆是否打开、现在记住了什么 | `memory.status` + `status_query` | 返回 `autoAccept`、candidate 数、accepted 数和 `LINGHUN.md` 状态；不得让模型泛泛自称没有记忆。 |
 | 索引好了没、当前索引状态 | `index.status` + `status_query` | 返回本地 index 状态、changedFiles/staleHint 和下一步建议；不得自动 refresh。 |
 | 帮我建立索引、初始化索引 | `index.init` + `safe_action_request` | 进入 Start Gate，并保留大文件安全门；不得直接执行。 |
-| 直接开启 bypass、直接 npm install、接受所有记忆 | 对应能力 + `dangerous_action_request` | 阻断或进入权限管道，显示风险、scope、reason 和恢复方式。 |
+| 直接开启 `full-access`、legacy `bypass` alias、直接 npm install、接受所有记忆 | 对应能力 + `dangerous_action_request` | 阻断或进入权限管道，显示风险、scope、reason 和恢复方式。 |
 
 禁止：
 
 - 不允许把自然语言“帮我改/写/运行/安装”直接映射到 `/write`、`/edit`、`/multiedit`、`/bash` 或依赖安装。
-- 不允许自然语言直接开启 `bypass`、写权限规则、接受长期记忆、启用第三方 plugin/skill、强制刷新索引或执行 hook/job/remote。
+- 不允许自然语言直接开启 `full-access` 或 legacy `bypass` alias、写权限规则、接受长期记忆、启用第三方 plugin/skill、强制刷新索引或执行 hook/job/remote。
 - 不允许模型自行宣称“记忆已开启”“索引 ready”“缓存命中率”等状态；这些必须来自 RuntimeStatus 或本地命令结果。
 - 不允许为了让模型更聪明而把完整 memory、完整 transcript、大索引结果、大日志塞入 prompt。
 - 不允许只用少量硬编码中文/英文关键词冒充语义识别；至少要通过 capability catalog、别名、描述、when-to-use 和参数 parser 共同判断。
@@ -896,7 +896,7 @@ Focused tests 至少覆盖：
 - 自然语言 router 测试必须覆盖每个第一批能力的中文问句、中文祈使句、英文问句、英文祈使句和用途/风险询问。
 - 风险一致性测试必须覆盖同一意图的中文/英文/同义表达映射到同一 risk handler。
 - 低置信度测试必须覆盖相似命令、拼写错误、缺少参数、多个候选，结果只能追问或列候选。
-- 负向安全测试必须覆盖 write/edit/bash/install/bypass/permissions/memory accept/plugin enable/index force/hook/job/remote 等自然语言请求不会直通。
+- 负向安全测试必须覆盖 write/edit/bash/install/full-access/legacy bypass alias/permissions/memory accept/plugin enable/index force/hook/job/remote 等自然语言请求不会直通。
 - RuntimeStatus 测试必须确保 memory/index/cache/model/mode/extensions 来源真实、字段短小、不会包含完整 memory/transcript/index/log。
 - 用户输入“自动记忆功能是否打开”时，回答必须包含当前 `autoAccept`、candidate 数、accepted 数和 `LINGHUN.md` 状态。
 - 用户输入 “is memory enabled?” 时必须得到同等英文或当前语言下的本地状态回答。
@@ -1083,12 +1083,12 @@ export type ModelRequest = {
 - `tool_use` 不得通过解析模型自然语言文本实现；模型说“我会先读文件”只能算普通文本，不能当作工具调用。
 - 工具 schema 必须来自 Linghun 现有工具 registry / metadata / Command Capability Catalog 或等价同源清单；不得新增第二套工具系统。
 - 第一轮 P0 收尾必须覆盖现有核心工具 schema：`Read`、`Grep`、`Glob`、`Write`、`Edit`、`MultiEdit`、`Bash`、`Todo`、`Diff`。
-- `Read` / `Grep` / `Glob` / `Diff` 按只读工具路径处理；`Write` / `Edit` / `MultiEdit` / `Bash` / `Todo` 可以被模型发起，但必须进入现有 `decidePermission()` / Start Gate / Plan / acceptEdits / auto / bypass 边界。
-- Plan 模式下，模型发起写入、编辑、Bash、依赖安装、权限规则、第三方启用必须拒绝；Plan 不能继承 bypass。
-- `acceptEdits` 只降低工作区内低风险编辑摩擦；Bash、联网、依赖、权限、越界路径、第三方扩展、hook/job/remote 仍必须审批或拒绝。
-- `auto` 必须依赖可用的本地 classifier/gate；不可用时 fail closed 或降级到 default，不得默认放行。
-- `bypass` 只能由用户本地显式开启；模型、tool_use、workflow、plugin、hook、remote channel 不得打开 bypass。
-- 安全检查优先于 allow/bypass：`.git`、权限配置、密钥、系统路径、项目外路径、依赖发布、破坏性 Bash 等必须特殊保护。
+- `Read` / `Grep` / `Glob` / `Diff` 按只读工具路径处理；`Write` / `Edit` / `MultiEdit` / `Bash` / `Todo` 可以被模型发起，但必须进入现有 `decidePermission()` / Start Gate / Plan / canonical permission mode 边界。
+- Plan 模式下，模型发起写入、编辑、Bash、依赖安装、权限规则、第三方启用必须拒绝；Plan 不能继承 `full-access` 或 legacy 高权限 alias。
+- `auto-review` 只降低工作区内低风险编辑摩擦或走本地 gate 明确允许路径；Bash、联网、依赖、权限、越界路径、第三方扩展、hook/job/remote 仍必须审批或拒绝。
+- 本地自动审查必须依赖可用的 classifier/gate；不可用时 fail closed 或降级到 `default`，不得默认放行。
+- `full-access` 只能由用户本地显式开启；模型、tool_use、workflow、plugin、hook、remote channel 不得打开高权限模式。
+- 安全检查优先于 allow / `full-access` / legacy high-permission alias：`.git`、权限配置、密钥、系统路径、项目外路径、依赖发布、破坏性 Bash 等必须特殊保护。
 - tool result 回灌模型时必须 summary-first：短摘要、evidence id、必要片段；完整文件、大 Bash 输出、大 grep 结果、完整索引和日志只进 transcript/log 或可展开详情。
 - 每个 tool_use/tool_result pair 必须可审计：记录 tool name、toolUseId、输入摘要、权限决策、执行结果摘要、evidence id、错误和是否截断。
 - 中转站如果不支持工具调用，`supportsTools=false`，role route doctor 必须 `WARN/BLOCK`；不得把纯文本计划包装成真实 tool_use。
@@ -1098,7 +1098,7 @@ Phase 15 pre-Beta P0 验收：
 - 模型能发起 `Read/Grep/Glob/Diff`，工具结果回灌后模型能继续基于结果回答。
 - 模型发起 `Write/Edit/MultiEdit/Bash/Todo` 时，权限管道能询问、拒绝或按模式放行；不得直通。
 - Plan 模式下写入和 Bash 被拒绝，即使已有 allow rule。
-- default 模式下危险工具需要审批；`bypass` 未本地启用时不能被模型开启。
+- `default` 模式下危险工具需要审批；`full-access` 未本地启用时不能被模型开启，legacy `bypass` alias 也必须拒绝或 normalize 后再按同一规则处理。
 - provider 不支持 tool calling 时，doctor 明确说明能力缺失和 fallback，不得假装可用。
 - 工具结果进入 `EvidenceSummary`，最终回答中的代码事实能引用 evidence。
 - focused tests 覆盖 tool_use 解析、tool_result 回灌、权限拒绝、Plan 拒绝、Bash 审批、输出截断和 unsupported provider。
@@ -1413,12 +1413,18 @@ export type DiffSummary = {
 ```ts
 export type PermissionMode =
   | 'default'
+  | 'auto-review'
   | 'plan'
+  | 'full-access'
+
+export type LegacyPermissionMode =
   | 'acceptEdits'
   | 'dontAsk'
   | 'auto'
   | 'bypass'
 ```
+
+兼容映射：`acceptEdits` -> `auto-review`，`auto` -> `auto-review`，`bypass` -> `full-access`，`dontAsk` -> `default` 或 legacy alias。配置读取必须 normalize 到 canonical mode；用户可见 TUI、help、status、doctor、Natural Command Bridge、handoff packet 和权限提示必须展示 canonical mode。
 
 权限决策顺序：
 
@@ -1428,8 +1434,8 @@ export type PermissionMode =
 4. plan 只读检查。
 5. 用户 deny 规则。
 6. 用户 ask 规则。
-7. acceptEdits 低风险编辑。
-8. bypass。
+7. auto-review 低风险工作区编辑 / 本地 gate 允许路径。
+8. full-access 本地显式 opt-in 检查。
 9. allow 规则。
 10. ask。
 
@@ -1451,7 +1457,49 @@ Plan 模式禁止：
 - 删除命令。
 - 长驻服务。
 
-### 9.1 Plan Choice 规格
+### 9.1 Architecture Runtime 规格
+
+Architecture Runtime 是 Phase 15 pre-smoke 底层工程判断能力，不是权限模式、Plan Mode、skill 或 prompt-only 文案。它必须与 Anti-Hallucination Runtime 协作：事实、证据、来源、边界和 unknown 标记由 Anti-Hallucination Runtime 提供；工程方向、技术选择、拆解、风险、验证路线和长期维护性由 Architecture Runtime 判断。
+
+```ts
+export type ArchitectureCard = {
+  target: string
+  projectFacts: string[]
+  recommendedApproach: string
+  rejectedApproaches: string[]
+  stagedBreakdown: string[]
+  risks: string[]
+  verification: string[]
+  nonGoals: string[]
+}
+```
+
+触发条件：多文件/跨模块改动、公共接口变化、依赖或配置变化、架构选择、阶段性实现、系统性缺口修复、用户要求对照成熟参考或可能影响长期维护性的实现。不得触发：typo、单行修复、明确局部 bug、纯只读状态查询、用户只问事实且无需工程决策。
+
+执行规则：Architecture Card 不授权写文件、不改变权限 mode、不替代 Start Gate 或 Plan approval；`projectFacts` 必须来自 README/package/config/current style/index/source 等本地证据，无法确认时写 unknown；后续执行偏离 `recommendedApproach` 或 `nonGoals` 时必须提示 drift 并重新确认或更新 card。
+
+Architecture Runtime v1 是轻量工程判断 guard，不是新 agent、不是 spec 平台、不是强制计划模式。它接入普通对话主链路：用户输入先经过本地轻量触发判断；命中架构场景时，模型必须先产出短 Architecture Card，再进入工具调用或实现；未命中时按原默认链路继续。
+
+触发器先采用 deterministic + lightweight rules，不上复杂分类器。关键词只作为辅助，核心看任务形态：跨模块、公共接口、依赖/配置、部署、性能、安全、新系统/新功能、系统性缺口、用户要求成熟/完整/对齐参考源/不要遗漏。小任务必须保持不触发：typo、单文件小 bug、只读问状态、简单解释、用户明确只改一处或要求直接修一个局部问题。
+
+Facts 规则：`projectFacts` 优先来自 README、package/config、当前代码风格、codebase index、已有 evidence 和本轮真实工具结果。需要当前外部事实时，例如最新框架版本、provider/API 当前行为、社区项目现状、模型价格、安全公告、部署平台规则或第三方方案对比，必须走 Web Evidence / Freshness Gate；未授权联网时先说明为什么需要联网和优先查询哪些官方/项目来源，未联网或联网失败时只能写 unknown / stale，不能把模型记忆或本地旧资料写成当前事实。
+
+输出形态必须克制：Architecture Card 默认不超过一屏，默认给一个成熟推荐方案，并说明拒绝方案；只有预算、部署偏好、业务约束、合规要求或用户偏好无法从项目事实判断时才向用户提问，不把常规技术选择压力推给新手。
+
+持久化 v1 不建复杂数据库。Architecture Card 写入 transcript system_event / evidence record，并在 handoff latest 中保留轻量 `currentArchitectureCard`；不得自动写入长期记忆，除非用户明确接受。
+
+Drift check v1 只做轻量偏航检查：后续动作如果要改 `nonGoals` 覆盖的内容、增加未在 Card 中出现的依赖/配置、扩大到新模块、跳过 `verification` 或改变 `recommendedApproach`，必须提示“当前实现偏离 Architecture Card”，并要求用户确认更新方案或回到原方案。
+
+Batch C 最小实现建议只落四个函数级能力，不引入重平台：
+
+```ts
+shouldTriggerArchitectureRuntime(input, context)
+collectArchitectureFacts(context)
+formatArchitectureCard(card)
+detectArchitectureDrift(card, nextAction)
+```
+
+### 9.2 Plan Choice 规格
 
 Plan 模式必须支持用户选择方案，而不是只输出一段文字。
 
@@ -1499,7 +1547,7 @@ Plan 交互：
 - `revise` 后继续只读规划。
 - `cancel` 后退出 plan，不修改文件。
 
-### 9.2 权限规则持久化
+### 9.3 权限规则持久化
 
 ```ts
 export type PermissionRuleRecord = {
@@ -1525,10 +1573,11 @@ export type RecentPermissionDecision = {
 
 - `/permissions` 能查看、添加、删除规则。
 - `/permissions recent` 能查看最近审批和拒绝原因。
-- `acceptEdits` 只能自动允许低风险工作区文件编辑。
-- `bypass` 不能绕过硬拒绝、安全路径和高风险交互检查。
+- `auto-review` 只能自动允许低风险工作区文件编辑或本地 gate 明确允许路径；不得自动通过 Bash、联网、依赖、权限、第三方扩展、越界路径、hook/job/remote。
+- `full-access` 必须本地显式 opt-in，且不能绕过硬拒绝、安全路径和高风险交互检查。
+- 历史 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 接受并 normalize，不作为用户可见主模式。
 
-## 9.3 Checkpoint / Rewind 规格
+## 9.4 Checkpoint / Rewind 规格
 
 ```ts
 export type Checkpoint = {
@@ -1549,7 +1598,7 @@ export type Checkpoint = {
 - `/rewind` 列出 checkpoint，用户确认后恢复。
 - rewind 本身必须记录到 transcript。
 
-## 9.4 输入队列、中断与临时插问
+## 9.5 输入队列、中断与临时插问
 
 ```ts
 export type InterruptState =
@@ -1932,7 +1981,7 @@ export type ReferenceMappedAuditItem = {
 - 如果需要“最新/社区/公开项目当前行为”证据，必须先走 Web Evidence / Freshness Gate；没有新鲜证据不得假装已经对照完成。
 - 在 Phase 15 pre-Beta Deep Parity Closure 中，必须判断 Solution Completeness Gate 目前是文档约束、工作流检查还是 runtime guard；如果真实工作仍会退化成发现一个补一个，必须提出最小升级路径，并按 P0/P1/P2 分类。
 - 输出必须 concise；不得把完整 transcript、完整审计报告、完整索引结果或大日志塞入 prompt。
-- 不能绕过 Start Gate、权限管道、Plan mode、bypass/auto 边界或 Verification Runner。
+- 不能绕过 Start Gate、权限管道、Plan mode、`full-access` / `auto-review` 边界、legacy alias normalization 或 Verification Runner。
 - 修复命令必须约束“不新增第二套解释系统、不复制第三方源码、不进入未确认阶段、不顺手扩范围”。
 - Phase 15 真实项目 Beta 前必须运行 **Pre-Beta Non-Real-Test Completeness Audit**。该审计必须逐项使用 `ReferenceMappedAuditItem`，并按 `Reference -> Reference behavior -> Linghun current evidence -> Gap -> Decision -> Required evidence` 输出；没有参考源和 Linghun 证据的项不得标为 `DONE`。
 - 审计覆盖面至少包括：Agent / multi-agent lifecycle、Learning / Memory / Skill evolution、MCP / Skills / Plugins Connect Lite、Provider / gateway request identity、TUI / help / doctor / hints、Provider usage/cache/quota、Freshness / Web evidence、hardcoded artifact sweep。
@@ -2693,7 +2742,7 @@ export type TuiOutputLayer = 'primary' | 'details' | 'debug'
 - `/help all` 或等价详情必须展示完整用户可见能力、风险、是否新手默认展示、是否高级开关、doctor/debug 入口和自然语言示例；默认简洁不能变成能力不可达。
 - `/features` 必须区分 recommended、advanced、dangerous、disabled、unsupported，说明是否增加学习成本、token/费用、后台运行、安全风险和关闭方式。
 - Start Gate、权限审批和提权提示必须统一为 human-first decision prompt：动作、范围、风险、原因、继续方式、取消方式、后续是否还会走权限管道。内部字段只进 `debug`。
-- Plan、acceptEdits、auto、bypass 的提示必须说明边界：是否只读、是否可写、是否仍需工具权限、是否本地显式 opt-in。
+- `plan`、`auto-review`、`full-access` 与 `default` 的提示必须说明边界：是否只读、是否可写、是否仍需工具权限、是否本地显式 opt-in；旧模式名只在 legacy alias 迁移提示中出现。
 - 错误必须包含 `what happened`、`likely cause`、`next action`。provider/key/baseUrl/model、index、MCP、plugin、skill、hook、workflow 的错误不得只返回 slash 用法。
 - 长任务轻提示必须包含预计时间范围、是否需要值守、完成产物、查看方式、取消方式和等待确认状态；时间只能是范围或保守估计，不承诺精确分钟。
 - 报告生成相关 polish 只补非阻塞用户闭合感：成功 Write 后若模型 final answer 未引用路径，可由本地追加确定性短行并记录 system event；没有显式报告文件名时优先澄清或提出非覆盖路径建议。该项不得替代 Phase 15 Beta 前的本地 Write evidence gate。
@@ -2708,7 +2757,7 @@ Phase 15.5 的 TUI 验收必须至少覆盖：
 - startup：无 `LINGHUN.md`、无 provider/key、index missing/ready/stale、cache n/a、memory empty。
 - help：分组输出、`/help all` 完整能力发现、`/features` 风险分层、中文/英文命令用途询问。
 - natural intent：状态查询、doctor 查询、用法询问、安全动作、危险动作、模糊请求。
-- decision prompts：Start Gate、权限审批、提权、Plan、acceptEdits、auto、bypass。
+- decision prompts：Start Gate、权限审批、提权、`plan`、`auto-review`、`full-access`、legacy alias normalization。
 - long-running hints：index、verification、agent、cross-review、build/test。
 - diagnostics：model doctor、MCP doctor、plugin/skill/hook/workflow doctor。
 - editing UX：`Write` / `Edit` / `MultiEdit` 已有工具底座，但 Phase 15.5 开源前必须验收 CCB-grade 编辑体验，包括 read-before-edit、唯一匹配/未找到 oldText 的可操作错误、权限审批 diff preview、成功 changedFiles/patch 摘要、rejected edit 可恢复反馈、stale file / Windows 路径 / 编码换行边界。该项不得因“工具已存在”而跳过。
@@ -3050,7 +3099,7 @@ export type LinghunError = {
 2. 切换模型。
 3. 读改测闭环。
 4. plan 模式禁止写入。
-5. acceptEdits 自动低风险编辑。
+5. auto-review 自动低风险编辑；legacy acceptEdits alias normalize 到 auto-review。
 6. cache history 记录。
 7. MCP 失败降级。
 8. codebase index 状态。

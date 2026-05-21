@@ -1,7 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Language, PermissionMode } from "@linghun/shared";
+import {
+  type Language,
+  type PermissionMode,
+  isRawPermissionMode,
+  normalizePermissionMode,
+} from "@linghun/shared";
 
 export type EndpointProfile = "chat_completions" | "responses";
 export type ProviderCompatibilityProfile =
@@ -621,11 +626,9 @@ function validatePermission(permission: LinghunConfig["permission"]): void {
   assertRecord(permission, "settings.permission");
   if (
     permission.defaultMode !== "default" &&
+    permission.defaultMode !== "auto-review" &&
     permission.defaultMode !== "plan" &&
-    permission.defaultMode !== "acceptEdits" &&
-    permission.defaultMode !== "dontAsk" &&
-    permission.defaultMode !== "auto" &&
-    permission.defaultMode !== "bypass"
+    permission.defaultMode !== "full-access"
   ) {
     throw new Error("settings.permission.defaultMode is invalid");
   }
@@ -854,6 +857,21 @@ function cleanProviderOverride(
   ) as ProviderConfig;
 }
 
+function normalizePermissionConfig(
+  permission: Partial<LinghunConfig["permission"]> | undefined,
+): LinghunConfig["permission"] {
+  const defaultMode = permission?.defaultMode;
+  if (defaultMode === undefined) return defaultConfig.permission;
+  if (!isRawPermissionMode(defaultMode)) {
+    return { ...defaultConfig.permission, defaultMode: defaultMode as PermissionMode };
+  }
+  return {
+    ...defaultConfig.permission,
+    ...permission,
+    defaultMode: normalizePermissionMode(defaultMode),
+  };
+}
+
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
   const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
   const openAiCompatibleProvider = cleanProviderOverride(
@@ -916,10 +934,7 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
       ...input.modelRoutes,
       routes: mergeModelRoutes(input.modelRoutes?.routes),
     },
-    permission: {
-      ...defaultConfig.permission,
-      ...input.permission,
-    },
+    permission: normalizePermissionConfig(input.permission),
     mcp: {
       ...defaultConfig.mcp,
       ...input.mcp,

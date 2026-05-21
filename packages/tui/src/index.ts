@@ -42,7 +42,13 @@ import {
   findKnownModel,
   resolveProviderBaseUrlDiagnostic,
 } from "@linghun/providers";
-import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
+import {
+  LINGHUN_NAME,
+  type Language,
+  type PermissionMode,
+  isRawPermissionMode,
+  normalizePermissionMode,
+} from "@linghun/shared";
 import {
   type DiffSummary,
   type TodoItem,
@@ -1670,7 +1676,7 @@ function formatFeaturePolicy(context: TuiContext): string {
     `- plugins: discover manifests=${context.plugins.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.plugins.trustedIds.join(",") || "none"}`,
     "- agents/background: manual commands only; verifier auto fork=no; coordinator/multi-worker=unsupported",
     "Dangerous defaults（off）",
-    "- bypass/auto permission: default off; bypass requires LINGHUN_ENABLE_BYPASS=1; auto requires LINGHUN_ENABLE_AUTO_PERMISSION=1",
+    "- full-access permission: default off; requires LINGHUN_ENABLE_FULL_ACCESS=1; auto-review never auto-allows Bash/network/deps/permission/plugin/hook/remote",
     `- hooks: enabled=${context.hooks.enabled ? "yes" : "no"}; projectTrusted=${context.hooks.projectTrusted ? "yes" : "no"}; auto execution=no`,
     "- auto accept all edits=no; auto dependency install=no; auto networking=no; delete/rename/restore auto execution=no",
     "- plugin marketplace auto install/update=no; remote bridge/control auto connect=no; continuous phase progression=no",
@@ -2538,18 +2544,19 @@ async function handleModeCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const nextMode = args[0] as PermissionMode | undefined;
-  if (!nextMode) {
+  const rawMode = args[0] === "set" ? args[1] : args[0];
+  if (!rawMode) {
     writeLine(output, `当前权限模式：${context.permissionMode}`);
-    writeLine(output, "可选：default / plan / acceptEdits / dontAsk / auto / bypass");
+    writeLine(output, "可选：default / auto-review / plan / full-access");
     writeLine(
       output,
-      "边界：bypass 需要本地显式 opt-in；auto 需要本地 gate/classifier 可用。Plan approval 不授权所有工具。",
+      "边界：full-access 需要本地显式 opt-in；auto-review 只自动允许低风险工作区编辑。Plan approval 不授权所有工具。",
     );
     return;
   }
-  if (!isPermissionMode(nextMode)) {
-    writeLine(output, "未知模式。可选：default / plan / acceptEdits / dontAsk / auto / bypass");
+  const nextMode = parsePermissionModeInput(rawMode);
+  if (!nextMode) {
+    writeLine(output, "未知模式。可选：default / auto-review / plan / full-access");
     return;
   }
   const guard = getModeChangeGuard(nextMode, context);
@@ -2562,7 +2569,7 @@ async function handleModeCommand(
 }
 
 async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
-  const modes: PermissionMode[] = ["default", "plan", "acceptEdits", "auto"];
+  const modes: PermissionMode[] = ["default", "auto-review", "plan"];
   const index = modes.indexOf(context.permissionMode);
   const nextMode = modes[(index + 1) % modes.length] ?? "default";
   const guard = getModeChangeGuard(nextMode, context);
@@ -2576,14 +2583,11 @@ async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
 }
 
 function getModeChangeGuard(nextMode: PermissionMode, context: TuiContext): string | null {
-  if (context.permissionMode === "plan" && nextMode === "bypass" && !context.planAccepted) {
-    return "Plan 模式不能直接切到 bypass 执行写入。请先批准计划的明确边界，或切回 default。";
+  if (context.permissionMode === "plan" && nextMode === "full-access" && !context.planAccepted) {
+    return "Plan 模式不能直接切到 full-access 执行写入。请先批准计划的明确边界，或切回 default。";
   }
-  if (nextMode === "bypass" && process.env.LINGHUN_ENABLE_BYPASS !== "1") {
-    return "已拒绝切换 bypass：bypass 必须本地显式 opt-in（设置 LINGHUN_ENABLE_BYPASS=1 后重新启动），不能由自然语言、workflow、agent、plugin 或 hook 静默开启。";
-  }
-  if (nextMode === "auto" && process.env.LINGHUN_ENABLE_AUTO_PERMISSION !== "1") {
-    return "已拒绝切换 auto：当前没有可用的本地 gate/classifier（LINGHUN_ENABLE_AUTO_PERMISSION=1 未开启）。请使用 default 或 plan。";
+  if (nextMode === "full-access" && process.env.LINGHUN_ENABLE_FULL_ACCESS !== "1") {
+    return "已拒绝切换 full-access：full-access 必须本地显式 opt-in（设置 LINGHUN_ENABLE_FULL_ACCESS=1 后重新启动），不能由自然语言、workflow、agent、plugin 或 hook 静默开启。";
   }
   return null;
 }
@@ -2626,16 +2630,16 @@ async function handlePlanCommand(
       return;
     }
     const boundary = args[1] ?? "manual";
-    if (boundary !== "manual" && boundary !== "acceptEdits") {
+    if (boundary !== "manual" && boundary !== "auto-review") {
       writeLine(
         output,
-        "用法：/plan accept manual|acceptEdits。批准计划不等于授权所有工具；Bash/联网/依赖/权限仍走权限管道。",
+        "用法：/plan accept manual|auto-review。批准计划不等于授权所有工具；Bash/联网/依赖/权限仍走权限管道。",
       );
       return;
     }
     const optionId = args[2] ?? context.activePlan.options[0]?.id ?? "a";
     context.planAccepted = true;
-    context.permissionMode = boundary === "acceptEdits" ? "acceptEdits" : "default";
+    context.permissionMode = boundary === "auto-review" ? "auto-review" : "default";
     const sessionId = await ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "plan_decision",
@@ -2691,7 +2695,7 @@ async function handlePlanCommand(
           "执行工作区内允许的低/中风险改动",
           "运行最小必要验证",
         ],
-        risks: ["需要写入时必须离开 plan 或确认计划", "Bash 不会在 acceptEdits 中自动放行"],
+        risks: ["需要写入时必须离开 plan 或确认计划", "Bash 不会在 auto-review 中自动放行"],
       },
       {
         id: "b",
@@ -2713,7 +2717,7 @@ async function handlePlanCommand(
   writeLine(output, formatPlanProposal(proposal));
   writeLine(
     output,
-    "确认执行请运行：/plan accept manual a 或 /plan accept acceptEdits a；拒绝请运行 /plan reject <反馈>。批准计划不授权 Bash/联网/依赖/权限变更。",
+    "确认执行请运行：/plan accept manual a 或 /plan accept auto-review a；拒绝请运行 /plan reject <反馈>。批准计划不授权 Bash/联网/依赖/权限变更。",
   );
   writeStatus(output, context);
 }
@@ -3091,7 +3095,7 @@ function getAgentPermissionMode(type: AgentType, parentMode: PermissionMode): Pe
     return "plan";
   }
   if (type === "verifier") {
-    return "dontAsk";
+    return "default";
   }
   return parentMode;
 }
@@ -8391,7 +8395,7 @@ function formatHelp(language: Language): string {
   /memory init          Create a basic LINGHUN.md template on explicit request
   /memory import sessions [source] [query]  Import external AI session summary/evidence only
   /mode                 Show permission mode
-  /mode plan|acceptEdits|dontAsk|auto|bypass|default  Switch mode
+  /mode default|auto-review|plan|full-access  Switch mode
   /tab                  Shift+Tab equivalent: cycle common modes
   /plan                 Show structured plan options
   /plan accept [id]     Accept a plan and return to default
@@ -8473,7 +8477,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /memory init          显式生成基础 LINGHUN.md 模板
   /memory import sessions [source] [query]  只导入外部 AI 会话摘要和证据引用
   /mode                 查看权限模式
-  /mode plan|acceptEdits|dontAsk|auto|bypass|default  切换模式
+  /mode default|auto-review|plan|full-access  切换模式
   /tab                  等价 Shift+Tab：循环切换常用模式
   /plan                 输出结构化可选方案
   /plan accept [id]     确认方案并回到 default 执行
@@ -8770,50 +8774,32 @@ async function decidePermission(
     return { request, decision: "allow", reason: `命中 allow 规则：${rule.id}` };
   }
 
-  if (context.permissionMode === "dontAsk") {
-    if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "dontAsk 模式允许只读或会话内工具。" };
-    }
-    const reason = "dontAsk 模式无法询问用户，需审批的操作自动拒绝，不会自动允许。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
-  }
-
-  if (context.permissionMode === "acceptEdits") {
+  if (context.permissionMode === "auto-review") {
     if (isLowRiskWorkspaceEdit(name, tool.permission.risk, files)) {
       return {
         request,
         decision: "allow",
-        reason: "acceptEdits 自动允许工作区内低风险文件编辑。",
+        reason: "auto-review 自动允许工作区内低风险文件编辑。",
         preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
       };
     }
     if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "acceptEdits 允许只读或会话内工具。" };
+      return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。" };
     }
-    const reason = "acceptEdits 不自动允许 Bash、高风险或越界操作。";
+    const reason = "auto-review 不自动允许 Bash、高风险或越界操作。";
     await recordPermissionDenied(context, name, reason);
     return { request, decision: "deny", reason };
   }
 
-  if (context.permissionMode === "bypass") {
+  if (context.permissionMode === "full-access") {
     return {
       request,
       decision: "allow",
-      reason: "bypass 已由用户显式开启，但硬拒绝和安全路径仍生效。",
+      reason: "full-access 已由本地用户显式开启，但硬拒绝和安全路径仍生效。",
       preflight: tool.isReadOnly
         ? undefined
         : formatDiffBeforeWrite(name, files, tool.permission.risk),
     };
-  }
-
-  if (context.permissionMode === "auto") {
-    if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "auto 分类为低风险只读/会话内工具。" };
-    }
-    const reason = "auto 分类器不可用，需审批操作回退为拒绝，避免默认放行。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
   }
 
   if (tool.isReadOnly || name === "Todo" || name === "Diff") {
@@ -8939,8 +8925,9 @@ function formatPermissionDenied(reason: string, summary: string): string {
   return `权限已拒绝：${reason}\n本次请求：${summary}\n建议：查看 /permissions recent，或切换合适模式后重试。`;
 }
 
-function isPermissionMode(value: string): value is PermissionMode {
-  return ["default", "plan", "acceptEdits", "dontAsk", "auto", "bypass"].includes(value);
+function parsePermissionModeInput(value: string): PermissionMode | null {
+  if (!isRawPermissionMode(value)) return null;
+  return normalizePermissionMode(value);
 }
 
 async function loadPermissionState(projectPath: string): Promise<PermissionState> {
