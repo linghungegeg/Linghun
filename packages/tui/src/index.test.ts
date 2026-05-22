@@ -3797,6 +3797,82 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("- path:");
   });
 
+  it("reads known log artifacts through details output slices summary-first", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const logDir = join(project, ".linghun", "logs", "tools");
+    await mkdir(logDir, { recursive: true });
+    const logPath = join(logDir, "bash-artifact.log");
+    await writeFile(
+      logPath,
+      [
+        "line 1 should stay out of tail",
+        "Authorization: Bearer sk-secret123456789",
+        "before failure",
+        "TypeError: failed candidate",
+        "after failure",
+        "最后一行中文输出",
+      ].join("\n"),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("bash", {
+        id: "bash-artifact",
+        status: "failed",
+        result: "fail",
+        outputPath: logPath,
+        logPath,
+        userVisibleSummary: "command failed; inspect candidates only",
+      }),
+    ];
+    const srcDir = join(project, "src");
+    await mkdir(srcDir, { recursive: true });
+    const ordinarySource = join(srcDir, "app.ts");
+    const explicitEvidenceOutput = join(project, "evidence-output.log");
+    await writeFile(ordinarySource, "ordinary source must not be sliced", "utf8");
+    await writeFile(
+      explicitEvidenceOutput,
+      ["explicit evidence output start", "explicit evidence output tail"].join("\n"),
+      "utf8",
+    );
+    context.evidence = [
+      {
+        id: "ev-explicit",
+        kind: "command_output",
+        source: ordinarySource,
+        fullOutputPath: explicitEvidenceOutput,
+        summary: "has explicit output artifact",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    await handleSlashCommand("/details output bash-artifact --tail 2", context, output);
+    await handleSlashCommand("/details output ev-explicit --tail 1", context, output);
+    await handleSlashCommand(
+      "/details output bash-artifact --grep TypeError --context 1",
+      context,
+      output,
+    );
+    await handleSlashCommand("/details output bash-artifact --errors", context, output);
+    await handleSlashCommand("/details output missing --tail 2", context, output);
+
+    expect(output.text).toContain("Log artifact tail 切片");
+    expect(output.text).toContain("Log artifact grep 切片");
+    expect(output.text).toContain("Log artifact errors 切片");
+    expect(output.text).toContain("最后一行中文输出");
+    expect(output.text).toContain("explicit evidence output tail");
+    expect(output.text).toContain("before failure");
+    expect(output.text).toContain("TypeError: failed candidate");
+    expect(output.text).toContain("do not change verification PASS/PARTIAL/FAIL");
+    expect(output.text).toContain("未找到 output");
+    expect(output.text).toContain("完整日志不会进入主屏、prompt、memory 或 handoff");
+    expect(output.text).not.toContain("sk-secret123456789");
+  });
+
   it("blocks code-fact answers without evidence and downgrades unsupported claims", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

@@ -77,6 +77,11 @@ import {
 } from "./compact-context.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
+  type LogArtifactRequest,
+  formatLogArtifactSlice,
+  readLogArtifactSlice,
+} from "./log-artifact.js";
+import {
   type NaturalIntent,
   type PendingNaturalCommand,
   type SLASH_COMMAND_REGISTRY,
@@ -232,6 +237,9 @@ export type EvidenceRecord = {
     | "user_provided";
   summary: string;
   source: string;
+  fullOutputPath?: string;
+  outputPath?: string;
+  logPath?: string;
   supportsClaims: string[];
   createdAt: string;
 };
@@ -2958,11 +2966,32 @@ async function handleDetailsCommand(
   }
   if (action === "output") {
     const task = findBackgroundTask(context, id);
+    const evidence = task ? undefined : findEvidence(context, id);
+    const logRequest = parseLogArtifactRequest(args.slice(2));
+    if (logRequest) {
+      if (!task && !evidence) {
+        writeLine(
+          output,
+          "未找到 output。用法：/details output <backgroundId|evidenceId> --tail [lines] | --grep <pattern> [--context N] | --errors",
+        );
+        return;
+      }
+      try {
+        const slice = await readLogArtifactSlice(
+          task ? { backgroundId: task.id } : { evidenceId: evidence?.id },
+          logRequest,
+          createLogArtifactRegistry(context),
+        );
+        writeLine(output, formatLogArtifactSlice(slice, context.language));
+      } catch (error) {
+        writeLine(output, formatError(error));
+      }
+      return;
+    }
     if (task) {
       writeLine(output, formatBackgroundOutputDetails(task, context.language));
       return;
     }
-    const evidence = findEvidence(context, id);
     writeLine(
       output,
       evidence
@@ -3190,7 +3219,58 @@ function formatBackgroundOutputDetails(task: BackgroundTaskState, language: Lang
     `- hasOutput: ${task.hasOutput}`,
     `- status: ${task.status}`,
     `- summary: ${task.userVisibleSummary}`,
+    `- slices: /details output ${task.id} --tail 40 | --grep <pattern> --context 2 | --errors`,
   ].join("\n");
+}
+
+function parseLogArtifactRequest(args: string[]): LogArtifactRequest | undefined {
+  const tailIndex = args.indexOf("--tail");
+  if (tailIndex >= 0) {
+    return {
+      mode: "tail",
+      lines: readPositiveIntegerArg(args[tailIndex + 1]),
+    };
+  }
+  const grepIndex = args.indexOf("--grep");
+  if (grepIndex >= 0) {
+    const contextIndex = args.indexOf("--context");
+    return {
+      mode: "grep",
+      pattern: args[grepIndex + 1],
+      contextLines: contextIndex >= 0 ? readPositiveIntegerArg(args[contextIndex + 1]) : undefined,
+    };
+  }
+  if (args.includes("--errors")) {
+    return { mode: "errors" };
+  }
+  return undefined;
+}
+
+function readPositiveIntegerArg(value: string | undefined): number | undefined {
+  if (!value || value.startsWith("--")) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function createLogArtifactRegistry(context: TuiContext) {
+  return {
+    workspaceRoot: context.projectPath,
+    logRoots: [join(context.projectPath, ".linghun", "logs")],
+    backgrounds: context.backgroundTasks.map((task) => ({
+      id: task.id,
+      outputPath: task.outputPath,
+      logPath: task.logPath,
+    })),
+    evidence: context.evidence.map((evidence) => ({
+      id: evidence.id,
+      source: evidence.source,
+      fullOutputPath: evidence.fullOutputPath,
+      outputPath: evidence.outputPath,
+      logPath: evidence.logPath,
+    })),
+  };
 }
 
 async function handleAgentsCommand(
