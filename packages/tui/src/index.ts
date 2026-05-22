@@ -537,11 +537,26 @@ export type AgentRun = {
   updatedAt: string;
 };
 
+export type MemoryScope = "project" | "user" | "session";
+export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
+
 export type MemoryCandidate = {
   id: string;
-  scope: "project" | "user";
+  scope: MemoryScope;
+  status: MemoryStatus;
   summary: string;
   source: string;
+  sourceRefs: string[];
+  risk: "low" | "medium" | "high";
+  inferred: boolean;
+  createdAt: string;
+};
+
+export type MemoryLearningRun = {
+  trigger: "manual" | "verification" | "handoff" | "evidence";
+  candidatesCreated: number;
+  modelCalled: boolean;
+  skippedReason?: string;
   createdAt: string;
 };
 
@@ -555,6 +570,10 @@ export type MemoryState = {
   sessionDir: string;
   candidates: MemoryCandidate[];
   accepted: MemoryCandidate[];
+  rejected: MemoryCandidate[];
+  disabled: MemoryCandidate[];
+  retired: MemoryCandidate[];
+  lastLearningRun?: MemoryLearningRun;
   lastHandoff?: HandoffPacket;
   lastResumeReadonly?: boolean;
 };
@@ -598,6 +617,17 @@ export type SkillSummary = {
   lastError?: string;
 };
 
+export type SkillEvolutionCandidate = {
+  id: string;
+  status: "candidate" | "rejected";
+  summary: string;
+  triggerCondition: string;
+  source: string;
+  risk: "low" | "medium" | "high";
+  suggestedPath: string;
+  createdAt: string;
+};
+
 export type SkillState = {
   enabled: boolean;
   projectDir: string;
@@ -605,6 +635,8 @@ export type SkillState = {
   skills: SkillSummary[];
   disabledIds: string[];
   trustedIds: string[];
+  evolutionCandidates: SkillEvolutionCandidate[];
+  rejectedEvolutionCandidates: SkillEvolutionCandidate[];
   lastError?: string;
 };
 
@@ -948,6 +980,9 @@ const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
 const PROJECT_RULES_STATUS_WIDTH = 160;
+const MEMORY_PROMPT_TOP_K = 3;
+const MEMORY_PROMPT_ITEM_WIDTH = 180;
+const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const MAX_CONTEXT_MESSAGES = 12;
 const MAX_CONTEXT_CHARS = 48_000;
 const REQUEST_SLOW_HINT_MS = 20_000;
@@ -1075,7 +1110,10 @@ export async function createMemoryState(
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
     candidates: [],
-    accepted: await loadAcceptedMemory(paths.memoryProject, paths.memoryUser),
+    accepted: await loadMemoryByStatus(paths, "accepted"),
+    rejected: await loadMemoryByStatus(paths, "rejected"),
+    disabled: await loadMemoryByStatus(paths, "disabled"),
+    retired: await loadMemoryByStatus(paths, "retired"),
   };
 }
 
@@ -1104,15 +1142,24 @@ function summarizeProjectRules(content: string): string {
   return truncateDisplay(normalized || "empty", PROJECT_RULES_SUMMARY_WIDTH);
 }
 
-async function loadAcceptedMemory(projectDir: string, userDir: string): Promise<MemoryCandidate[]> {
-  const [projectMemory, userMemory] = await Promise.all([
-    loadAcceptedMemoryDir(projectDir),
-    loadAcceptedMemoryDir(userDir),
+async function loadMemoryByStatus(
+  paths: ReturnType<typeof resolveStoragePaths>,
+  status: MemoryStatus,
+): Promise<MemoryCandidate[]> {
+  const [projectMemory, userMemory, sessionMemory] = await Promise.all([
+    loadMemoryDirByStatus(paths.memoryProject, status),
+    loadMemoryDirByStatus(paths.memoryUser, status),
+    loadMemoryDirByStatus(paths.memorySession, status),
   ]);
-  return [...projectMemory, ...userMemory].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return [...projectMemory, ...userMemory, ...sessionMemory].sort((a, b) =>
+    a.id.localeCompare(b.id),
+  );
 }
 
-async function loadAcceptedMemoryDir(directory: string): Promise<MemoryCandidate[]> {
+async function loadMemoryDirByStatus(
+  directory: string,
+  status: MemoryStatus,
+): Promise<MemoryCandidate[]> {
   let entries: string[];
   try {
     entries = await readdir(directory);
@@ -1125,30 +1172,62 @@ async function loadAcceptedMemoryDir(directory: string): Promise<MemoryCandidate
       .filter((entry) => entry.endsWith(".json"))
       .map(async (entry) => readMemoryCandidate(join(directory, entry))),
   );
-  return memory.filter((item): item is MemoryCandidate => item !== null);
+  return memory.filter(
+    (item): item is MemoryCandidate => item !== null && normalizeMemoryStatus(item) === status,
+  );
 }
 
 async function readMemoryCandidate(path: string): Promise<MemoryCandidate | null> {
   try {
     const value = JSON.parse(await readFile(path, "utf8")) as unknown;
-    if (!isMemoryCandidate(value)) {
-      return null;
-    }
-    return value;
+    return parseMemoryCandidate(value);
   } catch {
     return null;
   }
 }
 
-function isMemoryCandidate(value: unknown): value is MemoryCandidate {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    (value.scope === "project" || value.scope === "user") &&
-    typeof value.summary === "string" &&
-    typeof value.source === "string" &&
-    typeof value.createdAt === "string"
-  );
+function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.id !== "string" ||
+    typeof value.summary !== "string" ||
+    typeof value.source !== "string" ||
+    typeof value.createdAt !== "string"
+  ) {
+    return null;
+  }
+  if (value.scope !== "project" && value.scope !== "user" && value.scope !== "session") {
+    return null;
+  }
+  const status =
+    value.status === "candidate" ||
+    value.status === "accepted" ||
+    value.status === "rejected" ||
+    value.status === "disabled" ||
+    value.status === "retired"
+      ? value.status
+      : "accepted";
+  const risk = value.risk === "medium" || value.risk === "high" ? value.risk : "low";
+  const sourceRefs = Array.isArray(value.sourceRefs)
+    ? value.sourceRefs.filter((item): item is string => typeof item === "string")
+    : [value.source];
+  return {
+    id: value.id,
+    scope: value.scope,
+    status,
+    summary: truncateDisplay(value.summary.replace(/\s+/g, " "), 240),
+    source: value.source,
+    sourceRefs: sourceRefs.slice(0, 6),
+    risk,
+    inferred: value.inferred === true,
+    createdAt: value.createdAt,
+  };
+}
+
+function normalizeMemoryStatus(item: MemoryCandidate): MemoryStatus {
+  return item.status ?? "accepted";
 }
 
 function resolveConfiguredDir(projectPath: string, configured: string): string {
@@ -1173,6 +1252,8 @@ export async function createSkillState(
       skills,
       disabledIds: [...config.skills.disabledIds].sort((a, b) => a.localeCompare(b)),
       trustedIds: [...config.skills.trustedIds].sort((a, b) => a.localeCompare(b)),
+      evolutionCandidates: [],
+      rejectedEvolutionCandidates: [],
     };
   } catch (error) {
     return {
@@ -1182,6 +1263,8 @@ export async function createSkillState(
       skills: [],
       disabledIds: config.skills.disabledIds,
       trustedIds: config.skills.trustedIds,
+      evolutionCandidates: [],
+      rejectedEvolutionCandidates: [],
       lastError: formatError(error),
     };
   }
@@ -1941,6 +2024,7 @@ function formatSkills(context: TuiContext): string {
     `- projectDir: ${context.skills.projectDir}`,
     `- userDir: ${context.skills.userDir}`,
     `- enabled: ${context.skills.enabled ? "yes" : "no"}`,
+    `- evolutionCandidates: ${context.skills.evolutionCandidates.length}（candidate only; autoEnable=no）`,
   ];
   if (context.skills.lastError) {
     lines.push(`- lastError: ${context.skills.lastError}`);
@@ -1957,9 +2041,23 @@ function formatSkills(context: TuiContext): string {
     );
   }
   lines.push(
-    "- note: 默认只加载 metadata/description/triggers/stable summary；不会把 skill 正文塞进 prompt。",
+    "- note: 默认只加载 metadata/description/triggers/stable summary；不会把 skill 正文塞进 prompt；evolution candidate 只记录建议，不写文件、不启用。",
   );
   return lines.join("\n");
+}
+
+function createSkillEvolutionCandidate(summary: string, source: string): SkillEvolutionCandidate {
+  return {
+    id: randomUUID(),
+    status: "candidate",
+    summary: truncateDisplay(summary.replace(/\s+/g, " "), 240),
+    triggerCondition: "repeated verified workflow success or explicit user request",
+    source,
+    risk: "medium",
+    suggestedPath:
+      "manual-review-only; use /skills install local <path> after creating a trusted manifest",
+    createdAt: new Date().toISOString(),
+  };
 }
 
 function formatWorkflows(context: TuiContext): string {
@@ -2543,6 +2641,63 @@ async function handleSkillsCommand(
   }
   if (action === "validate") {
     writeLine(output, validateExtensionItems("skills", context, args[1]));
+    return;
+  }
+  if (action === "evolve") {
+    const summary = args.slice(1).join(" ").trim();
+    if (!summary) {
+      writeLine(
+        output,
+        [
+          "Skill evolution candidates（不会自动启用）",
+          "- autoEnable=no; writesFiles=no; trustChanges=no",
+          `- candidates: ${context.skills.evolutionCandidates.length}`,
+          ...context.skills.evolutionCandidates.map(
+            (item) =>
+              `  - ${item.id}: risk=${item.risk} trigger=${item.triggerCondition} suggestedPath=${item.suggestedPath} summary=${item.summary}`,
+          ),
+          "- usage: /skills evolve candidate <summary> | /skills evolve reject <id>",
+        ].join("\n"),
+      );
+      return;
+    }
+    if (args[1] === "reject") {
+      const id = args[2];
+      const candidate = context.skills.evolutionCandidates.find((item) => item.id === id);
+      if (!candidate) {
+        writeLine(output, "未找到 skill evolution candidate。用法：/skills evolve reject <id>");
+        return;
+      }
+      context.skills.evolutionCandidates = context.skills.evolutionCandidates.filter(
+        (item) => item.id !== id,
+      );
+      context.skills.rejectedEvolutionCandidates.unshift({ ...candidate, status: "rejected" });
+      const sessionId = await ensureSession(context);
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `skill_evolution action=rejected id=${candidate.id} source=${candidate.source}`,
+        "info",
+      );
+      writeLine(output, `已拒绝 skill evolution candidate：${id}；不会生成或启用 skill。`);
+      return;
+    }
+    const candidate = createSkillEvolutionCandidate(
+      summary.replace(/^candidate\s+/u, ""),
+      "manual /skills evolve candidate",
+    );
+    context.skills.evolutionCandidates.unshift(candidate);
+    const sessionId = await ensureSession(context);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `skill_evolution action=candidate id=${candidate.id} source=${candidate.source}`,
+      "info",
+    );
+    writeLine(
+      output,
+      `已创建 skill evolution candidate：${candidate.id}；不会自动写文件、安装、信任或启用。建议路径：${candidate.suggestedPath}`,
+    );
     return;
   }
   if (action === "remove") {
@@ -4837,13 +4992,30 @@ async function handleMemoryCommand(
     writeLine(output, formatMemoryReview(context));
     return;
   }
+  if (action === "stats") {
+    writeLine(output, formatMemoryStats(context));
+    return;
+  }
+  if (action === "learn") {
+    const result = await runControlledMemoryLearning(context);
+    writeLine(output, formatMemoryLearningRun(result));
+    return;
+  }
   if (action === "candidate") {
-    const summary = args.slice(1).join(" ").trim();
-    if (!summary) {
-      writeLine(output, "用法：/memory candidate <短小稳定记忆摘要>");
+    const parsed = parseMemoryCandidateArgs(args.slice(1));
+    if (!parsed.summary) {
+      writeLine(
+        output,
+        "用法：/memory candidate <短小稳定记忆摘要> [--scope project|user|session]",
+      );
       return;
     }
-    const candidate = createMemoryCandidate("project", summary, "manual /memory candidate");
+    const candidate = createMemoryCandidate(
+      parsed.scope,
+      parsed.summary,
+      "manual /memory candidate",
+      ["user:/memory candidate"],
+    );
     context.memory.candidates.unshift(candidate);
     const sessionId = await ensureSession(context);
     await context.store.appendEvent(sessionId, {
@@ -4865,34 +5037,88 @@ async function handleMemoryCommand(
       writeLine(output, "未找到候选记忆。用法：/memory accept <candidate-id>");
       return;
     }
-    await acceptMemoryCandidate(candidate, context);
+    const accepted = { ...candidate, status: "accepted" as const };
+    await writeMemoryRecord(accepted, context);
     context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
-    context.memory.accepted.unshift(candidate);
+    context.memory.accepted.unshift(accepted);
     const sessionId = await ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "memory_accepted",
-      memory: candidate,
+      memory: accepted,
       createdAt: new Date().toISOString(),
     });
+    await appendMemoryLifecycleEvent(context, sessionId, "accepted", accepted);
     refreshCacheFreshness(context);
     writeLine(
       output,
-      `已写入${candidate.scope === "project" ? "项目" : "用户"}级长期记忆：${candidate.id}`,
+      `已写入${formatMemoryScope(accepted.scope)}级长期记忆：${accepted.id}；autoAccept=no，后续注入仍受 top-k/字符预算限制。`,
     );
+    return;
+  }
+  if (action === "reject") {
+    const id = args[1];
+    const candidate = context.memory.candidates.find((item) => item.id === id);
+    if (!candidate) {
+      writeLine(output, "未找到候选记忆。用法：/memory reject <candidate-id>");
+      return;
+    }
+    const rejected = { ...candidate, status: "rejected" as const };
+    await writeMemoryRecord(rejected, context);
+    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
+    context.memory.rejected.unshift(rejected);
+    const sessionId = await ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "rejected", rejected);
+    refreshCacheFreshness(context);
+    writeLine(output, `已拒绝候选记忆：${id}；不会写入长期记忆或注入 prompt。`);
+    return;
+  }
+  if (action === "disable") {
+    const id = args[1];
+    const memory = context.memory.accepted.find((item) => item.id === id);
+    if (!memory) {
+      writeLine(output, "未找到已接受记忆。用法：/memory disable <accepted-id>");
+      return;
+    }
+    const disabled = { ...memory, status: "disabled" as const };
+    await writeMemoryRecord(disabled, context);
+    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== id);
+    context.memory.disabled.unshift(disabled);
+    const sessionId = await ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "disabled", disabled);
+    refreshCacheFreshness(context);
+    writeLine(output, `已禁用长期记忆：${id}；保留记录但不再注入 prompt。`);
+    return;
+  }
+  if (action === "rollback") {
+    const id = args[1];
+    const memory = context.memory.disabled.find((item) => item.id === id);
+    if (!memory) {
+      writeLine(output, "未找到已禁用记忆。用法：/memory rollback <disabled-id>");
+      return;
+    }
+    const accepted = { ...memory, status: "accepted" as const };
+    await writeMemoryRecord(accepted, context);
+    context.memory.disabled = context.memory.disabled.filter((item) => item.id !== id);
+    context.memory.accepted.unshift(accepted);
+    const sessionId = await ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "rollback", accepted);
+    refreshCacheFreshness(context);
+    writeLine(output, `已回滚启用长期记忆：${id}；仍受受控 prompt 注入预算限制。`);
     return;
   }
   if (action === "delete") {
     const id = args[1];
-    const before = context.memory.candidates.length + context.memory.accepted.length;
-    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
-    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== id);
+    const memory = findMemoryRecord(context.memory, id);
+    if (!memory) {
+      writeLine(output, "未找到该记忆。用法：/memory delete <id>");
+      return;
+    }
+    await removeMemoryRecord(memory, context);
+    removeMemoryFromState(context.memory, id);
+    const sessionId = await ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "deleted", memory);
     refreshCacheFreshness(context);
-    writeLine(
-      output,
-      before === context.memory.candidates.length + context.memory.accepted.length
-        ? "未找到该记忆。"
-        : `已删除本会话中的记忆记录：${id}`,
-    );
+    writeLine(output, `已删除记忆记录：${id}；不会保留在候选/长期/禁用列表。`);
     return;
   }
   if (action === "init") {
@@ -4905,7 +5131,7 @@ async function handleMemoryCommand(
   }
   writeLine(
     output,
-    "用法：/memory | /memory storage | /memory review | /memory candidate <摘要> | /memory accept <id> | /memory delete <id> | /memory init | /memory import sessions [source] [query]",
+    "用法：/memory | /memory storage | /memory review | /memory stats | /memory candidate <摘要> [--scope project|user|session] | /memory accept|reject|disable|rollback|delete <id> | /memory init | /memory import sessions [source] [query]",
   );
 }
 
@@ -5142,37 +5368,109 @@ async function writeHandoffPacket(context: TuiContext, packet: HandoffPacket): P
 }
 
 function createMemoryCandidate(
-  scope: "project" | "user",
+  scope: MemoryScope,
   summary: string,
   source: string,
+  sourceRefs: string[],
 ): MemoryCandidate {
   return {
     id: randomUUID(),
     scope,
+    status: "candidate",
     summary: truncateDisplay(summary.replace(/\s+/g, " "), 240),
     source,
+    sourceRefs: sourceRefs.slice(0, 6),
+    risk: "low",
+    inferred: false,
     createdAt: new Date().toISOString(),
   };
 }
 
-async function acceptMemoryCandidate(
-  candidate: MemoryCandidate,
-  context: TuiContext,
-): Promise<void> {
-  const directory =
-    candidate.scope === "project" ? context.memory.projectDir : context.memory.userDir;
+function parseMemoryCandidateArgs(args: string[]): { scope: MemoryScope; summary: string } {
+  const scopeIndex = args.findIndex((arg) => arg === "--scope");
+  const rawScope = scopeIndex >= 0 ? args[scopeIndex + 1] : undefined;
+  const scope: MemoryScope =
+    rawScope === "user" || rawScope === "session" || rawScope === "project" ? rawScope : "project";
+  const summary = args
+    .filter((_, index) => scopeIndex < 0 || (index !== scopeIndex && index !== scopeIndex + 1))
+    .join(" ")
+    .trim();
+  return { scope, summary };
+}
+
+async function writeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
+  const directory = getMemoryDirectory(candidate.scope, context);
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${candidate.id}.json`);
   await writeFile(path, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
 }
 
+async function removeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
+  await rm(join(getMemoryDirectory(candidate.scope, context), `${candidate.id}.json`), {
+    force: true,
+  });
+}
+
+function getMemoryDirectory(scope: MemoryScope, context: TuiContext): string {
+  if (scope === "project") return context.memory.projectDir;
+  if (scope === "user") return context.memory.userDir;
+  return context.memory.sessionDir;
+}
+
+function findMemoryRecord(
+  memory: MemoryState,
+  id: string | undefined,
+): MemoryCandidate | undefined {
+  if (!id) return undefined;
+  return [
+    ...memory.candidates,
+    ...memory.accepted,
+    ...memory.rejected,
+    ...memory.disabled,
+    ...memory.retired,
+  ].find((item) => item.id === id);
+}
+
+function removeMemoryFromState(memory: MemoryState, id: string): void {
+  memory.candidates = memory.candidates.filter((item) => item.id !== id);
+  memory.accepted = memory.accepted.filter((item) => item.id !== id);
+  memory.rejected = memory.rejected.filter((item) => item.id !== id);
+  memory.disabled = memory.disabled.filter((item) => item.id !== id);
+  memory.retired = memory.retired.filter((item) => item.id !== id);
+}
+
+async function appendMemoryLifecycleEvent(
+  context: TuiContext,
+  sessionId: string,
+  action: string,
+  memory: MemoryCandidate,
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `memory_lifecycle action=${action} id=${memory.id} scope=${memory.scope} status=${memory.status} source=${memory.source}`,
+    action === "deleted" ? "warning" : "info",
+  );
+}
+
+function formatMemoryScope(scope: MemoryScope): string {
+  if (scope === "project") return "项目";
+  if (scope === "user") return "用户";
+  return "会话";
+}
+
 function formatMemoryStatus(context: TuiContext): string {
+  const injected = createControlledMemoryInjection(context);
   return [
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}`,
     `- projectRulesSummary: ${formatProjectRulesContext(context)}`,
     `- candidates: ${context.memory.candidates.length}`,
     `- accepted: ${context.memory.accepted.length}`,
+    `- disabled: ${context.memory.disabled.length}`,
+    `- rejected: ${context.memory.rejected.length}`,
+    "- autoAccept: no",
+    `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K} injected=${injected.items.length} estimatedTokens=${estimateMemoryTokens(injected.text)}`,
     ...context.memory.accepted
       .slice(0, 5)
       .map((item) => `  - ${item.id} [${item.scope}] ${item.summary}`),
@@ -5204,22 +5502,163 @@ function formatMemoryStorage(context: TuiContext): string {
 
 function formatMemoryReview(context: TuiContext): string {
   const accepted = context.memory.accepted.map(
-    (item) => `- accepted ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
+    (item) =>
+      `- accepted ${item.id} [${item.scope}] ${item.summary} (source=${item.source}; refs=${item.sourceRefs.join(",") || "none"})`,
+  );
+  const disabled = context.memory.disabled.map(
+    (item) => `- disabled ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
   );
   if (context.memory.candidates.length === 0) {
     return [
-      "Memory review：暂无候选记忆。可用 /memory candidate <短小稳定摘要> 创建候选；长期写入前必须 /memory accept。",
+      "Memory review：暂无候选记忆。可用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选；长期写入前必须 /memory accept。",
+      "边界：默认不逐轮学习、不自动接受长期记忆、不把完整 transcript/source/tool output 写入记忆。",
       ...accepted,
+      ...disabled,
     ].join("\n");
   }
   return [
     "Memory review（候选，不是长期记忆）",
     ...context.memory.candidates.map(
-      (item) => `- candidate ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
+      (item) =>
+        `- candidate ${item.id} [${item.scope}] risk=${item.risk} inferred=${item.inferred ? "yes" : "no"} ${item.summary} (source=${item.source}; refs=${item.sourceRefs.join(",") || "none"})`,
     ),
     ...accepted,
-    "确认写入：/memory accept <id>；删除候选：/memory delete <id>",
+    ...disabled,
+    "确认写入：/memory accept <id>；拒绝候选：/memory reject <id>；禁用已接受：/memory disable <id>；删除：/memory delete <id>",
   ].join("\n");
+}
+
+function formatMemoryStats(context: TuiContext): string {
+  const injection = createControlledMemoryInjection(context);
+  return [
+    "Memory stats（controlled learning / cost guard）",
+    `- candidates: ${context.memory.candidates.length}`,
+    `- accepted: ${context.memory.accepted.length}`,
+    `- disabled: ${context.memory.disabled.length}`,
+    `- rejected: ${context.memory.rejected.length}`,
+    `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K} injected=${injection.items.length} chars=${injection.text.length} estimatedTokens=${estimateMemoryTokens(injection.text)}`,
+    `- lastLearningRun: ${context.memory.lastLearningRun ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}` : "none"}`,
+    "- autoLearning: off by default; no per-turn learning model call",
+    "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
+    "- summarizerRole: only optional bounded summary source; failure degrades to no learning",
+  ].join("\n");
+}
+
+async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryLearningRun> {
+  const candidates = createEvidenceBackedMemoryCandidates(context).slice(0, 3);
+  context.memory.candidates.unshift(...candidates);
+  const sessionId = await ensureSession(context);
+  for (const candidate of candidates) {
+    await context.store.appendEvent(sessionId, {
+      type: "memory_candidate",
+      candidate,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  const run: MemoryLearningRun = {
+    trigger: "manual",
+    candidatesCreated: candidates.length,
+    modelCalled: false,
+    ...(candidates.length === 0
+      ? { skippedReason: "no bounded evidence/todo/verification/handoff source" }
+      : {}),
+    createdAt: new Date().toISOString(),
+  };
+  context.memory.lastLearningRun = run;
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `memory_learning trigger=${run.trigger} candidates=${run.candidatesCreated} modelCalled=no skipped=${run.skippedReason ?? "none"}`,
+    candidates.length === 0 ? "warning" : "info",
+  );
+  refreshCacheFreshness(context);
+  return run;
+}
+
+function createEvidenceBackedMemoryCandidates(context: TuiContext): MemoryCandidate[] {
+  const existing = new Set(
+    [...context.memory.candidates, ...context.memory.accepted, ...context.memory.disabled].map(
+      (item) => item.summary,
+    ),
+  );
+  const summaries: MemoryCandidate[] = [];
+  const add = (summary: string, source: string, refs: string[]): void => {
+    const normalized = truncateDisplay(summary.replace(/\s+/g, " "), 240);
+    if (!normalized || existing.has(normalized)) {
+      return;
+    }
+    existing.add(normalized);
+    summaries.push(createMemoryCandidate("project", normalized, source, refs));
+  };
+  for (const evidence of context.evidence.slice(0, 3)) {
+    add(`证据线索：${evidence.summary}`, `evidence:${evidence.kind}`, [evidence.id]);
+  }
+  for (const todo of context.tools.todos.slice(0, 3)) {
+    if (todo.status === "completed") {
+      add(`已完成任务线索：${todo.content}`, "todo:completed", [`todo:${todo.id}`]);
+    }
+  }
+  if (context.lastVerification?.status === "pass") {
+    add(`验证通过线索：${context.lastVerification.summary}`, "verification:pass", [
+      context.lastVerification.id,
+    ]);
+  }
+  if (context.memory.lastHandoff) {
+    add(`handoff 线索：${context.memory.lastHandoff.goal}`, "handoff", [
+      context.memory.lastHandoff.id,
+    ]);
+  }
+  return summaries;
+}
+
+function formatMemoryLearningRun(run: MemoryLearningRun): string {
+  return [
+    "Memory learn（controlled / candidate-only）",
+    `- trigger: ${run.trigger}`,
+    `- candidatesCreated: ${run.candidatesCreated}`,
+    `- modelCalled: ${run.modelCalled ? "yes" : "no"}`,
+    `- skippedReason: ${run.skippedReason ?? "none"}`,
+    "- autoAccept: no；请运行 /memory review 后用 /memory accept <id> 明确确认长期写入。",
+  ].join("\n");
+}
+
+function createControlledMemoryInjection(context: TuiContext): {
+  items: MemoryCandidate[];
+  text: string;
+} {
+  const items = context.memory.accepted
+    .filter((item) => normalizeMemoryStatus(item) === "accepted" && !item.inferred)
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .slice(0, MEMORY_PROMPT_TOP_K);
+  const text = truncateDisplay(
+    items
+      .map(
+        (item) =>
+          `- ${item.id} [${item.scope}] ${truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH)} (source=${truncateDisplay(item.source, 80)})`,
+      )
+      .join("\n"),
+    MEMORY_PROMPT_TOTAL_WIDTH,
+  );
+  return { items, text };
+}
+
+function estimateMemoryTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function formatControlledMemoryForModel(context: TuiContext): string {
+  const injection = createControlledMemoryInjection(context);
+  if (injection.items.length === 0) {
+    return "[]";
+  }
+  return JSON.stringify(
+    injection.items.map((item) => ({
+      id: item.id,
+      scope: item.scope,
+      summary: truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH),
+      source: truncateDisplay(item.source, 80),
+    })),
+  );
 }
 
 function createLinghunMdTemplate(language: Language): string {
@@ -5345,6 +5784,7 @@ async function importAiSessions(
     "project",
     `外部会话导入线索：${source} / ${query}`,
     "AI sessions import summary",
+    [`ai-sessions:${source}:${query}`],
   );
   context.memory.candidates.unshift(candidate);
   refreshCacheFreshness(context);
@@ -6748,19 +7188,26 @@ function createProjectRulesFreshnessSummary(context: TuiContext): string {
 }
 
 function createMemoryFreshnessSummary(context: TuiContext): string {
+  const summarize = (items: MemoryCandidate[]) =>
+    items
+      .map((item) => ({
+        id: item.id,
+        scope: item.scope,
+        status: normalizeMemoryStatus(item),
+        summary: item.summary,
+        source: item.source,
+      }))
+      .sort((a, b) =>
+        `${a.status}:${a.scope}:${a.id}:${a.summary}:${a.source}`.localeCompare(
+          `${b.status}:${b.scope}:${b.id}:${b.summary}:${b.source}`,
+        ),
+      );
   return stableStringify({
     projectRules: context.memory.projectRulesSummary,
-    candidates: context.memory.candidates.map((item) => ({
-      id: item.id,
-      scope: item.scope,
-      summary: item.summary,
-    })),
-    accepted: context.memory.accepted.map((item) => ({
-      id: item.id,
-      scope: item.scope,
-      summary: item.summary,
-    })),
-    handoffCreatedAt: context.memory.lastHandoff?.createdAt ?? "none",
+    candidates: summarize(context.memory.candidates),
+    accepted: summarize(context.memory.accepted),
+    disabled: summarize(context.memory.disabled),
+    rejected: summarize(context.memory.rejected),
   });
 }
 
@@ -10256,7 +10703,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "You are Linghun, a coding assistant with tool-use capabilities. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
       : "你是 Linghun 工程型中文助手，具备工具调用能力。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 type FreshnessLiteState = {

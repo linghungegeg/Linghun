@@ -277,6 +277,9 @@ async function createTestContext(
       sessionDir: join(project, ".linghun", "memory", "session"),
       candidates: [],
       accepted: [],
+      rejected: [],
+      disabled: [],
+      retired: [],
     },
     skills: await createSkillState(config, project),
     workflows: createWorkflowState(config),
@@ -833,6 +836,111 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("项目长期规则只保存稳定工程事实");
     expect(output.text).toContain("memoryHash");
     expect(output.text).toMatch(/changedKeys: .*memoryHash/);
+  });
+
+  it("controls Phase 16 memory lifecycle, injection, and stats", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(
+      "/memory candidate 项目约定：只把经确认的长期规则注入 prompt --scope project",
+      context,
+      output,
+    );
+    const acceptedId = context.memory.candidates[0]?.id;
+    expect(acceptedId).toBeTruthy();
+    await handleSlashCommand(`/memory accept ${acceptedId}`, context, output);
+    await handleSlashCommand("/memory stats", context, output);
+
+    const prompt = createModelSystemPrompt("帮我继续", context, {
+      memory: { candidates: 0, accepted: 1 },
+    });
+    expect(prompt).toContain("ControlledMemorySummary=");
+    expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
+    expect(prompt).toContain("MemoryBoundary=acceptedOnly");
+    expect(output.text).toContain("autoLearning: off by default");
+    expect(output.text).toContain("promptInjection: acceptedOnly topK=3 injected=1");
+
+    await handleSlashCommand(`/memory disable ${acceptedId}`, context, output);
+    const disabledPrompt = createModelSystemPrompt("帮我继续", context, {
+      memory: { candidates: 0, accepted: 0 },
+    });
+    expect(disabledPrompt).not.toContain("项目约定：只把经确认的长期规则注入 prompt");
+    expect(context.memory.disabled).toHaveLength(1);
+
+    await handleSlashCommand(`/memory rollback ${acceptedId}`, context, output);
+    expect(context.memory.accepted).toHaveLength(1);
+    await handleSlashCommand(`/memory delete ${acceptedId}`, context, output);
+    expect(context.memory.accepted).toHaveLength(0);
+    await expect(
+      readFile(join(project, ".linghun", "memory", `${acceptedId}.json`), "utf8"),
+    ).rejects.toThrow();
+
+    await handleSlashCommand(
+      "/memory candidate 临时错误尝试不应长期保存 --scope session",
+      context,
+      output,
+    );
+    const rejectedId = context.memory.candidates[0]?.id;
+    await handleSlashCommand(`/memory reject ${rejectedId}`, context, output);
+    expect(context.memory.rejected).toHaveLength(1);
+    expect(output.text).toContain("已拒绝候选记忆");
+  });
+
+  it("creates Phase 16 memory learn candidates from bounded evidence without model calls", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.evidence.push({
+      id: "ev-phase-16",
+      kind: "test_result",
+      summary: "Phase 16 focused test passed",
+      source: "vitest",
+      supportsClaims: ["controlled-memory-learning"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand("/memory learn", context, output);
+
+    expect(context.memory.candidates).toHaveLength(1);
+    expect(context.memory.candidates[0]?.status).toBe("candidate");
+    expect(context.memory.candidates[0]?.sourceRefs).toEqual(["ev-phase-16"]);
+    expect(context.memory.lastLearningRun?.modelCalled).toBe(false);
+    expect(output.text).toContain("Memory learn（controlled / candidate-only）");
+    expect(output.text).toContain("modelCalled: no");
+    expect(output.text).toContain("autoAccept: no");
+  });
+
+  it("keeps Phase 16 skill evolution as candidate-only metadata", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(
+      "/skills evolve candidate 重复的 bug 修复流程可沉淀为本地 skill",
+      context,
+      output,
+    );
+    const candidateId = context.skills.evolutionCandidates[0]?.id;
+    expect(candidateId).toBeTruthy();
+    expect(output.text).toContain("不会自动写文件、安装、信任或启用");
+    expect(context.skills.skills).toHaveLength(0);
+
+    await handleSlashCommand("/skills evolve", context, output);
+    expect(output.text).toContain("Skill evolution candidates");
+    expect(output.text).toContain("autoEnable=no");
+
+    await handleSlashCommand(`/skills evolve reject ${candidateId}`, context, output);
+    expect(context.skills.evolutionCandidates).toHaveLength(0);
+    expect(context.skills.rejectedEvolutionCandidates).toHaveLength(1);
   });
 
   it("records complete handoff identity and branch parent source", async () => {
