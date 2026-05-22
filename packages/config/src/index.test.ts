@@ -10,9 +10,12 @@ import {
   getUserDataDir,
   lastConfigRecoveryWarning,
   loadConfig,
+  removeMcpServerConfig,
+  resetExtensionTrustForInstall,
   resolveStoragePaths,
   saveDefaultModel,
   saveExtensionEnablement,
+  saveMcpServerConfig,
   saveModelRoute,
 } from "./index.js";
 
@@ -225,7 +228,7 @@ describe("config directories", () => {
     expect(raw).not.toContain('"apiKey"');
   });
 
-  it("persists Phase 14 extension enablement and trust", async () => {
+  it("persists Phase 14 extension enablement and Phase 15.5D reinstall trust reset", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 
     await saveExtensionEnablement("skills", "bug-helper", false, project);
@@ -238,6 +241,52 @@ describe("config directories", () => {
     expect(enabled.skills.disabledIds).toEqual([]);
     expect(enabled.skills.trustedIds).toEqual(["bug-helper"]);
     expect(enabled.plugins.trustedIds).toEqual(["local-tools"]);
+
+    await resetExtensionTrustForInstall("skills", "bug-helper", project);
+    const reinstalled = await loadConfig(project);
+    expect(reinstalled.skills.disabledIds).toEqual(["bug-helper"]);
+    expect(reinstalled.skills.trustedIds).toEqual([]);
+  });
+
+  it("persists Phase 15.5D MCP source and trust records", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    await saveMcpServerConfig(
+      "local-demo",
+      {
+        command: "node",
+        args: ["--version"],
+        localPath: "node",
+        scope: "project",
+        installedAt: "2026-05-22T00:00:00.000Z",
+        trustLevel: "trusted",
+        permissionSummary: "tool-discovery",
+      },
+      true,
+      project,
+    );
+    const added = await loadConfig(project);
+    const addedServer = added.mcp.servers["local-demo"];
+    expect(addedServer).toBeDefined();
+    if (!addedServer) {
+      throw new Error("local-demo MCP server was not saved");
+    }
+    await saveMcpServerConfig(
+      "local-demo",
+      { ...addedServer, disabled: true, trustLevel: "disabled" },
+      false,
+      project,
+    );
+    const disabled = await loadConfig(project);
+    await removeMcpServerConfig("local-demo", project);
+    const removed = await loadConfig(project);
+
+    expect(added.mcp.enabledServers).toContain("local-demo");
+    expect(added.mcp.servers["local-demo"]?.localPath).toBe("node");
+    expect(added.mcp.servers["local-demo"]?.permissionSummary).toBe("tool-discovery");
+    expect(disabled.mcp.enabledServers).not.toContain("local-demo");
+    expect(disabled.mcp.servers["local-demo"]?.trustLevel).toBe("disabled");
+    expect(removed.mcp.servers["local-demo"]).toBeUndefined();
   });
 
   it.each([

@@ -28,6 +28,7 @@ import {
   recordModelUsage,
   runTui,
   validateCodebaseMemoryToolExecution,
+  validateExtensionContributionExecution,
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
@@ -5069,5 +5070,179 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("完整 skill 正文");
     expect(orphanOutput.text).toContain("未知 skill：ghost-skill");
     expect(orphanOutput.text).toContain("未知 plugin：ghost-plugin");
+  });
+
+  it("handles Phase 15.5D Connect Lite extension lifecycle and guards", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const skillSource = join(project, "skill-source");
+    const pluginSource = join(project, "plugin-source");
+    await mkdir(skillSource, { recursive: true });
+    await mkdir(pluginSource, { recursive: true });
+    await writeFile(
+      join(skillSource, "skill.json"),
+      JSON.stringify({
+        id: "connect-skill",
+        name: "Connect Skill",
+        description: "Connect Lite skill metadata.",
+        summary: "Connect Lite summary.",
+        triggers: ["connect"],
+        permissions: ["write", "network"],
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(pluginSource, "plugin.json"),
+      JSON.stringify({
+        id: "connect-plugin",
+        name: "Connect Plugin",
+        version: "1.0.0",
+        description: "Connect Lite plugin metadata.",
+        permissions: ["network"],
+        contributions: { commands: ["/connect-plugin"], hooks: ["PreToolUse"] },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(`/skills install local ${skillSource}`, context, output);
+    expect(
+      validateExtensionContributionExecution("skills", "connect-skill", "connect", context),
+    ).toEqual({
+      ok: false,
+      summary:
+        "Connect Lite guard: skills:connect-skill 未启用或未信任，已拒绝执行。请先 validate/enable/doctor。",
+    });
+    await handleSlashCommand("/skills status", context, output);
+    await handleSlashCommand("/skills validate connect-skill", context, output);
+    await handleSlashCommand("/skills disable connect-skill", context, output);
+    await handleSlashCommand("/skills enable connect-skill", context, output);
+    expect(
+      validateExtensionContributionExecution("skills", "connect-skill", "connect", context),
+    ).toEqual({ ok: true });
+    await handleSlashCommand("/skills update connect-skill", context, output);
+    expect(
+      validateExtensionContributionExecution("skills", "connect-skill", "connect", context),
+    ).toEqual({
+      ok: false,
+      summary:
+        "Connect Lite guard: skills:connect-skill 未启用或未信任，已拒绝执行。请先 validate/enable/doctor。",
+    });
+    await handleSlashCommand("/skills enable connect-skill", context, output);
+    await handleSlashCommand("/skills install github owner/repo --ref main", context, output);
+    await handleSlashCommand("/skills install github:owner/repo", context, output);
+    await handleSlashCommand(`/plugins install ${pluginSource}`, context, output);
+    expect(
+      validateExtensionContributionExecution(
+        "plugins",
+        "connect-plugin",
+        "/connect-plugin",
+        context,
+      ),
+    ).toEqual({
+      ok: false,
+      summary:
+        "Connect Lite guard: plugins:connect-plugin 未启用或未信任，已拒绝执行。请先 validate/enable/doctor。",
+    });
+    await handleSlashCommand("/plugins status", context, output);
+    await handleSlashCommand("/plugins validate connect-plugin", context, output);
+    await handleSlashCommand("/plugins enable connect-plugin", context, output);
+    expect(
+      validateExtensionContributionExecution(
+        "plugins",
+        "connect-plugin",
+        "/connect-plugin",
+        context,
+      ),
+    ).toEqual({ ok: true });
+    await handleSlashCommand("/plugins update connect-plugin", context, output);
+    expect(
+      validateExtensionContributionExecution(
+        "plugins",
+        "connect-plugin",
+        "/connect-plugin",
+        context,
+      ),
+    ).toEqual({
+      ok: false,
+      summary:
+        "Connect Lite guard: plugins:connect-plugin 未启用或未信任，已拒绝执行。请先 validate/enable/doctor。",
+    });
+    await handleSlashCommand("/plugins enable connect-plugin", context, output);
+    await handleSlashCommand("/plugins install https://github.com/owner/repo", context, output);
+    await handleSlashCommand("/plugins install github invalid --confirm-network", context, output);
+
+    const resumed = await store.resume(session.id);
+    expect(
+      resumed.transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("connect_lite_network_start_gate_confirmed") &&
+          event.message.includes("boundary=exact-command_start_gate_not_full_permission_approval"),
+      ),
+    ).toBe(true);
+
+    expect(output.text).toContain("已安装 skill manifest：connect-skill");
+    expect(output.text).toContain("Skills Connect Lite status");
+    expect(output.text).toContain("localPath=present:skill-source");
+    expect(output.text).toContain("Skills validate");
+    expect(output.text).toContain("Trust notice：即将启用 skill connect-skill");
+    expect(output.text).toContain("Connect Lite Start Gate：skills install github");
+    expect(output.text).toContain("/skills install github owner/repo --ref main --confirm-network");
+    expect(output.text).toContain("已安装 plugin manifest：connect-plugin");
+    expect(output.text).toContain("Plugins Connect Lite status");
+    expect(output.text).toContain("Plugins validate");
+    expect(output.text).toContain("Trust notice：即将启用 plugin connect-plugin");
+    expect(output.text).toContain("不执行仓库脚本、postinstall、hook、依赖安装或任意第三方代码");
+    expect(
+      validateExtensionContributionExecution("skills", "connect-skill", "connect", context),
+    ).toEqual({ ok: true });
+    expect(
+      validateExtensionContributionExecution("skills", "connect-skill", "missing", context),
+    ).toEqual({
+      ok: false,
+      summary: "Connect Lite guard: skill:connect-skill 未注册触发项 missing，已拒绝盲执行。",
+    });
+    expect(
+      validateExtensionContributionExecution(
+        "plugins",
+        "connect-plugin",
+        "/connect-plugin",
+        context,
+      ),
+    ).toEqual({ ok: true });
+    expect(
+      validateExtensionContributionExecution("plugins", "connect-plugin", "/missing", context),
+    ).toEqual({
+      ok: false,
+      summary: "Connect Lite guard: plugin:connect-plugin 未注册贡献项 /missing，已拒绝盲执行。",
+    });
+  });
+
+  it("handles Phase 15.5D MCP Connect Lite lifecycle without running servers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/mcp add local local-demo node --version", context, output);
+    await handleSlashCommand("/mcp validate local-demo", context, output);
+    await handleSlashCommand("/mcp disable local-demo", context, output);
+    await handleSlashCommand("/mcp enable local-demo", context, output);
+    await handleSlashCommand("/mcp update local-demo local node --help", context, output);
+    await handleSlashCommand("/mcp remove local-demo", context, output);
+
+    expect(output.text).toContain("已添加 MCP server：local-demo");
+    expect(output.text).toContain("MCP validate");
+    expect(output.text).toContain("source=present:node");
+    expect(output.text).toContain("permissions=tool-discovery");
+    expect(output.text).toContain("已禁用 MCP server：local-demo");
+    expect(output.text).toContain("已启用 MCP server：local-demo");
+    expect(output.text).toContain("已更新 MCP server：local-demo");
+    expect(output.text).toContain("未执行 server");
+    expect(output.text).toContain("已移除 MCP server：local-demo");
   });
 });

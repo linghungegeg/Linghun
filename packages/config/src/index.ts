@@ -63,6 +63,14 @@ export type McpServerConfig = {
   args?: string[];
   env?: Record<string, string>;
   disabled?: boolean;
+  sourceUrl?: string;
+  localPath?: string;
+  ref?: string;
+  commit?: string;
+  scope?: "project" | "user";
+  installedAt?: string;
+  trustLevel?: "trusted" | "untrusted" | "disabled";
+  permissionSummary?: string;
 };
 
 export type StorageScope = "project" | "user" | "custom";
@@ -504,6 +512,68 @@ export async function saveExtensionEnablement(
   return next;
 }
 
+export async function resetExtensionTrustForInstall(
+  kind: "skills" | "plugins",
+  id: string,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const section = current[kind];
+  const next: LinghunConfig = {
+    ...current,
+    [kind]: {
+      ...section,
+      disabledIds: stableUnique([...section.disabledIds, id]),
+      trustedIds: section.trustedIds.filter((item) => item !== id),
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+export async function saveMcpServerConfig(
+  id: string,
+  server: McpServerConfig,
+  enabled: boolean,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const enabledServers = enabled
+    ? stableUnique([...current.mcp.enabledServers, id])
+    : current.mcp.enabledServers.filter((item) => item !== id);
+  const next: LinghunConfig = {
+    ...current,
+    mcp: {
+      ...current.mcp,
+      enabledServers,
+      servers: {
+        ...current.mcp.servers,
+        [id]: server,
+      },
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
+export async function removeMcpServerConfig(
+  id: string,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const { [id]: _removed, ...servers } = current.mcp.servers;
+  const next: LinghunConfig = {
+    ...current,
+    mcp: {
+      ...current.mcp,
+      enabledServers: current.mcp.enabledServers.filter((item) => item !== id),
+      servers,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
 function stableUnique(values: string[]): string[] {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
@@ -649,6 +719,23 @@ function validateMcp(mcp: LinghunConfig["mcp"]): void {
       assertStringRecord(server.env, `${path}.env`);
     }
     assertOptionalBoolean(server.disabled, `${path}.disabled`);
+    assertOptionalString(server.sourceUrl, `${path}.sourceUrl`);
+    assertOptionalString(server.localPath, `${path}.localPath`);
+    assertOptionalString(server.ref, `${path}.ref`);
+    assertOptionalString(server.commit, `${path}.commit`);
+    if (server.scope !== undefined && server.scope !== "project" && server.scope !== "user") {
+      throw new Error(`${path}.scope is invalid`);
+    }
+    assertOptionalString(server.installedAt, `${path}.installedAt`);
+    if (
+      server.trustLevel !== undefined &&
+      server.trustLevel !== "trusted" &&
+      server.trustLevel !== "untrusted" &&
+      server.trustLevel !== "disabled"
+    ) {
+      throw new Error(`${path}.trustLevel is invalid`);
+    }
+    assertOptionalString(server.permissionSummary, `${path}.permissionSummary`);
   }
 }
 

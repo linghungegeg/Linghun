@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, extname, join, relative, resolve } from "node:path";
 import {
   stderr as defaultStderr,
@@ -12,14 +12,18 @@ import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import {
   type LinghunConfig,
+  type McpServerConfig,
   type ModelCapability,
   type ModelRole,
   type RoleModelRoute,
   defaultConfig,
   getProjectSettingsPath,
   loadConfig,
+  removeMcpServerConfig,
+  resetExtensionTrustForInstall,
   resolveStoragePaths,
   saveExtensionEnablement,
+  saveMcpServerConfig,
   saveModelRoute,
 } from "@linghun/config";
 import {
@@ -549,6 +553,22 @@ export type MemoryState = {
 export type ExtensionSource = "local" | "official" | "third-party";
 export type ExtensionScope = "project" | "user";
 
+export type ExtensionTrustLevel = "trusted" | "untrusted" | "disabled";
+
+export type ExtensionLifecycleRecord = {
+  sourceUrl?: string;
+  localPath?: string;
+  ref?: string;
+  commit?: string;
+  installedAt?: string;
+  trustLevel: ExtensionTrustLevel;
+  permissionSummary: string;
+  discovered: boolean;
+  registered: boolean;
+  schemaLoaded: boolean;
+  runtimeVersion: "compatible" | "incompatible" | "unknown";
+};
+
 export type SkillSummary = {
   id: string;
   name: string;
@@ -565,6 +585,7 @@ export type SkillSummary = {
   mayWrite: boolean;
   mayExecute: boolean;
   mayNetwork: boolean;
+  lifecycle: ExtensionLifecycleRecord;
   lastError?: string;
 };
 
@@ -632,6 +653,7 @@ export type PluginSummary = {
   mayWrite: boolean;
   mayExecute: boolean;
   mayNetwork: boolean;
+  lifecycle: ExtensionLifecycleRecord;
   contributions: {
     commands: string[];
     mcpServers: string[];
@@ -972,7 +994,10 @@ export function createMcpState(config: LinghunConfig): McpState {
         ({
           name,
           command: server.command,
-          status: server.disabled ? "disabled" : "configured",
+          status:
+            server.disabled || !config.mcp.enabledServers.includes(name)
+              ? "disabled"
+              : "configured",
         }) satisfies McpServerState,
     )
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -982,18 +1007,38 @@ export function createMcpState(config: LinghunConfig): McpState {
     tools: stabilizeMcpToolList(
       servers
         .filter((server) => server.status === "configured")
-        .map((server) => ({
-          server: server.name,
-          name: `${server.name}.status`,
-          description:
-            "MCP server health and tool discovery placeholder; real tool schemas are not dumped.",
-          discovery: "placeholder" as const,
-          trusted: false,
-          schemaLoaded: false,
-          runtimeVersion: "unknown" as const,
-        })),
+        .flatMap((server) => createMcpToolPlaceholders(server.name, "placeholder")),
     ),
   };
+}
+
+function createMcpToolPlaceholders(
+  serverName: string,
+  discovery: "discovered" | "placeholder",
+): McpToolState[] {
+  if (serverName !== "codebase-memory") {
+    return [
+      {
+        server: serverName,
+        name: `${serverName}.status`,
+        description:
+          "MCP server health and tool discovery placeholder; real tool schemas are not dumped.",
+        discovery,
+        trusted: discovery === "discovered",
+        schemaLoaded: discovery === "discovered",
+        runtimeVersion: discovery === "discovered" ? "compatible" : "unknown",
+      },
+    ];
+  }
+  return Object.keys(codebaseMemoryRequiredArgs()).map((tool) => ({
+    server: serverName,
+    name: `${serverName}.${tool}`,
+    description: `codebase-memory ${tool}; schema summary only, full schema omitted.`,
+    discovery,
+    trusted: discovery === "discovered",
+    schemaLoaded: discovery === "discovered",
+    runtimeVersion: discovery === "discovered" ? "compatible" : "unknown",
+  }));
 }
 
 export function createIndexState(config: LinghunConfig): IndexState {
@@ -1263,7 +1308,8 @@ async function readSkillManifest(
     const id = stableId(value.id, basename(path, extname(path)));
     const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
     const source = parseSource(value.source, scope);
-    const trusted = source !== "third-party" || config.skills.trustedIds.includes(id);
+    const trusted = source === "official" || config.skills.trustedIds.includes(id);
+    const enabled = config.skills.enabled && !config.skills.disabledIds.includes(id) && trusted;
     return {
       id,
       name: stringValue(value.name, id),
@@ -1274,12 +1320,20 @@ async function readSkillManifest(
       scope,
       path,
       version: stringValue(value.version, "0.0.0"),
-      enabled: config.skills.enabled && !config.skills.disabledIds.includes(id) && trusted,
+      enabled,
       trusted,
       permissions,
       mayWrite: permissions.includes("write"),
       mayExecute: permissions.includes("bash") || permissions.includes("execute"),
       mayNetwork: permissions.includes("network"),
+      lifecycle: readLifecycleRecord(value, {
+        path,
+        source,
+        trusted,
+        enabled,
+        permissions,
+        hasSchema: true,
+      }),
     };
   } catch (error) {
     return {
@@ -1298,6 +1352,15 @@ async function readSkillManifest(
       mayWrite: false,
       mayExecute: false,
       mayNetwork: false,
+      lifecycle: {
+        localPath: path,
+        trustLevel: "disabled",
+        permissionSummary: "none",
+        discovered: false,
+        registered: false,
+        schemaLoaded: false,
+        runtimeVersion: "unknown",
+      },
       lastError: formatError(error),
     };
   }
@@ -1335,7 +1398,9 @@ async function readPluginManifest(
     const id = stableId(value.id, basename(path, extname(path)));
     const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
     const source = parseSource(value.source, scope);
-    const trusted = source !== "third-party" || config.plugins.trustedIds.includes(id);
+    const trusted = source === "official" || config.plugins.trustedIds.includes(id);
+    const enabled = config.plugins.enabled && !config.plugins.disabledIds.includes(id) && trusted;
+    const contributions = normalizeContributions(value.contributions);
     return {
       id,
       name: stringValue(value.name, id),
@@ -1344,13 +1409,21 @@ async function readPluginManifest(
       source,
       scope,
       path,
-      enabled: config.plugins.enabled && !config.plugins.disabledIds.includes(id) && trusted,
+      enabled,
       trusted,
       permissions,
       mayWrite: permissions.includes("write"),
       mayExecute: permissions.includes("bash") || permissions.includes("execute"),
       mayNetwork: permissions.includes("network"),
-      contributions: normalizeContributions(value.contributions),
+      lifecycle: readLifecycleRecord(value, {
+        path,
+        source,
+        trusted,
+        enabled,
+        permissions,
+        hasSchema: Object.values(contributions).some((items) => items.length > 0),
+      }),
+      contributions,
     };
   } catch (error) {
     return {
@@ -1367,6 +1440,15 @@ async function readPluginManifest(
       mayWrite: false,
       mayExecute: false,
       mayNetwork: false,
+      lifecycle: {
+        localPath: path,
+        trustLevel: "disabled",
+        permissionSummary: "none",
+        discovered: false,
+        registered: false,
+        schemaLoaded: false,
+        runtimeVersion: "unknown",
+      },
       contributions: normalizeContributions(undefined),
       lastError: formatError(error),
     };
@@ -1463,6 +1545,45 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function permissionSummary(permissions: string[]): string {
+  if (permissions.length === 0) {
+    return "none";
+  }
+  const risks = [
+    permissions.includes("write") ? "write" : undefined,
+    permissions.includes("bash") || permissions.includes("execute") ? "execute" : undefined,
+    permissions.includes("network") ? "network" : undefined,
+  ].filter((item): item is string => Boolean(item));
+  return risks.length > 0 ? risks.join("+") : permissions.join("+");
+}
+
+function readLifecycleRecord(
+  value: Record<string, unknown>,
+  options: {
+    path: string;
+    source: ExtensionSource;
+    trusted: boolean;
+    enabled: boolean;
+    permissions: string[];
+    hasSchema: boolean;
+  },
+): ExtensionLifecycleRecord {
+  const raw = isRecord(value.lifecycle) ? value.lifecycle : value;
+  return {
+    sourceUrl: typeof raw.sourceUrl === "string" ? raw.sourceUrl : undefined,
+    localPath: typeof raw.localPath === "string" ? raw.localPath : options.path,
+    ref: typeof raw.ref === "string" ? raw.ref : undefined,
+    commit: typeof raw.commit === "string" ? raw.commit : undefined,
+    installedAt: typeof raw.installedAt === "string" ? raw.installedAt : undefined,
+    trustLevel: options.enabled ? "trusted" : options.trusted ? "disabled" : "untrusted",
+    permissionSummary: permissionSummary(options.permissions),
+    discovered: true,
+    registered: true,
+    schemaLoaded: options.hasSchema,
+    runtimeVersion: "compatible",
+  };
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -1808,7 +1929,9 @@ function formatSkills(context: TuiContext): string {
     lines.push(`- lastError: ${context.skills.lastError}`);
   }
   if (context.skills.skills.length === 0) {
-    lines.push("- none：可运行 /skills add 查看本地注册路径。");
+    lines.push(
+      "- none：可运行 /skills add 查看注册路径，或 /skills install local <path> 安装本地 skill manifest。",
+    );
   }
   for (const skill of context.skills.skills) {
     const error = skill.lastError ? ` lastError=${skill.lastError}` : "";
@@ -1845,7 +1968,7 @@ function formatPlugins(context: TuiContext): string {
   }
   if (context.plugins.plugins.length === 0) {
     lines.push(
-      "- none：把本地 manifest 放到 project/user plugins 目录；不支持市场/GitHub/远程安装。",
+      "- none：把本地 manifest 放到 project/user plugins 目录，或运行 /plugins install local <path>；Git/GitHub 仅支持受控 metadata 安装。",
     );
   }
   for (const plugin of context.plugins.plugins) {
@@ -1864,12 +1987,11 @@ function formatPluginsDoctor(context: TuiContext): string {
     `- disabledIds: ${context.plugins.disabledIds.join(",") || "none"}`,
     `- trustedIds: ${context.plugins.trustedIds.join(",") || "none"}`,
     ...context.plugins.plugins.map((plugin) => {
-      const risk =
-        plugin.source === "third-party" && !plugin.trusted ? "BLOCK untrusted third-party" : "ok";
+      const risk = !plugin.trusted ? `BLOCK untrusted ${plugin.source}` : "ok";
       const error = plugin.lastError ? ` lastError=${plugin.lastError}` : "";
       return `- ${plugin.id}: ${risk} path=${plugin.path} permissions=${plugin.permissions.join(",") || "none"}${error}`;
     }),
-    "- boundary: 不执行远程安装/自动更新/完整沙箱；第三方未信任前不得写文件、联网或执行命令。",
+    "- boundary: 不执行远程安装/自动更新/完整沙箱；未信任 extension 不得写文件、联网或执行命令。",
   ].join("\n");
 }
 
@@ -1903,11 +2025,458 @@ function formatTrustNotice(kind: "skill" | "plugin", item: SkillSummary | Plugin
     `- source: ${item.source}`,
     `- path: ${item.path}`,
     `- version: ${item.version}`,
+    `- sourceUrl: ${item.lifecycle.sourceUrl ? sanitizeDiagnosticText(item.lifecycle.sourceUrl) : "-"}`,
+    `- ref/commit: ${item.lifecycle.ref ?? "-"}/${item.lifecycle.commit ?? "-"}`,
+    `- installedAt: ${item.lifecycle.installedAt ?? "unknown"}`,
     `- permissions: ${item.permissions.join(",") || "none"}`,
-    `- trust: ${item.trusted ? "trusted" : "untrusted third-party"}`,
+    `- trust: ${item.trusted ? "trusted" : "untrusted"}`,
     `- mayWrite=${item.mayWrite ? "yes" : "no"} mayExecute=${item.mayExecute ? "yes" : "no"} mayNetwork=${item.mayNetwork ? "yes" : "no"}`,
-    "- 未信任第三方不得写文件、联网或执行命令；实际工具调用仍走权限管道。",
+    "- 未信任 extension 不得写文件、联网或执行命令；实际工具调用仍走权限管道。",
   ].join("\n");
+}
+
+export type ExtensionKind = "skills" | "plugins";
+
+type ExtensionInstallSource = "local" | "git" | "github";
+
+type ExtensionInstallRequest = {
+  source: ExtensionInstallSource;
+  locator: string;
+  scope: ExtensionScope;
+  ref?: string;
+  confirmNetwork: boolean;
+};
+
+function formatExtensionStatus(kind: ExtensionKind, context: TuiContext): string {
+  const items = kind === "skills" ? context.skills.skills : context.plugins.plugins;
+  const title = kind === "skills" ? "Skills Connect Lite status" : "Plugins Connect Lite status";
+  const disabledIds = kind === "skills" ? context.skills.disabledIds : context.plugins.disabledIds;
+  const trustedIds = kind === "skills" ? context.skills.trustedIds : context.plugins.trustedIds;
+  return [
+    title,
+    "- lifecycle: add/install, validate, enable/disable, remove/update, trust notice, doctor/status",
+    `- installed: ${items.length}`,
+    `- disabledIds: ${disabledIds.join(",") || "none"}`,
+    `- trustedIds: ${trustedIds.join(",") || "none"}`,
+    ...items.map((item) => {
+      const source = item.lifecycle.sourceUrl
+        ? `sourceUrl=${sanitizeDiagnosticText(item.lifecycle.sourceUrl)}`
+        : `localPath=${redactedPath(item.lifecycle.localPath)}`;
+      return `- ${item.id}: ${item.enabled ? "enabled" : "disabled"} trust=${item.lifecycle.trustLevel} ${source} ref=${item.lifecycle.ref ?? "-"} commit=${item.lifecycle.commit ?? "-"} permissions=${item.lifecycle.permissionSummary} discovered=${item.lifecycle.discovered ? "yes" : "no"} registered=${item.lifecycle.registered ? "yes" : "no"} schemaLoaded=${item.lifecycle.schemaLoaded ? "yes" : "no"} runtime=${item.lifecycle.runtimeVersion}${item.lastError ? ` loadError=${truncateDisplay(item.lastError, 80)}` : ""}`;
+    }),
+    "- boundary: Git/GitHub 安装只做受控 clone/fetch 和 manifest/SKILL.md 读取；不执行 postinstall、hook、仓库脚本或第三方代码。",
+  ].join("\n");
+}
+
+function parseExtensionInstallRequest(args: string[]): ExtensionInstallRequest | null {
+  const [first, second, ...remaining] = args;
+  if (!first) {
+    return null;
+  }
+  let source: ExtensionInstallSource;
+  let locator: string;
+  let rest: string[];
+  if (first === "local" || first === "git" || first === "github") {
+    if (!second) {
+      return null;
+    }
+    source = first;
+    locator = second;
+    rest = remaining;
+  } else if (first.startsWith("github:")) {
+    source = "github";
+    locator = first.slice("github:".length);
+    rest = [second, ...remaining].filter((item): item is string => Boolean(item));
+  } else if (isGitLocator(first)) {
+    source = "git";
+    locator = first;
+    rest = [second, ...remaining].filter((item): item is string => Boolean(item));
+  } else {
+    source = "local";
+    locator = first;
+    rest = [second, ...remaining].filter((item): item is string => Boolean(item));
+  }
+  if (!locator) {
+    return null;
+  }
+  let scope: ExtensionScope = "project";
+  let ref: string | undefined;
+  let confirmNetwork = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (value === "--scope" && (rest[index + 1] === "project" || rest[index + 1] === "user")) {
+      scope = rest[index + 1] as ExtensionScope;
+      index += 1;
+      continue;
+    }
+    if (value === "--ref" && rest[index + 1]) {
+      ref = rest[index + 1];
+      index += 1;
+      continue;
+    }
+    if (value === "--confirm-network") {
+      confirmNetwork = true;
+    }
+  }
+  return { source, locator, scope, ref, confirmNetwork };
+}
+
+function isGitLocator(value: string): boolean {
+  return /^https?:\/\//iu.test(value) || /^git@/iu.test(value) || value.endsWith(".git");
+}
+
+function formatExtensionInstallGate(
+  kind: ExtensionKind,
+  request: ExtensionInstallRequest,
+  command: string,
+): string {
+  return [
+    `Connect Lite Start Gate：${kind} install ${request.source}`,
+    `- source: ${sanitizeDiagnosticText(request.locator)}`,
+    `- scope: ${request.scope}`,
+    `- ref: ${request.ref ?? "default"}`,
+    "- risk: network + third-party extension metadata; install 前只读取 manifest / SKILL.md / metadata。",
+    "- boundary: 不执行仓库脚本、postinstall、hook、依赖安装或任意第三方代码。",
+    "- recovery: 失败不会覆盖已有启用项；可运行 status/doctor 查看来源、加载错误和下一步。",
+    "- permission: --confirm-network 是 exact-command Start Gate confirmation，不是完整 permission approval；后续工具/Bash/联网仍走权限管道，确认执行会写入 audit event。",
+    `- exact command: ${formatExtensionInstallExactCommand(command, request)}`,
+  ].join("\n");
+}
+
+function formatExtensionInstallExactCommand(
+  command: string,
+  request: ExtensionInstallRequest,
+): string {
+  const parts = [command];
+  if (!/\supdate\s/u.test(command)) {
+    parts.push(request.source, request.locator);
+    if (request.scope !== "project") {
+      parts.push("--scope", request.scope);
+    }
+  }
+  if (request.ref) {
+    parts.push("--ref", request.ref);
+  }
+  parts.push("--confirm-network");
+  return parts.join(" ");
+}
+
+async function installExtensionFromRequest(
+  kind: ExtensionKind,
+  request: ExtensionInstallRequest,
+  context: TuiContext,
+): Promise<{ ok: false; summary: string } | { ok: true; summary: string; id: string }> {
+  const targetDir = getExtensionTargetDir(kind, request.scope, context);
+  await mkdir(targetDir, { recursive: true });
+  if (request.source === "local") {
+    const localPath = resolve(context.projectPath, request.locator);
+    const result = await installExtensionFromDirectory(kind, localPath, targetDir, {
+      localPath,
+      source: "local",
+    });
+    if (result.ok) {
+      context.config = await resetExtensionTrustForInstall(kind, result.id, context.projectPath);
+    }
+    return result;
+  }
+  if (request.confirmNetwork) {
+    const sessionId = await ensureSession(context);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `connect_lite_network_start_gate_confirmed: kind=${kind} source=${request.source} scope=${request.scope} ref=${request.ref ?? "default"} locator=${sanitizeDiagnosticText(request.locator)} boundary=exact-command_start_gate_not_full_permission_approval`,
+      "info",
+    );
+  }
+  if (!request.confirmNetwork) {
+    return { ok: false, summary: "network confirmation required" };
+  }
+  const sourceUrl =
+    request.source === "github" ? githubRepoToUrl(request.locator) : request.locator;
+  if (!sourceUrl) {
+    return { ok: false, summary: "GitHub repo 格式应为 owner/repo，或使用完整 Git URL。" };
+  }
+  const tempRoot = await mkdtemp(join(tmpdir(), "linghun-connect-lite-"));
+  try {
+    const cloneArgs = ["-c", "core.hooksPath=/dev/null", "clone", "--depth", "1"];
+    if (request.ref) {
+      cloneArgs.push("--branch", request.ref);
+    }
+    cloneArgs.push("--", sourceUrl, tempRoot);
+    const clone = await runCommandCapture("git", cloneArgs, context.projectPath, 60_000);
+    if (clone.exitCode !== 0) {
+      return { ok: false, summary: `受控 git clone/fetch 失败：${clone.summary}` };
+    }
+    const commit = await runCommandCapture(
+      "git",
+      ["-C", tempRoot, "rev-parse", "HEAD"],
+      context.projectPath,
+      10_000,
+    );
+    const result = await installExtensionFromDirectory(kind, tempRoot, targetDir, {
+      sourceUrl,
+      ref: request.ref,
+      commit: commit.exitCode === 0 ? commit.stdout.trim().slice(0, 40) : undefined,
+    });
+    if (result.ok) {
+      context.config = await resetExtensionTrustForInstall(kind, result.id, context.projectPath);
+    }
+    return result;
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function githubRepoToUrl(locator: string): string | null {
+  if (/^https?:\/\//iu.test(locator) || locator.endsWith(".git")) {
+    return locator;
+  }
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(locator)) {
+    return `https://github.com/${locator}.git`;
+  }
+  return null;
+}
+
+function getExtensionTargetDir(
+  kind: ExtensionKind,
+  scope: ExtensionScope,
+  context: TuiContext,
+): string {
+  if (kind === "skills") {
+    return scope === "project" ? context.skills.projectDir : context.skills.userDir;
+  }
+  return scope === "project" ? context.plugins.projectDir : context.plugins.userDir;
+}
+
+async function installExtensionFromDirectory(
+  kind: ExtensionKind,
+  sourcePath: string,
+  targetDir: string,
+  lifecycle: Pick<ExtensionLifecycleRecord, "sourceUrl" | "localPath" | "ref" | "commit"> & {
+    source?: ExtensionSource;
+  },
+): Promise<{ ok: false; summary: string } | { ok: true; summary: string; id: string }> {
+  const manifest = await readExtensionSourceManifest(kind, sourcePath);
+  if (!manifest.ok) {
+    return manifest;
+  }
+  const id = stableId(manifest.value.id, basename(sourcePath, extname(sourcePath)));
+  const outputPath = join(targetDir, `${id}.json`);
+  const value = {
+    ...manifest.value,
+    id,
+    source: lifecycle.source ?? manifest.value.source ?? "third-party",
+    lifecycle: {
+      ...lifecycle,
+      installedAt: new Date().toISOString(),
+      trustLevel: "untrusted",
+    },
+  };
+  await writeFile(outputPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  return {
+    ok: true,
+    id,
+    summary: `已安装 ${kind === "skills" ? "skill" : "plugin"} manifest：${id}`,
+  };
+}
+
+async function readExtensionSourceManifest(
+  kind: ExtensionKind,
+  sourcePath: string,
+): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; summary: string }> {
+  const resolved = resolve(sourcePath);
+  const info = await stat(resolved).catch(() => null);
+  if (!info) {
+    return { ok: false, summary: `来源不存在：${redactedPath(resolved)}` };
+  }
+  const candidates = info.isDirectory()
+    ? [
+        kind === "skills" ? "skill.json" : "plugin.json",
+        kind === "skills" ? "linghun-skill.json" : "linghun-plugin.json",
+        "manifest.json",
+        "metadata.json",
+      ].map((file) => join(resolved, file))
+    : [resolved];
+  for (const candidate of candidates) {
+    const content = await readFile(candidate, "utf8").catch(() => null);
+    if (!content) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      return { ok: true, value: parsed };
+    } catch (error) {
+      return {
+        ok: false,
+        summary: `manifest JSON 无效：${redactedPath(candidate)} ${formatError(error)}`,
+      };
+    }
+  }
+  if (kind === "skills" && info.isDirectory()) {
+    const markdown = await readFile(join(resolved, "SKILL.md"), "utf8").catch(() => null);
+    if (markdown) {
+      const title = markdown.match(/^#\s+(.+)$/mu)?.[1]?.trim() ?? basename(resolved);
+      const summary = markdown
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .find((line) => line && !line.startsWith("#"));
+      return {
+        ok: true,
+        value: {
+          id: stableId(title, basename(resolved)),
+          name: title,
+          description: summary ?? title,
+          summary: summary ?? title,
+          triggers: [],
+          permissions: ["read"],
+        },
+      };
+    }
+  }
+  return {
+    ok: false,
+    summary:
+      "未找到 manifest.json / metadata.json / skill.json / plugin.json；skill 可提供 SKILL.md。",
+  };
+}
+
+async function refreshExtensionState(kind: ExtensionKind, context: TuiContext): Promise<void> {
+  if (kind === "skills") {
+    context.skills = await createSkillState(context.config, context.projectPath);
+    return;
+  }
+  context.plugins = await createPluginState(context.config, context.projectPath);
+  context.hooks = await createHookState(context.config, context.projectPath);
+}
+
+async function removeExtension(
+  kind: ExtensionKind,
+  id: string,
+  context: TuiContext,
+): Promise<string> {
+  const item =
+    kind === "skills"
+      ? context.skills.skills.find((skill) => skill.id === id)
+      : context.plugins.plugins.find((plugin) => plugin.id === id);
+  if (!item) {
+    return `未找到 ${kind === "skills" ? "skill" : "plugin"}：${id}`;
+  }
+  await rm(item.path, { force: true });
+  context.config = await saveExtensionEnablement(kind, id, false, context.projectPath);
+  await refreshExtensionState(kind, context);
+  refreshCacheFreshness(context);
+  return `已移除 ${kind === "skills" ? "skill" : "plugin"}：${id}；若需要恢复，请从原 source 重新 install。`;
+}
+
+async function updateExtension(
+  kind: ExtensionKind,
+  id: string,
+  context: TuiContext,
+  args: string[],
+): Promise<string> {
+  const item =
+    kind === "skills"
+      ? context.skills.skills.find((skill) => skill.id === id)
+      : context.plugins.plugins.find((plugin) => plugin.id === id);
+  if (!item) {
+    return `未找到 ${kind === "skills" ? "skill" : "plugin"}：${id}`;
+  }
+  const source = item.lifecycle.sourceUrl ? "git" : "local";
+  const request: ExtensionInstallRequest = {
+    source,
+    locator: item.lifecycle.sourceUrl ?? item.lifecycle.localPath ?? item.path,
+    scope: item.scope,
+    ref: args.includes("--ref") ? args[args.indexOf("--ref") + 1] : item.lifecycle.ref,
+    confirmNetwork: args.includes("--confirm-network"),
+  };
+  if (source === "git" && !request.confirmNetwork) {
+    return formatExtensionInstallGate(kind, request, `/${kind} update ${id}`);
+  }
+  const result = await installExtensionFromRequest(kind, request, context);
+  if (result.ok) {
+    await refreshExtensionState(kind, context);
+    refreshCacheFreshness(context);
+    return `已更新 ${kind === "skills" ? "skill" : "plugin"}：${id}；${result.summary}`;
+  }
+  return result.summary;
+}
+
+function validateExtensionItems(kind: ExtensionKind, context: TuiContext, id?: string): string {
+  const items = kind === "skills" ? context.skills.skills : context.plugins.plugins;
+  const selected = id ? items.filter((item) => item.id === id) : items;
+  if (selected.length === 0) {
+    return id
+      ? `未找到 ${kind === "skills" ? "skill" : "plugin"}：${id}`
+      : `没有已发现的 ${kind} manifest。`;
+  }
+  return [
+    `${kind === "skills" ? "Skills" : "Plugins"} validate`,
+    ...selected.map((item) => {
+      const problems = [];
+      if (!item.lifecycle.discovered) problems.push("not discovered");
+      if (!item.lifecycle.registered) problems.push("not registered");
+      if (!item.trusted) problems.push("untrusted");
+      if (!item.lifecycle.schemaLoaded) problems.push("schema not loaded");
+      if (item.lifecycle.runtimeVersion !== "compatible") problems.push("runtime incompatible");
+      if (item.lastError) problems.push("load error");
+      return `- ${item.id}: ${problems.length === 0 ? "ok" : problems.join("; ")} next=${problems.length === 0 ? "enable/use explicit command" : `run /${kind} doctor, then validate/enable after fixing`}`;
+    }),
+  ].join("\n");
+}
+
+export function validateExtensionContributionExecution(
+  kind: ExtensionKind,
+  id: string,
+  contribution: string,
+  context: Pick<TuiContext, "plugins" | "skills">,
+): { ok: true } | { ok: false; summary: string } {
+  const item =
+    kind === "skills"
+      ? context.skills.skills.find((skill) => skill.id === id)
+      : context.plugins.plugins.find((plugin) => plugin.id === id);
+  if (!item) {
+    return {
+      ok: false,
+      summary: `Connect Lite guard: ${kind}:${id} 未发现，已拒绝执行。请先 install/validate。`,
+    };
+  }
+  if (!item.enabled || !item.trusted) {
+    return {
+      ok: false,
+      summary: `Connect Lite guard: ${kind}:${id} 未启用或未信任，已拒绝执行。请先 validate/enable/doctor。`,
+    };
+  }
+  if (!item.lifecycle.discovered || !item.lifecycle.registered || !item.lifecycle.schemaLoaded) {
+    return {
+      ok: false,
+      summary: `Connect Lite guard: ${kind}:${id} 尚未完成 discover/register/schema load，已拒绝执行。请先 validate/doctor。`,
+    };
+  }
+  if (item.lifecycle.runtimeVersion !== "compatible") {
+    return {
+      ok: false,
+      summary: `Connect Lite guard: ${kind}:${id} runtimeVersion=${item.lifecycle.runtimeVersion} 不兼容，已拒绝执行。请 update 或 disable。`,
+    };
+  }
+  if (kind === "skills") {
+    const skill = item as SkillSummary;
+    if (!skill.triggers.includes(contribution)) {
+      return {
+        ok: false,
+        summary: `Connect Lite guard: skill:${id} 未注册触发项 ${contribution}，已拒绝盲执行。`,
+      };
+    }
+    return { ok: true };
+  }
+  const plugin = item as PluginSummary;
+  const contributions = Object.values(plugin.contributions).flat();
+  if (!contributions.includes(contribution)) {
+    return {
+      ok: false,
+      summary: `Connect Lite guard: plugin:${id} 未注册贡献项 ${contribution}，已拒绝盲执行。`,
+    };
+  }
+  return { ok: true };
 }
 
 async function handleSkillsCommand(
@@ -1920,16 +2489,60 @@ async function handleSkillsCommand(
     writeLine(output, formatSkills(context));
     return;
   }
-  if (action === "add") {
+  if (action === "status") {
+    writeLine(output, formatExtensionStatus("skills", context));
+    return;
+  }
+  if (action === "doctor") {
+    writeLine(output, validateExtensionItems("skills", context));
+    return;
+  }
+  if (action === "add" || action === "install") {
+    const request = parseExtensionInstallRequest(args.slice(1));
+    if (!request) {
+      writeLine(
+        output,
+        [
+          "Skills install（Connect Lite）",
+          `- project: ${context.skills.projectDir}`,
+          `- user: ${context.skills.userDir}`,
+          "- usage: /skills install local <path> [--scope project|user]",
+          "- usage: /skills install git <url> [--ref <ref>] --confirm-network",
+          "- usage: /skills install github <owner/repo> [--ref <ref>] --confirm-network",
+          "- install 前只读取 manifest / SKILL.md / metadata；不执行第三方代码。",
+        ].join("\n"),
+      );
+      return;
+    }
+    if (request.source !== "local" && !request.confirmNetwork) {
+      writeLine(output, formatExtensionInstallGate("skills", request, "/skills install"));
+      return;
+    }
+    const result = await installExtensionFromRequest("skills", request, context);
+    context.skills = await createSkillState(context.config, context.projectPath);
+    refreshCacheFreshness(context);
+    writeLine(output, result.summary);
+    return;
+  }
+  if (action === "validate") {
+    writeLine(output, validateExtensionItems("skills", context, args[1]));
+    return;
+  }
+  if (action === "remove") {
+    const id = args[1];
     writeLine(
       output,
-      [
-        "Skills add（本地注册提示）",
-        `- project: ${context.skills.projectDir}`,
-        `- user: ${context.skills.userDir}`,
-        "- 放入 *.json manifest；默认只读取 metadata/description/triggers/summary，正文按需由用户确认后再读。",
-        "- 不做 GitHub/远程安装，不自动安装依赖。",
-      ].join("\n"),
+      id ? await removeExtension("skills", id, context) : "用法：/skills remove <id>",
+    );
+    return;
+  }
+  if (action === "update") {
+    const id = args[1];
+    writeLine(
+      output,
+      id
+        ? await updateExtension("skills", id, context, args.slice(2))
+        : "用法：/skills update <id> [--ref <ref>] [--confirm-network]",
     );
     return;
   }
@@ -1964,7 +2577,10 @@ async function handleSkillsCommand(
     );
     return;
   }
-  writeLine(output, "用法：/skills | /skills add | /skills enable <id> | /skills disable <id>");
+  writeLine(
+    output,
+    "用法：/skills | /skills status|doctor|validate [id] | /skills install local|git|github ... | /skills enable|disable <id> | /skills remove <id> | /skills update <id>",
+  );
 }
 
 async function handleWorkflowsCommand(
@@ -2008,8 +2624,62 @@ async function handlePluginsCommand(
     writeLine(output, formatPlugins(context));
     return;
   }
+  if (action === "status") {
+    writeLine(output, formatExtensionStatus("plugins", context));
+    return;
+  }
   if (action === "doctor") {
     writeLine(output, formatPluginsDoctor(context));
+    return;
+  }
+  if (action === "add" || action === "install") {
+    const request = parseExtensionInstallRequest(args.slice(1));
+    if (!request) {
+      writeLine(
+        output,
+        [
+          "Plugins install（Connect Lite）",
+          `- project: ${context.plugins.projectDir}`,
+          `- user: ${context.plugins.userDir}`,
+          "- usage: /plugins install local <path> [--scope project|user]",
+          "- usage: /plugins install git <url> [--ref <ref>] --confirm-network",
+          "- usage: /plugins install github <owner/repo> [--ref <ref>] --confirm-network",
+          "- install 前只读取 manifest / metadata；不执行仓库脚本、postinstall、hook 或第三方代码。",
+        ].join("\n"),
+      );
+      return;
+    }
+    if (request.source !== "local" && !request.confirmNetwork) {
+      writeLine(output, formatExtensionInstallGate("plugins", request, "/plugins install"));
+      return;
+    }
+    const result = await installExtensionFromRequest("plugins", request, context);
+    context.plugins = await createPluginState(context.config, context.projectPath);
+    context.hooks = await createHookState(context.config, context.projectPath);
+    refreshCacheFreshness(context);
+    writeLine(output, result.summary);
+    return;
+  }
+  if (action === "validate") {
+    writeLine(output, validateExtensionItems("plugins", context, args[1]));
+    return;
+  }
+  if (action === "remove") {
+    const id = args[1];
+    writeLine(
+      output,
+      id ? await removeExtension("plugins", id, context) : "用法：/plugins remove <id>",
+    );
+    return;
+  }
+  if (action === "update") {
+    const id = args[1];
+    writeLine(
+      output,
+      id
+        ? await updateExtension("plugins", id, context, args.slice(2))
+        : "用法：/plugins update <id> [--ref <ref>] [--confirm-network]",
+    );
     return;
   }
   if (action === "enable" || action === "disable") {
@@ -2042,7 +2712,7 @@ async function handlePluginsCommand(
   }
   writeLine(
     output,
-    "用法：/plugins | /plugins doctor | /plugins enable <id> | /plugins disable <id>",
+    "用法：/plugins | /plugins status|doctor|validate [id] | /plugins install local|git|github ... | /plugins enable|disable <id> | /plugins remove <id> | /plugins update <id>",
   );
 }
 
@@ -3966,7 +4636,38 @@ async function handleMcpCommand(
     writeStatus(output, context);
     return;
   }
-  writeLine(output, "用法：/mcp | /mcp status | /mcp tools | /mcp doctor");
+  if (action === "validate") {
+    writeLine(output, validateMcpServers(context, args[1]));
+    return;
+  }
+  if (action === "add" || action === "install") {
+    const result = await addMcpServer(args.slice(1), context);
+    writeLine(output, result);
+    return;
+  }
+  if (action === "enable" || action === "disable") {
+    const id = args[1];
+    writeLine(
+      output,
+      id
+        ? await setMcpServerEnabled(id, action === "enable", context)
+        : `用法：/mcp ${action} <server-id>`,
+    );
+    return;
+  }
+  if (action === "remove") {
+    const id = args[1];
+    writeLine(output, id ? await removeMcpServer(id, context) : "用法：/mcp remove <server-id>");
+    return;
+  }
+  if (action === "update") {
+    writeLine(output, await updateMcpServer(args.slice(1), context));
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/mcp | /mcp status | /mcp tools | /mcp doctor | /mcp validate [id] | /mcp add local <id> <command> [args...] | /mcp update <id> local <command> [args...] | /mcp enable|disable <id> | /mcp remove <id>",
+  );
 }
 
 async function handleResumeCommand(
@@ -4962,16 +5663,7 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
   context.mcp.tools = stabilizeMcpToolList(
     context.mcp.servers
       .filter((server) => server.status === "configured")
-      .map((server) => ({
-        server: server.name,
-        name: `${server.name}.status`,
-        description:
-          "MCP server is available; full tool schemas are intentionally omitted for cache stability.",
-        discovery: "discovered" as const,
-        trusted: true,
-        schemaLoaded: true,
-        runtimeVersion: "compatible" as const,
-      })),
+      .flatMap((server) => createMcpToolPlaceholders(server.name, "discovered")),
   );
   refreshCacheFreshness(context);
 }
@@ -5008,6 +5700,107 @@ function formatMcpTools(context: TuiContext): string {
         `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery=${tool.discovery ?? "placeholder"}; trusted=${tool.trusted ? "yes" : "no"}; schemaLoaded=${tool.schemaLoaded ? "yes" : "no"}; runtime=${tool.runtimeVersion ?? "unknown"}`,
     ),
   ].join("\n");
+}
+
+function validateMcpServers(context: TuiContext, id?: string): string {
+  const servers = id
+    ? context.mcp.servers.filter((server) => server.name === id)
+    : context.mcp.servers;
+  if (servers.length === 0) {
+    return id ? `未找到 MCP server：${id}` : "没有 MCP server 配置。";
+  }
+  return [
+    "MCP validate",
+    ...servers.map((server) => {
+      const config = context.config.mcp.servers[server.name];
+      const problems = [];
+      if (!config) problems.push("not registered");
+      if (server.status === "disabled") problems.push("disabled");
+      if (server.status === "missing") problems.push("missing binary");
+      if (server.status === "error") problems.push("doctor error");
+      if (config?.trustLevel === "untrusted") problems.push("untrusted");
+      return `- ${server.name}: ${problems.length === 0 ? "ok" : problems.join("; ")} source=${config?.sourceUrl ? sanitizeDiagnosticText(config.sourceUrl) : redactedPath(config?.localPath ?? config?.command)} ref=${config?.ref ?? "-"} commit=${config?.commit ?? "-"} permissions=${config?.permissionSummary ?? "tool-discovery"} next=${problems.length === 0 ? "tools/status available" : "run /mcp doctor, then validate/enable after fixing"}`;
+    }),
+  ].join("\n");
+}
+
+async function addMcpServer(args: string[], context: TuiContext): Promise<string> {
+  const [source, id, command, ...commandArgs] = args;
+  if (source !== "local" || !id || !command) {
+    return [
+      "MCP add（Connect Lite）",
+      "- usage: /mcp add local <server-id> <command> [args...]",
+      "- 本阶段 MCP 只支持本地 command 注册；Git/GitHub install 只用于 skills/plugins。",
+      "- add 只写来源/权限记录，不执行 server；运行 /mcp doctor 才做受控 --version 诊断。",
+    ].join("\n");
+  }
+  const server: McpServerConfig = {
+    command,
+    args: commandArgs,
+    localPath: command,
+    scope: "project",
+    installedAt: new Date().toISOString(),
+    trustLevel: "trusted",
+    permissionSummary: "tool-discovery",
+  };
+  context.config = await saveMcpServerConfig(id, server, true, context.projectPath);
+  context.mcp = createMcpState(context.config);
+  refreshCacheFreshness(context);
+  return `已添加 MCP server：${id}；下一步运行 /mcp validate ${id} 或 /mcp doctor。`;
+}
+
+async function setMcpServerEnabled(
+  id: string,
+  enabled: boolean,
+  context: TuiContext,
+): Promise<string> {
+  const current = context.config.mcp.servers[id];
+  if (!current) {
+    return `未找到 MCP server：${id}`;
+  }
+  context.config = await saveMcpServerConfig(
+    id,
+    { ...current, disabled: !enabled, trustLevel: enabled ? "trusted" : "disabled" },
+    enabled,
+    context.projectPath,
+  );
+  context.mcp = createMcpState(context.config);
+  refreshCacheFreshness(context);
+  return `${enabled ? "已启用" : "已禁用"} MCP server：${id}；失败可通过 /mcp doctor 隔离诊断。`;
+}
+
+async function updateMcpServer(args: string[], context: TuiContext): Promise<string> {
+  const [id, source, command, ...commandArgs] = args;
+  const current = id ? context.config.mcp.servers[id] : undefined;
+  if (!id || source !== "local" || !command) {
+    return "用法：/mcp update <server-id> local <command> [args...]；Connect Lite 不执行 server，只更新 metadata。";
+  }
+  if (!current) {
+    return `未找到 MCP server：${id}`;
+  }
+  const server: McpServerConfig = {
+    ...current,
+    command,
+    args: commandArgs,
+    localPath: command,
+    installedAt: new Date().toISOString(),
+    trustLevel: current.disabled ? "disabled" : "trusted",
+    permissionSummary: current.permissionSummary ?? "tool-discovery",
+  };
+  context.config = await saveMcpServerConfig(id, server, !server.disabled, context.projectPath);
+  context.mcp = createMcpState(context.config);
+  refreshCacheFreshness(context);
+  return `已更新 MCP server：${id}；只更新本地 command metadata，未执行 server。下一步运行 /mcp validate ${id} 或 /mcp doctor。`;
+}
+
+async function removeMcpServer(id: string, context: TuiContext): Promise<string> {
+  if (!context.config.mcp.servers[id]) {
+    return `未找到 MCP server：${id}`;
+  }
+  context.config = await removeMcpServerConfig(id, context.projectPath);
+  context.mcp = createMcpState(context.config);
+  refreshCacheFreshness(context);
+  return `已移除 MCP server：${id}；已有普通聊天和本地工具不受影响。`;
 }
 
 async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<void> {
@@ -5590,11 +6383,8 @@ async function runCodebaseMemoryCli(
   }
 }
 
-export function validateCodebaseMemoryToolExecution(
-  tool: string,
-  input: Record<string, unknown>,
-): { ok: true } | { ok: false; summary: string } {
-  const requiredArgs: Record<string, string[]> = {
+function codebaseMemoryRequiredArgs(): Record<string, string[]> {
+  return {
     list_projects: [],
     index_status: ["project"],
     detect_changes: ["project"],
@@ -5606,6 +6396,13 @@ export function validateCodebaseMemoryToolExecution(
     trace_path: ["project", "from", "to"],
     search_graph: ["project", "query"],
   };
+}
+
+export function validateCodebaseMemoryToolExecution(
+  tool: string,
+  input: Record<string, unknown>,
+): { ok: true } | { ok: false; summary: string } {
+  const requiredArgs = codebaseMemoryRequiredArgs();
   if (!(tool in requiredArgs)) {
     return {
       ok: false,
@@ -9498,12 +10295,15 @@ function formatHelp(language: Language): string {
   /vision <path>        Record VisionObservation evidence through vision role
   /image generate <prompt> Generate image asset metadata through image role
   /skills               List local skills metadata summaries
-  /skills add           Show local skill registration paths
+  /skills status|doctor|validate [id] Show Connect Lite lifecycle status
+  /skills install local|git|github ... Install skill metadata with trust/source record
   /skills enable|disable <id> Persist local skill enablement
   /workflows            List workflow templates, risks, write/validation hints
   /workflows <name>     Show Start Gate for one workflow
   /plugins              List local plugin manifests and contributions
-  /plugins doctor       Diagnose plugin trust, permissions, and load errors
+  /plugins doctor       Diagnose plugin lifecycle and load errors
+  /plugins status|doctor|validate [id] Diagnose plugin lifecycle and load errors
+  /plugins install local|git|github ... Install plugin metadata with trust/source record
   /plugins enable|disable <id> Persist local plugin enablement
   /doctor hooks         Diagnose hook sources, events, timeout, logs, and cache impact
   /sessions             List sessions
@@ -9544,6 +10344,10 @@ function formatHelp(language: Language): string {
   /mcp [status]         Show MCP server status
   /mcp tools            Show stable MCP tool summary
   /mcp doctor           Diagnose MCP server availability
+  /mcp validate [id]    Validate MCP source/trust/enablement metadata
+  /mcp add local <id> <command> [args...] Register local MCP command metadata
+  /mcp update <id> local <command> [args...] Update local MCP command metadata
+  /mcp enable|disable|remove <id> Manage MCP server lifecycle
   /index status [--fresh] Show fast codebase-memory status; --fresh runs detect_changes
   /index doctor         Diagnose bundled/managed codebase-memory runtime
   /index check          Run explicit freshness check with detect_changes
@@ -9579,13 +10383,16 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /vision <path>        通过 vision role 记录 VisionObservation evidence
   /image generate <prompt>  通过 image role 生成本地资产 metadata
   /skills               列出本地 skill metadata 摘要
-  /skills add           显示本地 skill 注册路径
+  /skills status|doctor|validate [id] 查看 Connect Lite 生命周期状态
+  /skills install local|git|github ... 安装 skill metadata 与来源/信任记录
   /skills enable <id>   启用并信任本地 skill
   /skills disable <id>  禁用本地 skill，重启后保留
   /workflows            列出 workflow 模板、风险、写文件和验证提示
   /workflows <name>     展示单个 workflow 的 Start Gate
   /plugins              列出本地 plugin manifest 与贡献项
-  /plugins doctor       诊断 plugin 信任、权限和加载错误
+  /plugins doctor       诊断 plugin 生命周期和加载错误
+  /plugins status|doctor|validate [id] 诊断 plugin 生命周期和加载错误
+  /plugins install local|git|github ... 安装 plugin metadata 与来源/信任记录
   /plugins enable|disable <id> 持久化启停 plugin
   /doctor hooks         诊断 hook 来源、事件、timeout、日志和 cache 影响
   /sessions             列出当前项目会话
@@ -9633,6 +10440,10 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /mcp status           查看 MCP server 状态
   /mcp tools            查看稳定排序的 MCP tool 摘要
   /mcp doctor           诊断 MCP server 可用性
+  /mcp validate [id]    校验 MCP 来源/信任/启用 metadata
+  /mcp add local <id> <command> [args...] 注册本地 MCP command metadata
+  /mcp update <id> local <command> [args...] 更新本地 MCP command metadata
+  /mcp enable|disable|remove <id> 管理 MCP server 生命周期
   /index status [--fresh] 查看 fast 索引状态；--fresh 才运行 detect_changes
   /index doctor         诊断 bundled/managed codebase-memory runtime
   /index check          显式运行 detect_changes 新鲜度检查
