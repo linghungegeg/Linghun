@@ -167,7 +167,7 @@ type PendingResponsesToolCall = {
   arguments: string;
 };
 
-type ProviderRuntimeContract = {
+export type ProviderRuntimeContract = {
   profile: ProviderRuntimeProfile;
   endpointProfile: EndpointProfile;
   endpoint: "/chat/completions" | "/responses";
@@ -175,7 +175,12 @@ type ProviderRuntimeContract = {
   supportsTools: boolean;
   sendReasoning: boolean;
   includeUsage: boolean;
+  toolSchemaShape: "openai_chat_tools" | "openai_responses_tools";
   toolResultShape: "chat_tool_message" | "responses_function_call_output";
+  retryStatuses: number[];
+  maxAttempts: number;
+  requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
 };
 
 export type ProviderBaseUrlEndpointSuffix = "chat_completions" | "responses";
@@ -471,9 +476,9 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 }
 
-function resolveProviderRuntimeContract(
+export function resolveProviderRuntimeContract(
   config: ProviderConfig,
-  request: ModelRequest,
+  request: ModelRequest = { messages: [] },
 ): ProviderRuntimeContract {
   const supportsTools = config.supportsTools !== false;
   if (config.type === "deepseek") {
@@ -485,7 +490,12 @@ function resolveProviderRuntimeContract(
       supportsTools,
       sendReasoning: false,
       includeUsage: config.includeUsage === true,
+      toolSchemaShape: "openai_chat_tools",
       toolResultShape: "chat_tool_message",
+      retryStatuses: [...PROVIDER_RETRY_STATUSES],
+      maxAttempts: PROVIDER_MAX_ATTEMPTS,
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+      streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
     };
   }
   const endpointProfile = request.endpointProfile ?? config.endpointProfile ?? "chat_completions";
@@ -499,7 +509,12 @@ function resolveProviderRuntimeContract(
       supportsTools,
       sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
       includeUsage: config.includeUsage === true,
+      toolSchemaShape: "openai_responses_tools",
       toolResultShape: "responses_function_call_output",
+      retryStatuses: [...PROVIDER_RETRY_STATUSES],
+      maxAttempts: PROVIDER_MAX_ATTEMPTS,
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+      streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
     };
   }
   return {
@@ -515,7 +530,12 @@ function resolveProviderRuntimeContract(
       compatibilityProfile === "permissive_openai_compatible" &&
       Boolean(request.reasoningLevel ?? config.reasoningLevel),
     includeUsage: config.includeUsage === true,
+    toolSchemaShape: "openai_chat_tools",
     toolResultShape: "chat_tool_message",
+    retryStatuses: [...PROVIDER_RETRY_STATUSES],
+    maxAttempts: PROVIDER_MAX_ATTEMPTS,
+    requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+    streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
   };
 }
 

@@ -12,6 +12,7 @@ import {
   normalizeProviderError,
   parseOpenAiStream,
   resolveProviderBaseUrlDiagnostic,
+  resolveProviderRuntimeContract,
 } from "./index.js";
 
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
@@ -203,6 +204,54 @@ describe("OpenAI compatible provider", () => {
       },
       { type: "function_call_output", call_id: "call-1", output: "ok" },
     ]);
+  });
+
+  it("exposes provider runtime contract boundaries for doctor diagnostics", () => {
+    const deepseek = resolveProviderRuntimeContract({
+      id: "deepseek",
+      type: "deepseek",
+      model: "deepseek-v4-pro",
+    });
+    const strictChat = resolveProviderRuntimeContract({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      model: "gpt-5.5",
+    });
+    const responses = resolveProviderRuntimeContract({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "Medium",
+    });
+
+    expect(deepseek).toMatchObject({
+      profile: "deepseek_chat_completions",
+      endpointProfile: "chat_completions",
+      endpoint: "/chat/completions",
+      compatibilityProfile: "deepseek",
+      toolSchemaShape: "openai_chat_tools",
+      toolResultShape: "chat_tool_message",
+      sendReasoning: false,
+      retryStatuses: [429, 502, 503, 504],
+      maxAttempts: 3,
+      requestTimeoutMs: 30_000,
+      streamIdleTimeoutMs: 30_000,
+    });
+    expect(strictChat).toMatchObject({
+      profile: "strict_openai_compatible_chat_completions",
+      toolSchemaShape: "openai_chat_tools",
+      toolResultShape: "chat_tool_message",
+      sendReasoning: false,
+    });
+    expect(responses).toMatchObject({
+      profile: "openai_responses",
+      endpointProfile: "responses",
+      endpoint: "/responses",
+      toolSchemaShape: "openai_responses_tools",
+      toolResultShape: "responses_function_call_output",
+      sendReasoning: true,
+    });
   });
 
   it("does not silently fallback when streaming responses returns server error", async () => {

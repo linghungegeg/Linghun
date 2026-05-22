@@ -33,6 +33,7 @@ import {
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 
 class MemoryOutput extends Writable {
@@ -993,6 +994,157 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥--");
   });
 
+  it("enforces Freshness Lite warning in primary output when current external facts lack web evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "freshness-missing-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "freshness-missing-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("OpenAI API 当前版本是 example-v1。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["最新 OpenAI API 版本是什么\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).toContain("FreshnessBoundary=");
+    expect(JSON.stringify(requests[0])).toContain("web_source_evidence=missing");
+    expect(output.text).toContain("OpenAI API 当前版本是 example-v1");
+    expect(output.text).toContain("Freshness 提示：本会话没有 web_source 证据");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain(
+      "freshness_lite_boundary: sensitive=yes web_source_evidence=missing",
+    );
+    expect(transcript).toContain("freshness_lite_primary_enforced");
+    expect(transcript).toContain("Freshness 提示：本会话没有 web_source 证据");
+  });
+
+  it("does not add Freshness Lite primary warning when web_source evidence is present", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "freshness-present-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "freshness-present-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const existing = await store.create({ model: "freshness-present-model" });
+    await store.appendEvent(existing.id, {
+      type: "evidence_record",
+      id: "web-source-test",
+      kind: "web_source",
+      summary: "Official API docs checked in test fixture.",
+      source: "https://example.test/docs",
+      supportsClaims: ["OpenAI API current version"],
+      createdAt: new Date().toISOString(),
+    });
+    const requests = mockOpenAiTextFetch("根据已有来源，当前版本是 example-v2。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        `/sessions resume ${existing.id}\n最新 official OpenAI API 版本是什么\n/exit\n`,
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).toContain("web_source_evidence=present");
+    expect(output.text).toContain("当前版本是 example-v2");
+    expect(output.text).not.toContain("Freshness 提示：本会话没有 web_source 证据");
+    const transcript = await readFile(existing.transcriptPath, "utf8");
+    expect(transcript).toContain(
+      "freshness_lite_boundary: sensitive=yes web_source_evidence=present",
+    );
+    expect(transcript).not.toContain("freshness_lite_primary_enforced");
+  });
+
+  it("does not show Freshness Lite warning for ordinary non-freshness requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "ordinary-freshness-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "ordinary-freshness-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("我会先整理本地思路。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我写一句问候\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0])).not.toContain("FreshnessBoundary=");
+    expect(output.text).toContain("我会先整理本地思路");
+    expect(output.text).not.toContain("Freshness 提示");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).not.toContain("freshness_lite_boundary");
+  });
+
+  it("humanizes provider schema mismatch without leaking raw diagnostics in primary output", () => {
+    const error = new Error(
+      "400 bad request: tool_choice schema mismatch for https://example.invalid/v1?api_key=private-token rawBody request-id=123e4567-e89b-12d3-a456-426614174000",
+    ) as Error & { code: string };
+    error.code = "PROVIDER_BAD_REQUEST";
+
+    const primary = formatProviderFailurePrimary(error, "en-US");
+
+    expect(primary).toContain("provider rejected the request schema");
+    expect(primary).toContain("/model doctor");
+    expect(primary).toContain("tool_choice");
+    expect(primary).not.toContain("example.invalid");
+    expect(primary).not.toContain("private-token");
+    expect(primary).not.toContain("123e4567");
+  });
+
   it("preprocesses high-confidence natural model-status wording locally", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -1077,7 +1229,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).toContain(
-      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled includeUsage=no reasoning=not configured/未生效",
+      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro runtimeProfile=deepseek_chat_completions endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled toolSchema=openai_chat_tools toolResult=chat_tool_message retry=429/502/503/504x3 timeoutMs=30000 idleTimeoutMs=30000 includeUsage=no reasoning=not configured/未生效",
     );
     expect(output.text).toContain("apiKey=present");
     expect(output.text).toContain("masked=sk-…cret");

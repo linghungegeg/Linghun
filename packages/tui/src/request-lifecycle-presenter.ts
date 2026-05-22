@@ -63,6 +63,9 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
     if (kind === "abort") {
       return "This request was interrupted. Input is ready again.";
     }
+    if (kind === "schema") {
+      return "The provider rejected the request schema. Run /model doctor to check endpointProfile, tools/tool_choice, tool_result, and reasoning compatibility.";
+    }
     return "The model request did not complete. Run /model doctor for details, then retry.";
   }
   if (kind === "gateway") {
@@ -73,6 +76,9 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
   }
   if (kind === "abort") {
     return "已中断本次请求，可以继续输入。";
+  }
+  if (kind === "schema") {
+    return "provider 拒绝了本次请求 schema。请运行 /model doctor 检查 endpointProfile、tools/tool_choice、tool_result 和 reasoning 兼容性。";
   }
   return "模型请求未完成。可运行 /model doctor 查看详情后重试。";
 }
@@ -95,7 +101,9 @@ export function formatReportIncompletePrimary(path: string, language: Language):
     : `报告生成受阻：尚未在 ${path} 生成报告文件。`;
 }
 
-function classifyProviderFailure(error: unknown): "gateway" | "timeout" | "abort" | "generic" {
+function classifyProviderFailure(
+  error: unknown,
+): "gateway" | "timeout" | "abort" | "schema" | "generic" {
   const code = readStringField(error, "code");
   const name = readStringField(error, "name");
   const message = error instanceof Error ? error.message : String(error ?? "");
@@ -108,6 +116,17 @@ function classifyProviderFailure(error: unknown): "gateway" | "timeout" | "abort
   }
   if (/AbortError|aborted|abort|中断/iu.test(text) || code === "ABORT_ERR") {
     return "abort";
+  }
+  if (
+    code === "PROVIDER_BAD_REQUEST" ||
+    code === "MODEL_TOOLS_UNSUPPORTED" ||
+    code === "PROVIDER_PROFILE_MISMATCH" ||
+    code === "PROVIDER_PARTIAL_TOOL_CALL" ||
+    /schema|tool_choice|tools?|tool_result|profile mismatch|endpointProfile|请求格式|工具.*不支持/iu.test(
+      text,
+    )
+  ) {
+    return "schema";
   }
   return "generic";
 }

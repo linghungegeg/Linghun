@@ -45,6 +45,7 @@ import {
   OpenAiCompatibleProvider,
   findKnownModel,
   resolveProviderBaseUrlDiagnostic,
+  resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import {
   LINGHUN_NAME,
@@ -2886,8 +2887,9 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
     const keySource = provider.apiKey
       ? getProviderKeySource(providerId, projectSettingsApiKeyProviders)
       : undefined;
+    const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
     lines.push(
-      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} endpointProfile=${endpointProfile} compatibilityProfile=${compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${provider.supportsTools === false ? "disabled" : "enabled"} includeUsage=${provider.includeUsage === true ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
+      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
     );
     if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
@@ -8550,6 +8552,8 @@ async function sendMessage(
   context.model = selectedRuntime.model;
   const selectedTools = currentModelSupportsTools(context, selectedRuntime);
   const reportWriteGuard = createReportWriteGuard(text);
+  const freshnessLite = createFreshnessLiteState(text, context);
+  await recordFreshnessLiteBoundary(context, sessionId, freshnessLite);
   await appendSystemEvent(
     context,
     sessionId,
@@ -8808,7 +8812,18 @@ async function sendMessage(
   }
 
   if (assistantText) {
+    const freshnessWarning = formatFreshnessLitePrimaryWarning(freshnessLite, context.language);
     output.write("\n");
+    if (freshnessWarning) {
+      writeLine(output, freshnessWarning);
+      assistantText = `${assistantText}\n\n${freshnessWarning}`;
+      await appendSystemEvent(
+        context,
+        sessionId,
+        "freshness_lite_primary_enforced: web_source_evidence=missing warning=appended",
+        "warning",
+      );
+    }
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
       id: assistantEventId,
@@ -9650,11 +9665,70 @@ export function createModelSystemPrompt(
   architectureDirective?: string,
 ): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
+  const freshnessBoundary = createFreshnessLiteBoundary(text, context);
   return `${
     context.language === "en-US"
       ? "You are Linghun, a coding assistant with tool-use capabilities. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
       : "你是 Linghun 工程型中文助手，具备工具调用能力。默认用中文回答，除非用户明确指定其他语言。涉及代码事实必须先有证据，避免未验证断言。自然语言命令是否可执行由本地 RuntimeStatus 与 Command Capability Catalog 裁决，不能靠模型猜。需要文件、搜索、编辑、Bash 或 Todo 事实/动作时必须使用真实 tool_use 事件，不要用文本冒充工具调用。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+}
+
+type FreshnessLiteState = {
+  sensitive: boolean;
+  webSourceEvidence: "present" | "missing";
+};
+
+function createFreshnessLiteBoundary(text: string, context: TuiContext): string | undefined {
+  const state = createFreshnessLiteState(text, context);
+  if (!state.sensitive) {
+    return undefined;
+  }
+  return context.language === "en-US"
+    ? `FreshnessBoundary=latest/current/external facts requested; web_source_evidence=${state.webSourceEvidence}; if missing, do not present latest/current facts as verified and explicitly mark them as unverified or needing confirmation.`
+    : `FreshnessBoundary=本轮请求涉及最新/当前/外部事实；web_source_evidence=${state.webSourceEvidence}；如缺少 web_source，不得把最新/当前事实写成已验证，必须标记为未验证或需要确认。`;
+}
+
+function createFreshnessLiteState(text: string, context: TuiContext): FreshnessLiteState {
+  return {
+    sensitive: needsFreshnessLiteBoundary(text),
+    webSourceEvidence: context.evidence.some((item) => item.kind === "web_source")
+      ? "present"
+      : "missing",
+  };
+}
+
+async function recordFreshnessLiteBoundary(
+  context: TuiContext,
+  sessionId: string,
+  state: FreshnessLiteState,
+): Promise<void> {
+  if (!state.sensitive) {
+    return;
+  }
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `freshness_lite_boundary: sensitive=yes web_source_evidence=${state.webSourceEvidence}`,
+    state.webSourceEvidence === "missing" ? "warning" : "info",
+  );
+}
+
+function formatFreshnessLitePrimaryWarning(
+  state: FreshnessLiteState,
+  language: TuiContext["language"],
+): string | undefined {
+  if (!state.sensitive || state.webSourceEvidence === "present") {
+    return undefined;
+  }
+  return language === "en-US"
+    ? "Freshness note: no web_source evidence is available in this session, so any latest/current/external facts above are unverified and need confirmation."
+    : "Freshness 提示：本会话没有 web_source 证据，以上涉及最新/当前/外部事实的内容均未验证，需要进一步确认。";
+}
+
+function needsFreshnessLiteBoundary(text: string): boolean {
+  return /最新|当前|现在|今天|今年|实时|外部资料|网页|官网|官方|新闻|版本|价格|latest|current|today|now|real[-\s]?time|external|web|official|news|price|version/iu.test(
+    text,
+  );
 }
 
 function createEvidenceSummaryForModel(context: TuiContext): string {
@@ -9664,6 +9738,7 @@ function createEvidenceSummaryForModel(context: TuiContext): string {
       kind: item.kind,
       source: item.source,
       summary: truncateDisplay(item.summary.replace(/\s+/g, " "), 180),
+      supportsClaims: item.supportsClaims.slice(0, 5),
     })),
   );
 }
