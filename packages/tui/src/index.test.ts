@@ -413,7 +413,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/skills enable <id>");
     expect(output.text).toContain("/workflows <name>");
     expect(output.text).toContain("/plugins doctor");
+    expect(output.text).toContain("/doctor [readiness]");
     expect(output.text).toContain("/doctor hooks");
+    expect(output.text).toContain("/problems");
+    expect(output.text).toContain("Readiness：本地");
+    expect(output.text).toContain("非 smoke/Beta PASS");
     expect(output.text).toContain("/agents");
     expect(output.text).toContain("/fork <类型> <任务>");
     expect(output.text).toContain("/cache-log config size <n>");
@@ -435,6 +439,97 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("模式=default");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
+  });
+
+  it("shows Phase 15.5F readiness doctor and Problems Lite without raw debug leaks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "灵魂-readiness-项目-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.index.status = "stale";
+    context.index.staleHint = "changed files need refresh";
+    context.lastVerification = createVerificationReportFixture("timeout");
+    context.backgroundTasks.push(
+      createBackgroundTaskFixture("verification", {
+        status: "timeout",
+        result: "timeout",
+        userVisibleSummary: "timeout at C:\\secret\\Linghun\\raw.log api_key=raw-secret",
+        nextAction: "open C:\\secret\\Linghun\\raw.log",
+      }),
+    );
+    context.lastProviderFailure = {
+      code: "PROVIDER_BAD_REQUEST",
+      provider: "deepseek",
+      model: "deepseek-v4-flash-with-a-very-long-model-name-that-should-not-flood-terminal",
+      endpointProfile: "chat_completions",
+      summary: "raw body sk-test-secret C:\\secret\\Linghun\\provider.json",
+      evidenceId: "ev-provider",
+      createdAt: new Date().toISOString(),
+    };
+
+    await handleSlashCommand("/status", context, output);
+    await handleSlashCommand("/doctor", context, output);
+    await handleSlashCommand("/problems", context, output);
+
+    expect(output.text).toContain("Readiness：本地");
+    expect(output.text).toContain("非 smoke/Beta PASS");
+    expect(output.text).toContain(
+      "Terminal readiness doctor（仅本地/静态轻量检查；不是真实 smoke）",
+    );
+    expect(output.text).toContain("这不是 Beta PASS、smoke-ready 或 open-source-ready");
+    expect(output.text).toContain("[BLOCKED] verification");
+    expect(output.text).toContain("[PARTIAL] background/tasks");
+    expect(output.text).toContain("Problems Lite：当前");
+    expect(output.text).toContain("freshness");
+    expect(output.text).toContain("provider");
+    expect(output.text).not.toContain("sk-test-secret");
+    expect(output.text).not.toContain("api_key=raw-secret");
+    expect(output.text).not.toContain("C:\\secret");
+    expect(output.text).not.toContain(project);
+
+    const englishOutput = new MemoryOutput();
+    context.language = "en-US";
+    await handleSlashCommand("/doctor readiness", context, englishOutput);
+    expect(englishOutput.text).toContain(
+      "Terminal readiness doctor (local/static only; not real smoke)",
+    );
+    expect(englishOutput.text).toContain(
+      "This is not Beta PASS, smoke-ready, or open-source-ready.",
+    );
+  });
+
+  it("does not intercept ordinary development requests with the readiness doctor", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-readiness-provider-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        models: { deepseek: { provider: "deepseek", model: "deepseek-v4-flash" } },
+        defaultModel: "deepseek-v4-flash",
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.example",
+            apiKey: "test-key",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("普通开发请求已到达 provider。﹤DONE﹥");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["普通开发请求\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("普通开发请求已到达 provider。");
+    expect(output.text).not.toContain("Terminal readiness doctor");
   });
 
   it("reports Compact Lite boundaries without running tools or provider calls", async () => {

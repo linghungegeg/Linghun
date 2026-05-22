@@ -112,6 +112,13 @@ import {
   formatRequestActivity,
 } from "./request-lifecycle-presenter.js";
 import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import {
+  type TerminalProblemView,
+  type TerminalReadinessView,
+  formatTerminalProblemsPanel,
+  formatTerminalReadinessDoctor,
+  formatTerminalReadinessStatus,
+} from "./terminal-readiness-presenter.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 import {
   type WorkspaceReferenceCache,
@@ -751,6 +758,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/workflows",
   "/plugins",
   "/doctor",
+  "/problems",
   "/usage",
   "/stats",
   "/tab",
@@ -1832,6 +1840,10 @@ export async function handleSlashCommand(
     await handleDoctorCommand(rest, context, output);
     return "handled";
   }
+  if (command === "/problems") {
+    writeLine(output, formatTerminalProblemsPanel(createTerminalReadinessView(context)));
+    return "handled";
+  }
   if (command === "/usage") {
     writeLine(output, formatUsage(context));
     return "handled";
@@ -1842,6 +1854,7 @@ export async function handleSlashCommand(
   }
   if (command === "/status") {
     writeStatus(output, context);
+    writeLine(output, formatTerminalReadinessStatus(createTerminalReadinessView(context)));
     return "handled";
   }
   if (command === "/tab") {
@@ -2722,11 +2735,21 @@ async function handleDoctorCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  if (args[0] === "hooks") {
+  const action = args[0] ?? "readiness";
+  if (action === "hooks") {
     writeLine(output, formatHooksDoctor(context));
     return;
   }
-  writeLine(output, "用法：/doctor hooks");
+  if (action === "readiness" || action === "status" || action === "checklist") {
+    writeLine(output, formatTerminalReadinessDoctor(createTerminalReadinessView(context)));
+    return;
+  }
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? "Usage: /doctor [readiness|status|checklist|hooks]"
+      : "用法：/doctor [readiness|status|checklist|hooks]",
+  );
 }
 
 async function handleModelCommand(
@@ -6829,6 +6852,136 @@ function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
   return `files=${snapshot.counts.files} dirs=${snapshot.counts.directories} ignored=${snapshot.counts.ignored} stored=${snapshot.counts.storedEntries} partial=${snapshot.partial ? "yes" : "no"} changed=${changed}`;
 }
 
+function createTerminalReadinessView(context: TuiContext): TerminalReadinessView {
+  refreshBackgroundLifecycle(context);
+  const runtime = getSelectedModelRuntime(context);
+  const latestCache = context.cache.history.at(-1);
+  const blockedBackground = context.backgroundTasks.filter((task) =>
+    ["failed", "cancelled", "timeout", "stale"].includes(task.status),
+  );
+  const webSourceEvidence = context.evidence.some((evidence) => evidence.kind === "web_source")
+    ? "present"
+    : "missing";
+  return {
+    projectPath: context.projectPath,
+    provider: runtime.provider,
+    model: runtime.model,
+    endpointProfile: runtime.endpointProfile,
+    permissionMode: context.permissionMode,
+    language: context.language,
+    index: {
+      status: context.index.status,
+      changedFiles: context.index.changedFiles ?? null,
+      staleHint: context.index.staleHint,
+    },
+    cache: {
+      latestHitRate: latestCache?.hitRate ?? null,
+      compacted: context.cache.compacted,
+      workspaceSnapshot: context.cache.workspaceReference.latest?.workspaceSnapshot
+        ? "ready"
+        : "missing",
+    },
+    memory: {
+      projectRules: context.memory.projectRulesError
+        ? "unreadable"
+        : context.memory.projectRulesExists
+          ? "found"
+          : "missing",
+      candidates: context.memory.candidates.length,
+      accepted: context.memory.accepted.length,
+    },
+    mcp: {
+      enabled: context.mcp.enabled,
+      servers: context.mcp.servers.length,
+      tools: context.mcp.tools.length,
+      errors: context.mcp.servers.filter((server) => server.status === "error").length,
+    },
+    background: {
+      total: context.backgroundTasks.length,
+      running: context.backgroundTasks.filter((task) => task.status === "running").length,
+      blocked: blockedBackground.length,
+    },
+    verification: context.lastVerification
+      ? {
+          status: context.lastVerification.status,
+          summary: context.lastVerification.summary,
+          unverified: context.lastVerification.unverified.length,
+          risk: context.lastVerification.risk.length,
+        }
+      : undefined,
+    providerFailure: context.lastProviderFailure
+      ? {
+          code: context.lastProviderFailure.code,
+          provider: context.lastProviderFailure.provider,
+          model: context.lastProviderFailure.model,
+          endpointProfile: context.lastProviderFailure.endpointProfile,
+          summary: context.lastProviderFailure.summary,
+        }
+      : undefined,
+    freshness: { webSourceEvidence },
+    problems: createTerminalProblems(context, webSourceEvidence),
+  };
+}
+
+function createTerminalProblems(
+  context: TuiContext,
+  webSourceEvidence: "present" | "missing",
+): TerminalProblemView[] {
+  const problems: TerminalProblemView[] = [];
+  if (context.lastVerification && context.lastVerification.status !== "pass") {
+    problems.push({
+      source: "verification",
+      severity:
+        context.lastVerification.status === "fail" || context.lastVerification.status === "timeout"
+          ? "error"
+          : "warning",
+      summary: `${context.lastVerification.status}: ${context.lastVerification.summary}`,
+      nextAction: context.lastVerification.nextAction,
+      detailRef: "/verify last",
+    });
+  }
+  if (context.lastProviderFailure) {
+    problems.push({
+      source: "provider",
+      severity: "error",
+      summary: `${context.lastProviderFailure.code}: ${context.lastProviderFailure.provider}/${context.lastProviderFailure.model}`,
+      nextAction: "/model doctor",
+      detailRef: "/details evidence",
+    });
+  }
+  for (const task of context.backgroundTasks.filter((item) =>
+    ["failed", "cancelled", "timeout", "stale"].includes(item.status),
+  )) {
+    problems.push({
+      source: "background",
+      severity: task.status === "failed" || task.status === "timeout" ? "error" : "warning",
+      summary: `${task.kind} ${task.status}: ${task.userVisibleSummary}`,
+      nextAction: task.nextAction ?? `/details background ${task.id}`,
+      detailRef: `/details background ${task.id}`,
+    });
+  }
+  if (webSourceEvidence === "missing") {
+    problems.push({
+      source: "freshness",
+      severity: "warning",
+      summary:
+        "No web_source evidence in the current session; current/external facts must stay unverified.",
+      nextAction: "Mark latest/current/external facts as unverified unless evidence is added.",
+      detailRef: "/details evidence",
+    });
+  }
+  if (context.index.status === "stale" || context.index.status === "error") {
+    problems.push({
+      source: "index",
+      severity: context.index.status === "error" ? "error" : "warning",
+      summary: `index status=${context.index.status}${context.index.staleHint ? ` ${context.index.staleHint}` : ""}`,
+      nextAction: "/index doctor",
+      detailRef: "/index status",
+    });
+  }
+  return problems;
+}
+
 function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
   return [
@@ -10380,7 +10533,9 @@ function formatHelp(language: Language): string {
   /plugins status|doctor|validate [id] Diagnose plugin lifecycle and load errors
   /plugins install local|git|github ... Install plugin metadata with trust/source record
   /plugins enable|disable <id> Persist local plugin enablement
+  /doctor [readiness]   Show local terminal readiness checklist; does not run real smoke
   /doctor hooks         Diagnose hook sources, events, timeout, logs, and cache impact
+  /problems             Show local Problems Lite summary from runtime evidence
   /sessions             List sessions
   /sessions resume <id> Resume a session using structured handoff
   /resume [id]          Resume latest or selected session without full transcript injection
@@ -10469,7 +10624,9 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /plugins status|doctor|validate [id] 诊断 plugin 生命周期和加载错误
   /plugins install local|git|github ... 安装 plugin metadata 与来源/信任记录
   /plugins enable|disable <id> 持久化启停 plugin
+  /doctor [readiness]   查看本地终端就绪 checklist；不运行真实 smoke
   /doctor hooks         诊断 hook 来源、事件、timeout、日志和 cache 影响
+  /problems             查看来自 runtime evidence 的 Problems Lite 摘要
   /sessions             列出当前项目会话
   /sessions resume <id> 基于结构化 handoff 恢复历史会话
   /resume [id]          恢复最近或指定会话，不注入完整历史

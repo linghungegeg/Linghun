@@ -4,6 +4,7 @@ import {
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
   createPendingNaturalCommand,
+  formatCapabilityAnswer,
   formatNaturalClarification,
   formatNaturalPermissionBlock,
   formatNaturalStartGate,
@@ -23,6 +24,7 @@ const firstBatch = [
   "skills",
   "plugins",
   "hooks",
+  "readiness",
   "sessions",
   "resume",
   "branch",
@@ -121,6 +123,20 @@ describe("Phase 15 Natural Intent Router", () => {
       expect(zh.riskHandler).toBe(en.riskHandler);
     },
   );
+
+  it("aligns /doctor natural catalog routing with readiness default", () => {
+    const explicit = routeNaturalIntent("请解释 /doctor");
+    const readiness = routeNaturalIntent("终端就绪检查");
+    const hooks = routeNaturalIntent("doctor hooks", "en-US");
+
+    expect(explicit.capability?.id).toBe("readiness");
+    expect(explicit.command).toBe("/doctor");
+    expect(formatCapabilityAnswer(explicit)).toContain("终端就绪诊断");
+    expect(readiness.capability?.id).toBe("readiness");
+    expect(readiness.action).toBe("execute_readonly");
+    expect(hooks.capability?.id).toBe("hooks");
+    expect(hooks.command).toBe("/doctor hooks");
+  });
 
   it.each([
     ["现在是什么模型", "model", "/model"],

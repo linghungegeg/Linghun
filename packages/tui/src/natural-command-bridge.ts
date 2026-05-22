@@ -120,7 +120,8 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/skills", capabilityId: "skills", userVisible: true },
   { slash: "/workflows", capabilityId: "workflows", userVisible: true },
   { slash: "/plugins", capabilityId: "plugins", userVisible: true },
-  { slash: "/doctor", capabilityId: "hooks", userVisible: true },
+  { slash: "/doctor", capabilityId: "readiness", userVisible: true },
+  { slash: "/problems", capabilityId: "problems", userVisible: true },
   { slash: "/sessions", capabilityId: "sessions", userVisible: true },
   { slash: "/resume", capabilityId: "resume", userVisible: true },
   { slash: "/branch", capabilityId: "branch", userVisible: true },
@@ -280,6 +281,30 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "start_gate",
   ),
   cap(
+    "readiness",
+    "/doctor",
+    ["doctor", "readiness", "ready", "terminal readiness", "体检", "就绪检查"],
+    "终端就绪诊断",
+    "Readiness doctor",
+    "显示本地/静态终端就绪检查；不运行真实 smoke，也不声明 Beta PASS。",
+    "Shows local/static terminal readiness checks; does not run real smoke or claim Beta PASS.",
+    "检查 provider、index、cache、memory、MCP、background、verification 和 freshness 边界。",
+    "Use for provider, index, cache, memory, MCP, background, verification, and freshness readiness boundaries.",
+    "readonly",
+  ),
+  cap(
+    "problems",
+    "/problems",
+    ["problems", "problem panel", "问题", "诊断问题"],
+    "问题面板",
+    "Problems",
+    "显示来自 verification/provider/background/freshness/index 的轻量问题摘要。",
+    "Shows a lightweight problem summary from verification/provider/background/freshness/index.",
+    "查看当前阻塞、超时、stale、provider failure 或缺少来源证据的问题。",
+    "Use for current blockers, timeouts, stale tasks, provider failures, or missing source evidence.",
+    "readonly",
+  ),
+  cap(
     "hooks",
     "/doctor",
     ["hook", "hooks", "钩子", "doctor hooks"],
@@ -290,6 +315,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "询问 hook 开没开或 hook 风险。",
     "Use when asking whether hooks are enabled or risky.",
     "start_gate",
+    { hiddenReason: "listed as /doctor hooks in the readiness doctor help" },
   ),
   cap(
     "sessions",
@@ -863,7 +889,7 @@ export function routeNaturalIntent(
   const mentionedSlash = /\/[a-z-]+/iu.exec(text)?.[0];
   const catalog = getCommandCapabilityCatalog();
   const explicit = mentionedSlash
-    ? catalog.find((item) => item.slash === mentionedSlash)
+    ? findExplicitSlashCapability(catalog, mentionedSlash, normalized)
     : undefined;
   const classification = classifyNaturalControlIntent(normalized);
   const inquiry = classification.inquiry;
@@ -1417,7 +1443,7 @@ function classifyInquiry(
   actionRequest: boolean,
 ): NaturalIntent["inquiry"] {
   if (
-    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(
+    /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|已经.*了吗|ready|就绪/u.test(
       text,
     )
   ) {
@@ -1438,6 +1464,23 @@ function classifyInquiry(
 
 function detectInquiry(text: string): NaturalIntent["inquiry"] {
   return classifyNaturalControlIntent(text).inquiry;
+}
+
+function findExplicitSlashCapability(
+  catalog: CommandCapability[],
+  slash: string,
+  normalized: string,
+): CommandCapability | undefined {
+  if (slash === "/doctor" && /hook|hooks|钩子/u.test(normalized)) {
+    return catalog.find((item) => item.id === "hooks");
+  }
+  const registryEntry = SLASH_COMMAND_REGISTRY.find(
+    (item) => item.slash === slash && item.userVisible,
+  );
+  return (
+    catalog.find((item) => item.id === registryEntry?.capabilityId) ??
+    catalog.find((item) => item.slash === slash)
+  );
 }
 
 function classifyDangerousReason(text: string): string | null {
@@ -1503,7 +1546,9 @@ function isNaturalControlPlaneIntent(
   if (id === "read") return classification.projectRulesRead;
   if (id === "index") return classification.indexAction === "safe";
   if (id === "mode" && extractPermissionMode(text)) return true;
-  return ["model", "cache", "memory", "mode"].includes(id) && !classification.actionRequest;
+  return (
+    ["model", "cache", "memory", "mode", "readiness"].includes(id) && !classification.actionRequest
+  );
 }
 
 function isFirstBatchStatusCapability(id: string): boolean {
@@ -1517,6 +1562,7 @@ function isFirstBatchStatusCapability(id: string): boolean {
     "skills",
     "plugins",
     "hooks",
+    "readiness",
     "sessions",
     "resume",
     "branch",
@@ -1551,6 +1597,8 @@ function scoreCapability(
     const lower = alias.toLowerCase();
     if (normalized.includes(lower)) score += 3;
   }
+  if (capability.id === "readiness" && /readiness|就绪|体检|terminal readiness/u.test(normalized))
+    score += 6;
   if (capability.id === "hooks" && /hook|钩子/u.test(normalized)) score += 3;
   if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
     score += 3;
