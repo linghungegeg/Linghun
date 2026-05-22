@@ -316,7 +316,7 @@ export type BackgroundTask = {
 - 主任务不得在必要 verification / verifier task 未结束前宣称阶段完成。
 - 用户询问“现在在干嘛 / 还要多久 / 卡住了吗”时，必须读取 `BackgroundTask` 状态表回答，不得靠猜。
 - 后台任务状态事件必须进入 transcript 或等价任务日志，便于新会话 handoff。
-- Phase 17A 的 Virtual Agent Concurrency 必须在本结构上实现：`queued/running/sleeping/blocked/stale` 是调度状态，不是用户可见噱头；真实并发由资源 cap、heavy-task mutex、预算、权限和 owner/heartbeat 决定。
+- Phase 17A 的 Virtual Agent Concurrency 必须在本结构上实现：`queued/running/sleeping/blocked/stale` 是调度状态，不是用户可见噱头；真实并发由资源 cap、heavy-task mutex、预算、权限和 owner/heartbeat 决定。3 个真实运行 agent 是保守默认起点，8 agent 只是高配/压测候选目标，必须由 benchmark 证明后开放。
 
 Virtual Agent Concurrency 规格：
 
@@ -324,6 +324,8 @@ Virtual Agent Concurrency 规格：
 - agent 输入必须使用短摘要、Architecture Card / project facts、evidence refs、workspace reference cache refs、codebase-memory refs 和必要文件摘要；禁止复制完整聊天、完整源码、完整日志或完整索引结果。
 - agent 间共享索引状态、Workspace Reference Cache、tool result summary、verification evidence 和 known facts；同一文件/同一索引/同一验证结果命中共享摘要时，不重复扫全仓。
 - 前台模型请求默认并发 1；后台 agent/job 的模型请求、工具调用、bash、verify、index refresh、full test/build 必须分别有 cap，并受 heavy-task mutex 管理。
+- 用户创建的 agent / job 数量和真实运行并发数必须分离；超过当前资源预算的 agent / job 保持 `queued` / `sleeping` / `blocked`，不得抢占前台模型请求或重任务 mutex。
+- Native runner 正式接入前必须完成同场景 Native-vs-Node benchmark 和平台 hardening：Windows MSVC/linker、签名、杀软误报、中文/空格路径；Unix/macOS process group/session cleanup；managed/bundled runtime 分发；`/doctor runner`；missing/crash/protocol mismatch fallback tests；以及 scheduler/evidence/resource guard integration。未完成时只能 fallback Node runner，且 cancelled / timeout / stale / runner crash 不得生成 PASS evidence。
 - agent 取消、超时、stale、owner 死亡或 heartbeat 失联必须进入 `BackgroundTask` 和 evidence；这些状态不得产生 `pass` 结论。
 - 主消息流只接收 agent/job 的结构化摘要、采纳状态、风险和 evidence refs；原始 agent 对话和长输出只进 transcript/log/fullOutputPath。
 - 该能力属于 Phase 17A。Phase 15.5B 只实现资源/任务生命周期地基，不提前实现多 agent 调度器或 durable job 图。
@@ -2581,7 +2583,7 @@ Agent 限制：
 - verifier 默认只读，可运行验证命令。
 - worker 可编辑但受权限。
 - planner 只规划。
-- 默认最多 3 个并发 agent。
+- 默认最多 3 个真实运行并发 agent；Phase 17A 调度器可按资源预算、用户配置和 benchmark 放宽。8 agent 是高配/压测候选目标，不得作为默认无限并发或无条件承诺。
 - `/fork` 必须记录父会话和派生原因。
 - `/fork` 不允许复制完整历史，只允许结构化 handoff、证据、必要文件列表和权限范围。
 

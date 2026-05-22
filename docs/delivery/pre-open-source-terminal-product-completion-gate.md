@@ -30,7 +30,7 @@
 | Phase 15.5E Provider & Freshness | OpenAI-compatible + DeepSeek provider maturity、Freshness/Web Evidence | 第一版只要求 OpenAI-compatible + DeepSeek 成熟接入；其他 provider 标记 future / unsupported / experimental。实时外部事实必须能触发 Freshness/Web Evidence，未联网或失败标记 unknown/stale |
 | Phase 15.5F Terminal Product Readiness | Terminal TUI polish、help/doctor/status/error/report gate、CCB-grade standard output、release readiness 的终端运行部分 | 只做终端候选产品所需成熟度：安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步；补齐 Project Doctor Lite、Context Picker Lite、Source-of-Truth Drift Linter Lite、Rollback Coach、Task Cost Preview Lite、Problems panel Lite 和用户可见标准输出；完整发布物料后置 |
 | Phase 16 | 可控学习、memory / skill evolution | 默认不每轮学习、不自动接受长期记忆；候选来自 evidence/Todo/验证/handoff；可审计、可撤销、可关闭 |
-| Phase 17A | Local durable jobs + Virtual Agent Concurrency | 本地 job、handoff、预算、暂停、报告、状态可见、取消/超时/失败降级；补齐低资源多 agent 调度成熟度：用户可发起多个 agent / job，但 runtime 必须用共享索引/cache/evidence、短摘要传递、懒加载上下文、前台模型请求 cap、工具/重任务 cap、sleeping/blocked/running 状态和 stale recovery 控制真实并发；默认不做无限自治 |
+| Phase 17A | Local durable jobs + Virtual Agent Concurrency | 本地 job、handoff、预算、暂停、报告、状态可见、取消/超时/失败降级；补齐低资源多 agent 调度成熟度：用户可发起多个 agent / job，但 runtime 必须用共享索引/cache/evidence、短摘要传递、懒加载上下文、前台模型请求 cap、工具/重任务 cap、sleeping/blocked/running 状态和 stale recovery 控制真实并发；默认 3 个真实运行 agent 是保守基线，不是永久上限；8 agent 作为高配/压测候选目标，必须由资源预算和 benchmark 证明后启用；默认不做无限自治 |
 | Phase 17B | Remote channels 第一版 | 只做企业微信 / 飞书 / 钉钉 official_cli 或官方 webhook adapter；默认关闭；只发送脱敏摘要、审批和结果报告；必须有 doctor、幂等、过期、用户/设备绑定和脱敏审计 |
 | Terminal release readiness | 安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步 | 只做终端运行与开源前候选产品所需边界；完整发布物料可后置 |
 
@@ -49,7 +49,8 @@
 
 - 每个阶段做每个阶段的事，不再用真实项目实测替底座还债。
 - Phase 15.5B 只做资源与任务生命周期地基：前台请求守门、后台任务 cap、重任务互斥、取消/超时/stale、输出落盘和非 PASS 边界；不得提前实现第二套 agent/job runtime。
-- Phase 17A 才承接 Virtual Agent Concurrency：多 agent 可以对用户表现为并行，但底层必须按资源预算和证据边界调度，不能让每个 agent 复制完整上下文、重复扫全仓、并发跑重任务或把本机拖卡。
+- Phase 17A 才承接 Virtual Agent Concurrency：多 agent 可以对用户表现为并行，但底层必须按资源预算和证据边界调度，不能让每个 agent 复制完整上下文、重复扫全仓、并发跑重任务或把本机拖卡。3 agent 是低风险默认起点；8 agent 是覆盖大多数个人开发场景的压测/高配目标，不得写成无条件默认并发。
+- Native Local Job Runner 只是 Phase 17A 候选底座输入：正式接入前必须完成 Native-vs-Node benchmark、Windows MSVC/linker 与签名/杀软误报/中文和空格路径矩阵、Unix/macOS process group/session cleanup、managed/bundled runtime 分发、`/doctor runner`、fallback tests，以及 scheduler/evidence/resource guard integration；这些未完成前不得宣布 Phase 17A ready。
 - Phase 00-14 done 不回写、不污染。
 - 历史 A-C、D-H、focused/mock/local PASS 只作为 evidence，不作为 readiness proof。
 - 任何 `DOC-ONLY` 不能冒充 runtime DONE。
