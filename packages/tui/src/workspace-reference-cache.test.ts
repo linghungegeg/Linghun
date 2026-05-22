@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -145,5 +145,123 @@ describe("workspace reference cache", () => {
     expect(snapshot.source).toBe("stale");
     expect(snapshot.changedKeys).toContain("directorySummaryHash");
     expect(JSON.stringify(snapshot)).not.toContain("settings raw content");
+  });
+
+  it("adds metadata-only workspace snapshot lite with ignore boundaries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    await mkdir(join(project, "src"));
+    await mkdir(join(project, "node_modules"));
+    await mkdir(join(project, "tmp"));
+    await mkdir(join(project, "cache"));
+    await writeFile(
+      join(project, "src", "index.ts"),
+      "export const secret = 'not stored';",
+      "utf8",
+    );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { test: "vitest" } }),
+      "utf8",
+    );
+    await writeFile(join(project, ".gitignore"), "tmp/\n", "utf8");
+    await writeFile(join(project, ".cbmignore"), "cache/\n", "utf8");
+    const cache = createWorkspaceReferenceCache();
+
+    const snapshot = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+      watchedFiles: ["package.json", ".gitignore", ".cbmignore"],
+      watchedDirectories: ["."],
+      fileHashBytes: 8,
+    });
+
+    expect(snapshot.workspaceSnapshot?.bounded).toBe(true);
+    expect(snapshot.workspaceSnapshot?.counts.directories).toBeGreaterThanOrEqual(1);
+    expect(snapshot.workspaceSnapshot?.counts.ignored).toBeGreaterThanOrEqual(3);
+    expect(snapshot.workspaceSnapshot?.entries.some((entry) => entry.path === "src")).toBe(true);
+    expect(
+      snapshot.workspaceSnapshot?.entries.some(
+        (entry) => entry.ignoredReason === "hard-skip:node_modules",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.workspaceSnapshot?.entries.some(
+        (entry) => entry.ignoredReason === ".gitignore:tmp/",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.workspaceSnapshot?.ignoreSources.some(
+        (source) => source.path === ".cbmignore" && source.readable,
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.workspaceSnapshot?.entries.some(
+        (entry) => entry.ignoredReason === "hard-skip:cache",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain("not stored");
+    expect(JSON.stringify(snapshot)).not.toContain("vitest");
+  });
+
+  it("tracks bounded workspace snapshot changed summary", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    const appPath = join(project, "app.ts");
+    await writeFile(appPath, "alpha", "utf8");
+    const cache = createWorkspaceReferenceCache();
+
+    const first = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+      watchedFiles: ["app.ts"],
+      watchedDirectories: ["."],
+      fileHashBytes: 4,
+    });
+    const firstStat = await stat(appPath);
+    await writeFile(appPath, "bravo", "utf8");
+    await utimes(appPath, firstStat.atime, firstStat.mtime);
+    const changed = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+      watchedFiles: ["app.ts"],
+      watchedDirectories: ["."],
+      fileHashBytes: 4,
+    });
+    await rm(appPath);
+    const deleted = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+      watchedFiles: ["app.ts"],
+      watchedDirectories: ["."],
+      fileHashBytes: 4,
+    });
+
+    expect(first.workspaceSnapshot?.changedSummary?.changedKeys).toEqual([]);
+    expect(changed.source).toBe("stale");
+    expect(changed.changedKeys).toContain("workspaceSnapshotHash");
+    expect(changed.workspaceSnapshot?.changedSummary?.changedKeys).toContain(
+      "workspaceSnapshotModified",
+    );
+    expect(deleted.workspaceSnapshot?.changedSummary?.changedKeys).toContain(
+      "workspaceSnapshotDeleted",
+    );
+  });
+
+  it("keeps watched file hashing on bounded open/read path", async () => {
+    const source = await readFile(
+      join(process.cwd(), "packages/tui/src/workspace-reference-cache.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain('await open(absolutePath, "r")');
+    expect(source).toContain("handle.read(buffer, 0, bytesToRead, 0)");
+    expect(source).not.toContain("await readFile(absolutePath)");
   });
 });

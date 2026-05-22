@@ -6013,9 +6013,21 @@ function formatCacheStatus(context: TuiContext): string {
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- workspace reference: hits=${context.cache.workspaceReference.hits} misses=${context.cache.workspaceReference.misses} failures=${context.cache.workspaceReference.failures} latest=${context.cache.workspaceReference.latest?.source ?? "none"}`,
+    `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
     `- note: ${zeroNote}`,
   ].join("\n");
+}
+
+function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
+  const snapshot = context.cache.workspaceReference.latest?.workspaceSnapshot;
+  if (!snapshot) {
+    return "none";
+  }
+  const changed = snapshot.changedSummary?.changedKeys.length
+    ? snapshot.changedSummary.changedKeys.join(",")
+    : "none";
+  return `files=${snapshot.counts.files} dirs=${snapshot.counts.directories} ignored=${snapshot.counts.ignored} stored=${snapshot.counts.storedEntries} partial=${snapshot.partial ? "yes" : "no"} changed=${changed}`;
 }
 
 function formatCompactStatus(context: TuiContext): string {

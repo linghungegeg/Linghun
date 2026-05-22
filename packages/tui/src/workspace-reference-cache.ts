@@ -1,8 +1,25 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { lstat, open, opendir, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const DEFAULT_FILE_HASH_BYTES = 256 * 1024;
+const DEFAULT_IGNORE_FILE_BYTES = 64 * 1024;
+const DEFAULT_TOP_LEVEL_ENTRY_LIMIT = 80;
+const HARD_SKIP_DIRS = new Set([
+  ".git",
+  ".linghun/cache",
+  ".next",
+  ".turbo",
+  ".cache",
+  "build",
+  "cache",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+  "target",
+]);
+const IGNORE_FILES = [".linghunignore", ".cbmignore", ".gitignore"];
 const DEFAULT_WATCHED_FILES = [
   "README.md",
   "package.json",
@@ -11,6 +28,7 @@ const DEFAULT_WATCHED_FILES = [
   ".linghun/settings.json",
   ".linghunignore",
   ".cbmignore",
+  ".gitignore",
 ];
 const DEFAULT_WATCHED_DIRECTORIES = [".", ".linghun"];
 
@@ -43,6 +61,42 @@ export type WorkspaceReferenceDirectorySummary = {
   entryHash: string;
 };
 
+export type WorkspaceSnapshotLiteEntry = {
+  path: string;
+  kind: "file" | "directory" | "symlink" | "other";
+  size: number;
+  mtimeMs: number;
+  hashPrefix?: string;
+  ignoredReason?: string;
+};
+
+export type WorkspaceSnapshotLite = {
+  schemaVersion: 1;
+  root: ".";
+  bounded: true;
+  partial: boolean;
+  limits: {
+    topLevelEntryLimit: number;
+    fileHashBytes: number;
+  };
+  counts: {
+    files: number;
+    directories: number;
+    symlinks: number;
+    other: number;
+    ignored: number;
+    storedEntries: number;
+  };
+  ignoreSources: { path: string; readable: boolean; hashPrefix?: string }[];
+  entries: WorkspaceSnapshotLiteEntry[];
+  changedSummary?: {
+    added: number;
+    modified: number;
+    deleted: number;
+    changedKeys: string[];
+  };
+};
+
 export type WorkspaceReferenceSnapshot = {
   key: string;
   source: WorkspaceReferenceCacheSource;
@@ -55,6 +109,7 @@ export type WorkspaceReferenceSnapshot = {
   toolCapabilitySummary: string;
   evidenceRefs: string[];
   logRefs: string[];
+  workspaceSnapshot?: WorkspaceSnapshotLite;
   error?: string;
 };
 
@@ -79,7 +134,13 @@ export type WorkspaceReferenceInput = {
 
 export type WorkspaceReferenceScan = Pick<
   WorkspaceReferenceSnapshot,
-  "files" | "directories" | "runtimeStatus" | "toolCapabilitySummary" | "evidenceRefs" | "logRefs"
+  | "files"
+  | "directories"
+  | "runtimeStatus"
+  | "toolCapabilitySummary"
+  | "evidenceRefs"
+  | "logRefs"
+  | "workspaceSnapshot"
 > & {
   dimensions: WorkspaceReferenceDimensions;
 };
@@ -121,6 +182,10 @@ export async function getWorkspaceReferenceSnapshot(
       toolCapabilitySummary: truncateText(input.toolCapabilitySummary, 2_000),
       evidenceRefs: sanitizeRefs(scanned.evidenceRefs),
       logRefs: sanitizeRefs(scanned.logRefs),
+      workspaceSnapshot: attachWorkspaceSnapshotChangedSummary(
+        scanned.workspaceSnapshot,
+        previous?.workspaceSnapshot,
+      ),
     };
     cache.latest = snapshot;
     cache.misses += 1;
@@ -139,6 +204,7 @@ export async function getWorkspaceReferenceSnapshot(
       toolCapabilitySummary: truncateText(input.toolCapabilitySummary, 2_000),
       evidenceRefs: sanitizeRefs(input.evidenceRefs ?? []),
       logRefs: sanitizeRefs(input.logRefs ?? []),
+      workspaceSnapshot: cache.latest?.workspaceSnapshot,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -161,9 +227,10 @@ async function scanWorkspaceReference(
   const watchedFiles = input.watchedFiles ?? DEFAULT_WATCHED_FILES;
   const watchedDirectories = input.watchedDirectories ?? DEFAULT_WATCHED_DIRECTORIES;
   const fileHashBytes = input.fileHashBytes ?? DEFAULT_FILE_HASH_BYTES;
-  const [files, directories] = await Promise.all([
+  const [files, directories, workspaceSnapshot] = await Promise.all([
     Promise.all(watchedFiles.map((path) => summarizeFile(input.projectPath, path, fileHashBytes))),
     Promise.all(watchedDirectories.map((path) => summarizeDirectory(input.projectPath, path))),
+    summarizeWorkspaceSnapshotLite(input.projectPath, fileHashBytes),
   ]);
   return {
     dimensions: input.dimensions,
@@ -173,10 +240,14 @@ async function scanWorkspaceReference(
     toolCapabilitySummary: truncateText(input.toolCapabilitySummary, 2_000),
     evidenceRefs: sanitizeRefs(input.evidenceRefs ?? []),
     logRefs: sanitizeRefs(input.logRefs ?? []),
+    workspaceSnapshot,
   };
 }
 
-type WorkspaceReferenceProbe = Pick<WorkspaceReferenceSnapshot, "files" | "directories">;
+type WorkspaceReferenceProbe = Pick<
+  WorkspaceReferenceSnapshot,
+  "files" | "directories" | "workspaceSnapshot"
+>;
 
 async function probeWorkspaceReference(
   input: WorkspaceReferenceInput,
@@ -184,11 +255,12 @@ async function probeWorkspaceReference(
   const watchedFiles = input.watchedFiles ?? DEFAULT_WATCHED_FILES;
   const watchedDirectories = input.watchedDirectories ?? DEFAULT_WATCHED_DIRECTORIES;
   const fileHashBytes = input.fileHashBytes ?? DEFAULT_FILE_HASH_BYTES;
-  const [files, directories] = await Promise.all([
+  const [files, directories, workspaceSnapshot] = await Promise.all([
     Promise.all(watchedFiles.map((path) => summarizeFile(input.projectPath, path, fileHashBytes))),
     Promise.all(watchedDirectories.map((path) => summarizeDirectory(input.projectPath, path))),
+    summarizeWorkspaceSnapshotLite(input.projectPath, fileHashBytes),
   ]);
-  return { files, directories };
+  return { files, directories, workspaceSnapshot };
 }
 
 function workspaceReferenceProbeMatches(
@@ -200,7 +272,10 @@ function workspaceReferenceProbeMatches(
     stableHash(previous.dimensions) === stableHash(dimensions) &&
     stableHash(previous.files.map((file) => fileStatKey(file))) ===
       stableHash(probe.files.map((file) => fileStatKey(file))) &&
-    stableHash(previous.directories) === stableHash(probe.directories)
+    stableHash(previous.directories) === stableHash(probe.directories) &&
+    (!previous.workspaceSnapshot ||
+      stableHash(stripWorkspaceSnapshotChangedSummary(previous.workspaceSnapshot)) ===
+        stableHash(stripWorkspaceSnapshotChangedSummary(probe.workspaceSnapshot)))
   );
 }
 
@@ -226,13 +301,12 @@ async function summarizeFile(
     if (!fileStat.isFile()) {
       return missingFile(normalized);
     }
-    const content = await readFile(absolutePath);
-    const bounded = content.subarray(0, Math.max(0, maxHashBytes));
+    const bounded = await readFilePrefix(absolutePath, fileStat.size, maxHashBytes);
     const hash = stableHash({
       size: fileStat.size,
       mtimeMs: Math.trunc(fileStat.mtimeMs),
       contentHash: sha256(bounded),
-      truncated: content.length > bounded.length,
+      truncated: fileStat.size > bounded.length,
     });
     return {
       path: normalized,
@@ -308,6 +382,7 @@ function workspaceReferenceKey(scan: WorkspaceReferenceScan): string {
     dimensions: scan.dimensions,
     files: scan.files,
     directories: scan.directories,
+    workspaceSnapshot: stripWorkspaceSnapshotChangedSummary(scan.workspaceSnapshot),
     runtimeStatus: scan.runtimeStatus,
     toolCapabilitySummary: scan.toolCapabilitySummary,
     evidenceRefs: scan.evidenceRefs,
@@ -336,7 +411,251 @@ function diffWorkspaceReference(
   if (stableHash(previous.directories) !== stableHash(scan.directories)) {
     changed.add("directorySummaryHash");
   }
+  if (
+    stableHash(stripWorkspaceSnapshotChangedSummary(previous.workspaceSnapshot)) !==
+    stableHash(stripWorkspaceSnapshotChangedSummary(scan.workspaceSnapshot))
+  ) {
+    changed.add("workspaceSnapshotHash");
+  }
   return [...changed].sort((a, b) => a.localeCompare(b));
+}
+
+async function summarizeWorkspaceSnapshotLite(
+  projectPath: string,
+  fileHashBytes: number,
+): Promise<WorkspaceSnapshotLite> {
+  const entries: WorkspaceSnapshotLiteEntry[] = [];
+  const counts = { files: 0, directories: 0, symlinks: 0, other: 0, ignored: 0, storedEntries: 0 };
+  let partial = false;
+  const ignoreSources = await readIgnoreSources(projectPath);
+  const directory = await opendir(projectPath);
+  try {
+    for await (const entry of directory) {
+      const relativePath = normalizeRelativePath(entry.name);
+      const ignoredReason = getIgnoredReason(relativePath, entry.name, ignoreSources);
+      if (ignoredReason) {
+        counts.ignored += 1;
+        if (entries.length >= DEFAULT_TOP_LEVEL_ENTRY_LIMIT) {
+          partial = true;
+          continue;
+        }
+        entries.push({
+          path: relativePath,
+          kind: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other",
+          size: 0,
+          mtimeMs: 0,
+          ignoredReason,
+        });
+        continue;
+      }
+      if (entries.length >= DEFAULT_TOP_LEVEL_ENTRY_LIMIT) {
+        partial = true;
+        continue;
+      }
+      const absolutePath = join(projectPath, entry.name);
+      const entryStat = await lstat(absolutePath);
+      const kind = entryStat.isSymbolicLink()
+        ? "symlink"
+        : entryStat.isDirectory()
+          ? "directory"
+          : entryStat.isFile()
+            ? "file"
+            : "other";
+      incrementWorkspaceSnapshotCount(counts, kind);
+      entries.push({
+        path: relativePath,
+        kind,
+        size: entryStat.size,
+        mtimeMs: Math.trunc(entryStat.mtimeMs),
+        hashPrefix:
+          kind === "file"
+            ? await hashFilePrefix(absolutePath, entryStat.size, fileHashBytes)
+            : undefined,
+      });
+    }
+  } finally {
+    await directory.close().catch(() => undefined);
+  }
+  counts.storedEntries = entries.length;
+  return {
+    schemaVersion: 1,
+    root: ".",
+    bounded: true,
+    partial,
+    limits: { topLevelEntryLimit: DEFAULT_TOP_LEVEL_ENTRY_LIMIT, fileHashBytes },
+    counts,
+    ignoreSources: ignoreSources.map(({ path, readable, hashPrefix }) => ({
+      path,
+      readable,
+      hashPrefix,
+    })),
+    entries: entries.sort((a, b) => a.path.localeCompare(b.path)),
+  };
+}
+
+type IgnoreSource = { path: string; readable: boolean; patterns: string[]; hashPrefix?: string };
+
+type WorkspaceSnapshotCounts = WorkspaceSnapshotLite["counts"];
+
+async function readIgnoreSources(projectPath: string): Promise<IgnoreSource[]> {
+  return Promise.all(
+    IGNORE_FILES.map(async (path) => {
+      const absolutePath = join(projectPath, path);
+      try {
+        const fileStat = await stat(absolutePath);
+        if (!fileStat.isFile()) {
+          return { path, readable: false, patterns: [] };
+        }
+        const content = await readFilePrefix(
+          absolutePath,
+          fileStat.size,
+          DEFAULT_IGNORE_FILE_BYTES,
+        );
+        return {
+          path,
+          readable: true,
+          patterns: parseIgnorePatterns(content.toString("utf8")),
+          hashPrefix: sha256(content).slice(0, 12),
+        };
+      } catch {
+        return { path, readable: false, patterns: [] };
+      }
+    }),
+  );
+}
+
+function getIgnoredReason(
+  relativePath: string,
+  name: string,
+  ignoreSources: IgnoreSource[],
+): string | undefined {
+  if (HARD_SKIP_DIRS.has(relativePath) || HARD_SKIP_DIRS.has(name)) {
+    return `hard-skip:${name}`;
+  }
+  for (const source of ignoreSources) {
+    if (!source.readable) {
+      continue;
+    }
+    const matched = source.patterns.find((pattern) =>
+      ignorePatternMatches(pattern, relativePath, name),
+    );
+    if (matched) {
+      return `${source.path}:${matched}`;
+    }
+  }
+  return undefined;
+}
+
+function parseIgnorePatterns(content: string): string[] {
+  return content
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("!"))
+    .slice(0, 200);
+}
+
+function ignorePatternMatches(pattern: string, relativePath: string, name: string): boolean {
+  const normalized = normalizeRelativePath(pattern).replace(/^\//, "");
+  const directoryPattern = pattern.endsWith("/") ? normalized.replace(/\/$/, "") : normalized;
+  if (!directoryPattern || directoryPattern.includes("*")) {
+    return false;
+  }
+  return relativePath === directoryPattern || name === directoryPattern;
+}
+
+function incrementWorkspaceSnapshotCount(
+  counts: WorkspaceSnapshotCounts,
+  kind: WorkspaceSnapshotLiteEntry["kind"],
+): void {
+  if (kind === "file") counts.files += 1;
+  if (kind === "directory") counts.directories += 1;
+  if (kind === "symlink") counts.symlinks += 1;
+  if (kind === "other") counts.other += 1;
+}
+
+function attachWorkspaceSnapshotChangedSummary(
+  current: WorkspaceSnapshotLite | undefined,
+  previous: WorkspaceSnapshotLite | undefined,
+): WorkspaceSnapshotLite | undefined {
+  if (!current) {
+    return undefined;
+  }
+  return {
+    ...current,
+    changedSummary: diffWorkspaceSnapshotLite(previous, current),
+  };
+}
+
+function diffWorkspaceSnapshotLite(
+  previous: WorkspaceSnapshotLite | undefined,
+  current: WorkspaceSnapshotLite,
+): WorkspaceSnapshotLite["changedSummary"] {
+  if (!previous) {
+    return { added: 0, modified: 0, deleted: 0, changedKeys: [] };
+  }
+  const previousEntries = new Map(previous.entries.map((entry) => [entry.path, stableHash(entry)]));
+  const currentEntries = new Map(current.entries.map((entry) => [entry.path, stableHash(entry)]));
+  let added = 0;
+  let modified = 0;
+  let deleted = 0;
+  for (const [path, hash] of currentEntries) {
+    const previousHash = previousEntries.get(path);
+    if (!previousHash) {
+      added += 1;
+      continue;
+    }
+    if (previousHash !== hash) {
+      modified += 1;
+    }
+  }
+  for (const path of previousEntries.keys()) {
+    if (!currentEntries.has(path)) {
+      deleted += 1;
+    }
+  }
+  const changedKeys = [
+    ...(added > 0 ? ["workspaceSnapshotAdded"] : []),
+    ...(modified > 0 ? ["workspaceSnapshotModified"] : []),
+    ...(deleted > 0 ? ["workspaceSnapshotDeleted"] : []),
+  ];
+  return { added, modified, deleted, changedKeys };
+}
+
+function stripWorkspaceSnapshotChangedSummary(
+  snapshot: WorkspaceSnapshotLite | undefined,
+): Omit<WorkspaceSnapshotLite, "changedSummary"> | undefined {
+  if (!snapshot) {
+    return undefined;
+  }
+  const { changedSummary: _changedSummary, ...rest } = snapshot;
+  return rest;
+}
+
+async function hashFilePrefix(
+  absolutePath: string,
+  size: number,
+  maxBytes: number,
+): Promise<string> {
+  return sha256(await readFilePrefix(absolutePath, size, maxBytes)).slice(0, 12);
+}
+
+async function readFilePrefix(
+  absolutePath: string,
+  size: number,
+  maxBytes: number,
+): Promise<Buffer> {
+  const bytesToRead = Math.max(0, Math.min(size, maxBytes));
+  if (bytesToRead === 0) {
+    return Buffer.alloc(0);
+  }
+  const handle = await open(absolutePath, "r");
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
 function sanitizeRefs(refs: string[]): string[] {
