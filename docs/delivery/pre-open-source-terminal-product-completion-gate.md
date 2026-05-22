@@ -51,6 +51,7 @@
 - Phase 15.5B 只做资源与任务生命周期地基：前台请求守门、后台任务 cap、重任务互斥、取消/超时/stale、输出落盘和非 PASS 边界；不得提前实现第二套 agent/job runtime。
 - Phase 17A 才承接 Virtual Agent Concurrency：多 agent 可以对用户表现为并行，但底层必须按资源预算和证据边界调度，不能让每个 agent 复制完整上下文、重复扫全仓、并发跑重任务或把本机拖卡。3 agent 是低风险默认起点；8 agent 是覆盖大多数个人开发场景的压测/高配目标，不得写成无条件默认并发。
 - Native Local Job Runner 只是 Phase 17A 候选底座输入：正式接入前必须完成 Native-vs-Node benchmark、Windows MSVC/linker 与签名/杀软误报/中文和空格路径矩阵、Unix/macOS process group/session cleanup、managed/bundled runtime 分发、`/doctor runner`、fallback tests，以及 scheduler/evidence/resource guard integration；这些未完成前不得宣布 Phase 17A ready。
+- Fast Workspace Scanner 不进入当前必做实现；保留为 post-runner、benchmark-gated、optional managed native helper 候选。默认继续使用 TS/Node Workspace Snapshot Lite + codebase-memory；只有当大仓库/多 agent 共享 metadata benchmark 证明 TS/Node 路径成为瓶颈，且 Runner 的 managed binary / doctor / fallback 路线可控时，才启动 scanner prototype。
 - Phase 00-14 done 不回写、不污染。
 - 历史 A-C、D-H、focused/mock/local PASS 只作为 evidence，不作为 readiness proof。
 - 任何 `DOC-ONLY` 不能冒充 runtime DONE。

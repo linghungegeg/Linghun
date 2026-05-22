@@ -1,7 +1,16 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, extname, join, relative, resolve } from "node:path";
 import {
@@ -537,6 +546,94 @@ export type AgentRun = {
   updatedAt: string;
 };
 
+export type DurableJobStatus =
+  | "created"
+  | "running"
+  | "sleeping"
+  | "blocked"
+  | "stale"
+  | "cancelled"
+  | "timeout"
+  | "completed"
+  | "failed";
+
+export type DurableJobAgentStatus =
+  | "created"
+  | "running"
+  | "queued"
+  | "sleeping"
+  | "blocked"
+  | "stale"
+  | "cancelled"
+  | "timeout"
+  | "completed"
+  | "failed";
+
+export type DurableJobAgent = {
+  id: string;
+  type: AgentType;
+  goal: string;
+  status: DurableJobAgentStatus;
+  budgetTokens: number;
+  owner?: string;
+  heartbeatAt?: string;
+  summary?: string;
+};
+
+export type DurableJobState = {
+  id: string;
+  goal: string;
+  projectPath: string;
+  phase: string;
+  target: string;
+  plan: string[];
+  budget: {
+    maxTokens: number;
+    maxRunningAgents: number;
+    note: string;
+    usedTokens?: number;
+    remainingTokens?: number;
+    maxRuntimeMs?: number;
+  };
+  timeoutMs: number;
+  permissionPolicy: PermissionMode;
+  allowEdit: boolean;
+  allowBash: boolean;
+  allowMultiAgent: boolean;
+  status: DurableJobStatus;
+  pauseReason?: string;
+  agents: DurableJobAgent[];
+  handoffPacket?: HandoffPacket;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  logPath: string;
+  reportPath: string;
+  fullOutputPath: string;
+  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
+  verification?: { status: "not_run" | "pass" | "fail" | "partial"; summary: string };
+  ownerSessionId?: string;
+  ownerPid?: number;
+  heartbeatAt?: string;
+  worker?: {
+    sessionId?: string;
+    status: "not_started" | "running" | "completed" | "blocked" | "timeout" | "failed" | "stale";
+    startedAt?: string;
+    endedAt?: string;
+    summary: string;
+  };
+  result?: {
+    status: "partial" | "blocked" | "stale" | "timeout" | "overbudget" | "failed";
+    summary: string;
+    facts: string[];
+    evidenceRefs: string[];
+    generatedAt: string;
+  };
+  adoptedConclusions: string[];
+  rejectedConclusions: string[];
+};
+
 export type MemoryScope = "project" | "user" | "session";
 export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
 
@@ -767,6 +864,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/plan",
   "/permissions",
   "/background",
+  "/job",
   "/details",
   "/agents",
   "/fork",
@@ -994,7 +1092,14 @@ const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>>
   verification: 1,
   index: 1,
   agent: 3,
+  job: 1,
 };
+const DEFAULT_JOB_RUNNING_AGENT_CAP = 3;
+const JOB_AGENT_HIGH_CONFIG_CANDIDATE = 8;
+const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_JOB_BUDGET_TOKENS = 120_000;
+const JOB_LOG_TAIL_LINES = 40;
+const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 const MAX_CHECKPOINTS = 20;
 const MAX_AGENTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
@@ -1727,6 +1832,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
   };
+  await hydrateDurableJobBackgroundTasks(context);
   const gateway = createModelGateway(config);
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
@@ -1825,6 +1931,10 @@ export async function handleSlashCommand(
   }
   if (command === "/background") {
     await handleBackgroundCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/job") {
+    await handleJobCommand(rest, context, output);
     return "handled";
   }
   if (command === "/details") {
@@ -3791,6 +3901,7 @@ async function handleBackgroundCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  await hydrateDurableJobBackgroundTasks(context);
   refreshBackgroundLifecycle(context);
   if (context.backgroundTasks.length === 0) {
     writeLine(output, t(context, "backgroundNone"));
@@ -3799,6 +3910,826 @@ async function handleBackgroundCommand(
   for (const task of context.backgroundTasks) {
     writeLine(output, formatBackgroundTask(task, context.language));
   }
+}
+
+type ParsedJobRunOptions = {
+  goal: string;
+  phase: string;
+  target: string;
+  plan: string[];
+  maxTokens: number;
+  requestedAgents: number;
+  timeoutMs: number;
+  allowEdit: boolean;
+  allowBash: boolean;
+  allowMultiAgent: boolean;
+};
+
+async function handleJobCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "list";
+  await hydrateDurableJobBackgroundTasks(context);
+  if (action === "list") {
+    const jobs = await listDurableJobs(context);
+    writeLine(output, formatJobList(jobs, context));
+    return;
+  }
+  if (action === "run" || action === "create" || action === "new") {
+    const options = parseJobRunOptions(args.slice(1));
+    if (!options.goal) {
+      writeLine(
+        output,
+        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
+      );
+      return;
+    }
+    const start = action === "run";
+    const job = await createDurableJob(context, options, start);
+    await persistDurableJob(job);
+    await appendJobLog(
+      job,
+      `job ${action}: ${job.status}; pauseReason=${job.pauseReason ?? "none"}`,
+    );
+    await writeDurableJobReport(job);
+    const background = upsertJobBackgroundTask(context, job);
+    await appendBackgroundTaskEvent(context, await ensureSession(context), background);
+    if (start && job.status === "running") {
+      await runDurableJobLiteTick(context, job);
+    }
+    writeLine(output, formatJobPrimary(job, context));
+    return;
+  }
+  if (["status", "report", "logs", "pause", "resume", "cancel"].includes(action)) {
+    const job = await findDurableJob(context, args[1]);
+    if (!job) {
+      writeLine(output, "未找到 job。用法：/job status|report|logs|pause|resume|cancel <id>");
+      return;
+    }
+    if (action === "status") {
+      writeLine(output, formatJobStatus(job));
+      return;
+    }
+    if (action === "report") {
+      await writeDurableJobReport(job);
+      writeLine(output, formatJobReport(job));
+      return;
+    }
+    if (action === "logs") {
+      writeLine(output, await formatJobLogs(job));
+      return;
+    }
+    if (action === "pause") {
+      await transitionDurableJob(job, context, "sleeping", "user_paused");
+      writeLine(output, formatJobPrimary(job, context));
+      return;
+    }
+    if (action === "resume") {
+      await resumeDurableJob(job, context);
+      writeLine(output, formatJobPrimary(job, context));
+      return;
+    }
+    await transitionDurableJob(job, context, "cancelled", "user_cancelled");
+    writeLine(output, formatJobPrimary(job, context));
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/job list | /job run <goal> | /job create <goal> | /job status <id> | /job logs <id> | /job report <id> | /job pause <id> | /job resume <id> | /job cancel <id>",
+  );
+}
+
+function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
+  const goalParts: string[] = [];
+  let phase = "Phase 17A";
+  let target = "local-durable-jobs";
+  let requestedAgents = 1;
+  let maxTokens = DEFAULT_JOB_BUDGET_TOKENS;
+  let timeoutMs = DEFAULT_JOB_TIMEOUT_MS;
+  let allowEdit = false;
+  let allowBash = false;
+  let allowMultiAgent = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+    if (arg === "--phase") {
+      phase = args[index + 1] ?? phase;
+      index += 1;
+      continue;
+    }
+    if (arg === "--target") {
+      target = args[index + 1] ?? target;
+      index += 1;
+      continue;
+    }
+    if (arg === "--agents") {
+      requestedAgents = clampPositiveInt(args[index + 1], 1, MAX_AGENTS);
+      index += 1;
+      continue;
+    }
+    if (arg === "--tokens") {
+      maxTokens = clampPositiveInt(args[index + 1], DEFAULT_JOB_BUDGET_TOKENS, 10_000_000);
+      index += 1;
+      continue;
+    }
+    if (arg === "--timeout") {
+      timeoutMs = clampPositiveInt(args[index + 1], DEFAULT_JOB_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+      index += 1;
+      continue;
+    }
+    if (arg === "--allow-edit") {
+      allowEdit = true;
+      continue;
+    }
+    if (arg === "--allow-bash") {
+      allowBash = true;
+      continue;
+    }
+    if (arg === "--multi-agent") {
+      allowMultiAgent = true;
+      continue;
+    }
+    goalParts.push(arg);
+  }
+  const goal = goalParts.join(" ").trim();
+  const normalizedAgents = allowMultiAgent ? requestedAgents : 1;
+  return {
+    goal,
+    phase,
+    target,
+    plan: [
+      goal || "prepare job",
+      "validate handoff",
+      "schedule bounded local agents",
+      "write report",
+    ],
+    maxTokens,
+    requestedAgents: normalizedAgents,
+    timeoutMs,
+    allowEdit,
+    allowBash,
+    allowMultiAgent,
+  };
+}
+
+function clampPositiveInt(value: string | undefined, fallback: number, max: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+  return Math.min(parsed, max);
+}
+
+async function createDurableJob(
+  context: TuiContext,
+  options: ParsedJobRunOptions,
+  start: boolean,
+): Promise<DurableJobState> {
+  const now = new Date().toISOString();
+  const id = `job-${randomUUID().slice(0, 8)}`;
+  const paths = getDurableJobPaths(context, id);
+  const handoffPacket = await loadOrCreateHandoffPacket(context, await ensureSession(context));
+  const missing = validateHandoffPacket(handoffPacket);
+  const resourceGuard = start ? checkBackgroundStartGuard(context, "job", true) : null;
+  const runningCap = DEFAULT_JOB_RUNNING_AGENT_CAP;
+  const status: DurableJobStatus = !start
+    ? "created"
+    : missing.length > 0
+      ? "blocked"
+      : resourceGuard
+        ? "sleeping"
+        : "running";
+  const pauseReason =
+    missing.length > 0
+      ? `needs_handoff_repair:${missing.join(",")}`
+      : resourceGuard
+        ? `resource_guard:${resourceGuard}`
+        : undefined;
+  const agents = createDurableJobAgents(options, status, runningCap);
+  return {
+    id,
+    goal: options.goal,
+    projectPath: context.projectPath,
+    phase: options.phase,
+    target: options.target,
+    plan: options.plan,
+    budget: {
+      maxTokens: options.maxTokens,
+      maxRunningAgents: runningCap,
+      note: `${runningCap} running agents is the default cap; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only, not default.`,
+      usedTokens: 0,
+      remainingTokens: options.maxTokens,
+      maxRuntimeMs: options.timeoutMs,
+    },
+    timeoutMs: options.timeoutMs,
+    permissionPolicy: context.permissionMode,
+    allowEdit: options.allowEdit,
+    allowBash: options.allowBash,
+    allowMultiAgent: options.allowMultiAgent,
+    status,
+    pauseReason,
+    agents,
+    handoffPacket,
+    createdAt: now,
+    updatedAt: now,
+    startedAt: start && status === "running" ? now : undefined,
+    ownerSessionId: start && status === "running" ? await ensureSession(context) : undefined,
+    ownerPid: start && status === "running" ? process.pid : undefined,
+    heartbeatAt: start && status === "running" ? now : undefined,
+    worker: { status: "not_started", summary: "Lite worker has not run yet." },
+    logPath: paths.logPath,
+    reportPath: paths.reportPath,
+    fullOutputPath: paths.fullOutputPath,
+    evidenceRefs: context.evidence
+      .map((item) => ({ id: item.id, kind: item.kind, source: item.source, summary: item.summary }))
+      .slice(0, 8),
+    verification: { status: "not_run", summary: "not run in Phase 17A Lite job loop" },
+    adoptedConclusions: [],
+    rejectedConclusions:
+      status === "blocked" || status === "sleeping"
+        ? ["No PASS evidence is generated for blocked/sleeping jobs."]
+        : [],
+  };
+}
+
+function createDurableJobAgents(
+  options: ParsedJobRunOptions,
+  status: DurableJobStatus,
+  runningCap: number,
+): DurableJobAgent[] {
+  const total = Math.max(1, Math.min(options.requestedAgents, MAX_AGENTS));
+  return Array.from({ length: total }, (_, index) => {
+    const active = status === "running" && index < runningCap;
+    const agentStatus: DurableJobAgentStatus =
+      status === "running"
+        ? active
+          ? "running"
+          : "sleeping"
+        : status === "created"
+          ? "created"
+          : status;
+    return {
+      id: `job-agent-${index + 1}`,
+      type:
+        index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer",
+      goal: `${options.goal}#${index + 1}`,
+      status: agentStatus,
+      budgetTokens: Math.floor(options.maxTokens / total),
+      heartbeatAt: active ? new Date().toISOString() : undefined,
+      summary: active
+        ? "scheduled with trimmed handoff/evidence/cache refs only; no full transcript/source/index/log output"
+        : "not running; queued/sleeping behind Phase 17A resource cap",
+    };
+  });
+}
+
+async function resumeDurableJob(job: DurableJobState, context: TuiContext): Promise<void> {
+  const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
+  if (missing.length > 0) {
+    await transitionDurableJob(
+      job,
+      context,
+      "blocked",
+      `needs_handoff_repair:${missing.join(",")}`,
+    );
+    return;
+  }
+  const resourceGuard = checkBackgroundStartGuard(context, "job", true, job.id);
+  if (resourceGuard) {
+    await transitionDurableJob(job, context, "sleeping", `resource_guard:${resourceGuard}`);
+    return;
+  }
+  await transitionDurableJob(job, context, "running");
+  await runDurableJobLiteTick(context, job);
+}
+
+async function transitionDurableJob(
+  job: DurableJobState,
+  context: TuiContext,
+  status: DurableJobStatus,
+  pauseReason?: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  job.status = status;
+  job.pauseReason = pauseReason;
+  job.updatedAt = now;
+  if (status === "running") {
+    job.startedAt ??= now;
+    job.ownerSessionId = await ensureSession(context);
+    job.ownerPid = process.pid;
+    job.heartbeatAt = now;
+  }
+  if (
+    status === "cancelled" ||
+    status === "completed" ||
+    status === "failed" ||
+    status === "stale" ||
+    status === "timeout"
+  ) {
+    job.endedAt = now;
+  }
+  rescheduleDurableJobAgents(job);
+  await appendJobLog(job, `job transition: ${status}; pauseReason=${pauseReason ?? "none"}`);
+  await persistDurableJob(job);
+  await writeDurableJobReport(job);
+  const background = upsertJobBackgroundTask(context, job);
+  await appendBackgroundTaskEvent(context, await ensureSession(context), background);
+}
+
+async function hydrateDurableJobBackgroundTasks(context: TuiContext): Promise<void> {
+  const jobs = await listDurableJobs(context);
+  for (const job of jobs) {
+    const recovered = await recoverDurableJobForContext(context, job);
+    upsertJobBackgroundTask(context, recovered);
+  }
+}
+
+async function recoverDurableJobForContext(
+  context: TuiContext,
+  job: DurableJobState,
+): Promise<DurableJobState> {
+  if (job.status !== "running") {
+    return job;
+  }
+  const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
+  if (missing.length > 0) {
+    job.status = "blocked";
+    job.pauseReason = `needs_handoff_repair:${missing.join(",")}`;
+  } else if (!job.ownerSessionId || !job.ownerPid || !job.heartbeatAt) {
+    job.status = "stale";
+    job.pauseReason = "recovered_without_owner_or_heartbeat";
+  } else {
+    const heartbeatAge = Date.now() - Date.parse(job.heartbeatAt);
+    if (Number.isNaN(heartbeatAge) || heartbeatAge > JOB_RECOVERY_HEARTBEAT_STALE_MS) {
+      job.status = "stale";
+      job.pauseReason = "recovered_stale_heartbeat";
+    }
+  }
+  if (job.status === "running") {
+    return job;
+  }
+  const now = new Date().toISOString();
+  job.updatedAt = now;
+  job.endedAt = job.status === "stale" ? now : job.endedAt;
+  job.result = {
+    status: job.status === "blocked" ? "blocked" : "stale",
+    summary: `Recovered job moved to ${job.status}; no PASS evidence generated.`,
+    facts: ["startup recovery", job.pauseReason ?? "no pause reason"],
+    evidenceRefs: job.evidenceRefs.map((item) => item.id),
+    generatedAt: now,
+  };
+  job.rejectedConclusions = [
+    ...job.rejectedConclusions,
+    `Recovered ${job.status} job is conservative and not PASS evidence.`,
+  ];
+  rescheduleDurableJobAgents(job);
+  await appendJobLog(job, `job recovery: ${job.status}; pauseReason=${job.pauseReason ?? "none"}`);
+  await persistDurableJob(job);
+  await writeDurableJobReport(job);
+  return job;
+}
+
+async function runDurableJobLiteTick(context: TuiContext, job: DurableJobState): Promise<void> {
+  if (job.status !== "running") {
+    return;
+  }
+  const budgetStop = await applyDurableJobBudgetStop(context, job, "before_lite_worker");
+  if (budgetStop) {
+    return;
+  }
+  const startedAt = new Date().toISOString();
+  const workerSession = await context.store.create({
+    model: context.model,
+    summary: `job-worker:${job.id}:${truncateDisplay(job.goal, 40)}`,
+  });
+  const facts = [
+    `goal=${truncateDisplay(job.goal, 120)}`,
+    `phase=${job.phase}`,
+    `target=${job.target}`,
+    `handoff=${job.handoffPacket?.id ?? "missing"}`,
+    `index=${context.index.status}${context.index.projectName ? `:${context.index.projectName}` : ""}`,
+    `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
+    `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
+  ];
+  const summary = [
+    "Phase 17A Lite worker completed one read-only structured step.",
+    "Input boundary: trimmed handoff/project facts/evidence refs/cache/index status only.",
+    "No full transcript/source/index/log output was injected.",
+  ].join(" ");
+  const estimatedTokens = estimateJobTokens(`${summary}\n${facts.join("\n")}`);
+  if ((job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens) {
+    await transitionDurableJob(
+      job,
+      context,
+      "blocked",
+      `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
+    );
+    job.result = {
+      status: "overbudget",
+      summary:
+        "Lite worker stopped before output because maxTokens would be exceeded; no PASS evidence generated.",
+      facts,
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: new Date().toISOString(),
+    };
+    job.worker = {
+      sessionId: workerSession.id,
+      status: "blocked",
+      startedAt,
+      endedAt: new Date().toISOString(),
+      summary: job.result.summary,
+    };
+    await persistDurableJob(job);
+    await writeDurableJobReport(job);
+    return;
+  }
+  job.budget.usedTokens = (job.budget.usedTokens ?? 0) + estimatedTokens;
+  job.budget.remainingTokens = Math.max(0, job.budget.maxTokens - job.budget.usedTokens);
+  const endedAt = new Date().toISOString();
+  job.worker = { sessionId: workerSession.id, status: "completed", startedAt, endedAt, summary };
+  job.result = {
+    status: "partial",
+    summary,
+    facts,
+    evidenceRefs: job.evidenceRefs.map((item) => item.id),
+    generatedAt: endedAt,
+  };
+  job.verification = {
+    status: "partial",
+    summary: "Lite worker result is structured but not verification PASS.",
+  };
+  job.heartbeatAt = endedAt;
+  job.updatedAt = endedAt;
+  job.adoptedConclusions = [
+    ...job.adoptedConclusions,
+    "Lite worker produced a read-only structured result from trimmed refs.",
+  ];
+  job.rejectedConclusions = [
+    ...job.rejectedConclusions,
+    "Lite worker partial result is not PASS evidence and not smoke-ready proof.",
+  ];
+  rescheduleDurableJobAgents(job);
+  await context.store.appendEvent(workerSession.id, {
+    type: "system_event",
+    id: randomUUID(),
+    level: "info",
+    message: `${summary} facts=${facts.join(" | ")}`,
+    createdAt: endedAt,
+  });
+  await appendJobLog(
+    job,
+    `lite worker partial: session=${workerSession.id}; tokens=${estimatedTokens}`,
+  );
+  await persistDurableJob(job);
+  await writeDurableJobReport(job);
+  const background = upsertJobBackgroundTask(context, job);
+  await appendBackgroundTaskEvent(context, await ensureSession(context), background);
+  await applyDurableJobBudgetStop(context, job, "after_lite_worker");
+}
+
+async function applyDurableJobBudgetStop(
+  context: TuiContext,
+  job: DurableJobState,
+  phase: string,
+): Promise<boolean> {
+  const started = Date.parse(job.startedAt ?? job.createdAt);
+  const runtimeMs = Number.isNaN(started) ? 0 : Date.now() - started;
+  const maxRuntimeMs = job.budget.maxRuntimeMs ?? job.timeoutMs;
+  if (runtimeMs > maxRuntimeMs) {
+    await transitionDurableJob(
+      job,
+      context,
+      "timeout",
+      `timeout:${phase}:${runtimeMs}/${maxRuntimeMs}`,
+    );
+    job.result = {
+      status: "timeout",
+      summary: "Durable job exceeded maxRuntime/timeout; no PASS evidence generated.",
+      facts: [`runtimeMs=${runtimeMs}`, `maxRuntimeMs=${maxRuntimeMs}`],
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: new Date().toISOString(),
+    };
+    await persistDurableJob(job);
+    await writeDurableJobReport(job);
+    return true;
+  }
+  if ((job.budget.usedTokens ?? 0) > job.budget.maxTokens) {
+    await transitionDurableJob(job, context, "blocked", `budget_exceeded:${phase}`);
+    return true;
+  }
+  return false;
+}
+
+function estimateJobTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function rescheduleDurableJobAgents(job: DurableJobState): void {
+  let running = 0;
+  for (const agent of job.agents) {
+    if (job.status === "running" && running < job.budget.maxRunningAgents) {
+      agent.status = "running";
+      agent.heartbeatAt = job.updatedAt;
+      running += 1;
+      continue;
+    }
+    if (job.status === "running") {
+      agent.status = "sleeping";
+      continue;
+    }
+    agent.status =
+      job.status === "sleeping" ? "sleeping" : job.status === "blocked" ? "blocked" : job.status;
+  }
+}
+
+function upsertJobBackgroundTask(context: TuiContext, job: DurableJobState): BackgroundTaskState {
+  const existing = context.backgroundTasks.find((task) => task.id === job.id);
+  const task = createJobBackgroundTask(job, context);
+  if (existing) {
+    Object.assign(existing, task);
+    return existing;
+  }
+  rememberBackgroundTask(context, task);
+  return task;
+}
+
+function createJobBackgroundTask(job: DurableJobState, context: TuiContext): BackgroundTaskState {
+  const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  return {
+    id: job.id,
+    kind: "job",
+    title: `Job: ${truncateDisplay(job.goal, 40)}`,
+    status: mapDurableJobToBackgroundStatus(job.status),
+    currentStep: job.pauseReason ?? `agents ${runningAgents}/${job.agents.length}`,
+    progress: { completed: runningAgents, total: job.agents.length, label: "agents" },
+    startedAt: job.startedAt ?? job.createdAt,
+    updatedAt: job.updatedAt,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: job.timeoutMs,
+    logPath: job.logPath,
+    outputPath: job.fullOutputPath,
+    hasOutput: true,
+    result: mapDurableJobToBackgroundResult(job.status),
+    userVisibleSummary:
+      job.status === "running"
+        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; raw output stays in logs.`
+        : `Job ${job.status}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
+    nextAction: formatJobNextAction(job, context.language),
+  };
+}
+
+function mapDurableJobToBackgroundStatus(status: DurableJobStatus): BackgroundTaskStatus {
+  if (status === "created" || status === "sleeping" || status === "blocked") {
+    return "paused";
+  }
+  return status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "stale" ||
+    status === "timeout"
+    ? status
+    : "running";
+}
+
+function mapDurableJobToBackgroundResult(
+  status: DurableJobStatus,
+): BackgroundTaskState["result"] | undefined {
+  if (status === "completed") return "partial";
+  if (status === "failed") return "fail";
+  if (status === "cancelled") return "cancelled";
+  if (status === "stale") return "stale";
+  if (status === "timeout") return "timeout";
+  if (status === "blocked" || status === "sleeping") return "partial";
+  return undefined;
+}
+
+function formatJobNextAction(job: DurableJobState, language: Language): string {
+  if (job.status === "running") {
+    return language === "en-US"
+      ? `Use /job pause ${job.id}, /job cancel ${job.id}, /job report ${job.id}, or /job logs ${job.id}.`
+      : `可用 /job pause ${job.id}、/job cancel ${job.id}、/job report ${job.id} 或 /job logs ${job.id}。`;
+  }
+  if (job.status === "blocked") {
+    return language === "en-US"
+      ? "Repair the handoff packet or evidence/index state, then /job resume."
+      : "先修复 handoff/evidence/index 状态，再用 /job resume。";
+  }
+  return language === "en-US"
+    ? `Inspect /job report ${job.id}; cancelled/timeout/stale/blocked never count as PASS.`
+    : `查看 /job report ${job.id}；cancelled/timeout/stale/blocked 不产生 PASS。`;
+}
+
+async function persistDurableJob(job: DurableJobState): Promise<void> {
+  await mkdir(dirname(job.logPath), { recursive: true });
+  await writeFile(getDurableJobStatePath(job), `${JSON.stringify(job, null, 2)}\n`, "utf8");
+}
+
+async function appendJobLog(job: DurableJobState, message: string): Promise<void> {
+  await mkdir(dirname(job.logPath), { recursive: true });
+  await appendFile(job.logPath, `[${new Date().toISOString()}] ${message}\n`, "utf8");
+  await appendFile(job.fullOutputPath, `[${new Date().toISOString()}] ${message}\n`, "utf8");
+}
+
+async function writeDurableJobReport(job: DurableJobState): Promise<void> {
+  const lines = [
+    `# Job Report ${job.id}`,
+    "",
+    `- status: ${job.status}`,
+    `- goal: ${job.goal}`,
+    `- projectPath: ${job.projectPath}`,
+    `- phase/target: ${job.phase} / ${job.target}`,
+    `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    `- budget note: ${job.budget.note}`,
+    `- pauseReason: ${job.pauseReason ?? "-"}`,
+    `- owner: session=${job.ownerSessionId ?? "-"}; pid=${job.ownerPid ?? "-"}; heartbeatAt=${job.heartbeatAt ?? "-"}`,
+    `- worker: ${job.worker?.status ?? "not_started"}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
+    `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
+    `- handoff: ${job.handoffPacket?.id ?? "missing"}`,
+    `- evidenceRefs: ${job.evidenceRefs.map((item) => item.id).join(", ") || "none"}`,
+    `- logs: ${job.logPath}`,
+    `- fullOutput: ${job.fullOutputPath}`,
+    "",
+    "## Task graph",
+    ...job.plan.map((step, index) => `${index + 1}. ${step}`),
+    "",
+    "## Agent assignment",
+    ...job.agents.map(
+      (agent) =>
+        `- ${agent.id}: ${agent.type} status=${agent.status} budgetTokens=${agent.budgetTokens} goal=${agent.goal}`,
+    ),
+    "",
+    "## Lite result",
+    `- status: ${job.result?.status ?? "not_run"}`,
+    `- summary: ${job.result?.summary ?? "Lite worker has not produced a result yet."}`,
+    `- facts: ${job.result?.facts.join(" | ") ?? "none"}`,
+    `- evidenceRefs: ${job.result?.evidenceRefs.join(", ") ?? "none"}`,
+    "",
+    "## Budget enforcement",
+    `- usedTokens: ${job.budget.usedTokens ?? 0}`,
+    `- remainingTokens: ${job.budget.remainingTokens ?? job.budget.maxTokens}`,
+    `- maxRuntimeMs: ${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    "- conservative: overbudget/timeout/stale/blocked states do not generate PASS evidence.",
+    "",
+    "## Adopted conclusions",
+    ...(job.adoptedConclusions.length > 0 ? job.adoptedConclusions : ["- none"]),
+    "",
+    "## Rejected conclusions",
+    ...(job.rejectedConclusions.length > 0
+      ? job.rejectedConclusions.map((item) => `- ${item}`)
+      : ["- No blocked/cancelled/timeout/stale state is treated as PASS evidence."]),
+    "",
+    "## Boundaries",
+    "- Node/TUI runtime remains default; native runner integration is DEFERRED pending benchmark/platform/doctor/fallback/scheduler/evidence/resource-guard gates.",
+    "- Remote channels / Phase 17B and Phase 18 desktop are NOT entered.",
+    "- Agent context is trimmed to handoff/evidence/cache/index refs; no full transcript/source/index/log output is injected.",
+  ];
+  await mkdir(dirname(job.reportPath), { recursive: true });
+  await writeFile(job.reportPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function listDurableJobs(context: TuiContext): Promise<DurableJobState[]> {
+  const root = getDurableJobsRoot(context);
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const jobs: DurableJobState[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const job = await readDurableJobState(join(root, entry.name, "state.json"));
+    if (job) jobs.push(job);
+  }
+  return jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+async function findDurableJob(
+  context: TuiContext,
+  id: string | undefined,
+): Promise<DurableJobState | undefined> {
+  const jobs = await listDurableJobs(context);
+  if (!id) return jobs[0];
+  return jobs.find((job) => job.id === id || job.id.endsWith(id));
+}
+
+async function readDurableJobState(path: string): Promise<DurableJobState | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+    return isDurableJobState(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDurableJobState(value: unknown): value is DurableJobState {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.goal === "string" &&
+    typeof value.projectPath === "string" &&
+    typeof value.status === "string" &&
+    Array.isArray(value.plan) &&
+    Array.isArray(value.agents) &&
+    typeof value.logPath === "string" &&
+    typeof value.reportPath === "string" &&
+    typeof value.fullOutputPath === "string"
+  );
+}
+
+function getDurableJobsRoot(context: TuiContext): string {
+  return resolveStoragePaths(context.config, context.projectPath).jobs;
+}
+
+function getDurableJobPaths(
+  context: TuiContext,
+  id: string,
+): Pick<DurableJobState, "logPath" | "reportPath" | "fullOutputPath"> {
+  const dir = join(getDurableJobsRoot(context), id);
+  return {
+    logPath: join(dir, "job.log"),
+    reportPath: join(dir, "report.md"),
+    fullOutputPath: join(dir, "full-output.log"),
+  };
+}
+
+function getDurableJobStatePath(job: DurableJobState): string {
+  return join(dirname(job.logPath), "state.json");
+}
+
+function formatJobList(jobs: DurableJobState[], context: TuiContext): string {
+  if (jobs.length === 0) {
+    return "当前没有 durable job。用法：/job run <goal>。";
+  }
+  return [
+    "Durable jobs:",
+    ...jobs.map(
+      (job) =>
+        `${job.id}  ${job.status}  agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}  phase=${job.phase}  target=${job.target}  report=${job.reportPath}  goal=${truncateDisplay(job.goal, 60)}`,
+    ),
+    context.language === "en-US"
+      ? `Default running agent cap is ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only.`
+      : `默认真实运行 agent 上限为 ${DEFAULT_JOB_RUNNING_AGENT_CAP}；${JOB_AGENT_HIGH_CONFIG_CANDIDATE} 只是 benchmark/high-config 候选。`,
+  ].join("\n");
+}
+
+function formatJobPrimary(job: DurableJobState, context: TuiContext): string {
+  const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  return [
+    `[job] ${job.id} · ${job.status} · ${truncateDisplay(job.goal, 80)}`,
+    "- impact: local durable metadata + unified background task; no remote channel, no Phase 18, no Beta/smoke-ready PASS.",
+    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; 8-agent mode is deferred benchmark candidate.`,
+    `- verification: ${job.verification?.status ?? "not_run"}; cancelled/timeout/stale/blocked never generate PASS evidence.`,
+    `- next: ${formatJobNextAction(job, context.language)}`,
+    `- details: /job report ${job.id}; logs: /job logs ${job.id}; background: /background`,
+  ].join("\n");
+}
+
+function formatJobStatus(job: DurableJobState): string {
+  const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  return [
+    `Job ${job.id}`,
+    `- status: ${job.status}`,
+    `- pauseReason: ${job.pauseReason ?? "-"}`,
+    `- goal: ${job.goal}`,
+    `- projectPath: ${job.projectPath}`,
+    `- phase/target: ${job.phase} / ${job.target}`,
+    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    `- worker: ${job.worker?.status ?? "not_started"}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
+    `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
+    `- logPath: ${job.logPath}`,
+    `- reportPath: ${job.reportPath}`,
+  ].join("\n");
+}
+
+function formatJobReport(job: DurableJobState): string {
+  return [
+    `Job report ${job.id}`,
+    `- status: ${job.status}`,
+    `- task graph: ${job.plan.length} steps`,
+    `- agent assignment: ${job.agents.map((agent) => `${agent.id}:${agent.type}:${agent.status}`).join(", ")}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}`,
+    `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
+    `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
+    `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
+    `- pauseReason: ${job.pauseReason ?? "-"}`,
+    `- logPath: ${job.logPath}`,
+    `- fullOutputPath: ${job.fullOutputPath}`,
+    `- reportPath: ${job.reportPath}`,
+  ].join("\n");
+}
+
+async function formatJobLogs(job: DurableJobState): Promise<string> {
+  const content = await readFile(job.logPath, "utf8").catch(() => "");
+  const tail = content.split(/\r?\n/u).filter(Boolean).slice(-JOB_LOG_TAIL_LINES);
+  return [
+    `Job logs ${job.id}`,
+    `- path: ${job.logPath}`,
+    `- fullOutputPath: ${job.fullOutputPath}`,
+    `- tailLines: ${tail.length}/${JOB_LOG_TAIL_LINES}`,
+    tail.length > 0 ? tail.join("\n") : "日志为空；job 可能尚未写入输出。",
+  ].join("\n");
 }
 
 async function handleDetailsCommand(
@@ -3940,6 +4871,7 @@ function refreshBackgroundLifecycle(context: TuiContext): void {
 function checkResourceGuard(
   context: TuiContext,
   kind: BackgroundTaskState["kind"] | "model" | "heavy",
+  ignoreTaskId?: string,
 ): string | null {
   refreshBackgroundLifecycle(context);
   if (kind === "model") {
@@ -3947,8 +4879,8 @@ function checkResourceGuard(
       ? "已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。"
       : null;
   }
-  const activeTasks = context.backgroundTasks.filter((task) =>
-    isActiveBackgroundStatus(task.status),
+  const activeTasks = context.backgroundTasks.filter(
+    (task) => task.id !== ignoreTaskId && isActiveBackgroundStatus(task.status),
   );
   if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
     return `后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。`;
@@ -3959,7 +4891,8 @@ function checkResourceGuard(
         task.kind === "verification" ||
         task.kind === "index" ||
         task.kind === "agent" ||
-        task.kind === "bash",
+        task.kind === "bash" ||
+        task.kind === "job",
     );
     return heavy
       ? `已有重任务正在运行：${heavy.kind} ${heavy.id}。请等待完成、查看 /background，或先 /interrupt。`
@@ -3976,8 +4909,12 @@ function checkBackgroundStartGuard(
   context: TuiContext,
   kind: BackgroundTaskState["kind"],
   heavy = false,
+  ignoreTaskId?: string,
 ): string | null {
-  return checkResourceGuard(context, kind) ?? (heavy ? checkResourceGuard(context, "heavy") : null);
+  return (
+    checkResourceGuard(context, kind, ignoreTaskId) ??
+    (heavy ? checkResourceGuard(context, "heavy", ignoreTaskId) : null)
+  );
 }
 
 function rememberBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {
@@ -4713,6 +5650,7 @@ function abortBackgroundTask(context: TuiContext, taskId: string): boolean {
     return false;
   }
   controller.abort();
+  clearBackgroundAbortController(context, taskId);
   return true;
 }
 
@@ -11450,6 +12388,7 @@ function formatHelp(language: Language): string {
   /plan accept [id]     Accept a plan and return to default
   /permissions          Show permission rules
   /background           Show collapsed background task summaries
+  /job                  Manage local durable jobs (list/run/pause/resume/cancel/status/logs/report)
   /agents               List agent status, transcripts, and usage
   /agents show <id>     Show one agent detail
   /agents cancel <id>   Interrupt one agent without stopping the main session
@@ -11547,6 +12486,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /permissions recent delete <id> 删除单条最近拒绝
   /permissions recent clear  清空最近拒绝
   /background           查看后台任务一行摘要
+  /job                  管理本地 durable job（list/run/pause/resume/cancel/status/logs/report）
   /details              查看 evidence/background/details 摘要
   /agents               查看 agent 状态、transcript 和 usage
   /agents show <id>     查看单个 agent 详情

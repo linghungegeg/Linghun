@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
+import {
+  type LinghunConfig,
+  defaultConfig,
+  getSessionRootDir,
+  resolveStoragePaths,
+} from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
@@ -1349,6 +1354,298 @@ describe("Phase 06 TUI slash commands", () => {
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
     expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
     expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
+  });
+
+  it("runs Phase 17A durable job loop with persisted state, background reuse, and bounded agents", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-phase-17a",
+      kind: "test_result",
+      summary: "Phase 17A focused evidence",
+      source: "vitest",
+      supportsClaims: ["phase-17a-focused"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand(
+      "/job run implement durable loop --multi-agent --agents 5 --allow-bash --allow-edit --tokens 50000 --timeout 60000",
+      context,
+      output,
+    );
+    await handleSlashCommand("/job list", context, output);
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+    await handleSlashCommand(`/job status ${jobId}`, context, output);
+    await handleSlashCommand(`/job report ${jobId}`, context, output);
+    await handleSlashCommand(`/job logs ${jobId}`, context, output);
+    await handleSlashCommand(`/details background ${jobId}`, context, output);
+
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      agents?: { status?: string; summary?: string }[];
+      budget?: { maxRunningAgents?: number; note?: string; usedTokens?: number };
+      worker?: { status?: string };
+      result?: { status?: string };
+      reportPath?: string;
+    };
+    expect(persisted.status).toBe("running");
+    expect(persisted.worker?.status).toBe("completed");
+    expect(persisted.result?.status).toBe("partial");
+    expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
+    expect(persisted.agents).toHaveLength(5);
+    expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(3);
+    expect(persisted.agents?.filter((agent) => agent.status === "sleeping")).toHaveLength(2);
+    expect(persisted.budget?.maxRunningAgents).toBe(3);
+    expect(persisted.budget?.note).toContain("8 is benchmark/high-config candidate only");
+    expect(persisted.agents?.[0]?.summary).toContain("no full transcript/source/index/log output");
+    const report = await readFile(persisted.reportPath ?? "", "utf8");
+    expect(report).toContain("Node/TUI runtime remains default");
+    expect(report).toContain("Phase 17A Lite worker completed one read-only structured step");
+    expect(report).toContain("No full transcript/source/index/log output was injected");
+
+    expect(context.backgroundTasks).toContainEqual(
+      expect.objectContaining({ id: jobId, kind: "job", status: "running" }),
+    );
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+    expect(output.text).toContain("local durable metadata + unified background task");
+    expect(output.text).toContain("created=5, running=3, cap=3");
+    expect(output.text).toContain("blocked never generate PASS evidence");
+    expect(output.text).toContain("worker: completed");
+    expect(output.text).toContain("task graph: 4 steps");
+    expect(output.text).toContain("fullOutputPath:");
+    expect(output.text).not.toContain("Beta readiness PASS");
+  });
+
+  it("recovers Phase 17A durable jobs into background and marks missing owner heartbeat stale", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-recovery",
+      kind: "test_result",
+      summary: "recovery evidence",
+      source: "vitest",
+      supportsClaims: ["phase-17a-recovery"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand(
+      "/job run recover durable job --multi-agent --agents 4",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    persisted.ownerSessionId = undefined;
+    persisted.ownerPid = undefined;
+    persisted.heartbeatAt = undefined;
+    await writeFile(statePath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    const freshStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    });
+    const freshSession = await freshStore.create({ model: "deepseek-v4-flash" });
+    const freshContext = await createTestContext(project, freshStore, freshSession, config);
+    const freshOutput = new MemoryOutput();
+
+    await handleSlashCommand("/background", freshContext, freshOutput);
+
+    const recovered = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      pauseReason?: string;
+      result?: { status?: string };
+    };
+    expect(recovered.status).toBe("stale");
+    expect(recovered.pauseReason).toBe("recovered_without_owner_or_heartbeat");
+    expect(recovered.result?.status).toBe("stale");
+    expect(freshContext.backgroundTasks).toContainEqual(
+      expect.objectContaining({ id: jobId, kind: "job", status: "stale" }),
+    );
+    expect(freshContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+    expect(freshOutput.text).toContain("stale");
+  });
+
+  it("keeps Phase 17A cross-session resource guard and budget stops conservative", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-budget",
+      kind: "test_result",
+      summary: "budget evidence",
+      source: "vitest",
+      supportsClaims: ["phase-17a-budget"],
+      createdAt: new Date().toISOString(),
+    });
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(
+      "/job run active durable guard --multi-agent --agents 5",
+      context,
+      output,
+    );
+    const firstJobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const freshStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    });
+    const freshSession = await freshStore.create({ model: "deepseek-v4-flash" });
+    const freshContext = await createTestContext(project, freshStore, freshSession, config);
+    freshContext.index.status = "ready";
+    freshContext.index.projectName = "F-Linghun";
+    freshContext.lastVerification = createVerificationReportFixture("partial");
+    freshContext.evidence = [...context.evidence];
+
+    await handleSlashCommand(
+      "/job run guarded second durable job --multi-agent --agents 5",
+      freshContext,
+      output,
+    );
+    const jobsRoot = resolveStoragePaths(config, project).jobs;
+    const firstState = JSON.parse(
+      await readFile(join(jobsRoot, firstJobId ?? "missing", "state.json"), "utf8"),
+    ) as {
+      status?: string;
+    };
+    const guardedJob = freshContext.backgroundTasks.find(
+      (task) => task.kind === "job" && task.id !== firstJobId,
+    );
+    const guardedState = JSON.parse(
+      await readFile(join(jobsRoot, guardedJob?.id ?? "missing", "state.json"), "utf8"),
+    ) as {
+      status?: string;
+      pauseReason?: string;
+      agents?: { status?: string }[];
+    };
+    expect(firstState.status).toBe("running");
+    expect(guardedState.status).toBe("sleeping");
+    expect(guardedState.pauseReason).toContain("resource_guard");
+    expect(guardedState.agents).toHaveLength(5);
+    expect(guardedState.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
+
+    await handleSlashCommand(`/job cancel ${firstJobId}`, freshContext, output);
+    const budgetProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const budgetStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: budgetProject,
+    });
+    const budgetSession = await budgetStore.create({ model: "deepseek-v4-flash" });
+    const budgetContext = await createTestContext(
+      budgetProject,
+      budgetStore,
+      budgetSession,
+      config,
+    );
+    budgetContext.index.status = "ready";
+    budgetContext.index.projectName = "F-Linghun";
+    budgetContext.lastVerification = createVerificationReportFixture("partial");
+    budgetContext.evidence = [...context.evidence];
+    const budgetOutput = new MemoryOutput();
+    await handleSlashCommand(
+      "/job run overbudget durable worker --tokens 1",
+      budgetContext,
+      budgetOutput,
+    );
+    const budgetJobId = budgetContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const budgetJobsRoot = resolveStoragePaths(config, budgetProject).jobs;
+    const budgetState = JSON.parse(
+      await readFile(join(budgetJobsRoot, budgetJobId ?? "missing", "state.json"), "utf8"),
+    ) as {
+      status?: string;
+      pauseReason?: string;
+      result?: { status?: string; summary?: string };
+    };
+    expect(budgetState.status).toBe("blocked");
+    expect(budgetState.pauseReason).toContain("budget_exceeded");
+    expect(budgetState.result?.status).toBe("overbudget");
+    expect(budgetState.result?.summary).toContain("no PASS evidence");
+    expect(budgetContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+  });
+
+  it("blocks Phase 17A jobs when handoff is incomplete and never records PASS evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand(
+      "/job run blocked missing handoff --multi-agent --agents 4",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    await handleSlashCommand(`/job status ${jobId}`, context, output);
+    await handleSlashCommand(`/job cancel ${jobId}`, context, output);
+
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      pauseReason?: string;
+      agents?: { status?: string }[];
+    };
+    expect(output.text).toContain("needs_handoff_repair");
+    expect(output.text).toContain("cancelled/timeout/stale/blocked never generate PASS evidence");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    expect(persisted.status).toBe("cancelled");
+    expect(persisted.pauseReason).toBe("user_cancelled");
+    expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
   });
 
   it("routes Phase 13 roles, handoffs, vision, image, and usage", async () => {
