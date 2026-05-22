@@ -38,11 +38,12 @@
 ## 已完成功能
 
 - 新增 `Terminal Readiness Presenter`：集中格式化 terminal readiness doctor、readiness status companion line 和 Problems Lite 输出。
-- `/doctor` 默认输出本地/静态 readiness checklist；`/doctor readiness`、`/doctor status`、`/doctor checklist` 等价；`/doctor hooks` 继续保留既有 hooks doctor。
+- `/doctor` 默认输出本地/静态 readiness checklist；`/doctor readiness`、`/doctor status`、`/doctor checklist`、`/doctor project`、`/doctor report` 等价输出 Phase 15.5F readiness/report guard；`/doctor hooks` 继续保留既有 hooks doctor。
 - `/status` 保持既有短状态栏，同时追加一行 readiness companion：本地 pass 数、待处理数，并明确 `非 smoke/Beta PASS`。
-- 新增 `/problems`：仅从既有 runtime state 汇总 verification、provider failure、background blocked task、freshness missing source、index stale/error 的轻量问题摘要。
-- `/help` 与 Command Capability Catalog 更新：暴露 `/doctor [readiness]` 和 `/problems`，并保持 `/doctor hooks` 可见。
-- Readiness checklist 覆盖：provider/model、index、cache/context、memory/rules、mcp/connect、background/tasks、verification、freshness/web evidence。
+- 新增 `/problems`：仅从既有 runtime state 汇总 verification、provider failure、background blocked task、freshness missing source、index stale/error，以及 project/drift/context/rollback/cost Lite 的轻量问题摘要。
+- `/help` 与 Command Capability Catalog 更新：暴露 `/doctor [readiness]`、`/doctor project` 和 `/problems`，并保持 `/doctor hooks` 可见。
+- Readiness checklist 覆盖：provider/model、index、cache/context、memory/rules、mcp/connect、background/tasks、verification、freshness/web evidence、Project Doctor Lite、Source-of-Truth Drift Linter Lite、Context Picker Lite、Rollback Coach Lite、Task Cost Preview Lite。
+- 成熟度判定收紧：Project Doctor Lite 逐项检查 test/typecheck/check/build scripts、tsconfig、Vitest、Biome、pnpm/corepack、CI workflow、LINGHUN.md；任一关键项缺失不得 PASS。Source-of-Truth Drift Linter Lite 检查 15.5A-E 报告存在和 15.5F 四类否定声明；Rollback Coach Lite 读取真实 `git status --short`；Context Picker Lite 只有 project rules + fresh index + workspace snapshot + evidence/verification ref 同时具备才 PASS。
 - Product readiness guard：`pass` 只用于明确本地状态；missing/unknown/stale/cancelled/timeout/fail/partial 不会被计入 readiness PASS，也不会被表述为 Beta PASS、smoke-ready 或 open-source-ready。
 - 主屏脱敏与收敛：Problems Lite 对 secret、本地绝对路径、raw provider diagnostic 做主屏脱敏/截断；详情仍通过 `/model doctor`、`/details evidence`、`/details background <id>`、`/verify last`、`/index doctor` 等入口查看。
 - 普通开发请求不被 readiness doctor/local gate 拦截，仍按既有 provider/tool loop 执行。
@@ -53,21 +54,24 @@
 /status
 /doctor
 /doctor readiness
+/doctor project
+/doctor report
 /doctor hooks
 /problems
 ```
 
 - `/doctor`：查看本地/静态 terminal readiness checklist。该命令不运行真实 full smoke，不联网，不安装依赖，不刷新索引，不执行高风险动作。
+- `/doctor project` / `/doctor report`：同一 readiness 输出中展开 Project Doctor Lite、Source-of-Truth Drift Linter Lite、Context Picker Lite、Rollback Coach Lite、Task Cost Preview Lite；仍为只读本地/静态 guard。
 - `/status`：显示短状态栏，并追加 readiness companion line；只代表当前本地 runtime 摘要。
 - `/problems`：查看当前 local runtime evidence 派生的问题摘要；没有问题也不代表 readiness PASS。
 - `/doctor hooks`：继续查看既有 hooks doctor。
 
 ## 涉及模块
 
-- `packages/tui/src/terminal-readiness-presenter.ts`：新增 Phase 15.5F readiness/problem presenter。
-- `packages/tui/src/index.ts`：接入 `/doctor` readiness、`/problems`、`/status` readiness line；新增 `createTerminalReadinessView()` / `createTerminalProblems()`。
-- `packages/tui/src/natural-command-bridge.ts`：更新 command registry 与 capability catalog。
-- `packages/tui/src/index.test.ts`：新增 focused tests 并更新 help/status 断言。
+- `packages/tui/src/terminal-readiness-presenter.ts`：Phase 15.5F readiness/problem presenter；集中格式化 Project Doctor Lite、Source-of-Truth Drift Linter Lite、Context Picker Lite、Rollback Coach Lite、Task Cost Preview Lite。
+- `packages/tui/src/index.ts`：接入 `/doctor` readiness/project/report、`/problems`、`/status` readiness line；新增 `createTerminalReadinessView()` / `createTerminalProblems()`，复用既有 `TuiContext` 派生 project/drift/context/rollback/cost Lite state。
+- `packages/tui/src/natural-command-bridge.ts`：更新 command registry 与 capability catalog，补 `/doctor project` 自然语言入口。
+- `packages/tui/src/index.test.ts`：新增 focused tests 并更新 help/status/readiness/problem 断言。
 - `docs/delivery/README.md`：新增 Phase 15.5F 交付记录。
 - `docs/delivery/phase-15-5f-terminal-product-readiness.md`：本报告。
 
@@ -75,7 +79,7 @@
 
 ### Readiness is a local/static guard, not a smoke runner
 
-Terminal readiness doctor 只读取既有 TUI runtime state：provider/model runtime、index status、cache/workspace snapshot、memory rules、MCP state、background lifecycle、last verification、last provider failure、evidence kind。它不触发真实 provider smoke、不自动刷新索引、不安装依赖、不联网、不执行构建发布流程。
+Terminal readiness doctor 只读取既有 TUI runtime state：provider/model runtime、index status、cache/workspace snapshot、memory rules、MCP state、background lifecycle、last verification、last provider failure、evidence kind，以及少量本地静态文件存在性/短文本信号（package/config/CI/阶段报告）。它不触发真实 provider smoke、不自动刷新索引、不安装依赖、不联网、不执行构建发布流程。
 
 ### No PASS inflation
 
@@ -99,15 +103,16 @@ Readiness status 使用 `pass/partial/fail/unknown/stale/blocked`。只有明确
 
 - `/doctor`：新增默认 readiness doctor。
 - `/doctor readiness` / `/doctor status` / `/doctor checklist`：readiness doctor alias。
+- `/doctor project` / `/doctor report`：同一只读输出中展示 Project Doctor Lite、Source-of-Truth Drift Linter Lite、Context Picker Lite、Rollback Coach Lite、Task Cost Preview Lite 与 report/readiness guard。
 - `/doctor hooks`：保留既有 hooks doctor。
-- `/problems`：新增 Problems Lite 摘要。
+- `/problems`：新增 Problems Lite 摘要，包含 verification/provider/background/freshness/index/project/drift/context/rollback/cost 来源。
 - `/status`：追加 readiness companion line。
 
 ## 测试与验证
 
 Focused/local validation（本轮已执行）：
 
-- `corepack pnpm exec vitest run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：PASS（2 files，267 tests），覆盖 `/doctor` readiness 默认路由、`/doctor hooks` 保留、`/status` readiness companion、`/problems` 和普通开发请求不被拦截。
+- `corepack pnpm exec vitest run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts`：PASS（2 files，268 tests）。覆盖 `/doctor` readiness 默认路由、`/doctor project`、`/doctor hooks` 保留、`/status` readiness companion、`/problems`、Project Doctor Lite 逐项缺失不 PASS、Source-of-Truth Drift Linter Lite 15.5A-E 与否定声明检查、Context Picker Lite 收紧 PASS、Rollback Coach Lite 真实 `git status --short` 读取、Task Cost Preview Lite、主屏脱敏/无金额伪装/无 destructive rollback 建议，以及普通开发请求不被拦截。
 - `corepack pnpm check`：PASS（Biome checked 57 files, no fixes applied）。
 - `corepack pnpm typecheck`：PASS。
 - `corepack pnpm build`：PASS。
@@ -117,8 +122,10 @@ Focused/local validation（本轮已执行）：
 
 ## 性能结果
 
-- `/doctor` readiness 与 `/problems` 只聚合内存中的 `TuiContext`，不新增 provider 请求、shell 命令、索引刷新、网络请求或后台任务。
+- `/doctor` readiness 与 `/problems` 主要聚合内存中的 `TuiContext`，并做少量本地静态存在性/短文本读取；不新增 provider 请求、shell 命令、索引刷新、网络请求或后台任务。
 - `/status` 只增加一行本地 readiness companion，避免扩展窄状态栏本体。
+- Project Doctor Lite 只读取 package/config/CI/rules 的存在性和短 script key，不解析全仓库、不运行安装/测试。
+- Source-of-Truth Drift Linter Lite 只核对固定阶段文档是否存在及报告是否提及关键 Lite 能力，不做完整文档审计平台。
 - Problems Lite 限制展示前 8 个问题，并对长摘要截断，避免主屏 flood。
 
 ## 已知问题
@@ -184,8 +191,12 @@ Phase 15.5F 完成后必须停止。下一步只能由用户确认是否进入 p
 | 来源细节 | 裁决 | Phase 15.5F 处理 |
 | --- | --- | --- |
 | gate/spec：terminal TUI polish、help/doctor/status/error/report gate | DONE（Lite） | `/doctor` readiness、`/status` companion、`/problems` 和 help/catalog 对齐。 |
-| spec：Project Doctor Lite / readiness checklist | DONE（Lite） | 本地/静态 readiness checklist 聚合既有 provider/index/cache/memory/MCP/background/verification/freshness state。 |
-| spec：Problems panel Lite | DONE（Lite） | `/problems` 从 verification/provider/background/freshness/index runtime state 生成短摘要；无 LSP/problem DB。 |
+| spec：Project Doctor Lite / readiness checklist | DONE（Lite） | `/doctor` / `/doctor project` 聚合既有 runtime state，并静态读取 package/config/CI/rules 短信号；无安装、无测试执行、无联网。 |
+| spec：Context Picker Lite | DONE（Lite） | `/doctor project` 输出 project-rules、workspace-snapshot、index-status、verification/background/evidence kind 等短 refs；不 dump raw source/log/index。 |
+| spec：Source-of-Truth Drift Linter Lite | DONE（Lite） | 静态核对固定阶段文档存在性与 15.5F 报告关键 Lite 能力提及；不做完整审计平台。 |
+| spec：Rollback Coach | DONE（Advisory Lite） | 只读展示 changedFiles/checkpoints 和下一步建议；不执行 reset/checkout/restore/commit。 |
+| spec：Task Cost Preview Lite | DONE（Lite） | 展示 local-only/no-network/no-real-smoke/may-run-tests 等资源标签；不预测真实金额、不查 quota。 |
+| spec：Problems panel Lite | DONE（Lite） | `/problems` 从 verification/provider/background/freshness/index/project/drift/context/rollback/cost runtime state 生成短摘要；无 LSP/problem DB。 |
 | spec：primary/details/debug layering | DONE | 主屏 summary-first；详情仍走 `/details`、doctor、verification logs。 |
 | baseline section 13：主屏不泄露 raw evidence / raw flags / full output | DONE | Problems Lite 主屏脱敏/截断；测试覆盖 secret/path 不泄露。 |
 | baseline section 13：cancelled/timeout/stale 不能 PASS | DONE | verification cancelled/timeout/stale 显示为 blocked；background blocked 不计入 pass。 |

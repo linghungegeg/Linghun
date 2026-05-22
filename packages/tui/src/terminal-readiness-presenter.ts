@@ -35,11 +35,57 @@ export type TerminalReadinessView = {
     summary: string;
   };
   freshness: { webSourceEvidence: "present" | "missing" };
+  projectDoctor: {
+    status: ReadinessItemStatus;
+    packageManager: string;
+    scripts: string[];
+    configFiles: string[];
+    ciFiles: string[];
+    projectRules: "found" | "missing" | "unreadable";
+    checks: string[];
+    unknown: string[];
+  };
+  sourceDrift: {
+    status: ReadinessItemStatus;
+    checked: string[];
+    issues: string[];
+    nextAction: string;
+  };
+  contextPicker: {
+    status: ReadinessItemStatus;
+    refs: string[];
+    evidenceKinds: string[];
+    indexFreshness: "fresh" | "stale" | "unknown";
+  };
+  rollbackCoach: {
+    status: ReadinessItemStatus;
+    changedFiles: number;
+    checkpoints: number;
+    gitStatus: "clean" | "dirty" | "unavailable";
+    mode: "advisory-only";
+    nextAction: string;
+  };
+  costPreview: {
+    status: ReadinessItemStatus;
+    level: "light" | "medium" | "heavy" | "unknown";
+    labels: string[];
+    nextAction: string;
+  };
   problems: TerminalProblemView[];
 };
 
 export type TerminalProblemView = {
-  source: "verification" | "provider" | "background" | "freshness" | "index";
+  source:
+    | "verification"
+    | "provider"
+    | "background"
+    | "freshness"
+    | "index"
+    | "project"
+    | "drift"
+    | "context"
+    | "rollback"
+    | "cost";
   severity: "info" | "warning" | "error";
   summary: string;
   nextAction: string;
@@ -76,6 +122,7 @@ export function formatTerminalReadinessDoctor(view: TerminalReadinessView): stri
       `- [${item.status.toUpperCase()}] ${item.label}: ${item.summary}; ${view.language === "en-US" ? "next" : "下一步"}: ${item.nextAction}`,
     );
   }
+  lines.push(...formatReadinessLiteSections(view));
   lines.push(
     view.language === "en-US"
       ? "Details: use /model doctor, /index doctor, /cache status, /memory, /mcp doctor, /background, /verify last, /problems."
@@ -194,7 +241,65 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
           ? "/details evidence"
           : "mark current/external facts as unverified",
     },
+    {
+      id: "project-doctor",
+      label: "project doctor lite",
+      status: view.projectDoctor.status,
+      summary: `pm=${view.projectDoctor.packageManager} scripts=${view.projectDoctor.scripts.length} checks=${view.projectDoctor.checks.length} configs=${view.projectDoctor.configFiles.length} ci=${view.projectDoctor.ciFiles.length} unknown=${view.projectDoctor.unknown.length}`,
+      nextAction: "/doctor project",
+    },
+    {
+      id: "source-drift",
+      label: "source-of-truth drift lite",
+      status: view.sourceDrift.status,
+      summary: `checked=${view.sourceDrift.checked.length} issues=${view.sourceDrift.issues.length}`,
+      nextAction: view.sourceDrift.nextAction,
+    },
+    {
+      id: "context-picker",
+      label: "context picker lite",
+      status: view.contextPicker.status,
+      summary: `refs=${view.contextPicker.refs.length} evidenceKinds=${view.contextPicker.evidenceKinds.length} index=${view.contextPicker.indexFreshness}`,
+      nextAction: "/doctor project",
+    },
+    {
+      id: "rollback-coach",
+      label: "rollback coach lite",
+      status: view.rollbackCoach.status,
+      summary: `changedFiles=${view.rollbackCoach.changedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode}`,
+      nextAction: view.rollbackCoach.nextAction,
+    },
+    {
+      id: "task-cost-preview",
+      label: "task cost preview lite",
+      status: view.costPreview.status,
+      summary: `level=${view.costPreview.level} labels=${view.costPreview.labels.join("+")}`,
+      nextAction: view.costPreview.nextAction,
+    },
   ];
+}
+
+function formatReadinessLiteSections(view: TerminalReadinessView): string[] {
+  const lines = [view.language === "en-US" ? "Lite readiness surfaces:" : "轻量就绪入口："];
+  const projectUnknown = view.projectDoctor.unknown.length
+    ? ` unknown=${view.projectDoctor.unknown.join(",")}`
+    : "";
+  lines.push(
+    `- Project Doctor Lite: [${view.projectDoctor.status.toUpperCase()}] packageManager=${view.projectDoctor.packageManager} scripts=${safeList(view.projectDoctor.scripts)} checks=${safeList(view.projectDoctor.checks)} configs=${safeList(view.projectDoctor.configFiles)} ci=${safeList(view.projectDoctor.ciFiles)} projectRules=${view.projectDoctor.projectRules}${projectUnknown}`,
+  );
+  lines.push(
+    `- Source-of-Truth Drift Linter Lite: [${view.sourceDrift.status.toUpperCase()}] checked=${safeList(view.sourceDrift.checked)} issues=${safeList(view.sourceDrift.issues)} next=${view.sourceDrift.nextAction}`,
+  );
+  lines.push(
+    `- Context Picker Lite: [${view.contextPicker.status.toUpperCase()}] refs=${safeList(view.contextPicker.refs)} evidenceKinds=${safeList(view.contextPicker.evidenceKinds)} index=${view.contextPicker.indexFreshness}`,
+  );
+  lines.push(
+    `- Rollback Coach Lite: [${view.rollbackCoach.status.toUpperCase()}] changedFiles=${view.rollbackCoach.changedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode} next=${view.rollbackCoach.nextAction}`,
+  );
+  lines.push(
+    `- Task Cost Preview Lite: [${view.costPreview.status.toUpperCase()}] level=${view.costPreview.level} labels=${safeList(view.costPreview.labels)} next=${view.costPreview.nextAction}`,
+  );
+  return lines.map(sanitizePrimary);
 }
 
 function classifyVerification(status: string | undefined): ReadinessItemStatus {
@@ -208,6 +313,11 @@ function classifyVerification(status: string | undefined): ReadinessItemStatus {
 function formatPercent(value: number | null): string {
   if (value === null || Number.isNaN(value)) return "unknown";
   return `${Math.round(value * 100)}%`;
+}
+
+function safeList(values: string[]): string {
+  if (values.length === 0) return "none";
+  return values.map((value) => short(sanitizePrimary(value), 32)).join(",");
 }
 
 function displayProject(value: string): string {

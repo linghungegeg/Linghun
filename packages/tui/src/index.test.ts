@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -433,6 +434,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/index architecture");
     expect(output.text).toContain("/usage");
     expect(output.text).toContain("/stats endpoints");
+    expect(output.text).toContain("/doctor project");
+    expect(output.text).toContain("/doctor hooks");
+    expect(output.text).toContain("/problems");
     expect(output.text).toContain(
       "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
     );
@@ -481,8 +485,23 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("[BLOCKED] verification");
     expect(output.text).toContain("[PARTIAL] background/tasks");
     expect(output.text).toContain("Problems Lite：当前");
+    expect(output.text).toContain("Project Doctor Lite: [PARTIAL]");
+    expect(output.text).toContain("Source-of-Truth Drift Linter Lite");
+    expect(output.text).toContain("Context Picker Lite");
+    expect(output.text).toContain("Rollback Coach Lite");
+    expect(output.text).toContain("Task Cost Preview Lite");
     expect(output.text).toContain("freshness");
     expect(output.text).toContain("provider");
+    expect(output.text).toContain("project");
+    expect(output.text).toContain("drift");
+    expect(output.text).toContain("context");
+    expect(output.text).toContain("rollback");
+    expect(output.text).toContain("local-only");
+    expect(output.text).toContain("no-real-smoke");
+    expect(output.text).not.toContain("¥");
+    expect(output.text).not.toContain("$");
+    expect(output.text).not.toContain("git reset");
+    expect(output.text).not.toContain("git checkout");
     expect(output.text).not.toContain("sk-test-secret");
     expect(output.text).not.toContain("api_key=raw-secret");
     expect(output.text).not.toContain("C:\\secret");
@@ -497,6 +516,103 @@ describe("Phase 06 TUI slash commands", () => {
     expect(englishOutput.text).toContain(
       "This is not Beta PASS, smoke-ready, or open-source-ready.",
     );
+  });
+
+  it("shows Phase 15.5F Project Doctor, context picker, rollback coach, and cost preview Lite", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-readiness-lite-"));
+    await mkdir(join(project, "docs", "delivery"), { recursive: true });
+    await mkdir(join(project, ".github", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        packageManager: "pnpm@10.10.0",
+        scripts: {
+          build: "tsc -b",
+          check: "biome check .",
+          test: "vitest run",
+          typecheck: "tsc -b",
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "tsconfig.json"), "{}", "utf8");
+    await writeFile(join(project, "vitest.config.ts"), "export default {};", "utf8");
+    await writeFile(join(project, "biome.json"), "{}", "utf8");
+    await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'", "utf8");
+    await writeFile(join(project, ".github", "workflows", "ci.yml"), "name: ci", "utf8");
+    await writeFile(join(project, "LINGHUN.md"), "project rules", "utf8");
+    await writeFile(join(project, "LINGHUN_PHASED_DELIVERY_BLUEPRINT.md"), "Phase 15.5F", "utf8");
+    await writeFile(join(project, "LINGHUN_IMPLEMENTATION_SPEC.md"), "ProjectFacts", "utf8");
+    await writeFile(
+      join(project, "docs", "delivery", "pre-open-source-terminal-product-completion-gate.md"),
+      "Project Doctor Lite",
+      "utf8",
+    );
+    for (const reportName of [
+      "phase-15-5a-performance-context.md",
+      "phase-15-5b-resource-task-lifecycle.md",
+      "phase-15-5c-editing-tool-ux.md",
+      "phase-15-5c-plus-log-artifact-runtime-lite.md",
+      "phase-15-5c-plus-plus-workspace-snapshot-lite.md",
+      "phase-15-5d-connect-lite.md",
+      "phase-15-5e-provider-freshness.md",
+    ]) {
+      await writeFile(join(project, "docs", "delivery", reportName), "done", "utf8");
+    }
+    await writeFile(
+      join(project, "docs", "delivery", "phase-15-5f-terminal-product-readiness.md"),
+      [
+        "Project Doctor Lite",
+        "Source-of-Truth Drift",
+        "未执行真实 full smoke",
+        "不代表 Beta PASS、smoke-ready 或 open-source-ready",
+        "未进入 Phase 16 / 17 / 18",
+        "未 commit",
+      ].join("\n"),
+      "utf8",
+    );
+    spawnSync("git", ["init"], { cwd: project, windowsHide: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.memory.projectRulesExists = true;
+    context.index.status = "ready";
+    context.tools.changedFiles.push("packages/tui/src/index.ts");
+    context.evidence.push({
+      id: "ev-web",
+      kind: "web_source",
+      summary: "short source",
+      source: "https://example.com/source",
+      supportsClaims: ["freshness"],
+      createdAt: new Date().toISOString(),
+    });
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/doctor project", context, output);
+    await handleSlashCommand("/problems", context, output);
+
+    expect(output.text).toContain("Project Doctor Lite: [PASS]");
+    expect(output.text).toContain("packageManager=pnpm@10.10.0");
+    expect(output.text).toContain("scripts=build,check,test,typecheck");
+    expect(output.text).toContain("script:test=ok");
+    expect(output.text).toContain("script:typecheck=ok");
+    expect(output.text).toContain("script:check=ok");
+    expect(output.text).toContain("script:build=ok");
+    expect(output.text).toContain("Source-of-Truth Drift Linter Lite: [PASS]");
+    expect(output.text).toContain("Context Picker Lite: [PARTIAL]");
+    expect(output.text).toContain("web-source-evidence");
+    expect(output.text).toContain("Rollback Coach Lite: [PARTIAL]");
+    expect(output.text).toContain("gitStatus=dirty");
+    expect(output.text).toContain("mode=advisory-only");
+    expect(output.text).toContain("Task Cost Preview Lite: [PASS]");
+    expect(output.text).toContain("local-only");
+    expect(output.text).toContain("Problems Lite：当前 2 个问题");
+    expect(output.text).toContain("context");
+    expect(output.text).toContain("rollback");
+    expect(output.text).not.toContain(project);
+    expect(output.text).not.toContain("git reset");
+    expect(output.text).not.toContain("¥");
+    expect(output.text).not.toContain("$");
   });
 
   it("does not intercept ordinary development requests with the readiness doctor", async () => {

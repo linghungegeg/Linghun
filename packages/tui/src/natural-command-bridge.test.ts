@@ -127,6 +127,7 @@ describe("Phase 15 Natural Intent Router", () => {
   it("aligns /doctor natural catalog routing with readiness default", () => {
     const explicit = routeNaturalIntent("请解释 /doctor");
     const readiness = routeNaturalIntent("终端就绪检查");
+    const project = routeNaturalIntent("doctor project", "en-US");
     const hooks = routeNaturalIntent("doctor hooks", "en-US");
 
     expect(explicit.capability?.id).toBe("readiness");
@@ -134,6 +135,9 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(formatCapabilityAnswer(explicit)).toContain("终端就绪诊断");
     expect(readiness.capability?.id).toBe("readiness");
     expect(readiness.action).toBe("execute_readonly");
+    expect(project.capability?.id).toBe("readiness");
+    expect(project.command).toBe("/doctor");
+    expect(formatCapabilityAnswer(project)).toContain("Project Doctor");
     expect(hooks.capability?.id).toBe("hooks");
     expect(hooks.command).toBe("/doctor hooks");
   });

@@ -283,13 +283,30 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "readiness",
     "/doctor",
-    ["doctor", "readiness", "ready", "terminal readiness", "体检", "就绪检查"],
+    [
+      "doctor",
+      "doctor project",
+      "readiness",
+      "ready",
+      "terminal readiness",
+      "project doctor",
+      "context picker",
+      "rollback coach",
+      "cost preview",
+      "drift linter",
+      "体检",
+      "就绪检查",
+      "项目诊断",
+      "回滚建议",
+      "成本预估",
+      "漂移检查",
+    ],
     "终端就绪诊断",
     "Readiness doctor",
-    "显示本地/静态终端就绪检查；不运行真实 smoke，也不声明 Beta PASS。",
-    "Shows local/static terminal readiness checks; does not run real smoke or claim Beta PASS.",
-    "检查 provider、index、cache、memory、MCP、background、verification 和 freshness 边界。",
-    "Use for provider, index, cache, memory, MCP, background, verification, and freshness readiness boundaries.",
+    "显示本地/静态终端就绪、Project Doctor、drift/context/rollback/cost 检查；不运行真实 smoke，也不声明 Beta PASS。",
+    "Shows local/static terminal readiness plus Project Doctor, drift/context/rollback/cost checks; does not run real smoke or claim Beta PASS.",
+    "检查 provider、index、cache、memory、MCP、background、verification、freshness、project facts、source-of-truth drift、context refs、rollback advice 和 task cost 边界。",
+    "Use for provider, index, cache, memory, MCP, background, verification, freshness, project facts, source-of-truth drift, context refs, rollback advice, and task cost boundaries.",
     "readonly",
   ),
   cap(
@@ -298,10 +315,10 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     ["problems", "problem panel", "问题", "诊断问题"],
     "问题面板",
     "Problems",
-    "显示来自 verification/provider/background/freshness/index 的轻量问题摘要。",
-    "Shows a lightweight problem summary from verification/provider/background/freshness/index.",
-    "查看当前阻塞、超时、stale、provider failure 或缺少来源证据的问题。",
-    "Use for current blockers, timeouts, stale tasks, provider failures, or missing source evidence.",
+    "显示来自 verification/provider/background/freshness/index/project/drift/context/rollback/cost 的轻量问题摘要。",
+    "Shows a lightweight problem summary from verification/provider/background/freshness/index/project/drift/context/rollback/cost.",
+    "查看当前阻塞、超时、stale、provider failure、项目事实缺口、文档漂移或缺少来源证据的问题。",
+    "Use for current blockers, timeouts, stale tasks, provider failures, project fact gaps, doc drift, or missing source evidence.",
     "readonly",
   ),
   cap(
@@ -1597,7 +1614,12 @@ function scoreCapability(
     const lower = alias.toLowerCase();
     if (normalized.includes(lower)) score += 3;
   }
-  if (capability.id === "readiness" && /readiness|就绪|体检|terminal readiness/u.test(normalized))
+  if (
+    capability.id === "readiness" &&
+    /readiness|就绪|体检|terminal readiness|project doctor|doctor project|context picker|rollback coach|cost preview|drift linter|项目诊断|回滚建议|成本预估|漂移检查/u.test(
+      normalized,
+    )
+  )
     score += 6;
   if (capability.id === "hooks" && /hook|钩子/u.test(normalized)) score += 3;
   if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
