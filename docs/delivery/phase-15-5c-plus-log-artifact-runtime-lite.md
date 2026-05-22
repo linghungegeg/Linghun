@@ -13,7 +13,7 @@
 - 支持 bounded grep：按用户 literal pattern 匹配，支持有限 context，限制 maxBytes、maxMatches、maxLines 和 timeout。
 - 支持 bounded errors：用确定性候选模式提取 TypeScript/Vitest/Python/Bash 等错误候选，明确不判断 root cause、不改变 verification PASS/PARTIAL/FAIL 语义。
 - 路径安全：background 侧继续允许已知 `background.outputPath` / `logPath`；evidence 侧只允许明确 log/output artifact：`fullOutputPath` / `outputPath` / `logPath`，或位于 `.linghun/logs/**` / known log root 内的 `source`；普通 workspace 源码、README、报告文件不会被当作日志 artifact 切片。
-- 输出脱敏：对 Authorization、Cookie、Bearer、`sk-*`、api key/token/cookie 字段做保守 redaction。
+- 输出脱敏：对 Authorization、Cookie、Bearer、`sk-*`、api key/token/cookie 字段做保守 redaction；Log Artifact slice 主屏 `sourcePath` 只显示 `.linghun/logs/**` 相对路径或 `redacted:<basename>`，不显示完整本地绝对路径。
 - 扩展既有 `/details output`：新增 `--tail`、`--grep`、`--errors` 切片入口；无 slice 参数时仍展示原有 output path/status/summary，并提示可用 slice 命令。
 - 增加 focused tests 覆盖大日志 tail、bounded grep/context、错误候选、CRLF/中文 UTF-8、未知 id、越界路径、截断提示、summary-first 输出和 verification 语义不变。
 

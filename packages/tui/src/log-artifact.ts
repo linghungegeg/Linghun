@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { open, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 export type LogArtifactSource = {
@@ -93,7 +93,7 @@ export function formatLogArtifactSlice(
     language === "en-US" ? `Log artifact ${slice.mode}` : `Log artifact ${slice.mode} 切片`;
   const lines = [
     title,
-    `- sourcePath: ${slice.sourcePath}`,
+    `- sourcePath: ${formatDisplaySourcePath(slice.sourcePath)}`,
     `- mode: ${slice.mode}`,
     `- range: ${formatRange(slice)}`,
     `- truncated: ${slice.truncated ? "true" : "false"}`,
@@ -410,6 +410,18 @@ function clampPositive(value: number | undefined, fallback: number, max: number)
     return fallback;
   }
   return Math.min(Math.floor(value), max);
+}
+
+function formatDisplaySourcePath(sourcePath: string): string {
+  const normalized = sourcePath.replace(/\\/g, "/");
+  const logRootIndex = normalized.indexOf("/.linghun/logs/");
+  if (logRootIndex >= 0) {
+    return normalized.slice(logRootIndex + 1);
+  }
+  if (normalized.startsWith(".linghun/logs/")) {
+    return normalized;
+  }
+  return `redacted:${basename(sourcePath)}`;
 }
 
 function formatRange(slice: LogArtifactSlice): string {

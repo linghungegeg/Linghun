@@ -216,7 +216,7 @@ describe("Log Artifact Runtime Lite", () => {
   });
 
   it("caps output and formats summary-first slices without dumping the full log", async () => {
-    const { logPath, registry } = await createRegistry();
+    const { project, logPath, registry } = await createRegistry();
     await writeFile(
       logPath,
       Array.from({ length: 60 }, (_, index) => `repeat target ${index + 1}`).join("\n"),
@@ -233,8 +233,11 @@ describe("Log Artifact Runtime Lite", () => {
     expect(slice.truncated).toBe(true);
     expect(slice.matches).toHaveLength(3);
     expect(formatted).toContain("Log artifact grep 切片");
+    expect(formatted).toContain("sourcePath: .linghun/logs/tools/artifact.log");
     expect(formatted).toContain("truncated: true");
     expect(formatted).toContain("完整日志不会进入主屏、prompt、memory 或 handoff");
+    expect(formatted).not.toContain(project);
+    expect(formatted).not.toContain(logPath);
     expect(formatted).not.toContain("repeat target 60");
   });
 });

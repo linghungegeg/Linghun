@@ -3864,6 +3864,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Log artifact grep 切片");
     expect(output.text).toContain("Log artifact errors 切片");
     expect(output.text).toContain("最后一行中文输出");
+    expect(output.text).toContain("sourcePath: .linghun/logs/tools/bash-artifact.log");
+    expect(output.text).toContain("sourcePath: redacted:evidence-output.log");
     expect(output.text).toContain("explicit evidence output tail");
     expect(output.text).toContain("before failure");
     expect(output.text).toContain("TypeError: failed candidate");
