@@ -900,6 +900,7 @@ export type TuiContext = {
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;
   activeAbortController?: AbortController;
+  backgroundAbortControllers?: Map<string, AbortController>;
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
   solutionCompleteness: SolutionCompletenessStatus;
@@ -1644,6 +1645,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     recentlyMentionedFiles: [],
     lastProviderFailure: undefined,
     solutionCompleteness: createSolutionCompletenessStatus(),
+    backgroundAbortControllers: new Map(),
   };
   const gateway = createModelGateway(config);
 
@@ -4176,8 +4178,9 @@ async function completeAgent(
   context.roleHandoffs.unshift(
     createRoleHandoff("executor", agent.role, agent.id, summary, context),
   );
+  const verifierStatus = agent.type === "verifier" ? context.lastVerification?.status : undefined;
   task.status = "completed";
-  task.result = "pass";
+  task.result = mapAgentBackgroundResult(agent, verifierStatus);
   task.currentStep = context.language === "en-US" ? "summary ready" : "摘要已生成";
   task.progress = { completed: 1, total: 1, label: agent.type };
   task.updatedAt = now;
@@ -4202,6 +4205,16 @@ async function completeAgent(
   writeStatus(output, context);
 }
 
+function mapAgentBackgroundResult(
+  agent: AgentRun,
+  verifierStatus?: string,
+): BackgroundTaskState["result"] {
+  if (agent.type !== "verifier") {
+    return "partial";
+  }
+  return verifierStatus === "pass" ? "partial" : verifierStatus === "fail" ? "fail" : "partial";
+}
+
 async function runAgentWork(
   agent: AgentRun,
   context: TuiContext,
@@ -4217,7 +4230,7 @@ async function runAgentWork(
     const plan = await createVerificationPlan(context.projectPath, "smoke");
     const report = await runVerificationPlan(plan, context, agent.transcriptSessionId, output);
     context.lastVerification = report;
-    return `verifier 摘要：已在独立 transcript 中运行验证命令，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
+    return `verifier 摘要：session-scoped conservative verification；不是 durable job、不是第二套 job system、不是 Phase 17。已在独立 transcript 中运行验证命令，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
   }
   return runWorkerAgent(agent, context, output);
 }
@@ -4456,7 +4469,10 @@ async function handleInterruptCommand(context: TuiContext, output: Writable): Pr
     writeLine(output, t(context, "toolInterrupted"));
     return;
   }
-  if (context.activeAbortController) {
+  if (
+    context.activeAbortController &&
+    !(running && context.backgroundAbortControllers?.has(running.id))
+  ) {
     context.activeAbortController.abort();
     clearRequestActivity(context);
     context.interrupt = { type: "idle" };
@@ -4481,22 +4497,59 @@ async function handleInterruptCommand(context: TuiContext, output: Writable): Pr
     writeLine(output, t(context, "interruptIdle"));
     return;
   }
+  const aborted = abortBackgroundTask(context, running.id);
   running.status = "cancelled";
   running.result = "cancelled";
   running.updatedAt = new Date().toISOString();
-  running.nextAction =
-    context.language === "en-US"
-      ? "Review /background before continuing."
-      : "继续前可先查看 /background。";
+  running.nextAction = aborted
+    ? context.language === "en-US"
+      ? "Abort signal sent. Review /background and the log before continuing."
+      : "已发送取消信号。继续前可先查看 /background 和日志。"
+    : context.language === "en-US"
+      ? "No live abort controller was available; state marked cancelled. Review /background."
+      : "未找到可用取消 controller；仅将状态标记为 cancelled。继续前查看 /background。";
   await appendBackgroundTaskEvent(context, sessionId, running);
   await context.store.appendEvent(sessionId, {
     type: "interrupt",
     id: randomUUID(),
     status: "cancelled",
-    message: t(context, "interruptCancelled"),
+    message: aborted
+      ? `${t(context, "interruptCancelled")} abortSignal=sent`
+      : `${t(context, "interruptCancelled")} abortSignal=unavailable`,
     createdAt: new Date().toISOString(),
   });
-  writeLine(output, t(context, "interruptCancelled"));
+  writeLine(
+    output,
+    aborted
+      ? `${t(context, "interruptCancelled")}（已发送 AbortSignal）`
+      : `${t(context, "interruptCancelled")}（未找到可用 AbortSignal，仅标记状态）`,
+  );
+}
+
+function getBackgroundAbortControllers(context: TuiContext): Map<string, AbortController> {
+  if (!context.backgroundAbortControllers) {
+    context.backgroundAbortControllers = new Map();
+  }
+  return context.backgroundAbortControllers;
+}
+
+function registerBackgroundAbortController(context: TuiContext, taskId: string): AbortController {
+  const controller = new AbortController();
+  getBackgroundAbortControllers(context).set(taskId, controller);
+  return controller;
+}
+
+function clearBackgroundAbortController(context: TuiContext, taskId: string): void {
+  context.backgroundAbortControllers?.delete(taskId);
+}
+
+function abortBackgroundTask(context: TuiContext, taskId: string): boolean {
+  const controller = context.backgroundAbortControllers?.get(taskId);
+  if (!controller) {
+    return false;
+  }
+  controller.abort();
+  return true;
 }
 
 async function handleClaimCheckCommand(
@@ -5709,7 +5762,8 @@ function formatMcpStatus(context: TuiContext): string {
     `- codebase-memory source=${context.index.binarySource ?? "unknown"}`,
     `- codebase-memory binary=${context.index.binaryStatus ?? "unknown"} version=${context.index.binaryVersion ?? "-"}`,
     `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
-    "- guard: deferred MCP tools require discovery + trusted server + schemaLoaded + compatible runtime before execution.",
+    "- guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution; unknown or incomplete tool calls are rejected.",
+    "- guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime before execution.",
     "- license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata; external fallback is reported as external, not bundled.",
     "- note: MCP/codebase-memory 启动或检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
   ].join("\n");
@@ -5766,13 +5820,14 @@ async function addMcpServer(args: string[], context: TuiContext): Promise<string
     localPath: command,
     scope: "project",
     installedAt: new Date().toISOString(),
-    trustLevel: "trusted",
+    disabled: true,
+    trustLevel: "untrusted",
     permissionSummary: "tool-discovery",
   };
-  context.config = await saveMcpServerConfig(id, server, true, context.projectPath);
+  context.config = await saveMcpServerConfig(id, server, false, context.projectPath);
   context.mcp = createMcpState(context.config);
   refreshCacheFreshness(context);
-  return `已添加 MCP server：${id}；下一步运行 /mcp validate ${id} 或 /mcp doctor。`;
+  return `已添加 MCP server：${id}；默认 untrusted/disabled，未执行 server。下一步运行 /mcp validate ${id} 或 /mcp doctor；确认信任后再运行 /mcp enable ${id}。`;
 }
 
 async function setMcpServerEnabled(
@@ -5784,15 +5839,24 @@ async function setMcpServerEnabled(
   if (!current) {
     return `未找到 MCP server：${id}`;
   }
+  const nextTrustLevel = enabled ? "trusted" : "disabled";
   context.config = await saveMcpServerConfig(
     id,
-    { ...current, disabled: !enabled, trustLevel: enabled ? "trusted" : "disabled" },
+    { ...current, disabled: !enabled, trustLevel: nextTrustLevel },
     enabled,
     context.projectPath,
   );
   context.mcp = createMcpState(context.config);
   refreshCacheFreshness(context);
-  return `${enabled ? "已启用" : "已禁用"} MCP server：${id}；失败可通过 /mcp doctor 隔离诊断。`;
+  const trustNotice = enabled
+    ? "Trust notice：即将启用本地 MCP server；Linghun 不会在 enable 时执行 server，但后续 tools/call 仍必须经过 discovery/schema/required-args 和权限管道。"
+    : "";
+  return [
+    trustNotice,
+    `${enabled ? "已启用" : "已禁用"} MCP server：${id}；失败可通过 /mcp doctor 隔离诊断。`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function updateMcpServer(args: string[], context: TuiContext): Promise<string> {
@@ -5810,7 +5874,8 @@ async function updateMcpServer(args: string[], context: TuiContext): Promise<str
     args: commandArgs,
     localPath: command,
     installedAt: new Date().toISOString(),
-    trustLevel: current.disabled ? "disabled" : "trusted",
+    disabled: current.disabled ?? !context.config.mcp.enabledServers.includes(id),
+    trustLevel: current.trustLevel ?? (current.disabled ? "disabled" : "untrusted"),
     permissionSummary: current.permissionSummary ?? "tool-discovery",
   };
   context.config = await saveMcpServerConfig(id, server, !server.disabled, context.projectPath);
@@ -7114,6 +7179,9 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
     ...context.checkpoints.flatMap((checkpoint) => checkpoint.changedFiles),
   ]);
   const changedFiles = gitStatusLines ? gitStatusLines.length : fallbackChangedFiles.size;
+  const untrackedFiles = gitStatusLines
+    ? gitStatusLines.filter((line) => line.startsWith("??")).length
+    : 0;
   const gitStatus = gitStatusLines
     ? gitStatusLines.length > 0
       ? "dirty"
@@ -7131,6 +7199,7 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
   return {
     status,
     changedFiles,
+    untrackedFiles,
     checkpoints: context.checkpoints.length,
     gitStatus,
     mode: "advisory-only",
@@ -7144,15 +7213,16 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
 }
 
 function createTaskCostPreviewLite(context: TuiContext): TerminalReadinessView["costPreview"] {
-  const labels = ["local-only", "no-network", "no-real-smoke"];
+  const labels = ["local-only", "no-network", "no-real-smoke", "advisory-estimate"];
   if (context.lastVerification) labels.push("may-run-tests");
   if (context.backgroundTasks.length > 0) labels.push("background-visible");
   if (context.lastProviderFailure) labels.push("provider-diagnostic-only");
   return {
-    status: "pass",
+    status: "partial",
     level: context.lastVerification || context.backgroundTasks.length > 0 ? "medium" : "light",
     labels,
-    nextAction: "confirm before tests, provider calls, network, or release actions",
+    nextAction:
+      "advisory estimate only; confirm before tests, provider calls, network, or release actions",
   };
 }
 
@@ -7309,7 +7379,7 @@ function createTerminalProblems(
     problems.push({
       source: "rollback",
       severity: "info",
-      summary: `Rollback Coach Lite changedFiles=${lite.rollbackCoach.changedFiles} checkpoints=${lite.rollbackCoach.checkpoints}; read-only advice only`,
+      summary: `Rollback Coach Lite changedFiles=${lite.rollbackCoach.changedFiles} untracked=${lite.rollbackCoach.untrackedFiles} checkpoints=${lite.rollbackCoach.checkpoints}; read-only advice only`,
       nextAction: lite.rollbackCoach.nextAction,
     });
   }
@@ -9812,7 +9882,11 @@ function createToolInputSchema(name: ToolName): unknown {
   if (name === "Write") {
     return {
       ...base,
-      properties: { path: { type: "string" }, content: { type: "string" } },
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+        expectedHash: { type: "string" },
+      },
       required: ["path", "content"],
     };
   }
@@ -9823,6 +9897,7 @@ function createToolInputSchema(name: ToolName): unknown {
         path: { type: "string" },
         oldText: { type: "string" },
         newText: { type: "string" },
+        expectedHash: { type: "string" },
       },
       required: ["path", "oldText", "newText"],
     };
@@ -9832,6 +9907,7 @@ function createToolInputSchema(name: ToolName): unknown {
       ...base,
       properties: {
         path: { type: "string" },
+        expectedHash: { type: "string" },
         edits: {
           type: "array",
           items: {
@@ -10060,6 +10136,13 @@ async function executeApprovedModelToolUse(
     input: toolCall.input,
     createdAt: new Date().toISOString(),
   });
+  const backgroundController = task
+    ? registerBackgroundAbortController(context, task.id)
+    : undefined;
+  const previousAbortSignal = context.tools.abortSignal;
+  if (backgroundController) {
+    context.tools.abortSignal = backgroundController.signal;
+  }
   const progress = installToolProgressHandler(context, sessionId, toolCall.id, output, task);
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
@@ -10087,6 +10170,10 @@ async function executeApprovedModelToolUse(
       isError,
       evidence?.id,
     );
+    clearBackgroundAbortController(context, task?.id ?? "");
+    if (backgroundController) {
+      context.tools.abortSignal = previousAbortSignal;
+    }
     writeLine(
       output,
       formatModelToolOutput(
@@ -10107,6 +10194,10 @@ async function executeApprovedModelToolUse(
   } catch (error) {
     progress.restore();
     await Promise.all(progress.pending);
+    clearBackgroundAbortController(context, task?.id ?? "");
+    if (backgroundController) {
+      context.tools.abortSignal = previousAbortSignal;
+    }
     clearRequestActivity(context);
     const text = formatError(error, context.language);
     const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
@@ -11128,6 +11219,13 @@ async function handleToolCommand(
       input,
       createdAt: new Date().toISOString(),
     });
+    const backgroundController = task
+      ? registerBackgroundAbortController(context, task.id)
+      : undefined;
+    const previousAbortSignal = context.tools.abortSignal;
+    if (backgroundController) {
+      context.tools.abortSignal = backgroundController.signal;
+    }
     const progress = installToolProgressHandler(context, sessionId, callId, output, task);
     let result: Awaited<ReturnType<typeof runTool>>;
     try {
@@ -11135,6 +11233,10 @@ async function handleToolCommand(
     } finally {
       progress.restore();
       await Promise.all(progress.pending);
+      clearBackgroundAbortController(context, task?.id ?? "");
+      if (backgroundController) {
+        context.tools.abortSignal = previousAbortSignal;
+      }
     }
     if (task) {
       finishBackgroundTaskFromToolOutput(task, result.output, context);

@@ -35,6 +35,10 @@ import {
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
+import {
+  type TerminalReadinessView,
+  createReadinessItems,
+} from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 
 class MemoryOutput extends Writable {
@@ -518,6 +522,55 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("keeps readiness PASS counts conservative for MCP and freshness evidence", () => {
+    const baseView: TerminalReadinessView = {
+      projectPath: "F:/Linghun",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      endpointProfile: "chat_completions",
+      permissionMode: "auto-review",
+      language: "zh-CN",
+      index: { status: "ready", changedFiles: 0 },
+      cache: { latestHitRate: null, compacted: false, workspaceSnapshot: "ready" },
+      memory: { projectRules: "found", candidates: 0, accepted: 0 },
+      mcp: { enabled: true, servers: 1, tools: 0, errors: 0 },
+      background: { total: 0, running: 0, blocked: 0 },
+      verification: { status: "pass", summary: "local pass", unverified: 0, risk: 0 },
+      freshness: { webSourceEvidence: "present" },
+      projectDoctor: {
+        status: "pass",
+        packageManager: "pnpm@10.10.0",
+        scripts: ["build", "test"],
+        configFiles: [],
+        ciFiles: [],
+        projectRules: "found",
+        checks: [],
+        unknown: [],
+      },
+      sourceDrift: { status: "pass", checked: [], issues: [], nextAction: "no action" },
+      contextPicker: { status: "pass", refs: [], evidenceKinds: [], indexFreshness: "fresh" },
+      rollbackCoach: {
+        status: "pass",
+        changedFiles: 0,
+        untrackedFiles: 0,
+        checkpoints: 0,
+        gitStatus: "clean",
+        mode: "advisory-only",
+        nextAction: "no action",
+      },
+      costPreview: { status: "pass", level: "light", labels: [], nextAction: "no action" },
+      problems: [],
+    };
+
+    const items = createReadinessItems(baseView);
+
+    expect(items.find((item) => item.id === "mcp")?.status).toBe("partial");
+    expect(items.find((item) => item.id === "freshness")?.status).toBe("partial");
+    expect(items.find((item) => item.id === "freshness")?.summary).toContain(
+      "local presence is not source validation",
+    );
+  });
+
   it("shows Phase 15.5F Project Doctor, context picker, rollback coach, and cost preview Lite", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-readiness-lite-"));
     await mkdir(join(project, "docs", "delivery"), { recursive: true });
@@ -604,9 +657,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Rollback Coach Lite: [PARTIAL]");
     expect(output.text).toContain("gitStatus=dirty");
     expect(output.text).toContain("mode=advisory-only");
-    expect(output.text).toContain("Task Cost Preview Lite: [PASS]");
+    expect(output.text).toContain("Task Cost Preview Lite: [PARTIAL]");
     expect(output.text).toContain("local-only");
-    expect(output.text).toContain("Problems Lite：当前 2 个问题");
+    expect(output.text).toContain("advisory-estimate");
+    expect(output.text).toContain("Problems Lite：当前 3 个问题");
     expect(output.text).toContain("context");
     expect(output.text).toContain("rollback");
     expect(output.text).not.toContain(project);
@@ -1142,6 +1196,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("explorer 摘要");
     expect(output.text).toContain("planner 摘要");
     expect(output.text).toContain("verifier 摘要");
+    expect(output.text).toContain("session-scoped conservative verification");
+    expect(output.text).toContain("不是 durable job、不是第二套 job system、不是 Phase 17");
     expect(output.text).toContain("Agents:");
     expect(output.text).toContain("transcript:");
     expect(output.text).toContain("已降级为同步执行");
@@ -1150,6 +1206,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Evidence evidence-test-1");
     expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(0);
     expect(context.agents.length).toBe(4);
+    expect(context.backgroundTasks.filter((task) => task.kind === "agent")).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
     expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
     expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
@@ -1538,7 +1597,12 @@ describe("Phase 06 TUI slash commands", () => {
       max_output_tokens: 4_096,
       reasoning: { effort: "Medium" },
     });
-    expect(JSON.stringify(requests[0])).toContain('"tools":[{"type":"function","name":"Read"');
+    const modelRequestJson = JSON.stringify(requests[0]);
+    expect(modelRequestJson).toContain('"tools":[{"type":"function","name":"Read"');
+    expect(modelRequestJson).toContain('"name":"Write"');
+    expect(modelRequestJson).toContain('"expectedHash":{"type":"string"}');
+    expect(modelRequestJson).toContain('"name":"Edit"');
+    expect(modelRequestJson).toContain('"name":"MultiEdit"');
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).not.toContain("baseUrl=");
@@ -1888,7 +1952,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("codebase-memory source=env");
     expect(output.text).toContain("runtime: explicit codebase-memory override");
     expect(output.text).toContain(
-      "guard: deferred MCP tools require discovery + trusted server + schemaLoaded + compatible runtime",
+      "guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution",
+    );
+    expect(output.text).toContain(
+      "guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime",
     );
     expect(output.text).toContain(
       "license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata",
@@ -4283,6 +4350,40 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("状态为 idle");
   });
 
+  it("/interrupt sends AbortSignal to a running Bash background task", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    const running = handleSlashCommand('/bash node -e "setTimeout(()=>{}, 2000)"', context, output);
+    await waitForTestCondition(() => Boolean(context.backgroundAbortControllers?.size));
+    await handleSlashCommand("/interrupt", context, output);
+    await running;
+
+    expect(output.text).toContain("已发送 AbortSignal");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
+  });
+
+  it("/interrupt uses explicit best-effort wording when no background controller exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [createBackgroundTaskFixture("bash")];
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    expect(output.text).toContain("未找到可用 AbortSignal，仅标记状态");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+  });
+
   it("/interrupt cancels active verification without pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(
@@ -5599,10 +5700,16 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/mcp remove local-demo", context, output);
 
     expect(output.text).toContain("已添加 MCP server：local-demo");
+    expect(output.text).toContain("默认 untrusted/disabled");
     expect(output.text).toContain("MCP validate");
+    expect(output.text).toContain("disabled; untrusted");
     expect(output.text).toContain("source=present:node");
     expect(output.text).toContain("permissions=tool-discovery");
     expect(output.text).toContain("已禁用 MCP server：local-demo");
+    expect(output.text).toContain("Trust notice：即将启用本地 MCP server");
+    expect(output.text).toContain(
+      "后续 tools/call 仍必须经过 discovery/schema/required-args 和权限管道",
+    );
     expect(output.text).toContain("已启用 MCP server：local-demo");
     expect(output.text).toContain("已更新 MCP server：local-demo");
     expect(output.text).toContain("未执行 server");

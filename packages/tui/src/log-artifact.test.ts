@@ -45,6 +45,8 @@ describe("Log Artifact Runtime Lite", () => {
     expect(slice.content).toContain("line 1000");
     expect(slice.content).not.toMatch(/^line 1$/m);
     expect(slice.byteRange?.start).toBeGreaterThan(0);
+    expect(slice.lineRange?.end).toBe(1000);
+    expect(slice.lineRange?.start).toBeGreaterThanOrEqual(996);
     expect(slice.truncated).toBe(true);
   });
 
@@ -95,6 +97,29 @@ describe("Log Artifact Runtime Lite", () => {
     expect(slice.content).toContain("before two");
     expect(slice.content).not.toContain("sk-secret123456789");
     expect(slice.content).toContain("[REDACTED]");
+  });
+
+  it("greps the bounded tail window so late failures are visible", async () => {
+    const { logPath, registry } = await createRegistry();
+    const earlyNoise = Array.from({ length: 200 }, (_, index) => `early target ${index + 1}`);
+    await writeFile(
+      logPath,
+      [...earlyNoise, "near tail context", "late failure target", "after late failure"].join("\n"),
+      "utf8",
+    );
+
+    const slice = await readLogArtifactSlice(
+      { evidenceId: "ev-log" },
+      { mode: "grep", pattern: "late failure", contextLines: 1, maxBytes: 1024 },
+      registry,
+    );
+
+    expect(slice.byteRange?.start).toBeGreaterThan(0);
+    expect(slice.warnings?.join("\n")).not.toContain("No matches");
+    expect(slice.content).toContain("near tail context");
+    expect(slice.content).toContain("late failure target");
+    expect(slice.content).not.toContain("early target 1");
+    expect(slice.matches?.[0]?.line).toBe(202);
   });
 
   it("extracts bounded error candidates without changing verification semantics", async () => {

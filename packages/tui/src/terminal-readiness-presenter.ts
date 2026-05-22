@@ -60,6 +60,7 @@ export type TerminalReadinessView = {
   rollbackCoach: {
     status: ReadinessItemStatus;
     changedFiles: number;
+    untrackedFiles: number;
     checkpoints: number;
     gitStatus: "clean" | "dirty" | "unavailable";
     mode: "advisory-only";
@@ -210,7 +211,14 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
     {
       id: "mcp",
       label: "mcp/connect",
-      status: view.mcp.errors > 0 ? "partial" : view.mcp.enabled ? "pass" : "unknown",
+      status:
+        view.mcp.errors > 0
+          ? "partial"
+          : view.mcp.enabled && view.mcp.tools > 0
+            ? "pass"
+            : view.mcp.servers > 0
+              ? "partial"
+              : "unknown",
       summary: `enabled=${view.mcp.enabled ? "yes" : "no"} servers=${view.mcp.servers} tools=${view.mcp.tools} errors=${view.mcp.errors}`,
       nextAction: "/mcp doctor",
     },
@@ -234,11 +242,11 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
     {
       id: "freshness",
       label: "freshness/web evidence",
-      status: view.freshness.webSourceEvidence === "present" ? "pass" : "unknown",
-      summary: `web_source_evidence=${view.freshness.webSourceEvidence}`,
+      status: view.freshness.webSourceEvidence === "present" ? "partial" : "unknown",
+      summary: `web_source_evidence=${view.freshness.webSourceEvidence}; local presence is not source validation`,
       nextAction:
         view.freshness.webSourceEvidence === "present"
-          ? "/details evidence"
+          ? "/details evidence to confirm relevance and recency"
           : "mark current/external facts as unverified",
     },
     {
@@ -266,7 +274,7 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
       id: "rollback-coach",
       label: "rollback coach lite",
       status: view.rollbackCoach.status,
-      summary: `changedFiles=${view.rollbackCoach.changedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode}`,
+      summary: `changedFiles=${view.rollbackCoach.changedFiles} untracked=${view.rollbackCoach.untrackedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode}`,
       nextAction: view.rollbackCoach.nextAction,
     },
     {
@@ -294,7 +302,7 @@ function formatReadinessLiteSections(view: TerminalReadinessView): string[] {
     `- Context Picker Lite: [${view.contextPicker.status.toUpperCase()}] refs=${safeList(view.contextPicker.refs)} evidenceKinds=${safeList(view.contextPicker.evidenceKinds)} index=${view.contextPicker.indexFreshness}`,
   );
   lines.push(
-    `- Rollback Coach Lite: [${view.rollbackCoach.status.toUpperCase()}] changedFiles=${view.rollbackCoach.changedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode} next=${view.rollbackCoach.nextAction}`,
+    `- Rollback Coach Lite: [${view.rollbackCoach.status.toUpperCase()}] changedFiles=${view.rollbackCoach.changedFiles} untracked=${view.rollbackCoach.untrackedFiles} checkpoints=${view.rollbackCoach.checkpoints} gitStatus=${view.rollbackCoach.gitStatus} mode=${view.rollbackCoach.mode} next=${view.rollbackCoach.nextAction}`,
   );
   lines.push(
     `- Task Cost Preview Lite: [${view.costPreview.status.toUpperCase()}] level=${view.costPreview.level} labels=${safeList(view.costPreview.labels)} next=${view.costPreview.nextAction}`,

@@ -213,6 +213,13 @@ async function readTail(
   const usableLines = readStart > 0 ? allLines.slice(1) : allLines;
   const selected = preventCompleteLineDump(usableLines.slice(-lines), usableLines.length);
   const truncated = readStart > 0 || usableLines.length > selected.lines.length;
+  const firstUsableLine =
+    readStart > 0 ? (await countLineBreaksBeforeOffset(sourcePath, readStart)) + 2 : 1;
+  const tailStartLine = firstUsableLine + Math.max(0, usableLines.length - lines);
+  const selectedStartLine =
+    selected.lines.length > 0 ? tailStartLine + (selected.withheld ? 1 : 0) : undefined;
+  const selectedEndLine =
+    selectedStartLine === undefined ? undefined : selectedStartLine + selected.lines.length - 1;
   const warnings = [
     ...(selected.withheld ? [COMPLETE_ARTIFACT_WITHHELD_WARNING] : []),
     ...(truncated ? ["Output capped; increase --tail lines only when necessary."] : []),
@@ -221,7 +228,7 @@ async function readTail(
     sourcePath,
     mode: "tail",
     byteRange: { start: readStart, end: fileSize },
-    lineRange: { end: selected.lines.length },
+    lineRange: { start: selectedStartLine, end: selectedEndLine },
     truncated,
     content: redactLogContent(selected.lines.join("\n")),
     warnings: warnings.length > 0 ? warnings : undefined,
@@ -247,14 +254,15 @@ async function readGrep(
     clampPositive(request.contextLines, 0, MAX_CONTEXT_LINES),
     MAX_CONTEXT_LINES,
   );
-  const end = Math.max(0, Math.min(fileSize, maxBytes) - 1);
-  const stream = createReadStream(sourcePath, { encoding: "utf8", end });
+  const readStart = Math.max(0, fileSize - maxBytes - UTF8_BOUNDARY_PADDING_BYTES);
+  let lineNumber = readStart > 0 ? await countLineBreaksBeforeOffset(sourcePath, readStart) : 0;
+  const stream = createReadStream(sourcePath, { encoding: "utf8", start: readStart });
   const reader = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
   const before: Array<{ line: number; text: string }> = [];
   const outputLines: Array<{ line: number; text: string }> = [];
   const emitted = new Set<number>();
   const matches: Array<{ line: number; text: string }> = [];
-  let lineNumber = 0;
+  let skippedPartialLine = readStart === 0;
   let afterRemaining = 0;
   let truncated = fileSize > maxBytes;
 
@@ -262,6 +270,11 @@ async function readGrep(
     if (Date.now() - startedAt > timeoutMs) {
       truncated = true;
       break;
+    }
+    if (!skippedPartialLine) {
+      skippedPartialLine = true;
+      lineNumber += 1;
+      continue;
     }
     lineNumber += 1;
     if (pattern.test(line)) {
@@ -310,7 +323,7 @@ async function readGrep(
   return {
     sourcePath,
     mode: "grep",
-    byteRange: { start: 0, end: Math.min(fileSize, maxBytes) },
+    byteRange: { start: readStart, end: fileSize },
     lineRange: { start: selected.lines[0]?.line, end: selected.lines.at(-1)?.line },
     truncated: truncated || selected.withheld,
     matches,
@@ -350,6 +363,26 @@ function pushLine(
   }
   emitted.add(item.line);
   outputLines.push({ line: item.line, text: redactLogContent(item.text) });
+}
+
+async function countLineBreaksBeforeOffset(sourcePath: string, offset: number): Promise<number> {
+  if (offset <= 0) {
+    return 0;
+  }
+  return new Promise((resolveCount, reject) => {
+    let count = 0;
+    const stream = createReadStream(sourcePath, { start: 0, end: offset - 1 });
+    stream.on("data", (chunk) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      for (const byte of buffer) {
+        if (byte === 10) {
+          count += 1;
+        }
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => resolveCount(count));
+  });
 }
 
 function preventCompleteLineDump(
