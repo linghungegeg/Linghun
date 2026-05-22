@@ -109,7 +109,7 @@
 - Phase 15 命中率口径已改成目标观察区间：92%-96% 是稳定样本目标，不是任意模型/项目/provider 的硬承诺；硬验收是 usage 来源、公式、endpoint 拆分、break-cache 诊断和账单/usage 抽样对账。
 - Phase 16 已补可控学习成本边界：默认不每轮学习、不自动接受长期记忆；候选优先来自 evidence/Todo/验证/handoff，必要总结走低成本 summarizer role；prompt 只注入少量相关记忆摘要，并通过 `/memory stats` 展示注入条数和估算 token。
 - Phase 17 已补 Team/job 状态表设计和 Virtual Agent Concurrency 边界：任务图、agent 分工、预算、暂停原因和结构化报告可见；多 agent 可以对用户表现为并行，但底层必须共享索引/cache/evidence、短摘要传递、懒加载上下文、资源 cap、重任务互斥、sleeping/blocked/running/stale 状态和 owner/heartbeat 恢复；3 个真实运行 agent 是保守默认起点，8 agent 是高配/压测候选目标，最终由资源预算、任务类型 cap 和 benchmark 决定；原始长输出只进日志，不混入主消息流。Phase 15.5B 只做资源/任务生命周期地基，不提前做第二套 agent/job runtime。
-- Phase 17A Native Local Job Runner 仍只是候选底座输入：正式接入前必须完成 Native-vs-Node benchmark、Windows MSVC/linker 与签名/杀软误报/中文和空格路径矩阵、Unix/macOS process group/session cleanup、managed/bundled runtime 分发、`/doctor runner`、fallback tests，以及 scheduler/evidence/resource guard integration；未完成前不得宣称 17A ready 或接入主链路。
+- Phase 17C 已新增为 Native Runner / Job Supervisor Gate：Native Local Job Runner 在 17A/17B 期间仍只是候选底座输入；正式主链路接入归属 17C。17C 只做长任务执行与监督底座成熟，包括 Runner Resolver、Runner Adapter、Node fallback、`/doctor runner`、Windows 进程树清理、heartbeat/log/status supervisor、crash/missing/protocol mismatch fallback、scheduler/evidence/resource guard/log artifact/handoff recovery 集成，以及中文/空格路径和跨平台 process cleanup 验证。17C 不做 Fast Workspace Scanner、remote channels、桌面端、第二套 agent/job runtime 或性能宣传；native cancelled/timeout/stale/crash 不得生成 PASS evidence。
 - Fast Workspace Scanner 当前不进入必做实现；保留为 post-runner、benchmark-gated、optional managed native helper。默认继续使用 TS/Node Workspace Snapshot Lite + codebase-memory；只有在大仓库/多 agent 共享 metadata benchmark 证明 TS/Node 路径成为瓶颈，且 Runner 的 managed binary / doctor / fallback 路线可控后，才启动 scanner prototype。
 - Phase 17 已补 Remote Channels 安全硬化：默认关闭，必须校验绑定用户/设备、过期时间、nonce/消息 id、签名或等价来源证明，审批幂等，支持设备解绑和审计日志；远程端只发摘要/审批/报告，不发送完整上下文。
 - Phase 17 已补官方 CLI adapter 方向：飞书/Lark CLI、钉钉 CLI、企业微信 wecom-cli 等只作为公开 adapter 边界参考；优先用 official_cli 发送脱敏摘要/审批/报告，CLI 缺失、未登录、权限不足或输出不可解析时保持 disabled，并通过 `/remote channels doctor` 诊断。
@@ -128,7 +128,7 @@
 - 每个后续阶段完成后仍必须在 F:\Linghun\docs\delivery\ 下输出阶段交付文档；没有阶段交付文档，不视为阶段完成。
 - 每次改动后说明验证结果和剩余风险。
 - 自动工作默认只推进一个阶段；完成当前用户确认的阶段后必须停止，输出验证结果和 handoff packet。
-- 当前不得直接进入真实全量实测、Phase 18 桌面端或开源发布；下一步必须按 Pre-Open-Source Terminal Product Completion Gate 顺序推进：Phase 15.5A Performance & Context、15.5B Resource & Task Lifecycle、15.5C Editing & Tool UX、15.5D Connect Lite、15.5E Provider & Freshness、15.5F Terminal Product Readiness，然后是 Phase 16 可控学习、Phase 17A local durable jobs、Phase 17B 企业微信/飞书/钉钉 remote channels 第一版。终端开源发布前 terminal-scope P0/P1/P2 必须清零、降级为 NOT-DO，或证明 out-of-scope。
+- 当前不得直接进入真实全量实测、Phase 18 桌面端或开源发布；下一步必须按 Pre-Open-Source Terminal Product Completion Gate 顺序推进：Phase 15.5A Performance & Context、15.5B Resource & Task Lifecycle、15.5C Editing & Tool UX、15.5D Connect Lite、15.5E Provider & Freshness、15.5F Terminal Product Readiness，然后是 Phase 16 可控学习、Phase 17A local durable jobs、Phase 17B 企业微信/飞书/钉钉 remote channels 第一版、Phase 17C Native Runner / Job Supervisor Gate。终端开源发布前 terminal-scope P0/P1/P2 必须清零、降级为 NOT-DO，或证明 out-of-scope。
 - 如果用户只是讨论、评估或问方案，必须先通过 Start Gate 询问是否开始执行。
 - CLI 主命令统一为 linghun；Windows 下必须兼容 Linghun 大小写入口。
 

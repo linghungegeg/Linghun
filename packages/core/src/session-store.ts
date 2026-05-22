@@ -111,7 +111,11 @@ export class SessionStore {
 
   async appendEvent(sessionId: string, event: TranscriptEvent): Promise<void> {
     const project = identifyProject(this.projectPath);
-    const session = await this.readMetadata(project.projectId, sessionId);
+    let session = await this.readMetadata(project.projectId, sessionId);
+    if (!session) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      session = await this.readMetadata(project.projectId, sessionId);
+    }
     if (!session) {
       throw new Error(`未找到会话：${sessionId}`);
     }

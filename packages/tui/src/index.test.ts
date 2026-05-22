@@ -1399,35 +1399,62 @@ describe("Phase 06 TUI slash commands", () => {
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
       status?: string;
       agents?: { status?: string; summary?: string }[];
-      budget?: { maxRunningAgents?: number; note?: string; usedTokens?: number };
-      worker?: { status?: string };
+      budget?: {
+        maxRunningAgents?: number;
+        maxSteps?: number;
+        note?: string;
+        usedSteps?: number;
+        usedTokens?: number;
+      };
+      worker?: { status?: string; completedSteps?: number };
       result?: { status?: string };
+      logPath?: string;
+      fullOutputPath?: string;
       reportPath?: string;
     };
-    expect(persisted.status).toBe("running");
+    expect(persisted.status).toBe("completed");
     expect(persisted.worker?.status).toBe("completed");
+    expect(persisted.worker?.completedSteps).toBe(4);
     expect(persisted.result?.status).toBe("partial");
+    expect(persisted.budget?.usedSteps).toBe(4);
+    expect(persisted.budget?.maxSteps).toBe(4);
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
-    expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(3);
-    expect(persisted.agents?.filter((agent) => agent.status === "sleeping")).toHaveLength(2);
+    expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
+    expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(5);
     expect(persisted.budget?.maxRunningAgents).toBe(3);
     expect(persisted.budget?.note).toContain("8 is benchmark/high-config candidate only");
     expect(persisted.agents?.[0]?.summary).toContain("no full transcript/source/index/log output");
     const report = await readFile(persisted.reportPath ?? "", "utf8");
     expect(report).toContain("Node/TUI runtime remains default");
-    expect(report).toContain("Phase 17A Lite worker completed one read-only structured step");
-    expect(report).toContain("No full transcript/source/index/log output was injected");
+    expect(report).toContain(
+      "Phase 17A bounded worker loop completed local read-only task graph steps",
+    );
+    expect(report).toContain("no full transcript/source/index/log output is injected");
+    expect(report).toContain("## Worker result");
+    expect(report).toContain("maxSteps=4; usedSteps=4");
+    expect(report).toContain("verification remains partial");
+    const log = await readFile(persisted.logPath ?? "", "utf8");
+    expect(log).toContain("worker step 4/4");
+    expect(log).toContain("worker loop completed without verification PASS");
+    const fullOutput = await readFile(persisted.fullOutputPath ?? "", "utf8");
+    expect(fullOutput).toContain("worker step 4/4");
+    expect(fullOutput).not.toContain("full transcript");
+    expect(fullOutput).not.toContain("full source");
 
     expect(context.backgroundTasks).toContainEqual(
-      expect.objectContaining({ id: jobId, kind: "job", status: "running" }),
+      expect.objectContaining({ id: jobId, kind: "job", status: "completed", result: "partial" }),
     );
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
     expect(output.text).toContain("local durable metadata + unified background task");
-    expect(output.text).toContain("created=5, running=3, cap=3");
-    expect(output.text).toContain("blocked never generate PASS evidence");
+    expect(output.text).toContain("created=5, running=0, cap=3");
+    expect(output.text).toContain(`${jobId}  completed`);
+    expect(output.text).not.toContain(`${jobId}  running`);
+    expect(output.text).toContain(
+      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
+    );
     expect(output.text).toContain("worker: completed");
     expect(output.text).toContain("task graph: 4 steps");
     expect(output.text).toContain("fullOutputPath:");
@@ -1468,6 +1495,7 @@ describe("Phase 06 TUI slash commands", () => {
       "state.json",
     );
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    persisted.status = "running";
     persisted.ownerSessionId = undefined;
     persisted.ownerPid = undefined;
     persisted.heartbeatAt = undefined;
@@ -1563,13 +1591,15 @@ describe("Phase 06 TUI slash commands", () => {
       pauseReason?: string;
       agents?: { status?: string }[];
     };
-    expect(firstState.status).toBe("running");
-    expect(guardedState.status).toBe("sleeping");
-    expect(guardedState.pauseReason).toContain("resource_guard");
+    expect(firstState.status).toBe("completed");
+    expect(guardedState.status).toBe("completed");
+    expect(guardedState.pauseReason ?? "").not.toContain("resource_guard");
     expect(guardedState.agents).toHaveLength(5);
     expect(guardedState.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
+    expect(freshContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ kind: "job", result: "pass" }),
+    );
 
-    await handleSlashCommand(`/job cancel ${firstJobId}`, freshContext, output);
     const budgetProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const budgetStore = new SessionStore({
       sessionRootDir: getSessionRootDir(),
@@ -1608,6 +1638,99 @@ describe("Phase 06 TUI slash commands", () => {
     expect(budgetContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
+
+    const maxStepProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const maxStepStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: maxStepProject,
+    });
+    const maxStepSession = await maxStepStore.create({ model: "deepseek-v4-flash" });
+    const maxStepContext = await createTestContext(
+      maxStepProject,
+      maxStepStore,
+      maxStepSession,
+      config,
+    );
+    maxStepContext.index.status = "ready";
+    maxStepContext.index.projectName = "F-Linghun";
+    maxStepContext.lastVerification = createVerificationReportFixture("partial");
+    maxStepContext.evidence = [...context.evidence];
+    await handleSlashCommand(
+      "/job run max step durable worker --max-steps 2 --tokens 50000",
+      maxStepContext,
+      new MemoryOutput(),
+    );
+    const maxStepJobId = maxStepContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const maxStepState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, maxStepProject).jobs,
+          maxStepJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      status?: string;
+      pauseReason?: string;
+      budget?: { usedSteps?: number };
+      result?: { status?: string; summary?: string };
+    };
+    expect(maxStepState.status).toBe("blocked");
+    expect(maxStepState.pauseReason).toContain("max_steps_reached");
+    expect(maxStepState.budget?.usedSteps).toBe(2);
+    expect(maxStepState.result?.status).toBe("blocked");
+    expect(maxStepState.result?.summary).toContain("no PASS evidence");
+    expect(maxStepContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+
+    const timeoutProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const timeoutStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: timeoutProject,
+    });
+    const timeoutSession = await timeoutStore.create({ model: "deepseek-v4-flash" });
+    const timeoutContext = await createTestContext(
+      timeoutProject,
+      timeoutStore,
+      timeoutSession,
+      config,
+    );
+    timeoutContext.index.status = "ready";
+    timeoutContext.index.projectName = "F-Linghun";
+    timeoutContext.lastVerification = createVerificationReportFixture("partial");
+    timeoutContext.evidence = [...context.evidence];
+    await handleSlashCommand(
+      "/job create timeout durable worker --max-runtime-ms 1 --tokens 50000",
+      timeoutContext,
+      new MemoryOutput(),
+    );
+    const timeoutJobId = timeoutContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const timeoutStatePath = join(
+      resolveStoragePaths(config, timeoutProject).jobs,
+      timeoutJobId ?? "missing",
+      "state.json",
+    );
+    const timeoutSeed = JSON.parse(await readFile(timeoutStatePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    timeoutSeed.startedAt = new Date(Date.now() - 60_000).toISOString();
+    await writeFile(timeoutStatePath, `${JSON.stringify(timeoutSeed, null, 2)}\n`, "utf8");
+    await handleSlashCommand(`/job resume ${timeoutJobId}`, timeoutContext, new MemoryOutput());
+    const timeoutState = JSON.parse(await readFile(timeoutStatePath, "utf8")) as {
+      status?: string;
+      pauseReason?: string;
+      result?: { status?: string; summary?: string };
+    };
+    expect(timeoutState.status).toBe("timeout");
+    expect(timeoutState.pauseReason).toContain("timeout");
+    expect(timeoutState.result?.status).toBe("timeout");
+    expect(timeoutState.result?.summary).toContain("no PASS evidence");
+    expect(timeoutContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
   });
 
   it("blocks Phase 17A jobs when handoff is incomplete and never records PASS evidence", async () => {
@@ -1641,7 +1764,9 @@ describe("Phase 06 TUI slash commands", () => {
       agents?: { status?: string }[];
     };
     expect(output.text).toContain("needs_handoff_repair");
-    expect(output.text).toContain("cancelled/timeout/stale/blocked never generate PASS evidence");
+    expect(output.text).toContain(
+      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
+    );
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
     expect(persisted.status).toBe("cancelled");
     expect(persisted.pauseReason).toBe("user_cancelled");
@@ -4566,10 +4691,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
     await handleSlashCommand("/background", context, output);
 
+    const bashTask = context.backgroundTasks.find((item) => item.kind === "bash");
+
     expect(output.text).toContain("[后台]");
     expect(output.text).toContain("Bash:");
-    expect(context.backgroundTasks[0]?.status).toBe("completed");
-    expect(context.backgroundTasks[0]?.logPath).toBeTruthy();
+    expect(bashTask?.status).toBe("completed");
+    expect(bashTask?.logPath).toBeTruthy();
   });
 
   it("guards foreground model requests and background resource caps", async () => {
@@ -4875,10 +5002,11 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/background", context, backgroundOutput);
     await running;
 
+    const verificationTask = context.backgroundTasks.find((item) => item.kind === "verification");
     expect(backgroundOutput.text).toContain("stale");
     expect(context.lastVerification?.status).toBe("stale");
-    expect(context.backgroundTasks[0]?.status).toBe("stale");
-    expect(context.backgroundTasks[0]?.result).toBe("stale");
+    expect(verificationTask?.status).toBe("stale");
+    expect(verificationTask?.result).toBe("stale");
     expect(context.evidence[0]?.supportsClaims).not.toContain("已验证");
     expect(context.evidence[0]?.supportsClaims).toContain("verification:stale");
     expect(output.text).toContain("STALE");

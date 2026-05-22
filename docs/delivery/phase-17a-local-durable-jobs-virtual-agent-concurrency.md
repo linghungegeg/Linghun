@@ -2,7 +2,7 @@
 
 ## 阶段目标
 
-Phase 17A 本轮只完成终端运行侧的 Local Durable Jobs + Virtual Agent Concurrency Lite 最小闭环与 maturity closure：让用户可以在 TUI 中创建、查看、暂停、恢复、取消本地长期 job，并看到预算、agent 分配、handoff、日志和报告路径；同时补齐启动恢复、Lite read-only worker step、预算/运行时 stop condition 和跨会话 resource guard。
+Phase 17A 本轮完成终端运行侧的 Local Durable Jobs + Virtual Agent Concurrency maturity closure 2：让用户可以在 TUI 中创建、查看、暂停、恢复、取消本地长期 job，并看到预算、agent 分配、handoff、日志和报告路径；同时把原 Lite read-only worker step 收口为 bounded local worker loop，补齐 `maxSteps/maxTokens/maxRuntimeMs` stop condition、启动恢复、resume/stale 边界和跨会话 resource guard。
 
 本阶段不进入 Phase 17B remote channels，不进入 Phase 18 desktop，不运行真实全量 smoke，不宣布 Beta PASS、smoke-ready 或 open-source-ready。
 
@@ -18,6 +18,13 @@ Phase 17A 本轮只完成终端运行侧的 Local Durable Jobs + Virtual Agent C
 
 ### Gaps closed in this phase
 
+#### 小收口：worker completion lifecycle semantics
+
+- bounded worker loop 跑完本地只读 task graph 后，durable job lifecycle 从 `running` 转为 `completed`，避免 `/job list`、`/job status` 和 resource guard 继续把已结束 worker job 当作 running。
+- `completed` 只表示 Phase 17A bounded worker loop lifecycle 完成；`job.result.status` 仍为 `partial`，`job.verification.status` 仍为 `partial`，background result 仍映射为 `partial`，不生成 verification PASS、不代表 smoke-ready。
+- `/job list` 收口为 summary-first：列表不再展示完整 log/report 私有路径，只提示 `/job status <id>`、`/job report <id>`、`/job logs <id>`；完整路径保留在 status/report/logs 详情中。
+- 本轮未进入 Phase 17B/17C/18，未接入 Native Runner，未执行真实全量 smoke，未提交 commit。
+
 - 新增 `/job` 命令最小闭环：`list/run/create/status/logs/report/pause/resume/cancel`。
 - job state 持久化到 `resolveStoragePaths(context.config, context.projectPath).jobs/<jobId>/state.json`。
 - job start 生成/验证 `HandoffPacket`；缺 verification/evidence/index 等关键字段时进入 `blocked`，`pauseReason=needs_handoff_repair:*`，不启动运行态 agent，也不生成 PASS evidence。
@@ -26,8 +33,8 @@ Phase 17A 本轮只完成终端运行侧的 Local Durable Jobs + Virtual Agent C
 - `/job report` 输出 task graph、agent assignment、budget、status、verification、adopted/rejected conclusions、pause reason、log paths。
 - `/job logs` 只显示 bounded tail，并给出 full output path；raw long output 不进入主屏。
 - maturity closure 补齐启动/新上下文 recovery：持久化 `running/sleeping/blocked/stale` job 会重新 hydrate 到 `/background`；缺 owner/session/heartbeat 或 heartbeat 过期时保守转为 `stale`，不生成 PASS evidence。
-- maturity closure 新增 Lite read-only worker step：`running` job 至少执行一次本地结构化只读步骤，输入只包含 trimmed handoff/project facts/evidence refs/index/cache 摘要，输出写入 state/log/report，不注入完整 transcript/source/index/log。
-- maturity closure 新增预算/运行时 stop condition：记录 `usedTokens/remainingTokens/maxRuntimeMs`，超 token 或 timeout 时保守转 `blocked/timeout`，不生成 PASS evidence。
+- maturity closure 2 将 Lite read-only worker step 收口为 bounded local worker loop：`running` job 按 task graph step 顺序推进，受 `maxSteps/maxTokens/maxRuntimeMs` 控制；每步只读，输入只包含 trimmed handoff/project facts/evidence refs/index/cache 摘要，输出持续写入 state/log/full-output/report/background event，不注入完整 transcript/source/index/log。
+- maturity closure 新增预算/运行时 stop condition：记录 `usedTokens/remainingTokens/usedSteps/maxSteps/maxRuntimeMs`，超 token、maxSteps 或 timeout 时保守转 `blocked/timeout`，不生成 PASS evidence。
 - maturity closure 新增跨会话 resource guard：recovered active job 参与 `job` cap 与 heavy-task mutex，后续 job 进入 `sleeping/resource_guard:*`，保持 created agent count 与真实 running count 分离。
 
 ### Minimal touch points
@@ -50,7 +57,7 @@ Phase 17A 本轮只完成终端运行侧的 Local Durable Jobs + Virtual Agent C
 ### `/job` 命令
 
 - `/job list`
-- `/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]`
+- `/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>|--max-runtime-ms <ms>] [--allow-edit] [--allow-bash] [--multi-agent]`
 - `/job create <goal> ...` 或 `/job new <goal> ...`
 - `/job status <id>`
 - `/job logs <id>`
@@ -85,8 +92,8 @@ Job state 包含：
 - `evidenceRefs`
 - `verification`
 - `ownerSessionId` / `ownerPid` / `heartbeatAt`
-- `worker.status` / `worker.sessionId` / `worker.summary`
-- `budget.usedTokens` / `budget.remainingTokens` / `budget.maxRuntimeMs`
+- `worker.status` / `worker.sessionId` / `worker.currentStep` / `worker.completedSteps` / `worker.summary`
+- `budget.usedTokens` / `budget.remainingTokens` / `budget.usedSteps` / `budget.maxSteps` / `budget.maxRuntimeMs`
 - `result.status` / `result.summary` / bounded facts and evidence refs
 - `adoptedConclusions`
 - `rejectedConclusions`
@@ -109,7 +116,7 @@ Job state 包含：
 ## 使用方式
 
 ```text
-/job run implement durable loop --multi-agent --agents 5 --allow-bash --allow-edit --tokens 50000 --timeout 60000
+/job run implement durable loop --multi-agent --agents 5 --allow-bash --allow-edit --tokens 50000 --max-steps 4 --timeout 60000
 /job list
 /job status <jobId>
 /job report <jobId>
@@ -124,9 +131,10 @@ Job state 包含：
 ## 涉及模块
 
 - TUI command dispatcher：新增 `/job` 分支。
-- Durable job helpers：state parse/write、log/report 写入、status transition、agent scheduling。
-- Natural Command Bridge：新增 `/job` registry/capability，风险级别为 `start_gate`。
-- TUI tests：新增 Phase 17A focused tests，覆盖持久化、handoff blocked、background 复用、agent cap 和 no-PASS semantics。
+- Durable job helpers：state parse/write、log/report 写入、status transition、agent scheduling、bounded worker loop。
+- Natural Command Bridge：保留 `/job` registry/capability，风险级别为 `start_gate`。
+- SessionStore：`appendEvent` 增加一次 microtask retry，收敛 `/interrupt` 与 background Bash 事件写入的 transient session metadata race。
+- TUI tests：新增 Phase 17A focused tests，覆盖持久化、handoff blocked、background 复用、agent cap、stop condition 和 no-PASS semantics。
 
 ## 关键设计
 
@@ -151,20 +159,23 @@ Durable job 自身保存完整 Phase 17A lifecycle。为减少 public interface 
 - persisted `running` job 若 handoff 缺关键字段，保守转为 `blocked`，`pauseReason=needs_handoff_repair:*`。
 - recovered `blocked/stale` 只写 durable state/log/report 和 background partial/stale 状态，不产生 PASS evidence。
 
-### Lite read-only worker step
+### Bounded local worker loop
 
-`/job run` 或 `/job resume` 进入 `running` 后执行一次本地 Lite worker step：
+`/job run` 或 `/job resume` 进入 `running` 后执行 bounded local worker loop：
 
 - 创建独立 worker session，用于记录 job worker system event。
-- 输入边界仅包含 job goal/phase/target、handoff id、bounded evidence refs、index/cache/project facts、agent assignment summary 和 log/report paths。
+- 按 `plan` / task graph step 顺序推进，默认 `maxSteps=4`，最高 clamp 到 20；`--max-steps` / `--steps` 可覆盖。
+- 每步输入边界仅包含 job goal/phase/target、handoff id、bounded evidence refs、index/cache/project facts、agent assignment summary 和 log/report paths。
+- 每步只读；不执行写入、Bash、联网或高风险动作；即使 `allowEdit/allowBash` 记录为 true，也不绕过现有 Start Gate / permission pipeline。
 - 不注入完整 transcript、完整 source、完整 index 或完整 log output。
-- 输出 structured partial result 到 `state.json`、`job.log`、`full-output.log` 与 `report.md`。
-- worker partial result 不等于 verification PASS，也不表示 smoke-ready。
+- 每步输出 structured partial result 到 `state.json`、`job.log`、`full-output.log`、`report.md`，并同步 `background_task_update`。
+- worker loop completion 会把 durable job lifecycle 转为 `completed`，释放 running resource guard；但 `job.result.status`、`job.verification.status` 和 background result 仍保持 `partial`，不等于 verification PASS，也不表示 smoke-ready。
 
 ### Budget / runtime stop condition
 
-- job state 记录 `budget.usedTokens`、`budget.remainingTokens` 与 `budget.maxRuntimeMs`。
-- Lite worker 用本地文本长度估算 token usage；若会超过 `maxTokens`，转 `blocked`，`pauseReason=budget_exceeded:*`。
+- job state 记录 `budget.usedTokens`、`budget.remainingTokens`、`budget.usedSteps`、`budget.maxSteps` 与 `budget.maxRuntimeMs`。
+- Worker loop 用本地文本长度估算 token usage；若下一步会超过 `maxTokens`，转 `blocked`，`pauseReason=budget_exceeded:*`。
+- 若达到 `maxSteps` 但 task graph 仍未完成，转 `blocked`，`pauseReason=max_steps_reached:*`。
 - 若超过 `timeoutMs/maxRuntimeMs`，转 `timeout`，background result=`timeout`。
 - `blocked/timeout/stale/cancelled/sleeping` 均不生成 PASS evidence。
 
@@ -220,27 +231,31 @@ Native Local Job Runner 本轮保持 DEFERRED。正式接入前仍需要 native-
 
 ## 测试与验证
 
-已运行：
+Maturity closure 2 已运行：
 
 ```text
-corepack pnpm exec vitest run packages/tui/src/index.test.ts --testNamePattern "/interrupt sends AbortSignal|/interrupt cancels active verification|Phase 17A durable job|blocks Phase 17A|catalog drift|shows help"
+corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "Phase 17A|durable job|job recovery|worker loop|budget|stale|interrupt|resource guard"
 ```
 
-结果：PASS，5 tests passed，141 skipped；覆盖 Phase 17A focused job path 和 verifier 复检发现的 `/interrupt` 取消路径。
+结果：PASS，1 file passed，11 tests passed，137 skipped；覆盖 Phase 17A durable job bounded worker loop、per-step state/log/full-output/report/background event、maxSteps/maxTokens/maxRuntimeMs conservative stop、startup/recovery stale、cross-session resource guard、handoff blocked/no-PASS 和 `/interrupt` 回归。
 
 ```text
-corepack pnpm test
+corepack pnpm exec vitest run packages/tui/src/index.test.ts
 ```
 
-结果：PASS，15 files passed，401 tests passed。该复跑确认 verifier 先前发现的 full-suite `/interrupt cancels active verification without pass evidence` order-dependent failure 已收敛；最小修复为 `/interrupt` 发送 background AbortSignal 后立即清理 controller map，避免等待子进程 finally 期间出现脏 active controller 状态。
-
-Maturity closure 已运行：
+结果：PASS，1 file passed，148 tests passed；确认 TUI focused/full file 回归收敛。
 
 ```text
-corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "Phase 17A|durable job|job recovery|worker loop|budget|stale|interrupt"
+corepack pnpm exec biome check prototypes/native-runner/bench/native-vs-node-benchmark.mjs
 ```
 
-结果：PASS，1 file passed，11 tests passed，137 skipped；覆盖 Phase 17A durable job startup/recovery、Lite worker、budget stop、cross-session resource guard 和 `/interrupt` 相关路径。
+结果：PASS。P2 check 卫生项已用 Biome 最小格式化/organizeImports 处理；该文件仍只是 Native Runner benchmark/prototype，不接入 Phase 17A runtime。
+
+```text
+corepack pnpm exec biome check packages/core/src/session-store.ts packages/tui/src/index.ts packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.ts prototypes/native-runner/bench/native-vs-node-benchmark.mjs
+```
+
+结果：PASS，touched code files 无 formatter/lint error。
 
 ```text
 corepack pnpm typecheck
@@ -249,10 +264,10 @@ corepack pnpm typecheck
 结果：PASS，`tsc -b tsconfig.json` 完成。
 
 ```text
-corepack pnpm exec biome check packages/tui/src/index.ts packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.ts
+corepack pnpm check
 ```
 
-结果：PASS，touched TypeScript files 无 formatter/lint error。
+结果：PASS，Biome 全仓 check 通过；此前 `prototypes/native-runner/bench/native-vs-node-benchmark.mjs` format / organizeImports 卫生项已收敛。
 
 ```text
 corepack pnpm build
@@ -266,16 +281,47 @@ git diff --check
 
 结果：PASS，仅有 Windows line-ending warning，无 whitespace error。
 
+### Final local closure verification
+
+本轮 final local closure 只做验证和报告收口，未修改 runtime，未进入 Phase 17B/17C/18，未接入 Native Runner，未运行真实全量 smoke，未宣布 Beta PASS / smoke-ready / open-source-ready。
+
+```text
+corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "Phase 17A|durable job|resource guard|worker loop"
+```
+
+结果：PASS，1 file passed，4 tests passed，144 skipped；复核 bounded worker loop completion lifecycle、durable/background partial semantics、resource guard release 与 `/job list` 状态展示。
+
+```text
+corepack pnpm exec vitest run packages/tui/src/index.test.ts
+```
+
+结果：PASS，1 file passed，148 tests passed；确认 TUI full focused file 回归收敛。
+
+```text
+corepack pnpm typecheck
+```
+
+结果：PASS。
+
 ```text
 corepack pnpm check
 ```
 
-结果：FAIL（非本阶段新增代码）：Biome 报告 `prototypes/native-runner/bench/native-vs-node-benchmark.mjs` format / organizeImports 问题。该路径为本轮开始前已存在的 Native Runner benchmark untracked work，Phase 17A 本轮按最小改动原则未顺手修改。
+结果：PASS，Checked 58 files，No fixes applied。
 
-待 independent verifier 复检：
+```text
+corepack pnpm build
+```
 
-- Phase 17A maturity closure focused validation。
-- full check failure scope 是否仍确认为既有 Native Runner benchmark formatting，不影响本阶段 `/job` runtime。
+结果：PASS。
+
+```text
+git diff --check
+```
+
+结果：PASS，仅有 Windows LF/CRLF warning，无 whitespace error。
+
+结论：Phase 17A local closure PASS 仅代表上述本地验证通过；independent verifier 本轮未完成/未写入 independent verification PASS，因此本文档不得声称 independent verification PASS。该结论也不是 Beta PASS、smoke-ready 或 open-source-ready。下一步是否进入 Phase 17B 必须由用户明确决定。
 
 ## 性能结果
 
@@ -288,8 +334,8 @@ corepack pnpm check
 
 ## 已知问题
 
-- Phase 17A Lite 只做本地 durable metadata + bounded scheduling，不执行真正长期 autonomous worker loop。
-- `/job completed` 的 PASS 语义未开放；job lifecycle 不等于 verification PASS。
+- Phase 17A bounded worker loop 仍是本地只读、有限步数的 durable metadata loop，不是无限自治 daemon，也不是真实多进程 agent runner 池。
+- `/job completed` 的 PASS 语义未开放；completed 只表示 bounded worker loop lifecycle 结束，job result / verification / background result 仍是 partial，不等于 verification PASS。
 - runner crash recovery 仅通过 durable state/log/report 提供可恢复信息，未接入 native supervisor。
 - full scheduler 的 foreground model cap / tool cap / heavy mutex 与真实多进程 agent runtime 的深度集成仍后置。
 
@@ -306,9 +352,9 @@ corepack pnpm check
 
 ## 下一阶段衔接
 
-下一步仍应停在 Phase 17A 收口和验证，直到用户明确确认进入后续阶段。maturity closure 已补齐 startup recovery、Lite read-only worker step、budget decrement/stop condition 和 cross-session guard。若后续继续 Phase 17A 深化，可补：
+下一步仍应停在 Phase 17A 收口和验证，直到用户明确确认进入后续阶段。maturity closure 2 已补齐 startup recovery、bounded local worker loop、budget decrement/stop condition 和 cross-session guard。若后续继续 Phase 17A 深化，可补：
 
-- Lite worker 从单步结构化结果升级为 bounded 多步 worker loop，但仍不得无限自治。
+- bounded worker loop 从本地只读有限步升级为更完整的调度/队列执行，但仍不得无限自治。
 - runner crash/stale recovery 更细状态与恢复建议。
 - scheduler 与 model/tool caps 的更完整运行态集成。
 - Native Runner gated integration spike（仅在 prerequisite 全部满足后）。
@@ -350,14 +396,16 @@ corepack pnpm check
 
 ### 参考源 delta catch-up 裁决
 
-- Local durable jobs：DONE in Lite，state/log/report/status/cancel/pause/resume/list/run path added。
-- Job/report evidence integrity：DONE in Lite，blocked/cancelled/stale/timeout not PASS。
-- Multi-agent claim consistency：DONE in Lite，created vs running separated，cap=3。
-- Full concurrent tool scheduler：DEFERRED，Phase 17A Lite only maps resource guard and job cap。
-- Long-running background jobs：PARTIAL/DONE Lite，durable metadata and report done; autonomous worker loop deferred。
-- Remote channels：NOT-DO in Phase 17A。
-- Native Local Job Runner：DEFERRED。
+- Local durable jobs：DONE，state/log/full-output/report/status/cancel/pause/resume/list/run path added。
+- Job/report evidence integrity：DONE，blocked/cancelled/stale/timeout/overbudget/maxSteps stop not PASS；worker loop completion 转为 completed lifecycle 但 result/verification/background result 仍只是 partial。
+- Multi-agent claim consistency：DONE，created vs running separated，默认 cap=3；8 agent 仅 benchmark/high-config candidate。
+- Long-running background jobs：DONE in bounded terminal-scope，durable metadata、bounded worker loop、per-step report/log/background event、resume/recovery stop condition 已覆盖；无限自治 daemon / native supervisor DEFERRED。
+- Agent heartbeat/stale fields：DONE Lite，running persisted job 缺 owner/session/heartbeat 或 heartbeat 过期保守 stale。
+- Background task paused/compact/job/mcp typed states：DONE for job path，durable status 映射回统一 `BackgroundTaskState`。
+- Full concurrent tool scheduler：DEFERRED，Phase 17A 只复用 resource guard、job kind cap、foreground model cap 和 heavy-task mutex，不实现第二套 scheduler。
+- Native Local Job Runner：DEFERRED；benchmark/prototype 仅作 evidence，不接入 runtime。
 - Fast Workspace Scanner：NOT-DO。
+- Remote channels：NOT-DO in Phase 17A。
 
 ### 行为参考与实现边界
 

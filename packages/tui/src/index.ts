@@ -590,9 +590,11 @@ export type DurableJobState = {
   budget: {
     maxTokens: number;
     maxRunningAgents: number;
+    maxSteps: number;
     note: string;
     usedTokens?: number;
     remainingTokens?: number;
+    usedSteps?: number;
     maxRuntimeMs?: number;
   };
   timeoutMs: number;
@@ -621,6 +623,8 @@ export type DurableJobState = {
     status: "not_started" | "running" | "completed" | "blocked" | "timeout" | "failed" | "stale";
     startedAt?: string;
     endedAt?: string;
+    currentStep?: number;
+    completedSteps?: number;
     summary: string;
   };
   result?: {
@@ -1100,6 +1104,8 @@ const DEFAULT_JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_JOB_BUDGET_TOKENS = 120_000;
 const JOB_LOG_TAIL_LINES = 40;
 const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
+const DEFAULT_JOB_MAX_STEPS = 4;
+const MAX_JOB_MAX_STEPS = 20;
 const MAX_CHECKPOINTS = 20;
 const MAX_AGENTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
@@ -3918,6 +3924,7 @@ type ParsedJobRunOptions = {
   target: string;
   plan: string[];
   maxTokens: number;
+  maxSteps: number;
   requestedAgents: number;
   timeoutMs: number;
   allowEdit: boolean;
@@ -3942,7 +3949,7 @@ async function handleJobCommand(
     if (!options.goal) {
       writeLine(
         output,
-        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
+        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
       );
       return;
     }
@@ -4007,6 +4014,7 @@ function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   let target = "local-durable-jobs";
   let requestedAgents = 1;
   let maxTokens = DEFAULT_JOB_BUDGET_TOKENS;
+  let maxSteps = DEFAULT_JOB_MAX_STEPS;
   let timeoutMs = DEFAULT_JOB_TIMEOUT_MS;
   let allowEdit = false;
   let allowBash = false;
@@ -4036,7 +4044,12 @@ function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
       index += 1;
       continue;
     }
-    if (arg === "--timeout") {
+    if (arg === "--max-steps" || arg === "--steps") {
+      maxSteps = clampPositiveInt(args[index + 1], DEFAULT_JOB_MAX_STEPS, MAX_JOB_MAX_STEPS);
+      index += 1;
+      continue;
+    }
+    if (arg === "--timeout" || arg === "--max-runtime-ms") {
       timeoutMs = clampPositiveInt(args[index + 1], DEFAULT_JOB_TIMEOUT_MS, 24 * 60 * 60 * 1000);
       index += 1;
       continue;
@@ -4068,6 +4081,7 @@ function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
       "write report",
     ],
     maxTokens,
+    maxSteps,
     requestedAgents: normalizedAgents,
     timeoutMs,
     allowEdit,
@@ -4094,7 +4108,9 @@ async function createDurableJob(
   const paths = getDurableJobPaths(context, id);
   const handoffPacket = await loadOrCreateHandoffPacket(context, await ensureSession(context));
   const missing = validateHandoffPacket(handoffPacket);
-  const resourceGuard = start ? checkBackgroundStartGuard(context, "job", true) : null;
+  const resourceGuard = start
+    ? (checkResourceGuard(context, "model") ?? checkBackgroundStartGuard(context, "job", true))
+    : null;
   const runningCap = DEFAULT_JOB_RUNNING_AGENT_CAP;
   const status: DurableJobStatus = !start
     ? "created"
@@ -4120,9 +4136,11 @@ async function createDurableJob(
     budget: {
       maxTokens: options.maxTokens,
       maxRunningAgents: runningCap,
+      maxSteps: options.maxSteps,
       note: `${runningCap} running agents is the default cap; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only, not default.`,
       usedTokens: 0,
       remainingTokens: options.maxTokens,
+      usedSteps: 0,
       maxRuntimeMs: options.timeoutMs,
     },
     timeoutMs: options.timeoutMs,
@@ -4188,6 +4206,30 @@ function createDurableJobAgents(
 }
 
 async function resumeDurableJob(job: DurableJobState, context: TuiContext): Promise<void> {
+  if (
+    job.status === "cancelled" ||
+    job.status === "timeout" ||
+    job.status === "failed" ||
+    job.status === "completed"
+  ) {
+    job.result = {
+      status: job.status === "timeout" ? "timeout" : job.status === "failed" ? "failed" : "blocked",
+      summary: `Resume refused for terminal ${job.status} job; no PASS evidence generated.`,
+      facts: [`terminalStatus=${job.status}`, job.pauseReason ?? "no pause reason"],
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: new Date().toISOString(),
+    };
+    job.rejectedConclusions = [
+      ...job.rejectedConclusions,
+      `Terminal ${job.status} job was not upgraded by resume and is not PASS evidence.`,
+    ];
+    await persistDurableJobProgress(
+      context,
+      job,
+      `resume refused for terminal status ${job.status}`,
+    );
+    return;
+  }
   const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
   if (missing.length > 0) {
     await transitionDurableJob(
@@ -4198,7 +4240,8 @@ async function resumeDurableJob(job: DurableJobState, context: TuiContext): Prom
     );
     return;
   }
-  const resourceGuard = checkBackgroundStartGuard(context, "job", true, job.id);
+  const resourceGuard =
+    checkResourceGuard(context, "model") ?? checkBackgroundStartGuard(context, "job", true, job.id);
   if (resourceGuard) {
     await transitionDurableJob(job, context, "sleeping", `resource_guard:${resourceGuard}`);
     return;
@@ -4252,24 +4295,29 @@ async function recoverDurableJobForContext(
   context: TuiContext,
   job: DurableJobState,
 ): Promise<DurableJobState> {
-  if (job.status !== "running") {
+  const recoverableStatuses: DurableJobStatus[] = ["running", "sleeping", "blocked", "stale"];
+  if (!recoverableStatuses.includes(job.status)) {
     return job;
   }
+  const originalStatus = job.status;
   const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
   if (missing.length > 0) {
     job.status = "blocked";
     job.pauseReason = `needs_handoff_repair:${missing.join(",")}`;
-  } else if (!job.ownerSessionId || !job.ownerPid || !job.heartbeatAt) {
+  } else if (
+    originalStatus === "running" &&
+    (!job.ownerSessionId || !job.ownerPid || !job.heartbeatAt)
+  ) {
     job.status = "stale";
     job.pauseReason = "recovered_without_owner_or_heartbeat";
-  } else {
-    const heartbeatAge = Date.now() - Date.parse(job.heartbeatAt);
+  } else if (originalStatus === "running") {
+    const heartbeatAge = Date.now() - Date.parse(job.heartbeatAt ?? "");
     if (Number.isNaN(heartbeatAge) || heartbeatAge > JOB_RECOVERY_HEARTBEAT_STALE_MS) {
       job.status = "stale";
       job.pauseReason = "recovered_stale_heartbeat";
     }
   }
-  if (job.status === "running") {
+  if (job.status === originalStatus && originalStatus !== "stale") {
     return job;
   }
   const now = new Date().toISOString();
@@ -4297,7 +4345,7 @@ async function runDurableJobLiteTick(context: TuiContext, job: DurableJobState):
   if (job.status !== "running") {
     return;
   }
-  const budgetStop = await applyDurableJobBudgetStop(context, job, "before_lite_worker");
+  const budgetStop = await applyDurableJobBudgetStop(context, job, "before_worker_loop");
   if (budgetStop) {
     return;
   }
@@ -4306,89 +4354,196 @@ async function runDurableJobLiteTick(context: TuiContext, job: DurableJobState):
     model: context.model,
     summary: `job-worker:${job.id}:${truncateDisplay(job.goal, 40)}`,
   });
-  const facts = [
-    `goal=${truncateDisplay(job.goal, 120)}`,
-    `phase=${job.phase}`,
-    `target=${job.target}`,
-    `handoff=${job.handoffPacket?.id ?? "missing"}`,
-    `index=${context.index.status}${context.index.projectName ? `:${context.index.projectName}` : ""}`,
-    `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
-    `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
-  ];
-  const summary = [
-    "Phase 17A Lite worker completed one read-only structured step.",
-    "Input boundary: trimmed handoff/project facts/evidence refs/cache/index status only.",
-    "No full transcript/source/index/log output was injected.",
-  ].join(" ");
-  const estimatedTokens = estimateJobTokens(`${summary}\n${facts.join("\n")}`);
-  if ((job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens) {
-    await transitionDurableJob(
-      job,
-      context,
-      "blocked",
-      `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
-    );
-    job.result = {
-      status: "overbudget",
-      summary:
-        "Lite worker stopped before output because maxTokens would be exceeded; no PASS evidence generated.",
-      facts,
-      evidenceRefs: job.evidenceRefs.map((item) => item.id),
-      generatedAt: new Date().toISOString(),
-    };
+  job.worker = {
+    sessionId: workerSession.id,
+    status: "running",
+    startedAt,
+    currentStep: job.budget.usedSteps ?? 0,
+    completedSteps: job.budget.usedSteps ?? 0,
+    summary: "Bounded local worker loop is running with trimmed refs only.",
+  };
+  await persistDurableJobProgress(context, job, "worker loop started");
+
+  while (job.status === "running" && (job.budget.usedSteps ?? 0) < job.plan.length) {
+    const stepIndex = job.budget.usedSteps ?? 0;
+    if (stepIndex >= getDurableJobMaxSteps(job)) {
+      job.result = {
+        status: "blocked",
+        summary: "Durable worker stopped at maxSteps; no PASS evidence generated.",
+        facts: [`maxSteps=${getDurableJobMaxSteps(job)}`, `plannedSteps=${job.plan.length}`],
+        evidenceRefs: job.evidenceRefs.map((item) => item.id),
+        generatedAt: new Date().toISOString(),
+      };
+      job.worker = {
+        ...job.worker,
+        status: "blocked",
+        endedAt: job.result.generatedAt,
+        summary: job.result.summary,
+      };
+      await transitionDurableJob(
+        job,
+        context,
+        "blocked",
+        `max_steps_reached:${getDurableJobMaxSteps(job)}`,
+      );
+      return;
+    }
+
+    const stop = await applyDurableJobBudgetStop(context, job, `before_step_${stepIndex + 1}`);
+    if (stop) {
+      return;
+    }
+
+    const stepFacts = createDurableJobStepFacts(context, job, stepIndex);
+    const summary = [
+      `Phase 17A bounded worker step ${stepIndex + 1}/${job.plan.length}: ${job.plan[stepIndex]}.`,
+      "Input boundary: trimmed handoff/project facts/evidence refs/workspace cache/index status only.",
+      `Permissions: allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; no write/Bash/network action is executed by this local worker loop.`,
+      "No full transcript/source/index/log output was injected.",
+    ].join(" ");
+    const estimatedTokens = estimateJobTokens(`${summary}\n${stepFacts.join("\n")}`);
+    if ((job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens) {
+      job.result = {
+        status: "overbudget",
+        summary:
+          "Durable worker stopped before the next step because maxTokens would be exceeded; no PASS evidence generated.",
+        facts: stepFacts,
+        evidenceRefs: job.evidenceRefs.map((item) => item.id),
+        generatedAt: new Date().toISOString(),
+      };
+      job.worker = {
+        ...job.worker,
+        status: "blocked",
+        currentStep: stepIndex + 1,
+        completedSteps: stepIndex,
+        endedAt: job.result.generatedAt,
+        summary: job.result.summary,
+      };
+      await transitionDurableJob(
+        job,
+        context,
+        "blocked",
+        `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
+      );
+      return;
+    }
+
+    const now = new Date().toISOString();
+    job.budget.usedTokens = (job.budget.usedTokens ?? 0) + estimatedTokens;
+    job.budget.remainingTokens = Math.max(0, job.budget.maxTokens - job.budget.usedTokens);
+    job.budget.usedSteps = stepIndex + 1;
     job.worker = {
-      sessionId: workerSession.id,
-      status: "blocked",
-      startedAt,
-      endedAt: new Date().toISOString(),
-      summary: job.result.summary,
+      ...job.worker,
+      status: "running",
+      currentStep: stepIndex + 1,
+      completedSteps: stepIndex + 1,
+      summary,
     };
-    await persistDurableJob(job);
-    await writeDurableJobReport(job);
+    job.result = {
+      status: "partial",
+      summary,
+      facts: stepFacts,
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: now,
+    };
+    job.verification = {
+      status: "partial",
+      summary: "Bounded worker output is structured but not verification PASS.",
+    };
+    job.heartbeatAt = now;
+    job.updatedAt = now;
+    await context.store.appendEvent(workerSession.id, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "info",
+      message: `${summary} facts=${stepFacts.join(" | ")}`,
+      createdAt: now,
+    });
+    await appendJobLog(
+      job,
+      `worker step ${stepIndex + 1}/${job.plan.length}: tokens=${estimatedTokens}; refs=${stepFacts.join(" | ")}`,
+    );
+    await persistDurableJobProgress(context, job, `worker step ${stepIndex + 1} persisted`);
+
+    const afterStop = await applyDurableJobBudgetStop(context, job, `after_step_${stepIndex + 1}`);
+    if (afterStop) {
+      return;
+    }
+  }
+
+  if (job.status !== "running") {
     return;
   }
-  job.budget.usedTokens = (job.budget.usedTokens ?? 0) + estimatedTokens;
-  job.budget.remainingTokens = Math.max(0, job.budget.maxTokens - job.budget.usedTokens);
   const endedAt = new Date().toISOString();
-  job.worker = { sessionId: workerSession.id, status: "completed", startedAt, endedAt, summary };
+  job.worker = {
+    ...job.worker,
+    status: "completed",
+    endedAt,
+    currentStep: job.budget.usedSteps ?? job.plan.length,
+    completedSteps: job.budget.usedSteps ?? job.plan.length,
+    summary:
+      "Phase 17A bounded worker loop completed local read-only task graph steps; verification is still partial.",
+  };
   job.result = {
     status: "partial",
-    summary,
-    facts,
+    summary: job.worker.summary,
+    facts: createDurableJobStepFacts(context, job, Math.max(0, (job.budget.usedSteps ?? 1) - 1)),
     evidenceRefs: job.evidenceRefs.map((item) => item.id),
     generatedAt: endedAt,
   };
   job.verification = {
     status: "partial",
-    summary: "Lite worker result is structured but not verification PASS.",
+    summary: "Worker loop completion is not verification PASS and not smoke-ready proof.",
   };
+  job.status = "completed";
+  job.pauseReason = undefined;
+  job.endedAt = endedAt;
   job.heartbeatAt = endedAt;
   job.updatedAt = endedAt;
   job.adoptedConclusions = [
     ...job.adoptedConclusions,
-    "Lite worker produced a read-only structured result from trimmed refs.",
+    "Bounded worker loop produced read-only structured results from trimmed refs.",
   ];
   job.rejectedConclusions = [
     ...job.rejectedConclusions,
-    "Lite worker partial result is not PASS evidence and not smoke-ready proof.",
+    "Completed job lifecycle only means the bounded worker loop ended; it is not PASS evidence, not Beta readiness, and not smoke-ready proof.",
   ];
   rescheduleDurableJobAgents(job);
-  await context.store.appendEvent(workerSession.id, {
-    type: "system_event",
-    id: randomUUID(),
-    level: "info",
-    message: `${summary} facts=${facts.join(" | ")}`,
-    createdAt: endedAt,
-  });
-  await appendJobLog(
-    job,
-    `lite worker partial: session=${workerSession.id}; tokens=${estimatedTokens}`,
-  );
+  await appendJobLog(job, `worker loop completed: session=${workerSession.id}`);
+  await persistDurableJobProgress(context, job, "worker loop completed without verification PASS");
+}
+
+async function persistDurableJobProgress(
+  context: TuiContext,
+  job: DurableJobState,
+  message: string,
+): Promise<void> {
+  await appendJobLog(job, message);
   await persistDurableJob(job);
   await writeDurableJobReport(job);
   const background = upsertJobBackgroundTask(context, job);
   await appendBackgroundTaskEvent(context, await ensureSession(context), background);
-  await applyDurableJobBudgetStop(context, job, "after_lite_worker");
+}
+
+function createDurableJobStepFacts(
+  context: TuiContext,
+  job: DurableJobState,
+  stepIndex: number,
+): string[] {
+  const workspaceRef = context.cache.workspaceReference.latest;
+  const workspaceSnapshot = workspaceRef?.workspaceSnapshot;
+  return [
+    `step=${stepIndex + 1}/${job.plan.length}`,
+    `goal=${truncateDisplay(job.goal, 120)}`,
+    `phase=${job.phase}`,
+    `target=${job.target}`,
+    `handoff=${job.handoffPacket?.id ?? "missing"}`,
+    `index=${context.index.status}${context.index.projectName ? `:${context.index.projectName}` : ""}`,
+    `workspaceCache=${workspaceRef?.source ?? "missing"};snapshot=${workspaceSnapshot ? "ready" : "missing"}`,
+    `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
+    `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
+    `logs=${job.logPath};report=${job.reportPath}`,
+  ];
 }
 
 async function applyDurableJobBudgetStop(
@@ -4428,6 +4583,31 @@ function estimateJobTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+function getDurableJobMaxSteps(job: DurableJobState): number {
+  return Math.max(1, Math.min(job.budget.maxSteps ?? DEFAULT_JOB_MAX_STEPS, MAX_JOB_MAX_STEPS));
+}
+
+function countDurableJobAgents(job: DurableJobState): Record<DurableJobAgentStatus, number> {
+  return job.agents.reduce(
+    (counts, agent) => {
+      counts[agent.status] += 1;
+      return counts;
+    },
+    {
+      created: 0,
+      running: 0,
+      queued: 0,
+      sleeping: 0,
+      blocked: 0,
+      stale: 0,
+      cancelled: 0,
+      timeout: 0,
+      completed: 0,
+      failed: 0,
+    } satisfies Record<DurableJobAgentStatus, number>,
+  );
+}
+
 function rescheduleDurableJobAgents(job: DurableJobState): void {
   let running = 0;
   for (const agent of job.agents) {
@@ -4464,8 +4644,14 @@ function createJobBackgroundTask(job: DurableJobState, context: TuiContext): Bac
     kind: "job",
     title: `Job: ${truncateDisplay(job.goal, 40)}`,
     status: mapDurableJobToBackgroundStatus(job.status),
-    currentStep: job.pauseReason ?? `agents ${runningAgents}/${job.agents.length}`,
-    progress: { completed: runningAgents, total: job.agents.length, label: "agents" },
+    currentStep:
+      job.pauseReason ??
+      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}`,
+    progress: {
+      completed: job.budget.usedSteps ?? 0,
+      total: getDurableJobMaxSteps(job),
+      label: "worker steps",
+    },
     startedAt: job.startedAt ?? job.createdAt,
     updatedAt: job.updatedAt,
     heartbeatIntervalMs: 30_000,
@@ -4519,8 +4705,8 @@ function formatJobNextAction(job: DurableJobState, language: Language): string {
       : "先修复 handoff/evidence/index 状态，再用 /job resume。";
   }
   return language === "en-US"
-    ? `Inspect /job report ${job.id}; cancelled/timeout/stale/blocked never count as PASS.`
-    : `查看 /job report ${job.id}；cancelled/timeout/stale/blocked 不产生 PASS。`;
+    ? `Inspect /job report ${job.id}; completed/cancelled/timeout/stale/blocked never count as verification PASS.`
+    : `查看 /job report ${job.id}；completed/cancelled/timeout/stale/blocked 不等于 verification PASS。`;
 }
 
 async function persistDurableJob(job: DurableJobState): Promise<void> {
@@ -4543,7 +4729,7 @@ async function writeDurableJobReport(job: DurableJobState): Promise<void> {
     `- projectPath: ${job.projectPath}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
     `- budget note: ${job.budget.note}`,
     `- pauseReason: ${job.pauseReason ?? "-"}`,
     `- owner: session=${job.ownerSessionId ?? "-"}; pid=${job.ownerPid ?? "-"}; heartbeatAt=${job.heartbeatAt ?? "-"}`,
@@ -4563,9 +4749,10 @@ async function writeDurableJobReport(job: DurableJobState): Promise<void> {
         `- ${agent.id}: ${agent.type} status=${agent.status} budgetTokens=${agent.budgetTokens} goal=${agent.goal}`,
     ),
     "",
-    "## Lite result",
+    "## Worker result",
     `- status: ${job.result?.status ?? "not_run"}`,
-    `- summary: ${job.result?.summary ?? "Lite worker has not produced a result yet."}`,
+    `- summary: ${job.result?.summary ?? "Worker loop has not produced a result yet."}`,
+    `- lifecycle: ${job.status === "completed" ? "completed means the bounded worker loop ended; verification remains partial and is not PASS/smoke-ready" : job.status}`,
     `- facts: ${job.result?.facts.join(" | ") ?? "none"}`,
     `- evidenceRefs: ${job.result?.evidenceRefs.join(", ") ?? "none"}`,
     "",
@@ -4663,13 +4850,13 @@ function formatJobList(jobs: DurableJobState[], context: TuiContext): string {
   }
   return [
     "Durable jobs:",
-    ...jobs.map(
-      (job) =>
-        `${job.id}  ${job.status}  agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}  phase=${job.phase}  target=${job.target}  report=${job.reportPath}  goal=${truncateDisplay(job.goal, 60)}`,
-    ),
+    ...jobs.map((job) => {
+      const counts = countDurableJobAgents(job);
+      return `${job.id}  ${job.status}  created=${job.agents.length} running=${counts.running} sleeping=${counts.sleeping} blocked=${counts.blocked} stale=${counts.stale}  worker=${job.worker?.status ?? "not_started"} ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  pause=${job.pauseReason ?? "-"}  budget=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}  goal=${truncateDisplay(job.goal, 60)}  next=/job status ${job.id} | /job report ${job.id} | /job logs ${job.id}`;
+    }),
     context.language === "en-US"
-      ? `Default running agent cap is ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only.`
-      : `默认真实运行 agent 上限为 ${DEFAULT_JOB_RUNNING_AGENT_CAP}；${JOB_AGENT_HIGH_CONFIG_CANDIDATE} 只是 benchmark/high-config 候选。`,
+      ? `Default running agent cap is ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only. Full paths are shown only in /job status, /job report, and /job logs.`
+      : `默认真实运行 agent 上限为 ${DEFAULT_JOB_RUNNING_AGENT_CAP}；${JOB_AGENT_HIGH_CONFIG_CANDIDATE} 只是 benchmark/high-config 候选。完整路径只在 /job status、/job report 和 /job logs 中显示。`,
   ].join("\n");
 }
 
@@ -4679,14 +4866,14 @@ function formatJobPrimary(job: DurableJobState, context: TuiContext): string {
     `[job] ${job.id} · ${job.status} · ${truncateDisplay(job.goal, 80)}`,
     "- impact: local durable metadata + unified background task; no remote channel, no Phase 18, no Beta/smoke-ready PASS.",
     `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; 8-agent mode is deferred benchmark candidate.`,
-    `- verification: ${job.verification?.status ?? "not_run"}; cancelled/timeout/stale/blocked never generate PASS evidence.`,
+    `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
     `- details: /job report ${job.id}; logs: /job logs ${job.id}; background: /background`,
   ].join("\n");
 }
 
 function formatJobStatus(job: DurableJobState): string {
-  const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  const counts = countDurableJobAgents(job);
   return [
     `Job ${job.id}`,
     `- status: ${job.status}`,
@@ -4694,22 +4881,25 @@ function formatJobStatus(job: DurableJobState): string {
     `- goal: ${job.goal}`,
     `- projectPath: ${job.projectPath}`,
     `- phase/target: ${job.phase} / ${job.target}`,
-    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
-    `- worker: ${job.worker?.status ?? "not_started"}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
+    `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
     `- logPath: ${job.logPath}`,
+    `- fullOutputPath: ${job.fullOutputPath}`,
     `- reportPath: ${job.reportPath}`,
   ].join("\n");
 }
 
 function formatJobReport(job: DurableJobState): string {
+  const counts = countDurableJobAgents(job);
   return [
     `Job report ${job.id}`,
     `- status: ${job.status}`,
-    `- task graph: ${job.plan.length} steps`,
+    `- task graph: ${job.plan.length} steps; worker=${job.worker?.status ?? "not_started"}; usedSteps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- agent assignment: ${job.agents.map((agent) => `${agent.id}:${agent.type}:${agent.status}`).join(", ")}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}`,
+    `- agent counts: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
     `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
     `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
