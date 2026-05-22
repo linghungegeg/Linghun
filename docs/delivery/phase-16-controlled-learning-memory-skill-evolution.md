@@ -4,6 +4,8 @@
 
 本轮只完成 Pre-Open-Source Terminal Product Completion Gate 的 Phase 16：Controlled Learning / Memory / Skill Evolution。范围限定为复用 Linghun 既有 memory / skill / evidence / transcript / handoff / permission / config 机制，补齐候选优先、显式接受、可审计、可撤销、成本可见的受控学习闭环。
 
+本次更新是 Phase 16 maturity closure：用源码修复 session-scope memory 生命周期和 `/skills evolve` 命令语义，并补充回归测试；不是文字补丁。
+
 本轮不进入真实全量 smoke，不声明 Beta PASS、smoke-ready 或 open-source-ready，不进入 Phase 17A / 17B / 18，不提交 commit，不新增第二套 provider、tool、permission、evidence、MCP、index、agent、job、memory、skill、learning、desktop 或 release runtime，不复制 CCB / Claude Code / OpenCode / 第三方源码。
 
 ## Source-Level Reality Check 摘要
@@ -40,16 +42,17 @@
 
 - Memory record 扩展为受控 lifecycle：`candidate`、`accepted`、`rejected`、`disabled`、`retired`，scope 支持 `project`、`user`、`session`。
 - `/memory candidate <摘要> [--scope project|user|session]`：只创建候选，不长期注入。
-- `/memory accept <id>`：显式接受候选，写入对应 scope 的 memory JSON，并追加既有 `memory_accepted` transcript event。
+- `/memory accept <id>`：显式接受候选，并追加既有 `memory_accepted` transcript event；project/user scope 写入对应 memory JSON，session scope 只在当前 `TuiContext` / 当前会话生效，不写入跨会话长期 storage。
 - `/memory reject <id>`：拒绝候选，仅记录状态和 `system_event`，不注入 prompt。
 - `/memory disable <id>`：禁用 accepted memory；保留记录但从 prompt injection 中移除。
 - `/memory rollback <id>`：把 disabled memory 恢复为 accepted。
-- `/memory delete <id>`：删除任意 memory record，并删除对应持久化 JSON。
+- `/memory delete <id>`：删除任意 memory record；project/user scope 同步删除对应持久化 JSON，session scope 只删除当前会话内存态。
 - `/memory stats`：展示 candidates/accepted/disabled/rejected 计数、accepted-only topK 注入数量、字符数、估算 token、lastLearningRun、autoLearning/off、longTermWrite/explicit accept、summarizerRole 边界。
 - `/memory learn`：只从已有 evidence / completed Todo / verification pass / handoff 的 bounded refs 派生候选，最多 3 条，`modelCalled=false`，不调用 provider、不联网、不扫全仓、不自动接受。
 - `createModelSystemPrompt()` 新增 `ControlledMemorySummary` 与 `MemoryBoundary`，只注入 accepted、non-inferred、稳定排序、topK=3、截断后的摘要。
 - memory freshness summary 改为稳定排序的 project rules / candidates / accepted / disabled / rejected 摘要，不依赖访问时间或随机顺序。
 - `/skills evolve candidate <summary>`：只生成 skill evolution candidate metadata，不写文件、不安装、不信任、不启用。
+- `/skills evolve <其他文本>`：只给用法提示，不创建候选，避免自然文本误触发 skill evolution。
 - `/skills evolve`：查看候选，并显示 `autoEnable=no; writesFiles=no; trustChanges=no`。
 - `/skills evolve reject <id>`：拒绝 skill evolution candidate，仅记录状态。
 - natural-command bridge 更新 memory capability 文案：支持 review/stats/storage，同时明确 accept/delete/disable 需要显式命令。
@@ -132,7 +135,7 @@ DEFERRED：可选 learning policy 配置（例如默认 topK、learn source allo
 
 Focused/local validation（本轮已执行）：
 
-- `corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts packages/config/src/index.test.ts`：PASS（3 files，295 tests）。覆盖 memory lifecycle、accepted-only prompt injection、`/memory stats`、`/memory learn` candidate-only/modelCalled=no、skill evolution candidate-only、natural-command bridge memory capability 和 config regression。
+- `corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts packages/config/src/index.test.ts -t "Phase 16|memory lifecycle|memory learn|skill evolution|session"`：PASS（3 files，7 tests；288 skipped）。覆盖 session-scope memory 当前会话可注入/新会话不加载、memory lifecycle、`/memory learn` candidate-only/modelCalled=no、`/skills evolve <其他文本>` 不创建候选、skill evolution candidate-only、natural-command bridge/config scoped regression。
 - `corepack pnpm typecheck`：PASS。
 - `corepack pnpm check`：PASS（Biome checked 57 files, no fixes applied）。
 - `corepack pnpm build`：PASS。

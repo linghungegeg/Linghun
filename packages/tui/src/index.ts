@@ -1146,14 +1146,11 @@ async function loadMemoryByStatus(
   paths: ReturnType<typeof resolveStoragePaths>,
   status: MemoryStatus,
 ): Promise<MemoryCandidate[]> {
-  const [projectMemory, userMemory, sessionMemory] = await Promise.all([
+  const [projectMemory, userMemory] = await Promise.all([
     loadMemoryDirByStatus(paths.memoryProject, status),
     loadMemoryDirByStatus(paths.memoryUser, status),
-    loadMemoryDirByStatus(paths.memorySession, status),
   ]);
-  return [...projectMemory, ...userMemory, ...sessionMemory].sort((a, b) =>
-    a.id.localeCompare(b.id),
-  );
+  return [...projectMemory, ...userMemory].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 async function loadMemoryDirByStatus(
@@ -2682,8 +2679,20 @@ async function handleSkillsCommand(
       writeLine(output, `已拒绝 skill evolution candidate：${id}；不会生成或启用 skill。`);
       return;
     }
+    if (args[1] !== "candidate") {
+      writeLine(
+        output,
+        "用法：/skills evolve | /skills evolve candidate <summary> | /skills evolve reject <id>。不会自动写文件、安装、信任或启用。",
+      );
+      return;
+    }
+    const candidateSummary = args.slice(2).join(" ").trim();
+    if (!candidateSummary) {
+      writeLine(output, "用法：/skills evolve candidate <summary>");
+      return;
+    }
     const candidate = createSkillEvolutionCandidate(
-      summary.replace(/^candidate\s+/u, ""),
+      candidateSummary,
       "manual /skills evolve candidate",
     );
     context.skills.evolutionCandidates.unshift(candidate);
@@ -5399,6 +5408,9 @@ function parseMemoryCandidateArgs(args: string[]): { scope: MemoryScope; summary
 }
 
 async function writeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
+  if (candidate.scope === "session") {
+    return;
+  }
   const directory = getMemoryDirectory(candidate.scope, context);
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${candidate.id}.json`);
@@ -5406,6 +5418,9 @@ async function writeMemoryRecord(candidate: MemoryCandidate, context: TuiContext
 }
 
 async function removeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
+  if (candidate.scope === "session") {
+    return;
+  }
   await rm(join(getMemoryDirectory(candidate.scope, context), `${candidate.id}.json`), {
     force: true,
   });

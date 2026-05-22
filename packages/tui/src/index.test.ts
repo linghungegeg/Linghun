@@ -888,6 +888,27 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand(`/memory reject ${rejectedId}`, context, output);
     expect(context.memory.rejected).toHaveLength(1);
     expect(output.text).toContain("已拒绝候选记忆");
+
+    await handleSlashCommand(
+      "/memory candidate 仅当前会话可见的临时偏好 --scope session",
+      context,
+      output,
+    );
+    const sessionMemoryId = context.memory.candidates[0]?.id;
+    expect(sessionMemoryId).toBeTruthy();
+    await handleSlashCommand(`/memory accept ${sessionMemoryId}`, context, output);
+    const sessionPrompt = createModelSystemPrompt("继续当前任务", context, {
+      memory: { candidates: 0, accepted: 1 },
+    });
+    expect(sessionPrompt).toContain("仅当前会话可见的临时偏好");
+
+    const nextSession = await store.create({ model: "deepseek-v4-flash" });
+    const nextContext = await createTestContext(project, store, nextSession);
+    nextContext.memory = await createMemoryState(defaultConfig, project);
+    const nextPrompt = createModelSystemPrompt("继续新会话", nextContext, {
+      memory: { candidates: 0, accepted: 0 },
+    });
+    expect(nextPrompt).not.toContain("仅当前会话可见的临时偏好");
   });
 
   it("creates Phase 16 memory learn candidates from bounded evidence without model calls", async () => {
@@ -923,6 +944,14 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(
+      "/skills evolve 重复的 bug 修复流程可沉淀为本地 skill",
+      context,
+      output,
+    );
+    expect(output.text).toContain("用法：/skills evolve");
+    expect(context.skills.evolutionCandidates).toHaveLength(0);
 
     await handleSlashCommand(
       "/skills evolve candidate 重复的 bug 修复流程可沉淀为本地 skill",
