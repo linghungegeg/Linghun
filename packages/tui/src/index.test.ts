@@ -155,10 +155,12 @@ async function createMockCodebaseMemoryBinary(
     versionExitCode?: number;
     status?: string;
     fileName?: string;
+    projects?: Array<{ name: string; root_path?: string }>;
   } = {},
 ): Promise<{ callsPath: string; mockPath: string }> {
   const callsPath = join(mockDir, `${options.fileName ?? "codebase-memory-mock"}-calls.jsonl`);
   const mockPath = join(mockDir, `${options.fileName ?? "codebase-memory-mock"}.cjs`);
+  const projects = options.projects ?? [{ name: "test-project", root_path: project }];
   await writeFile(
     mockPath,
     `const fs = require("node:fs");
@@ -169,7 +171,7 @@ const tool = process.argv[3];
 const input = JSON.parse(process.argv[4] || "{}");
 fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ tool, input }) + "\\n");
 if (tool === "list_projects") {
-  console.log(JSON.stringify({ projects: [{ name: "test-project", root_path: ${JSON.stringify(project)} }] }));
+  console.log(JSON.stringify({ projects: ${JSON.stringify(projects)} }));
 } else if (tool === "index_status") {
   console.log(JSON.stringify({ status: ${JSON.stringify(options.status ?? "ready")}, nodes: 2, edges: 1 }));
 } else if (tool === "detect_changes") {
@@ -213,6 +215,7 @@ async function createMockCodebaseMemoryConfig(
     versionExitCode?: number;
     status?: string;
     fileName?: string;
+    projects?: Array<{ name: string; root_path?: string }>;
   } = {},
 ): Promise<{ config: LinghunConfig; callsPath: string; mockPath: string }> {
   const { callsPath, mockPath } = await createMockCodebaseMemoryBinary(
@@ -240,16 +243,22 @@ async function createMockCodebaseMemoryConfig(
   };
 }
 
-async function readMockCalls(callsPath: string): Promise<string[]> {
+async function readMockCallRecords(
+  callsPath: string,
+): Promise<Array<{ tool: string; input: Record<string, unknown> }>> {
   try {
     return (await readFile(callsPath, "utf8"))
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
-      .map((line) => JSON.parse(line).tool as string);
+      .map((line) => JSON.parse(line) as { tool: string; input: Record<string, unknown> });
   } catch {
     return [];
   }
+}
+
+async function readMockCalls(callsPath: string): Promise<string[]> {
+  return (await readMockCallRecords(callsPath)).map((record) => record.tool);
 }
 
 const windowsIt = process.platform === "win32" ? it : it.skip;
@@ -2518,6 +2527,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Native Runner Doctor：disabled");
     expect(output.text).toContain("Remote Channels：已开启");
     expect(output.text).toContain("feishu: ready");
+    expect(output.text).toContain("webhook_mock：diagnostic/test-only dry run");
     expect(output.text).not.toContain("Fast Workspace Scanner");
     expect(context.remote.channels.find((channel) => channel.id === "feishu")?.runtimeStatus).toBe(
       "ready",
@@ -3251,12 +3261,15 @@ describe("Phase 06 TUI slash commands", () => {
     await runTui({
       projectPath: project,
       stdin: Readable.from([
-        "/mcp doctor\n/index status\n/index search main\n/index architecture\n/exit\n",
+        "/mcp tools\n/mcp doctor\n/index status\n/index search main\n/index architecture\n/exit\n",
       ]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
+    expect(output.text).toContain("MCP tools（稳定排序摘要，不输出完整 schema）");
+    expect(output.text).toContain("placeholder 表示安全占位摘要");
+    expect(output.text).toContain("schemaLoaded=no");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("codebase-memory: configured");
     expect(output.text).toContain("codebase-memory source=env");
@@ -6084,8 +6097,129 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index status", context, output);
 
     expect(output.text).toContain("status: ready");
+    expect(output.text).toContain("project selection: root_path");
     expect(output.text).toContain("fast status：未运行 detect_changes");
     expect(await readMockCalls(callsPath)).toEqual(["list_projects", "index_status"]);
+  });
+
+  it("keeps index status root_path project selection ahead of name candidates", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "Linghun-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const projectName = projectRoot.replaceAll("\\", "/").split("/").at(-1) ?? "Linghun";
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      projectRoot,
+      mockDir,
+      { changed_count: 0 },
+      {
+        projects: [{ name: projectName }, { name: "root-match", root_path: projectRoot }],
+      },
+    );
+    const store = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: projectRoot,
+    });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(projectRoot, store, session, config);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain("project: root-match");
+    expect(output.text).toContain("project selection: root_path");
+    expect(
+      (await readMockCallRecords(callsPath)).find((call) => call.tool === "index_status")?.input,
+    ).toMatchObject({
+      project: "root-match",
+    });
+  });
+
+  it("selects index status project by unique basename candidate when root_path is missing", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "linghun-ceshi-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const projectName = projectRoot.replaceAll("\\", "/").split("/").at(-1) ?? "linghun-ceshi";
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      projectRoot,
+      mockDir,
+      { changed_count: 0 },
+      { projects: [{ name: projectName.toUpperCase() }] },
+    );
+    const store = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: projectRoot,
+    });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(projectRoot, store, session, config);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain(`project: ${projectName.toUpperCase()}`);
+    expect(output.text).toContain("project selection: name-candidate");
+    expect(
+      (await readMockCallRecords(callsPath)).find((call) => call.tool === "index_status")?.input,
+    ).toMatchObject({
+      project: projectName.toUpperCase(),
+    });
+  });
+
+  it("derives index status Windows drive plus basename candidates from projectPath", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "linghun-ceshi-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const normalizedProject = projectRoot.replaceAll("\\", "/");
+    const projectName = normalizedProject.split("/").at(-1) ?? "linghun-ceshi";
+    const drive = /^([A-Za-z]):\//.exec(normalizedProject)?.[1];
+    const driveCandidate = drive ? `${drive}-${projectName}` : projectName;
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      projectRoot,
+      mockDir,
+      { changed_count: 0 },
+      { projects: [{ name: driveCandidate.toUpperCase() }] },
+    );
+    const store = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: projectRoot,
+    });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(projectRoot, store, session, config);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain(`project: ${driveCandidate.toUpperCase()}`);
+    expect(output.text).toContain("project selection: name-candidate");
+    expect(
+      (await readMockCallRecords(callsPath)).find((call) => call.tool === "index_status")?.input,
+    ).toMatchObject({
+      project: driveCandidate.toUpperCase(),
+    });
+  });
+
+  it("does not guess index status project when multiple name candidates are ambiguous", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "linghun-ceshi-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const normalizedProject = projectRoot.replaceAll("\\", "/");
+    const projectName = normalizedProject.split("/").at(-1) ?? "linghun-ceshi";
+    const drive = /^([A-Za-z]):\//.exec(normalizedProject)?.[1];
+    const driveCandidate = drive ? `${drive}-${projectName}` : `drive-${projectName}`;
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      projectRoot,
+      mockDir,
+      { changed_count: 0 },
+      { projects: [{ name: projectName }, { name: driveCandidate }] },
+    );
+    const store = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: projectRoot,
+    });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(projectRoot, store, session, config);
+
+    await handleSlashCommand("/index status", context, output);
+
+    expect(output.text).toContain("status: missing");
+    expect(output.text).toContain("project selection: missing");
+    expect(await readMockCalls(callsPath)).toEqual(["list_projects"]);
   });
 
   it("marks index status stale from explicit fresh check without refreshing", async () => {

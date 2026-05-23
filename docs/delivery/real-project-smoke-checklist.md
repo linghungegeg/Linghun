@@ -10,7 +10,7 @@
 ## 测试项目
 
 ```text
-F:\linghun-ceshi
+用户指定真实测试项目
 ```
 
 真实 smoke 只能在用户明确进入第二阶段后执行。
@@ -40,7 +40,7 @@ DEEPSEEK_BASE_URL
 
 第一轮控制在 3-5 个任务，逐项执行、逐项记录，不并行扩大范围：
 
-1. 只读项目体检：读取 `F:\linghun-ceshi` 的项目结构、规则文件和关键入口，只输出摘要与风险，不改文件。
+1. 只读项目体检：读取 `用户指定真实测试项目` 的项目结构、规则文件和关键入口，只输出摘要与风险，不改文件。
 2. 小 bug 修复：选择一个低风险、单点、可验证的小问题，覆盖 Read/Edit/verification/summary-first 输出。
 3. 多文件改动：选择 2-3 个文件的受控改动，观察 changed files、permission、evidence、验证摘要和回滚建议。
 4. 架构性任务：提出需要 Architecture Runtime 判断的任务，确认工程事实、建议方案、non-goals、验证路径和 drift 提示是否正常。
@@ -48,15 +48,35 @@ DEEPSEEK_BASE_URL
 
 ## 每轮必须记录
 
-每轮记录只写 summary + artifact refs，不写完整日志：
+每轮记录只写 summary + artifact refs，不写完整日志。Mock/local/focused PASS 不能写成 live PASS；每轮必须单独裁决 PASS / BLOCKED / FAIL。
+
+建议记录模板：
+
+```text
+Smoke item: <编号 / 名称>
+Provider/model: <provider> / <model>
+Task: <用户任务摘要>
+Tools summary: <Read/Edit/Bash/Index/MCP/Remote 等摘要，不贴 raw output>
+Changed files: <无 / 相对路径清单>
+Verification command/result: <命令 + PASS/BLOCKED/FAIL 摘要>
+Token/cache/compact: <输入/输出/cache/compact 摘要或 unavailable>
+Architecture/evidence/permission: <是否触发；证据 refs；权限模式与审批摘要>
+Index/cache notes: <是否使用 .linghunignore/.cbmignore；是否只读 /index status fast；是否运行 fresh/check>
+Result: PASS / BLOCKED / FAIL
+Notes: <返工、幻觉、越权、泄露、provider 错误、路径暴露等摘要>
+```
+
+字段要求：
 
 - 模型/provider。
 - 用户任务。
 - 工具调用摘要。
 - 修改文件。
-- 验证命令。
+- 验证命令与结果。
 - token/cache/compact 情况。
-- 是否触发 architecture/evidence/permission。
+- architecture/evidence/permission 触发情况。
+- `.linghunignore` / `.cbmignore` 是否覆盖索引风险或 hard skip 相关边界。
+- PASS / BLOCKED / FAIL 裁决。
 - 是否出现返工、幻觉、越权或泄露。
 - 是否有 provider 报错、路径暴露、权限绕过或错误修改真实项目。
 
@@ -66,7 +86,7 @@ DEEPSEEK_BASE_URL
 
 必须同时满足：
 
-- 在真实 provider 和 `F:\linghun-ceshi` 上完成对应任务。
+- 在真实 provider 和 `用户指定真实测试项目` 上完成对应任务。
 - 工具、权限、evidence、验证、summary-first 输出符合预期。
 - 无密钥泄露、无 raw request/response 泄露、无完整日志泄露。
 - 无未授权写入、无路径越界、无 PASS 膨胀。

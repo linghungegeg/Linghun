@@ -44,4 +44,5 @@
 
 - P1-1：已关闭“无计划 DEFERRED”问题；当前有首批候选、风险、验证命令和 smoke 前实现建议。
 - P2-6：并入本计划；剩余 `index.ts` 拆分属于 smoke 后维护性任务或 smoke 暴露问题后的定向拆分。
+- P2 closure linkage：本轮 Pre-Smoke P2 Closure Hardening 只允许小修和文档澄清；除 Index Project Identity Reconciliation Lite 这一处定向小修外，不做 slash/router/model loop/permission/remote/job/MCP 的大拆代码。
 - 本轮不做大重构，避免真实 provider + 真实项目 smoke 前引入新风险。

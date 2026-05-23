@@ -368,6 +368,7 @@ export type McpState = {
 type CodebaseMemoryBinarySource = "env" | "managed" | "path" | "missing";
 type CodebaseMemoryBinaryStatus = "ready" | "missing" | "corrupt" | "unsupported" | "unknown";
 type CodebaseMemoryArtifactStatus = "ready" | "missing" | "stale" | "corrupt" | "unknown";
+type CodebaseMemoryProjectSelectionSource = "root_path" | "name-candidate" | "missing";
 
 export type IndexState = {
   enabled: boolean;
@@ -390,6 +391,7 @@ export type IndexState = {
   binaryCommand?: string;
   artifactStatus?: CodebaseMemoryArtifactStatus;
   artifactPath?: string;
+  projectSelectionSource?: CodebaseMemoryProjectSelectionSource;
   runtime?: string;
 };
 
@@ -4934,6 +4936,9 @@ function formatRemoteStatus(context: TuiContext): string {
       `- ${channel.id}: ${channel.runtimeStatus}; binding=${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}; lastError=${channel.lastError ?? "none"}; next=${channel.nextAction}`,
     );
   }
+  if (context.remote.channels.some((channel) => channel.config.transport === "webhook_mock")) {
+    lines.push("- webhook_mock：diagnostic/test-only dry run，不代表真实 remote delivery PASS。");
+  }
   lines.push("- 主路径：/remote setup <channel> -> /remote test <channel> -> /remote status");
   return lines.join("\n");
 }
@@ -8644,6 +8649,7 @@ function formatMcpTools(context: TuiContext): string {
   }
   return [
     "MCP tools（稳定排序摘要，不输出完整 schema）",
+    "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schemaLoaded=yes 只会在 discovery/doctor 成功后出现。",
     ...context.mcp.tools.map(
       (tool) =>
         `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery=${tool.discovery ?? "placeholder"}; trusted=${tool.trusted ? "yes" : "no"}; schemaLoaded=${tool.schemaLoaded ? "yes" : "no"}; runtime=${tool.runtimeVersion ?? "unknown"}`,
@@ -8769,6 +8775,8 @@ async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<v
     context.index.status = "missing";
     context.index.artifactStatus = "unknown";
     context.index.error = `${resolution.summary}。普通聊天不受影响；如需索引，请配置 ${CODEBASE_MEMORY_ENV} 或安装 Linghun-managed codebase-memory。`;
+    context.index.projectName = undefined;
+    context.index.projectSelectionSource = "missing";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
     return;
@@ -8779,6 +8787,8 @@ async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<v
     context.index.status = projects.errorCode === "ENOENT" ? "missing" : "error";
     context.index.artifactStatus = projects.errorCode === "ENOENT" ? "missing" : "corrupt";
     context.index.error = projects.summary;
+    context.index.projectName = undefined;
+    context.index.projectSelectionSource = "missing";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
     return;
@@ -8788,6 +8798,8 @@ async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<v
     context.index.status = "missing";
     context.index.artifactStatus = "missing";
     context.index.artifactPath = undefined;
+    context.index.projectName = undefined;
+    context.index.projectSelectionSource = "missing";
     context.index.error = "未找到当前项目索引。请运行 /index init fast 建立索引。";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
@@ -8795,6 +8807,7 @@ async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<v
   }
   context.index.projectName = project.name;
   context.index.artifactPath = project.rootPath;
+  context.index.projectSelectionSource = project.source;
   const status = await runCodebaseMemoryCli(
     context,
     "index_status",
@@ -9011,6 +9024,7 @@ function formatIndexStatus(context: TuiContext): string {
     "Index status",
     `- enabled: ${context.index.enabled ? "yes" : "no"}`,
     `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
+    `- project selection: ${context.index.projectSelectionSource ?? (context.index.projectName ? "root_path" : "missing")}`,
     `- status: ${context.index.status}`,
     `- source=${context.index.binarySource ?? "unknown"}`,
     `- binary status: ${context.index.binaryStatus ?? "unknown"}`,
@@ -9288,22 +9302,53 @@ function formatBytes(bytes: number): string {
 function findCurrentIndexProject(
   data: unknown,
   projectPath: string,
-): { name: string; rootPath?: string } | null {
+): { name: string; rootPath?: string; source: CodebaseMemoryProjectSelectionSource } | null {
   if (!isRecord(data) || !Array.isArray(data.projects)) {
     return null;
   }
   const normalizedProjectPath = normalizePath(projectPath);
-  const match = data.projects.find((project) => {
+  const rootPathMatch = data.projects.find((project) => {
     if (!isRecord(project)) {
       return false;
     }
     return normalizePath(String(project.root_path ?? "")) === normalizedProjectPath;
   });
-  if (isRecord(match) && typeof match.name === "string") {
-    const rootPath = typeof match.root_path === "string" ? match.root_path : undefined;
-    return { name: match.name, rootPath };
+  if (isRecord(rootPathMatch) && typeof rootPathMatch.name === "string") {
+    const rootPath =
+      typeof rootPathMatch.root_path === "string" ? rootPathMatch.root_path : undefined;
+    return { name: rootPathMatch.name, rootPath, source: "root_path" };
   }
-  return null;
+
+  const candidateNames = createCurrentIndexProjectNameCandidates(projectPath);
+  const nameMatches = data.projects.filter((project) => {
+    if (!isRecord(project) || typeof project.name !== "string") {
+      return false;
+    }
+    return candidateNames.has(project.name.toLowerCase());
+  });
+  if (nameMatches.length !== 1) {
+    return null;
+  }
+  const [nameMatch] = nameMatches;
+  if (!isRecord(nameMatch) || typeof nameMatch.name !== "string") {
+    return null;
+  }
+  const rootPath = typeof nameMatch.root_path === "string" ? nameMatch.root_path : undefined;
+  return { name: nameMatch.name, rootPath, source: "name-candidate" };
+}
+
+function createCurrentIndexProjectNameCandidates(projectPath: string): Set<string> {
+  const normalizedPath = projectPath.replaceAll("\\", "/").replace(/\/$/, "");
+  const projectName = basename(normalizedPath);
+  const candidates = new Set<string>();
+  if (projectName) {
+    candidates.add(projectName.toLowerCase());
+  }
+  const drive = /^([A-Za-z]):\//.exec(normalizedPath)?.[1];
+  if (drive && projectName) {
+    candidates.add(`${drive}-${projectName}`.toLowerCase());
+  }
+  return candidates;
 }
 
 async function runCodebaseMemoryCli(

@@ -17,7 +17,7 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 - Phase 15.5A-F、Phase 16、Phase 17A/B/C 已完成 focused/local validation，并已输出对应阶段交付文档；这些结论只代表本地、focused、mock 或 scoped validation 已闭环。
 - 当前仍不是 Beta PASS，不是 smoke-ready，不是 open-source-ready；不得把历史 A-C、focused/mock/local PASS、单阶段 PASS 或局部 live text PASS 推断为整体 ready。
 - 当前最新状态以 [START_NEXT_CHAT.md](./START_NEXT_CHAT.md) 和 [docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md](./docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md) 为准；本仓库正处于真实模型/真实项目 smoke 前的 P1/P2 remediation closure。
-- 下一步是在 P1/P2 closure 完成后，由用户确认进入 `F:\linghun-ceshi` 的 Real Provider + Real Project Smoke；真实 smoke 才允许用户通过临时 env 注入 provider key，且不得保存真实 key、raw provider request、完整 provider response 或完整日志。
+- 下一步是在 P1/P2 closure 完成后，由用户确认进入“用户指定真实测试项目”的 Real Provider + Real Project Smoke；真实 smoke 才允许用户通过临时 env 注入 provider key，且不得保存真实 key、raw provider request、完整 provider response 或完整日志。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认和旧权限边界。Pre-smoke 新基线要求用户可见权限模式统一为 `default` / `auto-review` / `plan` / `full-access`，旧 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据；高风险命令不得自然语言直通。Architecture Runtime 是 smoke 前底层工程判断能力，不是第五个权限模式、不是 Plan Mode、不是 skill、不是 prompt-only 文案；v1 只做轻量工程判断 guard 和短 Architecture Card，涉及最新外部事实时必须按需走 Freshness/Web Evidence，未联网不得伪造当前结论。
 - Linghun 的低学习成本原则是渐进披露：默认首屏、状态栏和 `/help` 简洁；完整能力必须通过 `/help all`、`/features`、`/config advanced`、doctor 详情和自然语言用途询问可发现；隐藏高级入口不能降低功能完整性。
