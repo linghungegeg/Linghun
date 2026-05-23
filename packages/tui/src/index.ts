@@ -355,6 +355,7 @@ export type CacheHistoryConfig = {
 export type LightHint = {
   id: string;
   severity: "info" | "warning";
+  priority: number;
   message: string;
   suggestedCommand: string;
   dedupeKey: string;
@@ -1209,6 +1210,7 @@ const MIN_CACHE_HISTORY_SIZE = 1;
 const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_LIGHT_HINTS_PER_TURN = 1;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 const MAX_MODEL_TOOL_ROUNDS = 4;
 const LARGE_INDEX_FILE_BYTES = 1_000_000;
@@ -2223,7 +2225,11 @@ export async function handleSlashCommand(
   if (command === "/help") {
     writeLine(
       output,
-      formatCatalogHelp(context.language, context.permissionMode, rest[0] === "all"),
+      formatCatalogHelp(
+        context.language,
+        context.permissionMode,
+        ["all", "advanced", "details"].includes(rest[0] ?? ""),
+      ),
     );
     return "handled";
   }
@@ -3371,7 +3377,14 @@ async function handleDoctorCommand(
     );
     return;
   }
-  if (["readiness", "status", "checklist", "project", "report"].includes(action)) {
+  if (["all", "details", "checklist", "project", "report"].includes(action)) {
+    writeLine(
+      output,
+      formatTerminalReadinessDoctor(createTerminalReadinessView(context), { showAll: true }),
+    );
+    return;
+  }
+  if (["readiness", "status"].includes(action)) {
     writeLine(output, formatTerminalReadinessDoctor(createTerminalReadinessView(context)));
     return;
   }
@@ -10833,7 +10846,10 @@ function collectLightHints(context: TuiContext): LightHint[] {
       createLightHint(
         "cache-hit-low",
         "warning",
-        context.language === "en-US" ? "Cache hit rate dropped" : "cache 命中率下降",
+        10,
+        context.language === "en-US"
+          ? "Reuse became less effective in the latest turn"
+          : "最近一轮复用效果变低",
         "/break-cache status",
       ),
     );
@@ -10843,9 +10859,10 @@ function collectLightHints(context: TuiContext): LightHint[] {
       createLightHint(
         "context-long",
         "info",
+        4,
         context.language === "en-US"
-          ? "Context is long; consider compacting when needed"
-          : "context 较长，建议按需压缩",
+          ? "This conversation is getting long; compact only if it starts feeling slow"
+          : "这轮对话较长；如果开始变慢，再按需压缩",
         "/compact",
       ),
     );
@@ -10855,9 +10872,10 @@ function collectLightHints(context: TuiContext): LightHint[] {
       createLightHint(
         "cache-zero-create-with-read",
         "info",
+        2,
         context.language === "en-US"
-          ? "cache_creation is reported as 0 while cache_read is high; this is usually provider field semantics, not zero write cost"
-          : "cache_creation 长期为 0 但 cache_read 很高时通常是 provider 字段口径，不代表零写入成本",
+          ? "Usage numbers may need checking before cost claims"
+          : "要下成本结论前，建议先核对用量口径",
         "/usage",
       ),
     );
@@ -10872,9 +10890,10 @@ function collectLightHints(context: TuiContext): LightHint[] {
       createLightHint(
         "freshness-changed",
         "warning",
+        8,
         context.language === "en-US"
-          ? "Important cache freshness hashes changed"
-          : "缓存 freshness 关键 hash 已变化",
+          ? "Project context changed; refresh reuse data when results look stale"
+          : "项目上下文有变化；结果像旧信息时再刷新复用数据",
         "/cache warmup",
       ),
     );
@@ -10885,12 +10904,14 @@ function collectLightHints(context: TuiContext): LightHint[] {
 function createLightHint(
   dedupeKey: string,
   severity: "info" | "warning",
+  priority: number,
   message: string,
   suggestedCommand: string,
 ): LightHint {
   return {
     id: randomUUID(),
     severity,
+    priority,
     message,
     suggestedCommand,
     dedupeKey,
@@ -10903,17 +10924,17 @@ function writeLightHints(output: Writable, context: TuiContext): void {
     return;
   }
   const now = Date.now();
-  for (const hint of collectLightHints(context)) {
-    const lastShown = context.cache.hintLastShownAt[hint.dedupeKey] ?? 0;
-    if (now - lastShown < hint.cooldownMs) {
-      continue;
-    }
+  const visibleHints = collectLightHints(context)
+    .filter((hint) => now - (context.cache.hintLastShownAt[hint.dedupeKey] ?? 0) >= hint.cooldownMs)
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, MAX_LIGHT_HINTS_PER_TURN);
+  for (const hint of visibleHints) {
     context.cache.hintLastShownAt[hint.dedupeKey] = now;
     writeLine(
       output,
       context.language === "en-US"
-        ? `[hint:${hint.severity}] ${hint.message}; suggestion: ${hint.suggestedCommand}`
-        : `[hint:${hint.severity}] ${hint.message}；建议：${hint.suggestedCommand}`,
+        ? `[hint:${hint.severity}] ${hint.message}; next: ${hint.suggestedCommand}`
+        : `[提示:${hint.severity}] ${hint.message}；下一步：${hint.suggestedCommand}`,
     );
   }
 }
@@ -14320,6 +14341,8 @@ const COMMAND_GROUP_ORDER: CommandGroup[] = [
   "exit",
 ];
 
+const DEFAULT_HELP_SLASHES = ["/model", "/mode", "/doctor", "/problems", "/help", "/exit"] as const;
+
 const COMMAND_GROUP_LABELS: Record<CommandGroup, { en: string; zh: string }> = {
   core: { en: "Core", zh: "核心" },
   edit: { en: "Edit", zh: "编辑" },
@@ -14341,29 +14364,59 @@ function formatCatalogHelp(
   const lines =
     language === "en-US"
       ? [
-          "Help: describe a goal in natural language first.",
-          "Slash commands are the precise/advanced entry when you need exact control.",
+          "Help: describe your goal directly first.",
           `Current mode: ${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
-          "",
-          "Command groups:",
+          "Core entries:",
         ]
       : [
-          "帮助：优先直接用自然语言描述目标。",
-          "Slash 命令是高级/精确入口，需要精确控制时再用。",
+          "帮助：优先直接描述你的目标。",
           `当前模式：${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
-          "",
-          "命令分组：",
+          "核心入口：",
         ];
-  lines.push(...formatGroupedCommandLines(language));
-  lines.push("");
-  lines.push(...formatModeBehaviorLines(language));
-  lines.push("");
+  lines.push(...formatDefaultCommandLines(language));
   lines.push(
     language === "en-US"
-      ? "Try / or /? for grouped discovery, /mo for prefix candidates, /help all for the full list."
-      : "输入 / 或 /? 查看分组候选，输入 /mo 查看前缀候选，/help all 查看完整列表。",
+      ? "Advanced commands stay available with /help all, /help advanced, or /help details."
+      : "高级、恢复、调试命令仍可用：/help all、/help advanced 或 /help details。",
+  );
+  lines.push(
+    language === "en-US"
+      ? "Tip: type / or /? for the same short discovery view."
+      : "提示：输入 / 或 /? 会显示同样的短候选。",
   );
   return lines.join("\n");
+}
+
+function formatDefaultCommandLines(language: Language): string[] {
+  const catalog = getDefaultVisibleCommandCapabilities();
+  return catalog.map((item) => {
+    const title = language === "en-US" ? item.titleEn : item.titleZh;
+    const description = getDefaultCommandDescription(item.slash, language);
+    return `- ${item.slash} — ${title}：${description}`;
+  });
+}
+
+function getDefaultCommandDescription(slash: string, language: Language): string {
+  const zh: Record<string, string> = {
+    "/model": "查看当前模型与路由。",
+    "/mode": "查看或切换权限模式。",
+    "/doctor": "查看本地诊断摘要。",
+    "/problems": "查看当前问题摘要。",
+    "/help": "查看帮助。",
+    "/exit": "退出。",
+  };
+  const en: Record<string, string> = {
+    "/model": "Show current model and routes.",
+    "/mode": "Show or switch permission mode.",
+    "/doctor": "Show local diagnostic summary.",
+    "/problems": "Show current problem summary.",
+    "/help": "Show help.",
+    "/exit": "Exit.",
+  };
+  return (
+    (language === "en-US" ? en : zh)[slash] ??
+    (language === "en-US" ? "Open this command." : "打开此命令。")
+  );
 }
 
 function formatGroupedCommandLines(language: Language): string[] {
@@ -14379,6 +14432,13 @@ function formatGroupedCommandLines(language: Language): string[] {
     }
   }
   return lines;
+}
+
+function getDefaultVisibleCommandCapabilities(): CommandCapability[] {
+  const all = getUserVisibleCommandCapabilities();
+  return DEFAULT_HELP_SLASHES.map((slash) => all.find((item) => item.slash === slash)).filter(
+    (item): item is CommandCapability => Boolean(item),
+  );
 }
 
 function wrapSlashNames(names: string[], maxWidth = 72): string[] {
@@ -14429,27 +14489,20 @@ function formatSlashDiscovery(language: Language, prefix = "/"): string {
       language === "en-US" ? [`Slash candidates for ${trimmed}:`] : [`${trimmed} 的候选命令：`];
     for (const item of candidates) {
       const title = language === "en-US" ? item.titleEn : item.titleZh;
-      lines.push(`- ${item.slash}  ${title}`);
+      lines.push(`- ${item.slash} — ${title}`);
     }
-    lines.push(
-      language === "en-US"
-        ? "Use /help for groups or /help all for the full list."
-        : "用 /help 看分组，/help all 看完整列表。",
-    );
+    lines.push(language === "en-US" ? "Full command list: /help all." : "完整命令表：/help all。");
     return lines.join("\n");
   }
   const lines =
     language === "en-US"
-      ? [
-          "Slash discovery: natural language is still the main entry.",
-          "Use slash commands when you need exact control.",
-        ]
-      : ["Slash 发现：自然语言仍是主入口。", "需要精确控制时再用 slash 命令。"];
-  lines.push(...formatGroupedCommandLines(language));
+      ? ["Describe your goal directly first.", "Core slash entries:"]
+      : ["优先直接描述你的目标。", "核心 slash 入口："];
+  lines.push(...formatDefaultCommandLines(language));
   lines.push(
     language === "en-US"
-      ? "Type a prefix like /mo to narrow candidates."
-      : "输入 /mo 这类前缀可缩小候选。",
+      ? "Advanced/recovery/debug commands: /help all."
+      : "高级、恢复、调试命令：/help all。",
   );
   return lines.join("\n");
 }
@@ -14457,7 +14510,7 @@ function formatSlashDiscovery(language: Language, prefix = "/"): string {
 function getSlashPrefixCandidates(prefix: string): CommandCapability[] {
   if (!prefix.startsWith("/") || prefix.length <= 1) return [];
   const normalized = prefix.toLowerCase();
-  return getUserVisibleCommandCapabilities()
+  return getDefaultVisibleCommandCapabilities()
     .filter((item) => item.slash.toLowerCase().startsWith(normalized))
     .slice(0, 8);
 }
@@ -14578,6 +14631,7 @@ function formatHelp(language: Language): string {
   /cache-log export [path]  Export recent cache usage records
   /cache status         Show cache status and freshness
   /cache warmup|refresh Attempt cache warmup or refresh
+  /compact              Compact long conversation context on request
   /break-cache status   Show cache freshness changes
   /mcp [status]         Show MCP server status
   /mcp tools            Show stable MCP tool summary
@@ -14678,6 +14732,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /cache-log export [path]  导出最近 cache usage 记录
   /cache status         查看 cache 状态与 freshness
   /cache warmup|refresh 尝试预热或刷新 cache
+  /compact              按需压缩长对话上下文
   /break-cache status   查看 cache freshness 变化
   /mcp                  查看 MCP 状态
   /mcp status           查看 MCP server 状态
@@ -16081,15 +16136,39 @@ function createSessionEndEvent(sessionId: string): TranscriptEvent {
 }
 
 function formatError(error: unknown, language: Language = "zh-CN"): string {
-  if (error instanceof Error && "suggestion" in error && typeof error.suggestion === "string") {
-    return language === "en-US"
-      ? `Error: ${error.message}\nSuggestion: ${error.suggestion}`
-      : `错误：${error.message}\n建议：${error.suggestion}`;
+  const rawMessage =
+    error instanceof Error ? error.message : language === "en-US" ? "unknown error" : "未知错误";
+  const message = sanitizeUserFacingError(rawMessage);
+  const suggestion =
+    error instanceof Error && "suggestion" in error && typeof error.suggestion === "string"
+      ? sanitizeUserFacingError(error.suggestion)
+      : language === "en-US"
+        ? "open the related details/debug command if you need the full trace"
+        : "如需完整 trace，请打开对应 details/debug 入口";
+  if (language === "en-US") {
+    return [
+      "Something went wrong.",
+      `- what happened: ${message}`,
+      "- impact: the current action did not complete.",
+      `- next: ${suggestion}`,
+      "- details: use the related /details or doctor command for the full record.",
+    ].join("\n");
   }
-  if (error instanceof Error) {
-    return language === "en-US" ? `Error: ${error.message}` : `错误：${error.message}`;
-  }
-  return language === "en-US" ? "Error: unknown error." : "错误：未知错误。";
+  return [
+    "出错了。",
+    `- 发生了什么：${message}`,
+    "- 影响范围：当前操作未完成。",
+    `- 下一步：${suggestion}`,
+    "- 详情：用对应 /details 或 doctor 命令查看完整记录。",
+  ].join("\n");
+}
+
+function sanitizeUserFacingError(value: string): string {
+  return sanitizeDiagnosticText(value)
+    .replace(/gateId=[^\s,;]+/giu, "gateId=***")
+    .replace(/request[_-]?id=[^\s,;]+/giu, "requestId=***")
+    .replace(/token=[^\s&]+/giu, "token=***")
+    .replace(/Authorization:\s*[^\s]+/giu, "Authorization: ***");
 }
 
 function writeLine(output: Writable, text: string): void {

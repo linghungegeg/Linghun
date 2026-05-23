@@ -51,13 +51,15 @@ export function formatToolOutput(
     lines.push(layered.preview);
   }
   if (layered.details || layered.truncated) {
-    lines.push(
-      language === "en-US"
-        ? "More details are available with /details."
-        : "更多详情可通过 /details 查看。",
-    );
+    lines.push(formatDetailsHint(language));
   }
   return lines.join("\n");
+}
+
+function formatDetailsHint(language: Language): string {
+  return language === "en-US"
+    ? "Details: use /details output <id> for the full result, or /details for recent items."
+    : "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。";
 }
 
 function createToolSummary(name: ToolName, output: ToolOutput, language: Language): string {
@@ -159,8 +161,8 @@ function createSummaryFirstPreview(
   }
   const hint =
     language === "en-US"
-      ? "Output summarized; use /details for the full result."
-      : "输出已摘要；完整结果可通过 /details 查看。";
+      ? "Output summarized; use /details output <id> for the full result."
+      : "输出已摘要；完整结果可通过 /details output <id> 查看。";
   return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
 }
 

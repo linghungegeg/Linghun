@@ -95,14 +95,21 @@ export type TerminalProblemView = {
 
 const PASSABLE_STATUSES = new Set<ReadinessItemStatus>(["pass"]);
 
-export function formatTerminalReadinessDoctor(view: TerminalReadinessView): string {
+export function formatTerminalReadinessDoctor(
+  view: TerminalReadinessView,
+  options: { showAll?: boolean } = {},
+): string {
   const items = createReadinessItems(view);
+  if (!options.showAll) {
+    return formatTerminalReadinessDoctorSummary(view, items);
+  }
+
   const passCount = items.filter((item) => PASSABLE_STATUSES.has(item.status)).length;
   const blockedCount = items.filter((item) => item.status !== "pass").length;
   const header =
     view.language === "en-US"
-      ? "Terminal readiness doctor (local/static only; not real smoke)"
-      : "Terminal readiness doctor（仅本地/静态轻量检查；不是真实 smoke）";
+      ? "Doctor details (local/static only; not real smoke)"
+      : "诊断详情（仅本地/静态轻量检查；不是真实 smoke）";
   const summary =
     view.language === "en-US"
       ? `Summary: ${passCount}/${items.length} local checks are pass; ${blockedCount} need attention. This is not Beta PASS, smoke-ready, or open-source-ready.`
@@ -128,6 +135,58 @@ export function formatTerminalReadinessDoctor(view: TerminalReadinessView): stri
     view.language === "en-US"
       ? "Details: use /model doctor, /index doctor, /cache status, /memory, /mcp doctor, /background, /verify last, /problems."
       : "详情：使用 /model doctor、/index doctor、/cache status、/memory、/mcp doctor、/background、/verify last、/problems。",
+  );
+  return lines.join("\n");
+}
+
+function formatTerminalReadinessDoctorSummary(
+  view: TerminalReadinessView,
+  items: TerminalReadinessItem[],
+): string {
+  const attention = items.filter((item) => item.status !== "pass");
+  const hardBlocks = attention.filter(
+    (item) => item.status === "fail" || item.status === "blocked",
+  );
+  const conclusion = hardBlocks.length > 0 ? "BLOCK" : attention.length > 0 ? "WARN" : "OK";
+  const visible = (hardBlocks.length > 0 ? hardBlocks : attention).slice(0, 4);
+  const lines = [
+    view.language === "en-US"
+      ? `Doctor: ${conclusion} — local checks only, not a smoke or Beta verdict.`
+      : `诊断：${conclusion} — 仅本地检查，不是真实 smoke 或 Beta 结论。`,
+    view.language === "en-US"
+      ? `Scope: ${items.length - attention.length}/${items.length} local checks pass; ${attention.length} need attention.`
+      : `范围：${items.length - attention.length}/${items.length} 项本地检查通过；${attention.length} 项需要处理。`,
+  ];
+
+  if (visible.length === 0) {
+    lines.push(
+      view.language === "en-US" ? "Reason: no local blockers found." : "原因：未发现本地阻塞项。",
+    );
+    lines.push(
+      view.language === "en-US"
+        ? "Next: use /doctor all for details before claiming readiness."
+        : "下一步：如需完整清单，用 /doctor all；不要据此宣称整体 ready。",
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(view.language === "en-US" ? "Needs attention:" : "需要处理：");
+  for (const item of visible) {
+    lines.push(
+      `- [${item.status.toUpperCase()}] ${item.label}: ${short(sanitizePrimary(item.summary), 96)}; ${view.language === "en-US" ? "next" : "下一步"}: ${sanitizePrimary(item.nextAction)}`,
+    );
+  }
+  if (attention.length > visible.length) {
+    lines.push(
+      view.language === "en-US"
+        ? `- ${attention.length - visible.length} more item(s) hidden from the default view.`
+        : `- 默认视图已隐藏 ${attention.length - visible.length} 个较低优先级项目。`,
+    );
+  }
+  lines.push(
+    view.language === "en-US"
+      ? "Details: /doctor all. Problems: /problems."
+      : "详情：/doctor all。问题列表：/problems。",
   );
   return lines.join("\n");
 }

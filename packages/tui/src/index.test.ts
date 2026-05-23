@@ -570,33 +570,26 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
+    const defaultHelpOutput = new MemoryOutput();
+    await handleSlashCommand("/help", context, defaultHelpOutput);
     await handleSlashCommand("/status", context, output);
-    await handleSlashCommand("/help", context, output);
     await handleSlashCommand("/help all", context, output);
     await handleSlashCommand("/model", context, output);
     await handleSlashCommand("/sessions", context, output);
 
+    expect(defaultHelpOutput.text).toContain("帮助：优先直接描述你的目标。");
+    expect(defaultHelpOutput.text).toContain("核心入口：");
+    expect(defaultHelpOutput.text).not.toContain("/trust");
+    expect(defaultHelpOutput.text).not.toContain("/permissions");
     expect(output.text).toContain("/sessions resume <id>");
     expect(output.text).toContain("/resume [id]");
     expect(output.text).toContain("/branch [目的]");
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
-    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
-    expect(output.text).toContain("Slash 命令是高级/精确入口");
-    expect(output.text).toContain("- 核心");
-    expect(output.text).toContain("- 编辑");
-    expect(output.text).toContain("- 索引与协议");
-    expect(output.text).toContain("- 记忆与规则");
-    expect(output.text).toContain("- 代理与任务");
-    expect(output.text).toContain("- 诊断");
-    expect(output.text).toContain("- 退出");
+    expect(output.text).toContain("可用命令：");
     expect(output.text).not.toContain("Core / 核心");
     expect(output.text).not.toContain("Index & MCP / 索引与 MCP");
-    expect(output.text).toContain("default: 风险动作会先确认。");
-    expect(output.text).toContain("auto-review: 低风险编辑更顺滑，高风险仍确认。");
-    expect(output.text).toContain("plan: 只规划，不直接改。");
-    expect(output.text).toContain("full-access: 本地开启后减少确认，安全边界仍生效。");
     expect(output.text).toContain("/features");
     expect(output.text).toContain("/model doctor");
     expect(output.text).toContain("/model route");
@@ -653,9 +646,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/mo", context, output);
     await handleSlashCommand("/modex", context, output);
 
-    expect(output.text).toContain("Slash 发现：自然语言仍是主入口。");
-    expect(output.text).toContain("- 核心");
+    expect(output.text).toContain("优先直接描述你的目标。");
+    expect(output.text).toContain("核心 slash 入口：");
     expect(output.text).not.toContain("Core / 核心");
+    expect(output.text).not.toContain("/trust");
     expect(output.text).toContain("/mo 的候选命令：");
     expect(output.text).toContain("/model");
     expect(output.text).toContain("/mode");
@@ -666,11 +660,11 @@ describe("Phase 06 TUI slash commands", () => {
     context.language = "en-US";
     await handleSlashCommand("/", context, englishOutput);
 
-    expect(englishOutput.text).toContain("- Core");
-    expect(englishOutput.text).toContain("- Index & MCP");
-    expect(englishOutput.text).toContain("- Agents & Jobs");
-    expect(englishOutput.text).not.toContain("Core / 核心");
-    expect(englishOutput.text).not.toContain("- 核心");
+    expect(englishOutput.text).toContain("Describe your goal directly first.");
+    expect(englishOutput.text).toContain("Core slash entries:");
+    expect(englishOutput.text).toContain("/doctor");
+    expect(englishOutput.text).not.toContain("- Index & MCP");
+    expect(englishOutput.text).not.toContain("/trust");
   });
 
   it("keeps Polish A help around 80-column scanable rows", async () => {
@@ -718,15 +712,18 @@ describe("Phase 06 TUI slash commands", () => {
       createdAt: new Date().toISOString(),
     };
 
+    const defaultDoctorOutput = new MemoryOutput();
+    await handleSlashCommand("/doctor", context, defaultDoctorOutput);
     await handleSlashCommand("/status", context, output);
-    await handleSlashCommand("/doctor", context, output);
+    await handleSlashCommand("/doctor all", context, output);
     await handleSlashCommand("/problems", context, output);
 
+    expect(defaultDoctorOutput.text).toContain("诊断：BLOCK");
+    expect(defaultDoctorOutput.text).toContain("详情：/doctor all");
+    expect(defaultDoctorOutput.text).not.toContain("Project Doctor Lite:");
     expect(output.text).toContain("Readiness：本地");
     expect(output.text).toContain("非 smoke/Beta PASS");
-    expect(output.text).toContain(
-      "Terminal readiness doctor（仅本地/静态轻量检查；不是真实 smoke）",
-    );
+    expect(output.text).toContain("诊断详情（仅本地/静态轻量检查；不是真实 smoke）");
     expect(output.text).toContain("这不是 Beta PASS、smoke-ready 或 open-source-ready");
     expect(output.text).toContain("[BLOCKED] verification");
     expect(output.text).toContain("[PARTIAL] background/tasks");
@@ -756,12 +753,8 @@ describe("Phase 06 TUI slash commands", () => {
     const englishOutput = new MemoryOutput();
     context.language = "en-US";
     await handleSlashCommand("/doctor readiness", context, englishOutput);
-    expect(englishOutput.text).toContain(
-      "Terminal readiness doctor (local/static only; not real smoke)",
-    );
-    expect(englishOutput.text).toContain(
-      "This is not Beta PASS, smoke-ready, or open-source-ready.",
-    );
+    expect(englishOutput.text).toContain("Doctor: BLOCK");
+    expect(englishOutput.text).toContain("local checks only, not a smoke or Beta verdict");
   });
 
   it("keeps readiness PASS counts conservative for MCP and freshness evidence", () => {
@@ -4763,7 +4756,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("输出已摘要");
     expect(output.text).toContain("120 行");
     expect(output.text).toContain("90 条结果");
-    expect(output.text).toContain("更多详情可通过 /details 查看");
+    expect(output.text).toContain(
+      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目",
+    );
     expect(output.text).not.toContain("主屏为 summary-first");
     expect(output.text).not.toContain("完整结果已保存在主屏之外");
     expect(output.text).not.toContain("tool_result");
@@ -4796,7 +4791,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).toContain("工具 Edit 已完成");
     expect(formatted).toContain("补丁 +1 -1");
     expect(formatted).toContain("读取保护 expectedHash");
-    expect(formatted).toContain("更多详情可通过 /details 查看。");
+    expect(formatted).toContain(
+      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。",
+    );
     expect(formatted).not.toContain("raw edit preview");
     expect(formatted).not.toContain("operation: Edit");
     expect(formatted).not.toContain("ev-edit-1");
@@ -4819,8 +4816,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).toContain("Tool Bash completed");
     expect(formatted).toContain("50 line(s)");
     expect(formatted).toContain("exit code 0");
-    expect(formatted).toContain("Output summarized; use /details for the full result.");
-    expect(formatted).toContain("More details are available with /details.");
+    expect(formatted).toContain("Output summarized; use /details output <id> for the full result.");
+    expect(formatted).toContain(
+      "Details: use /details output <id> for the full result, or /details for recent items.",
+    );
     expect(formatted).not.toContain("Primary output is summary-first");
     expect(formatted).not.toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).not.toContain("Evidence: ev-bash-1");
@@ -4840,7 +4839,9 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(formatted).toContain("疑似编码问题");
-    expect(formatted).toContain("更多详情可通过 /details 查看。");
+    expect(formatted).toContain(
+      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。",
+    );
     expect(formatted).not.toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
     expect(formatted).not.toContain("Ã¤Â¸Â­Ã¦Â–Â‡");
   });
@@ -5956,12 +5957,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/not-a-command", context, output);
     await handleSlashCommand("/read missing.txt", context, output);
 
-    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
+    expect(output.text).toContain("帮助：优先直接描述你的目标。");
     expect(output.text).toContain("Language switched to English.");
-    expect(output.text).toContain("Help: describe a goal in natural language first.");
+    expect(output.text).toContain("Help: describe your goal directly first.");
     expect(output.text).toContain("Status: Session");
     expect(output.text).toContain("Unknown command: /not-a-command");
-    expect(output.text).toContain("Error:");
+    expect(output.text).toContain("Something went wrong.");
   });
 
   it("creates checkpoints and restores them with rewind", async () => {
@@ -6857,7 +6858,7 @@ describe("Phase 06 TUI slash commands", () => {
     writeLightHintsForTest(output, context);
 
     expect(output.text).toContain(
-      "[hint:warning] Cache hit rate dropped; suggestion: /break-cache status",
+      "[hint:warning] Reuse became less effective in the latest turn; next: /break-cache status",
     );
     expect(output.text).not.toContain("你> [hint");
     expect(output.text).not.toContain("you> [hint");
@@ -7403,7 +7404,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
+    expect(output.text).toContain("帮助：优先直接描述你的目标。");
     expect(output.text).toContain("索引刷新完成");
     expect(output.text).toContain("当前没有等待确认的 Start Gate");
     expect(requests).toHaveLength(1);
