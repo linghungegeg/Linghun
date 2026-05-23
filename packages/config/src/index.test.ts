@@ -248,6 +248,47 @@ describe("config directories", () => {
     expect(reinstalled.skills.trustedIds).toEqual([]);
   });
 
+  it("deep merges Phase 17B remote channel settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        remote: {
+          enabled: true,
+          channels: {
+            feishu: {
+              enabled: true,
+              bindingUserId: "user-1",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.remote.enabled).toBe(true);
+    expect(config.remote.channels.feishu).toMatchObject({
+      enabled: true,
+      type: "feishu",
+      transport: "official_cli",
+      cliPath: "feishu-cli",
+      bindingUserId: "user-1",
+      redactionPolicy: "summary_only",
+      trustedSources: [],
+    });
+    expect(config.remote.channels.feishu?.allowedEventTypes).toEqual([
+      "approval_request",
+      "job_status",
+      "job_report",
+      "verification_result",
+    ]);
+    expect(config.remote.channels.wecom?.enabled).toBe(false);
+    expect(config.remote.channels.dingtalk?.cliPath).toBe("dws");
+  });
+
   it("persists Phase 15.5D MCP source and trust records", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 

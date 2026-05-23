@@ -26,11 +26,14 @@ import {
   createMemoryState,
   createModelSystemPrompt,
   createPluginState,
+  createRemoteEvent,
+  createRemoteState,
   createSkillState,
   createSolutionCompletenessStatus,
   createWorkflowState,
   handleNaturalInput,
   handleSlashCommand,
+  processRemoteApprovalForTest,
   recordModelUsage,
   runTui,
   validateCodebaseMemoryToolExecution,
@@ -290,6 +293,7 @@ async function createTestContext(
     workflows: createWorkflowState(config),
     hooks: await createHookState(config, project),
     plugins: await createPluginState(config, project),
+    remote: createRemoteState(config),
     agents: [],
     roleUsage: [],
     routeDecisions: [],
@@ -6245,6 +6249,157 @@ describe("Phase 06 TUI slash commands", () => {
       ok: false,
       summary: "Connect Lite guard: plugin:connect-plugin 未注册贡献项 /missing，已拒绝盲执行。",
     });
+  });
+
+  it("covers Phase 17B Remote Channels setup, doctor, redaction, and approval safety", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "webhook_mock",
+            bindingUserId: "user-1",
+            bindingDeviceId: "device-1",
+            trustedSources: ["feishu-user-1"],
+          },
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "missing-wecom-cli-for-test",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-user"],
+          },
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "webhook",
+            bindingUserId: "ding-user",
+            trustedSources: ["ding-user"],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    expect(defaultConfig.remote.enabled).toBe(false);
+    expect(Object.keys(defaultConfig.remote.channels).sort()).toEqual([
+      "dingtalk",
+      "feishu",
+      "wecom",
+    ]);
+    expect(context.remote.channels.map((channel) => channel.config.type).sort()).toEqual([
+      "dingtalk",
+      "feishu",
+      "wecom",
+    ]);
+
+    await handleSlashCommand("/remote setup feishu", context, output);
+    await handleSlashCommand("/remote doctor", context, output);
+    await handleSlashCommand("/remote test feishu", context, output);
+    await handleSlashCommand("/remote status", context, output);
+
+    expect(output.text).toContain("Remote setup：feishu");
+    expect(output.text).toContain("/remote test feishu");
+    expect(output.text).toContain("Remote Doctor：enabled");
+    expect(output.text).toContain("wecom: blocked");
+    expect(output.text).toContain("cli_missing");
+    expect(output.text).toContain("dingtalk: blocked");
+    expect(output.text).toContain("webhook_missing");
+    expect(output.text).toContain("Remote test 已发送：feishu");
+    expect(output.text).toContain("Remote Channels：已开启");
+    expect(output.text).toContain("Secrets/endpoints are redacted");
+    expect(output.text).not.toContain("secret-value");
+
+    const feishu = context.remote.channels.find((channel) => channel.id === "feishu");
+    expect(feishu).toBeDefined();
+    if (!feishu) throw new Error("missing feishu channel");
+    const event = createRemoteEvent(
+      feishu,
+      "approval_request",
+      "approve write token=secret-value Bearer abc123 sk-live-secret Authorization: Bearer auth-secret transcript={full} source={code} log={full} index result={full} apiKey=raw-api-key https://example.invalid/hook/full/path",
+      ["evidence-ref-1"],
+    );
+    expect(event.expiresAt).toBeTruthy();
+    expect(event.nonce).toBeTruthy();
+    expect(event.messageId).toBeTruthy();
+    expect(event.redactedSummary).not.toContain("secret-value");
+    expect(event.redactedSummary).not.toContain("abc123");
+    expect(event.redactedSummary).not.toContain("sk-live-secret");
+    expect(event.redactedSummary).not.toContain("auth-secret");
+    expect(event.redactedSummary).not.toContain("raw-api-key");
+    expect(event.redactedSummary).not.toContain("https://example.invalid/hook/full/path");
+    expect(event.redactedSummary).not.toContain("transcript={full}");
+    expect(event.redactedSummary).not.toContain("source={code}");
+    expect(event.redactedSummary).not.toContain("log={full}");
+    expect(event.redactedSummary).not.toContain("index result={full}");
+
+    const baseMessage = {
+      eventId: event.id,
+      channel: "feishu",
+      messageId: event.messageId,
+      nonce: event.nonce,
+      source: "feishu-user-1",
+      bindingUserId: "user-1",
+      bindingDeviceId: "device-1",
+      signature: `mock:${event.messageId}:${event.nonce}`,
+      approve: true,
+    };
+    expect(
+      processRemoteApprovalForTest(
+        context,
+        { ...event, expiresAt: new Date(Date.now() - 1).toISOString() },
+        baseMessage,
+      ),
+    ).toMatchObject({ status: "expired", evidenceCreated: false });
+    expect(
+      processRemoteApprovalForTest(context, event, { ...baseMessage, source: "unknown" }),
+    ).toMatchObject({ status: "unknown_source", evidenceCreated: false });
+    expect(
+      processRemoteApprovalForTest(context, event, { ...baseMessage, bindingDeviceId: "wrong" }),
+    ).toMatchObject({ status: "wrong_binding", evidenceCreated: false });
+    expect(
+      processRemoteApprovalForTest(context, event, { ...baseMessage, signature: "bad" }),
+    ).toMatchObject({ status: "bad_signature", evidenceCreated: false });
+    expect(processRemoteApprovalForTest(context, event, baseMessage)).toMatchObject({
+      status: "blocked",
+      evidenceCreated: false,
+    });
+    (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolCall: { id: "call-remote", name: "Write", input: { filePath: "x", content: "y" } },
+      toolName: "Write",
+      sessionId: session.id,
+    };
+    expect(processRemoteApprovalForTest(context, event, baseMessage)).toMatchObject({
+      status: "approved",
+      evidenceCreated: false,
+    });
+    expect(
+      (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval,
+    ).toBeTruthy();
+    expect(processRemoteApprovalForTest(context, event, baseMessage)).toMatchObject({
+      status: "replayed",
+      evidenceCreated: false,
+    });
+    await handleSlashCommand("/remote disable feishu", context, output);
+    await handleSlashCommand("/remote status", context, output);
+
+    expect(output.text).toContain("Remote channel disabled：feishu");
+    expect(output.text).toContain("feishu: disabled");
+    expect(output.text).toContain("disabled_by_user");
+    expect(context.remote.sessionDisabledChannelIds).toContain("feishu");
+    expect(context.evidence).toEqual([]);
+    expect(output.text).not.toContain("Native Runner");
+    expect(output.text).not.toContain("17C");
   });
 
   it("handles Phase 15.5D MCP Connect Lite lifecycle without running servers", async () => {

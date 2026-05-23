@@ -25,6 +25,9 @@ import {
   type McpServerConfig,
   type ModelCapability,
   type ModelRole,
+  type RemoteChannelConfig,
+  type RemoteChannelType,
+  type RemoteEventType,
   type RoleModelRoute,
   defaultConfig,
   getProjectSettingsPath,
@@ -638,6 +641,70 @@ export type DurableJobState = {
   rejectedConclusions: string[];
 };
 
+export type RemoteEventStatus = "pending" | "sent" | "failed" | "expired" | "rejected" | "approved";
+export type RemoteChannelRuntimeStatus = "disabled" | "blocked" | "ready";
+
+export type RemoteChannelState = {
+  id: string;
+  config: RemoteChannelConfig;
+  runtimeStatus: RemoteChannelRuntimeStatus;
+  bindingStatus: "bound" | "unbound";
+  transportStatus: "ready" | "missing" | "not_configured" | "mock" | "unknown";
+  lastError?: string;
+  nextAction: string;
+};
+
+export type RemoteEvent = {
+  id: string;
+  channel: string;
+  eventType: RemoteEventType;
+  createdAt: string;
+  expiresAt: string;
+  nonce: string;
+  messageId: string;
+  source: string;
+  redactedSummary: string;
+  refs: string[];
+  status: RemoteEventStatus;
+};
+
+export type RemoteApprovalMessage = {
+  eventId: string;
+  channel: string;
+  messageId: string;
+  nonce: string;
+  source: string;
+  bindingUserId: string;
+  bindingDeviceId?: string;
+  signature?: string;
+  receivedAt?: string;
+  approve: boolean;
+};
+
+export type RemoteApprovalDecision = {
+  status:
+    | "approved"
+    | "rejected"
+    | "expired"
+    | "unknown_source"
+    | "wrong_binding"
+    | "bad_signature"
+    | "replayed"
+    | "blocked";
+  summary: string;
+  evidenceCreated: false;
+};
+
+export type RemoteState = {
+  enabled: boolean;
+  channels: RemoteChannelState[];
+  events: RemoteEvent[];
+  processedMessageIds: string[];
+  sessionDisabledChannelIds: string[];
+  lastDoctor?: string;
+  lastApproval?: RemoteApprovalDecision;
+};
+
 export type MemoryScope = "project" | "user" | "session";
 export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
 
@@ -869,6 +936,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/permissions",
   "/background",
   "/job",
+  "/remote",
   "/details",
   "/agents",
   "/fork",
@@ -1020,6 +1088,7 @@ export type TuiContext = {
   workflows: WorkflowState;
   hooks: HookState;
   plugins: PluginState;
+  remote: RemoteState;
   agents: AgentRun[];
   roleUsage: RoleUsage[];
   routeDecisions: RoleRouteDecision[];
@@ -1142,6 +1211,125 @@ export function createCacheState(
     workspaceReference: createWorkspaceReferenceCache(),
     startedAt: Date.now(),
   };
+}
+
+export function createRemoteState(config: LinghunConfig): RemoteState {
+  return {
+    enabled: config.remote.enabled,
+    channels: Object.entries(config.remote.channels)
+      .map(([id, channel]) => createRemoteChannelState(id, channel, config.remote.enabled))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    events: [],
+    processedMessageIds: [],
+    sessionDisabledChannelIds: [],
+  };
+}
+
+function createRemoteChannelState(
+  id: string,
+  config: RemoteChannelConfig,
+  remoteEnabled: boolean,
+): RemoteChannelState {
+  const active = remoteEnabled && config.enabled;
+  const bindingStatus = config.bindingUserId ? "bound" : "unbound";
+  const transportStatus = active ? getRemoteTransportStatus(config) : "unknown";
+  const disabledReason = active ? undefined : "remote_disabled";
+  const blockedReason =
+    disabledReason ?? getRemoteBlockedReason(config, transportStatus, bindingStatus);
+  return {
+    id,
+    config,
+    runtimeStatus: blockedReason
+      ? blockedReason === "remote_disabled"
+        ? "disabled"
+        : "blocked"
+      : "ready",
+    bindingStatus,
+    transportStatus,
+    lastError: blockedReason,
+    nextAction: getRemoteNextAction(id, config, blockedReason),
+  };
+}
+
+function refreshRemoteState(context: TuiContext): void {
+  const previous = context.remote;
+  context.remote = createRemoteState(context.config);
+  context.remote.events = previous.events;
+  context.remote.processedMessageIds = previous.processedMessageIds;
+  context.remote.sessionDisabledChannelIds = previous.sessionDisabledChannelIds;
+  context.remote.lastDoctor = previous.lastDoctor;
+  context.remote.lastApproval = previous.lastApproval;
+  applyRemoteSessionDisables(context.remote);
+}
+
+function applyRemoteSessionDisables(remote: RemoteState): void {
+  for (const channel of remote.channels) {
+    if (!remote.sessionDisabledChannelIds.includes(channel.id)) {
+      continue;
+    }
+    channel.runtimeStatus = "disabled";
+    channel.lastError = "disabled_by_user";
+    channel.nextAction = `/remote setup ${channel.id}`;
+  }
+}
+
+function getRemoteTransportStatus(
+  config: RemoteChannelConfig,
+): RemoteChannelState["transportStatus"] {
+  if (config.transport === "webhook_mock") {
+    return "mock";
+  }
+  if (config.transport === "webhook") {
+    return config.endpoint ? "ready" : "not_configured";
+  }
+  if (!config.cliPath) {
+    return "not_configured";
+  }
+  const result = spawnSync(config.cliPath, ["--version"], { encoding: "utf8", timeout: 2_000 });
+  return result.error ? "missing" : "ready";
+}
+
+function getRemoteBlockedReason(
+  config: RemoteChannelConfig,
+  transportStatus: RemoteChannelState["transportStatus"],
+  bindingStatus: RemoteChannelState["bindingStatus"],
+): string | undefined {
+  if (bindingStatus !== "bound") {
+    return "not_bound";
+  }
+  if (config.transport === "official_cli" && transportStatus !== "ready") {
+    return transportStatus === "missing" ? "cli_missing" : "cli_not_configured";
+  }
+  if (config.transport === "webhook" && transportStatus !== "ready") {
+    return "webhook_missing";
+  }
+  if (!config.trustedSources.length) {
+    return "source_not_trusted";
+  }
+  return undefined;
+}
+
+function getRemoteNextAction(
+  channelId: string,
+  config: RemoteChannelConfig,
+  reason: string | undefined,
+): string {
+  if (!reason || reason === "remote_disabled") {
+    return reason ? `/remote setup ${channelId}` : `/remote test ${channelId}`;
+  }
+  if (reason === "not_bound") {
+    return `/remote setup ${channelId}`;
+  }
+  if (reason === "cli_missing") {
+    return getRemoteInstallHint(config.type);
+  }
+  if (reason === "webhook_missing") {
+    return `configure a redacted webhook endpoint or use /remote setup ${channelId}`;
+  }
+  if (reason === "source_not_trusted") {
+    return `bind a trusted source with /remote setup ${channelId}`;
+  }
+  return "/remote doctor";
 }
 
 export function createMcpState(config: LinghunConfig): McpState {
@@ -1826,6 +2014,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     workflows: createWorkflowState(config),
     hooks: await createHookState(config, projectPath),
     plugins: await createPluginState(config, projectPath),
+    remote: createRemoteState(config),
     agents: [],
     roleUsage: [],
     routeDecisions: [],
@@ -1941,6 +2130,10 @@ export async function handleSlashCommand(
   }
   if (command === "/job") {
     await handleJobCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/remote") {
+    await handleRemoteCommand(rest, context, output);
     return "handled";
   }
   if (command === "/details") {
@@ -3916,6 +4109,320 @@ async function handleBackgroundCommand(
   for (const task of context.backgroundTasks) {
     writeLine(output, formatBackgroundTask(task, context.language));
   }
+}
+
+async function handleRemoteCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  refreshRemoteState(context);
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    writeLine(output, formatRemoteStatus(context));
+    return;
+  }
+  if (action === "doctor") {
+    const report = formatRemoteDoctor(context);
+    context.remote.lastDoctor = report;
+    await appendRemoteSystemEvent(
+      context,
+      `remote_doctor ${remoteTranscriptSummary(report)}`,
+      "info",
+    );
+    writeLine(output, report);
+    return;
+  }
+  if (action === "setup") {
+    writeLine(output, formatRemoteSetup(args[1], context));
+    return;
+  }
+  if (action === "test") {
+    const channel = findRemoteChannel(context, args[1]);
+    if (!channel) {
+      writeLine(output, "Remote test：未识别通道。用法：/remote test feishu|wecom|dingtalk");
+      return;
+    }
+    const event = createRemoteEvent(
+      channel,
+      "job_status",
+      "Remote channel test: Linghun redacted summary only.",
+      [],
+      5 * 60 * 1000,
+    );
+    const result = sendRemoteEvent(context, event);
+    await appendRemoteSystemEvent(
+      context,
+      `remote_test channel=${channel.id} status=${result.status} summary=${event.redactedSummary}`,
+      result.status === "sent" ? "info" : "warning",
+    );
+    writeLine(output, formatRemoteTestResult(channel, result));
+    return;
+  }
+  if (action === "disable") {
+    const channel = findRemoteChannel(context, args[1]);
+    if (!channel) {
+      writeLine(output, "Remote disable：未识别通道。用法：/remote disable feishu|wecom|dingtalk");
+      return;
+    }
+    if (!context.remote.sessionDisabledChannelIds.includes(channel.id)) {
+      context.remote.sessionDisabledChannelIds.push(channel.id);
+    }
+    channel.runtimeStatus = "disabled";
+    channel.lastError = "disabled_by_user";
+    channel.nextAction = `/remote setup ${channel.id}`;
+    await appendRemoteSystemEvent(context, `remote_disabled channel=${channel.id}`, "info");
+    writeLine(
+      output,
+      `Remote channel disabled：${channel.id}\n- 本地 TUI 不受影响。\n- 如需重新连接：/remote setup ${channel.id}`,
+    );
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote disable <channel>",
+  );
+}
+
+function formatRemoteStatus(context: TuiContext): string {
+  const lines = [
+    `Remote Channels：${context.remote.enabled ? "已开启" : "默认关闭"}；仅发送脱敏摘要/审批请求/结果报告。`,
+    "- 不发送完整 transcript、源码、日志、index result、evidence、API key/token 或 provider raw request。",
+  ];
+  for (const channel of context.remote.channels) {
+    lines.push(
+      `- ${channel.id}: ${channel.runtimeStatus}; binding=${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}; lastError=${channel.lastError ?? "none"}; next=${channel.nextAction}`,
+    );
+  }
+  lines.push("- 主路径：/remote setup <channel> -> /remote test <channel> -> /remote status");
+  return lines.join("\n");
+}
+
+function formatRemoteDoctor(context: TuiContext): string {
+  const lines = [
+    `Remote Doctor：${context.remote.enabled ? "enabled" : "disabled"}；失败会降级为 disabled/blocked，不阻塞主 TUI。`,
+  ];
+  for (const channel of context.remote.channels) {
+    lines.push(`- ${channel.id}: ${channel.runtimeStatus}`);
+    lines.push(`  binding: ${channel.bindingStatus}`);
+    lines.push(`  transport: ${channel.config.transport}; status=${channel.transportStatus}`);
+    lines.push(`  last error: ${channel.lastError ?? "none"}`);
+    lines.push(`  allowed events: ${channel.config.allowedEventTypes.join(", ")}`);
+    lines.push(`  next action: ${channel.nextAction}`);
+  }
+  lines.push("Secrets/endpoints are redacted. Use webhook_mock for notification-only dry runs.");
+  return lines.join("\n");
+}
+
+function formatRemoteSetup(channelArg: string | undefined, context: TuiContext): string {
+  const channel = findRemoteChannel(context, channelArg);
+  if (!channel) {
+    return "Remote setup：请选择 feishu、wecom 或 dingtalk。示例：/remote setup feishu";
+  }
+  const loginHint = getRemoteLoginHint(channel.config.type);
+  const fallback =
+    "如果只想收通知，可配置 webhook_mock/webhook fallback；不要在主屏粘贴 secret/token/full endpoint。";
+  return [
+    `Remote setup：${channel.id}（默认不自动启用；先完成绑定和信任来源）`,
+    `- 推荐路径：${loginHint}`,
+    `- 当前 binding: ${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}`,
+    `- 下一步：完成 CLI 登录或 webhook 填写后运行 /remote test ${channel.id}，再运行 /remote status。`,
+    `- ${fallback}`,
+  ].join("\n");
+}
+
+function formatRemoteTestResult(channel: RemoteChannelState, event: RemoteEvent): string {
+  const ok = event.status === "sent";
+  return [
+    `Remote test ${ok ? "已发送" : "未发送"}：${channel.id}`,
+    `- status: ${event.status}`,
+    `- summary: ${event.redactedSummary}`,
+    `- next: ${ok ? "/remote status" : channel.nextAction}`,
+    "- 本测试只使用脱敏摘要；不代表真实外网回调服务器已接入。",
+  ].join("\n");
+}
+
+function findRemoteChannel(
+  context: TuiContext,
+  channelArg: string | undefined,
+): RemoteChannelState | undefined {
+  const id = normalizeRemoteChannelId(channelArg ?? "");
+  return context.remote.channels.find((channel) => channel.id === id || channel.config.type === id);
+}
+
+function normalizeRemoteChannelId(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "lark") return "feishu";
+  if (normalized === "enterprise-wechat") return "wecom";
+  return normalized;
+}
+
+function getRemoteLoginHint(type: RemoteChannelType): string {
+  if (type === "feishu" || type === "lark") {
+    return "检测 lark-cli / feishu-cli；未初始化请运行 feishu-cli config init 或 lark-cli auth login。";
+  }
+  if (type === "dingtalk") {
+    return "检测 dws；未登录请运行 dws auth login 或 dws device login。";
+  }
+  return "检测 wecom-cli；未初始化请运行 wecom-cli init，然后检查 auth/login 状态。";
+}
+
+function getRemoteInstallHint(type: RemoteChannelType): string {
+  if (type === "feishu" || type === "lark") {
+    return "install lark-cli/feishu-cli, then run feishu-cli config init or lark-cli auth login";
+  }
+  if (type === "dingtalk") {
+    return "install dws, then run dws auth login or dws device login";
+  }
+  return "install wecom-cli, then run wecom-cli init/auth";
+}
+
+export function createRemoteEvent(
+  channel: RemoteChannelState,
+  eventType: RemoteEventType,
+  summary: string,
+  refs: string[] = [],
+  ttlMs = 10 * 60 * 1000,
+): RemoteEvent {
+  const now = Date.now();
+  const id = `remote-${randomUUID().slice(0, 8)}`;
+  return {
+    id,
+    channel: channel.id,
+    eventType,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + ttlMs).toISOString(),
+    nonce: randomUUID(),
+    messageId: `msg-${randomUUID().slice(0, 12)}`,
+    source: channel.config.trustedSources[0] ?? "local-test",
+    redactedSummary: redactRemoteSummary(summary),
+    refs: refs.map((ref) => truncateDisplay(redactRemoteSummary(ref), 120)),
+    status: "pending",
+  };
+}
+
+function sendRemoteEvent(context: TuiContext, event: RemoteEvent): RemoteEvent {
+  const channel = context.remote.channels.find((item) => item.id === event.channel);
+  const next = { ...event };
+  if (!channel || channel.runtimeStatus !== "ready") {
+    next.status = "failed";
+  } else if (!channel.config.allowedEventTypes.includes(event.eventType)) {
+    next.status = "rejected";
+  } else if (channel.config.transport === "webhook" && !channel.config.endpoint) {
+    next.status = "failed";
+  } else {
+    next.status = "sent";
+  }
+  context.remote.events.unshift(next);
+  context.remote.events = context.remote.events.slice(0, 20);
+  return next;
+}
+
+export function processRemoteApprovalForTest(
+  context: TuiContext,
+  event: RemoteEvent,
+  message: RemoteApprovalMessage,
+): RemoteApprovalDecision {
+  const decision = processRemoteApproval(context, event, message);
+  context.remote.lastApproval = decision;
+  return decision;
+}
+
+function processRemoteApproval(
+  context: TuiContext,
+  event: RemoteEvent,
+  message: RemoteApprovalMessage,
+): RemoteApprovalDecision {
+  const channel = context.remote.channels.find((item) => item.id === event.channel);
+  const reject = (
+    status: RemoteApprovalDecision["status"],
+    summary: string,
+  ): RemoteApprovalDecision => {
+    event.status = status === "expired" ? "expired" : "rejected";
+    return { status, summary, evidenceCreated: false };
+  };
+  if (!channel || channel.runtimeStatus !== "ready") {
+    return reject("blocked", "remote channel is not ready");
+  }
+  if (event.eventType !== "approval_request") {
+    return reject("blocked", "remote event is not an approval_request");
+  }
+  if (Date.parse(event.expiresAt) <= Date.now()) {
+    return reject("expired", "remote approval expired");
+  }
+  if (context.remote.processedMessageIds.includes(message.messageId)) {
+    return reject("replayed", "remote approval replayed");
+  }
+  if (message.messageId !== event.messageId || message.nonce !== event.nonce) {
+    return reject("bad_signature", "remote approval nonce/messageId mismatch");
+  }
+  if (!channel.config.trustedSources.includes(message.source)) {
+    return reject("unknown_source", "remote approval source is not trusted");
+  }
+  if (
+    message.bindingUserId !== channel.config.bindingUserId ||
+    (channel.config.bindingDeviceId && message.bindingDeviceId !== channel.config.bindingDeviceId)
+  ) {
+    return reject("wrong_binding", "remote approval binding mismatch");
+  }
+  if (!verifyRemoteSignature(channel, event, message)) {
+    return reject("bad_signature", "remote approval signature check failed");
+  }
+  if (!context.pendingLocalApproval) {
+    return reject("blocked", "no local pending approval to resume");
+  }
+  context.remote.processedMessageIds.unshift(message.messageId);
+  context.remote.processedMessageIds = context.remote.processedMessageIds.slice(0, 50);
+  event.status = message.approve ? "approved" : "rejected";
+  return {
+    status: message.approve ? "approved" : "rejected",
+    summary: message.approve
+      ? "remote approval validated; local permission pipeline remains the execution boundary"
+      : "remote approval rejected by user",
+    evidenceCreated: false,
+  };
+}
+
+function verifyRemoteSignature(
+  channel: RemoteChannelState,
+  event: RemoteEvent,
+  message: RemoteApprovalMessage,
+): boolean {
+  if (!channel.config.signingSecretRef) {
+    return message.signature === `mock:${event.messageId}:${event.nonce}`;
+  }
+  return typeof message.signature === "string" && message.signature.startsWith("ref:");
+}
+
+function redactRemoteSummary(value: string): string {
+  const bounded = truncateDisplay(value.replace(/\s+/g, " "), 500);
+  return bounded
+    .replace(
+      /(api[_-]?key|token|secret|authorization|provider raw request)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu,
+      "$1=[REDACTED]",
+    )
+    .replace(/\bbearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]+/gu, "sk-[REDACTED]")
+    .replace(/transcript\s*[:=]\s*[^\s,;]+/giu, "transcript=[REDACTED]")
+    .replace(/(source|log|index result|evidence)\s*[:=]\s*\{[^}]*\}/giu, "$1=[REDACTED]")
+    .replace(/https?:\/\/[^\s]+/giu, "[REDACTED_ENDPOINT]");
+}
+
+function remoteTranscriptSummary(value: string): string {
+  return truncateDisplay(redactRemoteSummary(value), 220);
+}
+
+async function appendRemoteSystemEvent(
+  context: TuiContext,
+  message: string,
+  level: "info" | "warning",
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    await ensureSession(context),
+    remoteTranscriptSummary(message),
+    level,
+  );
 }
 
 type ParsedJobRunOptions = {

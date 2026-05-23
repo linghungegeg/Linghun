@@ -132,6 +132,7 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/permissions", capabilityId: "permissions", userVisible: true },
   { slash: "/background", capabilityId: "background", userVisible: true },
   { slash: "/job", capabilityId: "job", userVisible: true },
+  { slash: "/remote", capabilityId: "remote", userVisible: true },
   { slash: "/details", capabilityId: "details", userVisible: true },
   { slash: "/agents", capabilityId: "agents", userVisible: true },
   { slash: "/fork", capabilityId: "fork", userVisible: true },
@@ -470,6 +471,18 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "Manages local durable job list/run/pause/resume/cancel/status/logs/report while reusing background-task and evidence boundaries.",
     "查看或控制长期 job、预算、agent 分配、暂停原因和日志。",
     "Use for long-running job state, budget, agent assignment, pause reason, and logs.",
+    "start_gate",
+  ),
+  cap(
+    "remote",
+    "/remote",
+    ["remote", "远程", "飞书", "lark", "feishu", "钉钉", "dingtalk", "企业微信", "wecom"],
+    "远程通道",
+    "Remote channels",
+    "设置、诊断或测试企业微信/飞书/钉钉远程通道；默认关闭，只发送脱敏摘要、审批请求和结果报告。",
+    "Sets up, diagnoses, or tests WeCom/Feishu/DingTalk remote channels; disabled by default and sends redacted summaries, approvals, and reports only.",
+    "需要连接或排查远程通知/审批通道。",
+    "Use for remote notification/approval setup or diagnostics.",
     "start_gate",
   ),
   cap(
@@ -1670,6 +1683,11 @@ function scoreCapability(
   )
     score += 4;
   if (capability.id === "background" && /后台|background|长任务|long task/u.test(normalized))
+    score += 6;
+  if (
+    capability.id === "remote" &&
+    /远程|remote|飞书|lark|feishu|钉钉|dingtalk|企业微信|wecom/u.test(normalized)
+  )
     score += 6;
   if (capability.id === "glob" && /按模式找文件|模式找文件|find files|匹配文件/u.test(normalized))
     score += 4;

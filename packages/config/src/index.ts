@@ -135,6 +135,34 @@ export type PluginConfig = {
   trustedIds: string[];
 };
 
+export type RemoteChannelType = "wecom" | "enterprise-wechat" | "feishu" | "lark" | "dingtalk";
+export type RemoteTransport = "official_cli" | "webhook_mock" | "webhook";
+export type RemoteEventType =
+  | "approval_request"
+  | "job_status"
+  | "job_report"
+  | "verification_result";
+
+export type RemoteChannelConfig = {
+  enabled: boolean;
+  type: RemoteChannelType;
+  transport: RemoteTransport;
+  endpoint?: string;
+  cliPath?: string;
+  bindingUserId?: string;
+  bindingDeviceId?: string;
+  signingSecretRef?: string;
+  tokenRef?: string;
+  redactionPolicy: "summary_only";
+  allowedEventTypes: RemoteEventType[];
+  trustedSources: string[];
+};
+
+export type RemoteConfig = {
+  enabled: boolean;
+  channels: Record<string, RemoteChannelConfig>;
+};
+
 export type ConfigRecoveryWarning = {
   path: string;
   reason: string;
@@ -165,6 +193,7 @@ export type LinghunConfig = {
   workflows: WorkflowConfig;
   hooks: HookConfig;
   plugins: PluginConfig;
+  remote: RemoteConfig;
 };
 
 const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
@@ -345,6 +374,38 @@ export const defaultConfig: LinghunConfig = {
     userDir: "~/.linghun/plugins",
     disabledIds: [],
     trustedIds: [],
+  },
+  remote: {
+    enabled: false,
+    channels: {
+      feishu: {
+        enabled: false,
+        type: "feishu",
+        transport: "official_cli",
+        cliPath: "feishu-cli",
+        redactionPolicy: "summary_only",
+        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        trustedSources: [],
+      },
+      wecom: {
+        enabled: false,
+        type: "wecom",
+        transport: "official_cli",
+        cliPath: "wecom-cli",
+        redactionPolicy: "summary_only",
+        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        trustedSources: [],
+      },
+      dingtalk: {
+        enabled: false,
+        type: "dingtalk",
+        transport: "official_cli",
+        cliPath: "dws",
+        redactionPolicy: "summary_only",
+        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        trustedSources: [],
+      },
+    },
   },
 };
 
@@ -622,6 +683,7 @@ function validateConfig(config: LinghunConfig): LinghunConfig {
   validateExtensions(config.plugins, "settings.plugins", true);
   validateExtensions(config.workflows, "settings.workflows", false);
   validateHooks(config.hooks);
+  validateRemote(config.remote);
   return config;
 }
 
@@ -803,6 +865,41 @@ function validateHooks(hooks: HookConfig): void {
   assertStringArray(hooks.trustedIds, "settings.hooks.trustedIds");
 }
 
+function validateRemote(remote: RemoteConfig): void {
+  assertRecord(remote, "settings.remote");
+  assertBoolean(remote.enabled, "settings.remote.enabled");
+  assertRecord(remote.channels, "settings.remote.channels");
+  for (const [channelId, channel] of Object.entries(remote.channels)) {
+    const path = `settings.remote.channels.${channelId}`;
+    assertRecord(channel, path);
+    assertBoolean(channel.enabled, `${path}.enabled`);
+    if (!["wecom", "enterprise-wechat", "feishu", "lark", "dingtalk"].includes(channel.type)) {
+      throw new Error(`${path}.type is invalid`);
+    }
+    if (!["official_cli", "webhook_mock", "webhook"].includes(channel.transport)) {
+      throw new Error(`${path}.transport is invalid`);
+    }
+    assertOptionalString(channel.endpoint, `${path}.endpoint`);
+    assertOptionalString(channel.cliPath, `${path}.cliPath`);
+    assertOptionalString(channel.bindingUserId, `${path}.bindingUserId`);
+    assertOptionalString(channel.bindingDeviceId, `${path}.bindingDeviceId`);
+    assertOptionalString(channel.signingSecretRef, `${path}.signingSecretRef`);
+    assertOptionalString(channel.tokenRef, `${path}.tokenRef`);
+    if (channel.redactionPolicy !== "summary_only") {
+      throw new Error(`${path}.redactionPolicy must be summary_only`);
+    }
+    assertStringArray(channel.allowedEventTypes, `${path}.allowedEventTypes`);
+    for (const [index, eventType] of channel.allowedEventTypes.entries()) {
+      if (
+        !["approval_request", "job_status", "job_report", "verification_result"].includes(eventType)
+      ) {
+        throw new Error(`${path}.allowedEventTypes.${index} is invalid`);
+      }
+    }
+    assertStringArray(channel.trustedSources, `${path}.trustedSources`);
+  }
+}
+
 function assertRecord(value: unknown, path: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${path} must be an object`);
@@ -959,6 +1056,27 @@ function normalizePermissionConfig(
   };
 }
 
+function mergeRemoteChannels(
+  channels: Partial<Record<string, Partial<RemoteChannelConfig>>> | undefined,
+): Record<string, RemoteChannelConfig> {
+  const merged: Record<string, RemoteChannelConfig> = { ...defaultConfig.remote.channels };
+  for (const [channelId, channel] of Object.entries(channels ?? {})) {
+    const defaultChannel = defaultConfig.remote.channels[channelId];
+    merged[channelId] = defaultChannel
+      ? ({ ...defaultChannel, ...channel } as RemoteChannelConfig)
+      : (channel as RemoteChannelConfig);
+  }
+  return merged;
+}
+
+function mergeRemoteConfig(remote: Partial<RemoteConfig> | undefined): RemoteConfig {
+  return {
+    ...defaultConfig.remote,
+    ...remote,
+    channels: mergeRemoteChannels(remote?.channels),
+  };
+}
+
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
   const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
   const openAiCompatibleProvider = cleanProviderOverride(
@@ -1058,5 +1176,6 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
       ...defaultConfig.plugins,
       ...input.plugins,
     },
+    remote: mergeRemoteConfig(input.remote),
   };
 }
