@@ -14,8 +14,10 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 ## 当前进度
 
 - Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口。
-- Phase 15 pre-Beta Full Interaction Maturity Audit 后，Phase 15 Beta 暂停；必须先完成 P0-1~P0-6 全量阻塞修复：完整 tool_use/tool_result 工具闭环、文件智能指代、新手轻引导和默认 `LINGHUN.md` 模板成熟度、EvidenceSummary 入模型、模型流可取消、en-US 关键提示。
-- Phase 15 Pre-Smoke Full Reference Parity Audit + Permission / Architecture Runtime Feasibility + Source-of-Truth Reset 已完成，当前 pre-smoke 基线仍为 [docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md](./docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md)；Batch A/B/C 已完成并通过 A-C 综合验收门，综合验收报告为 [docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md](./docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md)。A-C 的 `READY_FOR_USER_DECISION_TO_START_REAL_PROJECT_SMOKE` 只作为历史证据；用户已选择把真实环境实测后移到终端候选产品成熟之后。当前执行入口为 [docs/delivery/pre-open-source-terminal-product-completion-gate.md](./docs/delivery/pre-open-source-terminal-product-completion-gate.md)：Phase 15.5A Performance & Context 已完成，报告为 [docs/delivery/phase-15-5a-performance-context.md](./docs/delivery/phase-15-5a-performance-context.md)，仅代表 Workspace Reference Cache / Virtual Workspace Cache、Compact Lite boundary、cache/status/index fast path，不代表 Beta PASS 或 smoke-ready，未进入真实全量 smoke、Phase 15.5B-F、Phase 16/17/18；下一步可由用户决定是否进入 Phase 15.5B Resource & Task Lifecycle。
+- Phase 15.5A-F、Phase 16、Phase 17A/B/C 已完成 focused/local validation，并已输出对应阶段交付文档；这些结论只代表本地、focused、mock 或 scoped validation 已闭环。
+- 当前仍不是 Beta PASS，不是 smoke-ready，不是 open-source-ready；不得把历史 A-C、focused/mock/local PASS、单阶段 PASS 或局部 live text PASS 推断为整体 ready。
+- 当前最新状态以 [START_NEXT_CHAT.md](./START_NEXT_CHAT.md) 和 [docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md](./docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md) 为准；本仓库正处于真实模型/真实项目 smoke 前的 P1/P2 remediation closure。
+- 下一步是在 P1/P2 closure 完成后，由用户确认进入 `F:\linghun-ceshi` 的 Real Provider + Real Project Smoke；真实 smoke 才允许用户通过临时 env 注入 provider key，且不得保存真实 key、raw provider request、完整 provider response 或完整日志。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认和旧权限边界。Pre-smoke 新基线要求用户可见权限模式统一为 `default` / `auto-review` / `plan` / `full-access`，旧 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据；高风险命令不得自然语言直通。Architecture Runtime 是 smoke 前底层工程判断能力，不是第五个权限模式、不是 Plan Mode、不是 skill、不是 prompt-only 文案；v1 只做轻量工程判断 guard 和短 Architecture Card，涉及最新外部事实时必须按需走 Freshness/Web Evidence，未联网不得伪造当前结论。
 - Linghun 的低学习成本原则是渐进披露：默认首屏、状态栏和 `/help` 简洁；完整能力必须通过 `/help all`、`/features`、`/config advanced`、doctor 详情和自然语言用途询问可发现；隐藏高级入口不能降低功能完整性。
@@ -42,6 +44,10 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 11. [docs/delivery/phase-15-natural-command-bridge.md](./docs/delivery/phase-15-natural-command-bridge.md)
 12. [docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md](./docs/audit/phase-15-pre-smoke-full-reference-parity-and-architecture-runtime-audit.md)
 13. [docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md](./docs/audit/phase-15-pre-smoke-a-c-combined-acceptance.md)
+14. [docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md](./docs/audit/pre-smoke-comprehensive-audit-2026-05-23.md)
+15. [docs/delivery/pre-smoke-p1-p2-remediation-closure.md](./docs/delivery/pre-smoke-p1-p2-remediation-closure.md)
+16. [docs/delivery/phase-17-pre-smoke-index-ts-split-plan.md](./docs/delivery/phase-17-pre-smoke-index-ts-split-plan.md)
+17. [docs/delivery/real-project-smoke-checklist.md](./docs/delivery/real-project-smoke-checklist.md)
 
 后续撰写开源项目介绍、README 卖点或发布说明时，参考 [docs/open-source-positioning-notes.md](./docs/open-source-positioning-notes.md)，不要忘记 evidence-first coding 这一定位。
 
