@@ -25,6 +25,7 @@ import {
   type McpServerConfig,
   type ModelCapability,
   type ModelRole,
+  type NativeRunnerConfig,
   type RemoteChannelConfig,
   type RemoteChannelType,
   type RemoteEventType,
@@ -583,6 +584,45 @@ export type DurableJobAgent = {
   summary?: string;
 };
 
+export type NativeRunnerResolutionStatus =
+  | "disabled"
+  | "unavailable"
+  | "available"
+  | "protocol_mismatch";
+
+export type NativeRunnerLifecycleStatus =
+  | "node_fallback"
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "timeout"
+  | "cancelled"
+  | "stale"
+  | "protocol_mismatch"
+  | "unavailable";
+
+export type ApprovedRunnerJobSpec = {
+  id: string;
+  approvedTaskKind: "durable_job_supervisor";
+  cwd: string;
+  envAllowlist: string[];
+  redactedEnvRefs: string[];
+  timeoutMs: number;
+  logPaths: {
+    state: string;
+    stdout: string;
+    stderr: string;
+    jobLog: string;
+    fullOutput: string;
+    report: string;
+  };
+  expectedProtocol: string;
+  permissionRef: PermissionMode;
+  evidenceRefs: string[];
+  runnerRoot: string;
+};
+
 export type DurableJobState = {
   id: string;
   goal: string;
@@ -618,6 +658,22 @@ export type DurableJobState = {
   fullOutputPath: string;
   evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
   verification?: { status: "not_run" | "pass" | "fail" | "partial"; summary: string };
+  runner?: {
+    enabled: boolean;
+    status: NativeRunnerLifecycleStatus;
+    resolution: NativeRunnerResolutionStatus;
+    adapter: "native" | "node";
+    protocol?: string;
+    version?: string;
+    pathRef?: string;
+    spec?: ApprovedRunnerJobSpec;
+    startedAt?: string;
+    updatedAt: string;
+    completedAt?: string;
+    lastError?: string;
+    fallbackReason?: string;
+    nextAction: string;
+  };
   ownerSessionId?: string;
   ownerPid?: number;
   heartbeatAt?: string;
@@ -631,7 +687,7 @@ export type DurableJobState = {
     summary: string;
   };
   result?: {
-    status: "partial" | "blocked" | "stale" | "timeout" | "overbudget" | "failed";
+    status: "partial" | "blocked" | "stale" | "timeout" | "overbudget" | "failed" | "cancelled";
     summary: string;
     facts: string[];
     evidenceRefs: string[];
@@ -1175,6 +1231,8 @@ const JOB_LOG_TAIL_LINES = 40;
 const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 const DEFAULT_JOB_MAX_STEPS = 4;
 const MAX_JOB_MAX_STEPS = 20;
+const NATIVE_RUNNER_VERSION_TIMEOUT_MS = 2_000;
+const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = "process.exit(0)";
 const MAX_CHECKPOINTS = 20;
 const MAX_AGENTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
@@ -3216,6 +3274,10 @@ async function handleDoctorCommand(
     writeLine(output, formatHooksDoctor(context));
     return;
   }
+  if (action === "runner") {
+    writeLine(output, formatRunnerDoctor(context));
+    return;
+  }
   if (["readiness", "status", "checklist", "project", "report"].includes(action)) {
     writeLine(output, formatTerminalReadinessDoctor(createTerminalReadinessView(context)));
     return;
@@ -3226,6 +3288,391 @@ async function handleDoctorCommand(
       ? "Usage: /doctor [readiness|status|checklist|project|report|hooks]"
       : "用法：/doctor [readiness|status|checklist|project|report|hooks]",
   );
+}
+
+type NativeRunnerResolution = {
+  status: NativeRunnerResolutionStatus;
+  enabled: boolean;
+  source: NativeRunnerConfig["source"];
+  path?: string;
+  pathRef: string;
+  version?: string;
+  protocol?: string;
+  platform: NodeJS.Platform;
+  nodeFallback: "available";
+  lastError?: string;
+  nextAction: string;
+};
+
+type NativeRunnerAdapterResult = {
+  status: NativeRunnerLifecycleStatus;
+  adapter: "native" | "node";
+  protocol?: string;
+  version?: string;
+  lastError?: string;
+  fallbackReason?: string;
+};
+
+function resolveNativeRunner(config: LinghunConfig): NativeRunnerResolution {
+  const runner = config.nativeRunner;
+  if (!runner.enabled) {
+    return {
+      status: "disabled",
+      enabled: false,
+      source: "disabled",
+      pathRef: "disabled",
+      platform: process.platform,
+      nodeFallback: "available",
+      nextAction: "Native runner is disabled; Node/TUI remains the fallback for durable jobs.",
+    };
+  }
+  if (!runner.path) {
+    return {
+      status: "unavailable",
+      enabled: true,
+      source: runner.source,
+      pathRef: "missing",
+      platform: process.platform,
+      nodeFallback: "available",
+      lastError: "runner path is not configured",
+      nextAction: "Configure a managed/native runner path, or keep using Node fallback.",
+    };
+  }
+  if (!existsSync(runner.path)) {
+    return {
+      status: "unavailable",
+      enabled: true,
+      source: runner.source,
+      path: runner.path,
+      pathRef: redactedPath(runner.path),
+      platform: process.platform,
+      nodeFallback: "available",
+      lastError: "runner binary is missing or not readable",
+      nextAction: "Install/repair the managed runner, or keep using Node fallback.",
+    };
+  }
+  const versionCommand = createNativeRunnerCommand(runner.path, ["version"]);
+  const version = spawnSync(versionCommand.command, versionCommand.args, {
+    cwd: dirname(runner.path),
+    encoding: "utf8",
+    timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  const raw = `${version.stdout ?? ""}\n${version.stderr ?? ""}`.trim();
+  if (version.error || version.status !== 0) {
+    return {
+      status: "unavailable",
+      enabled: true,
+      source: runner.source,
+      path: runner.path,
+      pathRef: redactedPath(runner.path),
+      platform: process.platform,
+      nodeFallback: "available",
+      lastError: sanitizeDiagnosticText(
+        version.error instanceof Error ? version.error.message : raw || "version probe failed",
+      ),
+      nextAction: "Repair runner execution permissions or keep using Node fallback.",
+    };
+  }
+  const parsed = parseRunnerJson(raw);
+  const protocol = stringValue(parsed.protocol, "unknown");
+  const runnerVersion = stringValue(parsed.version, "unknown");
+  if (protocol !== runner.expectedProtocol) {
+    return {
+      status: "protocol_mismatch",
+      enabled: true,
+      source: runner.source,
+      path: runner.path,
+      pathRef: redactedPath(runner.path),
+      version: runnerVersion,
+      protocol,
+      platform: process.platform,
+      nodeFallback: "available",
+      lastError: `protocol mismatch: expected ${runner.expectedProtocol}, got ${protocol}`,
+      nextAction: "Use a compatible managed runner build, or continue with Node fallback.",
+    };
+  }
+  return {
+    status: "available",
+    enabled: true,
+    source: runner.source,
+    path: runner.path,
+    pathRef: redactedPath(runner.path),
+    version: runnerVersion,
+    protocol,
+    platform: process.platform,
+    nodeFallback: "available",
+    nextAction:
+      "Native runner may supervise approved durable job specs; Node fallback remains available.",
+  };
+}
+
+function parseRunnerJson(raw: string): Record<string, unknown> {
+  for (const line of raw.split(/\r?\n/u).filter(Boolean).reverse()) {
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // keep looking for the short JSON protocol line
+    }
+  }
+  return {};
+}
+
+function createNativeRunnerCommand(
+  runnerPath: string,
+  args: string[],
+): { command: string; args: string[] } {
+  if (runnerPath.endsWith(".js") || runnerPath.endsWith(".cjs") || runnerPath.endsWith(".mjs")) {
+    return { command: process.execPath, args: [runnerPath, ...args] };
+  }
+  return { command: runnerPath, args };
+}
+
+function formatRunnerDoctor(context: TuiContext): string {
+  const resolution = resolveNativeRunner(context.config);
+  return [
+    `Native Runner Doctor：${resolution.status}；Node fallback=${resolution.nodeFallback}；主 TUI 不因 runner 问题崩溃。`,
+    `- enabled: ${resolution.enabled ? "yes" : "no"}`,
+    `- resolved path: ${resolution.pathRef}`,
+    `- version/protocol: ${resolution.version ?? "unknown"} / ${resolution.protocol ?? context.config.nativeRunner.expectedProtocol}`,
+    `- platform: ${resolution.platform}`,
+    `- source: ${resolution.source}`,
+    `- last error: ${resolution.lastError ? sanitizeDiagnosticText(resolution.lastError) : "none"}`,
+    `- next action: ${resolution.nextAction}`,
+    "- boundary: runner only accepts Linghun-approved job specs; it is not a second provider/tool/agent runtime and cannot decide verification PASS.",
+    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, and Unix/macOS process-group cleanup.",
+  ].join("\n");
+}
+
+function formatJobRunnerInline(job: DurableJobState): string {
+  if (!job.runner) {
+    return "runner=not_started; Node/TUI default";
+  }
+  return `runner=${job.runner.adapter}/${job.runner.status}; resolution=${job.runner.resolution}; fallback=${job.runner.fallbackReason ?? "none"}`;
+}
+
+function formatJobRunnerReportLine(job: DurableJobState): string {
+  if (!job.runner) {
+    return "- runner: not_started; Node/TUI default path remains active.";
+  }
+  return `- runner: enabled=${job.runner.enabled}; adapter=${job.runner.adapter}; status=${job.runner.status}; resolution=${job.runner.resolution}; pathRef=${job.runner.pathRef ?? "-"}; protocol=${job.runner.protocol ?? "unknown"}; version=${job.runner.version ?? "unknown"}; fallback=${job.runner.fallbackReason ?? "none"}; lastError=${job.runner.lastError ?? "none"}; next=${job.runner.nextAction}`;
+}
+
+function formatApprovedRunnerSpecLine(job: DurableJobState): string {
+  const spec = job.runner?.spec;
+  if (!spec) {
+    return "- approved spec: none";
+  }
+  return `- approved spec: id=${spec.id}; taskKind=${spec.approvedTaskKind}; cwdRef=${redactedPath(spec.cwd)}; timeoutMs=${spec.timeoutMs}; expectedProtocol=${spec.expectedProtocol}; envAllowlist=${spec.envAllowlist.join(",") || "none"}; redactedEnvRefs=${spec.redactedEnvRefs.join(",") || "none"}; evidenceRefs=${spec.evidenceRefs.join(",") || "none"}; logRefs=state/stdout/stderr/jobLog/fullOutput/report`;
+}
+
+function createApprovedRunnerJobSpec(
+  context: TuiContext,
+  job: DurableJobState,
+  resolution: NativeRunnerResolution,
+): ApprovedRunnerJobSpec {
+  const runnerRoot = join(dirname(job.logPath), "runner");
+  return {
+    id: job.id,
+    approvedTaskKind: "durable_job_supervisor",
+    cwd: context.projectPath,
+    envAllowlist: [],
+    redactedEnvRefs: ["PATH:runtime-only"],
+    timeoutMs: Math.min(job.timeoutMs, context.config.nativeRunner.timeoutMs),
+    logPaths: {
+      state: join(runnerRoot, job.id, "state.json"),
+      stdout: join(runnerRoot, job.id, "stdout.log"),
+      stderr: join(runnerRoot, job.id, "stderr.log"),
+      jobLog: job.logPath,
+      fullOutput: job.fullOutputPath,
+      report: job.reportPath,
+    },
+    expectedProtocol: resolution.protocol ?? context.config.nativeRunner.expectedProtocol,
+    permissionRef: job.permissionPolicy,
+    evidenceRefs: job.evidenceRefs.map((item) => item.id),
+    runnerRoot,
+  };
+}
+
+async function startRunnerForDurableJob(context: TuiContext, job: DurableJobState): Promise<void> {
+  const resolution = resolveNativeRunner(context.config);
+  const spec = createApprovedRunnerJobSpec(context, job, resolution);
+  const result = await startApprovedRunnerSpec(context, spec, resolution);
+  const now = new Date().toISOString();
+  job.runner = {
+    enabled: resolution.enabled,
+    status: result.status,
+    resolution: resolution.status,
+    adapter: result.adapter,
+    protocol: result.protocol ?? resolution.protocol,
+    version: result.version ?? resolution.version,
+    pathRef: resolution.pathRef,
+    spec,
+    startedAt: now,
+    updatedAt: now,
+    completedAt:
+      result.status === "completed" || result.status === "node_fallback" ? now : undefined,
+    lastError: result.lastError,
+    fallbackReason: result.fallbackReason,
+    nextAction:
+      result.adapter === "node"
+        ? "Node/TUI fallback is active; inspect /job report and logs."
+        : "Native runner lifecycle completed; verification remains partial until verified separately.",
+  };
+  await appendJobLog(
+    job,
+    `runner adapter=${job.runner.adapter} status=${job.runner.status} resolution=${job.runner.resolution} fallback=${job.runner.fallbackReason ?? "none"}`,
+  );
+}
+
+async function startApprovedRunnerSpec(
+  _context: TuiContext,
+  spec: ApprovedRunnerJobSpec,
+  resolution: NativeRunnerResolution,
+): Promise<NativeRunnerAdapterResult> {
+  if (resolution.status !== "available" || !resolution.path) {
+    return {
+      status: "node_fallback",
+      adapter: "node",
+      protocol: resolution.protocol,
+      version: resolution.version,
+      lastError: resolution.lastError,
+      fallbackReason: resolution.status,
+    };
+  }
+  await mkdir(spec.runnerRoot, { recursive: true });
+  const startCommand = createNativeRunnerCommand(resolution.path, [
+    "start",
+    "--id",
+    spec.id,
+    "--root",
+    spec.runnerRoot,
+    "--timeout-ms",
+    String(spec.timeoutMs),
+    "--",
+    process.execPath,
+    "-e",
+    NATIVE_RUNNER_APPROVED_TASK_SCRIPT,
+  ]);
+  const result = spawnSync(startCommand.command, startCommand.args, {
+    encoding: "utf8",
+    timeout: spec.timeoutMs + NATIVE_RUNNER_VERSION_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  if (result.error || result.status !== 0) {
+    return {
+      status: "node_fallback",
+      adapter: "node",
+      protocol: resolution.protocol,
+      version: resolution.version,
+      lastError: sanitizeDiagnosticText(
+        result.error instanceof Error ? result.error.message : raw || "runner start failed",
+      ),
+      fallbackReason: "start_failed",
+    };
+  }
+  const parsed = parseRunnerJson(raw);
+  const status = mapNativeRunnerStatus(stringValue(parsed.status, "completed"));
+  return {
+    status: status === "completed" ? "completed" : status,
+    adapter: "native",
+    protocol: stringValue(parsed.protocol, resolution.protocol ?? "unknown"),
+    version: resolution.version,
+  };
+}
+
+function mapNativeRunnerStatus(status: string): NativeRunnerLifecycleStatus {
+  if (status === "timeout") return "timeout";
+  if (status === "cancelled") return "cancelled";
+  if (status === "failed" || status === "duplicate" || status === "missing") return "failed";
+  if (status === "running") return "running";
+  if (status === "completed") return "completed";
+  return "failed";
+}
+
+function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): void {
+  if (!job.runner?.spec || job.runner.adapter !== "native") return;
+  const resolution = resolveNativeRunner(context.config);
+  if (resolution.status !== "available" || !resolution.path) {
+    markJobRunnerTerminal(
+      job,
+      resolution.status === "protocol_mismatch" ? "protocol_mismatch" : "unavailable",
+      resolution.lastError ?? resolution.status,
+    );
+    return;
+  }
+  const statusCommand = createNativeRunnerCommand(resolution.path, [
+    "status",
+    "--id",
+    job.runner.spec.id,
+    "--root",
+    job.runner.spec.runnerRoot,
+  ]);
+  const status = spawnSync(statusCommand.command, statusCommand.args, {
+    encoding: "utf8",
+    timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  const raw = `${status.stdout ?? ""}\n${status.stderr ?? ""}`.trim();
+  if (status.error || status.status !== 0) {
+    markJobRunnerTerminal(job, "failed", raw || "runner status failed");
+    return;
+  }
+  const parsed = parseRunnerJson(raw);
+  const mapped = mapNativeRunnerStatus(stringValue(parsed.status, job.runner.status));
+  job.runner.status = mapped;
+  job.runner.updatedAt = new Date().toISOString();
+  if (mapped !== "running") job.runner.completedAt ??= job.runner.updatedAt;
+}
+
+async function stopRunnerForDurableJob(context: TuiContext, job: DurableJobState): Promise<void> {
+  if (!job.runner?.spec || job.runner.adapter !== "native") {
+    markJobRunnerTerminal(job, "cancelled", "node fallback or no native runner to stop");
+    return;
+  }
+  const resolution = resolveNativeRunner(context.config);
+  if (resolution.status === "available" && resolution.path) {
+    const stopCommand = createNativeRunnerCommand(resolution.path, [
+      "stop",
+      "--id",
+      job.runner.spec.id,
+      "--root",
+      job.runner.spec.runnerRoot,
+    ]);
+    spawnSync(stopCommand.command, stopCommand.args, {
+      encoding: "utf8",
+      timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
+      windowsHide: true,
+    });
+  }
+  markJobRunnerTerminal(job, "cancelled", "user_cancelled");
+  await appendJobLog(job, "runner stop requested; cancelled is non-PASS");
+}
+
+function markJobRunnerTerminal(
+  job: DurableJobState,
+  status: NativeRunnerLifecycleStatus,
+  reason: string,
+): void {
+  const now = new Date().toISOString();
+  job.runner = {
+    enabled: job.runner?.enabled ?? false,
+    status,
+    resolution: job.runner?.resolution ?? "unavailable",
+    adapter: job.runner?.adapter ?? "node",
+    protocol: job.runner?.protocol,
+    version: job.runner?.version,
+    pathRef: job.runner?.pathRef,
+    spec: job.runner?.spec,
+    startedAt: job.runner?.startedAt,
+    updatedAt: now,
+    completedAt: now,
+    lastError: sanitizeDiagnosticText(reason),
+    fallbackReason: job.runner?.fallbackReason,
+    nextAction: "Inspect /job report and logs; runner terminal states are not verification PASS.",
+  };
 }
 
 async function handleModelCommand(
@@ -4462,6 +4909,9 @@ async function handleJobCommand(
     }
     const start = action === "run";
     const job = await createDurableJob(context, options, start);
+    if (start && job.status === "running") {
+      await startRunnerForDurableJob(context, job);
+    }
     await persistDurableJob(job);
     await appendJobLog(
       job,
@@ -4483,11 +4933,18 @@ async function handleJobCommand(
       return;
     }
     if (action === "status") {
+      refreshRunnerStatusForJob(context, job);
+      await persistDurableJob(job);
+      await writeDurableJobReport(job);
+      upsertJobBackgroundTask(context, job);
       writeLine(output, formatJobStatus(job));
       return;
     }
     if (action === "report") {
+      refreshRunnerStatusForJob(context, job);
+      await persistDurableJob(job);
       await writeDurableJobReport(job);
+      upsertJobBackgroundTask(context, job);
       writeLine(output, formatJobReport(job));
       return;
     }
@@ -4504,6 +4961,9 @@ async function handleJobCommand(
       await resumeDurableJob(job, context);
       writeLine(output, formatJobPrimary(job, context));
       return;
+    }
+    if (job.runner) {
+      await stopRunnerForDurableJob(context, job);
     }
     await transitionDurableJob(job, context, "cancelled", "user_cancelled");
     writeLine(output, formatJobPrimary(job, context));
@@ -4754,6 +5214,12 @@ async function resumeDurableJob(job: DurableJobState, context: TuiContext): Prom
     return;
   }
   await transitionDurableJob(job, context, "running");
+  if (job.status === "running") {
+    await startRunnerForDurableJob(context, job);
+    await persistDurableJob(job);
+    await writeDurableJobReport(job);
+    upsertJobBackgroundTask(context, job);
+  }
   await runDurableJobLiteTick(context, job);
 }
 
@@ -4781,6 +5247,15 @@ async function transitionDurableJob(
     status === "timeout"
   ) {
     job.endedAt = now;
+  }
+  if (status === "cancelled" || status === "failed" || status === "stale" || status === "timeout") {
+    job.result = {
+      status,
+      summary: `Durable job moved to ${status}; no PASS evidence generated.`,
+      facts: [pauseReason ?? "no pause reason", formatJobRunnerInline(job)],
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: now,
+    };
   }
   rescheduleDurableJobAgents(job);
   await appendJobLog(job, `job transition: ${status}; pauseReason=${pauseReason ?? "none"}`);
@@ -4826,6 +5301,9 @@ async function recoverDurableJobForContext(
   }
   if (job.status === originalStatus && originalStatus !== "stale") {
     return job;
+  }
+  if (job.runner && job.status === "stale") {
+    markJobRunnerTerminal(job, "stale", job.pauseReason ?? "recovered stale job");
   }
   const now = new Date().toISOString();
   job.updatedAt = now;
@@ -5146,6 +5624,7 @@ function upsertJobBackgroundTask(context: TuiContext, job: DurableJobState): Bac
 
 function createJobBackgroundTask(job: DurableJobState, context: TuiContext): BackgroundTaskState {
   const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  const runnerInline = formatJobRunnerInline(job);
   return {
     id: job.id,
     kind: "job",
@@ -5153,7 +5632,7 @@ function createJobBackgroundTask(job: DurableJobState, context: TuiContext): Bac
     status: mapDurableJobToBackgroundStatus(job.status),
     currentStep:
       job.pauseReason ??
-      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}`,
+      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}; ${runnerInline}`,
     progress: {
       completed: job.budget.usedSteps ?? 0,
       total: getDurableJobMaxSteps(job),
@@ -5169,8 +5648,8 @@ function createJobBackgroundTask(job: DurableJobState, context: TuiContext): Bac
     result: mapDurableJobToBackgroundResult(job.status),
     userVisibleSummary:
       job.status === "running"
-        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; raw output stays in logs.`
-        : `Job ${job.status}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
+        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; ${runnerInline}; raw output stays in logs.`
+        : `Job ${job.status}; ${runnerInline}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
     nextAction: formatJobNextAction(job, context.language),
   };
 }
@@ -5242,6 +5721,8 @@ async function writeDurableJobReport(job: DurableJobState): Promise<void> {
     `- owner: session=${job.ownerSessionId ?? "-"}; pid=${job.ownerPid ?? "-"}; heartbeatAt=${job.heartbeatAt ?? "-"}`,
     `- worker: ${job.worker?.status ?? "not_started"}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
     `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
+    formatJobRunnerReportLine(job),
+    formatApprovedRunnerSpecLine(job),
     `- handoff: ${job.handoffPacket?.id ?? "missing"}`,
     `- evidenceRefs: ${job.evidenceRefs.map((item) => item.id).join(", ") || "none"}`,
     `- logs: ${job.logPath}`,
@@ -5278,8 +5759,10 @@ async function writeDurableJobReport(job: DurableJobState): Promise<void> {
       : ["- No blocked/cancelled/timeout/stale state is treated as PASS evidence."]),
     "",
     "## Boundaries",
-    "- Node/TUI runtime remains default; native runner integration is DEFERRED pending benchmark/platform/doctor/fallback/scheduler/evidence/resource-guard gates.",
-    "- Remote channels / Phase 17B and Phase 18 desktop are NOT entered.",
+    "- Node/TUI runtime remains default and explicit fallback; Phase 17C only adds a gated native runner resolver/adapter for approved durable job specs.",
+    "- Native runner lifecycle completion is not verification PASS; failed/timeout/cancelled/stale/crash/protocol mismatch paths do not create PASS evidence.",
+    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, real daemon supervision, and Unix/macOS process-group cleanup.",
+    "- Remote channels / Phase 17B, Fast Workspace Scanner, and Phase 18 desktop are NOT entered.",
     "- Agent context is trimmed to handoff/evidence/cache/index refs; no full transcript/source/index/log output is injected.",
   ];
   await mkdir(dirname(job.reportPath), { recursive: true });
@@ -5373,6 +5856,7 @@ function formatJobPrimary(job: DurableJobState, context: TuiContext): string {
     `[job] ${job.id} · ${job.status} · ${truncateDisplay(job.goal, 80)}`,
     "- impact: local durable metadata + unified background task; no remote channel, no Phase 18, no Beta/smoke-ready PASS.",
     `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; 8-agent mode is deferred benchmark candidate.`,
+    `- runner: ${formatJobRunnerInline(job)}`,
     `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
     `- details: /job report ${job.id}; logs: /job logs ${job.id}; background: /background`,
@@ -13066,6 +13550,7 @@ function formatHelp(language: Language): string {
   /doctor [readiness]   Show local terminal readiness checklist; does not run real smoke
   /doctor project       Show Project Doctor, drift/context/rollback/cost Lite sections
   /doctor hooks         Diagnose hook sources, events, timeout, logs, and cache impact
+  /doctor runner        Diagnose native runner resolver, protocol, and Node fallback
   /problems             Show local Problems Lite summary from runtime evidence
   /sessions             List sessions
   /sessions resume <id> Resume a session using structured handoff
@@ -13159,6 +13644,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /doctor [readiness]   查看本地终端就绪 checklist；不运行真实 smoke
   /doctor project       查看 Project Doctor、drift/context/rollback/cost Lite 小节
   /doctor hooks         诊断 hook 来源、事件、timeout、日志和 cache 影响
+  /doctor runner        诊断 native runner 解析、协议与 Node fallback
   /problems             查看来自 runtime evidence 的 Problems Lite 摘要
   /sessions             列出当前项目会话
   /sessions resume <id> 基于结构化 handoff 恢复历史会话

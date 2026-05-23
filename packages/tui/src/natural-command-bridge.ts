@@ -288,6 +288,10 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     [
       "doctor",
       "doctor project",
+      "doctor runner",
+      "runner doctor",
+      "native runner",
+      "原生 runner",
       "readiness",
       "ready",
       "terminal readiness",

@@ -163,6 +163,21 @@ export type RemoteConfig = {
   channels: Record<string, RemoteChannelConfig>;
 };
 
+export type NativeRunnerSource =
+  | "disabled"
+  | "bundled"
+  | "optional-package"
+  | "project-local"
+  | "custom";
+
+export type NativeRunnerConfig = {
+  enabled: boolean;
+  path?: string;
+  expectedProtocol: string;
+  source: NativeRunnerSource;
+  timeoutMs: number;
+};
+
 export type ConfigRecoveryWarning = {
   path: string;
   reason: string;
@@ -194,6 +209,7 @@ export type LinghunConfig = {
   hooks: HookConfig;
   plugins: PluginConfig;
   remote: RemoteConfig;
+  nativeRunner: NativeRunnerConfig;
 };
 
 const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
@@ -406,6 +422,12 @@ export const defaultConfig: LinghunConfig = {
         trustedSources: [],
       },
     },
+  },
+  nativeRunner: {
+    enabled: false,
+    expectedProtocol: "linghun-native-runner-prototype.v1",
+    source: "disabled",
+    timeoutMs: 60_000,
   },
 };
 
@@ -684,6 +706,7 @@ function validateConfig(config: LinghunConfig): LinghunConfig {
   validateExtensions(config.workflows, "settings.workflows", false);
   validateHooks(config.hooks);
   validateRemote(config.remote);
+  validateNativeRunner(config.nativeRunner);
   return config;
 }
 
@@ -900,6 +923,23 @@ function validateRemote(remote: RemoteConfig): void {
   }
 }
 
+function validateNativeRunner(nativeRunner: NativeRunnerConfig): void {
+  assertRecord(nativeRunner, "settings.nativeRunner");
+  assertBoolean(nativeRunner.enabled, "settings.nativeRunner.enabled");
+  assertOptionalString(nativeRunner.path, "settings.nativeRunner.path");
+  assertNonEmptyString(nativeRunner.expectedProtocol, "settings.nativeRunner.expectedProtocol");
+  if (
+    nativeRunner.source !== "disabled" &&
+    nativeRunner.source !== "bundled" &&
+    nativeRunner.source !== "optional-package" &&
+    nativeRunner.source !== "project-local" &&
+    nativeRunner.source !== "custom"
+  ) {
+    throw new Error("settings.nativeRunner.source is invalid");
+  }
+  assertPositiveNumber(nativeRunner.timeoutMs, "settings.nativeRunner.timeoutMs");
+}
+
 function assertRecord(value: unknown, path: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${path} must be an object`);
@@ -1077,6 +1117,15 @@ function mergeRemoteConfig(remote: Partial<RemoteConfig> | undefined): RemoteCon
   };
 }
 
+function mergeNativeRunnerConfig(
+  nativeRunner: Partial<NativeRunnerConfig> | undefined,
+): NativeRunnerConfig {
+  return {
+    ...defaultConfig.nativeRunner,
+    ...nativeRunner,
+  };
+}
+
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
   const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
   const openAiCompatibleProvider = cleanProviderOverride(
@@ -1177,5 +1226,6 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
       ...input.plugins,
     },
     remote: mergeRemoteConfig(input.remote),
+    nativeRunner: mergeNativeRunnerConfig(input.nativeRunner),
   };
 }

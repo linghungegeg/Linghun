@@ -75,6 +75,10 @@ describe("config directories", () => {
     expect(config.hooks.timeoutMs).toBe(5_000);
     expect(config.plugins.projectDir).toBe(".linghun/plugins");
     expect(config.plugins.disabledIds).toEqual([]);
+    expect(config.nativeRunner.enabled).toBe(false);
+    expect(config.nativeRunner.source).toBe("disabled");
+    expect(config.nativeRunner.expectedProtocol).toBe("linghun-native-runner-prototype.v1");
+    expect(config.nativeRunner.timeoutMs).toBe(60_000);
     expect(config.modelRoutes.routes.map((route) => route.role)).toEqual([
       "planner",
       "executor",
@@ -287,6 +291,33 @@ describe("config directories", () => {
     ]);
     expect(config.remote.channels.wecom?.enabled).toBe(false);
     expect(config.remote.channels.dingtalk?.cliPath).toBe("dws");
+  });
+
+  it("deep merges Phase 17C native runner settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        nativeRunner: {
+          enabled: true,
+          path: "./runner 空格/linghun-native-runner",
+          source: "project-local",
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.nativeRunner).toMatchObject({
+      enabled: true,
+      path: "./runner 空格/linghun-native-runner",
+      source: "project-local",
+      expectedProtocol: "linghun-native-runner-prototype.v1",
+      timeoutMs: 60_000,
+    });
+    expect(config.remote.enabled).toBe(false);
   });
 
   it("persists Phase 15.5D MCP source and trust records", async () => {

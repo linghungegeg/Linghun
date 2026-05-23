@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -305,6 +305,88 @@ async function createTestContext(
     lastProviderFailure: undefined,
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
+}
+
+async function createMockNativeRunner(
+  project: string,
+): Promise<{ path: string; callsPath: string }> {
+  const runnerDir = join(project, "mock runner 空格", "子目录");
+  await mkdir(runnerDir, { recursive: true });
+  const callsPath = join(runnerDir, "runner-calls.jsonl");
+  const runnerPath = join(runnerDir, "linghun-native-runner-mock.cjs");
+  await writeFile(
+    runnerPath,
+    `const fs = require("node:fs");
+const path = require("node:path");
+const cp = require("node:child_process");
+const protocol = "linghun-native-runner-prototype.v1";
+const mode = process.env.LINGHUN_MOCK_RUNNER_MODE || "available";
+const callsPath = path.join(__dirname, "runner-calls.jsonl");
+const argv = process.argv.slice(2);
+fs.appendFileSync(callsPath, JSON.stringify({ argv }) + "\\n");
+function argValue(name, fallback) {
+  const index = argv.indexOf(name);
+  return index >= 0 ? argv[index + 1] : fallback;
+}
+function print(value) {
+  console.log(JSON.stringify(value));
+}
+if (argv[0] === "version") {
+  print({ ok: true, protocol: mode === "mismatch" ? "wrong-protocol.v0" : protocol, version: "0.1.0" });
+  process.exit(0);
+}
+const id = argValue("--id", "missing");
+const root = argValue("--root", path.join(__dirname, "runner-root"));
+const jobDir = path.join(root, id);
+if (argv[0] === "start") {
+  if (mode === "start-fail") {
+    console.error("runner start failed token=secret sk-live Authorization: Bearer raw");
+    process.exit(2);
+  }
+  fs.mkdirSync(jobDir, { recursive: true });
+  const separator = argv.indexOf("--");
+  const commandArgs = separator >= 0 ? argv.slice(separator + 1) : [];
+  const result = commandArgs.length > 0 ? cp.spawnSync(commandArgs[0], commandArgs.slice(1), { encoding: "utf8" }) : { status: 0, stdout: "", stderr: "" };
+  fs.writeFileSync(path.join(jobDir, "stdout.log"), result.stdout || "");
+  fs.writeFileSync(path.join(jobDir, "stderr.log"), result.stderr || "");
+  const status = result.status === 0 ? "completed" : "failed";
+  fs.writeFileSync(path.join(jobDir, "state.json"), JSON.stringify({ protocol, id, status, stdoutPath: "stdout.log", stderrPath: "stderr.log" }, null, 2));
+  print({ ok: true, protocol, id, status, stdoutPath: "stdout.log", stderrPath: "stderr.log" });
+  process.exit(0);
+}
+if (argv[0] === "status") {
+  const statePath = path.join(jobDir, "state.json");
+  if (!fs.existsSync(statePath)) {
+    print({ ok: true, protocol, id, status: "missing" });
+    process.exit(0);
+  }
+  print(JSON.parse(fs.readFileSync(statePath, "utf8")));
+  process.exit(0);
+}
+if (argv[0] === "stop") {
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(path.join(jobDir, "stop.request"), "stop");
+  print({ ok: true, protocol, id, status: "cancelled" });
+  process.exit(0);
+}
+print({ ok: false, protocol, status: "missing" });
+process.exit(1);
+`,
+    "utf8",
+  );
+  if (process.platform !== "win32") {
+    await chmod(runnerPath, 0o755);
+  }
+  return { path: runnerPath, callsPath };
+}
+
+async function readMockNativeRunnerCalls(callsPath: string): Promise<{ argv: string[] }[]> {
+  const raw = await readFile(callsPath, "utf8").catch(() => "");
+  return raw
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { argv: string[] });
 }
 
 function createBackgroundTaskFixture(
@@ -1775,6 +1857,254 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.status).toBe("cancelled");
     expect(persisted.pauseReason).toBe("user_cancelled");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
+  });
+
+  it("covers Phase 17C native runner resolver, adapter, fallback, doctor, and non-PASS boundaries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "灵魂 runner 空格-"));
+    const mockRunner = await createMockNativeRunner(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      nativeRunner: {
+        ...defaultConfig.nativeRunner,
+        enabled: true,
+        source: "project-local",
+        path: mockRunner.path,
+        timeoutMs: 60_000,
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-phase-17c",
+      kind: "test_result",
+      summary: "Phase 17C focused evidence",
+      source: "vitest",
+      supportsClaims: ["phase-17c-focused"],
+      createdAt: new Date().toISOString(),
+    });
+    const doctorOutput = new MemoryOutput();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/doctor runner", context, doctorOutput);
+    await handleSlashCommand(
+      "/job run native runner should not execute raw command rm -rf secret --allow-bash --tokens 50000 --timeout 60000",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+    await handleSlashCommand(`/job status ${jobId}`, context, output);
+    await handleSlashCommand(`/details background ${jobId}`, context, output);
+
+    const jobsRoot = resolveStoragePaths(config, project).jobs;
+    const statePath = join(jobsRoot, jobId ?? "missing", "state.json");
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      result?: { status?: string };
+      runner?: {
+        adapter?: string;
+        status?: string;
+        resolution?: string;
+        spec?: {
+          cwd?: string;
+          approvedTaskKind?: string;
+          envAllowlist?: string[];
+          logPaths?: Record<string, string>;
+        };
+      };
+    };
+    expect(persisted.status).toBe("completed");
+    expect(persisted.result?.status).toBe("partial");
+    expect(persisted.runner).toMatchObject({
+      adapter: "native",
+      status: "completed",
+      resolution: "available",
+    });
+    expect(persisted.runner?.spec).toMatchObject({
+      cwd: project,
+      approvedTaskKind: "durable_job_supervisor",
+      envAllowlist: [],
+    });
+    expect(persisted.runner?.spec?.logPaths?.stdout).toContain("stdout.log");
+    expect(context.backgroundTasks).toContainEqual(
+      expect.objectContaining({
+        id: jobId,
+        kind: "job",
+        result: "partial",
+        currentStep: expect.stringContaining("runner=native/completed"),
+      }),
+    );
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    const calls = await readMockNativeRunnerCalls(mockRunner.callsPath);
+    const startCall = calls.find((call) => call.argv[0] === "start");
+    expect(startCall?.argv).toContain("--root");
+    expect(startCall?.argv.join(" ")).toContain("process.exit(0)");
+    expect(startCall?.argv.join(" ")).not.toContain("rm -rf");
+    expect(startCall?.argv.join(" ")).not.toContain("secret");
+    expect(calls.some((call) => call.argv[0] === "status")).toBe(true);
+    expect(doctorOutput.text).toContain("Native Runner Doctor：available");
+    expect(doctorOutput.text).toContain("Node fallback=available");
+    expect(doctorOutput.text).toContain("present:linghun-native-runner-mock.cjs");
+    expect(doctorOutput.text).not.toContain(project);
+    expect(output.text).toContain("runner=native/completed");
+    expect(output.text).toContain(
+      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
+    );
+
+    await handleSlashCommand(`/job cancel ${jobId}`, context, output);
+    const cancelled = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      runner?: { status?: string; lastError?: string };
+      result?: { status?: string };
+    };
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.runner?.status).toBe("cancelled");
+    expect(cancelled.result?.status).toBe("cancelled");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    expect(
+      (await readMockNativeRunnerCalls(mockRunner.callsPath)).some(
+        (call) => call.argv[0] === "stop",
+      ),
+    ).toBe(true);
+
+    const mismatchProject = await mkdtemp(join(tmpdir(), "linghun-runner-mismatch-"));
+    const mismatchRunner = await createMockNativeRunner(mismatchProject);
+    const mismatchStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: mismatchProject,
+    });
+    const mismatchSession = await mismatchStore.create({ model: "deepseek-v4-flash" });
+    const mismatchContext = await createTestContext(
+      mismatchProject,
+      mismatchStore,
+      mismatchSession,
+      {
+        ...config,
+        nativeRunner: { ...config.nativeRunner, path: mismatchRunner.path },
+      },
+    );
+    mismatchContext.index.status = "ready";
+    mismatchContext.index.projectName = "F-Linghun";
+    mismatchContext.lastVerification = createVerificationReportFixture("partial");
+    mismatchContext.evidence = [...context.evidence];
+    const mismatchOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "mismatch");
+    await handleSlashCommand("/doctor runner", mismatchContext, mismatchOutput);
+    await handleSlashCommand(
+      "/job run mismatch fallback --tokens 50000",
+      mismatchContext,
+      mismatchOutput,
+    );
+    vi.unstubAllEnvs();
+    const mismatchJobId = mismatchContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const mismatchState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, mismatchProject).jobs,
+          mismatchJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      runner?: { adapter?: string; status?: string; resolution?: string; fallbackReason?: string };
+    };
+    expect(mismatchOutput.text).toContain("Native Runner Doctor：protocol_mismatch");
+    expect(mismatchOutput.text).toContain("Node fallback=available");
+    expect(mismatchState.runner).toMatchObject({
+      adapter: "node",
+      status: "node_fallback",
+      resolution: "protocol_mismatch",
+      fallbackReason: "protocol_mismatch",
+    });
+    expect(mismatchContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+
+    const failedProject = await mkdtemp(join(tmpdir(), "linghun-runner-fail-"));
+    const failedRunner = await createMockNativeRunner(failedProject);
+    const failedStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: failedProject,
+    });
+    const failedSession = await failedStore.create({ model: "deepseek-v4-flash" });
+    const failedContext = await createTestContext(failedProject, failedStore, failedSession, {
+      ...config,
+      nativeRunner: { ...config.nativeRunner, path: failedRunner.path },
+    });
+    failedContext.index.status = "ready";
+    failedContext.index.projectName = "F-Linghun";
+    failedContext.lastVerification = createVerificationReportFixture("partial");
+    failedContext.evidence = [...context.evidence];
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "start-fail");
+    await handleSlashCommand(
+      "/job run start failure fallback --tokens 50000",
+      failedContext,
+      output,
+    );
+    vi.unstubAllEnvs();
+    const failedJobId = failedContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const failedState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, failedProject).jobs,
+          failedJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      runner?: { adapter?: string; status?: string; fallbackReason?: string; lastError?: string };
+    };
+    expect(failedState.runner).toMatchObject({
+      adapter: "node",
+      status: "node_fallback",
+      fallbackReason: "start_failed",
+    });
+    expect(failedState.runner?.lastError).not.toContain("sk-live");
+    expect(failedState.runner?.lastError).not.toContain("Bearer raw");
+    expect(failedContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+  });
+
+  it("keeps Phase 17B remote channels unaffected by Phase 17C runner commands", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "webhook_mock",
+            bindingUserId: "user-1",
+            trustedSources: ["feishu-user-1"],
+          },
+        },
+      },
+    });
+
+    await handleSlashCommand("/doctor runner", context, output);
+    await handleSlashCommand("/remote status", context, output);
+
+    expect(output.text).toContain("Native Runner Doctor：disabled");
+    expect(output.text).toContain("Remote Channels：已开启");
+    expect(output.text).toContain("feishu: ready");
+    expect(output.text).not.toContain("Fast Workspace Scanner");
+    expect(context.remote.channels.find((channel) => channel.id === "feishu")?.runtimeStatus).toBe(
+      "ready",
+    );
   });
 
   it("routes Phase 13 roles, handoffs, vision, image, and usage", async () => {
