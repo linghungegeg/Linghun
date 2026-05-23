@@ -446,7 +446,7 @@ export const defaultConfig: LinghunConfig = {
 };
 
 export function getUserConfigDir(home = homedir()): string {
-  return join(home, ".linghun");
+  return process.env.LINGHUN_CONFIG_DIR || join(home, ".linghun");
 }
 
 export function getProjectConfigDir(projectPath = process.cwd()): string {
@@ -523,23 +523,57 @@ export function getProjectSettingsPath(projectPath = process.cwd()): string {
   return join(getProjectConfigDir(projectPath), "settings.json");
 }
 
+export function getUserSettingsPath(home = homedir()): string {
+  return join(getUserConfigDir(home), "settings.json");
+}
+
+async function readUserSettings(home = homedir()): Promise<Partial<LinghunConfig>> {
+  try {
+    const raw = await readFile(getUserSettingsPath(home), "utf8");
+    return JSON.parse(raw) as Partial<LinghunConfig>;
+  } catch {
+    return {};
+  }
+}
+
+async function loadUserLanguage(home = homedir()): Promise<Language | undefined> {
+  const settings = await readUserSettings(home);
+  return isLanguage(settings.language) ? settings.language : undefined;
+}
+
+function applyUserLanguage(
+  projectSettings: Partial<LinghunConfig>,
+  userLanguage: Language | undefined,
+): Partial<LinghunConfig> {
+  if (!userLanguage || isLanguage(projectSettings.language)) {
+    return projectSettings;
+  }
+  return { ...projectSettings, language: userLanguage };
+}
+
+function isLanguage(value: unknown): value is Language {
+  return value === "zh-CN" || value === "en-US";
+}
+
 export async function loadConfig(projectPath = process.cwd()): Promise<LinghunConfig> {
   const settingsPath = getProjectSettingsPath(projectPath);
+  const userLanguage = await loadUserLanguage();
   try {
     const raw = await readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<LinghunConfig>;
-    return validateConfig(mergeConfig(parsed));
+    return validateConfig(mergeConfig(applyUserLanguage(parsed, userLanguage)));
   } catch (error) {
+    const base = userLanguage ? mergeConfig({ language: userLanguage }) : defaultConfig;
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       lastConfigRecoveryWarning = undefined;
-      return defaultConfig;
+      return base;
     }
     lastConfigRecoveryWarning = {
       path: settingsPath,
       reason: error instanceof Error ? error.message : String(error),
       recoveredAt: new Date().toISOString(),
     };
-    return defaultConfig;
+    return base;
   }
 }
 
@@ -690,24 +724,44 @@ export async function saveWorkspaceTrust(
   return next;
 }
 
-export async function hasRecordedLanguage(projectPath = process.cwd()): Promise<boolean> {
+export async function hasRecordedUserLanguage(home = homedir()): Promise<boolean> {
+  return (await loadUserLanguage(home)) !== undefined;
+}
+
+export async function hasRecordedProjectLanguage(projectPath = process.cwd()): Promise<boolean> {
   try {
     const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");
     const parsed = JSON.parse(raw) as Partial<LinghunConfig>;
-    return parsed.language === "zh-CN" || parsed.language === "en-US";
+    return isLanguage(parsed.language);
   } catch {
     return false;
   }
+}
+
+export async function saveUserLanguage(language: Language, home = homedir()): Promise<void> {
+  const settingsPath = getUserSettingsPath(home);
+  const current = await readUserSettings(home);
+  await mkdir(dirname(settingsPath), { recursive: true });
+  const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify({ ...current, language }, null, 2)}\n`, "utf8");
+  await rename(tempPath, settingsPath);
+}
+
+export async function saveProjectLanguage(
+  language: Language,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const next: LinghunConfig = { ...current, language };
+  await writeConfig(projectPath, next, { includeLanguage: true });
+  return next;
 }
 
 export async function saveLanguage(
   language: Language,
   projectPath = process.cwd(),
 ): Promise<LinghunConfig> {
-  const current = await loadConfig(projectPath);
-  const next: LinghunConfig = { ...current, language };
-  await writeConfig(projectPath, next);
-  return next;
+  return saveProjectLanguage(language, projectPath);
 }
 
 function stableUnique(values: string[]): string[] {
@@ -718,20 +772,34 @@ function normalizeEndpointProfile(value: string | undefined): EndpointProfile {
   return value === "responses" ? "responses" : "chat_completions";
 }
 
-async function writeConfig(projectPath: string, config: LinghunConfig): Promise<void> {
+async function writeConfig(
+  projectPath: string,
+  config: LinghunConfig,
+  options: { includeLanguage?: boolean } = {},
+): Promise<void> {
   const settingsPath = getProjectSettingsPath(projectPath);
+  const hasProjectLanguage = await hasRecordedProjectLanguage(projectPath);
   await mkdir(dirname(settingsPath), { recursive: true });
   const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(
     tempPath,
-    `${JSON.stringify(removeSensitiveProjectSettings(validateConfig(config)), null, 2)}\n`,
+    `${JSON.stringify(
+      removeSensitiveProjectSettings(validateConfig(config), {
+        includeLanguage: options.includeLanguage === true || hasProjectLanguage,
+      }),
+      null,
+      2,
+    )}\n`,
     "utf8",
   );
   await rename(tempPath, settingsPath);
 }
 
-function removeSensitiveProjectSettings(config: LinghunConfig): LinghunConfig {
-  return {
+function removeSensitiveProjectSettings(
+  config: LinghunConfig,
+  options: { includeLanguage?: boolean } = {},
+): LinghunConfig | Omit<LinghunConfig, "language"> {
+  const safeConfig: LinghunConfig = {
     ...config,
     providers: Object.fromEntries(
       Object.entries(config.providers).map(([providerId, provider]) => {
@@ -740,6 +808,11 @@ function removeSensitiveProjectSettings(config: LinghunConfig): LinghunConfig {
       }),
     ),
   };
+  if (options.includeLanguage) {
+    return safeConfig;
+  }
+  const { language: _language, ...projectSettings } = safeConfig;
+  return projectSettings;
 }
 
 function validateConfig(config: LinghunConfig): LinghunConfig {

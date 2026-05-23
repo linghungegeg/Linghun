@@ -7,6 +7,7 @@ import {
   type LinghunConfig,
   defaultConfig,
   getSessionRootDir,
+  getUserSettingsPath,
   resolveStoragePaths,
 } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
@@ -5642,6 +5643,8 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("shows Polish B light Workspace Trust on first interactive missing trust and persists confirm", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-first-"));
+    const userConfig = join(project, "user-config");
+    vi.stubEnv("LINGHUN_CONFIG_DIR", userConfig);
     const input = new TtyInput();
     const output = new MemoryOutput();
     const running = runTui({
@@ -5654,6 +5657,8 @@ describe("Phase 06 TUI slash commands", () => {
     await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
     input.write("\n");
     await waitForTestCondition(() => output.text.includes("工作区信任"));
+    await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "zh-CN"');
     expect(output.text).toContain(`当前目录：${project}`);
     expect(output.text).toContain("是否信任这个项目");
     expect(output.text).toContain("Enter/yes：信任此项目");
@@ -5664,7 +5669,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await expect(running).resolves.toBe(0);
     const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
-    expect(settings).toContain('"language": "zh-CN"');
+    expect(settings).not.toContain('"language"');
     expect(settings).toContain('"workspaceTrust"');
     expect(settings).toContain('"level": "trusted"');
     expect(settings).toContain('"recorded": true');
@@ -5672,6 +5677,8 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("keeps Polish B light Workspace Trust restricted when first prompt is cancelled", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-cancel-"));
+    const userConfig = join(project, "user-config");
+    vi.stubEnv("LINGHUN_CONFIG_DIR", userConfig);
     const input = new TtyInput();
     const output = new MemoryOutput();
     const running = runTui({
@@ -5690,8 +5697,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await expect(running).resolves.toBe(0);
     const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
-    expect(settings).toContain('"language": "zh-CN"');
+    expect(settings).not.toContain('"language"');
     expect(settings).toContain('"level": "restricted"');
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "zh-CN"');
     expect(output.text).toContain("已拦截 /write");
     expect(output.text).toContain("帮助");
     expect(output.text).toContain("Readiness：本地");
@@ -5700,6 +5708,8 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("shows Polish D first-run language picker only for TTY and persists English", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-d-language-first-"));
+    const userConfig = join(project, "user-config");
+    vi.stubEnv("LINGHUN_CONFIG_DIR", userConfig);
     const input = new TtyInput();
     const output = new MemoryOutput();
     const running = runTui({
@@ -5712,6 +5722,8 @@ describe("Phase 06 TUI slash commands", () => {
     await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
     input.write("2\n");
     await waitForTestCondition(() => output.text.includes("Language switched to English."));
+    await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
     await waitForTestCondition(() => output.text.includes("Workspace trust"));
     expect(output.text).toContain("Do you trust this project?");
     input.write("no\n");
@@ -5720,12 +5732,48 @@ describe("Phase 06 TUI slash commands", () => {
 
     await expect(running).resolves.toBe(0);
     const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
-    expect(settings).toContain('"language": "en-US"');
+    expect(settings).not.toContain('"language"');
     expect(settings).toContain('"level": "restricted"');
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
+    expect(output.text).toContain("Status: Session");
+  });
+
+  it("persists first-run language to user settings when workspace trust is already recorded", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-d-language-trusted-"));
+    const userConfig = join(project, "user-config");
+    vi.stubEnv("LINGHUN_CONFIG_DIR", userConfig);
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({ workspaceTrust: { level: "trusted", recorded: true } }),
+      "utf8",
+    );
+    const input = new TtyInput();
+    const output = new MemoryOutput();
+    const running = runTui({
+      projectPath: project,
+      stdin: input,
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
+    input.write("2\n");
+    await waitForTestCondition(() => output.text.includes("Language switched to English."));
+    input.write("/exit\n");
+
+    await expect(running).resolves.toBe(0);
+    const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).not.toContain('"language"');
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
+    expect(output.text).not.toContain("Do you trust this project?");
+    expect(output.text).toContain("Status: Session");
   });
 
   it("does not show Polish B interactive Workspace Trust prompt for non-TTY input", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-nontty-"));
+    const userConfig = join(project, "user-config");
+    vi.stubEnv("LINGHUN_CONFIG_DIR", userConfig);
     const output = new MemoryOutput();
 
     await runTui({
@@ -5739,6 +5787,36 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("选择输出语言 / Choose output language");
     expect(output.text).not.toContain("是否信任这个项目");
     await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
+    await expect(readFile(getUserSettingsPath(), "utf8")).rejects.toThrow();
+  });
+
+  it("uses recorded user language across TTY workspaces without repeating the picker", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-polish-d-language-user-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(root, "user-config"));
+    await mkdir(join(root, "user-config"), { recursive: true });
+    await writeFile(getUserSettingsPath(), JSON.stringify({ language: "en-US" }), "utf8");
+    const project = join(root, "workspace");
+    await mkdir(project, { recursive: true });
+    const input = new TtyInput();
+    const output = new MemoryOutput();
+    const running = runTui({
+      projectPath: project,
+      stdin: input,
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    await waitForTestCondition(() => output.text.includes("Workspace trust"));
+    expect(output.text).not.toContain("选择输出语言 / Choose output language");
+    expect(output.text).toContain("Do you trust this project?");
+    input.write("no\n");
+    await waitForTestCondition(() => output.text.includes("Workspace trust: restricted"));
+    input.write("/exit\n");
+
+    await expect(running).resolves.toBe(0);
+    const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).not.toContain('"language"');
+    expect(settings).toContain('"level": "restricted"');
   });
 
   it("keeps Polish B trusted workspaces quiet on startup", async () => {
@@ -6038,6 +6116,7 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("switches i18n output between zh-CN and en-US", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(project, "user-config"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
@@ -6056,9 +6135,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Unknown command: /not-a-command");
     expect(output.text).toContain("Something went wrong.");
     expect(context.config.language).toBe("en-US");
-    expect(await readFile(join(project, ".linghun", "settings.json"), "utf8")).toContain(
-      '"language": "en-US"',
-    );
+    await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
+    expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
 
     const prompt = createModelSystemPrompt("continue", context, {
       model: { provider: "deepseek", name: "deepseek-v4-flash" },

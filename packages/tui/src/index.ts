@@ -35,15 +35,17 @@ import {
   type WorkspaceTrustLevel,
   defaultConfig,
   getProjectSettingsPath,
-  hasRecordedLanguage,
+  hasRecordedProjectLanguage,
+  hasRecordedUserLanguage,
   loadConfig,
   removeMcpServerConfig,
   resetExtensionTrustForInstall,
   resolveStoragePaths,
   saveExtensionEnablement,
-  saveLanguage,
   saveMcpServerConfig,
   saveModelRoute,
+  saveProjectLanguage,
+  saveUserLanguage,
   saveWorkspaceTrust,
 } from "@linghun/config";
 import {
@@ -4638,7 +4640,8 @@ async function shouldPromptForInitialLanguage(
 ): Promise<boolean> {
   return (
     (input as { isTTY?: boolean }).isTTY === true &&
-    !(await hasRecordedLanguage(context.projectPath))
+    !(await hasRecordedUserLanguage()) &&
+    !(await hasRecordedProjectLanguage(context.projectPath))
   );
 }
 
@@ -4657,7 +4660,8 @@ async function promptInitialLanguage(
     ].join("\n"),
   );
   const language = await readInitialLanguageDecision(input, output);
-  context.config = await saveLanguage(language, context.projectPath);
+  await saveUserLanguage(language);
+  context.config = { ...context.config, language };
   context.language = language;
   writeLine(output, t(context, language === "zh-CN" ? "languageSwitchedZh" : "languageSwitchedEn"));
 }
@@ -5376,15 +5380,38 @@ async function handleLanguageCommand(
   output: Writable,
 ): Promise<void> {
   const language = args[0] as Language | undefined;
+  const scope = args[1];
   if (!language) {
     writeLine(output, `language: ${context.language}`);
     return;
   }
-  if (language !== "zh-CN" && language !== "en-US") {
-    writeLine(output, "usage: /language zh-CN|en-US");
+  if (
+    (language !== "zh-CN" && language !== "en-US") ||
+    (scope && !["project", "--project", "user", "--user"].includes(scope))
+  ) {
+    writeLine(output, "usage: /language zh-CN|en-US [user|project]");
     return;
   }
-  context.config = await saveLanguage(language, context.projectPath);
+  const wantsProjectScope = scope === "project" || scope === "--project";
+  const hasProjectOverride = await hasRecordedProjectLanguage(context.projectPath);
+  const wantsUserScope = scope === "user" || scope === "--user";
+  const shouldSaveProjectLanguage =
+    (wantsProjectScope || (hasProjectOverride && !wantsUserScope)) &&
+    getEffectiveWorkspaceTrustLevel(context) === "trusted";
+  if (shouldSaveProjectLanguage) {
+    context.config = await saveProjectLanguage(language, context.projectPath);
+  } else {
+    if (wantsProjectScope && getEffectiveWorkspaceTrustLevel(context) !== "trusted") {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Project language scope requires trusted workspace; saved user language preference instead."
+          : "项目级语言覆盖需要已信任工作区；已改为保存用户级语言偏好。",
+      );
+    }
+    await saveUserLanguage(language);
+    context.config = { ...context.config, language };
+  }
   context.language = language;
   writeLine(output, t(context, language === "zh-CN" ? "languageSwitchedZh" : "languageSwitchedEn"));
   writeStatus(output, context);

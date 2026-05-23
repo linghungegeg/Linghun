@@ -10,8 +10,8 @@ updated: 2026-05-24
 
 本轮是 **Pre-Smoke TUI Polish D**，只收尾 TUI 产品化体验层：
 
-1. 首次 TTY 启动语言选择与持久化。
-2. `/language` 语言切换持久化，并继续复用现有 prompt/runtime language 机制。
+1. 首次 TTY 启动语言选择与用户级持久化。
+2. `/language` 语言切换默认写用户级偏好，并继续复用现有 prompt/runtime language 机制。
 3. Memory UX 默认瘦身：候选优先、人工接受、accepted-only topK 注入、无自动逐轮学习。
 4. 窄终端与主屏节奏：help/doctor/details/status/background/job/report 的关键行更短、更 summary-first。
 5. Agent displayName 展示层产品化：ASCII-safe、可截断、可读，但不改变 agent/job 生命周期或权限语义。
@@ -43,7 +43,7 @@ updated: 2026-05-24
 
 - 语言配置已有基础类型：`LinghunConfig.language: Language`，`Language = "zh-CN" | "en-US"`。
 - TUI context 已通过 `context.language` 影响用户输出与 `createModelSystemPrompt()` 的语言指令。
-- 配置写入已有 `loadConfig()` / `writeConfig()` 与 `.linghun/settings.json` 路径。
+- 配置写入已有 `loadConfig()` / `writeConfig()` 与 `.linghun/settings.json` 路径；本轮边界修复复用现有 `~/.linghun` 用户配置根目录，并允许测试通过 `LINGHUN_CONFIG_DIR` 隔离。
 - Workspace Trust 已有 TTY-only 首次启动确认；非 TTY 不进入交互提示。
 - Memory 已有候选、review、accept/reject/disable/rollback/delete、accepted memory 注入与 topK 限制。
 - Agent/job 已有 `AgentRun`、`DurableJobAgent`、`DurableJobState`、`/fork`、`/agents`、`/agents show`、`/job run/list/status/report`。
@@ -52,7 +52,8 @@ updated: 2026-05-24
 ### Gaps
 
 - 默认 `language` 来自 defaultConfig 时，无法区分“用户已选择”与“默认值”；TTY 首次启动缺少明确语言 picker。
-- `/language` 只更新当前上下文，缺少持久化到项目配置。
+- 已发现边界问题：首次 language picker 位于 Workspace Trust 之前，不能把用户级语言偏好写入项目 `.linghun/settings.json`，否则容易被审计理解为未信任工作区前发生项目写入。
+- `/language` 只更新当前上下文，缺少用户级持久化与项目级覆盖边界。
 - Memory 主屏仍偏内部状态，不够明确区分候选、长期记忆、prompt 注入与 lifecycle action。
 - Agent/job 输出使用 id/type/role 较多，缺少可读但不影响语义的展示名。
 - Job/background/report 关键行仍容易在窄终端过长。
@@ -97,7 +98,7 @@ updated: 2026-05-24
 
 ### 参考源裁决
 
-- **DONE**：语言选择只做 TTY first-run picker + config persistence，不引入新 i18n runtime。
+- **DONE**：语言选择只做 TTY first-run picker + 用户级 config persistence，不引入新 i18n runtime，也不在 Workspace Trust 前写项目 `.linghun/settings.json`。
 - **DONE**：Memory UX 只暴露候选/接受/注入摘要，不做自动接受、逐轮学习或完整聊天/日志/index 注入。
 - **DONE**：Agent displayName 只作为展示标签，不改变 role、permissionMode、resource guard、evidence 或 lifecycle。
 - **DONE**：Job/background/report 主屏继续 summary-first，保留 `/job report`、日志和 details 路径作为深入入口。
@@ -111,14 +112,25 @@ updated: 2026-05-24
 
 ### Language UX
 
-- 新增 `hasRecordedLanguage(projectPath)`，通过读取 `.linghun/settings.json` 判断用户是否已经显式记录语言。
-- 新增 `saveLanguage(language, projectPath)`，复用现有 `loadConfig()` / `writeConfig()` 合并写入配置。
+- 新增用户级 settings 路径：`getUserSettingsPath()`，默认位于 `~/.linghun/settings.json`；测试可用 `LINGHUN_CONFIG_DIR` 隔离。
+- 新增用户级语言 helper：`hasRecordedUserLanguage()`、`saveUserLanguage()`。
+- 保留项目级语言覆盖 helper：`hasRecordedProjectLanguage()`、`saveProjectLanguage()`。
+- `loadConfig()` 合并顺序为：defaultConfig -> user-level language -> project settings；项目已有明确 `language` 时仍优先项目覆盖。
 - TTY 首次启动时，在 Workspace Trust 之前展示双语语言选择：
   - Enter / `1` / 中文变体 => `zh-CN`
   - `2` / English 变体 => `en-US`
-- 非 TTY 不弹语言选择，避免脚本/管道卡住。
-- `/language zh-CN|en-US` 持久化到项目配置，并同步 `context.language`。
+- 首次 language picker 选择后只写用户级 settings，不写当前项目 `.linghun/settings.json`，因此不会在 Workspace Trust 确认前发生项目写入。
+- 已有用户级语言偏好或项目级明确语言覆盖时，不重复弹首次 language picker。
+- 非 TTY 不弹语言选择，避免脚本/管道卡住，也不写用户/项目 settings。
+- `/language zh-CN|en-US` 默认更新用户级语言偏好并同步 `context.language`；只有项目已有明确 language 覆盖或用户显式 `/language <lang> project`，且工作区 trusted 时，才写项目级配置。
 - Model prompt/runtime language 继续走既有 `context.language` -> `createModelSystemPrompt()`，没有新增 provider/model loop。
+
+### Pre-trust project write boundary fix
+
+- 本轮收口了 pre-trust project write 边界：首次 TTY language picker 可以在 Workspace Trust 前出现，但不会在确认前写项目文件。
+- Language 被视为用户级体验偏好；Workspace Trust 仍是项目级安全选择，两者不绑定。
+- restricted/untrusted 选择后，项目 `.linghun/settings.json` 只记录 Workspace Trust，不写 `language`；本次运行仍使用用户刚选择的语言。
+- trusted 已 recorded 的工作区也可以先显示首次 language picker，但选择仍持久化到用户级 settings，不污染项目配置。
 
 ### Memory UX slimming
 
@@ -150,10 +162,12 @@ updated: 2026-05-24
 ### Code
 
 - `packages/config/src/index.ts`
-  - 新增 language recorded 检测与持久化 helper。
+  - 新增用户级 language settings path、用户级语言读取/写入 helper、项目级 language override helper。
+  - `loadConfig()` 支持用户级 language 默认值；项目已有明确 language 时仍优先项目覆盖。
+  - 普通项目 settings 写入默认不把用户级 language 反写进 `.linghun/settings.json`。
 - `packages/tui/src/index.ts`
-  - 首次 TTY language picker。
-  - `/language` 持久化。
+  - 首次 TTY language picker 改为用户级语言偏好写入，不在 Workspace Trust 前写项目文件。
+  - `/language` 默认持久化到用户级 settings；仅项目已有 language 覆盖或显式 project scope 且 workspace trusted 时写项目级配置。
   - Memory UX 输出瘦身。
   - Agent displayName 派生、展示与边界说明。
   - Job/report/status/background display label 与窄行输出。
@@ -208,6 +222,29 @@ corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/jo
 - Test Files: 3 passed
 - Tests: 76 passed, 237 skipped
 
+### Focused language / trust boundary tests
+
+```bash
+corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "language|trust|Polish D"
+```
+
+结果：PASS
+
+- Test Files: 1 passed
+- Tests: 11 passed, 162 skipped
+- 覆盖：首次 language picker 不在 trust 前写项目 settings、restricted 不写项目 language、用户级 language 跨 workspace 生效、trusted 已记录时不重复 trust prompt、非 TTY 不提示不写入、`/language` 显式切换仍持久化。
+
+### Focused config tests
+
+```bash
+corepack pnpm exec vitest run packages/config/src/index.test.ts -t "config|language"
+```
+
+结果：PASS
+
+- Test Files: 1 passed
+- Tests: 24 passed
+
 ### Typecheck
 
 ```bash
@@ -257,9 +294,9 @@ corepack pnpm build
 
 按用户最新要求，已停止 independent verifier 复检；本轮不再等待或声明 independent verifier PASS。
 
-本轮改为执行者本地单独复核，复核依据为本报告“验证结果”中的 targeted vitest、focused vitest、typecheck、check、diff whitespace、full test、build，以及最终文档/状态复查。
+本轮改为执行者本地单独复核。边界修复后的复核依据为本报告“验证结果”中的 language/trust focused vitest、config focused vitest、typecheck、check、diff whitespace，以及最终文档/状态复查。Polish D 原闭合时的 full test/build 结果保留为历史闭合证据；本次 pre-trust project write 边界修复未进入 full test/build 或真实 smoke。
 
-本报告结论为 Polish D 本地验证闭合，不包含 independent verifier PASS。
+本报告结论为 Polish D pre-trust language persistence boundary 本地复核闭合，不包含 independent verifier PASS。
 
 ## 本地自审结论
 
@@ -309,4 +346,4 @@ Polish D 范围内本地验证未发现剩余 blocking P0/P1。
 - 索引状态：`F-Linghun` ready；nodes=1913；edges=4015。
 - 权限模式：本轮未提交 commit；未进入真实 smoke。
 - 模型/provider：本轮由当前 Claude Code 会话执行；未调用产品 provider 做真实请求。
-- 预算使用：未做真实 smoke；运行 targeted vitest、focused vitest、typecheck、check、diff whitespace、full test、build。
+- 预算使用：未做真实 smoke；Polish D 原闭合运行过 targeted vitest、focused vitest、typecheck、check、diff whitespace、full test、build；本次 pre-trust language boundary 修复单独运行 language/trust focused vitest、config focused vitest、typecheck、check、diff whitespace。
