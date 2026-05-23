@@ -309,11 +309,12 @@ async function createTestContext(
 
 async function createMockNativeRunner(
   project: string,
+  options: { runnerDir?: string; runnerName?: string } = {},
 ): Promise<{ path: string; callsPath: string }> {
-  const runnerDir = join(project, "mock runner 空格", "子目录");
+  const runnerDir = options.runnerDir ?? join(project, "mock runner 空格", "子目录");
   await mkdir(runnerDir, { recursive: true });
   const callsPath = join(runnerDir, "runner-calls.jsonl");
-  const runnerPath = join(runnerDir, "linghun-native-runner-mock.cjs");
+  const runnerPath = join(runnerDir, options.runnerName ?? "linghun-native-runner-mock.cjs");
   await writeFile(
     runnerPath,
     `const fs = require("node:fs");
@@ -1914,6 +1915,234 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.pauseReason).toBe("user_cancelled");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
   });
+
+  it("covers Phase 17C.B bundled native runner resolution and Node fallback boundaries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-bundled-runner-"));
+    const bundledRoot = join(project, "bundled root 空格");
+    const platformArch = `${process.platform}-${process.arch}`;
+    const bundledRunner = await createMockNativeRunner(project, {
+      runnerDir: join(bundledRoot, platformArch),
+      runnerName:
+        process.platform === "win32" ? "linghun-native-runner.cjs" : "linghun-native-runner",
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      nativeRunner: {
+        ...defaultConfig.nativeRunner,
+        enabled: true,
+        source: "bundled",
+        timeoutMs: 60_000,
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-phase-17cb",
+      kind: "test_result",
+      summary: "Phase 17C.B focused evidence",
+      source: "vitest",
+      supportsClaims: ["phase-17cb-focused"],
+      createdAt: new Date().toISOString(),
+    });
+    const output = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", bundledRoot);
+
+    await handleSlashCommand("/doctor runner", context, output);
+    await handleSlashCommand(
+      "/job run bundled native runner available --tokens 50000",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      result?: { status?: string };
+      runner?: { adapter?: string; resolution?: string; status?: string; pathRef?: string };
+    };
+    expect(output.text).toContain("Native Runner Doctor：available");
+    expect(output.text).toContain("source: bundled");
+    expect(output.text).toContain(`bundled platform/arch: ${platformArch}`);
+    expect(output.text).toContain(`bundled candidate: bundled:${platformArch}/`);
+    expect(output.text).toContain("resolved path: present:linghun-native-runner");
+    expect(output.text).toContain("fallback reason: none");
+    expect(output.text).not.toContain(bundledRoot);
+    expect(state.runner).toMatchObject({
+      adapter: "native",
+      resolution: "available",
+      status: "running",
+    });
+    expect(state.runner?.pathRef).toContain("present:linghun-native-runner");
+    expect(state.result?.status).toBe("partial");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+
+    const missingProject = await mkdtemp(join(tmpdir(), "linghun-bundled-missing-"));
+    const missingStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: missingProject,
+    });
+    const missingSession = await missingStore.create({ model: "deepseek-v4-flash" });
+    const missingContext = await createTestContext(
+      missingProject,
+      missingStore,
+      missingSession,
+      config,
+    );
+    missingContext.index.status = "ready";
+    missingContext.index.projectName = "F-Linghun";
+    missingContext.lastVerification = createVerificationReportFixture("partial");
+    missingContext.evidence = [...context.evidence];
+    const missingOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", join(missingProject, "no-bundled-runner"));
+    await handleSlashCommand("/doctor runner", missingContext, missingOutput);
+    await handleSlashCommand(
+      "/job run bundled missing fallback --tokens 50000",
+      missingContext,
+      missingOutput,
+    );
+    const missingJobId = missingContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const missingState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, missingProject).jobs,
+          missingJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as { runner?: { adapter?: string; resolution?: string; fallbackReason?: string } };
+    expect(missingOutput.text).toContain("Native Runner Doctor：unavailable");
+    expect(missingOutput.text).toContain(`bundled candidate: bundled:${platformArch}/`);
+    expect(missingOutput.text).toContain("Node fallback=available");
+    expect(missingState.runner).toMatchObject({
+      adapter: "node",
+      resolution: "unavailable",
+      fallbackReason: "unavailable",
+    });
+    expect(missingContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+
+    const mismatchProject = await mkdtemp(join(tmpdir(), "linghun-bundled-mismatch-"));
+    const mismatchRoot = join(mismatchProject, "bundled");
+    await createMockNativeRunner(mismatchProject, {
+      runnerDir: join(mismatchRoot, platformArch),
+      runnerName:
+        process.platform === "win32" ? "linghun-native-runner.cjs" : "linghun-native-runner",
+    });
+    const mismatchStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: mismatchProject,
+    });
+    const mismatchSession = await mismatchStore.create({ model: "deepseek-v4-flash" });
+    const mismatchContext = await createTestContext(
+      mismatchProject,
+      mismatchStore,
+      mismatchSession,
+      config,
+    );
+    mismatchContext.index.status = "ready";
+    mismatchContext.index.projectName = "F-Linghun";
+    mismatchContext.lastVerification = createVerificationReportFixture("partial");
+    mismatchContext.evidence = [...context.evidence];
+    const mismatchOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", mismatchRoot);
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "mismatch");
+    await handleSlashCommand("/doctor runner", mismatchContext, mismatchOutput);
+    await handleSlashCommand(
+      "/job run bundled mismatch fallback --tokens 50000",
+      mismatchContext,
+      mismatchOutput,
+    );
+    const mismatchJobId = mismatchContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const mismatchState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, mismatchProject).jobs,
+          mismatchJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as { runner?: { adapter?: string; resolution?: string; fallbackReason?: string } };
+    expect(mismatchOutput.text).toContain("Native Runner Doctor：protocol_mismatch");
+    expect(mismatchOutput.text).toContain("fallback reason: protocol mismatch");
+    expect(mismatchState.runner).toMatchObject({
+      adapter: "node",
+      resolution: "protocol_mismatch",
+      fallbackReason: "protocol_mismatch",
+    });
+    expect(mismatchContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+    vi.unstubAllEnvs();
+
+    const customProject = await mkdtemp(join(tmpdir(), "linghun-custom-runner-"));
+    const customRoot = join(customProject, "custom root");
+    const bundledRootForCustom = join(customProject, "bundled root");
+    const customRunner = await createMockNativeRunner(customProject, {
+      runnerDir: customRoot,
+      runnerName: "custom-runner.cjs",
+    });
+    await createMockNativeRunner(customProject, {
+      runnerDir: join(bundledRootForCustom, platformArch),
+      runnerName:
+        process.platform === "win32" ? "linghun-native-runner.cjs" : "linghun-native-runner",
+    });
+    const customStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: customProject,
+    });
+    const customSession = await customStore.create({ model: "deepseek-v4-flash" });
+    const customContext = await createTestContext(customProject, customStore, customSession, {
+      ...config,
+      nativeRunner: { ...config.nativeRunner, source: "custom", path: customRunner.path },
+    });
+    const customOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", bundledRootForCustom);
+    await handleSlashCommand("/doctor runner", customContext, customOutput);
+    expect(customOutput.text).toContain("source: custom");
+    expect(customOutput.text).toContain("resolved path: present:custom-runner.cjs");
+    expect(customOutput.text).toContain(`bundled candidate: bundled:${platformArch}/`);
+    expect(customOutput.text).not.toContain(bundledRootForCustom);
+    vi.unstubAllEnvs();
+
+    const darwinProject = await mkdtemp(join(tmpdir(), "linghun-darwin-runner-"));
+    const darwinRoot = join(darwinProject, "bundled");
+    await createMockNativeRunner(darwinProject, {
+      runnerDir: join(darwinRoot, "darwin-arm64"),
+      runnerName: "linghun-native-runner.cjs",
+    });
+    const darwinStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: darwinProject,
+    });
+    const darwinSession = await darwinStore.create({ model: "deepseek-v4-flash" });
+    const darwinContext = await createTestContext(
+      darwinProject,
+      darwinStore,
+      darwinSession,
+      config,
+    );
+    const darwinOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", darwinRoot);
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_PLATFORM_ARCH_TEST", "darwin-arm64");
+    await handleSlashCommand("/doctor runner", darwinContext, darwinOutput);
+    expect(darwinOutput.text).toContain("bundled platform/arch: darwin-arm64");
+    expect(darwinOutput.text).toContain(
+      "bundled candidate: bundled:darwin-arm64/linghun-native-runner.cjs",
+    );
+    expect(darwinOutput.text).not.toContain(darwinRoot);
+  }, 20_000);
 
   it("covers Phase 17C native runner resolver, adapter, fallback, doctor, and non-PASS boundaries", async () => {
     const project = await mkdtemp(join(tmpdir(), "灵魂 runner 空格-"));

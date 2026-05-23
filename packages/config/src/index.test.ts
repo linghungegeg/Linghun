@@ -320,6 +320,31 @@ describe("config directories", () => {
     expect(config.remote.enabled).toBe(false);
   });
 
+  it("accepts Phase 17C.B bundled native runner settings without a manual path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        nativeRunner: {
+          enabled: true,
+          source: "bundled",
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.nativeRunner).toMatchObject({
+      enabled: true,
+      source: "bundled",
+      expectedProtocol: "linghun-native-runner-prototype.v1",
+      timeoutMs: 60_000,
+    });
+    expect(config.nativeRunner.path).toBeUndefined();
+  });
+
   it("persists Phase 15.5D MCP source and trust records", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 

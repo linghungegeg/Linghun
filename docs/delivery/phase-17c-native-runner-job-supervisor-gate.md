@@ -158,21 +158,11 @@ Adapter 支持：
 /job cancel <job-id>
 ```
 
-启用 native runner 需手动配置 `.linghun/settings.json` 或等价 config source：
+17C.B 产品主路径走 bundled/internal resolver；用户不需要手动配置 prototype path。project-local/custom path 只作为开发/调试入口，例如本地验证 prototype 或 mock runner 时使用。
 
-```json
-{
-  "nativeRunner": {
-    "enabled": true,
-    "source": "project-local",
-    "path": "./prototypes/native-runner/target/debug/linghun-native-runner-prototype.exe",
-    "expectedProtocol": "linghun-native-runner-prototype.v1",
-    "timeoutMs": 60000
-  }
-}
-```
+真实 bundled binary release artifact、package files/bin 和一条命令安装验证仍保留到 release/open-source packaging gate；当前不声明 bundled binary release PASS。
 
-未配置或不可用时无需用户操作；Node/TUI fallback 显式生效。
+未配置、bundled candidate 缺失、不可执行或协议不匹配时无需用户操作；Node/TUI fallback 仍默认可用并显式生效。
 
 ## 涉及模块
 
@@ -254,7 +244,141 @@ nativeRunner: {
 - `/job logs <id>`
 - `/job cancel <id>`
 
+## 17C.B：Bundled Native Runner Internal Capability Lite
+
+### Source-Level Reality Check 摘要
+
+#### Existing implementation
+
+- 17C.A 已有 `LinghunConfig.nativeRunner`、Runner Resolver、Runner Adapter、`/doctor runner`、durable job runner summary、background/report/status 写回、approved spec only、safe log refs、cancel/timeout/status failure fallback 与 non-PASS evidence 边界。
+- 17A durable job 仍复用 `BackgroundTaskState(kind='job')`、resource guard、handoff、log/report/full-output artifact；completed lifecycle 仍为 `partial`，不是 verification PASS。
+- 17B remote channels 已有默认关闭、脱敏、approval safety、no-PASS 边界；本轮不改 remote runtime。
+- prototype native runner 已有 `version/start/status/stop/heartbeat` 与短 JSON protocol；benchmark 已证明 Windows supervision/path/log 边界有价值，但 Node spawn/raw throughput 更快，不能做性能宣传。
+
+#### Gaps closed in 17C.B
+
+- 17C.A 仍以 `path` 手动配置为主；17C.B 新增 bundled/internal candidate resolver：`nativeRunner.source='bundled'` 时无需 `path`，按随包路径约定自动解析候选。
+- `/doctor runner` 补齐 source、platform/arch、bundled platform/arch、bundled candidate ref、resolved path ref、version/protocol、fallback reason、next action。
+- Bundled candidate missing / unreadable / protocol mismatch 均显式进入 Node/TUI fallback，不崩 TUI，不生成 PASS evidence。
+- project-local/custom path 仍保留为开发/调试入口，并且不会被 bundled candidate 覆盖；只有 `source='bundled'` 才走 bundled path convention。
+- macOS/Linux 只通过 mocked platform/arch path convention 覆盖 candidate ref/fallback，不声明真实平台验证 PASS。
+
+#### Minimal touch points
+
+- `packages/tui/src/index.ts`
+- `packages/tui/src/index.test.ts`
+- `packages/config/src/index.test.ts`
+- `docs/delivery/phase-17c-native-runner-job-supervisor-gate.md`
+
+本轮未修改 native runner prototype、provider、tool、permission、evidence、MCP、index、agent、job runtime 公共接口，也未新增 package 发布系统。
+
+#### Forbidden duplicate systems
+
+- 不新增第二套 provider / tool / permission / evidence / MCP / index / agent / job runtime。
+- 不让 Native Runner 替代 Node/TUI 默认短任务路径；Node/TUI 仍是默认短任务和 fallback。
+- 不绕过 Start Gate / permission pipeline；runner 仍只消费 Linghun-approved durable job spec。
+- 不让 runner 生成 verification PASS 或改变 17A durable job non-PASS 语义。
+- 不进入 Fast Workspace Scanner、Phase 18 desktop、remote channel 扩展、自动升级、签名/AV 或完整 release matrix。
+
+### 17C.A / research / benchmark / reference-map 裁决
+
+- DONE：17C.A approved spec only、runner completed remains partial、safe log refs、cancel/timeout/status failure fallback、protocol mismatch fallback、remote unaffected 回归边界继续保留。
+- DONE：native research 中的 `version` bounded probe、protocol compatibility、doctor redacted path/version/protocol/source/fallback reason、fallback Node runner 思路进入 17C.B Lite。
+- DONE：benchmark 中“Native value is supervision/durability/process-tree cleanup, not raw speed”继续写入阶段边界；本轮不做性能宣传。
+- DONE：reference-map 中 Phase 17C 只吸收 supervisor、doctor、fallback、heartbeat/log/status 边界，不复制 CCB / OpenCode / 第三方源码。
+- DEFERRED：真实 bundled binary release、optional platform package 发布、Unix/macOS process-group cleanup、真实 Linghun workload benchmark、owner-death daemon benchmark。
+- NOT-DO：自动升级、签名/AV、完整 release matrix、Fast Workspace Scanner、Phase 18 desktop、真实全量 smoke、Beta PASS / smoke-ready / open-source-ready 宣告。
+
+### Bundled/internal path 规则
+
+17C.B 的 bundled path convention：
+
+```text
+<native-runner-root>/<platform>-<arch>/linghun-native-runner[.exe]
+<native-runner-root>/<platform>-<arch>/linghun-native-runner.cjs
+```
+
+当前支持的平台/架构候选：
+
+- `win32-x64`
+- `linux-x64`
+- `darwin-arm64`
+- `darwin-x64`
+
+Resolver 先生成 `bundled:<platform-arch>/<binary-name>` 形式的 candidate ref；doctor 与 job status/report 只显示 ref 或 `present:<basename>`，不显示完整私有路径。测试可用 `LINGHUN_NATIVE_RUNNER_BUNDLED_DIR` 指向 mock bundled root；真实产品路径由随包目录解析，仍不要求用户手动填写 prototype path。
+
+### Source 优先级 / 边界
+
+- `enabled=false` 或 `source='disabled'`：默认 disabled，Node/TUI fallback 不变。
+- `source='bundled'`：只走 bundled/internal candidate；无需 `nativeRunner.path`。
+- `source='project-local'` / `source='custom'`：只使用显式 path，作为开发/调试入口；即使 bundled candidate 存在，也不会覆盖 custom/project-local path。
+- `source='optional-package'`：保留配置枚举边界，17C.B 不实现真实 optional package 发布或 release matrix。
+
+### Protocol/version probe
+
+- bundled/project-local/custom runner 均先执行 bounded `version` probe。
+- `protocol !== expectedProtocol` 时 resolution=`protocol_mismatch`，job runner adapter=`node`、status=`node_fallback`、fallbackReason=`protocol_mismatch`。
+- probe failure / missing / unreadable / not executable 均 resolution=`unavailable`，保守 fallback Node/TUI。
+- doctor 输出 version/protocol、fallback reason、next action；错误信息经过脱敏，不展示 token/API key/Bearer 或完整私有路径。
+
+### Fallback 行为
+
+- Node/TUI 继续是默认短任务路径和 durable job fallback。
+- fallback 写入 job state/report/background summary，`runner=node/node_fallback` 可见。
+- fallback 不生成 PASS evidence；17A durable job completed lifecycle 仍保持 result/verification partial。
+- 17C.A 的 approved spec only、safe log refs、cancel/timeout/status failure 语义未改变。
+
+### Windows 真实验证与 macOS/Linux mock-only 边界
+
+- Windows 当前环境运行了 bundled source focused test：真实 Node/Vitest 下解析 `win32-x64` mock bundled path、启动 mock runner、写回 heartbeat/log refs、protocol mismatch fallback、candidate missing fallback、custom 不被 bundled 覆盖。
+- macOS/Linux 只用 mocked platform/arch env 覆盖 candidate ref/path convention；未在 macOS/Linux 真机运行，不声明真实 PASS。
+- 没有真实 bundled binary 发布物，因此不得声明 bundled binary release PASS。
+
+### Minimal packaged capability record
+
+17C.B 只是“随包/内置能力边界”的最小闭环：代码具备 bundled/internal path convention、doctor 可诊断、fallback 可见、测试可 mock。它不是用户 setup 平台，不新增自动下载/升级，不做签名/AV，不做完整 release matrix，也不声明一条命令安装目标已完成；一条命令安装仍保留到 release/open-source packaging gate 做最终验收。
+
 ## 测试与验证
+
+已运行（17C.B 本轮验证）：
+
+```text
+corepack pnpm exec vitest run packages/config/src/index.test.ts -t "native runner|Phase 17C"
+```
+
+结果：PASS，1 file passed，2 tests passed，22 skipped；覆盖 native runner 默认 disabled / Node fallback 不变、project-local deep merge、bundled source 无手动 path 配置。
+
+```text
+corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "Phase 17C.B bundled native runner|Phase 17C native runner|Phase 17B Remote Channels|remote channels unaffected"
+```
+
+结果：PASS，1 file passed，4 tests passed，148 skipped；覆盖 bundled source 自动解析、missing fallback、available + protocol match、protocol mismatch fallback、doctor redaction/path refs、custom 不被 bundled 覆盖、17C.A regression、17B remote unaffected。
+
+```text
+corepack pnpm typecheck
+```
+
+结果：PASS，`tsc -b tsconfig.json` 完成。
+
+```text
+corepack pnpm check
+```
+
+结果：PASS，Biome check 通过。第一次运行曾发现 formatting/import order 问题；已用 Biome 格式化 touched TUI files 后复跑通过。
+
+```text
+corepack pnpm build
+```
+
+结果：PASS，monorepo build 完成。
+
+```text
+git diff --check
+```
+
+结果：PASS，仅有 Windows LF/CRLF warning，无 whitespace error。
+
+未运行真实全量 smoke；未运行 cargo test/build；未验证真实 macOS/Linux runner binary；未声明 bundled binary release PASS。
 
 已运行（17C.A 追加复检）：
 
@@ -378,10 +502,11 @@ git diff --check
 ## 已知问题
 
 - 当前 adapter start 运行受控 Linghun-approved long-running lifecycle task，可覆盖 running/heartbeat/status/log/cancel/timeout 闭环；仍不是真实 owner-death daemon supervision 或完整 Linghun workload runtime。
-- 未提供 managed/bundled native runner package、签名、安装、升级、回滚或 AV false-positive 矩阵。
-- Unix/macOS process-group/session cleanup 未验证。
+- 已有 bundled/internal path convention 与 mock fixture tests，但仓库没有真实 bundled native binary 发布物；不得声明 bundled binary release PASS。
+- 未提供 optional platform package、签名、安装、升级、回滚或 AV false-positive 矩阵。
+- Unix/macOS process-group/session cleanup 未验证；macOS/Linux 本轮只做 mocked path convention/fallback test，不声明真实平台 PASS。
 - 尚无长期 native heartbeat owner-death benchmark。
-- 用户配置 native runner path 仍需手动编辑配置；未新增 setup 命令。
+- project-local/custom path 仍作为开发/调试入口；产品主路径应走 bundled/internal resolver，17C.B 不新增用户 setup 命令。
 
 ## 不在本阶段处理的内容
 
@@ -396,9 +521,9 @@ git diff --check
 
 ## 下一阶段衔接
 
-Phase 17C.A 当前本地实现和 focused validation 已闭合。用户已明确要求停止 independent verifier，改由本轮本地复检闭合；下一步由用户决定是否进入 Phase 17C.B：Bundled Native Runner Internal Capability Lite。不得自动进入，也不得自动执行真实全量 smoke 或宣布 Beta/open-source readiness。
+Phase 17C.B 当前本地实现和 focused validation 已闭合。下一步不是自动进入真实全量 smoke，也不是 Phase 18；只能由用户决定是否进入 pre-smoke comprehensive audit / polish / smoke pre-acceptance。
 
-Phase 17C.B 若启动，只做 Bundled Native Runner Internal Capability Lite：内部能力解析/轻量 bundled path 闭环与 fallback 边界，不做自动升级、签名/AV、完整 release matrix、Phase 18 desktop 或 Fast Workspace Scanner。17C.B 完成后，才进入 pre-smoke comprehensive audit / polish / smoke pre-acceptance。
+进入下一步前仍需保留边界：不做自动升级、签名/AV、完整 release matrix、Phase 18 desktop、Fast Workspace Scanner，不宣布 Beta PASS / smoke-ready / open-source-ready；如后续 release/open-source packaging gate 需要真实 bundled binary，再单独验证一条命令安装、package files/bin、平台矩阵和 release artifacts。
 
 ## 开发者排查入口
 
@@ -439,22 +564,23 @@ Phase 17C.B 若启动，只做 Bundled Native Runner Internal Capability Lite：
 
 ## 成品级结构化 handoff packet
 
-- nextPhase: user decision before Phase 17C.B Bundled Native Runner Internal Capability Lite; pre-smoke comprehensive audit / polish / smoke pre-acceptance only after 17C.B completes.
+- nextPhase: user decision before pre-smoke comprehensive audit / polish / smoke pre-acceptance; Phase 17C.B itself is locally closed by focused/mock validation only.
 - prohibited:
   - do not run real full smoke without explicit user approval
   - do not claim Beta PASS / smoke-ready / open-source-ready
   - do not enter Phase 18 desktop
   - do not implement Fast Workspace Scanner
-  - do not do auto-upgrade, signing/AV, or a full release matrix in 17C.B
+  - do not do auto-upgrade, signing/AV, or a full release matrix in this gate
   - do not make native runner default short-task executor
   - do not add a second provider/tool/permission/evidence/MCP/index/agent/job runtime
+  - do not claim bundled binary release PASS until real packaged artifacts exist and are validated
 - evidence:
-  - 17C.A self-recheck focused TUI vitest command above
-  - 17C.A self-recheck typecheck/check/diff-check commands above
-  - prior full TUI test and build commands above
-  - prior focused config/TUI vitest commands above
+  - 17C.B focused config vitest command above
+  - 17C.B focused TUI vitest command above
+  - 17C.B typecheck/check/build/diff-check commands above
+  - prior 17C.A focused config/TUI and full TUI/build commands above
 - indexStatus:
-  - codebase-memory project `F-Linghun` was ready during Source-Level Reality Check; detect_changes later reported current source changes.
+  - codebase-memory project `F-Linghun` was ready during Source-Level Reality Check.
 - permissionMode:
   - runner consumes approved durable job specs only; it does not bypass Start Gate or local permission pipeline.
 - provider/model:
@@ -464,4 +590,4 @@ Phase 17C.B 若启动，只做 Bundled Native Runner Internal Capability Lite：
 
 ## Blocking 判断
 
-当前未发现 Phase 17C.A blocking 问题。用户已明确要求停止 independent verifier，改由本轮本地自复检闭合；本轮自复检命令已通过：focused Phase 17C/Phase 17B regression、typecheck、check、diff-check，且此前 full TUI test/build 已通过。用户可决定是否进入 Phase 17C.B：Bundled Native Runner Internal Capability Lite；17C.A 仍不是 Beta PASS / smoke-ready / open-source-ready。17C.B 也不得做自动升级、签名/AV、完整 release matrix、Phase 18 desktop 或 Fast Workspace Scanner；17C.B 完成后，才进入 pre-smoke comprehensive audit / polish / smoke pre-acceptance。
+当前未发现 Phase 17C.B blocking 问题。17C.B 仍不是 Beta PASS / smoke-ready / open-source-ready，也不是 bundled binary release PASS；本轮只完成 bundled/internal path convention、doctor、protocol probe 和 fallback 的最小闭环。用户可决定是否进入 pre-smoke comprehensive audit / polish / smoke pre-acceptance；后续仍不得自动升级、签名/AV、完整 release matrix、Phase 18 desktop、Fast Workspace Scanner 或真实全量 smoke。

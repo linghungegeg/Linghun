@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { constants, accessSync, existsSync, readFileSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -20,6 +20,7 @@ import {
 } from "node:process";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   type LinghunConfig,
   type McpServerConfig,
@@ -1240,6 +1241,12 @@ const MAX_JOB_MAX_STEPS = 20;
 const NATIVE_RUNNER_VERSION_TIMEOUT_MS = 2_000;
 const NATIVE_RUNNER_START_STATE_WAIT_MS = 1_500;
 const NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS = 100;
+const NATIVE_RUNNER_BUNDLED_PLATFORM_ARCHES = new Set([
+  "win32-x64",
+  "linux-x64",
+  "darwin-arm64",
+  "darwin-x64",
+]);
 const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = [
   "const durationMs = Number(process.argv[1] || '1000');",
   "const heartbeatMs = 100;",
@@ -3308,8 +3315,8 @@ async function handleDoctorCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? "Usage: /doctor [readiness|status|checklist|project|report|hooks]"
-      : "用法：/doctor [readiness|status|checklist|project|report|hooks]",
+      ? "Usage: /doctor [readiness|status|checklist|project|report|hooks|runner]"
+      : "用法：/doctor [readiness|status|checklist|project|report|hooks|runner]",
   );
 }
 
@@ -3319,12 +3326,22 @@ type NativeRunnerResolution = {
   source: NativeRunnerConfig["source"];
   path?: string;
   pathRef: string;
+  bundledCandidateRef: string;
   version?: string;
   protocol?: string;
   platform: NodeJS.Platform;
+  arch: NodeJS.Architecture;
+  platformArch: string;
   nodeFallback: "available";
   lastError?: string;
   nextAction: string;
+};
+
+type NativeRunnerCandidate = {
+  path?: string;
+  ref: string;
+  platformArch: string;
+  supported: boolean;
 };
 
 type NativeRunnerAdapterResult = {
@@ -3344,45 +3361,60 @@ type NativeRunnerAdapterResult = {
 
 function resolveNativeRunner(config: LinghunConfig): NativeRunnerResolution {
   const runner = config.nativeRunner;
+  const bundledCandidate = getBundledNativeRunnerCandidate();
+  const base = {
+    bundledCandidateRef: bundledCandidate.ref,
+    platform: process.platform,
+    arch: process.arch,
+    platformArch: bundledCandidate.platformArch,
+    nodeFallback: "available" as const,
+  };
   if (!runner.enabled) {
     return {
       status: "disabled",
       enabled: false,
       source: "disabled",
       pathRef: "disabled",
-      platform: process.platform,
-      nodeFallback: "available",
+      ...base,
       nextAction: "Native runner is disabled; Node/TUI remains the fallback for durable jobs.",
     };
   }
-  if (!runner.path) {
+  const resolvedPath = resolveNativeRunnerPath(runner, bundledCandidate);
+  if (!resolvedPath) {
     return {
       status: "unavailable",
       enabled: true,
       source: runner.source,
       pathRef: "missing",
-      platform: process.platform,
-      nodeFallback: "available",
-      lastError: "runner path is not configured",
-      nextAction: "Configure a managed/native runner path, or keep using Node fallback.",
+      ...base,
+      lastError:
+        runner.source === "bundled" && !bundledCandidate.supported
+          ? `bundled runner platform is not supported: ${bundledCandidate.platformArch}`
+          : "runner path is not configured",
+      nextAction:
+        runner.source === "bundled"
+          ? "Install a Linghun package with a bundled runner for this platform, or keep using Node fallback."
+          : "Configure a project-local/custom runner path for development, or keep using Node fallback.",
     };
   }
-  if (!existsSync(runner.path)) {
+  if (!existsSync(resolvedPath) || !isExecutableNativeRunnerCandidate(resolvedPath)) {
     return {
       status: "unavailable",
       enabled: true,
       source: runner.source,
-      path: runner.path,
-      pathRef: redactedPath(runner.path),
-      platform: process.platform,
-      nodeFallback: "available",
-      lastError: "runner binary is missing or not readable",
-      nextAction: "Install/repair the managed runner, or keep using Node fallback.",
+      path: resolvedPath,
+      pathRef: redactedPath(resolvedPath),
+      ...base,
+      lastError: "runner binary is missing or not executable",
+      nextAction:
+        runner.source === "bundled"
+          ? "Bundled runner is unavailable; reinstall/repair Linghun or continue with Node fallback."
+          : "Repair runner execution permissions or keep using Node fallback.",
     };
   }
-  const versionCommand = createNativeRunnerCommand(runner.path, ["version"]);
+  const versionCommand = createNativeRunnerCommand(resolvedPath, ["version"]);
   const version = spawnSync(versionCommand.command, versionCommand.args, {
-    cwd: dirname(runner.path),
+    cwd: dirname(resolvedPath),
     encoding: "utf8",
     timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
     windowsHide: true,
@@ -3393,10 +3425,9 @@ function resolveNativeRunner(config: LinghunConfig): NativeRunnerResolution {
       status: "unavailable",
       enabled: true,
       source: runner.source,
-      path: runner.path,
-      pathRef: redactedPath(runner.path),
-      platform: process.platform,
-      nodeFallback: "available",
+      path: resolvedPath,
+      pathRef: redactedPath(resolvedPath),
+      ...base,
       lastError: sanitizeDiagnosticText(
         version.error instanceof Error ? version.error.message : raw || "version probe failed",
       ),
@@ -3411,29 +3442,105 @@ function resolveNativeRunner(config: LinghunConfig): NativeRunnerResolution {
       status: "protocol_mismatch",
       enabled: true,
       source: runner.source,
-      path: runner.path,
-      pathRef: redactedPath(runner.path),
+      path: resolvedPath,
+      pathRef: redactedPath(resolvedPath),
       version: runnerVersion,
       protocol,
-      platform: process.platform,
-      nodeFallback: "available",
+      ...base,
       lastError: `protocol mismatch: expected ${runner.expectedProtocol}, got ${protocol}`,
-      nextAction: "Use a compatible managed runner build, or continue with Node fallback.",
+      nextAction:
+        "Use a compatible bundled/project-local runner build, or continue with Node fallback.",
     };
   }
   return {
     status: "available",
     enabled: true,
     source: runner.source,
-    path: runner.path,
-    pathRef: redactedPath(runner.path),
+    path: resolvedPath,
+    pathRef: redactedPath(resolvedPath),
     version: runnerVersion,
     protocol,
-    platform: process.platform,
-    nodeFallback: "available",
+    ...base,
     nextAction:
       "Native runner may supervise approved durable job specs; Node fallback remains available.",
   };
+}
+
+function resolveNativeRunnerPath(
+  runner: NativeRunnerConfig,
+  bundledCandidate: NativeRunnerCandidate,
+): string | undefined {
+  if (runner.source === "bundled") {
+    return bundledCandidate.path;
+  }
+  if (runner.path) {
+    return resolve(runner.path);
+  }
+  return undefined;
+}
+
+function getBundledNativeRunnerCandidate(): NativeRunnerCandidate {
+  const platformArch = getNativeRunnerPlatformArch();
+  const supported = NATIVE_RUNNER_BUNDLED_PLATFORM_ARCHES.has(platformArch);
+  const targetPlatform = platformArch.split("-")[0];
+  const names =
+    targetPlatform === "win32"
+      ? ["linghun-native-runner.exe", "linghun-native-runner.cjs"]
+      : ["linghun-native-runner", "linghun-native-runner.cjs"];
+  const rootCandidates = getBundledNativeRunnerRoots();
+  for (const root of rootCandidates) {
+    for (const name of names) {
+      const candidate = join(root, platformArch, name);
+      if (existsSync(candidate)) {
+        return {
+          path: candidate,
+          ref: `bundled:${platformArch}/${name}`,
+          platformArch,
+          supported,
+        };
+      }
+    }
+  }
+  return {
+    path:
+      supported && rootCandidates[0]
+        ? join(rootCandidates[0], platformArch, names[0] ?? "linghun-native-runner")
+        : undefined,
+    ref: `bundled:${platformArch}/${names[0] ?? "linghun-native-runner"}`,
+    platformArch,
+    supported,
+  };
+}
+
+function getNativeRunnerPlatformArch(): string {
+  const override = process.env.LINGHUN_NATIVE_RUNNER_PLATFORM_ARCH_TEST;
+  if (override && NATIVE_RUNNER_BUNDLED_PLATFORM_ARCHES.has(override)) {
+    return override;
+  }
+  return `${process.platform}-${process.arch}`;
+}
+
+function getBundledNativeRunnerRoots(): string[] {
+  const roots: string[] = [];
+  if (process.env.LINGHUN_NATIVE_RUNNER_BUNDLED_DIR) {
+    roots.push(process.env.LINGHUN_NATIVE_RUNNER_BUNDLED_DIR);
+  }
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  roots.push(join(moduleDir, "..", "native-runner"));
+  roots.push(join(moduleDir, "native-runner"));
+  return roots;
+}
+
+function isExecutableNativeRunnerCandidate(path: string): boolean {
+  try {
+    accessSync(
+      path,
+      process.platform === "win32" ? constants.R_OK : constants.R_OK | constants.X_OK,
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseRunnerJson(raw: string): Record<string, unknown> {
@@ -3463,11 +3570,13 @@ function formatRunnerDoctor(context: TuiContext): string {
   return [
     `Native Runner Doctor：${resolution.status}；Node fallback=${resolution.nodeFallback}；主 TUI 不因 runner 问题崩溃。`,
     `- enabled: ${resolution.enabled ? "yes" : "no"}`,
+    `- source: ${resolution.source}`,
+    `- platform/arch: ${resolution.platform}/${resolution.arch}`,
+    `- bundled platform/arch: ${resolution.platformArch}`,
+    `- bundled candidate: ${resolution.bundledCandidateRef}`,
     `- resolved path: ${resolution.pathRef}`,
     `- version/protocol: ${resolution.version ?? "unknown"} / ${resolution.protocol ?? context.config.nativeRunner.expectedProtocol}`,
-    `- platform: ${resolution.platform}`,
-    `- source: ${resolution.source}`,
-    `- last error: ${resolution.lastError ? sanitizeDiagnosticText(resolution.lastError) : "none"}`,
+    `- fallback reason: ${resolution.status === "available" ? "none" : resolution.lastError ? sanitizeDiagnosticText(resolution.lastError) : resolution.status}`,
     `- next action: ${resolution.nextAction}`,
     "- boundary: runner only accepts Linghun-approved job specs; it is not a second provider/tool/agent runtime and cannot decide verification PASS.",
     "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, and Unix/macOS process-group cleanup.",
