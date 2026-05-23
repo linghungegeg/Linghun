@@ -344,17 +344,69 @@ if (argv[0] === "start") {
     process.exit(2);
   }
   fs.mkdirSync(jobDir, { recursive: true });
+  const timeoutMs = Number(argValue("--timeout-ms", "60000"));
+  const heartbeatMs = Number(argValue("--heartbeat-ms", "100"));
   const separator = argv.indexOf("--");
   const commandArgs = separator >= 0 ? argv.slice(separator + 1) : [];
-  const result = commandArgs.length > 0 ? cp.spawnSync(commandArgs[0], commandArgs.slice(1), { encoding: "utf8" }) : { status: 0, stdout: "", stderr: "" };
-  fs.writeFileSync(path.join(jobDir, "stdout.log"), result.stdout || "");
-  fs.writeFileSync(path.join(jobDir, "stderr.log"), result.stderr || "");
-  const status = result.status === 0 ? "completed" : "failed";
-  fs.writeFileSync(path.join(jobDir, "state.json"), JSON.stringify({ protocol, id, status, stdoutPath: "stdout.log", stderrPath: "stderr.log" }, null, 2));
-  print({ ok: true, protocol, id, status, stdoutPath: "stdout.log", stderrPath: "stderr.log" });
-  process.exit(0);
+  const statePath = path.join(jobDir, "state.json");
+  const stdoutPath = path.join(jobDir, "stdout.log");
+  const stderrPath = path.join(jobDir, "stderr.log");
+  const startedAt = Date.now();
+  let child = commandArgs.length > 0 ? cp.spawn(commandArgs[0], commandArgs.slice(1), { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] }) : undefined;
+  function writeState(status, extra = {}) {
+    const stdoutRef = mode === "absolute-log-refs" ? stdoutPath : "stdout.log";
+    const stderrRef = mode === "absolute-log-refs" ? stderrPath : "stderr.log";
+    fs.writeFileSync(statePath, JSON.stringify({ protocol, id, status, updatedAt: Date.now(), heartbeatAt: Date.now(), timeoutMs, stdoutPath: stdoutRef, stderrPath: stderrRef, ...extra }, null, 2));
+  }
+  writeState("running", { pid: child?.pid || process.pid });
+  fs.appendFileSync(stdoutPath, JSON.stringify({ kind: "mock-runner", status: "running", heartbeat: 0 }) + "\\n");
+  if (child?.stdout) child.stdout.on("data", (chunk) => fs.appendFileSync(stdoutPath, chunk));
+  if (child?.stderr) child.stderr.on("data", (chunk) => fs.appendFileSync(stderrPath, chunk));
+  let terminal = false;
+  let heartbeat = 0;
+  const durationMs = Number(commandArgs.at(-1) || "1200");
+  const finish = (status, exitCode = status === "completed" ? 0 : 1) => {
+    if (terminal) return;
+    terminal = true;
+    writeState(status, { exitCode, pid: child?.pid || process.pid });
+    print({ ok: true, protocol, id, status, exitCode, stdoutPath: "stdout.log", stderrPath: "stderr.log" });
+    process.exit(status === "failed" ? 1 : 0);
+  };
+  if (child) {
+    child.on("exit", (code) => finish(code === 0 ? "completed" : "failed", code ?? 1));
+    child.on("error", () => finish("failed", 1));
+  }
+  const interval = setInterval(() => {
+    heartbeat += 1;
+    fs.appendFileSync(stdoutPath, JSON.stringify({ kind: "mock-runner", status: "heartbeat", heartbeat }) + "\\n");
+    if (fs.existsSync(path.join(jobDir, "stop.request"))) {
+      child?.kill();
+      clearInterval(interval);
+      finish("cancelled", 1);
+      return;
+    }
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs >= timeoutMs) {
+      child?.kill();
+      clearInterval(interval);
+      finish("timeout", 1);
+      return;
+    }
+    if (elapsedMs >= durationMs) {
+      child?.kill();
+      clearInterval(interval);
+      finish("completed", 0);
+      return;
+    }
+    writeState("running", { pid: child?.pid || process.pid });
+  }, heartbeatMs);
+  return;
 }
 if (argv[0] === "status") {
+  if (mode === "status-fail") {
+    console.error("runner status failed token=secret sk-live Authorization: Bearer raw");
+    process.exit(3);
+  }
   const statePath = path.join(jobDir, "state.json");
   if (!fs.existsSync(statePath)) {
     print({ ok: true, protocol, id, status: "missing" });
@@ -387,6 +439,10 @@ async function readMockNativeRunnerCalls(callsPath: string): Promise<{ argv: str
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as { argv: string[] });
+}
+
+async function waitForTestMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createBackgroundTaskFixture(
@@ -1891,6 +1947,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
 
     await handleSlashCommand("/doctor runner", context, doctorOutput);
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "absolute-log-refs");
     await handleSlashCommand(
       "/job run native runner should not execute raw command rm -rf secret --allow-bash --tokens 50000 --timeout 60000",
       context,
@@ -1910,21 +1967,27 @@ describe("Phase 06 TUI slash commands", () => {
         adapter?: string;
         status?: string;
         resolution?: string;
+        heartbeatAt?: string;
+        logRefs?: Record<string, string>;
         spec?: {
           cwd?: string;
           approvedTaskKind?: string;
           envAllowlist?: string[];
           logPaths?: Record<string, string>;
         };
+        reportPath?: string;
       };
     };
     expect(persisted.status).toBe("completed");
     expect(persisted.result?.status).toBe("partial");
     expect(persisted.runner).toMatchObject({
       adapter: "native",
-      status: "completed",
+      status: "running",
       resolution: "available",
     });
+    expect(persisted.runner?.heartbeatAt).toBeTruthy();
+    expect(persisted.runner?.logRefs?.stdout).toBe("present:stdout.log");
+    expect(persisted.runner?.logRefs?.stderr).toBe("present:stderr.log");
     expect(persisted.runner?.spec).toMatchObject({
       cwd: project,
       approvedTaskKind: "durable_job_supervisor",
@@ -1936,14 +1999,27 @@ describe("Phase 06 TUI slash commands", () => {
         id: jobId,
         kind: "job",
         result: "partial",
-        currentStep: expect.stringContaining("runner=native/completed"),
+        currentStep: expect.stringContaining("runner=native/running"),
       }),
     );
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    const runnerStdoutPath = persisted.runner?.spec?.logPaths?.stdout ?? "";
+    const runnerStderrPath = persisted.runner?.spec?.logPaths?.stderr ?? "";
+    const runnerStdout = await readFile(runnerStdoutPath, "utf8");
+    const reportText = await readFile(persisted.runner?.spec?.logPaths?.report ?? "", "utf8");
+    expect(runnerStdout).toContain("heartbeat");
+    expect(output.text).not.toContain(runnerStdoutPath);
+    expect(output.text).not.toContain(runnerStderrPath);
+    expect(reportText).toContain("stdout:present:stdout.log");
+    expect(reportText).toContain("stderr:present:stderr.log");
+    expect(reportText).not.toContain(runnerStdoutPath);
+    expect(reportText).not.toContain(runnerStderrPath);
     const calls = await readMockNativeRunnerCalls(mockRunner.callsPath);
     const startCall = calls.find((call) => call.argv[0] === "start");
     expect(startCall?.argv).toContain("--root");
-    expect(startCall?.argv.join(" ")).toContain("process.exit(0)");
+    expect(startCall?.argv).toContain("--heartbeat-ms");
+    expect(startCall?.argv.join(" ")).toContain("linghun-approved-runner-task");
+    expect(startCall?.argv.join(" ")).not.toContain("process.exit(0)");
     expect(startCall?.argv.join(" ")).not.toContain("rm -rf");
     expect(startCall?.argv.join(" ")).not.toContain("secret");
     expect(calls.some((call) => call.argv[0] === "status")).toBe(true);
@@ -1951,13 +2027,34 @@ describe("Phase 06 TUI slash commands", () => {
     expect(doctorOutput.text).toContain("Node fallback=available");
     expect(doctorOutput.text).toContain("present:linghun-native-runner-mock.cjs");
     expect(doctorOutput.text).not.toContain(project);
-    expect(output.text).toContain("runner=native/completed");
+    expect(output.text).toContain("runner=native/running");
+    expect(output.text).toContain("heartbeat=");
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
 
-    await handleSlashCommand(`/job cancel ${jobId}`, context, output);
-    const cancelled = JSON.parse(await readFile(statePath, "utf8")) as {
+    await waitForTestMs(1400);
+    await handleSlashCommand(`/job status ${jobId}`, context, output);
+    vi.unstubAllEnvs();
+    const completed = JSON.parse(await readFile(statePath, "utf8")) as {
+      runner?: { status?: string };
+      result?: { status?: string };
+    };
+    expect(completed.runner?.status).toBe("completed");
+    expect(completed.result?.status).toBe("partial");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+
+    await handleSlashCommand(
+      "/job run native runner cancel active task --tokens 50000 --timeout 60000",
+      context,
+      output,
+    );
+    const cancelJobId = context.backgroundTasks.find(
+      (task) => task.kind === "job" && task.id !== jobId,
+    )?.id;
+    const cancelStatePath = join(jobsRoot, cancelJobId ?? "missing", "state.json");
+    await handleSlashCommand(`/job cancel ${cancelJobId}`, context, output);
+    const cancelled = JSON.parse(await readFile(cancelStatePath, "utf8")) as {
       status?: string;
       runner?: { status?: string; lastError?: string };
       result?: { status?: string };
@@ -1971,6 +2068,46 @@ describe("Phase 06 TUI slash commands", () => {
         (call) => call.argv[0] === "stop",
       ),
     ).toBe(true);
+
+    const timeoutProject = await mkdtemp(join(tmpdir(), "linghun-runner-timeout-"));
+    const timeoutRunner = await createMockNativeRunner(timeoutProject);
+    const timeoutStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: timeoutProject,
+    });
+    const timeoutSession = await timeoutStore.create({ model: "deepseek-v4-flash" });
+    const timeoutContext = await createTestContext(timeoutProject, timeoutStore, timeoutSession, {
+      ...config,
+      nativeRunner: { ...config.nativeRunner, path: timeoutRunner.path, timeoutMs: 200 },
+    });
+    timeoutContext.index.status = "ready";
+    timeoutContext.index.projectName = "F-Linghun";
+    timeoutContext.lastVerification = createVerificationReportFixture("partial");
+    timeoutContext.evidence = [...context.evidence];
+    await handleSlashCommand(
+      "/job run timeout stays non pass --tokens 50000 --timeout 200",
+      timeoutContext,
+      output,
+    );
+    const timeoutJobId = timeoutContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    await waitForTestMs(450);
+    await handleSlashCommand(`/job status ${timeoutJobId}`, timeoutContext, output);
+    const timeoutState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, timeoutProject).jobs,
+          timeoutJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as { status?: string; runner?: { status?: string }; result?: { status?: string } };
+    expect(timeoutState.status).toBe("timeout");
+    expect(timeoutState.runner?.status).toBe("timeout");
+    expect(timeoutState.result?.status).toBe("timeout");
+    expect(timeoutContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
 
     const mismatchProject = await mkdtemp(join(tmpdir(), "linghun-runner-mismatch-"));
     const mismatchRunner = await createMockNativeRunner(mismatchProject);
@@ -2071,7 +2208,58 @@ describe("Phase 06 TUI slash commands", () => {
     expect(failedContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
-  });
+
+    const statusFailProject = await mkdtemp(join(tmpdir(), "linghun-runner-status-fail-"));
+    const statusFailRunner = await createMockNativeRunner(statusFailProject);
+    const statusFailStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: statusFailProject,
+    });
+    const statusFailSession = await statusFailStore.create({ model: "deepseek-v4-flash" });
+    const statusFailContext = await createTestContext(
+      statusFailProject,
+      statusFailStore,
+      statusFailSession,
+      { ...config, nativeRunner: { ...config.nativeRunner, path: statusFailRunner.path } },
+    );
+    statusFailContext.index.status = "ready";
+    statusFailContext.index.projectName = "F-Linghun";
+    statusFailContext.lastVerification = createVerificationReportFixture("partial");
+    statusFailContext.evidence = [...context.evidence];
+    await handleSlashCommand(
+      "/job run status failure fallback --tokens 50000",
+      statusFailContext,
+      output,
+    );
+    const statusFailJobId = statusFailContext.backgroundTasks.find(
+      (task) => task.kind === "job",
+    )?.id;
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "status-fail");
+    await handleSlashCommand(`/job status ${statusFailJobId}`, statusFailContext, output);
+    vi.unstubAllEnvs();
+    const statusFailState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, statusFailProject).jobs,
+          statusFailJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      runner?: { adapter?: string; status?: string; fallbackReason?: string; lastError?: string };
+    };
+    expect(statusFailState.runner).toMatchObject({
+      adapter: "node",
+      status: "node_fallback",
+      fallbackReason: "status_failed",
+    });
+    expect(statusFailState.runner?.lastError).not.toContain("sk-live");
+    expect(statusFailState.runner?.lastError).not.toContain("Bearer raw");
+    expect(statusFailContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+  }, 15_000);
 
   it("keeps Phase 17B remote channels unaffected by Phase 17C runner commands", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));

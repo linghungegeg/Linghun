@@ -670,6 +670,12 @@ export type DurableJobState = {
     startedAt?: string;
     updatedAt: string;
     completedAt?: string;
+    heartbeatAt?: string;
+    logRefs?: {
+      state: string;
+      stdout: string;
+      stderr: string;
+    };
     lastError?: string;
     fallbackReason?: string;
     nextAction: string;
@@ -1232,7 +1238,24 @@ const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 const DEFAULT_JOB_MAX_STEPS = 4;
 const MAX_JOB_MAX_STEPS = 20;
 const NATIVE_RUNNER_VERSION_TIMEOUT_MS = 2_000;
-const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = "process.exit(0)";
+const NATIVE_RUNNER_START_STATE_WAIT_MS = 1_500;
+const NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS = 100;
+const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = [
+  "const durationMs = Number(process.argv[1] || '1000');",
+  "const heartbeatMs = 100;",
+  "const startedAt = Date.now();",
+  "let tick = 0;",
+  "console.log(JSON.stringify({ kind: 'linghun-approved-runner-task', status: 'started', tick, elapsedMs: 0 }));",
+  "const timer = setInterval(() => {",
+  "  tick += 1;",
+  "  const elapsedMs = Date.now() - startedAt;",
+  "  console.log(JSON.stringify({ kind: 'linghun-approved-runner-task', status: elapsedMs >= durationMs ? 'completed' : 'heartbeat', tick, elapsedMs }));",
+  "  if (elapsedMs >= durationMs) {",
+  "    clearInterval(timer);",
+  "    process.exitCode = 0;",
+  "  }",
+  "}, heartbeatMs);",
+].join("\n");
 const MAX_CHECKPOINTS = 20;
 const MAX_AGENTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
@@ -3309,6 +3332,12 @@ type NativeRunnerAdapterResult = {
   adapter: "native" | "node";
   protocol?: string;
   version?: string;
+  heartbeatAt?: string;
+  logRefs?: {
+    state: string;
+    stdout: string;
+    stderr: string;
+  };
   lastError?: string;
   fallbackReason?: string;
 };
@@ -3449,14 +3478,18 @@ function formatJobRunnerInline(job: DurableJobState): string {
   if (!job.runner) {
     return "runner=not_started; Node/TUI default";
   }
-  return `runner=${job.runner.adapter}/${job.runner.status}; resolution=${job.runner.resolution}; fallback=${job.runner.fallbackReason ?? "none"}`;
+  const heartbeat = job.runner.heartbeatAt ? `; heartbeat=${job.runner.heartbeatAt}` : "";
+  return `runner=${job.runner.adapter}/${job.runner.status}; resolution=${job.runner.resolution}; fallback=${job.runner.fallbackReason ?? "none"}${heartbeat}`;
 }
 
 function formatJobRunnerReportLine(job: DurableJobState): string {
   if (!job.runner) {
     return "- runner: not_started; Node/TUI default path remains active.";
   }
-  return `- runner: enabled=${job.runner.enabled}; adapter=${job.runner.adapter}; status=${job.runner.status}; resolution=${job.runner.resolution}; pathRef=${job.runner.pathRef ?? "-"}; protocol=${job.runner.protocol ?? "unknown"}; version=${job.runner.version ?? "unknown"}; fallback=${job.runner.fallbackReason ?? "none"}; lastError=${job.runner.lastError ?? "none"}; next=${job.runner.nextAction}`;
+  const logRefs = job.runner.logRefs
+    ? `; logs=state:${job.runner.logRefs.state},stdout:${job.runner.logRefs.stdout},stderr:${job.runner.logRefs.stderr}`
+    : "";
+  return `- runner: enabled=${job.runner.enabled}; adapter=${job.runner.adapter}; status=${job.runner.status}; resolution=${job.runner.resolution}; pathRef=${job.runner.pathRef ?? "-"}; protocol=${job.runner.protocol ?? "unknown"}; version=${job.runner.version ?? "unknown"}; heartbeat=${job.runner.heartbeatAt ?? "-"}; fallback=${job.runner.fallbackReason ?? "none"}; lastError=${job.runner.lastError ?? "none"}; next=${job.runner.nextAction}${logRefs}`;
 }
 
 function formatApprovedRunnerSpecLine(job: DurableJobState): string {
@@ -3513,12 +3546,16 @@ async function startRunnerForDurableJob(context: TuiContext, job: DurableJobStat
     updatedAt: now,
     completedAt:
       result.status === "completed" || result.status === "node_fallback" ? now : undefined,
+    heartbeatAt: result.heartbeatAt,
+    logRefs: result.logRefs,
     lastError: result.lastError,
     fallbackReason: result.fallbackReason,
     nextAction:
       result.adapter === "node"
         ? "Node/TUI fallback is active; inspect /job report and logs."
-        : "Native runner lifecycle completed; verification remains partial until verified separately.",
+        : result.status === "running"
+          ? "Native runner is supervising an approved long-running task; verification remains partial until verified separately."
+          : "Native runner reached a terminal lifecycle state; verification remains partial until verified separately.",
   };
   await appendJobLog(
     job,
@@ -3542,6 +3579,10 @@ async function startApprovedRunnerSpec(
     };
   }
   await mkdir(spec.runnerRoot, { recursive: true });
+  const taskDurationMs =
+    spec.timeoutMs <= NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS * 8
+      ? spec.timeoutMs + NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS * 5
+      : 1_200;
   const startCommand = createNativeRunnerCommand(resolution.path, [
     "start",
     "--id",
@@ -3550,37 +3591,137 @@ async function startApprovedRunnerSpec(
     spec.runnerRoot,
     "--timeout-ms",
     String(spec.timeoutMs),
+    "--heartbeat-ms",
+    String(NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS),
     "--",
     process.execPath,
     "-e",
     NATIVE_RUNNER_APPROVED_TASK_SCRIPT,
+    String(taskDurationMs),
   ]);
-  const result = spawnSync(startCommand.command, startCommand.args, {
-    encoding: "utf8",
-    timeout: spec.timeoutMs + NATIVE_RUNNER_VERSION_TIMEOUT_MS,
-    windowsHide: true,
-  });
-  const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
-  if (result.error || result.status !== 0) {
+  let child!: ReturnType<typeof spawn>;
+  try {
+    child = spawn(startCommand.command, startCommand.args, {
+      cwd: spec.cwd,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", () => {
+      // The adapter observes missing state below and falls back to Node/TUI.
+    });
+    child.unref();
+  } catch (error) {
     return {
       status: "node_fallback",
       adapter: "node",
       protocol: resolution.protocol,
       version: resolution.version,
-      lastError: sanitizeDiagnosticText(
-        result.error instanceof Error ? result.error.message : raw || "runner start failed",
-      ),
+      lastError: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error)),
       fallbackReason: "start_failed",
     };
   }
-  const parsed = parseRunnerJson(raw);
-  const status = mapNativeRunnerStatus(stringValue(parsed.status, "completed"));
+
+  const state = await waitForRunnerState(spec, NATIVE_RUNNER_START_STATE_WAIT_MS);
+  if (!state) {
+    const failed = await new Promise<boolean>((resolve) => {
+      if (child.exitCode !== null) {
+        resolve(true);
+        return;
+      }
+      child.once("exit", () => resolve(true));
+      setTimeout(() => resolve(false), 25);
+    });
+    return {
+      status: "node_fallback",
+      adapter: "node",
+      protocol: resolution.protocol,
+      version: resolution.version,
+      lastError: failed
+        ? "runner start failed before writing observable state"
+        : "runner did not write observable state before startup timeout",
+      fallbackReason: "start_failed",
+    };
+  }
+  const status = mapNativeRunnerStatus(stringValue(state.status, "running"));
   return {
-    status: status === "completed" ? "completed" : status,
+    status,
     adapter: "native",
-    protocol: stringValue(parsed.protocol, resolution.protocol ?? "unknown"),
+    protocol: stringValue(state.protocol, resolution.protocol ?? "unknown"),
     version: resolution.version,
+    heartbeatAt: runnerHeartbeatValue(state),
+    logRefs: runnerLogRefs(spec, state),
+    lastError:
+      status === "failed"
+        ? sanitizeDiagnosticText(stringValue(state.error, "runner start failed"))
+        : undefined,
   };
+}
+
+async function waitForRunnerState(
+  spec: ApprovedRunnerJobSpec,
+  timeoutMs: number,
+): Promise<Record<string, unknown> | undefined> {
+  const started = Date.now();
+  while (Date.now() - started <= timeoutMs) {
+    const state = await readRunnerState(spec);
+    if (state) return state;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}
+
+async function readRunnerState(
+  spec: ApprovedRunnerJobSpec,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(spec.logPaths.state, "utf8")) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function runnerHeartbeatValue(state: Record<string, unknown>): string | undefined {
+  const heartbeatAt = state.heartbeatAt;
+  if (typeof heartbeatAt === "number" || typeof heartbeatAt === "string") {
+    return String(heartbeatAt);
+  }
+  const updatedAt = state.updatedAt;
+  return typeof updatedAt === "number" || typeof updatedAt === "string"
+    ? String(updatedAt)
+    : undefined;
+}
+
+function runnerLogRefs(
+  spec: ApprovedRunnerJobSpec,
+  state: Record<string, unknown>,
+): { state: string; stdout: string; stderr: string } {
+  return {
+    state: "state.json",
+    stdout: safeRunnerLogRef(state.stdoutPath, spec.logPaths.stdout),
+    stderr: safeRunnerLogRef(state.stderrPath, spec.logPaths.stderr),
+  };
+}
+
+function safeRunnerLogRef(value: unknown, fallbackPath: string): string {
+  const fallback = basename(fallbackPath);
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return isSafeRunnerRelativeLogRef(fallback) ? fallback : "log";
+  }
+  const ref = sanitizeDiagnosticText(value.trim());
+  if (isSafeRunnerRelativeLogRef(ref)) {
+    return ref;
+  }
+  const redactedBasename = ref.replaceAll("\\", "/").split("/").filter(Boolean).at(-1);
+  if (redactedBasename && isSafeRunnerRelativeLogRef(redactedBasename)) {
+    return `present:${redactedBasename}`;
+  }
+  return isSafeRunnerRelativeLogRef(fallback) ? `present:${fallback}` : "present:log";
+}
+
+function isSafeRunnerRelativeLogRef(ref: string): boolean {
+  return /^[A-Za-z0-9._-]+$/u.test(ref) && !ref.includes("..") && !ref.includes(":");
 }
 
 function mapNativeRunnerStatus(status: string): NativeRunnerLifecycleStatus {
@@ -3596,11 +3737,7 @@ function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): v
   if (!job.runner?.spec || job.runner.adapter !== "native") return;
   const resolution = resolveNativeRunner(context.config);
   if (resolution.status !== "available" || !resolution.path) {
-    markJobRunnerTerminal(
-      job,
-      resolution.status === "protocol_mismatch" ? "protocol_mismatch" : "unavailable",
-      resolution.lastError ?? resolution.status,
-    );
+    markJobRunnerFallback(job, resolution.status, resolution.lastError ?? resolution.status);
     return;
   }
   const statusCommand = createNativeRunnerCommand(resolution.path, [
@@ -3617,14 +3754,31 @@ function refreshRunnerStatusForJob(context: TuiContext, job: DurableJobState): v
   });
   const raw = `${status.stdout ?? ""}\n${status.stderr ?? ""}`.trim();
   if (status.error || status.status !== 0) {
-    markJobRunnerTerminal(job, "failed", raw || "runner status failed");
+    markJobRunnerFallback(job, "available", raw || "runner status failed", "status_failed");
     return;
   }
   const parsed = parseRunnerJson(raw);
   const mapped = mapNativeRunnerStatus(stringValue(parsed.status, job.runner.status));
+  const now = new Date().toISOString();
   job.runner.status = mapped;
-  job.runner.updatedAt = new Date().toISOString();
-  if (mapped !== "running") job.runner.completedAt ??= job.runner.updatedAt;
+  job.runner.updatedAt = now;
+  job.runner.heartbeatAt = runnerHeartbeatValue(parsed) ?? job.runner.heartbeatAt;
+  job.runner.logRefs = runnerLogRefs(job.runner.spec, parsed);
+  if (mapped !== "running") job.runner.completedAt ??= now;
+  if (mapped === "timeout" || mapped === "cancelled" || mapped === "failed") {
+    job.status = mapped;
+    job.pauseReason = `runner_${mapped}`;
+    job.updatedAt = now;
+    job.endedAt = now;
+    job.result = {
+      status: mapped,
+      summary: `Native runner reported ${mapped}; no PASS evidence generated.`,
+      facts: [formatJobRunnerInline(job)],
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: now,
+    };
+    rescheduleDurableJobAgents(job);
+  }
 }
 
 async function stopRunnerForDurableJob(context: TuiContext, job: DurableJobState): Promise<void> {
@@ -3669,9 +3823,39 @@ function markJobRunnerTerminal(
     startedAt: job.runner?.startedAt,
     updatedAt: now,
     completedAt: now,
+    heartbeatAt: job.runner?.heartbeatAt,
+    logRefs: job.runner?.logRefs,
     lastError: sanitizeDiagnosticText(reason),
     fallbackReason: job.runner?.fallbackReason,
     nextAction: "Inspect /job report and logs; runner terminal states are not verification PASS.",
+  };
+}
+
+function markJobRunnerFallback(
+  job: DurableJobState,
+  resolution: NativeRunnerResolutionStatus,
+  reason: string,
+  fallbackReason: string = resolution,
+): void {
+  const now = new Date().toISOString();
+  job.runner = {
+    enabled: job.runner?.enabled ?? true,
+    status: "node_fallback",
+    resolution,
+    adapter: "node",
+    protocol: job.runner?.protocol,
+    version: job.runner?.version,
+    pathRef: job.runner?.pathRef,
+    spec: job.runner?.spec,
+    startedAt: job.runner?.startedAt,
+    updatedAt: now,
+    completedAt: now,
+    heartbeatAt: job.runner?.heartbeatAt,
+    logRefs: job.runner?.logRefs,
+    lastError: sanitizeDiagnosticText(reason),
+    fallbackReason,
+    nextAction:
+      "Node/TUI fallback is active; runner fallback is non-PASS and visible in report/background.",
   };
 }
 
@@ -5875,6 +6059,7 @@ function formatJobStatus(job: DurableJobState): string {
     `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
     `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
     `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
+    `- runner: ${formatJobRunnerInline(job)}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
     `- logPath: ${job.logPath}`,
     `- fullOutputPath: ${job.fullOutputPath}`,
@@ -5892,6 +6077,7 @@ function formatJobReport(job: DurableJobState): string {
     `- agent counts: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
     `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
     `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
+    `- runner: ${formatJobRunnerInline(job)}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
     `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
     `- pauseReason: ${job.pauseReason ?? "-"}`,
