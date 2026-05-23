@@ -31,6 +31,7 @@ import {
   type RemoteChannelType,
   type RemoteEventType,
   type RoleModelRoute,
+  type WorkspaceTrustLevel,
   defaultConfig,
   getProjectSettingsPath,
   loadConfig,
@@ -40,6 +41,7 @@ import {
   saveExtensionEnablement,
   saveMcpServerConfig,
   saveModelRoute,
+  saveWorkspaceTrust,
 } from "@linghun/config";
 import {
   type CacheFreshness,
@@ -1029,6 +1031,10 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/usage",
   "/stats",
   "/tab",
+  "/esc",
+  "/enter",
+  "/trust",
+  "/autopilot",
   "/sessions",
   "/read",
   "/write",
@@ -1041,6 +1047,16 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/diff",
   "/exit",
 ] as const satisfies readonly (typeof SLASH_COMMAND_REGISTRY)[number]["slash"][];
+
+type PendingAutopilotRequest = {
+  goal: string;
+  maxSteps: number;
+  maxTokens: number;
+  timeoutMs: number;
+  allowEdit: boolean;
+  allowBash: boolean;
+  createdAt: string;
+};
 
 type PendingLocalApproval =
   | {
@@ -1166,6 +1182,8 @@ export type TuiContext = {
   activeVerificationAbortController?: AbortController;
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;
+  pendingAutopilot?: PendingAutopilotRequest;
+  workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;
   recentlyMentionedFiles: string[];
@@ -2113,6 +2131,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const gateway = createModelGateway(config);
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
+  writeWorkspaceTrustStartupNotice(output, context);
   writeStatus(output, context);
   writeLine(output, formatHomeScreen(context));
   writeLine(output, `${t(context, "intro")}\n`);
@@ -2181,6 +2200,12 @@ export async function handleSlashCommand(
   const [command, ...rest] = text.split(/\s+/);
   if (command === "/" || command === "/?") {
     writeLine(output, formatSlashDiscovery(context.language));
+    return "handled";
+  }
+  const workspaceGuard = getWorkspaceTrustCommandGuard(command, rest, context);
+  if (workspaceGuard) {
+    writeLine(output, workspaceGuard);
+    writeStatus(output, context);
     return "handled";
   }
   if (command === "/help") {
@@ -2341,6 +2366,22 @@ export async function handleSlashCommand(
   }
   if (command === "/tab") {
     await cycleMode(context, output);
+    return "handled";
+  }
+  if (command === "/esc") {
+    await cancelPendingInteraction(context, output, "Esc");
+    return "handled";
+  }
+  if (command === "/enter") {
+    await confirmPendingInteraction(context, output);
+    return "handled";
+  }
+  if (command === "/trust") {
+    await handleTrustCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/autopilot") {
+    await handleAutopilotCommand(rest, context, output);
     return "handled";
   }
   if (command === "/sessions") {
@@ -4534,6 +4575,346 @@ function createRouteRepairSuggestions(
 
 function formatRoutePauseMessage(role: ModelRole, decision: RoleRouteDecision): string {
   return `${role} role 路由暂停：${decision.stopConditions.join("；")}。修复建议：${decision.repairSuggestions.join("；")}。不会假装可用。`;
+}
+
+function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiContext): void {
+  const level = context.config.workspaceTrust.level;
+  if (level === "trusted") {
+    return;
+  }
+  context.workspaceTrustEnforced = true;
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Workspace trust: ${level}. Read-only status and safe diagnostics are allowed; writes, Bash, extensions, remote channels, and long jobs stay blocked until you choose /trust trust or keep /trust restricted.`
+      : `工作区信任：${level}。只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks、远程通道和长任务会受限。可用 /trust trust 信任，或 /trust restricted 保持受限。`,
+  );
+}
+
+function getWorkspaceTrustCommandGuard(
+  command: string,
+  args: string[],
+  context: TuiContext,
+): string | null {
+  const level = context.config.workspaceTrust.level;
+  if (!context.workspaceTrustEnforced || level === "trusted") {
+    return null;
+  }
+  if (!isWorkspaceTrustRestrictedCommand(command, args)) {
+    return null;
+  }
+  return context.language === "en-US"
+    ? `Workspace is ${level}. I did not run ${command}. Read-only status is still available; choose /trust trust to persist trust in .linghun/settings.json, or /trust restricted to keep this boundary.`
+    : `当前工作区为 ${level}，已拦截 ${command}。只读状态仍可用；如确认信任，请运行 /trust trust（写入 .linghun/settings.json），或用 /trust restricted 保持受限。`;
+}
+
+function isWorkspaceTrustRestrictedCommand(command: string, args: string[]): boolean {
+  if (["/write", "/edit", "/multiedit", "/bash"].includes(command)) return true;
+  if (command === "/job") return ["run", "create", "new", "resume"].includes(args[0] ?? "list");
+  if (command === "/autopilot") return !["status", "details", "cancel"].includes(args[0] ?? "");
+  if (command === "/remote") return !["", "status", "doctor", "list"].includes(args[0] ?? "");
+  if (command === "/index") return ["init", "refresh", "repair"].includes(args[0] ?? "");
+  if (command === "/mcp")
+    return ["add", "enable", "disable", "remove", "update"].includes(args[0] ?? "");
+  if (command === "/skills" || command === "/plugins") {
+    return ["install", "enable", "disable", "remove", "update", "evolve"].includes(args[0] ?? "");
+  }
+  if (command === "/workflows") return ["run", "enable", "disable"].includes(args[0] ?? "");
+  return false;
+}
+
+async function handleTrustCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "status";
+  if (action === "status") {
+    writeLine(output, formatWorkspaceTrustStatus(context));
+    return;
+  }
+  const level = parseWorkspaceTrustAction(action);
+  if (!level) {
+    writeLine(output, "用法：/trust status | /trust trust | /trust restricted | /trust untrust");
+    return;
+  }
+  context.config = await saveWorkspaceTrust(level, context.projectPath);
+  context.workspaceTrustEnforced = level !== "trusted";
+  writeLine(output, formatWorkspaceTrustStatus(context));
+  writeStatus(output, context);
+}
+
+function parseWorkspaceTrustAction(action: string): WorkspaceTrustLevel | null {
+  if (action === "trust" || action === "trusted") return "trusted";
+  if (action === "restricted" || action === "restrict") return "restricted";
+  if (action === "untrust" || action === "untrusted") return "untrusted";
+  return null;
+}
+
+function formatWorkspaceTrustStatus(context: TuiContext): string {
+  const level = context.config.workspaceTrust.level;
+  const path =
+    relative(context.projectPath, getProjectSettingsPath(context.projectPath)) ||
+    ".linghun/settings.json";
+  return context.language === "en-US"
+    ? [
+        `Workspace trust: ${level}`,
+        `- persists in: ${path}`,
+        "- trusted: quiet startup; normal permission pipeline still applies.",
+        "- restricted/untrusted: read-only status and safe diagnostics remain; writes, Bash, extension enablement, remote channels, and long jobs are blocked or require trust first.",
+      ].join("\n")
+    : [
+        `工作区信任：${level}`,
+        `- 持久化位置：${path}`,
+        "- trusted：启动时安静；仍保留权限管道。",
+        "- restricted/untrusted：只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks 启用、远程通道和长任务会先受限。",
+      ].join("\n");
+}
+
+function formatPendingApprovalDetails(approval: PendingLocalApproval, context: TuiContext): string {
+  if (approval.kind === "index_ignore_write") {
+    return context.language === "en-US"
+      ? [
+          "Pending permission details",
+          "- action: update index ignore file, then refresh the index",
+          `- file: ${approval.plan.path}`,
+          `- entries: ${approval.plan.missingEntries.length}`,
+          "- raw content, tokens, request ids, and internal gate ids are hidden.",
+          "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
+        ].join("\n")
+      : [
+          "待确认权限详情",
+          "- 动作：更新索引 ignore 文件，然后刷新索引",
+          `- 文件：${approval.plan.path}`,
+          `- 条目数量：${approval.plan.missingEntries.length}`,
+          "- raw content、token、request id 和内部 gate id 已隐藏。",
+          "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
+        ].join("\n");
+  }
+  if (approval.kind === "architecture_drift") {
+    const warnings = approval.warnings.map((item) => truncateDisplay(item, 120)).join("；") || "-";
+    return context.language === "en-US"
+      ? [
+          "Pending permission details",
+          `- tool: ${approval.toolName}`,
+          `- reason: agreed scope would change (${warnings})`,
+          "- tool input, tokens, request ids, and internal gate ids are hidden.",
+          "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
+        ].join("\n")
+      : [
+          "待确认权限详情",
+          `- 工具：${approval.toolName}`,
+          `- 原因：会改变已约定范围（${warnings}）`,
+          "- tool input、token、request id 和内部 gate id 已隐藏。",
+          "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
+        ].join("\n");
+  }
+  return context.language === "en-US"
+    ? [
+        "Pending permission details",
+        `- tool: ${approval.toolName}`,
+        "- reason: protected tool requires approval before running",
+        "- tool input, tokens, request ids, and internal gate ids are hidden.",
+        "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
+      ].join("\n")
+    : [
+        "待确认权限详情",
+        `- 工具：${approval.toolName}`,
+        "- 原因：受保护工具运行前需要审批",
+        "- tool input、token、request id 和内部 gate id 已隐藏。",
+        "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
+      ].join("\n");
+}
+
+function formatPendingNaturalCommandDetails(
+  gate: PendingNaturalCommand,
+  context: TuiContext,
+): string {
+  return context.language === "en-US"
+    ? [
+        "Pending Start Gate details",
+        `- command: ${gate.exactCommand}`,
+        `- risk: ${gate.risk}`,
+        `- scope: ${gate.scope}`,
+        `- confirmation: ${gate.requiresExactConfirmation ? "exact command required" : "yes/confirm or /enter allowed"}`,
+        "- raw schema, keys, tokens, and internal gate ids are hidden.",
+        "- next: confirm as shown, or /esc to cancel.",
+      ].join("\n")
+    : [
+        "待确认 Start Gate 详情",
+        `- 命令：${gate.exactCommand}`,
+        `- 风险：${gate.risk}`,
+        `- 范围：${gate.scope}`,
+        `- 确认方式：${gate.requiresExactConfirmation ? "需要输入精确命令" : "可用 yes/确认 或 /enter"}`,
+        "- raw schema、key、token 和内部 gate id 已隐藏。",
+        "- 下一步：按提示确认，或输入 /esc 取消。",
+      ].join("\n");
+}
+
+async function cancelPendingInteraction(
+  context: TuiContext,
+  output: Writable,
+  source: string,
+): Promise<void> {
+  if (context.pendingLocalApproval) {
+    const approval = context.pendingLocalApproval;
+    context.pendingLocalApproval = undefined;
+    if (approval.kind === "index_ignore_write") {
+      writeLine(output, "已取消待确认权限；未写入文件，也未刷新索引。可修改请求后重试。");
+    } else {
+      writeLine(output, "已取消待确认权限；工具尚未执行。可调整请求或继续说明目标。");
+    }
+    writeStatus(output, context);
+    return;
+  }
+  if (context.pendingNaturalCommand) {
+    context.pendingNaturalCommand = undefined;
+    writeLine(output, `${source} 已取消待确认动作；没有执行命令。可重新描述目标或输入 /help。`);
+    writeStatus(output, context);
+    return;
+  }
+  if (context.pendingAutopilot) {
+    context.pendingAutopilot = undefined;
+    writeLine(output, "已取消持续推进确认；没有启动 job。可用 /autopilot <目标> 重新设置边界。");
+    writeStatus(output, context);
+    return;
+  }
+  if (context.activePlan && !context.planAccepted) {
+    context.activePlan = undefined;
+    context.planAccepted = false;
+    writeLine(output, "已取消待确认计划；没有进入执行。可重新运行 /plan 或继续说明修改意见。");
+    writeStatus(output, context);
+    return;
+  }
+  writeLine(
+    output,
+    "当前没有可取消的等待交互；已执行的工具不会被静默撤销。需要停止长任务请用 /interrupt 或 /job cancel <id>。",
+  );
+  writeStatus(output, context);
+}
+
+async function confirmPendingInteraction(context: TuiContext, output: Writable): Promise<void> {
+  if (context.pendingNaturalCommand?.requiresExactConfirmation) {
+    writeLine(
+      output,
+      "该动作需要输入精确 slash command；/enter 不会绕过精确确认。输入 /esc 可取消。",
+    );
+    writeStatus(output, context);
+    return;
+  }
+  if (context.pendingAutopilot) {
+    await startPendingAutopilot(context, output);
+    return;
+  }
+  if (context.pendingLocalApproval) {
+    await handleNaturalInput("yes", context, output);
+    return;
+  }
+  if (context.pendingNaturalCommand) {
+    await handleNaturalInput("yes", context, output);
+    return;
+  }
+  if (context.activePlan && !context.planAccepted) {
+    await handlePlanCommand(
+      ["accept", "manual", context.activePlan.options[0]?.id ?? "a"],
+      context,
+      output,
+    );
+    return;
+  }
+  writeLine(output, "当前没有等待确认的显式选择；请提交输入或先发起需要确认的请求。");
+  writeStatus(output, context);
+}
+
+async function handleAutopilotCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "";
+  if (action === "status" || action === "details") {
+    writeLine(output, formatPendingAutopilotDetails(context));
+    return;
+  }
+  if (action === "cancel") {
+    await cancelPendingInteraction(context, output, "autopilot");
+    return;
+  }
+  if (action === "confirm" || action === "start") {
+    await startPendingAutopilot(context, output);
+    return;
+  }
+  const goal = args.join(" ").trim();
+  if (!goal) {
+    writeLine(
+      output,
+      "用法：/autopilot <目标> [--steps N] [--tokens N] [--timeout MS] [--allow-edit] [--allow-bash]，确认后用 /autopilot confirm。持续推进不会绕过 Start Gate、权限或 Plan。 ",
+    );
+    return;
+  }
+  context.pendingAutopilot = createPendingAutopilotRequest(args);
+  writeLine(output, formatPendingAutopilotDetails(context));
+  writeStatus(output, context);
+}
+
+function createPendingAutopilotRequest(args: string[]): PendingAutopilotRequest {
+  const parsed = parseJobRunOptions(args);
+  return {
+    goal: parsed.goal,
+    maxSteps: parsed.maxSteps,
+    maxTokens: parsed.maxTokens,
+    timeoutMs: parsed.timeoutMs,
+    allowEdit: parsed.allowEdit,
+    allowBash: parsed.allowBash,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function formatPendingAutopilotDetails(context: TuiContext): string {
+  const pending = context.pendingAutopilot;
+  if (!pending) {
+    return "当前没有待确认的持续推进。用法：/autopilot <目标> [--steps N] [--tokens N] [--timeout MS]。";
+  }
+  return [
+    "持续推进待确认",
+    `- 目标：${truncateDisplay(pending.goal, 100)}`,
+    `- 允许范围：durable job + background + runner fallback；allowEdit=${pending.allowEdit ? "yes" : "no"}；allowBash=${pending.allowBash ? "yes" : "no"}`,
+    `- 预算：steps<=${pending.maxSteps}；tokens<=${pending.maxTokens}；timeoutMs<=${pending.timeoutMs}`,
+    "- 禁止事项：不绕过 Start Gate / permission pipeline / Plan approval；不进入真实 smoke；不把 runner completed 当 verification PASS。",
+    "- 控制入口：/autopilot confirm 启动；/esc 或 /autopilot cancel 取消；启动后用 /job pause|resume|cancel <id>。",
+    "- 报告入口：启动后查看 /job report <id>、/job logs <id>、/background。",
+  ].join("\n");
+}
+
+async function startPendingAutopilot(context: TuiContext, output: Writable): Promise<void> {
+  const pending = context.pendingAutopilot;
+  if (!pending) {
+    writeLine(output, "当前没有待确认的持续推进。先运行 /autopilot <目标>。 ");
+    return;
+  }
+  if (context.workspaceTrustEnforced && context.config.workspaceTrust.level !== "trusted") {
+    writeLine(
+      output,
+      getWorkspaceTrustCommandGuard("/autopilot", ["confirm"], context) ??
+        "当前工作区未信任，未启动持续推进。",
+    );
+    writeStatus(output, context);
+    return;
+  }
+  context.pendingAutopilot = undefined;
+  const args = [
+    "run",
+    pending.goal,
+    "--max-steps",
+    String(pending.maxSteps),
+    "--tokens",
+    String(pending.maxTokens),
+    "--timeout",
+    String(pending.timeoutMs),
+    ...(pending.allowEdit ? ["--allow-edit"] : []),
+    ...(pending.allowBash ? ["--allow-bash"] : []),
+  ];
+  await handleJobCommand(args, context, output);
 }
 
 async function handleModeCommand(
@@ -11158,6 +11539,11 @@ export async function handleNaturalInput(
   const pendingLocalApproval = context.pendingLocalApproval;
   if (pendingLocalApproval) {
     const normalized = text.trim().toLowerCase();
+    if (/^(details|detail|详情|细节)$/iu.test(normalized)) {
+      writeLine(output, formatPendingApprovalDetails(pendingLocalApproval, context));
+      writeStatus(output, context);
+      return "handled";
+    }
     if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(normalized)) {
       const approval = pendingLocalApproval;
       context.pendingLocalApproval = undefined;
@@ -11333,6 +11719,11 @@ export async function handleNaturalInput(
 
   if (context.pendingNaturalCommand) {
     const gate = context.pendingNaturalCommand;
+    if (/^(details|detail|详情|细节)$/iu.test(text.trim())) {
+      writeLine(output, formatPendingNaturalCommandDetails(gate, context));
+      writeStatus(output, context);
+      return "handled";
+    }
     const decision = matchesNaturalGateConfirmation(gate, text);
     if (decision === "expired") {
       context.pendingNaturalCommand = undefined;
@@ -11419,6 +11810,8 @@ const LOCAL_CONTROL_PLANE_CAPABILITY_IDS = new Set([
   "cache",
   "permissions",
   "hooks",
+  "trust",
+  "autopilot",
 ]);
 
 const LOCAL_READONLY_COMMANDS = new Set([
@@ -12707,14 +13100,14 @@ async function executeModelToolUse(
     if (drift.drift) {
       const warning =
         context.language === "en-US"
-          ? `Architecture drift requires confirmation before this tool use: ${drift.warnings.join("; ")}`
-          : `Architecture drift 需要确认后才能执行本次工具调用：${drift.warnings.join("；")}`;
+          ? `Scope change requires confirmation before this tool use: ${drift.warnings.join("; ")}`
+          : `本次工具调用改变约定范围，需要确认后才能执行：${drift.warnings.join("；")}`;
       await appendSystemEvent(context, sessionId, warning, "warning");
       writeLine(
         output,
         context.language === "en-US"
-          ? "Architecture drift detected. Confirm before running this tool."
-          : "检测到 Architecture drift。确认后才会运行本工具。",
+          ? "This tool use changes the agreed scope. Confirm before running it."
+          : "本次工具调用会改变已约定范围。确认后才会运行本工具。",
       );
       context.pendingLocalApproval = {
         kind: "architecture_drift",
@@ -15248,6 +15641,11 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
 function writeStatus(output: Writable, context: TuiContext): void {
   const background = context.backgroundTasks.filter((task) => task.status === "running").length;
   const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
+  const gate = context.pendingLocalApproval
+    ? "waiting approval"
+    : context.pendingNaturalCommand || context.pendingAutopilot
+      ? "waiting confirmation"
+      : "none";
   writeLine(
     output,
     formatRuntimeStatusLine(
@@ -15261,11 +15659,7 @@ function writeStatus(output: Writable, context: TuiContext): void {
         background,
         cacheHitRate: latestHitRate,
         indexStatus: context.index.status,
-        gate: context.pendingLocalApproval
-          ? "waiting approval"
-          : context.pendingNaturalCommand
-            ? "waiting confirmation"
-            : "none",
+        gate,
       },
       context.language,
     ),

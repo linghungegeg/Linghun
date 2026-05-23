@@ -5345,6 +5345,237 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
   });
 
+  it("covers Polish B pending interaction controls and safe details", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-controls-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.pendingNaturalCommand = {
+      gateId: "gate-raw-secret",
+      capabilityId: "mode",
+      source: "natural",
+      exactCommand: "/mode plan",
+      command: "/mode plan",
+      risk: "start_gate",
+      scope: `current project ${project}`,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: false,
+    };
+    await handleNaturalInput("details", context, output);
+    expect(output.text).toContain("待确认 Start Gate 详情");
+    expect(output.text).not.toContain("gate-raw-secret");
+    await handleSlashCommand("/esc", context, output);
+    expect(context.pendingNaturalCommand).toBeUndefined();
+    expect(context.permissionMode).toBe("default");
+
+    context.pendingNaturalCommand = {
+      gateId: "gate-exact-secret",
+      capabilityId: "mode",
+      source: "natural",
+      exactCommand: "/mode full-access",
+      command: "/mode full-access",
+      risk: "start_gate",
+      scope: `current project ${project}`,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: true,
+    };
+    await handleSlashCommand("/enter", context, output);
+    expect(output.text).toContain("/enter 不会绕过精确确认");
+    expect(context.pendingNaturalCommand).toBeTruthy();
+    expect(context.permissionMode).toBe("default");
+    await handleSlashCommand("/esc", context, output);
+
+    context.pendingNaturalCommand = {
+      gateId: "gate-normal-secret",
+      capabilityId: "mode",
+      source: "natural",
+      exactCommand: "/mode plan",
+      command: "/mode plan",
+      risk: "start_gate",
+      scope: `current project ${project}`,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: false,
+    };
+    await handleSlashCommand("/enter", context, output);
+    expect(context.pendingNaturalCommand).toBeUndefined();
+    expect(context.permissionMode).toBe("plan");
+
+    context.permissionMode = "default";
+    context.pendingLocalApproval = {
+      kind: "index_ignore_write",
+      plan: {
+        path: ".linghunignore",
+        content: "raw-schema sk-test-secret request-secret\n",
+        expectedHash: "hash-secret",
+        missingEntries: ["secret.json"],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+    await handleNaturalInput("details", context, output);
+    expect(output.text).toContain("待确认权限详情");
+    expect(output.text).toContain("条目数量：1");
+    expect(output.text).not.toContain("sk-test-secret");
+    expect(output.text).not.toContain("request-secret");
+    expect(output.text).not.toContain("hash-secret");
+    await handleSlashCommand("/esc", context, output);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+
+    await handleSlashCommand("/plan", context, output);
+    expect(context.activePlan).toBeTruthy();
+    await handleSlashCommand("/esc", context, output);
+    expect(context.activePlan).toBeUndefined();
+    expect(context.planAccepted).toBe(false);
+  });
+
+  it("covers Polish B Workspace Trust boundaries without bypassing permissions", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/trust restricted", context, output);
+    expect(context.config.workspaceTrust.level).toBe("restricted");
+    expect(context.workspaceTrustEnforced).toBe(true);
+    await handleSlashCommand("/status", context, output);
+    await handleSlashCommand("/help", context, output);
+    await handleSlashCommand("/doctor readiness", context, output);
+    await handleSlashCommand("/write trust.txt blocked", context, output);
+    await handleSlashCommand("/bash node --version", context, output);
+    await handleSlashCommand("/job run blocked by trust", context, output);
+    expect(output.text).toContain("已拦截 /write");
+    expect(output.text).toContain("已拦截 /bash");
+    expect(output.text).toContain("已拦截 /job");
+    expect(output.text).toContain("Readiness：本地");
+    expect(await readFile(join(project, ".linghun", "settings.json"), "utf8")).toContain(
+      '"level": "restricted"',
+    );
+    await expect(readFile(join(project, "trust.txt"), "utf8")).rejects.toThrow();
+
+    context.config = {
+      ...context.config,
+      workspaceTrust: { ...context.config.workspaceTrust, level: "trusted" },
+    };
+    context.workspaceTrustEnforced = false;
+    await handleSlashCommand(
+      "/autopilot trusted pending --steps 1 --tokens 50000",
+      context,
+      output,
+    );
+    expect(context.pendingAutopilot).toBeTruthy();
+    await handleSlashCommand("/trust restricted", context, output);
+    await handleSlashCommand("/autopilot confirm", context, output);
+    expect(output.text).toContain("已拦截 /autopilot");
+    expect(context.pendingAutopilot).toBeTruthy();
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+    await handleSlashCommand("/autopilot cancel", context, output);
+    expect(context.pendingAutopilot).toBeUndefined();
+
+    await handleSlashCommand("/trust trust", context, output);
+    expect(context.config.workspaceTrust.level).toBe("trusted");
+    expect(context.workspaceTrustEnforced).toBe(false);
+    await handleSlashCommand("/write trust.txt still-asks", context, output);
+    expect(output.text).toContain("权限已拒绝");
+    expect(output.text).toContain("需要用户确认后才会执行本次工具");
+    await expect(readFile(join(project, "trust.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("covers Polish B bounded autopilot state and job delegation boundaries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-autopilot-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-polish-b-autopilot",
+      kind: "test_result",
+      summary: "Polish B autopilot focused evidence",
+      source: "vitest",
+      supportsClaims: ["polish-b-autopilot"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand(
+      "/autopilot polish b bounded work --steps 2 --tokens 50000 --timeout 60000 --allow-edit --allow-bash",
+      context,
+      output,
+    );
+    expect(context.pendingAutopilot).toMatchObject({
+      goal: "polish b bounded work",
+      maxSteps: 2,
+      maxTokens: 50_000,
+      timeoutMs: 60_000,
+      allowEdit: true,
+      allowBash: true,
+    });
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+    await handleSlashCommand("/autopilot status", context, output);
+    await handleSlashCommand("/autopilot details", context, output);
+    expect(output.text).toContain("持续推进待确认");
+    expect(output.text).toContain("steps<=2");
+    expect(output.text).toContain("allowEdit=yes");
+    await handleSlashCommand("/autopilot cancel", context, output);
+    expect(context.pendingAutopilot).toBeUndefined();
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+
+    await handleSlashCommand(
+      "/autopilot polish b delegated job --steps 2 --tokens 50000",
+      context,
+      output,
+    );
+    await handleSlashCommand("/autopilot confirm", context, output);
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+    expect(context.pendingAutopilot).toBeUndefined();
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    expect(context.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ kind: "autopilot" }),
+    );
+    const state = JSON.parse(
+      await readFile(
+        join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json"),
+        "utf8",
+      ),
+    ) as { result?: { status?: string; summary?: string } };
+    expect(state.result?.status).not.toBe("pass");
+    expect(state.result?.summary).toContain("no PASS evidence");
+    expect(output.text).toContain("local durable metadata + unified background task");
+    expect(output.text).toContain("never equals verification PASS");
+  });
+
+  it("keeps Polish B permission mode hard boundaries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-modes-"));
+    await writeFile(join(project, "sample.txt"), "alpha", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleNaturalInput("请帮我开启 full-access", context, output);
+    expect(context.permissionMode).toBe("default");
+    await handleNaturalInput("yes", context, output);
+    expect(context.permissionMode).toBe("default");
+    expect(output.text).toContain("普通 yes/确认 未放行");
+
+    await handleSlashCommand("/mode plan", context, output);
+    await handleSlashCommand("/write sample.txt beta", context, output);
+    await handleSlashCommand("/bash node --version", context, output);
+    expect(output.text).toContain("Plan 模式禁止写入");
+    expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
+  });
+
   it("shows only canonical modes and normalizes legacy aliases", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

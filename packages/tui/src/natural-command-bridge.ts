@@ -138,6 +138,10 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/memory", capabilityId: "memory", userVisible: true },
   { slash: "/mode", capabilityId: "mode", userVisible: true },
   { slash: "/tab", capabilityId: "tab", userVisible: true },
+  { slash: "/esc", capabilityId: "esc", userVisible: true },
+  { slash: "/enter", capabilityId: "enter", userVisible: true },
+  { slash: "/trust", capabilityId: "trust", userVisible: true },
+  { slash: "/autopilot", capabilityId: "autopilot", userVisible: true },
   { slash: "/plan", capabilityId: "plan", userVisible: true },
   { slash: "/permissions", capabilityId: "permissions", userVisible: true },
   { slash: "/background", capabilityId: "background", userVisible: true },
@@ -436,6 +440,54 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "Cycles common permission modes.",
     "只在用户明确要切换常用模式时使用。",
     "Use only when explicitly cycling common modes.",
+    "start_gate",
+  ),
+  cap(
+    "esc",
+    "/esc",
+    ["esc", "escape", "取消当前交互", "cancel pending"],
+    "取消当前交互",
+    "Cancel pending",
+    "取消等待中的输入、确认、权限、计划或持续推进确认；不会取消已执行工具。",
+    "Cancels pending input, confirmation, permission, plan, or autopilot approval; does not cancel tools that already ran.",
+    "需要取消当前等待确认的交互。",
+    "Use to cancel the current pending interaction.",
+    "start_gate",
+  ),
+  cap(
+    "enter",
+    "/enter",
+    ["enter", "确认当前选择", "confirm pending"],
+    "确认当前选择",
+    "Confirm pending",
+    "确认当前显式选择；需要精确确认的危险动作仍不会放行。",
+    "Confirms the current explicit choice; exact-confirmation actions remain protected.",
+    "需要用等价 Enter 路径确认当前选择。",
+    "Use as the Enter-equivalent confirmation path.",
+    "start_gate",
+  ),
+  cap(
+    "trust",
+    "/trust",
+    ["trust", "workspace trust", "信任工作区", "restricted", "untrust"],
+    "工作区信任",
+    "Workspace trust",
+    "查看或设置当前工作区 trust / restricted / untrusted 边界。",
+    "Shows or sets workspace trust / restricted / untrusted boundaries.",
+    "需要查看或调整当前项目的信任状态。",
+    "Use for workspace trust state and boundaries.",
+    "start_gate",
+  ),
+  cap(
+    "autopilot",
+    "/autopilot",
+    ["autopilot", "持续推进", "继续做", "不用每步都问"],
+    "持续推进",
+    "Bounded autopilot",
+    "基于现有 durable job 启动有预算、可暂停/取消的持续推进。",
+    "Starts bounded progress on existing durable jobs with budgets and pause/cancel controls.",
+    "用户明确要求持续推进或不用每步都问。",
+    "Use only when the user explicitly asks for bounded continued progress.",
     "start_gate",
   ),
   cap(
@@ -1843,6 +1895,15 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
   if (capability.id === "mode") {
     const mode = extractPermissionMode(normalized);
     return mode ? `/mode ${mode}` : "/mode";
+  }
+  if (capability.id === "trust") {
+    if (/restricted|限制|受限/u.test(normalized)) return "/trust restricted";
+    if (/untrust|untrusted|不信任|取消信任/u.test(normalized)) return "/trust untrust";
+    if (/trust|trusted|信任/u.test(normalized)) return "/trust trust";
+    return "/trust status";
+  }
+  if (capability.id === "autopilot") {
+    return "/autopilot";
   }
   if (capability.id === "model") {
     if (

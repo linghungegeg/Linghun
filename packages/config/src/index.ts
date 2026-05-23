@@ -178,6 +178,14 @@ export type NativeRunnerConfig = {
   timeoutMs: number;
 };
 
+export type WorkspaceTrustLevel = "trusted" | "restricted" | "untrusted";
+
+export type WorkspaceTrustConfig = {
+  level: WorkspaceTrustLevel;
+  trustedAt?: string;
+  updatedAt?: string;
+};
+
 export type ConfigRecoveryWarning = {
   path: string;
   reason: string;
@@ -210,6 +218,7 @@ export type LinghunConfig = {
   plugins: PluginConfig;
   remote: RemoteConfig;
   nativeRunner: NativeRunnerConfig;
+  workspaceTrust: WorkspaceTrustConfig;
 };
 
 const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
@@ -428,6 +437,9 @@ export const defaultConfig: LinghunConfig = {
     expectedProtocol: "linghun-native-runner-prototype.v1",
     source: "disabled",
     timeoutMs: 60_000,
+  },
+  workspaceTrust: {
+    level: "trusted",
   },
 };
 
@@ -657,6 +669,24 @@ export async function removeMcpServerConfig(
   return next;
 }
 
+export async function saveWorkspaceTrust(
+  level: WorkspaceTrustLevel,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const now = new Date().toISOString();
+  const next: LinghunConfig = {
+    ...current,
+    workspaceTrust: {
+      level,
+      trustedAt: level === "trusted" ? (current.workspaceTrust.trustedAt ?? now) : undefined,
+      updatedAt: now,
+    },
+  };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
 function stableUnique(values: string[]): string[] {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
@@ -707,6 +737,7 @@ function validateConfig(config: LinghunConfig): LinghunConfig {
   validateHooks(config.hooks);
   validateRemote(config.remote);
   validateNativeRunner(config.nativeRunner);
+  validateWorkspaceTrust(config.workspaceTrust);
   return config;
 }
 
@@ -938,6 +969,19 @@ function validateNativeRunner(nativeRunner: NativeRunnerConfig): void {
     throw new Error("settings.nativeRunner.source is invalid");
   }
   assertPositiveNumber(nativeRunner.timeoutMs, "settings.nativeRunner.timeoutMs");
+}
+
+function validateWorkspaceTrust(workspaceTrust: WorkspaceTrustConfig): void {
+  assertRecord(workspaceTrust, "settings.workspaceTrust");
+  if (
+    workspaceTrust.level !== "trusted" &&
+    workspaceTrust.level !== "restricted" &&
+    workspaceTrust.level !== "untrusted"
+  ) {
+    throw new Error("settings.workspaceTrust.level is invalid");
+  }
+  assertOptionalString(workspaceTrust.trustedAt, "settings.workspaceTrust.trustedAt");
+  assertOptionalString(workspaceTrust.updatedAt, "settings.workspaceTrust.updatedAt");
 }
 
 function assertRecord(value: unknown, path: string): asserts value is Record<string, unknown> {
@@ -1227,5 +1271,9 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     },
     remote: mergeRemoteConfig(input.remote),
     nativeRunner: mergeNativeRunnerConfig(input.nativeRunner),
+    workspaceTrust: {
+      ...defaultConfig.workspaceTrust,
+      ...input.workspaceTrust,
+    },
   };
 }

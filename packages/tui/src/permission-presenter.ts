@@ -23,7 +23,7 @@ export function formatLocalToolPermissionPrompt(
       `- Why paused: ${permission.reason}`,
       `- Safety level: ${risk}`,
       `- Scope: ${files}`,
-      "- Next: type yes/confirm to allow once, or no/cancel to deny. The tool has not run yet.",
+      "- Next: type yes/confirm to allow once, no/cancel/Esc to deny, or details to inspect the safe summary. The tool has not run yet.",
     ].join("\n");
   }
   return [
@@ -32,7 +32,7 @@ export function formatLocalToolPermissionPrompt(
     `- 暂停原因：${permission.reason}`,
     `- 安全级别：${risk}`,
     `- 影响范围：${files}`,
-    "- 下一步：输入 yes/确认/继续 可本次允许；输入 no/取消 可拒绝。工具尚未执行。",
+    "- 下一步：输入 yes/确认/继续 可本次允许；输入 no/取消/Esc 可拒绝；输入 details/详情 查看安全摘要。工具尚未执行。",
   ].join("\n");
 }
 
