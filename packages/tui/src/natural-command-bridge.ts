@@ -469,7 +469,17 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "trust",
     "/trust",
-    ["trust", "workspace trust", "信任工作区", "restricted", "untrust"],
+    [
+      "trust",
+      "workspace trust",
+      "trust this folder",
+      "trust this project",
+      "信任工作区",
+      "信任这个项目",
+      "调整工作区信任",
+      "restricted",
+      "untrust",
+    ],
     "工作区信任",
     "Workspace trust",
     "查看或设置当前工作区 trust / restricted / untrusted 边界。",
@@ -1390,6 +1400,21 @@ export function formatNaturalStartGate(
     : intent.language === "en-US"
       ? "Reply `yes` to continue, or type anything else to cancel."
       : "回复 `确认` 继续；输入其他内容则取消。";
+  if (c?.id === "trust") {
+    return intent.language === "en-US"
+      ? [
+          "I recognized that you want to adjust workspace trust. Authorize?",
+          "- Yes: continue to the safe confirmation path.",
+          "- No: cancel; no workspace trust change is made.",
+          "- Details: show what workspace trust can allow and which safety boundaries still apply.",
+        ].join("\n")
+      : [
+          "我识别到你想调整工作区信任。是否授权？",
+          "- Yes：继续进入安全确认路径。",
+          "- No：取消；不改变工作区信任。",
+          "- Details：查看 workspace trust 可允许什么，以及哪些安全边界仍然生效。",
+        ].join("\n");
+  }
   if (intent.language === "en-US") {
     return [
       `Ready to prepare: ${c?.titleEn ?? "command"}.`,
@@ -1705,6 +1730,7 @@ function isNaturalControlPlaneIntent(
   if (id === "read") return classification.projectRulesRead;
   if (id === "index") return classification.indexAction === "safe";
   if (id === "mode" && extractPermissionMode(text)) return true;
+  if (id === "trust") return true;
   return (
     ["model", "cache", "memory", "mode", "readiness"].includes(id) && !classification.actionRequest
   );
@@ -1897,9 +1923,6 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     return mode ? `/mode ${mode}` : "/mode";
   }
   if (capability.id === "trust") {
-    if (/restricted|限制|受限/u.test(normalized)) return "/trust restricted";
-    if (/untrust|untrusted|不信任|取消信任/u.test(normalized)) return "/trust untrust";
-    if (/trust|trusted|信任/u.test(normalized)) return "/trust trust";
     return "/trust status";
   }
   if (capability.id === "autopilot") {

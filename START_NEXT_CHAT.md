@@ -121,6 +121,8 @@
 
 后续每个实现阶段开工前必须先做 Source-Level Reality Check：读取本阶段 source-of-truth 后，优先用 codebase-memory 索引项目 `F-Linghun` 定位现有实现，再用 `rg` / 精读关键源码交叉确认；输出 existing implementation、gaps、minimal touch points、forbidden duplicate systems。没有这份源码事实清单，不允许直接实现。若发现已有 runtime 基础，必须优先复用和补齐，不得新造第二套系统；若发现参考源或历史审计中本阶段相关细节遗漏，必须在阶段 scope 中逐项裁决 DONE / DEFERRED / NOT-DO，尽量当轮补齐 terminal-scope 成熟度，减少最后审计才补技术债。
 
+后续 Polish C/D、真实全量实测前终极综合验收和所有 TUI/UX 相关实现，还必须执行 Anti-Overdesign / User-Layer Lightness 约束：用户层保持轻学习、轻交互，常见能力优先自然语言、轻提示、Yes/No/Details、快捷键和状态面板；slash 命令只作为高级/精确/恢复入口。终极验收必须确认“用户层无感、底层不弱”：普通开发者不需要敲或记任何 slash 命令，也能通过自然语言、轻确认和状态提示完成常见开发/诊断/修复/验证/长任务流程；底层仍必须真实接入 Start Gate、permission、tool loop、evidence、doctor、job/runner、MCP/index/cache 等边界。参考 CCB / OpenCode / Warp 时必须基于源码或公开事实吸收“轻交互 + 真边界”，不得把成熟度做成重 wizard、命令百科、审计报告流或平台化设计。终极审计需逐项裁决 KEEP / SIMPLIFY / HIDE_ADVANCED / MERGE / REMOVE / DEFER_RELEASE；若功能真实但用户层过重，优先降噪、隐藏高级入口或并入 Start Gate / permission / doctor / NCB，而不是新增系统。
+
 要求：
 - 只做当前阶段范围内的事情。
 - Phase 15 preflight 已完成，交付文档为 F:\Linghun\docs\delivery\phase-15-natural-command-bridge.md。自然语言桥已覆盖中文和英文语义变体，例如“自动记忆是否打开 / is memory enabled”“帮我建立索引 / build the index”“缓存命中怎么样 / cache hit rate”“现在什么模型 / current model”“打开 bug-fix 工作流 / start bug-fix workflow”。所有 slash 命令都能被自然语言询问用途和风险，高风险命令只能解释、Start Gate 或进入权限审批。

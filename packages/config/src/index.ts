@@ -182,6 +182,7 @@ export type WorkspaceTrustLevel = "trusted" | "restricted" | "untrusted";
 
 export type WorkspaceTrustConfig = {
   level: WorkspaceTrustLevel;
+  recorded: boolean;
   trustedAt?: string;
   updatedAt?: string;
 };
@@ -440,6 +441,7 @@ export const defaultConfig: LinghunConfig = {
   },
   workspaceTrust: {
     level: "trusted",
+    recorded: false,
   },
 };
 
@@ -679,6 +681,7 @@ export async function saveWorkspaceTrust(
     ...current,
     workspaceTrust: {
       level,
+      recorded: true,
       trustedAt: level === "trusted" ? (current.workspaceTrust.trustedAt ?? now) : undefined,
       updatedAt: now,
     },
@@ -980,6 +983,7 @@ function validateWorkspaceTrust(workspaceTrust: WorkspaceTrustConfig): void {
   ) {
     throw new Error("settings.workspaceTrust.level is invalid");
   }
+  assertBoolean(workspaceTrust.recorded, "settings.workspaceTrust.recorded");
   assertOptionalString(workspaceTrust.trustedAt, "settings.workspaceTrust.trustedAt");
   assertOptionalString(workspaceTrust.updatedAt, "settings.workspaceTrust.updatedAt");
 }
@@ -1170,6 +1174,19 @@ function mergeNativeRunnerConfig(
   };
 }
 
+function mergeWorkspaceTrustConfig(
+  workspaceTrust: Partial<WorkspaceTrustConfig> | undefined,
+): WorkspaceTrustConfig {
+  if (!workspaceTrust) {
+    return defaultConfig.workspaceTrust;
+  }
+  return {
+    ...defaultConfig.workspaceTrust,
+    ...workspaceTrust,
+    recorded: workspaceTrust.recorded ?? true,
+  };
+}
+
 function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
   const deepseekProvider = cleanProviderOverride(input.providers?.deepseek);
   const openAiCompatibleProvider = cleanProviderOverride(
@@ -1271,9 +1288,6 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     },
     remote: mergeRemoteConfig(input.remote),
     nativeRunner: mergeNativeRunnerConfig(input.nativeRunner),
-    workspaceTrust: {
-      ...defaultConfig.workspaceTrust,
-      ...input.workspaceTrust,
-    },
+    workspaceTrust: mergeWorkspaceTrustConfig(input.workspaceTrust),
   };
 }

@@ -64,6 +64,10 @@
 - 用户可见主屏必须 summary-first、human-first、action-first：只说发生了什么、影响范围、用户选择、验证状态、下一步和详情路径。
 - 完整日志、完整聊天、完整索引、完整报告、raw tool_result、raw evidence、raw flags、gateId 和内部审计/架构字段不得进入普通主屏；需要时进入 details/debug/report。
 - 反幻觉、架构、Source-Level Reality Check、Evidence、risk flag 等底层机制默认回归底层；普通用户只看到成熟的人话摘要和可执行下一步。
+- 用户层必须保持轻学习、轻交互：常见能力优先自然语言、轻提示、Yes/No/Details、快捷键和状态面板；slash 命令只能作为高级/精确/恢复入口，不得把普通主路径做成命令依赖。
+- 终极验收必须确认“用户层无感、底层不弱”：普通开发者不需要敲或记任何 slash 命令，也能通过自然语言、轻确认和状态提示完成常见开发/诊断/修复/验证/长任务流程；底层仍必须真实接入 Start Gate、permission、tool loop、evidence、doctor、job/runner、MCP/index/cache 等边界。
+- 参考 CCB / OpenCode / Warp 时必须吸收“轻交互 + 真边界”，不得把成熟度误解为重 wizard、命令百科、审计报告流或平台化设计。以 Workspace Trust 为例，第一体验应是轻量确认和真实安全边界，而不是要求用户记住 `/trust` 类命令。
+- 终极综合验收必须包含 Anti-Overdesign / User-Layer Lightness Audit：逐项裁决 KEEP / SIMPLIFY / HIDE_ADVANCED / MERGE / REMOVE / DEFER_RELEASE。若功能已经真实接到底层但用户层过重，优先降噪、隐藏高级入口或并入现有 Start Gate / permission / doctor / NCB，而不是继续加新系统。
 
 ## 阶段开工硬门槛
 

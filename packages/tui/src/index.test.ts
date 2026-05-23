@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import {
   type LinghunConfig,
   defaultConfig,
@@ -33,6 +33,7 @@ import {
   createWorkflowState,
   handleNaturalInput,
   handleSlashCommand,
+  handleTuiKeypress,
   processRemoteApprovalForTest,
   recordModelUsage,
   runTui,
@@ -55,6 +56,16 @@ class MemoryOutput extends Writable {
   override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
     this.text += chunk.toString();
     callback();
+  }
+}
+
+class TtyInput extends PassThrough {
+  isTTY = true;
+  isRaw = false;
+
+  setRawMode(enabled: boolean): this {
+    this.isRaw = enabled;
+    return this;
   }
 }
 
@@ -2806,6 +2817,66 @@ describe("Phase 06 TUI slash commands", () => {
     expect(primary).not.toContain("123e4567");
   });
 
+  it("preprocesses Polish B natural workspace trust as light confirmation with Details", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+
+    await handleNaturalInput("信任这个项目", context, output);
+
+    expect(context.pendingNaturalCommand?.capabilityId).toBe("trust");
+    expect(context.pendingNaturalCommand?.exactCommand).toBe("/trust status");
+    expect(context.pendingNaturalCommand?.exactCommand).not.toBe("/trust trust");
+    expect(output.text).toContain("我识别到你想调整工作区信任。是否授权？");
+    expect(output.text).toContain("Yes");
+    expect(output.text).toContain("No");
+    expect(output.text).toContain("Details");
+    expect(output.text).not.toContain("信任后 Linghun 可以在当前目录读、改、运行命令");
+    expect(output.text).not.toContain("/trust trust");
+
+    await handleNaturalInput("details", context, output);
+
+    expect(output.text).toContain("信任后 Linghun 可以在当前目录读、改、运行命令");
+    expect(output.text).toContain("Start Gate");
+    expect(output.text).toContain("Plan approval");
+    expect(output.text).toContain("permission pipeline");
+    expect(output.text).toContain("/trust 仍是高级恢复/状态入口");
+    expect(output.text).not.toContain("/trust trust");
+  });
+
+  it("preprocesses English Polish B natural workspace trust without using /trust trust", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.language = "en-US";
+    const output = new MemoryOutput();
+
+    await handleNaturalInput("trust this folder", context, output);
+
+    expect(context.pendingNaturalCommand?.capabilityId).toBe("trust");
+    expect(context.pendingNaturalCommand?.exactCommand).toBe("/trust status");
+    expect(context.pendingNaturalCommand?.exactCommand).not.toBe("/trust trust");
+    expect(output.text).toContain(
+      "I recognized that you want to adjust workspace trust. Authorize?",
+    );
+    expect(output.text).toContain("Yes");
+    expect(output.text).toContain("No");
+    expect(output.text).toContain("Details");
+    expect(output.text).not.toContain("If trusted, Linghun can read, edit, and run commands");
+
+    await handleNaturalInput("Details", context, output);
+
+    expect(output.text).toContain("If trusted, Linghun can read, edit, and run commands");
+    expect(output.text).toContain("Start Gate");
+    expect(output.text).toContain("Plan approval");
+    expect(output.text).toContain("permission pipeline");
+    expect(output.text).toContain("/trust remains an advanced recovery/status entry");
+    expect(output.text).not.toContain("/trust trust");
+  });
+
   it("preprocesses high-confidence natural model-status wording locally", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -5345,7 +5416,84 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
   });
 
-  it("covers Polish B pending interaction controls and safe details", async () => {
+  it("covers Polish B real Esc, Enter, and Shift+Tab key handlers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-real-keys-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.pendingNaturalCommand = {
+      gateId: "key-gate-exact-secret",
+      capabilityId: "mode",
+      source: "natural",
+      exactCommand: "/mode full-access",
+      command: "/mode full-access",
+      risk: "start_gate",
+      scope: `current project ${project}`,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: true,
+    };
+    await handleTuiKeypress("return", context, output);
+    expect(output.text).toContain("/enter 不会绕过精确确认");
+    expect(context.pendingNaturalCommand).toBeTruthy();
+    expect(context.permissionMode).toBe("default");
+    await handleTuiKeypress("escape", context, output);
+    expect(context.pendingNaturalCommand).toBeUndefined();
+
+    context.pendingNaturalCommand = {
+      gateId: "key-gate-normal-secret",
+      capabilityId: "mode",
+      source: "natural",
+      exactCommand: "/mode plan",
+      command: "/mode plan",
+      risk: "start_gate",
+      scope: `current project ${project}`,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      requiresExactConfirmation: false,
+    };
+    await handleTuiKeypress("return", context, output);
+    expect(context.pendingNaturalCommand).toBeUndefined();
+    expect(context.permissionMode).toBe("plan");
+
+    context.permissionMode = "default";
+    context.pendingLocalApproval = {
+      kind: "index_ignore_write",
+      plan: {
+        path: ".linghunignore",
+        content: "secret.json\n",
+        expectedHash: "key-hash-secret",
+        missingEntries: ["secret.json"],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+    await handleTuiKeypress("escape", context, output);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+
+    await handleSlashCommand("/plan", context, output);
+    expect(context.activePlan).toBeTruthy();
+    await handleTuiKeypress("escape", context, output);
+    expect(context.activePlan).toBeUndefined();
+
+    await handleSlashCommand(
+      "/autopilot key handler work --steps 1 --tokens 50000",
+      context,
+      output,
+    );
+    expect(context.pendingAutopilot).toBeTruthy();
+    await handleTuiKeypress("escape", context, output);
+    expect(context.pendingAutopilot).toBeUndefined();
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+
+    await handleTuiKeypress("shift-tab", context, output);
+    expect(context.permissionMode).toBe("plan");
+    expect(output.text).toContain("Shift+Tab 只打开这个切换提示；不会开启 full-access");
+    expect(output.text).toContain("不能绕过 Start Gate");
+  });
+
+  it("covers Polish B pending interaction controls and slash fallbacks with safe details", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-controls-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -5430,6 +5578,95 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/esc", context, output);
     expect(context.activePlan).toBeUndefined();
     expect(context.planAccepted).toBe(false);
+  });
+
+  it("shows Polish B light Workspace Trust on first interactive missing trust and persists confirm", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-first-"));
+    const input = new TtyInput();
+    const output = new MemoryOutput();
+    const running = runTui({
+      projectPath: project,
+      stdin: input,
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    await waitForTestCondition(() => output.text.includes("工作区信任"));
+    expect(output.text).toContain(`当前目录：${project}`);
+    expect(output.text).toContain("是否信任这个项目");
+    expect(output.text).toContain("Enter/yes：信任此项目");
+    expect(output.text).toContain("权限管道约束");
+    input.write("\n");
+    await waitForTestCondition(() => output.text.includes("工作区信任：trusted"));
+    input.write("/exit\n");
+
+    await expect(running).resolves.toBe(0);
+    const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).toContain('"workspaceTrust"');
+    expect(settings).toContain('"level": "trusted"');
+    expect(settings).toContain('"recorded": true');
+  });
+
+  it("keeps Polish B light Workspace Trust restricted when first prompt is cancelled", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-cancel-"));
+    const input = new TtyInput();
+    const output = new MemoryOutput();
+    const running = runTui({
+      projectPath: project,
+      stdin: input,
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    await waitForTestCondition(() => output.text.includes("工作区信任"));
+    input.emit("keypress", "", { name: "escape" });
+    await waitForTestCondition(() => output.text.includes("工作区信任：restricted"));
+    input.write("/write trust.txt blocked\n/help\n/status\n/doctor readiness\n/exit\n");
+
+    await expect(running).resolves.toBe(0);
+    const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).toContain('"level": "restricted"');
+    expect(output.text).toContain("已拦截 /write");
+    expect(output.text).toContain("帮助");
+    expect(output.text).toContain("Readiness：本地");
+    await expect(readFile(join(project, "trust.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("does not show Polish B interactive Workspace Trust prompt for non-TTY input", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-nontty-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("工作区信任尚未记录");
+    expect(output.text).not.toContain("是否信任这个项目");
+    await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps Polish B trusted workspaces quiet on startup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-b-trust-quiet-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({ workspaceTrust: { level: "trusted", recorded: true } }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).not.toContain("是否信任这个项目");
+    expect(output.text).not.toContain("工作区信任尚未记录");
   });
 
   it("covers Polish B Workspace Trust boundaries without bypassing permissions", async () => {

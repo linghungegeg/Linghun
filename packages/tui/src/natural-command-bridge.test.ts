@@ -268,6 +268,26 @@ describe("Phase 15 Natural Intent Router", () => {
     expect(intent.command).toBe(command);
   });
 
+  it.each(["信任这个项目", "调整工作区信任", "trust this folder", "workspace trust"])(
+    "keeps Polish B natural workspace trust phrase off /trust trust: %s",
+    (phrase) => {
+      const intent = routeNaturalIntent(phrase);
+      expect(intent.capability?.id).toBe("trust");
+      expect(intent.action).toBe("start_gate");
+      expect(intent.command).toBe("/trust status");
+      expect(intent.command).not.toBe("/trust trust");
+    },
+  );
+
+  it.each(["/trust trust", "/trust restricted", "/trust untrust"])(
+    "keeps /trust slash fallback discoverable for %s",
+    (phrase) => {
+      const intent = routeNaturalIntent(phrase);
+      expect(intent.capability?.id).toBe("trust");
+      expect(intent.action).toBe("answer");
+    },
+  );
+
   it("returns low-confidence typos to the model instead of guessing a command", () => {
     expect(routeNaturalIntent("cach statuz").action).toBe("model");
     const multi = routeNaturalIntent("status");

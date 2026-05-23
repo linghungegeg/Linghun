@@ -1,6 +1,6 @@
 ---
 title: Pre-Smoke TUI Polish B - Interactive Controls, Permission Recovery, Workspace Trust
-status: CLOSED
+status: FINAL_CLOSE
 updated: 2026-05-24
 ---
 
@@ -8,129 +8,118 @@ updated: 2026-05-24
 
 ## 本轮定位
 
-本轮是 **Polish B remaining scope closure**，接续上一轮 auto-compact recovery 后的 `PARTIAL_CLOSURE`，只做 Polish B 剩余小收口：补 targeted tests、裁决真实 key handling、收紧 Workspace Trust 成熟度、收紧 Bounded Autopilot 测试和边界。
+本轮是 **Polish B final close**，只收尾两个已知缺口：
 
-本轮没有从头重做 SLRC，没有重扫全部参考源，没有进入 Polish C/D、Phase 18 或真实 smoke。
+1. CCB-style 轻量首次 Workspace Trust。
+2. 真实 TUI key handling：Esc / Enter / Shift+Tab。
 
-本轮先读取并基于以下当前工作区事实判断范围：
+本轮未进入 Polish C / Polish D / Phase 18，未进入真实 smoke，未宣布 Beta PASS / smoke-ready / open-source-ready，未提交 commit。
 
-- `F:\Linghun\docs\delivery\pre-smoke-tui-polish-b-interactive-controls-permission-workspace-trust.md`
-- `git status --short`
-- `git diff -- packages/tui/src/index.ts`
-- `git diff -- packages/tui/src/index.test.ts`
-- `git diff -- packages/config/src/index.ts`
-- `git diff -- packages/tui/src/natural-command-bridge.ts`
-- `git diff -- packages/tui/src/permission-presenter.ts`
+## Source-Level Reality Check
+
+本轮开工前已运行：
+
+```bash
+git status --short
+```
+
+开工时输出为空。
+
+本轮读取并基于源码事实确认：
+
+- `docs/delivery/pre-smoke-tui-polish-b-interactive-controls-permission-workspace-trust.md`
+- `packages/tui/src/index.ts`
+- `packages/tui/src/index.test.ts`
+- `packages/config/src/index.ts`
+- `packages/tui/src/natural-command-bridge.ts`
+- `packages/tui/src/permission-presenter.ts`
+- `F:\ccb-source\src\components\TrustDialog\TrustDialog.tsx`
+- `F:\ccb-source\src\interactiveHelpers.tsx`
+- `F:\ccb-source\src\utils\config.ts`
+- `F:\ccb-source\src\main.tsx` 中 trust / non-interactive 相关片段
+
+结论：
+
+1. Linghun 当前 Workspace Trust 已接到底层 guard：`getWorkspaceTrustCommandGuard()` 会在 enforced 且非 trusted 时拦截 `/write`、`/bash`、`/job run`、`/autopilot confirm`、extension/remote 等入口。
+2. 旧实现 `defaultConfig.workspaceTrust.level = "trusted"` 且 `mergeConfig()` 会把缺失配置合并成 trusted，导致首次仓库无轻提示；本轮改为可区分 `recorded=false` 与显式 trusted。
+3. 当前输入循环是 `readline/promises` line iterator。真实 key handling 必须最小接入 keypress hook，不能只改 `/esc`、`/enter`、`/tab` 文案；本轮已在 TTY path 注册 keypress，不重写非 TTY 输入路径。
+4. 最小 touch points：`packages/config/src/index.ts`、`packages/tui/src/index.ts`、`packages/tui/src/index.test.ts`、本交付文档。
+5. 不能做成文字补丁的内容：Workspace Trust 必须实际在启动路径和 guard 生效；Esc / Enter / Shift+Tab 必须实际接入 TTY keypress handler。
+
+## CCB 源码事实对照
+
+只读参考结论：
+
+- CCB `TrustDialog` 是首次未信任 workspace 的轻量确认，不是要求用户输入独立 `/trust` 主命令。
+- Dialog 展示当前目录，询问是否信任项目；信任后说明可读、改、运行命令。
+- Enter 确认，Esc/No 取消；已接受 trust 后自动跳过。
+- CCB `showSetupScreens()` 在交互式 setup 中触发 trust dialog；非交互 `--print` 跳过 trust dialog，并在 help 文案中提示只在信任目录使用。
+- CCB 持久化 trust 到项目配置；home dir 有 session-only 特例。Linghun 本轮未复制 CCB 源码实现，只参考产品行为和边界。
 
 ## 修改文件清单
 
 - `packages/config/src/index.ts`
-  - 增加 `workspaceTrust` 配置结构、默认值、校验与保存入口。
-  - 默认保持 `trusted`，避免在未显式设置信任边界时改变既有显式 slash 命令行为。
+  - `WorkspaceTrustConfig` 增加 `recorded: boolean`。
+  - `defaultConfig.workspaceTrust` 保持 level 为 trusted 以兼容旧读取，但新增 `recorded=false`，避免 missing trust 被静默当作显式 trusted。
+  - `saveWorkspaceTrust()` 写入 `recorded=true`。
+  - `mergeWorkspaceTrustConfig()` 对已有旧配置补 `recorded=true`，避免迁移旧用户配置时重复打扰。
 - `packages/tui/src/index.ts`
-  - 接入 `/esc`、`/enter`、`/trust`、`/autopilot` 的最小 TUI 控制路径。
-  - 为 pending permission / Start Gate 增加安全 `details` 摘要，隐藏 raw schema、key、token、request id、内部 gate id。
-  - pending permission / pending natural command / pending plan / pending autopilot 增加取消或确认入口。
-  - Workspace Trust 增加启动提示、状态输出、受限命令拦截与 `/trust` 持久化入口。
-  - Bounded Autopilot 只复用已有 durable job / background / runner fallback 边界；未新增 agent/job runtime。
-  - 将普通主屏中的 `Architecture drift` 文案降级为用户可理解的 scope change 提示。
-- `packages/tui/src/natural-command-bridge.ts`
-  - 将 `/esc`、`/enter`、`/trust`、`/autopilot` 纳入用户可见控制面 catalog。
-  - 增加自然语言桥对 trust/autopilot 的最小映射，但不把危险动作变成静默执行。
-- `packages/tui/src/permission-presenter.ts`
-  - permission prompt 增加 `Esc` / `details` 恢复提示。
+  - 首次交互式启动且 trust 未记录时显示轻量 Workspace Trust prompt。
+  - Enter/yes 写入 trusted；Esc/no 写入 restricted。
+  - 已 trusted 后安静启动；`/trust` 保留为高级 fallback/status/recover，不作为主路径。
+  - restricted/untrusted 下继续拦截高风险入口；`/help`、`/status`、`/doctor` 等只读诊断仍可用。
+  - TTY 输入路径注册最小 keypress hook：Esc 取消 pending interaction，Enter 确认普通 pending interaction，Shift+Tab 打开 mode switch 提示且不启用 full-access。
+  - 非 TTY 输入路径保持原 line/chunk 读取，不弹 trust prompt，不改 pipe/script 生命周期。
 - `packages/tui/src/index.test.ts`
-  - 新增 Polish B targeted tests，覆盖 pending controls、safe details、Workspace Trust、Bounded Autopilot、权限模式边界和 job/runner no-PASS。
+  - 新增 focused tests 覆盖首次 trust prompt、trust confirm 持久化、trust cancel restricted、高风险拦截、只读命令可用、trusted quiet startup、非 TTY 不弹交互 prompt、真实 key handler 与 slash fallback。
 - `docs/delivery/pre-smoke-tui-polish-b-interactive-controls-permission-workspace-trust.md`
-  - 将报告从 `PARTIAL_CLOSURE` 更新为 `CLOSED`。
+  - 本报告更新为 Polish B final close。
 
-## DONE
+## Linghun 真实接入点
 
-- 四权限模式的用户可见差异仍保留：`default` / `auto-review` / `plan` / `full-access` 文案和模式边界未改语义。
-- `full-access` 仍不能通过自然语言静默开启：仍需要本地 `LINGHUN_ENABLE_FULL_ACCESS=1` opt-in，且 `plan -> full-access` 仍受阻断。
-- pending Start Gate / permission / plan approval / autopilot confirmation 有取消或拒绝路径：
-  - `/esc` 可取消待确认的 permission、natural command、autopilot、plan。
-  - permission 仍支持 `no/cancel` 拒绝。
-  - `/enter` 只确认允许普通确认的 pending interaction；对需要精确命令的 Start Gate 不绕过。
-- `details` / permission / trust / autopilot 输出使用安全摘要，不输出 raw schema、key、token、request id、内部 gate id。
-- Workspace Trust 最小成熟闭合：
-  - 默认 `trusted`，原因是 Polish B 不引入“首次信任弹窗”或改变既有显式 slash 命令行为。
-  - 默认 `trusted` 不是首次信任弹窗，也不是绕过权限；它只表示不主动启用 workspace trust 拦截层，正常 permission pipeline 仍生效。
-  - 用户可显式 `/trust restricted` 或 `/trust untrust` 切到受限边界。
-  - restricted/untrusted 下只限制高风险动作：写入、Bash、部分扩展/远程/长任务入口；不影响 `/status`、`/help`、`/doctor readiness` 等只读状态/诊断。
-  - trust 状态持久化到项目 `.linghun/settings.json` 的 `workspaceTrust` 字段。
-- Bounded Autopilot 最小成熟闭合：
-  - `/autopilot <目标>` 创建 pending request，包含 goal、maxSteps、maxTokens、timeoutMs、allowEdit、allowBash。
-  - `/autopilot status|details|cancel|confirm` 状态、详情、取消、确认路径可用。
-  - confirm 前不启动 job。
-  - restricted/untrusted 下 confirm 不启动。
-  - confirm 后只调用既有 `/job run`，复用 durable job / background / runner fallback；未新增第二套 agent/job runtime。
-  - 不声明 native runner 完整收益，不声明 verification PASS。
-- runner/job completed 仍不等于 verification PASS；测试覆盖 no-PASS 边界。
-- 普通主屏中的内部审计术语做了最小降噪：`Architecture drift` 用户提示改为 scope change，不展开底层审计机制。
+### Workspace Trust
 
-## Targeted tests 覆盖
+- 启动路径：`runTui()` 在主屏状态输出前调用首次 trust prompt。
+- 配置路径：`.linghun/settings.json` 的 `workspaceTrust` 字段持久化 `level`、`recorded`、`trustedAt`、`updatedAt`。
+- Guard 路径：`getWorkspaceTrustCommandGuard()` / `isWorkspaceTrustRestrictedCommand()` 继续作为受限工作区的高风险入口拦截点。
+- 高级 fallback：`/trust status|trust|restricted|untrust` 保留，但不再是首次信任主体验。
 
-新增 targeted tests 覆盖：
+### Real key handling
 
-- `/esc` 取消 pending Start Gate。
-- `/esc` 取消 pending permission。
-- `/esc` 取消 pending plan approval。
-- `/enter` 不绕过 exact confirmation。
-- `/enter` 可确认普通 pending interaction。
-- `details` 展示安全摘要，不含 raw schema / key / token / gateId / request id。
-- `/trust restricted` 后拦截 `/write`、`/bash`、`/job run`、`/autopilot confirm`。
-- `/trust trust` 后恢复既有 permission pipeline，不静默绕过 permission。
-- `/autopilot status/details/cancel/confirm` 状态正确。
-- autopilot 启动只转到既有 `/job run`，不新增 agent/job runtime。
-- runner/job completed 不等于 verification PASS。
-- full-access 仍不能通过自然语言静默开启。
-- plan 模式仍不能直接写文件或运行高风险动作。
+- TTY path：`readInputLines()` 对 TTY 输入使用 `emitKeypressEvents()` 注册 keypress listener，并在 finally 中清理 listener 与 raw mode。
+- Esc：调用同一套 pending cancel 逻辑，覆盖 pending permission / natural command / plan / autopilot。
+- Enter：只在有 pending interaction 时调用普通确认逻辑；需要 exact confirmation 的 Start Gate 仍被拒绝，不绕过 full-access / force / dangerous confirmation。
+- Shift+Tab：打开 mode switch 提示，列出四权限模式，但不直接开启 full-access，不绕过 Start Gate。
+- Slash fallback：`/esc`、`/enter`、`/tab` 继续保留。
 
-## 真实 key handling 裁决
+## Focused tests 覆盖
 
-状态：**DEFERRED**，但不阻塞 Polish B CLOSED。
+新增或更新 focused tests 覆盖：
 
-裁决依据：当前主输入循环位于 `runTui` / `readInputLines`，TTY 路径使用 `node:readline/promises` 的 line iterator：
-
-- 非 TTY：一次性读取 chunks，按换行切分。
-- TTY：`createInterface({ input, output })` 后 `for await (const line of rl)`，只接收提交后的完整 line。
-
-在这个结构下，安全支持真实 `Esc` / `Enter` / `Shift+Tab` 需要切换 raw keypress mode 或并行注册 keypress listener。该改动会触碰输入循环语义、readline 生命周期、TTY/non-TTY 差异和测试输入模型，不属于 Polish B remaining scope 的最小安全改动。
-
-本轮保留 slash-equivalent：
-
-- `/esc`
-- `/enter`
-- `/tab`
-
-没有假装完成真实 key handling；如后续要做，应单独进入小范围输入层任务，不为了 Polish B 重写输入循环。
-
-## NOT-DO
-
-- 未进入 Polish C / Polish D / Phase 18。
-- 未进入真实 smoke。
-- 未宣布 Beta PASS / smoke-ready / open-source-ready。
-- 未新增第二套 NCB / permission / provider / tool / evidence / MCP / index / memory / agent / job runtime。
-- 未改变四权限模式语义。
-- 未绕过 Start Gate / permission pipeline / Plan approval。
-- 未把 slash 命令当主体验；slash 只作为控制与恢复入口。
-- 未做反幻觉 / Architecture Runtime 二阶增强。
-- 未新增依赖。
-- 未提交 commit。
+- 首次 missing trust 的交互式路径会出现轻量 trust prompt。
+- trust confirm 后写入 `.linghun/settings.json`。
+- trust cancel 后进入 restricted，并拦截高风险命令。
+- restricted/untrusted 下 `/help`、`/status`、`/doctor readiness` 可用。
+- trusted 后安静启动，不重复提示。
+- trusted 后不绕过 permission pipeline：`/write` 仍按原权限链路暂停/拒绝，不直接写文件。
+- 非 TTY 不弹交互式 trust prompt。
+- 真实 Esc handler 能取消 pending permission / natural command / plan / autopilot。
+- 真实 Enter handler 不能绕过 exact confirmation。
+- Shift+Tab/mode key 不会开启 full-access，不会绕过 Start Gate。
+- Slash fallback `/esc`、`/enter`、`/tab` 仍可用。
 
 ## 验证结果
 
 已运行：
 
 ```bash
-corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts -t "Polish B|permission|mode|trust|workspace|autopilot|Start Gate|plan|details|cancel|full-access|esc|enter"
+corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts -t "Polish B|trust|workspace|key|Esc|Enter|Shift|Tab|permission|mode|Start Gate|plan|autopilot"
 ```
 
 结果：PASS
 
 - Test Files: 2 passed
-- Tests: 86 passed, 206 skipped
+- Tests: 88 passed, 209 skipped
 
 ```bash
 corepack pnpm typecheck
@@ -144,38 +133,121 @@ corepack pnpm check
 
 结果：PASS
 
+由于本轮触碰 TTY 输入循环，还补跑：
+
+```bash
+corepack pnpm test
+```
+
+结果：PASS
+
+- Test Files: 19 passed
+- Tests: 442 passed
+
+```bash
+corepack pnpm build
+```
+
+结果：PASS
+
 ```bash
 git diff --check
 ```
 
 结果：PASS
 
-备注：本轮曾出现两类中间失败，均已用最小改动收口：
+备注：`corepack pnpm check` 首次因格式化差异失败，已用项目 formatter 修正后重跑通过。
 
-1. `/trust trust` 后的 `/write` 显式 slash 路径不会创建 model-tool pending approval，而是走既有 permission denied/prompt 输出；测试已改为断言恢复既有 permission pipeline 且未写文件。
-2. 新增测试存在格式化差异；已用项目 formatter 修正。
+## Polish B final micro-fix
+
+本轮在 final close 后追加一个小收口：只调整 Natural Command Bridge 中 Workspace Trust 的自然语言口径，未进入 Polish C/D、Phase 18 或真实 smoke。
+
+变更结论：
+
+- NCB trust 自然语言不再把 `/trust trust`、`/trust restricted`、`/trust untrust` 当作普通用户主路径。
+- 用户说“信任这个项目 / 调整工作区信任 / trust this folder / workspace trust”时，主屏进入轻确认：`我识别到你想调整工作区信任。是否授权？`，并展示 Yes / No / Details。
+- Details 才解释边界：信任后 Linghun 可以在当前目录读、改、运行命令；Start Gate、Plan approval 和 permission pipeline 仍然生效；`/trust` 是高级恢复/状态入口，不是普通用户主路径。
+- `/trust` slash fallback 继续保留，不删除，不影响高级恢复场景。
+- 本轮不改变 Workspace Trust 底层 guard、不改变 `.linghun/settings.json` schema、不改变 permission pipeline / Start Gate / Plan approval、不改变首次交互式 trust prompt。
+
+追加验证：
+
+```bash
+corepack pnpm exec vitest run packages/tui/src/natural-command-bridge.test.ts packages/tui/src/index.test.ts -t "trust|workspace|Polish B|natural|command|Start Gate|Details"
+```
+
+结果：PASS
+
+- Test Files: 2 passed
+- Tests: 225 passed, 81 skipped
+
+备注：该 focused 命令首次运行发现 trust 自然语言仍被普通项目请求过滤，已最小修正后重跑通过。
+
+按用户最新要求，本 micro-fix 已停止独立 verifier 复检；本轮改为本地自审，不声明 independent verifier PASS。
+
+```bash
+corepack pnpm typecheck
+```
+
+结果：PASS
+
+```bash
+corepack pnpm check
+```
+
+结果：PASS
+
+备注：`corepack pnpm check` 曾发现新增测试格式差异，已用项目 formatter 修正后重跑通过。
+
+```bash
+git diff --check
+```
+
+结果：PASS
+
+## 本地自审结论
+
+按用户最新要求，本轮已停止独立 verifier 复审；本报告不声明 independent verifier PASS。
+
+本地自审确认：
+
+- Workspace Trust 主路径是首次交互式启动轻量确认，不要求用户输入 `/trust trust`。
+- `/trust` 仅保留为高级 fallback/status/recover。
+- missing trust 通过 `recorded=false` 与显式 trusted 区分；旧配置迁移为已记录，避免重复打扰旧用户。
+- restricted/untrusted 下高风险入口仍走现有 workspace trust guard；只读诊断命令仍可用。
+- trusted 后不绕过 Start Gate、Plan approval 或 permission pipeline。
+- TTY path 只接入最小 keypress hook；非 TTY/scripted path 保持 line/chunk 输入生命周期，不弹交互 prompt。
+- Esc / Enter / Shift+Tab 均复用现有 pending interaction / mode / permission 边界，没有新增第二套 input loop 或 permission 系统。
+
+## NOT-DO
+
+- 未进入 Polish C / Polish D / Phase 18。
+- 未进入真实 smoke。
+- 未宣布 Beta PASS / smoke-ready / open-source-ready。
+- 未新增第二套 permission / Start Gate / input loop / NCB / job / trust 系统。
+- 未做重 onboarding / wizard / 命令百科。
+- 未复制 CCB / Claude Code / OpenCode 源码。
+- 未新增依赖。
+- 未提交 commit。
+
+## 已知边界
+
+- 非 TTY / scripted path 不弹交互 UI；本轮保留脚本路径的 line/chunk 输入生命周期，并在主屏提示 trust 未记录。首次显式信任仍建议用交互式启动完成。
+- Shift+Tab 本轮选择低风险 mode switch 提示，而不是直接循环到 full-access；full-access 仍必须本地显式 opt-in，且不能绕过 Start Gate / permission pipeline / Plan approval。
 
 ## 索引状态
 
 - codebase-memory 项目：`F-Linghun`
-- 本轮查询结果：`status=ready`, `nodes=1875`, `edges=3949`
+- 本轮查询结果：`status=ready`, `nodes=1894`, `edges=3969`
 - 未触发索引重建、force refresh 或慢检测。
-
-## Verdict
-
-**CLOSED**。
-
-理由：Polish B 剩余项已经通过 targeted tests 覆盖，真实 key handling 已基于当前 readline/input loop 明确裁决为 DEFERRED 且不阻塞 B；Workspace Trust 和 Bounded Autopilot 均以最小成熟边界闭合。
-
-可以进入 Polish C 的条件：用户明确确认后再进入；本报告本身不自动进入 Polish C/D。
 
 ## Handoff Packet
 
-- 当前阶段：Pre-Smoke TUI Polish B remaining scope closure。
-- 当前结论：`CLOSED`，不是 Beta PASS、不是 smoke-ready、不是 open-source-ready。
-- 下一步：等待用户确认是否进入 Polish C；不要自动推进。
-- 禁止事项：不进入 Polish C/D、真实 smoke、Phase 18；不新增第二套 runtime；不改四权限模式语义；不提交 commit。
-- 证据引用：本报告的“验证结果”和“Targeted tests 覆盖”小节。
+- 当前阶段：Pre-Smoke TUI Polish B final close。
+- 当前结论：两个收尾项已闭合：CCB-style light Workspace Trust + real key handling。
+- 下一步：等待用户确认；不要自动进入 Polish C/D、Phase 18 或真实 smoke。
+- 禁止事项：不新增第二套 runtime；不改四权限模式语义；不把 `/trust` 做成主路径；不提交 commit。
+- 证据引用：本报告“验证结果”和“Focused tests 覆盖”。
 - 权限模式：本轮未提交 commit；未进入真实 smoke。
 - 模型/provider：本轮由当前 Claude Code 会话执行；未调用产品 provider 做真实请求。
-- 预算使用：未做真实 smoke、未跑 full build；运行了 focused vitest、typecheck、check、diff whitespace。
+- 预算使用：未做真实 smoke；已运行 focused vitest、typecheck、check、full test、build、diff whitespace。

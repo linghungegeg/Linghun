@@ -18,6 +18,7 @@ import {
   stdin as defaultStdin,
   stdout as defaultStdout,
 } from "node:process";
+import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -2131,7 +2132,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const gateway = createModelGateway(config);
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
-  writeWorkspaceTrustStartupNotice(output, context);
+  if (shouldPromptForInitialWorkspaceTrust(input, context)) {
+    await promptInitialWorkspaceTrust(input, output, context);
+  } else {
+    writeWorkspaceTrustStartupNotice(output, context);
+  }
   writeStatus(output, context);
   writeLine(output, formatHomeScreen(context));
   writeLine(output, `${t(context, "intro")}\n`);
@@ -2150,11 +2155,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   process.once("SIGINT", sigintHandler);
 
   try {
-    for await (const line of readInputLines(input, output)) {
+    for await (const line of readInputLines(input, output, {
+      onEsc: () => handleTuiKeypress("escape", context, output),
+      onEnter: () => handleTuiKeypress("return", context, output),
+      onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
+    })) {
       process.removeListener("SIGINT", sigintHandler);
       process.once("SIGINT", sigintHandler);
       const text = line.trim();
       if (!text) {
+        if (hasPendingEnterConfirmation(context)) {
+          await confirmPendingInteraction(context, output);
+        }
         continue;
       }
 
@@ -4579,6 +4591,15 @@ function formatRoutePauseMessage(role: ModelRole, decision: RoleRouteDecision): 
 
 function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiContext): void {
   const level = context.config.workspaceTrust.level;
+  if (!context.config.workspaceTrust.recorded) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Workspace trust is not recorded. Non-interactive input skips the trust prompt; use an interactive start to confirm this workspace. Start Gate, Plan approval, and the permission pipeline still apply."
+        : "工作区信任尚未记录。非交互输入不会弹出 trust 确认；请用交互式启动确认此工作区。Start Gate、Plan approval 和权限管道仍会生效。",
+    );
+    return;
+  }
   if (level === "trusted") {
     return;
   }
@@ -4586,9 +4607,101 @@ function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiContext)
   writeLine(
     output,
     context.language === "en-US"
-      ? `Workspace trust: ${level}. Read-only status and safe diagnostics are allowed; writes, Bash, extensions, remote channels, and long jobs stay blocked until you choose /trust trust or keep /trust restricted.`
-      : `工作区信任：${level}。只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks、远程通道和长任务会受限。可用 /trust trust 信任，或 /trust restricted 保持受限。`,
+      ? `Workspace trust: ${level}. Read-only status and safe diagnostics are allowed; writes, Bash, extensions, remote channels, and long jobs stay blocked until you confirm trust or keep /trust restricted.`
+      : `工作区信任：${level}。只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks、远程通道和长任务会受限。可确认信任，或用 /trust restricted 保持受限。`,
   );
+}
+
+function shouldPromptForInitialWorkspaceTrust(input: Readable, context: TuiContext): boolean {
+  return (input as { isTTY?: boolean }).isTTY === true && !context.config.workspaceTrust.recorded;
+}
+
+async function promptInitialWorkspaceTrust(
+  input: Readable,
+  output: Writable,
+  context: TuiContext,
+): Promise<void> {
+  const project = context.projectPath;
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? [
+          "Workspace trust",
+          `- Current directory: ${project}`,
+          "- Do you trust this project?",
+          "- If trusted, Linghun can read, edit, and run commands here, but Start Gate, Plan approval, and the permission pipeline still apply.",
+          "- Enter/yes: trust this project. Esc/no: keep restricted for this project.",
+        ].join("\n")
+      : [
+          "工作区信任",
+          `- 当前目录：${project}`,
+          "- 是否信任这个项目？",
+          "- 信任后 Linghun 可以在这里读、改、运行命令，但仍受 Start Gate、Plan approval 和权限管道约束。",
+          "- Enter/yes：信任此项目。Esc/no：对此项目保持 restricted。",
+        ].join("\n"),
+  );
+  const trusted = await readInitialWorkspaceTrustDecision(input, output);
+  context.config = await saveWorkspaceTrust(
+    trusted ? "trusted" : "restricted",
+    context.projectPath,
+  );
+  context.workspaceTrustEnforced = !trusted;
+  writeLine(output, formatWorkspaceTrustStatus(context));
+}
+
+async function readInitialWorkspaceTrustDecision(
+  input: Readable,
+  output: Writable,
+): Promise<boolean> {
+  if ("setEncoding" in input && typeof input.setEncoding === "function") {
+    input.setEncoding("utf8");
+  }
+  const rl = createInterface({ input, output });
+  const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
+  const wasRaw = rawInput.isRaw === true;
+  let settled = false;
+  return await new Promise<boolean>((resolveDecision) => {
+    const finish = (trusted: boolean) => {
+      if (settled) return;
+      settled = true;
+      input.off("keypress", onKeypress);
+      rl.off("line", onLine);
+      if (typeof rawInput.setRawMode === "function" && !wasRaw) {
+        rawInput.setRawMode(false);
+      }
+      rl.close();
+      resolveDecision(trusted);
+    };
+    const onKeypress = (_str: string, key: { name?: string } = {}) => {
+      if (key.name === "escape") {
+        finish(false);
+      }
+    };
+    const onLine = (line: string) => {
+      const normalized = line.trim().toLowerCase();
+      if (
+        normalized === "" ||
+        /^(yes|y|confirm|ok|okay|trust|trusted|确认|是|信任)$/iu.test(normalized)
+      ) {
+        finish(true);
+        return;
+      }
+      if (
+        /^(no|n|cancel|restricted|restrict|untrust|untrusted|取消|否|不|受限)$/iu.test(normalized)
+      ) {
+        finish(false);
+        return;
+      }
+      writeLine(output, "请输入 yes/Enter 信任，或 no/Esc 保持 restricted。");
+    };
+    emitKeypressEvents(input);
+    input.on("keypress", onKeypress);
+    rl.on("line", onLine);
+    if (typeof rawInput.setRawMode === "function") {
+      rawInput.setRawMode(true);
+    }
+    output.write("> ");
+  });
 }
 
 function getWorkspaceTrustCommandGuard(
@@ -4596,7 +4709,7 @@ function getWorkspaceTrustCommandGuard(
   args: string[],
   context: TuiContext,
 ): string | null {
-  const level = context.config.workspaceTrust.level;
+  const level = getEffectiveWorkspaceTrustLevel(context);
   if (!context.workspaceTrustEnforced || level === "trusted") {
     return null;
   }
@@ -4604,8 +4717,8 @@ function getWorkspaceTrustCommandGuard(
     return null;
   }
   return context.language === "en-US"
-    ? `Workspace is ${level}. I did not run ${command}. Read-only status is still available; choose /trust trust to persist trust in .linghun/settings.json, or /trust restricted to keep this boundary.`
-    : `当前工作区为 ${level}，已拦截 ${command}。只读状态仍可用；如确认信任，请运行 /trust trust（写入 .linghun/settings.json），或用 /trust restricted 保持受限。`;
+    ? `Workspace is ${level}. I did not run ${command}. Read-only status is still available; confirm trust interactively or use /trust as an advanced fallback to persist trust in .linghun/settings.json.`
+    : `当前工作区为 ${level}，已拦截 ${command}。只读状态仍可用；可用交互式 trust 确认，或将 /trust 作为高级 fallback 写入 .linghun/settings.json。`;
 }
 
 function isWorkspaceTrustRestrictedCommand(command: string, args: string[]): boolean {
@@ -4651,20 +4764,29 @@ function parseWorkspaceTrustAction(action: string): WorkspaceTrustLevel | null {
   return null;
 }
 
+function getEffectiveWorkspaceTrustLevel(context: TuiContext): WorkspaceTrustLevel {
+  return context.config.workspaceTrust.recorded
+    ? context.config.workspaceTrust.level
+    : "restricted";
+}
+
 function formatWorkspaceTrustStatus(context: TuiContext): string {
-  const level = context.config.workspaceTrust.level;
+  const level = getEffectiveWorkspaceTrustLevel(context);
+  const recorded = context.config.workspaceTrust.recorded ? "yes" : "no";
   const path =
     relative(context.projectPath, getProjectSettingsPath(context.projectPath)) ||
     ".linghun/settings.json";
   return context.language === "en-US"
     ? [
         `Workspace trust: ${level}`,
+        `- recorded: ${recorded}`,
         `- persists in: ${path}`,
         "- trusted: quiet startup; normal permission pipeline still applies.",
         "- restricted/untrusted: read-only status and safe diagnostics remain; writes, Bash, extension enablement, remote channels, and long jobs are blocked or require trust first.",
       ].join("\n")
     : [
         `工作区信任：${level}`,
+        `- 已记录：${recorded}`,
         `- 持久化位置：${path}`,
         "- trusted：启动时安静；仍保留权限管道。",
         "- restricted/untrusted：只读状态和安全诊断可用；写文件、Bash、插件/skills/hooks 启用、远程通道和长任务会先受限。",
@@ -4730,6 +4852,23 @@ function formatPendingNaturalCommandDetails(
   gate: PendingNaturalCommand,
   context: TuiContext,
 ): string {
+  if (gate.capabilityId === "trust") {
+    return context.language === "en-US"
+      ? [
+          "Workspace trust details",
+          "- If trusted, Linghun can read, edit, and run commands in the current directory.",
+          "- Start Gate, Plan approval, and the permission pipeline still apply.",
+          "- /trust remains an advanced recovery/status entry, not the normal user path.",
+          "- Yes continues to the safe confirmation path; No/Esc cancels.",
+        ].join("\n")
+      : [
+          "工作区信任详情",
+          "- 信任后 Linghun 可以在当前目录读、改、运行命令。",
+          "- Start Gate、Plan approval 和 permission pipeline 仍然生效。",
+          "- /trust 仍是高级恢复/状态入口，不是普通用户主路径。",
+          "- Yes 继续进入安全确认路径；No/Esc 取消。",
+        ].join("\n");
+  }
   return context.language === "en-US"
     ? [
         "Pending Start Gate details",
@@ -4749,6 +4888,24 @@ function formatPendingNaturalCommandDetails(
         "- raw schema、key、token 和内部 gate id 已隐藏。",
         "- 下一步：按提示确认，或输入 /esc 取消。",
       ].join("\n");
+}
+
+export async function handleTuiKeypress(
+  key: "escape" | "return" | "shift-tab",
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (key === "escape") {
+    await cancelPendingInteraction(context, output, "Esc");
+    return;
+  }
+  if (key === "shift-tab") {
+    openModeSwitch(context, output);
+    return;
+  }
+  if (hasPendingEnterConfirmation(context)) {
+    await confirmPendingInteraction(context, output);
+  }
 }
 
 async function cancelPendingInteraction(
@@ -4791,6 +4948,15 @@ async function cancelPendingInteraction(
     "当前没有可取消的等待交互；已执行的工具不会被静默撤销。需要停止长任务请用 /interrupt 或 /job cancel <id>。",
   );
   writeStatus(output, context);
+}
+
+function hasPendingEnterConfirmation(context: TuiContext): boolean {
+  return Boolean(
+    context.pendingLocalApproval ||
+      context.pendingNaturalCommand ||
+      context.pendingAutopilot ||
+      (context.activePlan && !context.planAccepted),
+  );
 }
 
 async function confirmPendingInteraction(context: TuiContext, output: Writable): Promise<void> {
@@ -4892,7 +5058,7 @@ async function startPendingAutopilot(context: TuiContext, output: Writable): Pro
     writeLine(output, "当前没有待确认的持续推进。先运行 /autopilot <目标>。 ");
     return;
   }
-  if (context.workspaceTrustEnforced && context.config.workspaceTrust.level !== "trusted") {
+  if (context.workspaceTrustEnforced && getEffectiveWorkspaceTrustLevel(context) !== "trusted") {
     writeLine(
       output,
       getWorkspaceTrustCommandGuard("/autopilot", ["confirm"], context) ??
@@ -4954,6 +5120,28 @@ async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
     return;
   }
   await setPermissionMode(context, output, nextMode, "tab mode cycle");
+}
+
+function openModeSwitch(context: TuiContext, output: Writable): void {
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? [
+          "Mode switch",
+          `- current: ${context.permissionMode}`,
+          "- options: default / auto-review / plan / full-access",
+          "- Shift+Tab opens this switch only; it does not enable full-access.",
+          "- use /mode <mode> to switch. full-access still requires local opt-in and cannot bypass Start Gate.",
+        ].join("\n")
+      : [
+          "模式切换",
+          `- 当前：${context.permissionMode}`,
+          "- 可选：default / auto-review / plan / full-access",
+          "- Shift+Tab 只打开这个切换提示；不会开启 full-access。",
+          "- 用 /mode <mode> 切换。full-access 仍需要本地显式 opt-in，不能绕过 Start Gate。",
+        ].join("\n"),
+  );
+  writeStatus(output, context);
 }
 
 function getModeChangeGuard(nextMode: PermissionMode, context: TuiContext): string | null {
@@ -11835,7 +12023,7 @@ async function handleLocalControlPlaneInput(
   context: TuiContext,
   output: Writable,
 ): Promise<"handled" | "pass"> {
-  if (looksLikeOrdinaryDevelopmentRequest(text)) {
+  if (looksLikeOrdinaryDevelopmentRequest(text) && !looksLikeWorkspaceTrustNaturalRequest(text)) {
     return "pass";
   }
 
@@ -11858,7 +12046,7 @@ async function handleLocalControlPlaneInput(
     return "handled";
   }
 
-  if (isAllowedModeStartGate(intent)) {
+  if (isAllowedModeStartGate(intent) || isWorkspaceTrustNaturalStartGate(intent)) {
     const gate = createPendingNaturalCommand(intent, context);
     if (!gate) {
       return "pass";
@@ -11881,6 +12069,12 @@ async function handleLocalControlPlaneInput(
 
 function looksLikeOrdinaryDevelopmentRequest(text: string): boolean {
   return /分析|实现|修复|部署|报告|生成|输出|项目|技术栈|代码|开发|写|改|新增|导出|bug|analy[sz]e|implement|fix|deploy|report|generate|project|tech stack|code|write|export/iu.test(
+    text,
+  );
+}
+
+function looksLikeWorkspaceTrustNaturalRequest(text: string): boolean {
+  return /信任.*(?:项目|工作区)|调整.*工作区信任|workspace trust|trust this (?:folder|project)/iu.test(
     text,
   );
 }
@@ -11912,6 +12106,16 @@ function isAllowedModeStartGate(
     intent.capability?.id === "mode" &&
     typeof intent.command === "string" &&
     /^\/mode (?:default|auto-review|plan|full-access)$/u.test(intent.command)
+  );
+}
+
+function isWorkspaceTrustNaturalStartGate(
+  intent: NaturalIntent,
+): intent is NaturalIntent & { command: string } {
+  return (
+    intent.action === "start_gate" &&
+    intent.capability?.id === "trust" &&
+    intent.command === "/trust status"
   );
 }
 
@@ -13980,7 +14184,17 @@ function formatFileCandidates(candidates: string[], language: Language): string 
     : ["找到多个可能文件，请用明确命令选择一个：", ...lines, "示例：/read <path>"].join("\n");
 }
 
-async function* readInputLines(input: Readable, output: Writable): AsyncGenerator<string> {
+type InputKeyHandlers = {
+  onEsc?: () => void | Promise<void>;
+  onEnter?: () => void | Promise<void>;
+  onShiftTab?: () => void | Promise<void>;
+};
+
+async function* readInputLines(
+  input: Readable,
+  output: Writable,
+  keyHandlers: InputKeyHandlers = {},
+): AsyncGenerator<string> {
   if ((input as { isTTY?: boolean }).isTTY !== true) {
     const chunks: Buffer[] = [];
     for await (const chunk of input) {
@@ -13997,15 +14211,62 @@ async function* readInputLines(input: Readable, output: Writable): AsyncGenerato
     input.setEncoding("utf8");
   }
 
+  const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
+  const wasRaw = rawInput.isRaw === true;
+  if (typeof rawInput.setRawMode === "function") {
+    rawInput.setRawMode(true);
+  }
+
   const rl = createInterface({ input, output });
+  const cleanupKeypress = installInputKeyHandlers(input, rl, keyHandlers);
+  let skipNextEmptyLine = false;
   try {
     output.write("你> ");
     for await (const line of rl) {
+      if (skipNextEmptyLine && line.trim() === "") {
+        skipNextEmptyLine = false;
+        output.write("你> ");
+        continue;
+      }
       yield line;
       output.write("你> ");
     }
   } finally {
+    cleanupKeypress();
+    if (typeof rawInput.setRawMode === "function" && !wasRaw) {
+      rawInput.setRawMode(false);
+    }
     rl.close();
+  }
+
+  function installInputKeyHandlers(
+    target: Readable,
+    readline: { line?: string },
+    handlers: InputKeyHandlers,
+  ): () => void {
+    if (!handlers.onEsc && !handlers.onEnter && !handlers.onShiftTab) {
+      return () => undefined;
+    }
+    const onKeypress = (_str: string, key: { name?: string; shift?: boolean } = {}) => {
+      if (key.name === "escape" && handlers.onEsc) {
+        void handlers.onEsc();
+        return;
+      }
+      if (key.name === "tab" && key.shift && handlers.onShiftTab) {
+        void handlers.onShiftTab();
+        return;
+      }
+      if (key.name === "return" && handlers.onEnter) {
+        const currentLine = (readline as unknown as { line?: string }).line ?? "";
+        if (currentLine.trim() === "") {
+          skipNextEmptyLine = true;
+          void handlers.onEnter();
+        }
+      }
+    };
+    emitKeypressEvents(target);
+    target.on("keypress", onKeypress);
+    return () => target.off("keypress", onKeypress);
   }
 }
 
