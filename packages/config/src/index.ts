@@ -690,6 +690,26 @@ export async function saveWorkspaceTrust(
   return next;
 }
 
+export async function hasRecordedLanguage(projectPath = process.cwd()): Promise<boolean> {
+  try {
+    const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");
+    const parsed = JSON.parse(raw) as Partial<LinghunConfig>;
+    return parsed.language === "zh-CN" || parsed.language === "en-US";
+  } catch {
+    return false;
+  }
+}
+
+export async function saveLanguage(
+  language: Language,
+  projectPath = process.cwd(),
+): Promise<LinghunConfig> {
+  const current = await loadConfig(projectPath);
+  const next: LinghunConfig = { ...current, language };
+  await writeConfig(projectPath, next);
+  return next;
+}
+
 function stableUnique(values: string[]): string[] {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }

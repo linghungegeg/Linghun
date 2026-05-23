@@ -1,6 +1,6 @@
 ---
 title: Pre-Smoke TUI Polish C - Output Tone, Doctor, Details, Light Hints
-status: FINAL_CLOSE_PENDING_VERIFIER
+status: FINAL_CLOSE_LOCAL_VERIFIED
 updated: 2026-05-24
 ---
 
@@ -246,6 +246,8 @@ corepack pnpm build
 按用户最新要求，已停止独立 verifier 复检；本轮改为执行者本地单独复检。
 
 本报告不声明 independent verifier PASS。
+
+本报告结论为本地验证闭合，不包含 independent verifier PASS。
 
 ## 本地自审结论
 

@@ -176,6 +176,21 @@ describe("job runner presenters", () => {
     expect(rendered).toContain("log: job.log");
     expect(rendered).toContain("next: Inspect /job report job-test");
     expect(rendered).not.toContain("complete raw log line");
+
+    const narrow = formatBackgroundTask(
+      {
+        ...baseBackground,
+        title:
+          "Background task with a very long title that should be truncated before it dominates narrow terminals",
+        currentStep:
+          "collecting diagnostics with a very long step name that should stay bounded in the primary row",
+        nextAction:
+          "Inspect /job report job-test, then resume only after checking handoff and logs.",
+      },
+      "en-US",
+    );
+    expect(narrow.length).toBeLessThanOrEqual(190);
+    expect(narrow).toContain("…");
   });
 
   it("formats failed, timeout, and cancelled summaries without secrets when state is already bounded", () => {
@@ -188,7 +203,9 @@ describe("job runner presenters", () => {
         nextAction: "Inspect the log, fix the issue, then rerun if needed.",
       };
       const rendered = formatBackgroundDetails(task, "en-US");
-      expect(rendered).toContain(`- result: ${result}`);
+      expect(rendered).toContain(`result=${result}`);
+      expect(rendered).toContain("- why stale/blocked:");
+      expect(rendered).toContain("- resume/cancel: Inspect the log");
       expect(rendered).toContain("- summary: Command ended with");
       expect(rendered).not.toMatch(/sk-[A-Za-z0-9_-]+|api[_-]?key|Bearer\s+raw|C:\\secret/u);
     }

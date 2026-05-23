@@ -35,11 +35,13 @@ import {
   type WorkspaceTrustLevel,
   defaultConfig,
   getProjectSettingsPath,
+  hasRecordedLanguage,
   loadConfig,
   removeMcpServerConfig,
   resetExtensionTrustForInstall,
   resolveStoragePaths,
   saveExtensionEnablement,
+  saveLanguage,
   saveMcpServerConfig,
   saveModelRoute,
   saveWorkspaceTrust,
@@ -533,6 +535,7 @@ export type ImageGenerationResult = {
 export type AgentRun = {
   id: string;
   type: AgentType;
+  displayName?: string;
   role: ModelRole;
   provider: string;
   parentSessionId?: string;
@@ -582,6 +585,7 @@ export type DurableJobAgentStatus =
 export type DurableJobAgent = {
   id: string;
   type: AgentType;
+  displayName?: string;
   goal: string;
   status: DurableJobAgentStatus;
   budgetTokens: number;
@@ -2134,6 +2138,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const gateway = createModelGateway(config);
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
+  if (await shouldPromptForInitialLanguage(input, context)) {
+    await promptInitialLanguage(input, output, context);
+  }
   if (shouldPromptForInitialWorkspaceTrust(input, context)) {
     await promptInitialWorkspaceTrust(input, output, context);
   } else {
@@ -4625,6 +4632,75 @@ function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiContext)
   );
 }
 
+async function shouldPromptForInitialLanguage(
+  input: Readable,
+  context: TuiContext,
+): Promise<boolean> {
+  return (
+    (input as { isTTY?: boolean }).isTTY === true &&
+    !(await hasRecordedLanguage(context.projectPath))
+  );
+}
+
+async function promptInitialLanguage(
+  input: Readable,
+  output: Writable,
+  context: TuiContext,
+): Promise<void> {
+  writeLine(
+    output,
+    [
+      "选择输出语言 / Choose output language",
+      "- 1 / 中文：中文主屏、状态、帮助、权限、doctor 和错误提示。",
+      "- 2 / English: English main screen, status, help, permissions, doctor, and errors.",
+      "- Press Enter for 中文. You can change it later with /language zh-CN or /language en-US.",
+    ].join("\n"),
+  );
+  const language = await readInitialLanguageDecision(input, output);
+  context.config = await saveLanguage(language, context.projectPath);
+  context.language = language;
+  writeLine(output, t(context, language === "zh-CN" ? "languageSwitchedZh" : "languageSwitchedEn"));
+}
+
+async function readInitialLanguageDecision(input: Readable, output: Writable): Promise<Language> {
+  if ("setEncoding" in input && typeof input.setEncoding === "function") {
+    input.setEncoding("utf8");
+  }
+  const rl = createInterface({ input, output });
+  const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
+  const wasRaw = rawInput.isRaw === true;
+  let settled = false;
+  return await new Promise<Language>((resolveDecision) => {
+    const finish = (language: Language) => {
+      if (settled) return;
+      settled = true;
+      rl.off("line", onLine);
+      if (typeof rawInput.setRawMode === "function" && !wasRaw) {
+        rawInput.setRawMode(false);
+      }
+      rl.close();
+      resolveDecision(language);
+    };
+    const onLine = (line: string) => {
+      const normalized = line.trim().toLowerCase();
+      if (normalized === "" || /^(1|zh|zh-cn|中文|chinese|cn)$/iu.test(normalized)) {
+        finish("zh-CN");
+        return;
+      }
+      if (/^(2|en|en-us|english|英文)$/iu.test(normalized)) {
+        finish("en-US");
+        return;
+      }
+      writeLine(output, "请输入 1/中文 或 2/English。Type 1/中文 or 2/English.");
+    };
+    rl.on("line", onLine);
+    if (typeof rawInput.setRawMode === "function") {
+      rawInput.setRawMode(false);
+    }
+    output.write("> ");
+  });
+}
+
 function shouldPromptForInitialWorkspaceTrust(input: Readable, context: TuiContext): boolean {
   return (input as { isTTY?: boolean }).isTTY === true && !context.config.workspaceTrust.recorded;
 }
@@ -5308,6 +5384,7 @@ async function handleLanguageCommand(
     writeLine(output, "usage: /language zh-CN|en-US");
     return;
   }
+  context.config = await saveLanguage(language, context.projectPath);
   context.language = language;
   writeLine(output, t(context, language === "zh-CN" ? "languageSwitchedZh" : "languageSwitchedEn"));
   writeStatus(output, context);
@@ -5965,6 +6042,49 @@ async function createDurableJob(
   };
 }
 
+function deriveAgentDisplayName(type: AgentType, task: string): string {
+  const stopWords = new Set([
+    "a",
+    "an",
+    "and",
+    "for",
+    "help",
+    "job",
+    "please",
+    "run",
+    "task",
+    "the",
+    "to",
+    "with",
+  ]);
+  const asciiTask = Array.from(task.normalize("NFKD").toLowerCase())
+    .map((char) => (char.charCodeAt(0) <= 127 ? char : " "))
+    .join("");
+  const tokens = asciiTask
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter((token) => token && !stopWords.has(token))
+    .slice(0, 3);
+  const base =
+    tokens.length > 0
+      ? tokens.join("-")
+      : `task-${createHash("sha1").update(task).digest("hex").slice(0, 6)}`;
+  const label = base.endsWith(`-${type}`) ? base : `${base}-${type}`;
+  return truncateAsciiLabel(label, 36);
+}
+
+function truncateAsciiLabel(value: string, maxLength: number): string {
+  const cleaned = value
+    .replace(/[^a-z0-9-]/gu, "-")
+    .replace(/-{2,}/gu, "-")
+    .replace(/^-|-$/gu, "");
+  if (cleaned.length <= maxLength) {
+    return cleaned || "agent";
+  }
+  return cleaned.slice(0, maxLength).replace(/-+$/u, "") || "agent";
+}
+
 function createDurableJobAgents(
   options: ParsedJobRunOptions,
   status: DurableJobStatus,
@@ -5985,6 +6105,10 @@ function createDurableJobAgents(
       id: `job-agent-${index + 1}`,
       type:
         index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer",
+      displayName: deriveAgentDisplayName(
+        index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer",
+        options.goal,
+      ),
       goal: `${options.goal}#${index + 1}`,
       status: agentStatus,
       budgetTokens: Math.floor(options.maxTokens / total),
@@ -6619,26 +6743,35 @@ function getDurableJobStatePath(job: DurableJobState): string {
 
 function formatJobList(jobs: DurableJobState[], context: TuiContext): string {
   if (jobs.length === 0) {
-    return "当前没有 durable job。用法：/job run <goal>。";
+    return context.language === "en-US"
+      ? "No durable jobs. Usage: /job run <goal>."
+      : "当前没有 durable job。用法：/job run <goal>。";
   }
   return [
-    "Durable jobs:",
+    context.language === "en-US" ? "Durable jobs:" : "Durable jobs：",
     ...jobs.map((job) => {
       const counts = countDurableJobAgents(job);
-      return `${job.id}  ${job.status}  created=${job.agents.length} running=${counts.running} sleeping=${counts.sleeping} blocked=${counts.blocked} stale=${counts.stale}  worker=${job.worker?.status ?? "not_started"} ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  pause=${job.pauseReason ?? "-"}  budget=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}  goal=${truncateDisplay(job.goal, 60)}  next=/job status ${job.id} | /job report ${job.id} | /job logs ${job.id}`;
+      const label = job.agents[0]?.displayName ?? deriveAgentDisplayName("worker", job.goal);
+      return `${job.id}  ${job.status}  label=${label}  agents=${job.agents.length}/${counts.running}  blocked=${counts.blocked} stale=${counts.stale}  step=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal=${truncateDisplay(job.goal, 42)}  next=/job status ${job.id}`;
     }),
     context.language === "en-US"
-      ? `Default running agent cap is ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only. Full paths are shown only in /job status, /job report, and /job logs.`
-      : `默认真实运行 agent 上限为 ${DEFAULT_JOB_RUNNING_AGENT_CAP}；${JOB_AGENT_HIGH_CONFIG_CANDIDATE} 只是 benchmark/high-config 候选。完整路径只在 /job status、/job report 和 /job logs 中显示。`,
+      ? `Running cap=${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} remains benchmark-only. Details: /job report <id> or /job logs <id>.`
+      : `真实运行上限=${DEFAULT_JOB_RUNNING_AGENT_CAP}；${JOB_AGENT_HIGH_CONFIG_CANDIDATE} 仍是 benchmark 候选。详情：/job report <id> 或 /job logs <id>。`,
   ].join("\n");
 }
 
 function formatJobPrimary(job: DurableJobState, context: TuiContext): string {
   const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
+  const label = job.agents[0]?.displayName ?? deriveAgentDisplayName("worker", job.goal);
   return [
-    `[job] ${job.id} · ${job.status} · ${truncateDisplay(job.goal, 80)}`,
-    "- impact: local durable metadata + unified background task; no remote channel, no Phase 18, no Beta/smoke-ready PASS.",
-    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; 8-agent mode is deferred benchmark candidate.`,
+    `[job] ${job.id} · ${job.status} · ${label}`,
+    context.language === "en-US"
+      ? `- goal: ${truncateDisplay(job.goal, 72)}`
+      : `- 目标：${truncateDisplay(job.goal, 72)}`,
+    context.language === "en-US"
+      ? "- scope: local durable metadata + unified background task; no remote channel, Phase 18, Beta PASS, or smoke-ready claim."
+      : "- 范围：本地 durable metadata + 统一后台任务；未进入 remote、Phase 18、Beta PASS 或 smoke-ready。",
+    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; displayName is cosmetic only.`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
@@ -6652,12 +6785,14 @@ function formatJobStatus(job: DurableJobState): string {
     `Job ${job.id}`,
     `- status: ${job.status}`,
     `- pauseReason: ${job.pauseReason ?? "-"}`,
-    `- goal: ${job.goal}`,
+    "- resumeCheck: handoff/evidence/index/resource guard before any worker step",
+    `- goal: ${truncateDisplay(job.goal, 120)}`,
     `- projectPath: ${job.projectPath}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
-    `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${job.worker?.summary ?? "-"}`,
+    `- agent labels: ${formatJobAgentLabels(job.agents)}`,
+    `- budget: tokens=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}; steps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}`,
+    `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
     `- logPath: ${job.logPath}`,
@@ -6670,20 +6805,45 @@ function formatJobReport(job: DurableJobState): string {
   const counts = countDurableJobAgents(job);
   return [
     `Job report ${job.id}`,
-    `- status: ${job.status}`,
+    `- status: ${job.status}; pauseReason=${job.pauseReason ?? "-"}`,
+    `- conclusion: ${formatJobReportConclusion(job)}`,
     `- task graph: ${job.plan.length} steps; worker=${job.worker?.status ?? "not_started"}; usedSteps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
-    `- agent assignment: ${job.agents.map((agent) => `${agent.id}:${agent.type}:${agent.status}`).join(", ")}`,
+    `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
-    `- verification: ${job.verification?.status ?? "not_run"}; ${job.verification?.summary ?? "-"}`,
+    `- budget: tokens=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}; steps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}`,
+    `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
     `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
-    `- pauseReason: ${job.pauseReason ?? "-"}`,
     `- logPath: ${job.logPath}`,
     `- fullOutputPath: ${job.fullOutputPath}`,
     `- reportPath: ${job.reportPath}`,
   ].join("\n");
+}
+
+function formatJobAgentLabels(agents: DurableJobAgent[]): string {
+  return truncateDisplay(
+    agents
+      .map(
+        (agent) =>
+          `${agent.id}:${agent.displayName ?? deriveAgentDisplayName(agent.type, agent.goal)}:${agent.status}`,
+      )
+      .join(", "),
+    140,
+  );
+}
+
+function formatJobReportConclusion(job: DurableJobState): string {
+  if (job.status === "stale") {
+    return "stale because heartbeat/owner recovery failed; /job resume first rechecks handoff, evidence/index state, and resource guard.";
+  }
+  if (job.status === "blocked") {
+    return "blocked until handoff/evidence/index/resource guard is repaired; no PASS evidence generated.";
+  }
+  if (job.status === "cancelled" || job.status === "timeout" || job.status === "completed") {
+    return `${job.status} is terminal or conservative; inspect verification before treating it as useful evidence.`;
+  }
+  return "running/created job uses trimmed handoff, evidence refs, cache/index refs, and resource guard.";
 }
 
 async function formatJobLogs(job: DurableJobState): Promise<string> {
@@ -7066,6 +7226,7 @@ async function handleForkCommand(
   const agent: AgentRun = {
     id: `agent-${randomUUID().slice(0, 8)}`,
     type,
+    displayName: deriveAgentDisplayName(type, task),
     role,
     provider: route.provider || "unconfigured",
     parentSessionId,
@@ -7158,13 +7319,14 @@ function createAgentContextSummary(
 }
 
 function createAgentBackgroundTask(agent: AgentRun, context: TuiContext): BackgroundTaskState {
+  const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
   return {
     id: agent.id,
     kind: "agent",
-    title: `Agent ${agent.type}: ${truncateDisplay(agent.task, 40)}`,
+    title: `Agent ${label}`,
     status: "running",
-    currentStep: context.language === "en-US" ? "running agent" : "正在运行 agent",
-    progress: { completed: 0, total: 1, label: agent.type },
+    currentStep: context.language === "en-US" ? `running ${agent.type}` : `正在运行 ${agent.type}`,
+    progress: { completed: 0, total: 1, label },
     startedAt: agent.startedAt,
     updatedAt: agent.updatedAt,
     heartbeatIntervalMs: 30_000,
@@ -7173,8 +7335,8 @@ function createAgentBackgroundTask(agent: AgentRun, context: TuiContext): Backgr
     hasOutput: true,
     userVisibleSummary:
       context.language === "en-US"
-        ? `Started ${agent.type} agent. Use /agents show ${agent.id}.`
-        : `已启动 ${agent.type} agent。可用 /agents show ${agent.id} 查看。`,
+        ? `Started ${label}. Use /agents show ${agent.id}.`
+        : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`,
     nextAction:
       context.language === "en-US"
         ? `Use /agents cancel ${agent.id} to interrupt.`
@@ -7345,28 +7507,40 @@ function findAgent(context: TuiContext, id: string | undefined): AgentRun | unde
 
 function formatAgentsList(context: TuiContext): string {
   if (context.agents.length === 0) {
-    return "当前没有 agent。用法：/fork explorer|planner|verifier|worker <task>";
+    return context.language === "en-US"
+      ? "No agents. Usage: /fork explorer|planner|verifier|worker <task>."
+      : "当前没有 agent。用法：/fork explorer|planner|verifier|worker <task>。";
   }
-  const lines = ["Agents:"];
+  const lines = [context.language === "en-US" ? "Agents:" : "Agents："];
   for (const agent of context.agents) {
+    const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
     lines.push(
-      `${agent.id}  ${agent.type}  role=${agent.role}  ${agent.status}  provider=${agent.provider}  model=${agent.model}  mode=${agent.permissionMode}  estimated tokens=${agent.cost.inputTokens + agent.cost.outputTokens}  task=${truncateDisplay(agent.task, 60)}`,
+      `${agent.id}  ${label}  type=${agent.type}  role=${agent.role}  ${agent.status}  mode=${agent.permissionMode}  tokens~${agent.cost.inputTokens + agent.cost.outputTokens}  task=${truncateDisplay(agent.task, 24)}`,
     );
   }
+  lines.push(
+    context.language === "en-US"
+      ? "displayName is cosmetic only; role, permission mode, resource guard, evidence, and lifecycle stay unchanged."
+      : "displayName 仅用于展示；role、权限模式、资源守卫、证据和生命周期不变。",
+  );
   return lines.join("\n");
 }
 
 function formatAgentDetails(agent: AgentRun, context: TuiContext): string {
+  const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
   const lines = [
-    `Agent ${agent.id}`,
+    `Agent ${agent.id} (${label})`,
+    `- displayName: ${label}`,
     `- type: ${agent.type}`,
     `- role: ${agent.role}`,
-    `- provider: ${agent.provider}`,
+    `- provider/model: ${agent.provider} / ${agent.model}`,
     `- status: ${agent.status}`,
+    `- task: ${truncateDisplay(agent.task, 120)}`,
     `- parentSessionId: ${agent.parentSessionId ?? "none"}`,
     `- transcript: ${agent.transcriptPath}`,
     `- permissionMode: ${agent.permissionMode}`,
     `- cost: input=${agent.cost.inputTokens}, output=${agent.cost.outputTokens}, cacheRead=${agent.cost.cacheReadTokens}, cacheWrite=${agent.cost.cacheWriteTokens}, estimatedCny=${agent.cost.estimatedCny}`,
+    "- boundary: displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
     `- context: ${agent.contextSummary}`,
     `- summary: ${agent.summary}`,
   ];
@@ -7872,7 +8046,7 @@ async function handleMemoryCommand(
   }
   if (action === "learn") {
     const result = await runControlledMemoryLearning(context);
-    writeLine(output, formatMemoryLearningRun(result));
+    writeLine(output, formatMemoryLearningRun(result, context.language));
     return;
   }
   if (action === "candidate") {
@@ -8343,22 +8517,16 @@ function formatMemoryStatus(context: TuiContext): string {
   const injected = createControlledMemoryInjection(context);
   return [
     "Memory status",
-    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}`,
-    `- projectRulesSummary: ${formatProjectRulesContext(context)}`,
-    `- candidates: ${context.memory.candidates.length}`,
-    `- accepted: ${context.memory.accepted.length}`,
-    `- disabled: ${context.memory.disabled.length}`,
-    `- rejected: ${context.memory.rejected.length}`,
-    "- autoAccept: no",
-    `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K} injected=${injected.items.length} estimatedTokens=${estimateMemoryTokens(injected.text)}`,
-    ...context.memory.accepted
-      .slice(0, 5)
-      .map((item) => `  - ${item.id} [${item.scope}] ${item.summary}`),
+    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary=${formatProjectRulesContext(context)}`,
+    `- review queue: candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
+    "- default: autoLearning=off; autoAccept=no; long-term memory requires /memory accept <id>",
+    `- prompt injection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injected.items.length}; estimatedTokens=${estimateMemoryTokens(injected.text)}; details=/memory stats`,
+    "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
     context.memory.projectRulesError
       ? "- hint: LINGHUN.md 读取失败；可运行 /memory storage 定位路径，不会自动生成或打断输入。"
       : context.memory.projectRulesExists
-        ? "- note: LINGHUN.md 只用于长期稳定工程规则；这里只显示截断摘要。"
+        ? "- note: LINGHUN.md 只显示截断摘要；完整规则不刷主屏、不注入完整聊天。"
         : "- hint: 缺少 LINGHUN.md。可运行 /memory init 生成基础模板；不会打断输入。",
   ].join("\n");
 }
@@ -8381,46 +8549,66 @@ function formatMemoryStorage(context: TuiContext): string {
 }
 
 function formatMemoryReview(context: TuiContext): string {
-  const accepted = context.memory.accepted.map(
-    (item) =>
-      `- accepted ${item.id} [${item.scope}] ${item.summary} (source=${item.source}; refs=${item.sourceRefs.join(",") || "none"})`,
-  );
-  const disabled = context.memory.disabled.map(
-    (item) => `- disabled ${item.id} [${item.scope}] ${item.summary} (source=${item.source})`,
-  );
+  const accepted = context.memory.accepted
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `- accepted ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; disable=/memory disable ${item.id}`,
+    );
+  const disabled = context.memory.disabled
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `- disabled ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; rollback=/memory rollback ${item.id}; delete=/memory delete ${item.id}`,
+    );
   if (context.memory.candidates.length === 0) {
     return [
-      "Memory review：暂无候选记忆。可用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选；长期写入前必须 /memory accept。",
-      "边界：默认不逐轮学习、不自动接受长期记忆、不把完整 transcript/source/tool output 写入记忆。",
+      "Memory review：暂无候选记忆；长期记忆不会自动写入。",
+      "来源边界：/memory learn 只看 bounded evidence/Todo/verification/handoff，不读取完整聊天、完整日志或完整索引。",
+      "下一步：需要时用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选，再 /memory accept。",
       ...accepted,
       ...disabled,
+      "动作区别：accept=写入长期且可被 topK 注入；reject=丢弃候选；disable=暂停已接受注入；rollback=重新启用；delete=删除记录。",
     ].join("\n");
   }
   return [
-    "Memory review（候选，不是长期记忆）",
-    ...context.memory.candidates.map(
-      (item) =>
-        `- candidate ${item.id} [${item.scope}] risk=${item.risk} inferred=${item.inferred ? "yes" : "no"} ${item.summary} (source=${item.source}; refs=${item.sourceRefs.join(",") || "none"})`,
-    ),
+    "Memory review（候选 ≠ 长期记忆）",
+    ...context.memory.candidates
+      .slice(0, 8)
+      .map(
+        (item) =>
+          `- candidate ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 100)}; source=${truncateDisplay(item.source, 48)}; accept=/memory accept ${item.id}; reject=/memory reject ${item.id}`,
+      ),
     ...accepted,
     ...disabled,
-    "确认写入：/memory accept <id>；拒绝候选：/memory reject <id>；禁用已接受：/memory disable <id>；删除：/memory delete <id>",
+    "动作区别：accept=写入长期且可被 topK 注入；reject=丢弃候选；disable=暂停已接受注入；rollback=重新启用；delete=删除记录。",
   ].join("\n");
 }
 
 function formatMemoryStats(context: TuiContext): string {
   const injection = createControlledMemoryInjection(context);
+  const lastRun = context.memory.lastLearningRun
+    ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
+    : "none";
+  if (context.language === "en-US") {
+    return [
+      "Memory stats (controlled learning / cost guard)",
+      `- candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
+      `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injection.items.length}; chars=${injection.text.length}; estimatedTokens=${estimateMemoryTokens(injection.text)}`,
+      `- lastLearningRun: ${lastRun}`,
+      "- autoLearning: off by default; no per-turn learning model call",
+      "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
+      "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
+    ].join("\n");
+  }
   return [
-    "Memory stats（controlled learning / cost guard）",
-    `- candidates: ${context.memory.candidates.length}`,
-    `- accepted: ${context.memory.accepted.length}`,
-    `- disabled: ${context.memory.disabled.length}`,
-    `- rejected: ${context.memory.rejected.length}`,
-    `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K} injected=${injection.items.length} chars=${injection.text.length} estimatedTokens=${estimateMemoryTokens(injection.text)}`,
-    `- lastLearningRun: ${context.memory.lastLearningRun ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}` : "none"}`,
-    "- autoLearning: off by default; no per-turn learning model call",
-    "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
-    "- summarizerRole: only optional bounded summary source; failure degrades to no learning",
+    "Memory stats（受控学习 / 成本守卫）",
+    `- 候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}；已禁用=${context.memory.disabled.length}；已拒绝=${context.memory.rejected.length}`,
+    `- prompt 注入：acceptedOnly topK=${MEMORY_PROMPT_TOP_K}；injected=${injection.items.length}；chars=${injection.text.length}；estimatedTokens=${estimateMemoryTokens(injection.text)}`,
+    `- 上次学习：${lastRun}`,
+    "- 自动学习：默认关闭；不逐轮调用模型学习",
+    "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
+    "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
   ].join("\n");
 }
 
@@ -8491,14 +8679,24 @@ function createEvidenceBackedMemoryCandidates(context: TuiContext): MemoryCandid
   return summaries;
 }
 
-function formatMemoryLearningRun(run: MemoryLearningRun): string {
+function formatMemoryLearningRun(run: MemoryLearningRun, language: Language): string {
+  if (language === "en-US") {
+    return [
+      "Memory learn (controlled / candidate-only)",
+      `- source: bounded evidence/Todo/verification/handoff only; trigger=${run.trigger}`,
+      `- candidatesCreated: ${run.candidatesCreated}`,
+      `- modelCalled: ${run.modelCalled ? "yes" : "no"}`,
+      `- skippedReason: ${run.skippedReason ?? "none"}`,
+      "- next: review candidates with /memory review, then accept or reject. autoAccept=no.",
+    ].join("\n");
+  }
   return [
-    "Memory learn（controlled / candidate-only）",
-    `- trigger: ${run.trigger}`,
-    `- candidatesCreated: ${run.candidatesCreated}`,
-    `- modelCalled: ${run.modelCalled ? "yes" : "no"}`,
-    `- skippedReason: ${run.skippedReason ?? "none"}`,
-    "- autoAccept: no；请运行 /memory review 后用 /memory accept <id> 明确确认长期写入。",
+    "Memory learn（受控 / 只生成候选）",
+    `- 来源：仅 bounded evidence/Todo/verification/handoff；trigger=${run.trigger}`,
+    `- 新候选：${run.candidatesCreated}`,
+    `- 调用模型：${run.modelCalled ? "yes" : "no"}`,
+    `- 跳过原因：${run.skippedReason ?? "none"}`,
+    "- 下一步：用 /memory review 查看候选，再 accept 或 reject；autoAccept=no。",
   ].join("\n");
 }
 

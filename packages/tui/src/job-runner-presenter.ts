@@ -112,16 +112,16 @@ export function formatBackgroundDetails(task: BackgroundTaskState, language: Lan
   return [
     language === "en-US" ? `Background ${task.id}` : `Background ${task.id}`,
     `- kind: ${task.kind}`,
-    `- title: ${task.title}`,
-    `- status: ${task.status}`,
-    `- currentStep: ${task.currentStep ?? "-"}`,
+    `- title: ${truncateLine(task.title, 72)}`,
+    `- status: ${task.status}; result=${task.result ?? "-"}`,
+    `- currentStep: ${truncateLine(task.currentStep ?? "-", 72)}`,
     `- progress: ${progress}`,
+    `- why stale/blocked: ${formatBackgroundReason(task, language)}`,
+    `- resume/cancel: ${truncateLine(task.nextAction ?? "-", 96)}`,
+    `- summary: ${truncateLine(task.userVisibleSummary, 120)}`,
     `- logPath: ${task.logPath ?? "-"}`,
     `- outputPath: ${task.outputPath ?? "-"}`,
     `- hasOutput: ${task.hasOutput}`,
-    `- result: ${task.result ?? "-"}`,
-    `- summary: ${task.userVisibleSummary}`,
-    `- nextAction: ${task.nextAction ?? "-"}`,
     `- startedAt: ${task.startedAt}`,
     `- updatedAt: ${task.updatedAt}`,
   ].join("\n");
@@ -154,7 +154,36 @@ export function formatBackgroundTask(task: BackgroundTaskState, language: Langua
     : language === "en-US"
       ? "no valid output yet"
       : "尚未产生有效输出";
+  const title = truncateLine(task.title, 42);
+  const step = truncateLine(task.currentStep ?? "-", 44);
+  const next = truncateLine(task.nextAction ?? "-", 48);
   return language === "en-US"
-    ? `[background] ${task.title} · ${task.status} · ${task.currentStep ?? "-"}${progress} · log: ${output} · next: ${task.nextAction ?? "-"}`
-    : `[后台] ${task.title} · ${task.status} · ${task.currentStep ?? "-"}${progress} · 日志：${output} · 下一步：${task.nextAction ?? "-"}`;
+    ? `[background] ${title} · ${task.status} · ${step}${progress} · log: ${output} · next: ${next}`
+    : `[后台] ${title} · ${task.status} · ${step}${progress} · 日志：${output} · 下一步：${next}`;
+}
+
+function formatBackgroundReason(task: BackgroundTaskState, language: Language): string {
+  if (task.status === "stale") {
+    return language === "en-US"
+      ? "heartbeat/output stopped; resume should inspect logs and state first"
+      : "heartbeat/output 已停止；恢复前应先检查日志和状态";
+  }
+  if (task.status === "paused") {
+    return language === "en-US"
+      ? "paused by resource guard, handoff repair, or user action"
+      : "因资源守卫、handoff 修复或用户操作暂停";
+  }
+  if (task.status === "timeout" || task.status === "cancelled") {
+    return language === "en-US"
+      ? `${task.status}; this is not PASS evidence`
+      : `${task.status}；这不是 PASS 证据`;
+  }
+  return language === "en-US" ? "not stale" : "未 stale";
+}
+
+function truncateLine(value: string, max: number): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= max) return normalized;
+  if (max <= 1) return "…";
+  return `${normalized.slice(0, max - 1)}…`;
 }

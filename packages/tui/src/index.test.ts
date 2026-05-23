@@ -1035,7 +1035,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(loaded.projectRulesExists).toBe(true);
     expect(loaded.projectRulesSummary).toContain("长期稳定项目规则");
     expect(loaded.projectRulesSummary.length).toBeLessThan(700);
-    expect(output.text).toContain("projectRulesSummary");
+    expect(output.text).toContain("summary=长期稳定项目规则");
     expect(output.text).toContain("projectRulesHash");
     expect(output.text).toMatch(/changedKeys: .*projectRulesHash/);
     expect(output.text).toContain("projectRules:");
@@ -1064,7 +1064,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(loaded.accepted).toHaveLength(1);
     expect(loaded.accepted[0]?.summary).toBe("项目长期规则只保存稳定工程事实");
-    expect(output.text).toContain("accepted: 1");
+    expect(output.text).toContain("review queue: candidates=0; accepted=1");
     expect(output.text).toContain("项目长期规则只保存稳定工程事实");
     expect(output.text).toContain("memoryHash");
     expect(output.text).toMatch(/changedKeys: .*memoryHash/);
@@ -1085,6 +1085,8 @@ describe("Phase 06 TUI slash commands", () => {
     const acceptedId = context.memory.candidates[0]?.id;
     expect(acceptedId).toBeTruthy();
     await handleSlashCommand(`/memory accept ${acceptedId}`, context, output);
+    await handleSlashCommand("/memory", context, output);
+    await handleSlashCommand("/memory review", context, output);
     await handleSlashCommand("/memory stats", context, output);
 
     const prompt = createModelSystemPrompt("帮我继续", context, {
@@ -1093,8 +1095,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("ControlledMemorySummary=");
     expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
-    expect(output.text).toContain("autoLearning: off by default");
-    expect(output.text).toContain("promptInjection: acceptedOnly topK=3 injected=1");
+    expect(output.text).toContain("autoLearning=off; autoAccept=no");
+    expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
+    expect(output.text).toContain("自动学习：默认关闭；不逐轮调用模型学习");
+    expect(output.text).toContain("prompt 注入：acceptedOnly topK=3；injected=1");
+    expect(output.text).toContain("完整候选、聊天、日志和索引 dump 不注入 prompt");
 
     await handleSlashCommand(`/memory disable ${acceptedId}`, context, output);
     const disabledPrompt = createModelSystemPrompt("帮我继续", context, {
@@ -1165,9 +1170,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates[0]?.status).toBe("candidate");
     expect(context.memory.candidates[0]?.sourceRefs).toEqual(["ev-phase-16"]);
     expect(context.memory.lastLearningRun?.modelCalled).toBe(false);
-    expect(output.text).toContain("Memory learn（controlled / candidate-only）");
-    expect(output.text).toContain("modelCalled: no");
-    expect(output.text).toContain("autoAccept: no");
+    expect(output.text).toContain("Memory learn（受控 / 只生成候选）");
+    expect(output.text).toContain("调用模型：no");
+    expect(output.text).toContain("autoAccept=no");
   });
 
   it("keeps Phase 16 skill evolution as candidate-only metadata", async () => {
@@ -1533,10 +1538,11 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/fork explorer inspect cache", context, output);
+    const inspectAgent = context.agents[0];
     await handleSlashCommand("/fork planner plan agent loop", context, output);
     await handleSlashCommand("/fork verifier verify agent loop", context, output);
     await handleSlashCommand("/agents", context, output);
-    await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, output);
+    await handleSlashCommand(`/agents show ${inspectAgent?.id}`, context, output);
     await handleSlashCommand("/fork explorer cancellable --background", context, output);
     await handleSlashCommand("/details", context, output);
     await handleSlashCommand(
@@ -1567,7 +1573,15 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("verifier 摘要");
     expect(output.text).toContain("session-scoped conservative verification");
     expect(output.text).toContain("不是 durable job、不是第二套 job system、不是 Phase 17");
-    expect(output.text).toContain("Agents:");
+    expect(output.text).toContain("Agents：");
+    expect(output.text).toContain("inspect-cache-explorer");
+    expect(output.text).toContain("displayName: inspect-cache-explorer");
+    expect(output.text).toContain(
+      "displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
+    );
+    expect(inspectAgent?.displayName).toBe("inspect-cache-explorer");
+    expect(inspectAgent?.role).toBe("executor");
+    expect(inspectAgent?.permissionMode).toBe("plan");
     expect(output.text).toContain("transcript:");
     expect(output.text).toContain("已降级为同步执行");
     expect(output.text).toContain("- full output: /details evidence <id>");
@@ -1581,6 +1595,44 @@ describe("Phase 06 TUI slash commands", () => {
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
     expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
     expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
+  });
+
+  it("keeps Polish D agent display names cosmetic, ASCII-safe, and bounded", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-d-agent-label-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand(
+      "/fork verifier repair extremely long windows path diagnostics and terminal wrapping without changing permissions",
+      context,
+      output,
+    );
+    const verifierAgent = context.agents[0];
+    await handleSlashCommand("/fork explorer 修复中文路径显示", context, output);
+    const explorerAgent = context.agents[0];
+    await handleSlashCommand("/agents", context, output);
+    await handleSlashCommand(`/agents show ${explorerAgent?.id}`, context, output);
+
+    expect(verifierAgent?.displayName).toBe("repair-extremely-long-verifier");
+    expect(explorerAgent?.displayName).toMatch(/^task-[0-9a-f]{6}-explorer$/u);
+    expect(verifierAgent?.role).toBe("verifier");
+    expect(explorerAgent?.role).toBe("executor");
+    expect(verifierAgent?.permissionMode).toBe("default");
+    expect(explorerAgent?.permissionMode).toBe("plan");
+    expect(output.text).toContain("repair-extremely-long-verifier");
+    expect(output.text).toContain(`displayName: ${explorerAgent?.displayName}`);
+    expect(output.text).toContain(
+      "displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
+    );
+    expect(output.text).not.toContain("修复中文路径显示-explorer");
+    const keyLines = output.text
+      .split("\n")
+      .filter(
+        (line) => line.includes("repair-extremely-long-verifier") || line.includes("displayName"),
+      );
+    expect(keyLines.every((line) => line.length <= 160)).toBe(true);
   });
 
   it("runs Phase 17A durable job loop with persisted state, background reuse, and bounded agents", async () => {
@@ -1625,7 +1677,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
       status?: string;
-      agents?: { status?: string; summary?: string }[];
+      agents?: { displayName?: string; status?: string; summary?: string }[];
       budget?: {
         maxRunningAgents?: number;
         maxSteps?: number;
@@ -1647,6 +1699,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.budget?.maxSteps).toBe(4);
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
+    expect(persisted.agents?.[0]?.displayName).toBe("implement-durable-loop-planner");
+    expect(persisted.agents?.[1]?.displayName).toBe("implement-durable-loop-worker");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
     expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(5);
     expect(persisted.budget?.maxRunningAgents).toBe(3);
@@ -1675,14 +1729,19 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
-    expect(output.text).toContain("local durable metadata + unified background task");
-    expect(output.text).toContain("created=5, running=0, cap=3");
-    expect(output.text).toContain(`${jobId}  completed`);
+    expect(output.text).toContain("本地 durable metadata + 统一后台任务");
+    expect(output.text).toContain(
+      "agents: created=5, running=0, cap=3; displayName is cosmetic only.",
+    );
+    expect(output.text).toContain(`${jobId}  completed  label=implement-durable-loop-planner`);
     expect(output.text).not.toContain(`${jobId}  running`);
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
-    expect(output.text).toContain("worker: completed");
+    expect(output.text).toContain(
+      "agent assignment: job-agent-1:implement-durable-loop-planner:completed",
+    );
+    expect(output.text).toContain("worker=completed");
     expect(output.text).toContain("task graph: 4 steps");
     expect(output.text).toContain("fullOutputPath:");
     expect(output.text).not.toContain("Beta readiness PASS");
@@ -5592,6 +5651,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
+    await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
+    input.write("\n");
     await waitForTestCondition(() => output.text.includes("工作区信任"));
     expect(output.text).toContain(`当前目录：${project}`);
     expect(output.text).toContain("是否信任这个项目");
@@ -5603,6 +5664,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await expect(running).resolves.toBe(0);
     const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).toContain('"language": "zh-CN"');
     expect(settings).toContain('"workspaceTrust"');
     expect(settings).toContain('"level": "trusted"');
     expect(settings).toContain('"recorded": true');
@@ -5619,6 +5681,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
+    await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
+    input.write("\n");
     await waitForTestCondition(() => output.text.includes("工作区信任"));
     input.emit("keypress", "", { name: "escape" });
     await waitForTestCondition(() => output.text.includes("工作区信任：restricted"));
@@ -5626,11 +5690,38 @@ describe("Phase 06 TUI slash commands", () => {
 
     await expect(running).resolves.toBe(0);
     const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).toContain('"language": "zh-CN"');
     expect(settings).toContain('"level": "restricted"');
     expect(output.text).toContain("已拦截 /write");
     expect(output.text).toContain("帮助");
     expect(output.text).toContain("Readiness：本地");
     await expect(readFile(join(project, "trust.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("shows Polish D first-run language picker only for TTY and persists English", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-polish-d-language-first-"));
+    const input = new TtyInput();
+    const output = new MemoryOutput();
+    const running = runTui({
+      projectPath: project,
+      stdin: input,
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    await waitForTestCondition(() => output.text.includes("选择输出语言 / Choose output language"));
+    input.write("2\n");
+    await waitForTestCondition(() => output.text.includes("Language switched to English."));
+    await waitForTestCondition(() => output.text.includes("Workspace trust"));
+    expect(output.text).toContain("Do you trust this project?");
+    input.write("no\n");
+    await waitForTestCondition(() => output.text.includes("Workspace trust: restricted"));
+    input.write("/exit\n");
+
+    await expect(running).resolves.toBe(0);
+    const settings = await readFile(join(project, ".linghun", "settings.json"), "utf8");
+    expect(settings).toContain('"language": "en-US"');
+    expect(settings).toContain('"level": "restricted"');
   });
 
   it("does not show Polish B interactive Workspace Trust prompt for non-TTY input", async () => {
@@ -5645,6 +5736,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("工作区信任尚未记录");
+    expect(output.text).not.toContain("选择输出语言 / Choose output language");
     expect(output.text).not.toContain("是否信任这个项目");
     await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
   });
@@ -5789,7 +5881,7 @@ describe("Phase 06 TUI slash commands", () => {
     ) as { result?: { status?: string; summary?: string } };
     expect(state.result?.status).not.toBe("pass");
     expect(state.result?.summary).toContain("no PASS evidence");
-    expect(output.text).toContain("local durable metadata + unified background task");
+    expect(output.text).toContain("本地 durable metadata + 统一后台任务");
     expect(output.text).toContain("never equals verification PASS");
   });
 
@@ -5963,6 +6055,16 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Status: Session");
     expect(output.text).toContain("Unknown command: /not-a-command");
     expect(output.text).toContain("Something went wrong.");
+    expect(context.config.language).toBe("en-US");
+    expect(await readFile(join(project, ".linghun", "settings.json"), "utf8")).toContain(
+      '"language": "en-US"',
+    );
+
+    const prompt = createModelSystemPrompt("continue", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+    expect(prompt).toContain("Answer in English by default");
+    expect(prompt).not.toContain("默认用中文回答");
   });
 
   it("creates checkpoints and restores them with rewind", async () => {
