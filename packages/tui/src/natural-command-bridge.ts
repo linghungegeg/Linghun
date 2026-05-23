@@ -8,10 +8,20 @@ export type CommandRisk =
   | "tool_permission"
   | "dangerous";
 
+export type CommandGroup =
+  | "core"
+  | "edit"
+  | "index-mcp"
+  | "memory-rules"
+  | "agents-jobs"
+  | "diagnostics"
+  | "exit";
+
 export type CommandCapability = {
   id: string;
   slash: string;
   aliases: string[];
+  group: CommandGroup;
   titleZh: string;
   titleEn: string;
   descriptionZh: string;
@@ -887,6 +897,55 @@ export function validateCommandCapabilityCoverage(
   ];
 }
 
+function inferCommandGroup(id: string, slash: string): CommandGroup {
+  if (["read", "write", "edit", "multiedit", "grep", "glob", "bash", "todo", "diff"].includes(id)) {
+    return "edit";
+  }
+  if (["index", "mcp"].includes(id)) {
+    return "index-mcp";
+  }
+  if (["memory", "permissions"].includes(id)) {
+    return "memory-rules";
+  }
+  if (
+    ["agents", "fork", "background", "job", "remote", "sessions", "resume", "branch"].includes(id)
+  ) {
+    return "agents-jobs";
+  }
+  if (
+    [
+      "readiness",
+      "problems",
+      "details",
+      "verify",
+      "review",
+      "cache",
+      "cache-log",
+      "break-cache",
+      "usage",
+      "stats",
+      "claim-check",
+      "hooks",
+      "rewind",
+    ].includes(id)
+  ) {
+    return "diagnostics";
+  }
+  if (slash === "/exit") {
+    return "exit";
+  }
+  return "core";
+}
+
+export function getUserVisibleCommandCapabilities(): CommandCapability[] {
+  const visible = new Set(
+    SLASH_COMMAND_REGISTRY.filter((item) => item.userVisible).map((item) => item.capabilityId),
+  );
+  return getCommandCapabilityCatalog().filter(
+    (item) => visible.has(item.id) && item.userInvocable && !item.hiddenReason,
+  );
+}
+
 export function buildRuntimeStatusForModel(context: RuntimeStatusSource): RuntimeStatusForModel {
   const latest = context.cache.history.at(-1);
   const freshness = latest?.freshness ?? context.cache.lastFreshness;
@@ -1400,6 +1459,7 @@ function cap(
     id,
     slash,
     aliases,
+    group: options.group ?? inferCommandGroup(id, slash),
     titleZh,
     titleEn,
     descriptionZh,

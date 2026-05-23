@@ -64,8 +64,14 @@ describe("Phase 15 Command Capability Catalog", () => {
     const catalog = getCommandCapabilityCatalog();
     expect(catalog.some((item) => item.id === "status" && item.hiddenReason)).toBe(true);
     expect(
-      catalog.every((item) => item.titleZh && item.titleEn && item.whenToUseZh && item.whenToUseEn),
+      catalog.every(
+        (item) =>
+          item.titleZh && item.titleEn && item.whenToUseZh && item.whenToUseEn && item.group,
+      ),
     ).toBe(true);
+    expect(catalog.find((item) => item.slash === "/model")?.group).toBe("core");
+    expect(catalog.find((item) => item.slash === "/index")?.group).toBe("index-mcp");
+    expect(catalog.find((item) => item.slash === "/write")?.group).toBe("edit");
   });
 
   it("creates a stable short model-visible summary", () => {

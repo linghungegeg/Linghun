@@ -544,6 +544,11 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("Linghun TUI / REPL");
+    expect(output.text).toContain("项目 linghun-tui-project-");
+    expect(output.text).toContain("模型 deepseek-v4-flash");
+    expect(output.text).toContain("模式 风险确认");
+    expect(output.text).toContain("可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。");
+    expect(output.text).toContain("需要精确命令时，用 /help 查看。");
     expect(output.text).not.toContain("Phase 14 TUI / REPL");
   });
 
@@ -556,6 +561,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/status", context, output);
     await handleSlashCommand("/help", context, output);
+    await handleSlashCommand("/help all", context, output);
     await handleSlashCommand("/model", context, output);
     await handleSlashCommand("/sessions", context, output);
 
@@ -565,6 +571,21 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/memory storage");
     expect(output.text).toContain("/memory review");
     expect(output.text).toContain("/memory accept <id>");
+    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
+    expect(output.text).toContain("Slash 命令是高级/精确入口");
+    expect(output.text).toContain("- 核心");
+    expect(output.text).toContain("- 编辑");
+    expect(output.text).toContain("- 索引与协议");
+    expect(output.text).toContain("- 记忆与规则");
+    expect(output.text).toContain("- 代理与任务");
+    expect(output.text).toContain("- 诊断");
+    expect(output.text).toContain("- 退出");
+    expect(output.text).not.toContain("Core / 核心");
+    expect(output.text).not.toContain("Index & MCP / 索引与 MCP");
+    expect(output.text).toContain("default: 风险动作会先确认。");
+    expect(output.text).toContain("auto-review: 低风险编辑更顺滑，高风险仍确认。");
+    expect(output.text).toContain("plan: 只规划，不直接改。");
+    expect(output.text).toContain("full-access: 本地开启后减少确认，安全边界仍生效。");
     expect(output.text).toContain("/features");
     expect(output.text).toContain("/model doctor");
     expect(output.text).toContain("/model route");
@@ -604,9 +625,59 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
     );
-    expect(output.text).toContain("模式=default");
+    expect(output.text).toContain("模式 风险确认");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
+  });
+
+  it("shows Polish A slash discovery and unknown command suggestions", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/", context, output);
+    await handleSlashCommand("/?", context, output);
+    await handleSlashCommand("/mo", context, output);
+    await handleSlashCommand("/modex", context, output);
+
+    expect(output.text).toContain("Slash 发现：自然语言仍是主入口。");
+    expect(output.text).toContain("- 核心");
+    expect(output.text).not.toContain("Core / 核心");
+    expect(output.text).toContain("/mo 的候选命令：");
+    expect(output.text).toContain("/model");
+    expect(output.text).toContain("/mode");
+    expect(output.text).toContain("未知命令：/modex");
+    expect(output.text).toMatch(/你是不是想用 .*\/model|你是不是想用 .*\/mode/u);
+
+    const englishOutput = new MemoryOutput();
+    context.language = "en-US";
+    await handleSlashCommand("/", context, englishOutput);
+
+    expect(englishOutput.text).toContain("- Core");
+    expect(englishOutput.text).toContain("- Index & MCP");
+    expect(englishOutput.text).toContain("- Agents & Jobs");
+    expect(englishOutput.text).not.toContain("Core / 核心");
+    expect(englishOutput.text).not.toContain("- 核心");
+  });
+
+  it("keeps Polish A help around 80-column scanable rows", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/help", context, output);
+
+    const longEngineeringRows = output.text
+      .split(/\r?\n/u)
+      .filter(
+        (line) =>
+          line.length > 90 && /provider|baseURL|apiKey|endpointProfile|reasoningStatus/u.test(line),
+      );
+    expect(longEngineeringRows).toEqual([]);
   });
 
   it("shows Phase 15.5F readiness doctor and Problems Lite without raw debug leaks", async () => {
@@ -3680,7 +3751,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests).toHaveLength(2);
     expect(output.text).toContain("这条输入不会发送给模型");
-    expect(output.text).toContain("确认=待批准");
+    expect(output.text).toContain("确认 待批准");
     expect(output.text).toContain("当前权限模式：default");
     expect(output.text).toContain("已写入 allowed-after-pending.txt。");
     await expect(readFile(join(project, "allowed-after-pending.txt"), "utf8")).resolves.toBe("ok");
@@ -5417,10 +5488,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/not-a-command", context, output);
     await handleSlashCommand("/read missing.txt", context, output);
 
-    expect(output.text).toContain("可用命令");
+    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
     expect(output.text).toContain("Language switched to English.");
-    expect(output.text).toContain("Available commands");
-    expect(output.text).toContain("Status: session");
+    expect(output.text).toContain("Help: describe a goal in natural language first.");
+    expect(output.text).toContain("Status: Session");
     expect(output.text).toContain("Unknown command: /not-a-command");
     expect(output.text).toContain("Error:");
   });
@@ -6864,7 +6935,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("可用命令");
+    expect(output.text).toContain("帮助：优先直接用自然语言描述目标。");
     expect(output.text).toContain("索引刷新完成");
     expect(output.text).toContain("当前没有等待确认的 Start Gate");
     expect(requests).toHaveLength(1);
@@ -6878,7 +6949,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");
-    expect(output.text).toContain("最近拒绝");
+    expect(output.text).toContain("查看 /permissions recent");
     expect(output.text).toContain("Index status");
     expect(output.text).not.toContain("证据记录：");
     expect(await readMockCalls(callsPath)).toContain("index_repository");

@@ -34,11 +34,13 @@
 | Phase 17B | Remote channels 第一版 | 只做企业微信 / 飞书 / 钉钉 official_cli 或官方 webhook adapter；默认关闭；只发送脱敏摘要、审批和结果报告；必须有 doctor、幂等、过期、用户/设备绑定和脱敏审计 |
 | Phase 17C | Native Runner / Job Supervisor Gate | 只做长任务执行与监督底座成熟：Runner Resolver、Runner Adapter、Node fallback、`/doctor runner`、Windows 进程树清理、heartbeat/log/status supervisor、crash/missing/protocol mismatch fallback、scheduler/evidence/resource guard/log artifact/handoff recovery 集成，以及中文/空格路径和跨平台 process cleanup 验证；不得做 Fast Workspace Scanner、remote channels、桌面端、第二套 agent/job runtime 或性能宣传 |
 | Terminal release readiness | 安装、CLI 入口、配置、doctor、密钥脱敏、debug bundle、升级/回滚基础诊断、文档同步 | 只做终端运行与开源前候选产品所需边界；完整发布物料可后置 |
+| Open-source packaging gate | GitHub release artifact、platform runner package、checksum、一条命令安装验证 | 开源发布前必须做到 GitHub Actions 产出 Windows/Linux/macOS runner artifacts、SHA256 checksum、package/bin 平台选择、`/doctor runner` hash/version/fallback 诊断和一条命令安装可用；不做商业级签名、AV 矩阵或自动升级 |
 
 ## 继续后置
 
 - Phase 18 桌面端完整实现；本轮只保留 core/UI/API/IPC 复用预留。
-- 开源发布物料、官网、宣传、商业化、账号系统。
+- 官网、宣传、商业化、账号系统。
+- 商业级签名、AV 全矩阵、公证、企业级安装器和自动升级；开源发布时只要求 GitHub release artifacts + checksum + 一条命令安装可用。
 - 插件市场、skill 市场、评分推荐、云同步、自动更新。
 - 个人微信。
 - 完整远程工作台。
@@ -53,6 +55,7 @@
 - Phase 17A 才承接 Virtual Agent Concurrency：多 agent 可以对用户表现为并行，但底层必须按资源预算和证据边界调度，不能让每个 agent 复制完整上下文、重复扫全仓、并发跑重任务或把本机拖卡。3 agent 是低风险默认起点；8 agent 是覆盖大多数个人开发场景的压测/高配目标，不得写成无条件默认并发。
 - Native Local Job Runner 只是 Phase 17A/17B 前后的候选底座输入；正式主链路接入归属 Phase 17C Native Runner / Job Supervisor Gate。17C 必须通过 Runner Resolver / Adapter 把 approved job spec 映射到 start/status/stop，并把 runner 状态回写既有 BackgroundTask、job report、evidence、log artifact、resource guard 和 handoff recovery；native missing、crash、protocol mismatch 或平台不兼容时必须 fallback Node。17C 不得新造第二套 agent/job runtime，不得替代权限管道，不得把 cancelled/timeout/stale/crash 写成 PASS evidence。
 - Fast Workspace Scanner 不进入当前必做实现；保留为 post-runner、benchmark-gated、optional managed native helper 候选。默认继续使用 TS/Node Workspace Snapshot Lite + codebase-memory；只有当大仓库/多 agent 共享 metadata benchmark 证明 TS/Node 路径成为瓶颈，且 Runner 的 managed binary / doctor / fallback 路线可控时，才启动 scanner prototype。
+- 开源发布时，Native Runner 的发布成熟度必须达到“第二层”开源分发边界：GitHub Actions 自动构建 Windows/Linux/macOS artifacts，Release 附带 SHA256 checksum，package/bin 可按平台选择 runner，用户一条命令安装后无需 Rust toolchain 或手动配置 path，`/doctor runner` 能显示平台、版本、hash 校验、fallback 状态和下一步。该边界不包含商业级签名、AV 矩阵、自动升级或企业安装器。
 - Phase 00-14 done 不回写、不污染。
 - 历史 A-C、D-H、focused/mock/local PASS 只作为 evidence，不作为 readiness proof。
 - 任何 `DOC-ONLY` 不能冒充 runtime DONE。

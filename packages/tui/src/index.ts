@@ -121,6 +121,8 @@ import {
   readLogArtifactSlice,
 } from "./log-artifact.js";
 import {
+  type CommandCapability,
+  type CommandGroup,
   type NaturalIntent,
   type PendingNaturalCommand,
   type SLASH_COMMAND_REGISTRY,
@@ -129,7 +131,7 @@ import {
   createPendingNaturalCommand,
   formatCapabilityAnswer,
   formatNaturalStartGate,
-  getCommandCapabilityCatalog,
+  getUserVisibleCommandCapabilities,
   matchesNaturalGateConfirmation,
   routeNaturalIntent,
 } from "./natural-command-bridge.js";
@@ -150,7 +152,7 @@ import {
   formatReportIncompletePrimary,
   formatRequestActivity,
 } from "./request-lifecycle-presenter.js";
-import { formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import {
   type TerminalProblemView,
   type TerminalReadinessView,
@@ -2112,6 +2114,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
 
   writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
   writeStatus(output, context);
+  writeLine(output, formatHomeScreen(context));
   writeLine(output, `${t(context, "intro")}\n`);
   if (!context.memory.projectRulesExists) {
     writeLine(output, t(context, "projectRulesMissingHint"));
@@ -2176,8 +2179,15 @@ export async function handleSlashCommand(
   }
 
   const [command, ...rest] = text.split(/\s+/);
+  if (command === "/" || command === "/?") {
+    writeLine(output, formatSlashDiscovery(context.language));
+    return "handled";
+  }
   if (command === "/help") {
-    writeLine(output, formatCatalogHelp(context.language));
+    writeLine(
+      output,
+      formatCatalogHelp(context.language, context.permissionMode, rest[0] === "all"),
+    );
     return "handled";
   }
   if (command === "/features") {
@@ -2368,12 +2378,13 @@ export async function handleSlashCommand(
     return "exit";
   }
 
-  writeLine(
-    output,
-    context.language === "en-US"
-      ? `Unknown command: ${command}. Type /help to see available commands.`
-      : `未知命令：${command}。输入 /help 查看可用命令。`,
-  );
+  const prefixCandidates = getSlashPrefixCandidates(command);
+  if (prefixCandidates.length > 0) {
+    writeLine(output, formatSlashDiscovery(context.language, command));
+    return "handled";
+  }
+
+  writeLine(output, formatUnknownSlashCommand(command, context.language));
   return "handled";
 }
 
@@ -13623,25 +13634,230 @@ function decodeInput(bytes: Buffer): string {
   return new TextDecoder("gb18030", { fatal: false }).decode(bytes);
 }
 
-function formatCatalogHelp(language: Language): string {
+function formatHomeScreen(context: TuiContext): string {
+  const model = getSelectedModelRuntime(context).model;
+  const project = basename(context.projectPath) || context.projectPath;
+  const mode = formatPermissionModeLabel(context.permissionMode, context.language);
+  if (context.language === "en-US") {
+    return [
+      `Project ${project} · Model ${model} · Mode ${mode}`,
+      "You can describe a goal directly, like “check project status” or “run tests”.",
+      "For exact commands, use /help.",
+      formatModeBehavior(context.permissionMode, context.language),
+      "",
+    ].join("\n");
+  }
+  return [
+    `项目 ${project} · 模型 ${model} · 模式 ${mode}`,
+    "可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。",
+    "需要精确命令时，用 /help 查看。",
+    formatModeBehavior(context.permissionMode, context.language),
+    "",
+  ].join("\n");
+}
+
+const COMMAND_GROUP_ORDER: CommandGroup[] = [
+  "core",
+  "edit",
+  "index-mcp",
+  "memory-rules",
+  "agents-jobs",
+  "diagnostics",
+  "exit",
+];
+
+const COMMAND_GROUP_LABELS: Record<CommandGroup, { en: string; zh: string }> = {
+  core: { en: "Core", zh: "核心" },
+  edit: { en: "Edit", zh: "编辑" },
+  "index-mcp": { en: "Index & MCP", zh: "索引与协议" },
+  "memory-rules": { en: "Memory & Rules", zh: "记忆与规则" },
+  "agents-jobs": { en: "Agents & Jobs", zh: "代理与任务" },
+  diagnostics: { en: "Diagnostics", zh: "诊断" },
+  exit: { en: "Exit", zh: "退出" },
+};
+
+function formatCatalogHelp(
+  language: Language,
+  mode: PermissionMode = "default",
+  showAll = false,
+): string {
+  if (showAll) {
+    return formatHelp(language);
+  }
   const lines =
     language === "en-US"
-      ? ["Available commands (from Command Capability Catalog):"]
-      : ["可用命令（来自 Command Capability Catalog）："];
-  for (const capability of getCommandCapabilityCatalog().filter((item) => !item.hiddenReason)) {
-    const title = language === "en-US" ? capability.titleEn : capability.titleZh;
-    const description = language === "en-US" ? capability.descriptionEn : capability.descriptionZh;
-    lines.push(
-      `  ${capability.slash.padEnd(18)} ${title} — ${description} [risk=${capability.risk}]`,
-    );
-  }
+      ? [
+          "Help: describe a goal in natural language first.",
+          "Slash commands are the precise/advanced entry when you need exact control.",
+          `Current mode: ${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
+          "",
+          "Command groups:",
+        ]
+      : [
+          "帮助：优先直接用自然语言描述目标。",
+          "Slash 命令是高级/精确入口，需要精确控制时再用。",
+          `当前模式：${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
+          "",
+          "命令分组：",
+        ];
+  lines.push(...formatGroupedCommandLines(language));
+  lines.push("");
+  lines.push(...formatModeBehaviorLines(language));
   lines.push("");
   lines.push(
     language === "en-US"
-      ? "Natural language can ask what any slash command does or request safe status. High-risk actions never bypass Start Gate or permission pipeline."
-      : "普通自然语言可以询问任何 slash command 的用途/风险，也可以请求安全状态查询。高风险动作不会绕过 Start Gate 或权限管道。",
+      ? "Try / or /? for grouped discovery, /mo for prefix candidates, /help all for the full list."
+      : "输入 / 或 /? 查看分组候选，输入 /mo 查看前缀候选，/help all 查看完整列表。",
   );
-  return `${lines.join("\n")}\n\n${formatHelp(language)}`;
+  return lines.join("\n");
+}
+
+function formatGroupedCommandLines(language: Language): string[] {
+  const catalog = getUserVisibleCommandCapabilities();
+  const lines: string[] = [];
+  for (const group of COMMAND_GROUP_ORDER) {
+    const commands = catalog.filter((item) => item.group === group);
+    if (commands.length === 0) continue;
+    const label = COMMAND_GROUP_LABELS[group];
+    lines.push(`- ${language === "en-US" ? label.en : label.zh}`);
+    for (const row of wrapSlashNames(commands.map((item) => item.slash))) {
+      lines.push(`  ${row}`);
+    }
+  }
+  return lines;
+}
+
+function wrapSlashNames(names: string[], maxWidth = 72): string[] {
+  const rows: string[] = [];
+  let row = "";
+  for (const name of names) {
+    const next = row ? `${row}  ${name}` : name;
+    if (next.length > maxWidth && row) {
+      rows.push(row);
+      row = name;
+      continue;
+    }
+    row = next;
+  }
+  if (row) rows.push(row);
+  return rows;
+}
+
+function formatModeBehaviorLines(language: Language): string[] {
+  const modes: PermissionMode[] = ["default", "auto-review", "plan", "full-access"];
+  return [
+    language === "en-US" ? "Mode behavior:" : "模式差异：",
+    ...modes.map((mode) => `- ${mode}: ${formatModeBehavior(mode, language)}`),
+  ];
+}
+
+function formatModeBehavior(mode: PermissionMode, language: Language): string {
+  const zh: Record<PermissionMode, string> = {
+    default: "风险动作会先确认。",
+    "auto-review": "低风险编辑更顺滑，高风险仍确认。",
+    plan: "只规划，不直接改。",
+    "full-access": "本地开启后减少确认，安全边界仍生效。",
+  };
+  const en: Record<PermissionMode, string> = {
+    default: "Risky actions ask first.",
+    "auto-review": "Low-risk edits are smoother; high-risk still asks.",
+    plan: "Plans and explains; does not edit directly.",
+    "full-access": "Local opt-in reduces prompts; safety boundaries remain.",
+  };
+  return language === "en-US" ? en[mode] : zh[mode];
+}
+
+function formatSlashDiscovery(language: Language, prefix = "/"): string {
+  const trimmed = prefix.trim();
+  const candidates = trimmed === "/" || trimmed === "/?" ? [] : getSlashPrefixCandidates(trimmed);
+  if (candidates.length > 0) {
+    const lines =
+      language === "en-US" ? [`Slash candidates for ${trimmed}:`] : [`${trimmed} 的候选命令：`];
+    for (const item of candidates) {
+      const title = language === "en-US" ? item.titleEn : item.titleZh;
+      lines.push(`- ${item.slash}  ${title}`);
+    }
+    lines.push(
+      language === "en-US"
+        ? "Use /help for groups or /help all for the full list."
+        : "用 /help 看分组，/help all 看完整列表。",
+    );
+    return lines.join("\n");
+  }
+  const lines =
+    language === "en-US"
+      ? [
+          "Slash discovery: natural language is still the main entry.",
+          "Use slash commands when you need exact control.",
+        ]
+      : ["Slash 发现：自然语言仍是主入口。", "需要精确控制时再用 slash 命令。"];
+  lines.push(...formatGroupedCommandLines(language));
+  lines.push(
+    language === "en-US"
+      ? "Type a prefix like /mo to narrow candidates."
+      : "输入 /mo 这类前缀可缩小候选。",
+  );
+  return lines.join("\n");
+}
+
+function getSlashPrefixCandidates(prefix: string): CommandCapability[] {
+  if (!prefix.startsWith("/") || prefix.length <= 1) return [];
+  const normalized = prefix.toLowerCase();
+  return getUserVisibleCommandCapabilities()
+    .filter((item) => item.slash.toLowerCase().startsWith(normalized))
+    .slice(0, 8);
+}
+
+function formatUnknownSlashCommand(command: string, language: Language): string {
+  const suggestions = suggestSlashCommands(command);
+  if (suggestions.length === 0) {
+    return language === "en-US"
+      ? `Unknown command: ${command}. Type /help to see available commands.`
+      : `未知命令：${command}。输入 /help 查看可用命令。`;
+  }
+  const joined = suggestions.map((item) => item.slash).join(" / ");
+  return language === "en-US"
+    ? `Unknown command: ${command}. Did you mean ${joined}? Type /help for groups.`
+    : `未知命令：${command}。你是不是想用 ${joined}？输入 /help 查看分组。`;
+}
+
+function suggestSlashCommands(command: string): CommandCapability[] {
+  const normalized = command.toLowerCase();
+  return getUserVisibleCommandCapabilities()
+    .map((item) => ({ item, score: scoreSlashSuggestion(normalized, item.slash.toLowerCase()) }))
+    .filter((entry) => entry.score < 4)
+    .sort((a, b) => a.score - b.score || a.item.slash.localeCompare(b.item.slash))
+    .slice(0, 3)
+    .map((entry) => entry.item);
+}
+
+function scoreSlashSuggestion(input: string, slash: string): number {
+  if (slash === input) return 0;
+  if (slash.startsWith(input) || input.startsWith(slash)) return 1;
+  if (slash.includes(input.slice(1)) || input.includes(slash.slice(1))) return 2;
+  return boundedEditDistance(input, slash, 3);
+}
+
+function boundedEditDistance(a: string, b: string, maxDistance: number): number {
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    let rowBest = current[0] ?? i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const value = Math.min(
+        (previous[j] ?? maxDistance) + 1,
+        (current[j - 1] ?? maxDistance) + 1,
+        (previous[j - 1] ?? maxDistance) + cost,
+      );
+      current[j] = value;
+      rowBest = Math.min(rowBest, value);
+    }
+    if (rowBest > maxDistance) return maxDistance + 1;
+    previous = current;
+  }
+  return previous[b.length] ?? maxDistance + 1;
 }
 
 function formatHelp(language: Language): string {
