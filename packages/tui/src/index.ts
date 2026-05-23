@@ -95,6 +95,14 @@ import {
   createManualCompactBoundary,
   microCompactMessages,
 } from "./compact-context.js";
+import {
+  type CodebaseMemoryBinarySource,
+  type CodebaseMemoryBinaryStatus,
+  type IndexSafetyFile,
+  type IndexState,
+  createIndexState,
+  findCurrentIndexProject,
+} from "./index-runtime.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type LogArtifactRequest,
@@ -119,6 +127,11 @@ import {
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
 import {
+  formatMcpTools,
+  formatRemoteStatus,
+  formatRemoteTestResult,
+} from "./remote-mcp-presenter.js";
+import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
   formatProviderFailurePrimary,
@@ -141,6 +154,9 @@ import {
   getWorkspaceReferenceSnapshot,
   workspaceReferenceHash,
 } from "./workspace-reference-cache.js";
+
+export type { IndexState } from "./index-runtime.js";
+export { createIndexState } from "./index-runtime.js";
 
 export type TuiStatus = "ready";
 
@@ -363,36 +379,6 @@ export type McpState = {
   servers: McpServerState[];
   tools: McpToolState[];
   lastDoctor?: string;
-};
-
-type CodebaseMemoryBinarySource = "env" | "managed" | "path" | "missing";
-type CodebaseMemoryBinaryStatus = "ready" | "missing" | "corrupt" | "unsupported" | "unknown";
-type CodebaseMemoryArtifactStatus = "ready" | "missing" | "stale" | "corrupt" | "unknown";
-type CodebaseMemoryProjectSelectionSource = "root_path" | "name-candidate" | "missing";
-
-export type IndexState = {
-  enabled: boolean;
-  projectName?: string;
-  status: "unknown" | "ready" | "missing" | "stale" | "error" | "indexing";
-  nodes?: number;
-  edges?: number;
-  indexedAt?: string;
-  changedFiles?: number;
-  staleHint?: string;
-  safetyWarning?: string;
-  safetyRiskyFiles?: IndexSafetyFile[];
-  safetyAction?: "init fast" | "refresh";
-  error?: string;
-  lastQuery?: string;
-  lastSummary?: string;
-  binarySource?: CodebaseMemoryBinarySource;
-  binaryStatus?: CodebaseMemoryBinaryStatus;
-  binaryVersion?: string;
-  binaryCommand?: string;
-  artifactStatus?: CodebaseMemoryArtifactStatus;
-  artifactPath?: string;
-  projectSelectionSource?: CodebaseMemoryProjectSelectionSource;
-  runtime?: string;
 };
 
 export type VerdictScope =
@@ -1474,13 +1460,6 @@ function createMcpToolPlaceholders(
     schemaLoaded: discovery === "discovered",
     runtimeVersion: discovery === "discovered" ? "compatible" : "unknown",
   }));
-}
-
-export function createIndexState(config: LinghunConfig): IndexState {
-  return {
-    enabled: config.index.enabled,
-    status: config.index.enabled ? "unknown" : "missing",
-  };
 }
 
 export async function createMemoryState(
@@ -4861,7 +4840,7 @@ async function handleRemoteCommand(
   refreshRemoteState(context);
   const action = args[0] ?? "status";
   if (action === "status") {
-    writeLine(output, formatRemoteStatus(context));
+    writeLine(output, formatRemoteStatus(context.remote));
     return;
   }
   if (action === "doctor") {
@@ -4926,23 +4905,6 @@ async function handleRemoteCommand(
   );
 }
 
-function formatRemoteStatus(context: TuiContext): string {
-  const lines = [
-    `Remote Channels：${context.remote.enabled ? "已开启" : "默认关闭"}；仅发送脱敏摘要/审批请求/结果报告。`,
-    "- 不发送完整 transcript、源码、日志、index result、evidence、API key/token 或 provider raw request。",
-  ];
-  for (const channel of context.remote.channels) {
-    lines.push(
-      `- ${channel.id}: ${channel.runtimeStatus}; binding=${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}; lastError=${channel.lastError ?? "none"}; next=${channel.nextAction}`,
-    );
-  }
-  if (context.remote.channels.some((channel) => channel.config.transport === "webhook_mock")) {
-    lines.push("- webhook_mock：diagnostic/test-only dry run，不代表真实 remote delivery PASS。");
-  }
-  lines.push("- 主路径：/remote setup <channel> -> /remote test <channel> -> /remote status");
-  return lines.join("\n");
-}
-
 function formatRemoteDoctor(context: TuiContext): string {
   const lines = [
     `Remote Doctor：${context.remote.enabled ? "enabled" : "disabled"}；失败会降级为 disabled/blocked，不阻塞主 TUI。`,
@@ -4973,17 +4935,6 @@ function formatRemoteSetup(channelArg: string | undefined, context: TuiContext):
     `- 当前 binding: ${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}`,
     `- 下一步：完成 CLI 登录或 webhook 填写后运行 /remote test ${channel.id}，再运行 /remote status。`,
     `- ${fallback}`,
-  ].join("\n");
-}
-
-function formatRemoteTestResult(channel: RemoteChannelState, event: RemoteEvent): string {
-  const ok = event.status === "sent";
-  return [
-    `Remote test ${ok ? "已发送" : "未发送"}：${channel.id}`,
-    `- status: ${event.status}`,
-    `- summary: ${event.redactedSummary}`,
-    `- next: ${ok ? "/remote status" : channel.nextAction}`,
-    "- 本测试只使用脱敏摘要；不代表真实外网回调服务器已接入。",
   ].join("\n");
 }
 
@@ -7289,7 +7240,7 @@ async function handleMcpCommand(
   if (action === "tools") {
     context.mcp.tools = stabilizeMcpToolList(context.mcp.tools);
     refreshCacheFreshness(context);
-    writeLine(output, formatMcpTools(context));
+    writeLine(output, formatMcpTools(context.mcp));
     return;
   }
   if (action === "doctor") {
@@ -8643,20 +8594,6 @@ function formatMcpStatus(context: TuiContext): string {
   ].join("\n");
 }
 
-function formatMcpTools(context: TuiContext): string {
-  if (context.mcp.tools.length === 0) {
-    return "MCP tools：暂无稳定工具摘要。可运行 /mcp doctor 检测本机 server；不会输出完整 tool schema。";
-  }
-  return [
-    "MCP tools（稳定排序摘要，不输出完整 schema）",
-    "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schemaLoaded=yes 只会在 discovery/doctor 成功后出现。",
-    ...context.mcp.tools.map(
-      (tool) =>
-        `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery=${tool.discovery ?? "placeholder"}; trusted=${tool.trusted ? "yes" : "no"}; schemaLoaded=${tool.schemaLoaded ? "yes" : "no"}; runtime=${tool.runtimeVersion ?? "unknown"}`,
-    ),
-  ].join("\n");
-}
-
 function validateMcpServers(context: TuiContext, id?: string): string {
   const servers = id
     ? context.mcp.servers.filter((server) => server.name === id)
@@ -9122,12 +9059,6 @@ function summarizeNamedCounts(value: unknown): string {
     .join(", ");
 }
 
-type IndexSafetyFile = {
-  path: string;
-  size: number;
-  reason: string;
-};
-
 type IndexSafetyResult = {
   riskyFiles: IndexSafetyFile[];
   truncated: boolean;
@@ -9297,58 +9228,6 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1_000_000).toFixed(1)} MB`;
   }
   return `${Math.round(bytes / 1_000)} KB`;
-}
-
-function findCurrentIndexProject(
-  data: unknown,
-  projectPath: string,
-): { name: string; rootPath?: string; source: CodebaseMemoryProjectSelectionSource } | null {
-  if (!isRecord(data) || !Array.isArray(data.projects)) {
-    return null;
-  }
-  const normalizedProjectPath = normalizePath(projectPath);
-  const rootPathMatch = data.projects.find((project) => {
-    if (!isRecord(project)) {
-      return false;
-    }
-    return normalizePath(String(project.root_path ?? "")) === normalizedProjectPath;
-  });
-  if (isRecord(rootPathMatch) && typeof rootPathMatch.name === "string") {
-    const rootPath =
-      typeof rootPathMatch.root_path === "string" ? rootPathMatch.root_path : undefined;
-    return { name: rootPathMatch.name, rootPath, source: "root_path" };
-  }
-
-  const candidateNames = createCurrentIndexProjectNameCandidates(projectPath);
-  const nameMatches = data.projects.filter((project) => {
-    if (!isRecord(project) || typeof project.name !== "string") {
-      return false;
-    }
-    return candidateNames.has(project.name.toLowerCase());
-  });
-  if (nameMatches.length !== 1) {
-    return null;
-  }
-  const [nameMatch] = nameMatches;
-  if (!isRecord(nameMatch) || typeof nameMatch.name !== "string") {
-    return null;
-  }
-  const rootPath = typeof nameMatch.root_path === "string" ? nameMatch.root_path : undefined;
-  return { name: nameMatch.name, rootPath, source: "name-candidate" };
-}
-
-function createCurrentIndexProjectNameCandidates(projectPath: string): Set<string> {
-  const normalizedPath = projectPath.replaceAll("\\", "/").replace(/\/$/, "");
-  const projectName = basename(normalizedPath);
-  const candidates = new Set<string>();
-  if (projectName) {
-    candidates.add(projectName.toLowerCase());
-  }
-  const drive = /^([A-Za-z]):\//.exec(normalizedPath)?.[1];
-  if (drive && projectName) {
-    candidates.add(`${drive}-${projectName}`.toLowerCase());
-  }
-  return candidates;
 }
 
 async function runCodebaseMemoryCli(
