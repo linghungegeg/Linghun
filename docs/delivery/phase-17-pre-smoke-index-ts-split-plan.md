@@ -2,8 +2,9 @@
 
 ## 状态
 
-- 本文件用于关闭 Pre-Smoke P1-1 / P2-6 的拆分计划要求。
-- 本轮只制定首批低风险拆分计划，不做大拆代码，不在真实 smoke 前引入新的 runtime 风险。
+- 本文件用于关闭 Pre-Smoke P1-1 / P2-6 的拆分计划要求，并记录 Pre-Smoke `index.ts` modularization Batch 1-3 combined closure。
+- Batch 1-3 已按小步、低风险、行为保持方式完成并通过 combined regression gate。
+- Batch 4 暂停；本轮不继续拆分、不进入 TUI polish、不进入真实 provider / 真实项目 smoke。
 - 当前不宣布 Beta PASS / smoke-ready / open-source-ready。
 
 ## 当前风险
@@ -46,3 +47,22 @@
 - P2-6：并入本计划；剩余 `index.ts` 拆分属于 smoke 后维护性任务或 smoke 暴露问题后的定向拆分。
 - P2 closure linkage：本轮 Pre-Smoke P2 Closure Hardening 只允许小修和文档澄清；除 Index Project Identity Reconciliation Lite 这一处定向小修外，不做 slash/router/model loop/permission/remote/job/MCP 的大拆代码。
 - 本轮不做大重构，避免真实 provider + 真实项目 smoke 前引入新风险。
+
+## Batch 1-3 Combined Closure（2026-05-23）
+
+### 已完成的小步拆分
+
+- Batch 1：`packages/tui/src/index-runtime.ts` 承载 index/codebase-memory 纯类型、`createIndexState()`、当前项目选择 helper；未硬编码 `F-Linghun`，`/index status` 默认 fast path 仍不运行 `detect_changes`。
+- Batch 2：`packages/tui/src/remote-mcp-presenter.ts` 承载 Remote / MCP 纯 presenter helper；未移动 Remote/MCP runtime、validation 或 tool execution。
+- Batch 3：`packages/tui/src/job-runner-presenter.ts` 承载 Native Runner / Durable Job / background task 纯 presenter / mapper helper；未移动 runner resolver/adapter/scheduler/process supervision、job state machine、resource guard 或 artifact slicing runtime。
+
+### 暂停项 / 不在 smoke 前继续拆分
+
+- Batch 4 暂停，默认不继续。
+- smoke 前不拆 model loop、slash command router、permission pipeline、Native Runner adapter/scheduler/process supervision、durable job state machine、resource guard、artifact registry slicing、index query/runtime heavy path。
+- 若后续真实 smoke 暴露必须修复的问题，先做局部补丁；只有在不拆分无法安全修复时，才按最小行为保持方式单独确认拆分。
+
+### Combined gate 口径
+
+- Batch 1-3 combined closure 只证明本地 focused regression / typecheck / check / build 通过，不代表真实 provider smoke、真实项目 smoke、Beta PASS、smoke-ready 或 open-source-ready。
+- 交付记录见 `docs/delivery/phase-17-pre-smoke-index-ts-modularization-batch-1-3-closure.md`。
