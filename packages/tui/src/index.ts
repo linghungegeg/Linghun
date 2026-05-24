@@ -170,7 +170,12 @@ import {
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
-import { createOutputBlock, createShellViewModel } from "./shell/view-model.js";
+import {
+  createOutputBlock,
+  createShellViewModel,
+  mapPendingApprovalToPermission,
+  mapRequestActivityToView,
+} from "./shell/view-model.js";
 import {
   type TerminalProblemView,
   type TerminalReadinessView,
@@ -1233,6 +1238,8 @@ export type TuiContext = {
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
+  requestActivityPhase?: RequestActivityPhase;
+  requestActivityToolName?: string;
 };
 
 type ProviderFailureSummary = {
@@ -2366,6 +2373,18 @@ async function runInkShell(
         setupNeeded: startup.setupNeeded,
         projectRouteProblem: startup.projectRouteProblem,
         outputBlocks: blocks,
+        activity: mapRequestActivityToView(context),
+        permission: mapPendingApprovalToPermission(context),
+        backgroundSummaries: context.backgroundTasks
+          .filter(
+            (t) =>
+              t.status === "running" ||
+              t.status === "completed" ||
+              t.status === "failed" ||
+              t.status === "timeout",
+          )
+          .slice(-2)
+          .map((t) => ({ id: t.id, title: t.title, status: t.status, result: t.result })),
         limitations: createShellLimitations(context, startup),
       }),
     onInput: async (event: ShellInputEvent) => {
@@ -13349,6 +13368,8 @@ function clearRequestActivity(context: TuiContext): void {
     clearTimeout(timer);
   }
   context.requestActivity = undefined;
+  context.requestActivityPhase = undefined;
+  context.requestActivityToolName = undefined;
 }
 
 function startRequestActivity(
@@ -13358,6 +13379,8 @@ function startRequestActivity(
   values: { reportPath?: string; toolName?: string } = {},
 ): void {
   clearRequestActivity(context);
+  context.requestActivityPhase = phase;
+  context.requestActivityToolName = values.toolName;
   writeLine(output, formatRequestActivity(phase, context.language, values));
   if (
     phase !== "request_started" &&

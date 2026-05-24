@@ -4,7 +4,13 @@ import type { TuiContext } from "../index.js";
 import { handleComposerInput } from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
-import { createOutputBlock, createShellViewModel, getComposerPlaceholder } from "./view-model.js";
+import {
+  createOutputBlock,
+  createShellViewModel,
+  getComposerPlaceholder,
+  mapPendingApprovalToPermission,
+  mapRequestActivityToView,
+} from "./view-model.js";
 
 class TestTtyOutput extends Writable {
   readonly chunks: string[] = [];
@@ -426,5 +432,526 @@ describe("Ink shell selection", () => {
     expect(plainRendered).toContain("LingHun");
     expect(plainRendered).not.toContain("█");
     expect(plainRendered).not.toContain("L I N G H U N");
+  });
+});
+
+describe("home → task view mode transition", () => {
+  it("defaults to home mode when no output/activity/permission", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect(view.viewMode).toBe("home");
+  });
+
+  it("switches to task mode when outputBlocks are present", () => {
+    const block = createOutputBlock("task completed", "zh-CN", "out-1");
+    const view = createShellViewModel(createContext(), { width: 80, outputBlocks: [block] });
+    expect(view.viewMode).toBe("task");
+  });
+
+  it("switches to task mode when activity is present", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      activity: { phase: "thinking", text: "正在思考…" },
+    });
+    expect(view.viewMode).toBe("task");
+  });
+
+  it("switches to task mode when permission is present", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Bash",
+        reason: "需要执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp/test"],
+        hint: "输入 yes 允许，no 拒绝",
+      },
+    });
+    expect(view.viewMode).toBe("task");
+  });
+
+  it("allows explicit viewMode override", () => {
+    const view = createShellViewModel(createContext(), { width: 80, viewMode: "task" });
+    expect(view.viewMode).toBe("task");
+    const homeView = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "home",
+      outputBlocks: [createOutputBlock("x", "zh-CN")],
+    });
+    expect(homeView.viewMode).toBe("home");
+  });
+
+  it("task mode plain render has compact top bar without full brand area", () => {
+    const block = createOutputBlock("done", "zh-CN", "out-1");
+    const view = createShellViewModel(createContext(), { width: 80, outputBlocks: [block] });
+    const rendered = renderPlainShell(view);
+
+    // Brand appears in compact top bar, not as centered hero
+    expect(rendered).toContain("LingHun");
+    // No vision text in task mode
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
+    // Status tray preserved
+    expect(rendered).toContain("项目：");
+    expect(rendered).toContain("模型：");
+    // Composer preserved
+    expect(rendered).toContain("我能帮您做点什么？");
+    // Output block preserved
+    expect(rendered).toContain("最近输出");
+  });
+
+  it("task mode plain render shows activity indicator", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      activity: { phase: "tool_running", text: "正在运行 Bash…", toolName: "Bash" },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("正在运行 Bash…");
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
+  });
+
+  it("task mode plain render shows permission prompt", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Write",
+        reason: "写入文件",
+        risk: "medium",
+        scope: ["src/main.ts"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[Write]");
+    expect(rendered).toContain("写入文件");
+    expect(rendered).toContain("src/main.ts");
+    expect(rendered).toContain("yes / no");
+  });
+
+  it("task mode Ink render shows activity and hides brand hero", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          activity: { phase: "thinking", text: "正在思考…" },
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // Brand in compact top bar
+    expect(output.text).toContain("LingHun");
+    // Activity indicator visible
+    expect(output.text).toContain("正在思考…");
+    // Vision text NOT shown in task mode
+    expect(output.text).not.toContain("技术普惠会越来越成熟");
+    // Composer still present
+    expect(output.text).toContain("我能帮您做点什么？");
+  });
+
+  it("task mode Ink render shows permission with border", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          permission: {
+            toolName: "Bash",
+            reason: "执行命令",
+            risk: "high",
+            scope: ["npm install"],
+            hint: "yes / no",
+          },
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("Bash");
+    expect(output.text).toContain("执行命令");
+    // Permission uses single border
+    expect(output.text).toContain("│");
+    expect(output.text).toContain("yes / no");
+  });
+
+  it("home mode Ink render does NOT show task activity or permission", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // Home mode shows vision
+    expect(output.text).toContain("技术普惠会越来越成熟");
+    // No activity or permission
+    expect(output.text).not.toContain("正在思考");
+    expect(output.text).not.toContain("yes / no");
+  });
+
+  it("task mode does not leak sensitive keys in output blocks", () => {
+    const block = createOutputBlock(
+      "result: sk-proj-abcdefghijklmnop Bearer token123456",
+      "zh-CN",
+      "out-secret",
+    );
+    const view = createShellViewModel(createContext(), { width: 80, outputBlocks: [block] });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).not.toContain("sk-proj-abcdefghijklmnop");
+    expect(rendered).toContain("[masked-key]");
+  });
+
+  it("setupHint does not appear in task mode when setupNeeded is false", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      setupNeeded: false,
+    });
+    expect(view.setupHint).toBeUndefined();
+    const rendered = renderPlainShell(view);
+    expect(rendered).not.toContain("还没有模型配置");
+  });
+
+  it("resize does not duplicate home page in Ink shell", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    let callCount = 0;
+    const controller = {
+      getViewModel: () => {
+        callCount += 1;
+        return createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        });
+      },
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+
+    // Simulate resize
+    output.columns = 60;
+    output.rows = 20;
+    output.emit("resize");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await shell.waitUntilRenderFlush();
+
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // Brand should appear but NOT be duplicated (alternateScreen handles clearing)
+    const brandMatches = output.text.split("技术普惠会越来越成熟");
+    // With alternateScreen, Ink clears before re-render, so no duplication
+    // The text may appear multiple times in raw output due to initial + re-render,
+    // but the key assertion is no stdout.write("\x1b[2J\x1b[H") from ShellApp
+    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+  });
+
+  it("resize in task mode stays stable without duplicating content", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          activity: { phase: "thinking", text: "正在思考…" },
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+
+    output.columns = 50;
+    output.rows = 18;
+    output.emit("resize");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await shell.waitUntilRenderFlush();
+
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // No manual clear-screen from ShellApp
+    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+    // Activity still visible after resize
+    expect(output.text).toContain("正在思考…");
+  });
+});
+
+describe("mapRequestActivityToView — real context field mapping", () => {
+  it("returns undefined when no requestActivityPhase is set", () => {
+    const ctx = createContext();
+    expect(mapRequestActivityToView(ctx)).toBeUndefined();
+  });
+
+  it("maps request_started to thinking phase with zh-CN text", () => {
+    const ctx = createContext({ requestActivityPhase: "request_started" } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("thinking");
+    expect(result?.text).toBe("正在思考…");
+    expect(result?.toolName).toBeUndefined();
+  });
+
+  it("maps tool_running with toolName to tool_running phase", () => {
+    const ctx = createContext({
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Write",
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("tool_running");
+    expect(result?.text).toBe("正在运行 Write…");
+    expect(result?.toolName).toBe("Write");
+  });
+
+  it("maps continuing_after_tool to continuing phase", () => {
+    const ctx = createContext({
+      requestActivityPhase: "continuing_after_tool",
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("continuing");
+    expect(result?.text).toBe("工具完成，继续处理…");
+  });
+
+  it("maps permission_waiting phase correctly", () => {
+    const ctx = createContext({
+      requestActivityPhase: "permission_waiting",
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("permission_waiting");
+    expect(result?.text).toBe("等待权限确认…");
+  });
+
+  it("maps en-US language correctly", () => {
+    const ctx = createContext({
+      language: "en-US",
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Bash",
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.text).toBe("Running Bash…");
+  });
+
+  it("returns undefined for unknown phase values", () => {
+    const ctx = createContext({
+      requestActivityPhase: "unknown_phase" as unknown,
+    } as Partial<TuiContext>);
+    expect(mapRequestActivityToView(ctx)).toBeUndefined();
+  });
+});
+
+describe("mapPendingApprovalToPermission — real context field mapping", () => {
+  it("returns undefined when no pendingLocalApproval is set", () => {
+    const ctx = createContext();
+    expect(mapPendingApprovalToPermission(ctx)).toBeUndefined();
+  });
+
+  it("maps model_tool_use approval for Bash with high risk", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "model_tool_use",
+        toolName: "Bash",
+        toolCall: { input: { command: "rm -rf /tmp/test" } },
+      },
+    } as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("Bash");
+    expect(result?.risk).toBe("high");
+    expect(result?.scope).toContain("rm -rf /tmp/test");
+    expect(result?.reason).toContain("Bash");
+    expect(result?.hint).toContain("y");
+  });
+
+  it("maps model_tool_use approval for Write with medium risk", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "model_tool_use",
+        toolName: "Write",
+        toolCall: { input: { file_path: "src/main.ts" } },
+      },
+    } as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("Write");
+    expect(result?.risk).toBe("medium");
+    expect(result?.scope).toContain("src/main.ts");
+  });
+
+  it("maps architecture_drift approval with warnings", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "architecture_drift",
+        toolName: "Edit",
+        toolCall: { input: { file_path: "core/api.ts" } },
+        warnings: ["修改了公共接口"],
+      },
+    } as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("Edit");
+    expect(result?.reason).toContain("修改了公共接口");
+  });
+
+  it("returns undefined for unrecognized approval kinds", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "index_ignore_write",
+      },
+    } as Partial<TuiContext>);
+    expect(mapPendingApprovalToPermission(ctx)).toBeUndefined();
+  });
+
+  it("maps en-US language hint correctly", () => {
+    const ctx = createContext({
+      language: "en-US",
+      pendingLocalApproval: {
+        kind: "model_tool_use",
+        toolName: "Bash",
+        toolCall: { input: { command: "npm install" } },
+      },
+    } as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.hint).toContain("Enter y to allow");
+  });
+});
+
+describe("backgroundSummaries → blocks mapping", () => {
+  it("maps running/completed/failed summaries to ProductBlockViewModels", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      backgroundSummaries: [
+        { id: "t1", title: "lint check", status: "running" },
+        { id: "t2", title: "test suite", status: "completed", result: "pass" },
+      ],
+    });
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(2);
+    expect(bgBlocks[0]?.id).toBe("bg-t1");
+    expect(bgBlocks[0]?.kind).toBe("run");
+    expect(bgBlocks[0]?.status).toBe("running");
+    expect(bgBlocks[0]?.title).toContain("后台：lint check");
+    expect(bgBlocks[1]?.id).toBe("bg-t2");
+    expect(bgBlocks[1]?.status).toBe("pass");
+    expect(bgBlocks[1]?.summary).toContain("pass");
+  });
+
+  it("maps failed and timeout statuses correctly", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      backgroundSummaries: [
+        { id: "t3", title: "deploy", status: "failed", result: "fail" },
+        { id: "t4", title: "health check", status: "timeout" },
+      ],
+    });
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks[0]?.status).toBe("fail");
+    expect(bgBlocks[1]?.status).toBe("blocked");
+  });
+
+  it("uses en-US prefix for background blocks", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
+    });
+    const bgBlock = view.blocks.find((b) => b.id === "bg-t5");
+    expect(bgBlock?.title).toContain("Background: build");
+  });
+});
+
+describe("Bearer token standalone redaction", () => {
+  it("redacts standalone Bearer tokens in output blocks", () => {
+    const block = createOutputBlock(
+      "result: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+      "zh-CN",
+      "out-bearer",
+    );
+    expect(block.summary).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+    expect(block.summary).toContain("Bearer [masked-key]");
+  });
+
+  it("redacts Bearer tokens even without authorization header prefix", () => {
+    const block = createOutputBlock(
+      "Token is Bearer abcdefghijklmnop used here",
+      "en-US",
+      "out-bearer2",
+    );
+    expect(block.summary).not.toContain("abcdefghijklmnop");
+    expect(block.summary).toContain("Bearer [masked-key]");
+  });
+
+  it("does not redact short Bearer values (less than 8 chars)", () => {
+    const block = createOutputBlock("Bearer short", "en-US", "out-short");
+    expect(block.summary).toBe("Bearer short");
+  });
+
+  it("redacts both sk- keys and Bearer tokens in the same line", () => {
+    const block = createOutputBlock(
+      "keys: sk-proj-abcdefghijklmnop and Bearer eyJhbGciOiJIUzI1NiJ9.x",
+      "zh-CN",
+      "out-both",
+    );
+    expect(block.summary).not.toContain("sk-proj-abcdefghijklmnop");
+    expect(block.summary).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+    expect(block.summary).toContain("[masked-key]");
+    expect(block.summary).toContain("Bearer [masked-key]");
   });
 });

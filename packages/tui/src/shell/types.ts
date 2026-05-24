@@ -42,6 +42,22 @@ export type ComposerViewModel = {
   masking: boolean;
 };
 
+export type ShellViewMode = "home" | "task";
+
+export type TaskActivityView = {
+  phase: "thinking" | "tool_running" | "permission_waiting" | "continuing" | "completed" | "error";
+  text: string;
+  toolName?: string;
+};
+
+export type TaskPermissionView = {
+  toolName: string;
+  reason: string;
+  risk: "low" | "medium" | "high";
+  scope: string[];
+  hint: string;
+};
+
 export type ShellViewModel = {
   language: Language;
   projectName: string;
@@ -50,9 +66,12 @@ export type ShellViewModel = {
   height: number;
   mode: ShellRuntimeMode;
   themeMode: ShellThemeMode;
+  viewMode: ShellViewMode;
   brand: string;
   homeVision: string;
   setupHint?: string;
+  activity?: TaskActivityView;
+  permission?: TaskPermissionView;
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
@@ -75,4 +94,11 @@ export type ShellRenderOptions = {
   stdin?: Readable;
   stdout?: Writable;
   stderr?: Writable;
+};
+
+export type BackgroundTaskSummary = {
+  id: string;
+  title: string;
+  status: string;
+  result?: string;
 };

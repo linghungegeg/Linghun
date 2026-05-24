@@ -2,7 +2,14 @@ import { basename } from "node:path";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "../index.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
-import type { ProductBlockViewModel, ShellViewModel } from "./types.js";
+import type {
+  BackgroundTaskSummary,
+  ProductBlockViewModel,
+  ShellViewMode,
+  ShellViewModel,
+  TaskActivityView,
+  TaskPermissionView,
+} from "./types.js";
 
 const shellText = {
   "zh-CN": {
@@ -57,7 +64,11 @@ export type ShellViewModelOptions = {
   width?: number;
   height?: number;
   noColor?: boolean;
+  viewMode?: ShellViewMode;
+  activity?: TaskActivityView;
+  permission?: TaskPermissionView;
   outputBlocks?: ProductBlockViewModel[];
+  backgroundSummaries?: BackgroundTaskSummary[];
   setupNeeded?: boolean;
   projectRouteProblem?: string;
   limitations?: string[];
@@ -80,14 +91,22 @@ export function createShellViewModel(
   // setup-needed 不再生成 bordered block，改为轻提示
   const setupHint = setupNeeded ? text.setupHint : undefined;
 
-  // blocks 只保留 project-route 和 output（最多 1 条）
+  // blocks 只保留 project-route、background summaries 和 output（最多 1 条）
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
+  if (options.backgroundSummaries?.length) {
+    blocks.push(...mapBackgroundSummariesToBlocks(options.backgroundSummaries, language));
+  }
   const outputBlocks = (options.outputBlocks ?? []).slice(-1);
   blocks.push(...outputBlocks);
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
+
+  // Determine view mode: task if explicitly set, or if there are output blocks / activity / permission
+  const viewMode: ShellViewMode =
+    options.viewMode ??
+    (options.outputBlocks?.length || options.activity || options.permission ? "task" : "home");
 
   return {
     language,
@@ -97,9 +116,12 @@ export function createShellViewModel(
     height,
     mode: "ink",
     themeMode: options.noColor ? "no-color" : "color",
+    viewMode,
     brand: text.brand,
     homeVision: text.vision,
     setupHint,
+    activity: options.activity,
+    permission: options.permission,
     status: {
       project: text.project(projectName),
       model: text.model(truncateMiddle(context.model || "unknown", width <= 40 ? 12 : 22)),
@@ -143,6 +165,101 @@ export function createOutputBlock(
   };
 }
 
+/**
+ * Maps a TuiContext's requestActivityPhase to a TaskActivityView for the shell.
+ * Returns undefined if no activity is in progress.
+ */
+export function mapRequestActivityToView(context: TuiContext): TaskActivityView | undefined {
+  const phase = (context as { requestActivityPhase?: string }).requestActivityPhase;
+  if (!phase) return undefined;
+
+  const phaseMap: Record<string, TaskActivityView["phase"]> = {
+    request_started: "thinking",
+    request_started_report: "thinking",
+    waiting_first_delta: "thinking",
+    tool_running: "tool_running",
+    continuing_after_tool: "continuing",
+    permission_waiting: "permission_waiting",
+  };
+  const mapped = phaseMap[phase];
+  if (!mapped) return undefined;
+
+  const toolName = (context as { requestActivityToolName?: string }).requestActivityToolName;
+  const textMap: Record<string, Record<string, string>> = {
+    "zh-CN": {
+      thinking: "正在思考…",
+      tool_running: toolName ? `正在运行 ${toolName}…` : "正在运行工具…",
+      continuing: "工具完成，继续处理…",
+      permission_waiting: "等待权限确认…",
+    },
+    "en-US": {
+      thinking: "Thinking…",
+      tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
+      continuing: "Continuing after tool…",
+      permission_waiting: "Waiting for permission…",
+    },
+  };
+  const texts = textMap[context.language] ?? textMap["en-US"];
+  return {
+    phase: mapped,
+    text: texts[mapped] ?? "",
+    toolName: toolName ?? undefined,
+  };
+}
+
+/**
+ * Maps a TuiContext's pendingLocalApproval to a TaskPermissionView for the shell.
+ * Returns undefined if no permission prompt is pending.
+ */
+export function mapPendingApprovalToPermission(
+  context: TuiContext,
+): TaskPermissionView | undefined {
+  const approval = (
+    context as {
+      pendingLocalApproval?: {
+        kind: string;
+        toolName?: string;
+        toolCall?: { input?: unknown };
+        warnings?: string[];
+      };
+    }
+  ).pendingLocalApproval;
+  if (!approval) return undefined;
+
+  if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
+    const toolName = approval.toolName ?? "unknown";
+    const input = approval.toolCall?.input as
+      | { file_path?: string; path?: string; command?: string }
+      | undefined;
+    const scope: string[] = [];
+    if (input?.file_path) scope.push(input.file_path);
+    if (input?.path && input.path !== input.file_path) scope.push(input.path);
+    if (input?.command) scope.push(input.command.slice(0, 60));
+
+    const reason =
+      approval.kind === "architecture_drift"
+        ? (approval.warnings ?? []).join("; ") ||
+          (context.language === "zh-CN" ? "工具调用改变约定范围" : "Tool use changes agreed scope")
+        : context.language === "zh-CN"
+          ? `${toolName} 需要用户确认`
+          : `${toolName} requires confirmation`;
+
+    const hint =
+      context.language === "zh-CN"
+        ? "输入 y 允许 / n 拒绝 / details 查看详情"
+        : "Enter y to allow / n to deny / details for more";
+
+    return {
+      toolName,
+      reason,
+      risk: toolName === "Bash" ? "high" : "medium",
+      scope,
+      hint,
+    };
+  }
+  return undefined;
+}
+
 function createProjectRouteBlock(language: Language, problem: string): ProductBlockViewModel {
   const text = shellText[language];
   return {
@@ -153,6 +270,33 @@ function createProjectRouteBlock(language: Language, problem: string): ProductBl
     summary: text.routeSummary(problem),
     nextAction: text.routeNextAction,
   };
+}
+
+function mapBackgroundSummariesToBlocks(
+  summaries: BackgroundTaskSummary[],
+  language: Language,
+): ProductBlockViewModel[] {
+  return summaries.map((s) => {
+    const statusMap: Record<string, ProductBlockViewModel["status"]> = {
+      running: "running",
+      completed: "pass",
+      failed: "fail",
+      cancelled: "partial",
+      timeout: "blocked",
+      stale: "blocked",
+      paused: "info",
+    };
+    const blockStatus = statusMap[s.status] ?? "info";
+    const resultSuffix = s.result && s.result !== s.status ? ` (${s.result})` : "";
+    const title = language === "zh-CN" ? `后台：${s.title}` : `Background: ${s.title}`;
+    return {
+      id: `bg-${s.id}`,
+      kind: "run" as const,
+      status: blockStatus,
+      title,
+      summary: `${s.status}${resultSuffix}`,
+    };
+  });
 }
 
 function formatTrust(context: TuiContext, language: Language): string {
@@ -203,7 +347,8 @@ function redactSensitiveText(value: string): string {
   return value
     .replace(/sk-[A-Za-z0-9_-]{8,}/gu, "[masked-key]")
     .replace(/(api[_-]?key\s*[=:]\s*)\S+/giu, "$1[masked-key]")
-    .replace(/(authorization\s*:\s*bearer\s+)\S+/giu, "$1[masked-key]");
+    .replace(/(authorization\s*:\s*bearer\s+)\S+/giu, "$1[masked-key]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/giu, "Bearer [masked-key]");
 }
 
 function truncateMiddle(value: string, max: number): string {
