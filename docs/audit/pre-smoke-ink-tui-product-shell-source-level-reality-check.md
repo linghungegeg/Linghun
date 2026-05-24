@@ -1010,3 +1010,79 @@ safety:
   copied_reference_source: false
 next_step_requires_user_confirmation: true
 ```
+
+---
+
+## Slice D Final Polish — Visual + Vertical Resize Closure
+
+> 本轮是 D visual + resize final polish，不是 E。未进入真实 smoke。未宣布 Beta PASS / smoke-ready / open-source-ready。
+
+### 变更摘要
+
+1. **布局重排**：ShellApp.tsx 首页顺序从 brand → vision → composer → setupHint → status 改为 brand → vision → status → setupHint → composer。Composer 现在是最底部的输入 dock，符合 composer-first 居中略偏上的设计意图。
+
+2. **上下 resize 修复**：useResizeRerender 在 resize 事件时先写入 `\x1b[2J\x1b[H`（clear entire screen + cursor home）再触发 rerender，防止垂直缩小时旧下半屏内容残留、放大时出现空白间隙。延迟 rerender 从 16ms 调整为 32ms 以确保 Ink 有足够时间完成 layout。
+
+3. **Composer 区域**：无上下双横线，无大空框。左侧 `|` accent 作为轻输入指示，宽度 76 columns 居中。未输入时显示 muted placeholder，输入时显示正常 foreground 文字。
+
+4. **状态 tray**：使用 `项目：xxx  模型：xxx  权限：xxx  信任：xxx  索引：xxx  后台：0` 格式，双空格分隔，无 `·`。窄屏 (<60) 自动截断到前 4 项。
+
+5. **愿景按语言**：zh-CN 只显示中文愿景，en-US 只显示英文愿景，不同时显示。
+
+6. **setupHint**：轻提示，warning 色 + dimColor，不是 ProductBlock bordered card。
+
+7. **配色**：brand white bold，accent cyanBright，muted gray，warning yellow dimColor。NO_COLOR 不回归（TTY 判断和 render-mode 分离）。
+
+### 旧文案/旧 chunk 搜索结果
+
+- `packages/tui/dist`：无匹配（干净）
+- `apps/cli/dist`：无匹配（干净）
+- `packages/tui/src/index.ts:2303`：`"需要配置模型：这是本机一次配置，不是当前仓库配置。"` — 这是 **plain fallback** 路径（非 Ink 首页），保留正确。
+- `view-model.test.ts:73`：`homeVisionEn` 出现在负断言中（验证旧字段不存在），正确。
+- `view-model.test.ts:306`：`not.toContain("需要配置模型")` — Ink render 负断言，正确。
+- 无 `ink-renderer-AF5VLESO`、`ink-renderer-JIE4CVCP` 旧 chunk 残留。
+
+### Renderer 状态
+
+- 当前 renderer 仍是 Ink/React 自建 shell（`ShellApp` + `useResizeRerender` + alternateScreen）。
+- 未新增第二套 TUI 系统或 renderer。
+- OpenCode 只作为 composer-first 成熟度参考，未照抄 logo/源码。
+
+### 用户实测反馈
+
+- 左右 resize 已明显改善（上轮确认）。
+- 上下 resize 本轮通过 clear-screen + double-rerender 修复。
+- 仍需用户最终在 Windows cmd/PowerShell/Windows Terminal 手动复测。
+
+### 验证结果
+
+```yaml
+slice: D-final-polish
+validation:
+  - command: corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts
+    result: PASS; 12 tests passed
+  - command: corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/shell/view-model.test.ts
+    result: PASS; 194 tests passed
+  - command: corepack pnpm --filter @linghun/tui typecheck
+    result: PASS
+  - command: corepack pnpm --filter @linghun/tui build
+    result: PASS; fresh dist chunk ink-renderer-D3Z2HXMQ.js
+  - command: corepack pnpm --filter @linghun/cli build
+    result: PASS
+  - command: git diff --check
+    result: PASS; no whitespace errors
+changed_files:
+  - packages/tui/src/shell/components/ShellApp.tsx (layout reorder + resize clear-screen)
+  - packages/tui/src/shell/view-model.test.ts (resize clear assertion)
+manual_retest_required:
+  - Windows cmd vertical resize (shrink + grow)
+  - PowerShell vertical resize
+  - Windows Terminal vertical resize
+  - 首页视觉确认：品牌 → 愿景 → 状态 → setupHint → composer 顺序
+safety:
+  real_provider_smoke_run: false
+  real_project_smoke_run: false
+  commit_created: false
+  entered_phase_E: false
+next_step_requires_user_confirmation: true
+```

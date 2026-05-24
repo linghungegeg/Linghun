@@ -64,23 +64,27 @@ function createContext(overrides: Partial<TuiContext> = {}): TuiContext {
 }
 
 describe("shell view model", () => {
-  it("uses the required zh-CN and en-US home slogan and composer placeholders", () => {
+  it("zh-CN only shows Chinese vision, en-US only shows English vision", () => {
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
 
-    expect(zhView.brand).toBe("Linghun");
-    expect(zhView.homeVision).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
-    expect(zhView.homeVisionEn).toContain(
-      "Technology will become more accessible, and you are the greatest dreamer.",
-    );
-    expect(enView.brand).toBe("Linghun");
-    expect(enView.homeVision).toContain(
+    expect(zhView.brand).toBe("L I N G H U N");
+    expect(zhView.homeVision).toBe("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
+    expect((zhView as Record<string, unknown>).homeVisionEn).toBeUndefined();
+    expect(enView.brand).toBe("L I N G H U N");
+    expect(enView.homeVision).toBe(
       "Technology will become more accessible, and you are the greatest dreamer.",
     );
     expect(getComposerPlaceholder("zh-CN")).toBe("我能帮您做点什么？");
     expect(getComposerPlaceholder("en-US")).toBe("What can I help you with?");
     expect(zhView.composer.placeholder).toBe("我能帮您做点什么？");
     expect(enView.composer.placeholder).toBe("What can I help you with?");
+  });
+
+  it("composer has no prompt or hint fields", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect((view.composer as Record<string, unknown>).prompt).toBeUndefined();
+    expect((view.composer as Record<string, unknown>).hint).toBeUndefined();
   });
 
   it("projects setup-needed as a light hint, not a bordered block", () => {
@@ -90,13 +94,13 @@ describe("shell view model", () => {
       width: 120,
     });
 
-    expect(zhView.brand).toBe("Linghun");
-    expect(zhView.status.project).toContain("项目");
-    expect(zhView.status.model).toContain("模型");
-    expect(zhView.status.permission).toBe("权限 风险确认");
-    expect(zhView.status.trust).toBe("信任 已信任");
-    expect(zhView.status.index).toBe("索引 ready");
-    expect(zhView.status.background).toBe("后台 1");
+    expect(zhView.brand).toBe("L I N G H U N");
+    expect(zhView.status.project).toContain("项目：");
+    expect(zhView.status.model).toContain("模型：");
+    expect(zhView.status.permission).toBe("权限：风险确认");
+    expect(zhView.status.trust).toBe("信任：已信任");
+    expect(zhView.status.index).toBe("索引：ready");
+    expect(zhView.status.background).toBe("后台：1");
     // setup-needed 不再生成 block
     expect(zhView.blocks.some((block) => block.id === "setup-needed")).toBe(false);
     // 而是生成 setupHint 轻提示
@@ -160,15 +164,16 @@ describe("shell view model", () => {
 
       expect(view.width).toBe(width);
       expect(view.projectName.length).toBeLessThanOrEqual(width);
-      expect(view.status.project).toContain("项目");
-      expect(view.status.model).toContain("模型");
-      expect(view.status.model.length).toBeLessThanOrEqual(width <= 40 ? 15 : 25);
-      expect(view.status.permission).toContain("权限");
+      expect(view.status.project).toContain("项目：");
+      expect(view.status.model).toContain("模型：");
+      expect(view.status.permission).toContain("权限：");
       expect(view.blocks.map((block) => block.id)).toEqual([]);
-      expect(rendered).toContain("Linghun");
+      expect(rendered).toContain("L I N G H U N");
       expect(rendered).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
       expect(rendered).not.toContain("首页");
       expect(rendered).not.toContain("项目状态");
+      // status tray uses double-space, not ·
+      expect(rendered).not.toContain("·");
     }
   });
 
@@ -181,7 +186,7 @@ describe("shell view model", () => {
     });
     const rendered = renderPlainShell(view);
 
-    expect(rendered).toContain("Linghun");
+    expect(rendered).toContain("L I N G H U N");
     expect(rendered).not.toContain("[INFO] 首页");
     // setup-needed 现在是 setupHint 轻提示，不是 block
     expect(view.setupHint).toContain("按 Enter");
@@ -191,6 +196,9 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("endpointProfile");
     expect(rendered).not.toContain("tool_result");
     expect(rendered).not.toContain("local/static only");
+    // no prompt prefix
+    expect(rendered).not.toContain("你 >");
+    expect(rendered).not.toContain("you >");
   });
 });
 
@@ -265,6 +273,8 @@ describe("Ink shell selection", () => {
     // alternateScreen 进入和退出
     expect(output.text).toContain("\u001B[?1049h");
     expect(output.text).toContain("\u001B[?1049l");
+    // vertical resize clear-screen sequence
+    expect(output.text).toContain("\x1b[2J\x1b[H");
   });
 
   it("renders the mature home without setup or composer border cards", async () => {
@@ -291,10 +301,13 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("Linghun");
+    expect(output.text).toContain("L I N G H U N");
     expect(output.text).toContain("我能帮您做点什么？");
     expect(output.text).not.toContain("需要配置模型");
     expect(output.text).not.toContain("╭");
     expect(output.text).not.toContain("┌");
+    // no double border lines around composer
+    expect(output.text).not.toContain("你 >");
+    expect(output.text).not.toContain("直接描述目标");
   });
 });

@@ -2,9 +2,11 @@ import type { ProductBlockStatus, ShellThemeMode } from "./types.js";
 
 export type ShellTheme = {
   mode: ShellThemeMode;
+  brand: string;
   accent: string;
   muted: string;
   border: string;
+  warning: string;
   status: Record<ProductBlockStatus, string>;
 };
 
@@ -12,9 +14,11 @@ export function createShellTheme(noColor: boolean): ShellTheme {
   if (noColor) {
     return {
       mode: "no-color",
+      brand: "white",
       accent: "white",
       muted: "white",
       border: "white",
+      warning: "white",
       status: {
         info: "white",
         running: "white",
@@ -27,16 +31,18 @@ export function createShellTheme(noColor: boolean): ShellTheme {
   }
   return {
     mode: "color",
-    accent: "cyan",
+    brand: "white",
+    accent: "cyanBright",
     muted: "gray",
     border: "gray",
+    warning: "yellow",
     status: {
       info: "cyan",
       running: "yellow",
       pass: "green",
       partial: "yellow",
       fail: "red",
-      blocked: "red",
+      blocked: "yellow",
     },
   };
 }

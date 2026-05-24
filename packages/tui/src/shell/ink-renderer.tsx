@@ -34,7 +34,12 @@ export function renderInkShell(
   return {
     rerender: () => instance.rerender(<ShellApp controller={controller} />),
     clear: () => instance.clear(),
-    unmount: () => instance.unmount(),
+    unmount: () => {
+      instance.unmount();
+      // Unref stdin to prevent the process from hanging on exit
+      const stdin = options.stdin as { unref?: () => void } | undefined;
+      stdin?.unref?.();
+    },
     waitUntilExit: async () => {
       await instance.waitUntilExit();
     },

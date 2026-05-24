@@ -38,8 +38,6 @@ export type StatusTrayViewModel = {
 
 export type ComposerViewModel = {
   placeholder: string;
-  prompt: string;
-  hint: string;
   submittedHint: string;
   masking: boolean;
 };
@@ -54,7 +52,6 @@ export type ShellViewModel = {
   themeMode: ShellThemeMode;
   brand: string;
   homeVision: string;
-  homeVisionEn: string;
   setupHint?: string;
   status: StatusTrayViewModel;
   composer: ComposerViewModel;

@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createShellTheme } from "../theme.js";
 import type { ShellController } from "../types.js";
 import { Composer } from "./Composer.js";
@@ -11,8 +11,7 @@ export function ShellApp({ controller }: { controller: ShellController }): React
   useResizeRerender(controller);
   const view = controller.getViewModel();
   const theme = createShellTheme(view.themeMode === "no-color");
-  const composerMaxWidth = Math.min(84, Math.max(40, view.width - 4));
-  const compact = view.width < 60;
+  const composerMaxWidth = Math.min(76, Math.max(40, view.width - 4));
 
   return (
     <Box
@@ -25,16 +24,13 @@ export function ShellApp({ controller }: { controller: ShellController }): React
       <Box flexGrow={1} minHeight={0} />
 
       <Box justifyContent="center">
-        <Text color={theme.accent} bold>
+        <Text color={theme.brand} bold>
           {view.brand}
         </Text>
       </Box>
 
-      <Box flexDirection="column" alignItems="center" marginTop={1}>
+      <Box justifyContent="center" marginTop={1}>
         <Text color={theme.muted}>{fitText(view.homeVision, composerMaxWidth)}</Text>
-        {view.language !== "en-US" ? (
-          <Text color={theme.muted}>{fitText(view.homeVisionEn, composerMaxWidth)}</Text>
-        ) : null}
       </Box>
 
       <Box marginTop={1} justifyContent="center">
@@ -43,14 +39,15 @@ export function ShellApp({ controller }: { controller: ShellController }): React
 
       {view.setupHint ? (
         <Box marginTop={1} justifyContent="center" width={composerMaxWidth}>
-          <Text color={theme.status.blocked}>{fitText(view.setupHint, composerMaxWidth)}</Text>
+          <Text color={theme.warning} dimColor>
+            {fitText(view.setupHint, composerMaxWidth - 2)}
+          </Text>
         </Box>
       ) : null}
 
-      <Box marginTop={1} width={composerMaxWidth} flexDirection="column">
-        {!compact ? <Text color={theme.border}>{"─".repeat(composerMaxWidth)}</Text> : null}
+      <Box marginTop={1} width={composerMaxWidth}>
+        <Text color={theme.accent}>{"|"} </Text>
         <Composer view={view} onInput={controller.onInput} />
-        {!compact ? <Text color={theme.border}>{"─".repeat(composerMaxWidth)}</Text> : null}
       </Box>
 
       {view.blocks.length > 0 ? (
@@ -101,15 +98,27 @@ function charWidth(char: string): number {
 function useResizeRerender(controller: ShellController): void {
   const { stdout } = useStdout();
   const [, setVersion] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const rerenderOnResize = () => {
       controller.onResize?.();
-      setVersion((version) => version + 1);
+      // Clear the alternate screen buffer to remove stale lines from vertical resize
+      // (shrink leaves old bottom content, grow leaves gaps)
+      stdout.write("\x1b[2J\x1b[H");
+      // Immediate rerender for new dimensions
+      setVersion((v) => v + 1);
+      // Schedule a second rerender on next tick to ensure clean paint
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        setVersion((v) => v + 1);
+        timerRef.current = null;
+      }, 32);
     };
     stdout.on("resize", rerenderOnResize);
     return () => {
       stdout.off("resize", rerenderOnResize);
+      if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [controller, stdout]);
 }

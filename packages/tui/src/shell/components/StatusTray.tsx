@@ -23,7 +23,7 @@ export function StatusTray({
   const visible = width < 60 ? items.slice(0, 4) : items;
   return (
     <Box marginTop={0} marginBottom={0}>
-      <Text color={theme.muted}>{visible.join(" · ")}</Text>
+      <Text color={theme.muted}>{visible.join("  ")}</Text>
     </Box>
   );
 }

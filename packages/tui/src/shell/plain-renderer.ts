@@ -17,13 +17,10 @@ export function renderPlainShell(view: ShellViewModel): string {
   const lines = [
     view.brand,
     view.homeVision,
-    ...(view.language !== "en-US" ? [view.homeVisionEn] : []),
-    formatStatusTray(view),
+    `| ${view.composer.placeholder}`,
     ...(view.setupHint ? [view.setupHint] : []),
+    formatStatusTray(view),
     ...(blockLines.length > 0 ? [separator, ...blockLines] : []),
-    separator,
-    `${view.composer.prompt}> ${view.composer.placeholder}`,
-    view.composer.hint,
     ...view.limitations.map((item) => `- ${item}`),
   ];
   return lines.join("\n");
@@ -42,7 +39,7 @@ function formatStatusTray(view: ShellViewModel): string {
     view.status.index,
     view.status.background,
   ];
-  const line = items.join(" · ");
+  const line = items.join("  ");
   if (view.width >= 60) return line;
-  return items.slice(0, 4).join(" · ");
+  return items.slice(0, 4).join("  ");
 }

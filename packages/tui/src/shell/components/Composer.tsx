@@ -10,7 +10,7 @@ type ComposerProps = {
 
 export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
   const [text, setText] = useState("");
-  const compact = view.width < 60;
+  const maxWidth = Math.min(80, Math.max(30, view.width - 4));
 
   useInput((input, key) => {
     if (key.escape) {
@@ -36,21 +36,14 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
     }
   });
 
-  const value = text ? formatComposerText(text, view.composer.masking) : view.composer.placeholder;
-  const promptColor = text ? "white" : "gray";
+  const displayText = text
+    ? formatComposerText(text, view.composer.masking)
+    : view.composer.placeholder;
+  const color = text ? "white" : "gray";
+
   return (
-    <Box flexDirection="column" width="100%">
-      <Box>
-        <Text color={promptColor}>
-          {view.composer.prompt} &gt; {fitText(value, compact ? view.width - 4 : 80)}
-        </Text>
-      </Box>
-      <Text color="gray">
-        {compact ? fitText(view.composer.hint, view.width - 2) : view.composer.hint}
-      </Text>
-      {view.width < 45 ? (
-        <Text color="gray">Shift+Enter fallback: paste newline text, then Enter.</Text>
-      ) : null}
+    <Box width="100%">
+      <Text color={color}>{fitText(displayText, maxWidth)}</Text>
     </Box>
   );
 }
