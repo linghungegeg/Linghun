@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getProviderEnvPath } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCli } from "./cli.js";
 
@@ -25,6 +26,8 @@ describe("CLI", () => {
     expect(result.stdout).toContain("Linghun --version");
     expect(result.stdout).toContain("sessions list");
     expect(result.stdout).toContain("model doctor");
+    expect(result.stdout).toContain("TUI /model setup");
+    expect(result.stdout).toContain("交互式配置 API 地址、key、模型名称和推理等级");
     expect(result.stdout).toContain("/model route");
     expect(result.stdout).toContain("/model route doctor");
     expect(result.stdout).toContain("/image generate <prompt>");
@@ -105,7 +108,7 @@ describe("CLI", () => {
       process.chdir(project);
       const doctor = await runCli(["/model", "doctor"]);
 
-      expect(doctor.stdout).toContain("apiKey=present source=project-settings");
+      expect(doctor.stdout).toContain("apiKey=present source=project-settings-legacy");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
       expect(doctor.stdout).toContain("环境变量或私有配置");
@@ -156,6 +159,42 @@ describe("CLI", () => {
       expect(doctor.stdout).not.toContain("base_url：https://api.deepseek.com/v1");
       expect(doctor.stdout).not.toContain("sk-cli-project-overridden-secret");
       expect(doctor.stdout).not.toContain("sk-cli-env-secret");
+      expect(doctor.stdout).not.toContain(project);
+      expect(doctor.exitCode).toBe(0);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("shows provider.env source for headless openai-compatible model doctor", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-cli-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      getProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-cli-provider-secret",
+        "LINGHUN_OPENAI_MODEL=provider-cli-model",
+        "LINGHUN_INFERENCE_LEVEL=Low",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const previousCwd = process.cwd();
+
+    try {
+      process.chdir(project);
+      const doctor = await runCli(["model", "doctor"]);
+
+      expect(doctor.stdout).toContain("provider=openai-compatible model=provider-cli-model");
+      expect(doctor.stdout).toContain("apiKey=present source=user-provider-env");
+      expect(doctor.stdout).toContain("masked=sk-…cret");
+      expect(doctor.stdout).toContain("endpointProfile=chat_completions");
+      expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("baseUrl=present");
+      expect(doctor.stdout).not.toContain("sk-cli-provider-secret");
       expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
     } finally {

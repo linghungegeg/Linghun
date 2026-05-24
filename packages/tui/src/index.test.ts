@@ -6,8 +6,10 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import {
   type LinghunConfig,
   defaultConfig,
+  getProviderEnvPath,
   getSessionRootDir,
   getUserSettingsPath,
+  loadConfig,
   resolveStoragePaths,
 } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
@@ -637,6 +639,90 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("模式 风险确认");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
+  });
+
+  it("shows light missing model config hint without entering setup", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain(
+      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。",
+    );
+    expect(output.text).toContain("provider.env 模板位置：");
+    expect(output.text).not.toContain("模型配置向导");
+    expect(output.text).not.toContain("runtime");
+    expect(output.text).not.toContain("schema");
+    expect(output.text).not.toContain("provider contract");
+  });
+
+  it("runs /model setup without writing API key to project settings or output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "/model setup\nhttps://provider.invalid/v1\nsk-test-setup-secret\nsetup-model\n\n\nyes\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+    const providerEnv = await readFile(getProviderEnvPath(home), "utf8");
+    const config = await loadConfig(project);
+
+    expect(providerEnv).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
+    expect(providerEnv).toContain("LINGHUN_OPENAI_MODEL=setup-model");
+    expect(providerEnv).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
+    expect(config.providers["openai-compatible"]?.model).toBe("setup-model");
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
+      "openai-compatible",
+    );
+    expect(output.text).toContain("模型配置摘要");
+    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("已保存，请重启 Linghun 后使用。");
+    expect(output.text).toContain("可选增强：Linghun 支持角色路由");
+    expect(output.text).not.toContain("sk-test-setup-secret");
+  });
+
+  it("shows provider.env as model doctor API key source without leaking key", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      getProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-provider-env-secret",
+        "LINGHUN_OPENAI_MODEL=provider-env-model",
+        "LINGHUN_INFERENCE_LEVEL=Low",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: config.defaultModel });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/model doctor", context, output);
+
+    expect(output.text).toContain("source=user-provider-env");
+    expect(output.text).toContain("reasoning=ignored/unsupported");
+    expect(output.text).toContain("apiKey=present");
+    expect(output.text).not.toContain("sk-provider-env-secret");
   });
 
   it("shows Polish A slash discovery and unknown command suggestions", async () => {

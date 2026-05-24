@@ -18,7 +18,7 @@ import {
   stdin as defaultStdin,
   stdout as defaultStdout,
 } from "node:process";
-import { emitKeypressEvents } from "node:readline";
+import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -28,16 +28,22 @@ import {
   type ModelCapability,
   type ModelRole,
   type NativeRunnerConfig,
+  type ProviderEnvSetup,
   type RemoteChannelConfig,
   type RemoteChannelType,
   type RemoteEventType,
   type RoleModelRoute,
   type WorkspaceTrustLevel,
   defaultConfig,
+  ensureProviderEnvTemplate,
   getProjectSettingsPath,
+  getProviderEnvPath,
   hasRecordedProjectLanguage,
   hasRecordedUserLanguage,
+  lastProviderEnvWarning,
   loadConfig,
+  providerEnvExists,
+  readProviderEnvValues,
   removeMcpServerConfig,
   resetExtensionTrustForInstall,
   resolveStoragePaths,
@@ -45,8 +51,10 @@ import {
   saveMcpServerConfig,
   saveModelRoute,
   saveProjectLanguage,
+  saveProviderEnvSetup,
   saveUserLanguage,
   saveWorkspaceTrust,
+  validateProviderEnvSetup,
 } from "@linghun/config";
 import {
   type CacheFreshness,
@@ -244,6 +252,15 @@ export type PlanProposal = {
   id: string;
   title: string;
   options: { id: string; title: string; steps: string[]; risks: string[] }[];
+};
+
+type ModelSetupStep = "baseUrl" | "apiKey" | "model" | "reasoning" | "auxModel" | "confirm";
+
+type PendingModelSetup = {
+  step: ModelSetupStep;
+  providerEnvPath: string;
+  createdTemplate: boolean;
+  values: Partial<ProviderEnvSetup>;
 };
 
 export type BackgroundTaskStatus =
@@ -1191,6 +1208,7 @@ export type TuiContext = {
   pendingNaturalCommand?: PendingNaturalCommand;
   pendingLocalApproval?: PendingLocalApproval;
   pendingAutopilot?: PendingAutopilotRequest;
+  pendingModelSetup?: PendingModelSetup;
   workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;
@@ -2154,6 +2172,23 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   if (!context.memory.projectRulesExists) {
     writeLine(output, t(context, "projectRulesMissingHint"));
   }
+  if (lastProviderEnvWarning) {
+    writeLine(
+      output,
+      `provider.env 读取失败：${lastProviderEnvWarning.reason}。请修正后重启 Linghun，或运行 /model setup 重新配置。`,
+    );
+  }
+  if (hasSelectedProviderConfigProblem(context)) {
+    const setupHint =
+      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。";
+    if ((input as { isTTY?: boolean }).isTTY === true) {
+      const existed = await providerEnvExists();
+      const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
+      writeLine(output, `${setupHint}\nprovider.env 模板位置：${providerEnvPath}`);
+    } else {
+      writeLine(output, `${setupHint}\nprovider.env 模板位置：${getProviderEnvPath()}`);
+    }
+  }
 
   const sigintHandler = () => {
     const controller = context.activeAbortController ?? context.activeVerificationAbortController;
@@ -2170,11 +2205,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       onEsc: () => handleTuiKeypress("escape", context, output),
       onEnter: () => handleTuiKeypress("return", context, output),
       onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
+      shouldMaskInput: () => context.pendingModelSetup?.step === "apiKey",
     })) {
       process.removeListener("SIGINT", sigintHandler);
       process.once("SIGINT", sigintHandler);
       const text = line.trim();
       if (!text) {
+        if (context.pendingModelSetup) {
+          await handleModelSetupInput("", context, output);
+          continue;
+        }
         if (hasPendingEnterConfirmation(context)) {
           await confirmPendingInteraction(context, output);
         }
@@ -2212,6 +2252,11 @@ export async function handleSlashCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<"handled" | "exit" | "message"> {
+  if (context.pendingModelSetup) {
+    await handleModelSetupInput(text, context, output);
+    return "handled";
+  }
+
   if (!text.startsWith("/")) {
     return "message";
   }
@@ -4027,6 +4072,10 @@ async function handleModelCommand(
     await handleModelRouteCommand(args.slice(1), context, output);
     return;
   }
+  if (action === "setup") {
+    await startModelSetup(context, output);
+    return;
+  }
   if (action === "doctor") {
     writeLine(output, await formatModelRouteDoctor(context));
     return;
@@ -4045,6 +4094,183 @@ async function handleModelCommand(
   writeLine(output, formatModelRouteSummary(context));
   writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
   writeStatus(output, context);
+}
+
+async function startModelSetup(context: TuiContext, output: Writable): Promise<void> {
+  const existed = await providerEnvExists();
+  const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
+  context.pendingModelSetup = {
+    step: "baseUrl",
+    providerEnvPath,
+    createdTemplate: !existed,
+    values: { reasoningLevel: "Medium" },
+  };
+  writeLine(
+    output,
+    [
+      "模型配置向导",
+      "- 只需要填写 API 地址、API key、模型名称和推理等级。",
+      "- API key 会写入本机私密 provider.env，不会写入项目 .linghun/settings.json。",
+      `- 写入位置：${providerEnvPath}`,
+      existed ? "" : "- 已创建带注释模板，后续可直接编辑这个文件。",
+      "API 地址不能为空。请输入 root API 地址，例如 https://example.com/v1。",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+}
+
+async function handleModelSetupInput(
+  text: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const setup = context.pendingModelSetup;
+  if (!setup) return;
+  const trimmed = text.trim();
+  const value = setup.step === "apiKey" ? text : trimmed;
+  if (/^(cancel|no|n|取消|否)$/iu.test(trimmed)) {
+    context.pendingModelSetup = undefined;
+    writeLine(output, "已取消模型配置，未保存任何 key。");
+    return;
+  }
+  if (/^(details|detail|详情)$/iu.test(value)) {
+    writeLine(
+      output,
+      [
+        "安全说明",
+        `- provider.env 路径：${setup.providerEnvPath}`,
+        "- shell env 变量优先级最高，其次 provider.env，再走现有 settings/default。",
+        "- 真实 key 不会显示、不写入项目 settings、不写入文档或报告。",
+        "- 不设置角色路由也可以正常使用，角色默认跟随主模型。",
+      ].join("\n"),
+    );
+    writeModelSetupPrompt(setup, output);
+    return;
+  }
+  try {
+    if (setup.step === "baseUrl") {
+      validateProviderEnvSetup({
+        baseUrl: value,
+        apiKey: "temporary-validation-key",
+        model: "temporary-model",
+        reasoningLevel: "Medium",
+      });
+      setup.values.baseUrl = value;
+      setup.step = "apiKey";
+      writeLine(output, "API key 不能为空。请输入 API key（输入时会尽量 mask，不显示原值）。");
+      return;
+    }
+    if (setup.step === "apiKey") {
+      validateProviderEnvSetup({
+        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
+        apiKey: value,
+        model: "temporary-model",
+        reasoningLevel: "Medium",
+      });
+      setup.values.apiKey = value;
+      setup.step = "model";
+      writeLine(output, "模型名称不能为空。请输入模型名称。");
+      return;
+    }
+    if (setup.step === "model") {
+      validateProviderEnvSetup({
+        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
+        apiKey: setup.values.apiKey ?? "temporary-validation-key",
+        model: value,
+        reasoningLevel: "Medium",
+      });
+      setup.values.model = value;
+      setup.step = "reasoning";
+      writeLine(output, "推理等级可选 Low / Medium / High，默认 Medium。直接回车使用 Medium。");
+      return;
+    }
+    if (setup.step === "reasoning") {
+      const reasoningLevel = value || "Medium";
+      validateProviderEnvSetup({
+        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
+        apiKey: setup.values.apiKey ?? "temporary-validation-key",
+        model: setup.values.model ?? "temporary-model",
+        reasoningLevel: reasoningLevel as ProviderEnvSetup["reasoningLevel"],
+      });
+      setup.values.reasoningLevel = normalizeModelSetupReasoningLevel(reasoningLevel);
+      setup.step = "auxModel";
+      writeLine(output, "辅助模型可选，直接回车则跟随主模型。");
+      return;
+    }
+    if (setup.step === "auxModel") {
+      setup.values.auxModel = value || undefined;
+      setup.step = "confirm";
+      writeLine(output, formatModelSetupSummary(setup));
+      return;
+    }
+    if (setup.step === "confirm") {
+      if (/^(yes|y|save|ok|confirm|确认|保存|是)$/iu.test(value)) {
+        const savedPath = await saveProviderEnvSetup(setup.values as ProviderEnvSetup);
+        context.pendingModelSetup = undefined;
+        context.config = await loadConfig(context.projectPath);
+        context.model = resolveInitialModel(context.config);
+        writeLine(output, formatModelSetupSaved(savedPath));
+        return;
+      }
+      if (/^(details|detail|详情)$/iu.test(value)) {
+        writeLine(
+          output,
+          "保存后请重启 Linghun 后使用；不会显示 key 原值。shell env 仍可临时覆盖 provider.env。",
+        );
+        writeLine(output, formatModelSetupSummary(setup));
+        return;
+      }
+      context.pendingModelSetup = undefined;
+      writeLine(output, "已取消模型配置，未保存任何 key。");
+      return;
+    }
+  } catch (error) {
+    writeLine(output, error instanceof Error ? error.message : "检查未通过，请补全缺失项。");
+    writeModelSetupPrompt(setup, output);
+  }
+}
+
+function writeModelSetupPrompt(setup: PendingModelSetup, output: Writable): void {
+  if (setup.step === "baseUrl") writeLine(output, "请填写 API 地址，例如 https://example.com/v1。");
+  if (setup.step === "apiKey") writeLine(output, "请填写 API key。");
+  if (setup.step === "model") writeLine(output, "请填写模型名称。");
+  if (setup.step === "reasoning")
+    writeLine(output, "请填写 Low / Medium / High，或直接回车使用 Medium。");
+  if (setup.step === "auxModel") writeLine(output, "辅助模型可选，直接回车则跟随主模型。");
+  if (setup.step === "confirm")
+    writeLine(output, "请输入 yes 保存，no 取消，details 查看安全说明。");
+}
+
+function normalizeModelSetupReasoningLevel(value: string): "Low" | "Medium" | "High" {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "low") return "Low";
+  if (normalized === "high") return "High";
+  return "Medium";
+}
+
+function formatModelSetupSummary(setup: PendingModelSetup): string {
+  return [
+    "模型配置摘要",
+    "- provider=openai-compatible",
+    `- baseUrl=${setup.values.baseUrl ? "present" : "missing"}`,
+    `- apiKey=${setup.values.apiKey ? "present" : "missing"}`,
+    `- model=${setup.values.model ?? "missing"}`,
+    `- reasoningLevel=${setup.values.reasoningLevel ?? "Medium"}`,
+    `- 写入位置：${setup.providerEnvPath}`,
+    "请输入 yes 保存，no 取消，details 查看安全说明。",
+  ].join("\n");
+}
+
+function formatModelSetupSaved(path: string): string {
+  return [
+    "已保存，请重启 Linghun 后使用。",
+    `- 写入位置：${path}`,
+    "- 后续想更换 API 地址、key 或模型名称，可运行 /model setup 重新配置，或编辑上述 provider.env。",
+    "- 检查配置可运行 /model doctor。",
+    "可选增强：Linghun 支持角色路由，可以把规划、执行、复查、验证分给不同模型。这样可以让强模型只用于关键步骤，日常步骤使用更便宜或更快的模型，帮助降低成本。不设置也可以正常使用；以后可运行 `/model route` 调整。",
+    "Optional: Linghun supports role routing, so planning, execution, review, and verification can use different models. Stronger models can handle critical steps while cheaper or faster models handle routine work. You can skip it now and change it later with `/model route`.",
+  ].join("\n");
 }
 
 async function handleModelRouteCommand(
@@ -4154,6 +4380,12 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
   const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
     context.projectPath,
   );
+  const providerEnvApiKeyProviders = await readProviderEnvApiKeyProviders();
+  if (lastProviderEnvWarning) {
+    lines.push(
+      `WARN: provider.env 读取失败；path=${lastProviderEnvWarning.path}；reason=${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
+    );
+  }
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
     const endpointProfile = provider.endpointProfile ?? "chat_completions";
@@ -4173,11 +4405,11 @@ async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
       endpointProfile as EndpointProfile,
     );
     const keySource = provider.apiKey
-      ? getProviderKeySource(providerId, projectSettingsApiKeyProviders)
+      ? getProviderKeySource(providerId, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
       : undefined;
     const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
     lines.push(
-      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing"}`,
+      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
     );
     if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
@@ -4256,19 +4488,39 @@ async function readProjectSettingsApiKeyProviders(projectPath: string): Promise<
   }
 }
 
+async function readProviderEnvApiKeyProviders(): Promise<Set<string>> {
+  try {
+    const values = await readProviderEnvValues();
+    return new Set(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []);
+  } catch {
+    return new Set();
+  }
+}
+
 function getProviderKeySource(
   providerId: string,
   projectSettingsApiKeyProviders: Set<string>,
+  providerEnvApiKeyProviders: Set<string>,
 ): string {
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
   if (process.env[envName]) return "env";
-  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
+  if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
+  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
   return "merged-config";
 }
 
 function maskSecret(secret: string): string {
   if (secret.length <= 8) return "****";
   return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
+}
+
+function hasSelectedProviderConfigProblem(context: TuiContext): boolean {
+  const runtime = getSelectedModelRuntime(context);
+  const provider = context.config.providers[runtime.provider];
+  if (!provider) return true;
+  if (!provider.apiKey) return true;
+  if (provider.type !== "openai-compatible") return false;
+  return !provider.baseUrl || !provider.model || provider.model === "openai-compatible-model";
 }
 
 function hasOpenAiCompatibleDoctorProblem(context: TuiContext): boolean {
@@ -14450,6 +14702,7 @@ type InputKeyHandlers = {
   onEsc?: () => void | Promise<void>;
   onEnter?: () => void | Promise<void>;
   onShiftTab?: () => void | Promise<void>;
+  shouldMaskInput?: () => boolean;
 };
 
 async function* readInputLines(
@@ -14517,6 +14770,12 @@ async function* readInputLines(
       if (key.name === "tab" && key.shift && handlers.onShiftTab) {
         void handlers.onShiftTab();
         return;
+      }
+      if (handlers.shouldMaskInput?.()) {
+        const currentLine = (readline as unknown as { line?: string }).line ?? "";
+        clearLine(output, 0);
+        cursorTo(output, 0);
+        output.write(`你> ${"*".repeat(currentLine.length)}`);
       }
       if (key.name === "return" && handlers.onEnter) {
         const currentLine = (readline as unknown as { line?: string }).line ?? "";
@@ -14815,6 +15074,7 @@ function formatHelp(language: Language): string {
   /features             Show default feature policy and disabled automation boundaries
   /language zh-CN|en-US Switch UI language
   /model                Show current model
+  /model setup          Configure API address, key, model, and reasoning level
   /model doctor         Alias of /model route doctor
   /model route          Show role-based model routes
   /model route doctor   Diagnose role provider/model/capability/budget
@@ -14909,6 +15169,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /features             查看默认功能策略与关闭的自动化边界
   /language zh-CN|en-US 切换界面语言
   /model                显示当前模型
+  /model setup          配置 API 地址、key、模型名称和推理等级
   /model doctor         等价于 /model route doctor
   /model route          查看角色模型路由
   /model route doctor   诊断角色 provider/model/capability/budget

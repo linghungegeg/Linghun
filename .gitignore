@@ -1,6 +1,11 @@
 node_modules/
 dist/
 *.tsbuildinfo
+.env
+.env.local
+.env.*.local
+provider.env
 .linghun/*
+.linghun/provider.env
 !.linghun/.gitkeep
 .codebase-memory/

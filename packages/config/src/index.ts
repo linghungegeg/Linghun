@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -193,7 +193,23 @@ export type ConfigRecoveryWarning = {
   recoveredAt: string;
 };
 
+export type ProviderEnvWarning = {
+  path: string;
+  reason: string;
+};
+
+export type ProviderEnvSetup = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  reasoningLevel?: "Low" | "Medium" | "High";
+  endpointProfile?: EndpointProfile;
+  includeUsage?: boolean;
+  auxModel?: string;
+};
+
 export let lastConfigRecoveryWarning: ConfigRecoveryWarning | undefined;
+export let lastProviderEnvWarning: ProviderEnvWarning | undefined;
 
 export type LinghunConfig = {
   language: Language;
@@ -229,6 +245,29 @@ const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
   process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
 );
 const defaultReasoningLevel = process.env.LINGHUN_INFERENCE_LEVEL;
+const providerEnvFileName = "provider.env";
+const providerEnvKeys = new Set([
+  "LINGHUN_OPENAI_BASE_URL",
+  "LINGHUN_OPENAI_API_KEY",
+  "LINGHUN_OPENAI_MODEL",
+  "LINGHUN_OPENAI_ENDPOINT_PROFILE",
+  "LINGHUN_OPENAI_INCLUDE_USAGE",
+  "LINGHUN_INFERENCE_LEVEL",
+  "LINGHUN_AUX_MODEL",
+]);
+
+export const providerEnvTemplate = `# Linghun private provider config. Do not commit this file.
+# Shell env variables with the same names have higher priority.
+# Fill these values with your OpenAI-compatible provider details.
+LINGHUN_OPENAI_BASE_URL=
+LINGHUN_OPENAI_API_KEY=
+LINGHUN_OPENAI_MODEL=
+LINGHUN_OPENAI_ENDPOINT_PROFILE=chat_completions
+LINGHUN_OPENAI_INCLUDE_USAGE=false
+LINGHUN_INFERENCE_LEVEL=Medium
+# Optional: leave empty to let helper roles follow the main model.
+LINGHUN_AUX_MODEL=
+`;
 
 export const defaultModelRoutes: ModelRouteConfig = {
   defaultModel: defaultLinghunModel,
@@ -527,6 +566,269 @@ export function getUserSettingsPath(home = homedir()): string {
   return join(getUserConfigDir(home), "settings.json");
 }
 
+export function getProviderEnvPath(home = homedir()): string {
+  return join(getUserConfigDir(home), providerEnvFileName);
+}
+
+export async function providerEnvExists(home = homedir()): Promise<boolean> {
+  try {
+    await stat(getProviderEnvPath(home));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureProviderEnvTemplate(home = homedir()): Promise<string> {
+  const path = getProviderEnvPath(home);
+  if (await providerEnvExists(home)) {
+    return path;
+  }
+  await mkdir(dirname(path), { recursive: true });
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, providerEnvTemplate, "utf8");
+  await rename(tempPath, path);
+  return path;
+}
+
+export async function saveProviderEnvSetup(
+  setup: ProviderEnvSetup,
+  home = homedir(),
+): Promise<string> {
+  const validated = validateProviderEnvSetup(setup);
+  const path = getProviderEnvPath(home);
+  await mkdir(dirname(path), { recursive: true });
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, formatProviderEnv(validated), "utf8");
+  await rename(tempPath, path);
+  return path;
+}
+
+export async function readProviderEnvValues(home = homedir()): Promise<Record<string, string>> {
+  const path = getProviderEnvPath(home);
+  const raw = await readFile(path, "utf8");
+  return parseProviderEnv(raw, path);
+}
+
+export function validateProviderEnvSetup(setup: ProviderEnvSetup): ProviderEnvSetup {
+  const baseUrl = setup.baseUrl.trim();
+  const apiKey = setup.apiKey;
+  const model = setup.model.trim();
+  const reasoningLevel = normalizeReasoningLevel(setup.reasoningLevel ?? "Medium");
+  validateProviderBaseUrl(baseUrl);
+  validateProviderApiKey(apiKey);
+  validateProviderModel(model);
+  return {
+    ...setup,
+    baseUrl,
+    apiKey,
+    model,
+    reasoningLevel,
+    endpointProfile: setup.endpointProfile ?? "chat_completions",
+    includeUsage: setup.includeUsage ?? false,
+    auxModel: setup.auxModel?.trim(),
+  };
+}
+
+function validateProviderBaseUrl(value: string): void {
+  if (!value) {
+    throw new Error("API 地址不能为空。");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("这个地址看起来不对，请填写 root API 地址，例如 https://example.com/v1。");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      "这个地址看起来不对，请填写 http/https root API 地址，例如 https://example.com/v1。",
+    );
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error(
+      "API 地址不要包含 query、fragment 或 token 参数，请填写 root API 地址，例如 https://example.com/v1。",
+    );
+  }
+  if (/\/(chat\/completions|responses)\/?$/u.test(parsed.pathname)) {
+    throw new Error(
+      "API 地址应为 root baseUrl，例如 https://example.com/v1，不要包含 /chat/completions 或 /responses。",
+    );
+  }
+}
+
+function validateProviderApiKey(value: string): void {
+  if (!value.trim()) {
+    throw new Error("API key 不能为空。");
+  }
+  if (value !== value.trim()) {
+    throw new Error("API key 首尾不要包含空格，请重新粘贴单行 key。");
+  }
+  if (/\r|\n/u.test(value)) {
+    throw new Error("API key 不能包含换行，请重新粘贴单行 key。");
+  }
+  if (
+    value.startsWith("'") ||
+    value.startsWith('"') ||
+    value.endsWith("'") ||
+    value.endsWith('"')
+  ) {
+    throw new Error("API key 不需要包裹引号，请去掉首尾引号。");
+  }
+}
+
+function validateProviderModel(value: string): void {
+  if (!value) {
+    throw new Error("模型名称不能为空。");
+  }
+}
+
+function normalizeReasoningLevel(value: string): "Low" | "Medium" | "High" {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return "Medium";
+  if (normalized === "low") return "Low";
+  if (normalized === "medium") return "Medium";
+  if (normalized === "high") return "High";
+  throw new Error("推理等级可选 Low / Medium / High，默认 Medium。");
+}
+
+function formatProviderEnv(setup: ProviderEnvSetup): string {
+  return [
+    "# Linghun private provider config. Do not commit this file.",
+    "# Shell env variables with the same names have higher priority.",
+    `LINGHUN_OPENAI_BASE_URL=${setup.baseUrl}`,
+    `LINGHUN_OPENAI_API_KEY=${setup.apiKey}`,
+    `LINGHUN_OPENAI_MODEL=${setup.model}`,
+    `LINGHUN_OPENAI_ENDPOINT_PROFILE=${setup.endpointProfile ?? "chat_completions"}`,
+    `LINGHUN_OPENAI_INCLUDE_USAGE=${setup.includeUsage === true ? "true" : "false"}`,
+    `LINGHUN_INFERENCE_LEVEL=${setup.reasoningLevel ?? "Medium"}`,
+    `LINGHUN_AUX_MODEL=${setup.auxModel ?? ""}`,
+    "",
+  ].join("\n");
+}
+
+function parseProviderEnv(raw: string, path: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const [index, line] of raw.split(/\r?\n/u).entries()) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) {
+      throw new Error(`${path}:${index + 1} 不是有效的 KEY=VALUE 行。`);
+    }
+    const key = trimmed.slice(0, equalsIndex).trim();
+    if (!providerEnvKeys.has(key)) {
+      continue;
+    }
+    const rawValue = trimmed.slice(equalsIndex + 1).trim();
+    values[key] = unquoteProviderEnvValue(rawValue, path, index + 1);
+  }
+  return values;
+}
+
+function unquoteProviderEnvValue(value: string, path: string, line: number): string {
+  if (!value) return "";
+  const quote = value[0];
+  if (quote !== "'" && quote !== '"') {
+    return value;
+  }
+  if (!value.endsWith(quote) || value.length === 1) {
+    throw new Error(`${path}:${line} 引号不完整，请检查 provider.env。`);
+  }
+  return value.slice(1, -1);
+}
+
+function providerEnvToConfig(values: Record<string, string>): Partial<LinghunConfig> {
+  const hasMainProviderValue = Boolean(
+    values.LINGHUN_OPENAI_BASE_URL || values.LINGHUN_OPENAI_API_KEY || values.LINGHUN_OPENAI_MODEL,
+  );
+  if (!hasMainProviderValue) {
+    return {};
+  }
+  validateProviderEnvSetup({
+    baseUrl: process.env.LINGHUN_OPENAI_BASE_URL ?? values.LINGHUN_OPENAI_BASE_URL ?? "",
+    apiKey: process.env.LINGHUN_OPENAI_API_KEY ?? values.LINGHUN_OPENAI_API_KEY ?? "",
+    model: process.env.LINGHUN_OPENAI_MODEL ?? values.LINGHUN_OPENAI_MODEL ?? "",
+    reasoningLevel: values.LINGHUN_INFERENCE_LEVEL
+      ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
+      : "Medium",
+  });
+  const openAiProvider: Partial<ProviderConfig> = {};
+  if (values.LINGHUN_OPENAI_BASE_URL) openAiProvider.baseUrl = values.LINGHUN_OPENAI_BASE_URL;
+  if (values.LINGHUN_OPENAI_API_KEY) openAiProvider.apiKey = values.LINGHUN_OPENAI_API_KEY;
+  if (values.LINGHUN_OPENAI_MODEL) openAiProvider.model = values.LINGHUN_OPENAI_MODEL;
+  openAiProvider.endpointProfile = values.LINGHUN_OPENAI_ENDPOINT_PROFILE
+    ? normalizeEndpointProfile(values.LINGHUN_OPENAI_ENDPOINT_PROFILE)
+    : "chat_completions";
+  if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
+    openAiProvider.includeUsage = values.LINGHUN_OPENAI_INCLUDE_USAGE === "true";
+  }
+  openAiProvider.reasoningLevel = values.LINGHUN_INFERENCE_LEVEL
+    ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
+    : "Medium";
+  const model = process.env.LINGHUN_OPENAI_MODEL ?? openAiProvider.model;
+  return {
+    ...(model ? { defaultModel: model } : {}),
+    providers: {
+      "openai-compatible": {
+        type: "openai-compatible",
+        model: model ?? openAiCompatibleModelPlaceholder,
+        ...openAiProvider,
+      },
+    },
+    modelRoutes: model
+      ? {
+          defaultModel: model,
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.requiredCapabilities.includes("text")
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: model,
+                  fallbackModels: [],
+                }
+              : route,
+          ),
+        }
+      : undefined,
+  };
+}
+
+async function readProviderEnvConfig(home = homedir()): Promise<Partial<LinghunConfig>> {
+  try {
+    const values = await readProviderEnvValues(home);
+    lastProviderEnvWarning = undefined;
+    return providerEnvToConfig(values);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      lastProviderEnvWarning = undefined;
+      return {};
+    }
+    lastProviderEnvWarning = {
+      path: getProviderEnvPath(home),
+      reason: error instanceof Error ? error.message : String(error),
+    };
+    return {};
+  }
+}
+
+function mergeProviderEnvConfig(
+  projectSettings: Partial<LinghunConfig>,
+  providerEnv: Partial<LinghunConfig>,
+): Partial<LinghunConfig> {
+  return {
+    ...projectSettings,
+    ...providerEnv,
+    providers: {
+      ...projectSettings.providers,
+      ...providerEnv.providers,
+    },
+    modelRoutes: providerEnv.modelRoutes ?? projectSettings.modelRoutes,
+  };
+}
+
 async function readUserSettings(home = homedir()): Promise<Partial<LinghunConfig>> {
   try {
     const raw = await readFile(getUserSettingsPath(home), "utf8");
@@ -558,12 +860,16 @@ function isLanguage(value: unknown): value is Language {
 export async function loadConfig(projectPath = process.cwd()): Promise<LinghunConfig> {
   const settingsPath = getProjectSettingsPath(projectPath);
   const userLanguage = await loadUserLanguage();
+  const providerEnv = await readProviderEnvConfig();
   try {
     const raw = await readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<LinghunConfig>;
-    return validateConfig(mergeConfig(applyUserLanguage(parsed, userLanguage)));
+    return validateConfig(
+      mergeConfig(mergeProviderEnvConfig(applyUserLanguage(parsed, userLanguage), providerEnv)),
+    );
   } catch (error) {
-    const base = userLanguage ? mergeConfig({ language: userLanguage }) : defaultConfig;
+    const baseInput = userLanguage ? { language: userLanguage } : {};
+    const base = mergeConfig(mergeProviderEnvConfig(baseInput, providerEnv));
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       lastConfigRecoveryWarning = undefined;
       return base;
@@ -1335,6 +1641,11 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
           process.env.LINGHUN_INFERENCE_LEVEL ??
           openAiCompatibleProvider?.reasoningLevel ??
           defaultConfig.providers["openai-compatible"].reasoningLevel,
+        includeUsage:
+          process.env.LINGHUN_OPENAI_INCLUDE_USAGE !== undefined
+            ? process.env.LINGHUN_OPENAI_INCLUDE_USAGE === "true"
+            : (openAiCompatibleProvider?.includeUsage ??
+              defaultConfig.providers["openai-compatible"].includeUsage),
       },
     },
     modelRoutes: {

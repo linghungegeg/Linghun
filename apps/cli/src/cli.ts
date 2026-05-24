@@ -18,6 +18,7 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   ${LINGHUN_CLI_NAME} model                         查看当前模型配置
   ${LINGHUN_CLI_NAME} model set <model>             切换当前 headless 模型
   ${LINGHUN_CLI_NAME} model doctor                   诊断模型配置
+  TUI /model setup                                  交互式配置 API 地址、key、模型名称和推理等级
   TUI /model route                                  查看角色模型路由
   TUI /model route doctor                           诊断角色 provider/model/capability/budget
   TUI /model route set <role> <model>               设置 planner/executor/reviewer/verifier/summarizer/vision/image
@@ -89,10 +90,12 @@ export async function runCli(argv: string[]): Promise<CliResult> {
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {
   const [subcommand, ...rest] = argv;
-  const [
-    { getProjectSettingsPath, loadConfig, saveDefaultModel },
-    { deepSeekModels, resolveProviderBaseUrlDiagnostic },
-  ] = await Promise.all([import("@linghun/config"), import("@linghun/providers")]);
+  const [configModule, { deepSeekModels, resolveProviderBaseUrlDiagnostic }] = await Promise.all([
+    import("@linghun/config"),
+    import("@linghun/providers"),
+  ]);
+  const { getProjectSettingsPath, loadConfig, readProviderEnvValues, saveDefaultModel } =
+    configModule;
   const config = await loadConfig();
   const provider = config.providers.deepseek;
   const modelId = provider.model;
@@ -130,26 +133,35 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
       getProjectSettingsPath(process.cwd()),
     );
-    const keySource = provider.apiKey
-      ? getProviderKeySource("deepseek", projectSettingsApiKeyProviders)
-      : undefined;
+    const providerEnvApiKeyProviders = await readProviderEnvApiKeyProviders(readProviderEnvValues);
+    const target = resolveDoctorTarget(config);
+    const keySource = getProviderKeySource(
+      target.providerId,
+      Boolean(target.provider.apiKey),
+      projectSettingsApiKeyProviders,
+      providerEnvApiKeyProviders,
+    );
     const problems: string[] = [];
     const warnings: string[] = [];
-    if (!provider.baseUrl) {
-      problems.push("- 缺少 base_url：请设置 LINGHUN_DEEPSEEK_BASE_URL 或配置 provider.baseUrl。");
+    const envPrefix = target.providerId === "deepseek" ? "LINGHUN_DEEPSEEK" : "LINGHUN_OPENAI";
+    if (!target.provider.baseUrl) {
+      problems.push(`- 缺少 base_url：请设置 ${envPrefix}_BASE_URL 或配置 provider.baseUrl。`);
     }
-    if (!provider.apiKey) {
+    if (!target.provider.apiKey) {
       problems.push(
-        "- 缺少 api_key：请设置 LINGHUN_DEEPSEEK_API_KEY，或在本地配置中填写 api_key。",
+        `- 缺少 api_key：请设置 ${envPrefix}_API_KEY，或在本机私有 provider.env 中填写。`,
       );
     }
-    if (projectSettingsApiKeyProviders.has("deepseek")) {
+    if (projectSettingsApiKeyProviders.has(target.providerId)) {
       warnings.push(
-        "WARN: project-settings provider=deepseek contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。",
+        `WARN: project-settings provider=${target.providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
       );
     }
-    const endpointProfile = provider.endpointProfile ?? "chat_completions";
-    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(provider.baseUrl, endpointProfile);
+    const endpointProfile = target.provider.endpointProfile ?? "chat_completions";
+    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
+      target.provider.baseUrl,
+      endpointProfile,
+    );
     if (baseUrlDiagnostic.hasQueryOrFragment) {
       warnings.push(
         "WARN: baseUrl contains query/fragment; doctor hides raw value，请改为不含 query/fragment 的 root baseUrl。",
@@ -160,11 +172,10 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
         `WARN: baseUrl contains full endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}; endpointPath=${baseUrlDiagnostic.endpointPath}`,
       );
     }
-    const apiKeyStatus =
-      provider.apiKey && keySource
-        ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}`
-        : "missing";
-    const header = `模型诊断：${model.id}\nprovider=deepseek model=${model.id} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nbaseUrl=${provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli-deepseek-only; full route diagnostics: TUI /model doctor\n`;
+    const apiKeyStatus = target.provider.apiKey
+      ? `present source=${keySource} masked=${maskSecret(target.provider.apiKey)}`
+      : "missing source=missing";
+    const header = `模型诊断：${target.modelId}\nprovider=${target.providerId} model=${target.modelId} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nbaseUrl=${target.provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli; full route diagnostics: TUI /model doctor\n`;
     const warningText = warnings.length > 0 ? `${warnings.join("\n")}\n` : "";
     if (problems.length === 0) {
       return { stdout: `${header}${warningText}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
@@ -189,6 +200,46 @@ function formatModelInfo(
   return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ?? "未配置"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
 }
 
+type DoctorProviderConfig = {
+  type: "openai-compatible" | "deepseek";
+  baseUrl?: string;
+  apiKey?: string;
+  model: string;
+  endpointProfile?: "chat_completions" | "responses";
+};
+
+type DoctorConfig = {
+  defaultModel: string;
+  providers: Record<string, DoctorProviderConfig>;
+  modelRoutes?: {
+    defaultModel?: string;
+    routes?: Array<{ provider: string; primaryModel: string }>;
+  };
+};
+
+function resolveDoctorTarget(config: DoctorConfig): {
+  providerId: string;
+  provider: DoctorProviderConfig;
+  modelId: string;
+} {
+  const modelId = config.defaultModel;
+  const route = config.modelRoutes?.routes?.find(
+    (item) => item.primaryModel === modelId && Boolean(config.providers[item.provider]),
+  );
+  if (route) {
+    return { providerId: route.provider, provider: config.providers[route.provider], modelId };
+  }
+  const providerEntry = Object.entries(config.providers).find(([, item]) => item.model === modelId);
+  if (providerEntry) {
+    return { providerId: providerEntry[0], provider: providerEntry[1], modelId };
+  }
+  return {
+    providerId: "deepseek",
+    provider: config.providers.deepseek,
+    modelId: config.providers.deepseek.model,
+  };
+}
+
 async function readProjectSettingsApiKeyProviders(settingsPath: string): Promise<Set<string>> {
   try {
     const raw = await readFile(settingsPath, "utf8");
@@ -203,14 +254,29 @@ async function readProjectSettingsApiKeyProviders(settingsPath: string): Promise
   }
 }
 
+async function readProviderEnvApiKeyProviders(
+  readProviderEnvValues: () => Promise<Record<string, string>>,
+): Promise<Set<string>> {
+  try {
+    const values = await readProviderEnvValues();
+    return new Set(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []);
+  } catch {
+    return new Set();
+  }
+}
+
 function getProviderKeySource(
   providerId: string,
+  hasApiKey: boolean,
   projectSettingsApiKeyProviders: Set<string>,
+  providerEnvApiKeyProviders: Set<string>,
 ): string {
+  if (!hasApiKey) return "missing";
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
   if (process.env[envName]) return "env";
-  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings";
-  return "merged-config";
+  if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
+  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
+  return "missing";
 }
 
 function maskSecret(secret: string): string {

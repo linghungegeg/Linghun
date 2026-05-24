@@ -14,10 +14,10 @@ Linghun 是一个面向中文开发者的 AI 编程终端规划仓库。
 ## 当前进度
 
 - Phase 00-14 主闭环、Phase 14 hardening 与 Phase 15 preflight hardening：Natural Command Bridge 已完成；Natural Intent Contract 成品级手感硬化已收口。
-- Phase 15.5A-F、Phase 16、Phase 17A/B/C、Pre-Smoke TUI Polish A-D、Performance Gate 小范围修复、Closure A 已完成对应 local/focused/mock/synthetic validation，并已输出对应交付或审计文档；这些结论只代表本地、focused、mock、synthetic 或 scoped validation 已闭环。
-- 当前仍不是 Beta PASS，不是 smoke-ready，不是 open-source-ready；不得把历史 A-C、focused/mock/local/synthetic PASS、单阶段 PASS 或局部 live text PASS 推断为整体 ready。
-- 当前最新状态以 [START_NEXT_CHAT.md](./START_NEXT_CHAT.md)、[docs/audit/pre-smoke-terminal-product-ultimate-audit.md](./docs/audit/pre-smoke-terminal-product-ultimate-audit.md) 和 [docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md](./docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md) 为准；本仓库正处于真实模型/真实项目 smoke 前的 P2 product/truthfulness closure。
-- 下一步是在 Closure B 完成并停止后，由用户确认是否进入“用户指定真实测试项目”的 Real Provider + Real Project Smoke；真实 smoke 才允许用户通过临时 env 注入 provider key，且不得把真实 key 写入文档或配置，不得保存 raw provider request、完整 provider response 或完整日志。
+- Phase 15.5A-F、Phase 16、Phase 17A/B/C、Pre-Smoke TUI Polish A-D、Performance Gate 小范围修复、Closure A、Closure B 和 Closure C 已完成对应 local/focused/mock/synthetic validation 或本地口径收口，并已输出对应交付或审计文档；这些结论只代表本地、focused、mock、synthetic 或 scoped validation 已闭环。
+- 当前仍不是 Beta PASS，不是 smoke-ready，不是 open-source-ready；不得把历史 A-C、focused/mock/local/synthetic PASS、单阶段 PASS、Closure A/B/C 本地收口或局部 live text PASS 推断为整体 ready。
+- 当前最新状态以 [START_NEXT_CHAT.md](./START_NEXT_CHAT.md)、[docs/audit/pre-smoke-terminal-product-ultimate-audit.md](./docs/audit/pre-smoke-terminal-product-ultimate-audit.md)、[docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md](./docs/delivery/pre-smoke-closure-a-p1-engineering-risk.md)、[docs/delivery/pre-smoke-closure-b-p2-product-truthfulness.md](./docs/delivery/pre-smoke-closure-b-p2-product-truthfulness.md) 和 [docs/delivery/pre-smoke-closure-c-provider-auth-config-center.md](./docs/delivery/pre-smoke-closure-c-provider-auth-config-center.md) 为准；Closure C 已完成 provider/auth config center 本地收口。
+- 下一步由用户确认是否进入“用户指定真实测试项目”的 Real Provider + Real Project Smoke；真实 smoke 可通过 shell env 或本机私有 provider.env 使用 provider key，且不得把真实 key 写入文档、报告、日志或项目 `.linghun/settings.json`，不得保存 raw provider request、完整 provider response 或完整日志。
 - Phase 14 已补齐本地 Skills、Workflows、Hooks doctor、Plugin manifest loader、启停、信任和权限边界，并完成稳定性与安全边界加固；不得写成已经实现插件市场、GitHub 安装、自动更新、长期任务或 Phase 15+ 功能。
 - Phase 15 preflight hardening 已让中文/英文自然语言可查询 memory、index、cache、model、mode、workflow、skills、plugins、hooks、sessions 等状态，并基于 Command Capability Catalog 做本地裁决；已补 Catalog/dispatch 漂移检测、关键参数提取、pending Start Gate 过期/精确确认和旧权限边界。Pre-smoke 新基线要求用户可见权限模式统一为 `default` / `auto-review` / `plan` / `full-access`，旧 `acceptEdits` / `auto` / `bypass` / `dontAsk` 只作为 legacy alias 或历史证据；高风险命令不得自然语言直通。Architecture Runtime 是 smoke 前底层工程判断能力，不是第五个权限模式、不是 Plan Mode、不是 skill、不是 prompt-only 文案；v1 只做轻量工程判断 guard 和短 Architecture Card，涉及最新外部事实时必须按需走 Freshness/Web Evidence，未联网不得伪造当前结论。
 - Linghun 的低学习成本原则是渐进披露：默认首屏、状态栏、`/help` 和 `/doctor` 必须简洁；完整能力必须通过 `/help all|advanced|details`、`/features`、`/config advanced`、`/doctor all|details|checklist|project|report` 和自然语言用途询问可发现；隐藏高级入口不能降低功能完整性。
@@ -59,6 +59,26 @@ Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent tr
 - CLI 主命令：`linghun`
 - Windows 兼容入口：`Linghun`
 - 文档和脚本默认写 `linghun`，只在兼容说明中写 `Linghun`。
+
+## 模型配置
+
+新用户不需要手写 `providers` 或 `modelRoutes` JSON。首次运行发现当前模型配置不可用时，TTY 环境会提示进入模型配置向导；也可以随时运行：
+
+```text
+/model setup
+```
+
+向导只要求填写 API 地址、API key、模型名称和推理等级。API key 会保存到本机用户目录下的私有 `provider.env`，默认路径为 `~/.linghun/provider.env`；设置 `LINGHUN_CONFIG_DIR` 时路径为 `$LINGHUN_CONFIG_DIR/provider.env`。该文件不应放入项目目录，也不应提交到 git。
+
+配置优先级：shell env 变量最高，其次是用户私有 `provider.env`，最后才是既有 settings/default。支持的变量见 [.env.example](./.env.example)；示例文件不包含真实 key，复制不是必须的，`/model setup` 会自动创建带注释模板。
+
+常用检查命令：
+
+```text
+/model doctor
+```
+
+`/model doctor` 会显示 API key 来源：`env`、`user-provider-env`、`project-settings-legacy` 或 `missing`，并只显示脱敏结果。若旧项目 `.linghun/settings.json` 含有 `apiKey`，doctor 会提示迁移到 shell env 或私有 `provider.env`。
 
 ## 文档结构
 

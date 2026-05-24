@@ -5,12 +5,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   defaultConfig,
   ensureConfigDirs,
+  ensureProviderEnvTemplate,
   getProjectConfigDir,
   getProjectSettingsPath,
+  getProviderEnvPath,
   getSessionRootDir,
   getUserDataDir,
   lastConfigRecoveryWarning,
+  lastProviderEnvWarning,
   loadConfig,
+  providerEnvExists,
+  readProviderEnvValues,
   removeMcpServerConfig,
   resetExtensionTrustForInstall,
   resolveStoragePaths,
@@ -18,6 +23,7 @@ import {
   saveExtensionEnablement,
   saveMcpServerConfig,
   saveModelRoute,
+  saveProviderEnvSetup,
 } from "./index.js";
 
 afterEach(() => {
@@ -265,6 +271,150 @@ describe("config directories", () => {
 
     expect(raw).not.toContain("sk-env-openai-secret");
     expect(raw).not.toContain('"apiKey"');
+  });
+
+  it("loads private provider.env below shell env and above project settings", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-shell-secret");
+    vi.resetModules();
+    const {
+      getProjectConfigDir: envGetProjectConfigDir,
+      getProviderEnvPath: envGetProviderEnvPath,
+      loadConfig: envLoadConfig,
+      saveModelRoute: envSaveModelRoute,
+    } = await import("./index.js");
+    await mkdir(envGetProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://project.invalid/v1",
+            apiKey: "sk-project-secret",
+            model: "project-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      [
+        "# private provider env",
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-provider-secret",
+        "LINGHUN_OPENAI_MODEL=provider-model",
+        "LINGHUN_INFERENCE_LEVEL=High",
+        "LINGHUN_OPENAI_INCLUDE_USAGE=true",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+    await envSaveModelRoute("planner", "provider-model", project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://provider.invalid/v1");
+    expect(config.providers["openai-compatible"]?.apiKey).toBe("sk-shell-secret");
+    expect(config.providers["openai-compatible"]?.model).toBe("provider-model");
+    expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("High");
+    expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
+      "openai-compatible",
+    );
+    expect(raw).not.toContain("sk-shell-secret");
+    expect(raw).not.toContain("sk-provider-secret");
+    expect(raw).not.toContain("sk-project-secret");
+  });
+
+  it("creates provider.env template and saves setup atomically in user config dir", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const {
+      ensureProviderEnvTemplate: envEnsureProviderEnvTemplate,
+      getProviderEnvPath: envGetProviderEnvPath,
+      providerEnvExists: envProviderEnvExists,
+      readProviderEnvValues: envReadProviderEnvValues,
+      saveProviderEnvSetup: envSaveProviderEnvSetup,
+    } = await import("./index.js");
+
+    const path = await envEnsureProviderEnvTemplate(home);
+    expect(path).toBe(envGetProviderEnvPath(home));
+    expect(await envProviderEnvExists(home)).toBe(true);
+
+    await envSaveProviderEnvSetup(
+      {
+        baseUrl: "https://provider.invalid/v1",
+        apiKey: "sk-provider-secret",
+        model: "provider-model",
+        reasoningLevel: "Medium",
+      },
+      home,
+    );
+    const raw = await readFile(path, "utf8");
+    const values = await envReadProviderEnvValues(home);
+
+    expect(raw).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
+    expect(raw).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
+    expect(values.LINGHUN_OPENAI_API_KEY).toBe("sk-provider-secret");
+  });
+
+  it("rejects quote-wrapped or quote-prefixed provider API keys before saving", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+
+    await expect(
+      saveProviderEnvSetup(
+        {
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: "'sk-provider-secret",
+          model: "provider-model",
+        },
+        home,
+      ),
+    ).rejects.toThrow("API key 不需要包裹引号");
+    await expect(
+      saveProviderEnvSetup(
+        {
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: 'sk-provider-secret"',
+          model: "provider-model",
+        },
+        home,
+      ),
+    ).rejects.toThrow("API key 不需要包裹引号");
+    expect(await providerEnvExists(home)).toBe(false);
+  });
+
+  it("records actionable warning for broken provider.env and falls back", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const {
+      getProviderEnvPath: envGetProviderEnvPath,
+      lastProviderEnvWarning: envLastProviderEnvWarning,
+      loadConfig: envLoadConfig,
+    } = await import("./index.js");
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      "LINGHUN_OPENAI_BASE_URL=https://bad.invalid/v1\n",
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+    const warningModule = await import("./index.js");
+
+    expect(config.providers["openai-compatible"]?.model).toBe("openai-compatible-model");
+    expect(warningModule.lastProviderEnvWarning ?? envLastProviderEnvWarning).toMatchObject({
+      path: envGetProviderEnvPath(home),
+    });
   });
 
   it("persists Phase 14 extension enablement and Phase 15.5D reinstall trust reset", async () => {
