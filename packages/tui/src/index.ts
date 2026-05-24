@@ -2517,8 +2517,8 @@ class ShellBlockOutput extends Writable {
     const normalized = text.trim();
     if (normalized) {
       this.blocks.push(createOutputBlock(normalized, this.context.language));
-      if (this.blocks.length > 6) {
-        this.blocks.splice(0, this.blocks.length - 6);
+      if (this.blocks.length > 3) {
+        this.blocks.splice(0, this.blocks.length - 3);
       }
       this.onWrite();
     }

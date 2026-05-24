@@ -12,12 +12,12 @@ export function ShellApp({ controller }: { controller: ShellController }): React
   const compact = view.width < 60;
   return (
     <Box flexDirection="column" paddingX={compact ? 0 : 1}>
-      <Box flexDirection="column">
+      <Box flexDirection="column" marginBottom={1}>
         <Text color={theme.accent}>{view.homeTitle}</Text>
         <Text>{view.homeSummary}</Text>
         <StatusTray status={view.status} theme={theme} width={view.width} />
       </Box>
-      <Box flexDirection="column">
+      <Box flexDirection="column" marginBottom={1}>
         {view.blocks.map((block) => (
           <ProductBlock key={block.id} block={block} theme={theme} width={view.width} />
         ))}

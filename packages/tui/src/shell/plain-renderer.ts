@@ -1,23 +1,25 @@
 import type { Writable } from "node:stream";
+import { getStatusMarker } from "./theme.js";
 import type { ShellViewModel } from "./types.js";
 
 export function renderPlainShell(view: ShellViewModel): string {
   const noColor = view.themeMode === "no-color";
   const separator = noColor ? "----" : "────";
+  const blockLines = view.blocks.flatMap((block) => {
+    const marker = getStatusMarker(block.status, noColor);
+    return [
+      `${marker} ${block.title}`,
+      `  ${block.summary}`,
+      block.detail ? `  ${block.detail}` : undefined,
+      block.nextAction ? `  ${block.nextAction}` : undefined,
+    ].filter((line): line is string => Boolean(line));
+  });
   const lines = [
     view.homeTitle,
     view.homeSummary,
     formatStatusTray(view),
     separator,
-    ...view.blocks.flatMap((block) => {
-      const marker = noColor ? `[${block.status.toUpperCase()}]` : "•";
-      return [
-        `${marker} ${block.title}`,
-        `  ${block.summary}`,
-        block.detail ? `  ${block.detail}` : undefined,
-        block.nextAction ? `  ${block.nextAction}` : undefined,
-      ].filter((line): line is string => Boolean(line));
-    }),
+    ...blockLines,
     separator,
     `${view.composer.prompt}> ${view.composer.placeholder}`,
     view.composer.hint,

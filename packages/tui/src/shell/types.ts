@@ -7,6 +7,7 @@ export type ShellThemeMode = "color" | "no-color";
 
 export type ProductBlockKind =
   | "home"
+  | "repo"
   | "setup"
   | "permission"
   | "run"
