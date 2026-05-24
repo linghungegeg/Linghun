@@ -40,6 +40,7 @@ export type ComposerViewModel = {
   prompt: string;
   hint: string;
   submittedHint: string;
+  masking: boolean;
 };
 
 export type ShellViewModel = {

@@ -63,6 +63,7 @@ export function createShellViewModel(
         language === "en-US"
           ? "Submitted through the shared TUI controller."
           : "已通过同一条 TUI controller 路径提交。",
+      masking: context.pendingModelSetup?.step === "apiKey",
     },
     blocks,
     limitations: options.limitations ?? [],

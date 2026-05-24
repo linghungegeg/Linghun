@@ -36,7 +36,7 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
     }
   });
 
-  const value = text || view.composer.placeholder;
+  const value = text ? formatComposerText(text, view.composer.masking) : view.composer.placeholder;
   return (
     <Box
       flexDirection="column"
@@ -52,4 +52,8 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
       ) : null}
     </Box>
   );
+}
+
+function formatComposerText(text: string, masking: boolean): string {
+  return masking ? "*".repeat(Array.from(text).length) : text;
 }

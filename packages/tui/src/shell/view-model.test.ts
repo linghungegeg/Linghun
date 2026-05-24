@@ -47,6 +47,18 @@ describe("shell view model", () => {
     ).toBe(true);
   });
 
+  it("exposes composer masking only during the model setup apiKey step", () => {
+    const apiKeyView = createShellViewModel(
+      createContext({ pendingModelSetup: { step: "apiKey" } } as Partial<TuiContext>),
+    );
+    const modelView = createShellViewModel(
+      createContext({ pendingModelSetup: { step: "model" } } as Partial<TuiContext>),
+    );
+
+    expect(apiKeyView.composer.masking).toBe(true);
+    expect(modelView.composer.masking).toBe(false);
+  });
+
   it("keeps narrow 80/60/40-column view models bounded for long CJK paths and model names", () => {
     for (const width of [80, 60, 40]) {
       const view = createShellViewModel(createContext(), { width });
