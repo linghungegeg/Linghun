@@ -19,6 +19,11 @@
     "@linghun/core": "workspace:*",
     "@linghun/providers": "workspace:*",
     "@linghun/shared": "workspace:*",
-    "@linghun/tools": "workspace:*"
+    "@linghun/tools": "workspace:*",
+    "ink": "^7.0.3",
+    "react": "^19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.15"
   }
 }

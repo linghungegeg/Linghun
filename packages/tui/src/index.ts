@@ -20,7 +20,7 @@ import {
 } from "node:process";
 import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
-import type { Readable, Writable } from "node:stream";
+import { type Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   type LinghunConfig,
@@ -168,6 +168,9 @@ import {
   formatRequestActivity,
 } from "./request-lifecycle-presenter.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { writePlainShell } from "./shell/plain-renderer.js";
+import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
+import { createOutputBlock, createShellViewModel } from "./shell/view-model.js";
 import {
   type TerminalProblemView,
   type TerminalReadinessView,
@@ -2157,39 +2160,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   await hydrateDurableJobBackgroundTasks(context);
   const gateway = createModelGateway(config);
 
-  writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
-  if (await shouldPromptForInitialLanguage(input, context)) {
-    await promptInitialLanguage(input, output, context);
-  }
-  if (shouldPromptForInitialWorkspaceTrust(input, context)) {
-    await promptInitialWorkspaceTrust(input, output, context);
-  } else {
-    writeWorkspaceTrustStartupNotice(output, context);
-  }
-  writeStatus(output, context);
-  writeLine(output, formatHomeScreen(context));
-  writeLine(output, `${t(context, "intro")}\n`);
-  if (!context.memory.projectRulesExists) {
-    writeLine(output, t(context, "projectRulesMissingHint"));
-  }
-  if (lastProviderEnvWarning) {
-    writeLine(
-      output,
-      `provider.env 读取失败：${lastProviderEnvWarning.reason}。请修正后重启 Linghun，或运行 /model setup 重新配置。`,
-    );
-  }
-  if (hasSelectedProviderConfigProblem(context)) {
-    const setupHint =
-      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。";
-    if ((input as { isTTY?: boolean }).isTTY === true) {
-      const existed = await providerEnvExists();
-      const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
-      writeLine(output, `${setupHint}\nprovider.env 模板位置：${providerEnvPath}`);
-    } else {
-      writeLine(output, `${setupHint}\nprovider.env 模板位置：${getProviderEnvPath()}`);
-    }
-  }
-
+  const startup = await prepareTuiStartup(input, output, context);
   const sigintHandler = () => {
     const controller = context.activeAbortController ?? context.activeVerificationAbortController;
     if (!controller) {
@@ -2201,49 +2172,298 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   process.once("SIGINT", sigintHandler);
 
   try {
-    for await (const line of readInputLines(input, output, {
-      onEsc: () => handleTuiKeypress("escape", context, output),
-      onEnter: () => handleTuiKeypress("return", context, output),
-      onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
-      shouldMaskInput: () => context.pendingModelSetup?.step === "apiKey",
-    })) {
-      process.removeListener("SIGINT", sigintHandler);
-      process.once("SIGINT", sigintHandler);
-      const text = line.trim();
-      if (!text) {
-        if (context.pendingModelSetup) {
-          await handleModelSetupInput("", context, output);
-          continue;
-        }
-        if (hasPendingEnterConfirmation(context)) {
-          await confirmPendingInteraction(context, output);
-        }
-        continue;
-      }
-
-      const commandResult = await handleSlashCommand(text, context, output);
-      if (commandResult === "exit") {
-        if (context.sessionId && !context.sessionEnded) {
-          await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
-          context.sessionEnded = true;
-        }
-        writeLine(output, t(context, "exit"));
-        return 0;
-      }
-      if (commandResult === "message") {
-        const naturalResult = await handleNaturalInput(text, context, gateway, output);
-        if (naturalResult === "message") {
-          await sendMessage(text, context, gateway, output);
-        }
-      }
+    const useInkShell = await shouldEnterInkShell(input, output);
+    if (useInkShell) {
+      return await runInkShell(
+        input,
+        output,
+        errorOutput,
+        context,
+        gateway,
+        store,
+        startup,
+        sigintHandler,
+      );
     }
-    return 0;
+    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
   } catch (error) {
     const message = error instanceof Error ? error.message : "TUI 运行失败。";
     writeLine(errorOutput, `错误：${message}`);
     return 1;
   } finally {
     process.removeListener("SIGINT", sigintHandler);
+  }
+}
+
+type TuiStartupState = {
+  setupNeeded: boolean;
+  providerEnvPath?: string;
+  providerEnvWarning?: string;
+};
+
+type TuiLineResult = "continue" | "exit";
+
+async function prepareTuiStartup(
+  input: Readable,
+  output: Writable,
+  context: TuiContext,
+): Promise<TuiStartupState> {
+  if (await shouldPromptForInitialLanguage(input, context)) {
+    await promptInitialLanguage(input, output, context);
+  }
+  if (shouldPromptForInitialWorkspaceTrust(input, context)) {
+    await promptInitialWorkspaceTrust(input, output, context);
+  }
+  const startup: TuiStartupState = {
+    setupNeeded: hasSelectedProviderConfigProblem(context),
+    providerEnvWarning: lastProviderEnvWarning?.reason,
+  };
+  if (startup.setupNeeded && !shouldEnterProductShellCandidate(input, output)) {
+    startup.providerEnvPath =
+      (input as { isTTY?: boolean }).isTTY === true
+        ? (await providerEnvExists())
+          ? getProviderEnvPath()
+          : await ensureProviderEnvTemplate()
+        : getProviderEnvPath();
+  }
+  return startup;
+}
+
+function writeLegacyStartup(output: Writable, context: TuiContext, startup: TuiStartupState): void {
+  writeLine(output, t(context, "appTitle", { name: LINGHUN_NAME }));
+  writeWorkspaceTrustStartupNotice(output, context);
+  writeStatus(output, context);
+  writeLine(output, formatHomeScreen(context));
+  writeLine(output, `${t(context, "intro")}\n`);
+  if (!context.memory.projectRulesExists) {
+    writeLine(output, t(context, "projectRulesMissingHint"));
+  }
+  if (startup.providerEnvWarning) {
+    writeLine(
+      output,
+      `provider.env 读取失败：${startup.providerEnvWarning}。请修正后重启 Linghun，或运行 /model setup 重新配置。`,
+    );
+  }
+  if (startup.setupNeeded) {
+    const setupHint =
+      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。";
+    writeLine(
+      output,
+      `${setupHint}\nprovider.env 模板位置：${startup.providerEnvPath ?? getProviderEnvPath()}`,
+    );
+  }
+}
+
+async function runPlainTui(
+  input: Readable,
+  output: Writable,
+  context: TuiContext,
+  gateway: ModelGateway,
+  store: SessionStore,
+  startup: TuiStartupState,
+  sigintHandler: () => void,
+): Promise<number> {
+  writeLegacyStartup(output, context, startup);
+  for await (const line of readInputLines(input, output, {
+    prompt: t(context, "inputPrompt"),
+    onEsc: () => handleTuiKeypress("escape", context, output),
+    onEnter: () => handleTuiKeypress("return", context, output),
+    onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
+    shouldMaskInput: () => context.pendingModelSetup?.step === "apiKey",
+  })) {
+    process.removeListener("SIGINT", sigintHandler);
+    process.once("SIGINT", sigintHandler);
+    const result = await processTuiLine(line, context, gateway, output, store);
+    if (result === "exit") return 0;
+  }
+  return 0;
+}
+
+async function runInkShell(
+  input: Readable,
+  output: Writable,
+  errorOutput: Writable,
+  context: TuiContext,
+  gateway: ModelGateway,
+  store: SessionStore,
+  startup: TuiStartupState,
+  sigintHandler: () => void,
+): Promise<number> {
+  const { renderInkShell, isNoColorTerminal, shouldUseInkShell } = await import(
+    "./shell/ink-renderer.js"
+  );
+  if (!shouldUseInkShell(input, output)) {
+    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
+  }
+
+  const blocks: ProductBlockViewModel[] = [];
+  let shell: ReturnType<typeof renderInkShell> | undefined;
+  let resolveExit: (code: number) => void = () => undefined;
+  const exitPromise = new Promise<number>((resolve) => {
+    resolveExit = resolve;
+  });
+  const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
+  const controller: ShellController = {
+    getViewModel: () =>
+      createShellViewModel(context, {
+        width: readOutputColumns(output),
+        noColor: isNoColorTerminal(),
+        setupNeeded: startup.setupNeeded,
+        outputBlocks: blocks,
+        limitations: createShellLimitations(context, startup),
+      }),
+    onInput: async (event: ShellInputEvent) => {
+      process.removeListener("SIGINT", sigintHandler);
+      process.once("SIGINT", sigintHandler);
+      if (event.type === "escape") {
+        await handleTuiKeypress("escape", context, shellOutput);
+        shell?.rerender();
+        return;
+      }
+      if (event.type === "shift-enter") {
+        blocks.push({
+          id: `shift-enter-${Date.now()}`,
+          kind: "details",
+          status: "partial",
+          title: context.language === "en-US" ? "Multiline fallback" : "多行输入降级",
+          summary:
+            context.language === "en-US"
+              ? "Shift+Enter is host-dependent in this foundation slice; paste multiline text and press Enter."
+              : "本切片中 Shift+Enter 受终端 host 限制；可粘贴多行文本后按 Enter。",
+        });
+        shell?.rerender();
+        return;
+      }
+      const result = await processTuiLine(
+        event.type === "submit" ? event.text : "",
+        context,
+        gateway,
+        shellOutput,
+        store,
+      );
+      shell?.rerender();
+      if (result === "exit") {
+        shell?.unmount();
+        resolveExit(0);
+      }
+    },
+  };
+
+  try {
+    shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: errorOutput,
+    });
+  } catch (error) {
+    blocks.push(
+      createOutputBlock(
+        context.language === "en-US"
+          ? `Ink shell failed to start; falling back to plain TUI. ${error instanceof Error ? error.message : String(error)}`
+          : `Ink shell 启动失败，已降级到 plain TUI。${error instanceof Error ? error.message : String(error)}`,
+        context.language,
+        "ink-fallback",
+      ),
+    );
+    writePlainShell(output, controller.getViewModel());
+    return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
+  }
+  return await exitPromise;
+}
+
+async function processTuiLine(
+  line: string,
+  context: TuiContext,
+  gateway: ModelGateway,
+  output: Writable,
+  store: SessionStore,
+): Promise<TuiLineResult> {
+  const text = line.trim();
+  if (!text) {
+    if (context.pendingModelSetup) {
+      await handleModelSetupInput("", context, output);
+      return "continue";
+    }
+    if (hasPendingEnterConfirmation(context)) {
+      await confirmPendingInteraction(context, output);
+    }
+    return "continue";
+  }
+
+  const commandResult = await handleSlashCommand(text, context, output);
+  if (commandResult === "exit") {
+    if (context.sessionId && !context.sessionEnded) {
+      await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
+      context.sessionEnded = true;
+    }
+    writeLine(output, t(context, "exit"));
+    return "exit";
+  }
+  if (commandResult === "message") {
+    const naturalResult = await handleNaturalInput(text, context, gateway, output);
+    if (naturalResult === "message") {
+      await sendMessage(text, context, gateway, output);
+    }
+  }
+  return "continue";
+}
+
+async function shouldEnterInkShell(input: Readable, output: Writable): Promise<boolean> {
+  if (!shouldEnterProductShellCandidate(input, output)) return false;
+  const { shouldUseInkShell } = await import("./shell/ink-renderer.js");
+  return shouldUseInkShell(input, output);
+}
+
+function shouldEnterProductShellCandidate(input: Readable, output: Writable): boolean {
+  if (process.env.LINGHUN_TUI_PLAIN === "1") return false;
+  if (process.env.TERM === "dumb") return false;
+  return (
+    (input as { isTTY?: boolean }).isTTY === true && (output as { isTTY?: boolean }).isTTY === true
+  );
+}
+
+function createShellLimitations(context: TuiContext, startup: TuiStartupState): string[] {
+  const limitations: string[] = [];
+  if (startup.providerEnvWarning) {
+    limitations.push(
+      context.language === "en-US"
+        ? "Provider env could not be read; run /model setup or /model doctor."
+        : "provider.env 读取失败；可用 /model setup 或 /model doctor 处理。",
+    );
+  }
+  if (process.env.NO_COLOR === "1" || process.env.FORCE_COLOR === "0") {
+    limitations.push(
+      context.language === "en-US" ? "No-color mode is active." : "当前为无颜色模式。",
+    );
+  }
+  return limitations;
+}
+
+function readOutputColumns(output: Writable): number {
+  const columns = (output as { columns?: number }).columns;
+  return typeof columns === "number" && Number.isFinite(columns) ? columns : 80;
+}
+
+class ShellBlockOutput extends Writable {
+  constructor(
+    private readonly context: TuiContext,
+    private readonly blocks: ProductBlockViewModel[],
+    private readonly onWrite: () => void,
+  ) {
+    super();
+  }
+
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
+    const text = chunk.toString();
+    const normalized = text.trim();
+    if (normalized) {
+      this.blocks.push(createOutputBlock(normalized, this.context.language));
+      if (this.blocks.length > 6) {
+        this.blocks.splice(0, this.blocks.length - 6);
+      }
+      this.onWrite();
+    }
+    callback();
   }
 }
 
@@ -14699,6 +14919,7 @@ function formatFileCandidates(candidates: string[], language: Language): string 
 }
 
 type InputKeyHandlers = {
+  prompt?: string;
   onEsc?: () => void | Promise<void>;
   onEnter?: () => void | Promise<void>;
   onShiftTab?: () => void | Promise<void>;
@@ -14734,17 +14955,18 @@ async function* readInputLines(
 
   const rl = createInterface({ input, output });
   const cleanupKeypress = installInputKeyHandlers(input, rl, keyHandlers);
+  const prompt = keyHandlers.prompt ?? "你> ";
   let skipNextEmptyLine = false;
   try {
-    output.write("你> ");
+    output.write(prompt);
     for await (const line of rl) {
       if (skipNextEmptyLine && line.trim() === "") {
         skipNextEmptyLine = false;
-        output.write("你> ");
+        output.write(prompt);
         continue;
       }
       yield line;
-      output.write("你> ");
+      output.write(prompt);
     }
   } finally {
     cleanupKeypress();
@@ -14775,7 +14997,7 @@ async function* readInputLines(
         const currentLine = (readline as unknown as { line?: string }).line ?? "";
         clearLine(output, 0);
         cursorTo(output, 0);
-        output.write(`你> ${"*".repeat(currentLine.length)}`);
+        output.write(`${prompt}${"*".repeat(currentLine.length)}`);
       }
       if (key.name === "return" && handlers.onEnter) {
         const currentLine = (readline as unknown as { line?: string }).line ?? "";
