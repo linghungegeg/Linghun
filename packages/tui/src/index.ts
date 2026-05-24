@@ -117,12 +117,7 @@ import {
   createManualCompactBoundary,
   microCompactMessages,
 } from "./compact-context.js";
-import {
-  estimateModelMessageChars,
-  estimateToolCallsCharsLocal,
-  estimateTranscriptContextChars,
-  estimateValueChars,
-} from "./context-estimator.js";
+import { estimateModelMessageChars, estimateTranscriptContextChars } from "./context-estimator.js";
 import {
   type CodebaseMemoryBinarySource,
   type CodebaseMemoryBinaryStatus,

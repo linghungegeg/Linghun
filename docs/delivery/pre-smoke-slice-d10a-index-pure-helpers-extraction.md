@@ -4,6 +4,7 @@
 
 ```
  M packages/tui/src/index.ts
+?? docs/delivery/pre-smoke-slice-d10a-index-pure-helpers-extraction.md
 ?? packages/tui/src/cache-freshness.test.ts
 ?? packages/tui/src/cache-freshness.ts
 ?? packages/tui/src/context-estimator.test.ts
@@ -12,9 +13,9 @@
 
 ## 实际读取文件列表
 
-- `packages/tui/src/index.ts`（17298 行 → 17161 行）
+- `packages/tui/src/index.ts`（17298 行 → 17159 行）
 - `packages/tui/src/index.test.ts`（确认 197 测试通过）
-- `docs/delivery/pre-smoke-slice-d9-5-hot-path-micro-closure.md`（未需要读取，本次无热路径改动）
+- `docs/delivery/pre-smoke-slice-d9-5-hot-path-micro-closure.md`（精读，确认 D.9.5 热路径改动范围与本次提取函数无冲突）
 
 ## Moved Functions 表
 
@@ -81,8 +82,8 @@
 | 指标 | 值 |
 |------|-----|
 | Before | 17298 行 |
-| After | 17161 行 |
-| 净减少 | 137 行 |
+| After | 17159 行 |
+| 净减少 | 139 行 |
 
 ## 测试命令和结果
 
