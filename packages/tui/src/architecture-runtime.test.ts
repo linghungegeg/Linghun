@@ -48,6 +48,29 @@ describe("architecture runtime trigger rules", () => {
     expect(shouldTriggerArchitectureRuntime("add export report feature")).toBe(true);
   });
 
+  it("triggers for ordinary page/component/UI development requests", () => {
+    expect(shouldTriggerArchitectureRuntime("做一个页面")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("做一个登录页面")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("写一个 React 组件")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("帮我做个首页")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("实现一个用户列表页面")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("加一个导航栏")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("build a landing page")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("create a dashboard page")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("make a responsive homepage")).toBe(true);
+  });
+
+  it("triggers for bug fix requests that are not trivially small", () => {
+    expect(shouldTriggerArchitectureRuntime("修复登录页面的 bug")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("fix a bug in the login form")).toBe(true);
+    expect(shouldTriggerArchitectureRuntime("debug this crash issue")).toBe(true);
+  });
+
+  it("does not trigger for trivially small bug fixes", () => {
+    expect(shouldTriggerArchitectureRuntime("修一个小 bug")).toBe(false);
+    expect(shouldTriggerArchitectureRuntime("fix a local small bug")).toBe(false);
+  });
+
   it("triggers when the user requests mature complete reference-aligned work", () => {
     expect(
       shouldTriggerArchitectureRuntime("请做 mature complete reference-aligned no omissions 实现"),
@@ -110,6 +133,19 @@ describe("architecture card facts and formatting", () => {
     expect(directive).toContain("不改变权限模式");
     expect(directive).toContain("不替代 Plan approval");
     expect(directive).toContain("verifier");
+  });
+
+  it("includes maturity defaults and long task hint in the directive", () => {
+    const directive = createArchitectureRuntimeDirective(baseCard);
+
+    expect(directive).toContain("MaturityDefaults=");
+    expect(directive).toContain("信息架构清晰");
+    expect(directive).toContain("响应式布局");
+    expect(directive).toContain("空态");
+    expect(directive).toContain("错误态");
+    expect(directive).toContain("LongTaskHint=");
+    expect(directive).toContain("/autopilot");
+    expect(directive).toContain("/plan");
   });
 });
 

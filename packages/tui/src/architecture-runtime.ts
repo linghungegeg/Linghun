@@ -58,6 +58,9 @@ const SYSTEMIC_TRIGGER_PATTERNS = [
   /(实现|新增|添加|加一个|支持).{0,16}(功能|模块|系统|流程|接口)/i,
   /\b(implement|add|support)\b.{0,32}\b(feature|module|system|flow|api)\b/i,
   /mature|complete|reference[-\s]?aligned|no\s+omissions|成熟|完整|对齐参考源|不要遗漏/i,
+  /(做|写|建|改|加|开发|搭建|重构|实现).{0,20}(页面|组件|界面|主页|首页|后台|仪表盘|表单|导航|侧边栏|弹窗|模态框)/i,
+  /\b(build|create|make|write|develop|redesign|refactor)\b.{0,32}\b(page|component|view|homepage|dashboard|form|layout|modal|sidebar|navbar|ui)\b/i,
+  /(修复|修|改|fix|resolve|debug).{0,16}(bug|问题|报错|异常|崩溃|error|issue|crash)/i,
 ];
 
 const SMALL_TASK_PATTERNS = [
@@ -206,6 +209,8 @@ export function createArchitectureRuntimeDirective(card: ArchitectureCard): stri
     "主屏只输出 1-2 行面向用户的行动摘要；不要把 Architecture Card、字段名或内部审计结构输出到主屏。",
     "后续动作必须保持与该 card 一致；完整 Architecture Card 仅用于内部记录、details/debug 或验证。",
     "Architecture Runtime 不授权写入、不改变权限模式、不替代 Plan approval、Freshness/Web Evidence 或 verifier。",
+    "MaturityDefaults=默认要求成熟方案：信息架构清晰、响应式布局、状态/空态/错误态/加载态完整、可读性优先、语义化结构。避免卡片流水席、营销式 hero、堆内部术语、无意义工程废话。用户不需要额外说'成熟'或'别做丑'。",
+    "LongTaskHint=若任务涉及多步骤或预计超过 3 轮工具调用，主动提示用户可用 /autopilot 或 /plan 进入托管/规划模式，但不强制。",
     formatArchitectureCard(card),
   ].join("\n");
 }
