@@ -48,6 +48,13 @@ import {
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import {
+  checkProviderCooldown,
+  clearProviderBreaker,
+  createProviderCircuitBreakerState,
+  formatCooldownMessage,
+  recordProviderFailure,
+} from "./provider-circuit-breaker.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
 import {
   type TerminalReadinessView,
@@ -328,6 +335,7 @@ async function createTestContext(
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
     lastProviderFailure: undefined,
+    providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
   };
 }
@@ -8475,5 +8483,117 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已更新 MCP server：local-demo");
     expect(output.text).toContain("未执行 server");
     expect(output.text).toContain("已移除 MCP server：local-demo");
+  });
+});
+
+describe("D.8 provider circuit breaker integration", () => {
+  it("2 consecutive recoverable errors enter cooldown, 3rd check is blocked", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "test-model" });
+    const context = await createTestContext(project, store, session);
+
+    // First recoverable failure — no cooldown
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+    expect(checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o").blocked).toBe(false);
+
+    // Second recoverable failure — enters cooldown
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+    const check = checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o");
+    expect(check.blocked).toBe(true);
+    if (check.blocked) {
+      expect(check.remainingMs).toBeGreaterThan(0);
+      expect(check.remainingMs).toBeLessThanOrEqual(45_000);
+    }
+  });
+
+  it("cooldown message is human-readable with remaining time and /model doctor, no secrets", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "test-model" });
+    const context = await createTestContext(project, store, session);
+
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+
+    const check = checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o");
+    expect(check.blocked).toBe(true);
+    if (check.blocked) {
+      const msg = formatCooldownMessage("openai", "gpt-4o", check.remainingMs, context.language);
+      expect(msg).toContain("openai/gpt-4o");
+      expect(msg).toContain("/model doctor");
+      expect(msg).toContain("/model");
+      expect(msg).toMatch(/\d+/); // contains remaining seconds
+      expect(msg).not.toMatch(/sk-[A-Za-z0-9]/);
+      expect(msg).not.toMatch(/https?:\/\//);
+      expect(msg).not.toMatch(/Bearer/);
+    }
+  });
+
+  it("PROVIDER_AUTH_ERROR and PROVIDER_SCHEMA_ERROR do not trigger breaker", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "test-model" });
+    const context = await createTestContext(project, store, session);
+
+    // Non-recoverable errors should not accumulate
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_SCHEMA_ERROR");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_BAD_REQUEST");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "ABORT");
+
+    expect(checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o").blocked).toBe(false);
+    expect(context.providerBreaker.entries.size).toBe(0);
+  });
+
+  it("one successful request clears failure count", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "test-model" });
+    const context = await createTestContext(project, store, session);
+
+    // Accumulate 1 failure
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+    expect(context.providerBreaker.entries.has("openai::gpt-4o")).toBe(true);
+
+    // Simulate successful request clearing the breaker
+    clearProviderBreaker(context.providerBreaker, "openai", "gpt-4o");
+    expect(context.providerBreaker.entries.has("openai::gpt-4o")).toBe(false);
+
+    // Next failure starts fresh — 1 failure alone does not trigger cooldown
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+    expect(checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o").blocked).toBe(false);
+  });
+
+  it("different provider/model combinations do not affect each other", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "test-model" });
+    const context = await createTestContext(project, store, session);
+
+    // Provider A enters cooldown
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+    recordProviderFailure(context.providerBreaker, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+    expect(checkProviderCooldown(context.providerBreaker, "openai", "gpt-4o").blocked).toBe(true);
+
+    // Provider B is unaffected
+    expect(checkProviderCooldown(context.providerBreaker, "anthropic", "claude-3").blocked).toBe(
+      false,
+    );
+
+    // Same provider, different model is unaffected
+    expect(checkProviderCooldown(context.providerBreaker, "openai", "gpt-3.5").blocked).toBe(false);
+
+    // Provider B accumulates independently
+    recordProviderFailure(
+      context.providerBreaker,
+      "anthropic",
+      "claude-3",
+      "PROVIDER_NETWORK_ERROR",
+    );
+    expect(checkProviderCooldown(context.providerBreaker, "anthropic", "claude-3").blocked).toBe(
+      false,
+    );
   });
 });

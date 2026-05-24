@@ -1,0 +1,338 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BREAKER_CONSTANTS,
+  type ProviderCircuitBreakerState,
+  checkProviderCooldown,
+  clearProviderBreaker,
+  createProviderCircuitBreakerState,
+  formatCooldownDoctorLine,
+  formatCooldownMessage,
+  isRecoverableProviderFailure,
+  makeBreakerKey,
+  recordProviderFailure,
+} from "./provider-circuit-breaker.js";
+
+describe("provider-circuit-breaker", () => {
+  let state: ProviderCircuitBreakerState;
+
+  beforeEach(() => {
+    state = createProviderCircuitBreakerState();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  describe("createProviderCircuitBreakerState", () => {
+    it("returns empty entries map", () => {
+      expect(state.entries.size).toBe(0);
+    });
+  });
+
+  describe("makeBreakerKey", () => {
+    it("combines provider and model with separator", () => {
+      expect(makeBreakerKey("openai", "gpt-4o")).toBe("openai::gpt-4o");
+    });
+  });
+
+  describe("isRecoverableProviderFailure", () => {
+    it("returns true for PROVIDER_SERVER_ERROR", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_SERVER_ERROR")).toBe(true);
+    });
+
+    it("returns true for PROVIDER_RATE_LIMITED", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_RATE_LIMITED")).toBe(true);
+    });
+
+    it("returns true for PROVIDER_REQUEST_TIMEOUT", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_REQUEST_TIMEOUT")).toBe(true);
+    });
+
+    it("returns true for PROVIDER_STREAM_TIMEOUT", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_STREAM_TIMEOUT")).toBe(true);
+    });
+
+    it("returns true for PROVIDER_NETWORK_ERROR", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_NETWORK_ERROR")).toBe(true);
+    });
+
+    it("returns false for PROVIDER_AUTH_ERROR", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_AUTH_ERROR")).toBe(false);
+    });
+
+    it("returns false for PROVIDER_SCHEMA_ERROR", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_SCHEMA_ERROR")).toBe(false);
+    });
+
+    it("returns false for ABORT", () => {
+      expect(isRecoverableProviderFailure("ABORT")).toBe(false);
+    });
+
+    it("returns false for UNKNOWN", () => {
+      expect(isRecoverableProviderFailure("UNKNOWN")).toBe(false);
+    });
+  });
+
+  describe("recordProviderFailure", () => {
+    it("ignores non-recoverable error codes", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
+      expect(state.entries.size).toBe(0);
+    });
+
+    it("records first recoverable failure without entering cooldown", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      const entry = state.entries.get("openai::gpt-4o");
+      expect(entry).toBeDefined();
+      expect(entry?.consecutiveFailures).toBe(1);
+      expect(entry?.cooldownUntil).toBe(0);
+      expect(entry?.reasonCode).toBe("PROVIDER_RATE_LIMITED");
+    });
+
+    it("enters cooldown after reaching threshold (2 consecutive failures)", () => {
+      vi.setSystemTime(1000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      vi.setSystemTime(2000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      const entry = state.entries.get("openai::gpt-4o");
+      expect(entry).toBeDefined();
+      expect(entry?.consecutiveFailures).toBe(2);
+      expect(entry?.cooldownUntil).toBe(2000 + BREAKER_CONSTANTS.COOLDOWN_MS);
+      expect(entry?.reasonCode).toBe("PROVIDER_SERVER_ERROR");
+    });
+
+    it("tracks different provider+model combinations independently", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      recordProviderFailure(state, "anthropic", "claude-3", "PROVIDER_SERVER_ERROR");
+      expect(state.entries.size).toBe(2);
+      expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
+      expect(state.entries.get("anthropic::claude-3")?.consecutiveFailures).toBe(1);
+    });
+
+    it("updates reason code to the latest failure", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_STREAM_TIMEOUT");
+      const entry = state.entries.get("openai::gpt-4o");
+      expect(entry?.reasonCode).toBe("PROVIDER_STREAM_TIMEOUT");
+    });
+  });
+
+  describe("clearProviderBreaker", () => {
+    it("removes the entry for the given provider+model", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      expect(state.entries.has("openai::gpt-4o")).toBe(true);
+      clearProviderBreaker(state, "openai", "gpt-4o");
+      expect(state.entries.has("openai::gpt-4o")).toBe(false);
+    });
+
+    it("does not throw when clearing a non-existent entry", () => {
+      expect(() => clearProviderBreaker(state, "openai", "gpt-4o")).not.toThrow();
+    });
+
+    it("does not affect other provider+model entries", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "anthropic", "claude-3", "PROVIDER_SERVER_ERROR");
+      clearProviderBreaker(state, "openai", "gpt-4o");
+      expect(state.entries.has("anthropic::claude-3")).toBe(true);
+    });
+  });
+
+  describe("checkProviderCooldown", () => {
+    it("returns blocked=false when no entry exists", () => {
+      const result = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(result.blocked).toBe(false);
+    });
+
+    it("returns blocked=false when below threshold (1 failure)", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      const result = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(result.blocked).toBe(false);
+    });
+
+    it("returns blocked=true with remaining time when in cooldown", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      // Still at time 10_000 — full cooldown remaining
+      const result = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(result.blocked).toBe(true);
+      if (result.blocked) {
+        expect(result.remainingMs).toBe(BREAKER_CONSTANTS.COOLDOWN_MS);
+        expect(result.reasonCode).toBe("PROVIDER_SERVER_ERROR");
+        expect(result.entry.providerId).toBe("openai");
+        expect(result.entry.model).toBe("gpt-4o");
+      }
+    });
+
+    it("returns blocked=false and clears entry after cooldown expires", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      // Advance past cooldown
+      vi.setSystemTime(10_000 + BREAKER_CONSTANTS.COOLDOWN_MS + 1);
+      const result = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(result.blocked).toBe(false);
+      // Entry should be cleaned up
+      expect(state.entries.has("openai::gpt-4o")).toBe(false);
+    });
+
+    it("returns correct remaining time mid-cooldown", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      // Advance 20 seconds into cooldown
+      vi.setSystemTime(30_000);
+      const result = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(result.blocked).toBe(true);
+      if (result.blocked) {
+        // cooldownUntil = 10_000 + 45_000 = 55_000; remaining = 55_000 - 30_000 = 25_000
+        expect(result.remainingMs).toBe(25_000);
+      }
+    });
+  });
+
+  describe("formatCooldownMessage", () => {
+    it("formats English message with seconds and next steps", () => {
+      const msg = formatCooldownMessage("openai", "gpt-4o", 30_000, "en-US");
+      expect(msg).toContain("openai/gpt-4o");
+      expect(msg).toContain("30s");
+      expect(msg).toContain("/model doctor");
+      expect(msg).toContain("/model");
+    });
+
+    it("formats Chinese message with seconds and next steps", () => {
+      const msg = formatCooldownMessage("openai", "gpt-4o", 15_000, "zh-CN");
+      expect(msg).toContain("openai/gpt-4o");
+      expect(msg).toContain("15 秒");
+      expect(msg).toContain("/model doctor");
+      expect(msg).toContain("/model");
+    });
+
+    it("rounds up partial seconds", () => {
+      const msg = formatCooldownMessage("openai", "gpt-4o", 1_500, "en-US");
+      expect(msg).toContain("2s");
+    });
+
+    it("does not leak API keys or raw URLs", () => {
+      const msg = formatCooldownMessage("openai", "gpt-4o", 10_000, "en-US");
+      expect(msg).not.toMatch(/sk-[A-Za-z0-9]/);
+      expect(msg).not.toMatch(/https?:\/\//);
+    });
+  });
+
+  describe("formatCooldownDoctorLine", () => {
+    it("returns undefined when no active cooldowns", () => {
+      const result = formatCooldownDoctorLine(state, "en-US");
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined when entry exists but cooldown expired", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      vi.setSystemTime(10_000 + BREAKER_CONSTANTS.COOLDOWN_MS + 1);
+      // Entry still in map but cooldown expired
+      const result = formatCooldownDoctorLine(state, "en-US");
+      expect(result).toBeUndefined();
+    });
+
+    it("returns English doctor line with active cooldown", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_RATE_LIMITED");
+      vi.setSystemTime(15_000);
+      const result = formatCooldownDoctorLine(state, "en-US");
+      expect(result).toBeDefined();
+      expect(result).toContain("Provider cooldown");
+      expect(result).toContain("openai/gpt-4o");
+      expect(result).toContain("PROVIDER_RATE_LIMITED");
+    });
+
+    it("returns Chinese doctor line with active cooldown", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      vi.setSystemTime(15_000);
+      const result = formatCooldownDoctorLine(state, "zh-CN");
+      expect(result).toBeDefined();
+      expect(result).toContain("Provider 冷却");
+      expect(result).toContain("openai/gpt-4o");
+    });
+
+    it("shows multiple active cooldowns", () => {
+      vi.setSystemTime(10_000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "anthropic", "claude-3", "PROVIDER_RATE_LIMITED");
+      recordProviderFailure(state, "anthropic", "claude-3", "PROVIDER_RATE_LIMITED");
+      vi.setSystemTime(15_000);
+      const result = formatCooldownDoctorLine(state, "en-US");
+      expect(result).toBeDefined();
+      expect(result).toContain("openai/gpt-4o");
+      expect(result).toContain("anthropic/claude-3");
+    });
+  });
+
+  describe("end-to-end flow", () => {
+    it("full lifecycle: failures → cooldown → expiry → clear", () => {
+      vi.setSystemTime(0);
+
+      // First failure — no cooldown
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+
+      // Second failure — enters cooldown
+      vi.setSystemTime(1000);
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      const check1 = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(check1.blocked).toBe(true);
+
+      // Mid-cooldown — still blocked
+      vi.setSystemTime(20_000);
+      const check2 = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(check2.blocked).toBe(true);
+
+      // After cooldown expires — unblocked
+      vi.setSystemTime(1000 + BREAKER_CONSTANTS.COOLDOWN_MS + 1);
+      const check3 = checkProviderCooldown(state, "openai", "gpt-4o");
+      expect(check3.blocked).toBe(false);
+    });
+
+    it("successful request clears breaker mid-accumulation", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      expect(state.entries.has("openai::gpt-4o")).toBe(true);
+
+      // Simulate successful request
+      clearProviderBreaker(state, "openai", "gpt-4o");
+      expect(state.entries.has("openai::gpt-4o")).toBe(false);
+
+      // Next failure starts fresh
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+    });
+
+    it("non-recoverable errors do not affect breaker state", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
+      // Auth error should not increment — still at 1
+      expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
+    });
+  });
+
+  describe("constants", () => {
+    it("threshold is 2", () => {
+      expect(BREAKER_CONSTANTS.FAILURE_THRESHOLD).toBe(2);
+    });
+
+    it("cooldown is 45 seconds", () => {
+      expect(BREAKER_CONSTANTS.COOLDOWN_MS).toBe(45_000);
+    });
+
+    it("recoverable codes set has 5 entries", () => {
+      expect(BREAKER_CONSTANTS.RECOVERABLE_CODES.size).toBe(5);
+    });
+  });
+});

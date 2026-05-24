@@ -155,6 +155,15 @@ import {
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
 import {
+  type ProviderCircuitBreakerState,
+  checkProviderCooldown,
+  clearProviderBreaker,
+  createProviderCircuitBreakerState,
+  formatCooldownDoctorLine,
+  formatCooldownMessage,
+  recordProviderFailure,
+} from "./provider-circuit-breaker.js";
+import {
   formatMcpTools,
   formatRemoteStatus,
   formatRemoteTestResult,
@@ -1235,6 +1244,7 @@ export type TuiContext = {
   backgroundAbortControllers?: Map<string, AbortController>;
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
+  providerBreaker: ProviderCircuitBreakerState;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
@@ -2174,6 +2184,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
     lastProviderFailure: undefined,
+    providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
   };
@@ -11605,6 +11616,15 @@ function createTerminalProblems(
       detailRef: "/details evidence",
     });
   }
+  const cooldownDoctorLine = formatCooldownDoctorLine(context.providerBreaker, context.language);
+  if (cooldownDoctorLine) {
+    problems.push({
+      source: "provider",
+      severity: "warning",
+      summary: cooldownDoctorLine,
+      nextAction: "/model doctor",
+    });
+  }
   for (const task of context.backgroundTasks.filter((item) =>
     ["failed", "cancelled", "timeout", "stale"].includes(item.status),
   )) {
@@ -13432,6 +13452,22 @@ async function sendMessage(
     writeLine(output, modelGuard);
     return;
   }
+  const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
+  const cooldownCheck = checkProviderCooldown(
+    context.providerBreaker,
+    selectedRuntimeForCooldown.provider,
+    selectedRuntimeForCooldown.model,
+  );
+  if (cooldownCheck.blocked) {
+    const cooldownMsg = formatCooldownMessage(
+      selectedRuntimeForCooldown.provider,
+      selectedRuntimeForCooldown.model,
+      cooldownCheck.remainingMs,
+      context.language,
+    );
+    writeLine(output, cooldownMsg);
+    return;
+  }
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
@@ -13588,6 +13624,12 @@ async function sendMessage(
         if (event.type === "error") {
           clearRequestActivity(context);
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
+          recordProviderFailure(
+            context.providerBreaker,
+            selectedRuntime.provider,
+            selectedRuntime.model,
+            event.error.code ?? "UNKNOWN",
+          );
           writeLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
@@ -13699,6 +13741,9 @@ async function sendMessage(
     context.tools.abortSignal = undefined;
     context.interrupt = { type: "idle" };
   }
+
+  // Successful response — clear the circuit breaker for this provider+model
+  clearProviderBreaker(context.providerBreaker, selectedRuntime.provider, selectedRuntime.model);
 
   if (reportWriteGuard && !reportWriteGuard.completed) {
     const message = await recordReportIncompleteEvidence(context, sessionId, reportWriteGuard);
@@ -13907,6 +13952,12 @@ async function streamFinalModelAnswerWithoutTools(
         event.error,
         runtimeFromContinuation(continuation),
       );
+      recordProviderFailure(
+        context.providerBreaker,
+        continuation.provider,
+        continuation.model,
+        event.error.code ?? "UNKNOWN",
+      );
       writeLine(output, formatProviderFailurePrimary(event.error, context.language));
       return assistantText;
     }
@@ -13980,6 +14031,12 @@ async function continueModelAfterToolResults(
             sessionId,
             event.error,
             runtimeFromContinuation(continuation),
+          );
+          recordProviderFailure(
+            context.providerBreaker,
+            continuation.provider,
+            continuation.model,
+            event.error.code ?? "UNKNOWN",
           );
           writeLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
