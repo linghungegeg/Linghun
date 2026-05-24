@@ -105,11 +105,24 @@ import {
   summarizeArchitectureCard,
 } from "./architecture-runtime.js";
 import {
+  createCacheFreshness,
+  createConfigFreshnessSummary,
+  diffFreshness,
+  stableHash,
+  stableStringify,
+} from "./cache-freshness.js";
+import {
   type CompactBoundary,
   compactBoundaryHash,
   createManualCompactBoundary,
   microCompactMessages,
 } from "./compact-context.js";
+import {
+  estimateModelMessageChars,
+  estimateToolCallsCharsLocal,
+  estimateTranscriptContextChars,
+  estimateValueChars,
+} from "./context-estimator.js";
 import {
   type CodebaseMemoryBinarySource,
   type CodebaseMemoryBinaryStatus,
@@ -10921,44 +10934,6 @@ function recordCompactBoundary(context: TuiContext, boundary: CompactBoundary): 
   }
 }
 
-function estimateTranscriptContextChars(transcript: TranscriptEvent[]): number {
-  return transcript.reduce((total, event) => {
-    if (event.type === "user_message") return total + event.text.length;
-    if (event.type === "assistant_text_delta") return total + event.text.length;
-    if (event.type === "tool_call_start") return total + estimateValueChars(event.input);
-    if (event.type === "tool_result") return total + estimateValueChars(event.content);
-    return total;
-  }, 0);
-}
-
-/**
- * Lightweight character count estimator for arbitrary values.
- * Avoids full JSON.stringify allocation when only an approximate length is needed.
- * Accuracy: within ~5% of JSON.stringify().length for typical tool payloads.
- */
-function estimateValueChars(value: unknown, depth = 0): number {
-  if (value === null || value === undefined) return 4; // "null"
-  if (typeof value === "string") return value.length + 2; // quotes
-  if (typeof value === "number" || typeof value === "boolean") return String(value).length;
-  if (depth > 8) return 16; // safety cap for deeply nested structures
-  if (Array.isArray(value)) {
-    let size = 2; // brackets
-    for (const item of value) {
-      size += estimateValueChars(item, depth + 1) + 1; // +1 for comma
-    }
-    return size;
-  }
-  if (typeof value === "object") {
-    let size = 2; // braces
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      size += key.length + 3; // key + quotes + colon
-      size += estimateValueChars((value as Record<string, unknown>)[key], depth + 1) + 1;
-    }
-    return size;
-  }
-  return 8; // fallback for symbols, functions, etc.
-}
-
 async function refreshWorkspaceReferenceCache(
   context: TuiContext,
   runtimeStatus: unknown,
@@ -10998,33 +10973,6 @@ function createWorkspaceReferenceDimensions(context: TuiContext) {
     }),
     compactBoundaryHash: compactBoundaryHash(context.cache.compactBoundaries),
     extensionListHash: stableHash(createExtensionFreshnessSummary(context)),
-  };
-}
-
-function createConfigFreshnessSummary(config: LinghunConfig): unknown {
-  return {
-    language: config.language,
-    permission: config.permission,
-    index: config.index,
-    defaultModel: config.defaultModel,
-    modelRoutes: config.modelRoutes,
-    providers: Object.fromEntries(
-      Object.entries(config.providers)
-        .map(([id, provider]) => ({
-          id,
-          summary: {
-            type: provider.type,
-            model: provider.model,
-            baseUrl: provider.baseUrl ? "configured" : "missing",
-            apiKey: provider.apiKey ? "configured" : "missing",
-            endpointProfile: provider.endpointProfile,
-            compatibilityProfile: provider.compatibilityProfile,
-            supportsTools: provider.supportsTools,
-          },
-        }))
-        .sort((a, b) => a.id.localeCompare(b.id))
-        .map((entry) => [entry.id, entry.summary]),
-    ),
   };
 }
 
@@ -11133,68 +11081,6 @@ function createExtensionFreshnessSummary(context: TuiContext): Record<string, un
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
   };
-}
-
-function createCacheFreshness(input: {
-  systemPrompt: unknown;
-  toolSchema: unknown;
-  mcpToolList: unknown;
-  model: string;
-  provider: string;
-  reasoningEffort?: unknown;
-  projectRules?: unknown;
-  memory?: unknown;
-  compact?: unknown;
-  plugins?: unknown;
-  _precomputedToolSchemaHash?: string;
-}): CacheFreshness {
-  return {
-    systemPromptHash: stableHash(input.systemPrompt),
-    toolSchemaHash: input._precomputedToolSchemaHash ?? stableHash(input.toolSchema),
-    mcpToolListHash: stableHash(input.mcpToolList),
-    modelProviderHash: stableHash(`${input.provider}:${input.model}`),
-    reasoningEffortHash: stableHash(input.reasoningEffort ?? "default"),
-    projectRulesHash: stableHash(input.projectRules ?? "none"),
-    memoryHash: stableHash(input.memory ?? "none"),
-    compactHash: stableHash(input.compact ?? "none"),
-    pluginListHash: stableHash(input.plugins ?? []),
-    changedKeys: [],
-  };
-}
-
-function diffFreshness(previous: CacheFreshness | undefined, current: CacheFreshness): string[] {
-  if (!previous) {
-    return [];
-  }
-  const keys: (keyof CacheFreshness)[] = [
-    "systemPromptHash",
-    "toolSchemaHash",
-    "mcpToolListHash",
-    "modelProviderHash",
-    "reasoningEffortHash",
-    "projectRulesHash",
-    "memoryHash",
-    "compactHash",
-    "pluginListHash",
-  ];
-  return keys.filter((key) => previous[key] !== current[key]);
-}
-
-function stableHash(value: unknown): string {
-  return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 12);
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, item]) => `${key}:${stableStringify(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? String(value);
 }
 
 function formatCacheLog(context: TuiContext): string {
@@ -13907,29 +13793,6 @@ async function buildModelMessagesWithRecentContext(
     refreshCacheFreshness(context);
   }
   return compacted.messages;
-}
-
-function estimateModelMessageChars(messages: ModelMessage[]): number {
-  return messages.reduce((total, message) => {
-    if (message.role === "assistant") {
-      return total + message.content.length + estimateToolCallsCharsLocal(message.toolCalls);
-    }
-    return total + message.content.length;
-  }, 0);
-}
-
-/** Lightweight toolCalls size estimate — avoids JSON.stringify allocation on budget hot path. */
-function estimateToolCallsCharsLocal(
-  toolCalls: Array<{ id: string; name: string; input: unknown }> | undefined,
-): number {
-  if (!toolCalls || toolCalls.length === 0) return 2; // "[]"
-  let size = 2; // brackets
-  for (const call of toolCalls) {
-    // Conservative: id + name + fixed JSON overhead (keys, quotes, braces, colons, comma)
-    size += call.id.length + call.name.length + 28;
-    size += estimateValueChars(call.input);
-  }
-  return size;
 }
 
 async function streamFinalModelAnswerWithoutTools(
