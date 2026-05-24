@@ -24,22 +24,58 @@ export function renderInkShell(
   controller: ShellController,
   options: ShellRenderOptions = {},
 ): InkShellInstance {
+  const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const instance = render(<ShellApp controller={controller} />, {
     stdin: options.stdin as NodeJS.ReadStream | undefined,
-    stdout: options.stdout as NodeJS.WriteStream | undefined,
+    stdout,
     stderr: options.stderr as NodeJS.WriteStream | undefined,
     exitOnCtrlC: false,
     alternateScreen: true,
+    kittyKeyboard: { mode: "auto" },
   });
+
+  let unmounted = false;
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  const doUnmount = () => {
+    if (unmounted) return;
+    unmounted = true;
+    if (resizeTimer) {
+      clearTimeout(resizeTimer);
+      resizeTimer = undefined;
+    }
+    stdout?.off("resize", onResize);
+    instance.unmount();
+    // Unref stdin to prevent the process from hanging on exit
+    const stdin = options.stdin as { unref?: () => void } | undefined;
+    stdin?.unref?.();
+  };
+
+  const rerender = () => {
+    if (unmounted) return;
+    instance.rerender(<ShellApp controller={controller} />);
+  };
+
+  const onResize = () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = undefined;
+      if (unmounted) return;
+      instance.clear();
+      rerender();
+    }, 60);
+  };
+
+  // Handle stdin close/error (Windows cmd window close, pipe break)
+  const stdinStream = options.stdin as NodeJS.ReadStream | undefined;
+  stdinStream?.on("close", doUnmount);
+  stdinStream?.on("end", doUnmount);
+  stdinStream?.on("error", doUnmount);
+  stdout?.on("resize", onResize);
+
   return {
-    rerender: () => instance.rerender(<ShellApp controller={controller} />),
+    rerender,
     clear: () => instance.clear(),
-    unmount: () => {
-      instance.unmount();
-      // Unref stdin to prevent the process from hanging on exit
-      const stdin = options.stdin as { unref?: () => void } | undefined;
-      stdin?.unref?.();
-    },
+    unmount: doUnmount,
     waitUntilExit: async () => {
       await instance.waitUntilExit();
     },

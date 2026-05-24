@@ -32,10 +32,10 @@ export function createShellTheme(noColor: boolean): ShellTheme {
   return {
     mode: "color",
     brand: "white",
-    accent: "cyanBright",
+    accent: "cyan",
     muted: "gray",
     border: "gray",
-    warning: "yellow",
+    warning: "redBright",
     status: {
       info: "cyan",
       running: "yellow",

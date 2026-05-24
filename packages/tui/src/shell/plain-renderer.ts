@@ -1,4 +1,5 @@
 import type { Writable } from "node:stream";
+import { brandWordmark, composerMaxWidth, lineChar } from "./text-utils.js";
 import { getStatusMarker } from "./theme.js";
 import type { ShellViewModel } from "./types.js";
 
@@ -14,11 +15,15 @@ export function renderPlainShell(view: ShellViewModel): string {
       block.nextAction ? `  ${block.nextAction}` : undefined,
     ].filter((line): line is string => Boolean(line));
   });
+  const composerWidth = composerMaxWidth(view.width);
+  const composerLine = lineChar(noColor).repeat(composerWidth);
   const lines = [
-    view.brand,
+    ...brandWordmark(noColor),
     view.homeVision,
-    `| ${view.composer.placeholder}`,
     ...(view.setupHint ? [view.setupHint] : []),
+    composerLine,
+    view.composer.placeholder,
+    composerLine,
     formatStatusTray(view),
     ...(blockLines.length > 0 ? [separator, ...blockLines] : []),
     ...view.limitations.map((item) => `- ${item}`),
@@ -35,7 +40,6 @@ function formatStatusTray(view: ShellViewModel): string {
     view.status.project,
     view.status.model,
     view.status.permission,
-    view.status.trust,
     view.status.index,
     view.status.background,
   ];

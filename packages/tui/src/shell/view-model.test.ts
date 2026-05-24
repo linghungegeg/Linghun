@@ -1,6 +1,7 @@
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
+import { handleComposerInput } from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import { createOutputBlock, createShellViewModel, getComposerPlaceholder } from "./view-model.js";
@@ -68,10 +69,10 @@ describe("shell view model", () => {
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
 
-    expect(zhView.brand).toBe("L I N G H U N");
-    expect(zhView.homeVision).toBe("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
+    expect(zhView.brand).toBe("LingHun");
+    expect(zhView.homeVision).toBe("技术普惠会越来越成熟 而你就是最伟大的梦想家");
     expect((zhView as Record<string, unknown>).homeVisionEn).toBeUndefined();
-    expect(enView.brand).toBe("L I N G H U N");
+    expect(enView.brand).toBe("LingHun");
     expect(enView.homeVision).toBe(
       "Technology will become more accessible, and you are the greatest dreamer.",
     );
@@ -94,7 +95,7 @@ describe("shell view model", () => {
       width: 120,
     });
 
-    expect(zhView.brand).toBe("L I N G H U N");
+    expect(zhView.brand).toBe("LingHun");
     expect(zhView.status.project).toContain("项目：");
     expect(zhView.status.model).toContain("模型：");
     expect(zhView.status.permission).toBe("权限：风险确认");
@@ -106,10 +107,10 @@ describe("shell view model", () => {
     // 而是生成 setupHint 轻提示
     expect(zhView.setupHint).toContain("按 Enter");
     expect(zhView.setupHint).toContain("我要配置模型");
-    expect(zhView.setupHint).toContain("/model setup");
+    expect(zhView.setupHint).not.toContain("/model setup");
     expect(enView.setupHint).toContain("Press Enter");
     expect(enView.setupHint).toContain("configure provider");
-    expect(enView.setupHint).toContain("/model setup");
+    expect(enView.setupHint).not.toContain("/model setup");
   });
 
   it("exposes composer masking only during the model setup apiKey step", () => {
@@ -168,8 +169,9 @@ describe("shell view model", () => {
       expect(view.status.model).toContain("模型：");
       expect(view.status.permission).toContain("权限：");
       expect(view.blocks.map((block) => block.id)).toEqual([]);
-      expect(rendered).toContain("L I N G H U N");
-      expect(rendered).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
+      expect(rendered).toContain("LingHun");
+      expect(rendered).toContain("技术普惠会越来越成熟 而你就是最伟大的梦想家");
+      expect(rendered).not.toContain("信任：");
       expect(rendered).not.toContain("首页");
       expect(rendered).not.toContain("项目状态");
       // status tray uses double-space, not ·
@@ -186,7 +188,7 @@ describe("shell view model", () => {
     });
     const rendered = renderPlainShell(view);
 
-    expect(rendered).toContain("L I N G H U N");
+    expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("[INFO] 首页");
     // setup-needed 现在是 setupHint 轻提示，不是 block
     expect(view.setupHint).toContain("按 Enter");
@@ -239,6 +241,7 @@ describe("Ink shell selection", () => {
     const input = createTtyInput();
     const widths: number[] = [];
     const heights: number[] = [];
+    let resizeCallbacks = 0;
     const controller = {
       getViewModel: () => {
         widths.push(output.columns);
@@ -249,6 +252,9 @@ describe("Ink shell selection", () => {
         });
       },
       onInput: () => undefined,
+      onResize: () => {
+        resizeCallbacks += 1;
+      },
     };
 
     const shell = renderInkShell(controller, {
@@ -261,7 +267,8 @@ describe("Ink shell selection", () => {
     output.columns = 40;
     output.rows = 15;
     output.emit("resize");
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Wait for debounce (60ms) + render settle
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
     await shell.waitUntilRenderFlush();
     shell.unmount();
     await shell.waitUntilExit();
@@ -273,8 +280,18 @@ describe("Ink shell selection", () => {
     // alternateScreen 进入和退出
     expect(output.text).toContain("\u001B[?1049h");
     expect(output.text).toContain("\u001B[?1049l");
-    // vertical resize clear-screen sequence
-    expect(output.text).toContain("\x1b[2J\x1b[H");
+    expect(resizeCallbacks).toBe(0);
+    expect(output.text).not.toContain("\x1b[2J\x1b[H");
+  });
+
+  it("keeps ShellApp as a pure renderer without direct stdout resize handling", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile("packages/tui/src/shell/components/ShellApp.tsx", "utf8");
+
+    expect(source).not.toContain("useStdout");
+    expect(source).not.toContain('stdout.on("resize"');
+    expect(source).not.toContain("stdout.write");
+    expect(source).not.toContain("onResize?.()");
   });
 
   it("renders the mature home without setup or composer border cards", async () => {
@@ -301,13 +318,113 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("L I N G H U N");
+    expect(output.text).toContain("LingHun");
+    expect(output.text).not.toContain("L I N G H U N");
+    expect(output.text).not.toContain("信任：");
     expect(output.text).toContain("我能帮您做点什么？");
     expect(output.text).not.toContain("需要配置模型");
+    // CCB-style two-line composer: has horizontal lines, no round border
+    expect(output.text).toContain("─");
     expect(output.text).not.toContain("╭");
+    expect(output.text).not.toContain("╮");
+    expect(output.text).not.toContain("╰");
+    expect(output.text).not.toContain("╯");
     expect(output.text).not.toContain("┌");
-    // no double border lines around composer
+    // no old prompt prefix or hint text
     expect(output.text).not.toContain("你 >");
     expect(output.text).not.toContain("直接描述目标");
+  });
+
+  it("hides setupHint when setupNeeded is false", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          setupNeeded: false,
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // setupHint must NOT appear when setupNeeded=false
+    expect(output.text).not.toContain("还没有模型配置");
+    expect(output.text).not.toContain("/model setup");
+
+    // plain renderer also confirmed free of setupHint
+    const plainView = createShellViewModel(createContext(), { setupNeeded: false, width: 80 });
+    const plainRendered = renderPlainShell(plainView);
+    expect(plainRendered).not.toContain("还没有模型配置");
+    expect(plainRendered).not.toContain("/model setup");
+  });
+
+  it("keeps Shift+Enter as a composer newline instead of submitting", () => {
+    expect(handleComposerInput("hello", "", { return: true, shift: true })).toEqual({
+      kind: "append",
+      text: "\n",
+    });
+    expect(handleComposerInput("hello\nworld", "", { return: true })).toEqual({
+      kind: "emit",
+      event: { type: "submit", text: "hello\nworld" },
+      nextText: "",
+    });
+  });
+
+  it("keeps the brand wordmark stable without blocky pixel glyphs or duplicate text lines", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("LingHun");
+    expect(output.text).toContain("──────────────");
+    expect(output.text).not.toContain("█");
+    expect(output.text).not.toContain("▀▄▄▀");
+    expect(output.text).not.toContain("L I N G H U N");
+    // No figlet or heavy Unicode card borders
+    expect(output.text).not.toContain("╔");
+    expect(output.text).not.toContain("╗");
+    expect(output.text).not.toContain("╚");
+    expect(output.text).not.toContain("╝");
+    expect(output.text).not.toContain("┏");
+    expect(output.text).not.toContain("┓");
+    expect(output.text).not.toContain("┗");
+    expect(output.text).not.toContain("┛");
+
+    // Plain renderer also has wordmark
+    const plainView = createShellViewModel(createContext(), { width: 80 });
+    const plainRendered = renderPlainShell(plainView);
+    expect(plainRendered).toContain("LingHun");
+    expect(plainRendered).not.toContain("█");
+    expect(plainRendered).not.toContain("L I N G H U N");
   });
 });

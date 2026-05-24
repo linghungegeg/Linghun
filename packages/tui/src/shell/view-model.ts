@@ -6,16 +6,15 @@ import type { ProductBlockViewModel, ShellViewModel } from "./types.js";
 
 const shellText = {
   "zh-CN": {
-    brand: "L I N G H U N",
-    vision: "技术普惠会越来越成熟，而你就是最伟大的梦想家。",
+    brand: "LingHun",
+    vision: "技术普惠会越来越成熟 而你就是最伟大的梦想家",
     project: (name: string) => `项目：${name}`,
     model: (name: string) => `模型：${name}`,
     permission: (mode: string) => `权限：${mode}`,
     trust: (value: string) => `信任：${value}`,
     placeholder: "我能帮您做点什么？",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
-    setupHint:
-      "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。高级入口：/model setup。",
+    setupHint: "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。",
     routeTitle: "项目模型路由需要处理",
     routeSummary: (problem: string) =>
       `${problem}。这是项目级 route/settings 问题，不要重复填写用户 API key。`,
@@ -30,7 +29,7 @@ const shellText = {
     latestOutputNext: "如需完整运行时输出，可用 /details。",
   },
   "en-US": {
-    brand: "L I N G H U N",
+    brand: "LingHun",
     vision: "Technology will become more accessible, and you are the greatest dreamer.",
     project: (name: string) => `Project: ${name}`,
     model: (name: string) => `Model: ${name}`,
@@ -38,8 +37,7 @@ const shellText = {
     trust: (value: string) => `Trust: ${value}`,
     placeholder: "What can I help you with?",
     submittedHint: "Submitted through the shared TUI controller.",
-    setupHint:
-      'No model configured. Press Enter to start, or say "configure provider". Advanced: /model setup.',
+    setupHint: 'No model configured. Press Enter, or say "configure provider".',
     routeTitle: "Project model route needs attention",
     routeSummary: (problem: string) =>
       `${problem}. This is a project-scoped route/settings issue; do not re-enter the user API key.`,

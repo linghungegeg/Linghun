@@ -2358,10 +2358,6 @@ async function runInkShell(
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
   const controller: ShellController = {
-    onResize: () => {
-      shell?.clear();
-      shell?.rerender();
-    },
     getViewModel: () =>
       createShellViewModel(context, {
         width: readOutputColumns(output),
