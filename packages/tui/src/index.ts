@@ -8614,6 +8614,8 @@ function formatMemoryReview(context: TuiContext): string {
 
 function formatMemoryStats(context: TuiContext): string {
   const injection = createControlledMemoryInjection(context);
+  const acceptedScopeCounts = countMemoryScopes(context.memory.accepted);
+  const candidateScopeCounts = countMemoryScopes(context.memory.candidates);
   const lastRun = context.memory.lastLearningRun
     ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
     : "none";
@@ -8621,9 +8623,12 @@ function formatMemoryStats(context: TuiContext): string {
     return [
       "Memory stats (controlled learning / cost guard)",
       `- candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
+      `- session-scope: accepted=${acceptedScopeCounts.session}; current TuiContext only, not persisted across new sessions`,
+      `- project/user persistent scope: accepted=${acceptedScopeCounts.project + acceptedScopeCounts.user} (project=${acceptedScopeCounts.project}; user=${acceptedScopeCounts.user}); accepted-only topK prompt injection`,
+      `- candidate scope: project=${candidateScopeCounts.project}; user=${candidateScopeCounts.user}; session=${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
       `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injection.items.length}; chars=${injection.text.length}; estimatedTokens=${estimateMemoryTokens(injection.text)}`,
       `- lastLearningRun: ${lastRun}`,
-      "- autoLearning: off by default; no per-turn learning model call",
+      "- autoLearning: off by default; no per-turn learning model call; autoAccept=no",
       "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
       "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
     ].join("\n");
@@ -8631,12 +8636,23 @@ function formatMemoryStats(context: TuiContext): string {
   return [
     "Memory stats（受控学习 / 成本守卫）",
     `- 候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}；已禁用=${context.memory.disabled.length}；已拒绝=${context.memory.rejected.length}`,
+    `- session-scope：已接受=${acceptedScopeCounts.session}；仅当前 TuiContext / 当前会话生效，不跨新会话持久化`,
+    `- project/user persistent scope：已接受=${acceptedScopeCounts.project + acceptedScopeCounts.user}（project=${acceptedScopeCounts.project}；user=${acceptedScopeCounts.user}）；仅 accepted-only topK 注入 prompt`,
+    `- candidate：project=${candidateScopeCounts.project}；user=${candidateScopeCounts.user}；session=${candidateScopeCounts.session}；候选不会自动接受或注入`,
     `- prompt 注入：acceptedOnly topK=${MEMORY_PROMPT_TOP_K}；injected=${injection.items.length}；chars=${injection.text.length}；estimatedTokens=${estimateMemoryTokens(injection.text)}`,
     `- 上次学习：${lastRun}`,
-    "- 自动学习：默认关闭；不逐轮调用模型学习",
+    "- 自动学习：默认关闭；不逐轮调用模型学习；autoAccept=no",
     "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
     "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
   ].join("\n");
+}
+
+function countMemoryScopes(items: MemoryCandidate[]): Record<MemoryScope, number> {
+  return {
+    project: items.filter((item) => item.scope === "project").length,
+    user: items.filter((item) => item.scope === "user").length,
+    session: items.filter((item) => item.scope === "session").length,
+  };
 }
 
 async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryLearningRun> {
@@ -14601,8 +14617,8 @@ function formatCatalogHelp(
   lines.push(...formatDefaultCommandLines(language));
   lines.push(
     language === "en-US"
-      ? "Advanced commands stay available with /help all, /help advanced, or /help details."
-      : "高级、恢复、调试命令仍可用：/help all、/help advanced 或 /help details。",
+      ? "Full command list: /help all, /help advanced, or /help details."
+      : "完整命令表：/help all、/help advanced 或 /help details。",
   );
   lines.push(
     language === "en-US"

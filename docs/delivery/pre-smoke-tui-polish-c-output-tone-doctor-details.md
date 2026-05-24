@@ -1,6 +1,6 @@
 ---
 title: Pre-Smoke TUI Polish C - Output Tone, Doctor, Details, Light Hints
-status: FINAL_CLOSE_LOCAL_VERIFIED
+status: LOCAL_VERIFIED
 updated: 2026-05-24
 ---
 
@@ -8,7 +8,9 @@ updated: 2026-05-24
 
 ## 本轮定位
 
-本轮是 **Pre-Smoke TUI Polish C**，只收尾用户层输出噪声与可发现性：
+本轮是 **Pre-Smoke TUI Polish C**，只收尾用户层输出噪声与可发现性。本报告状态统一为 `LOCAL_VERIFIED`：执行者本地复核闭合，未声明 independent verifier PASS；independent verifier 不作为真实 smoke 前置条件；不等于 Beta PASS / smoke-ready / open-source-ready。
+
+本轮只处理：
 
 1. Help / Slash Discovery 默认视图瘦身。
 2. Light Hints 优先级、冷却与单轮限流。

@@ -725,6 +725,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(defaultDoctorOutput.text).toContain("诊断：BLOCK");
     expect(defaultDoctorOutput.text).toContain("详情：/doctor all");
+    expect(defaultDoctorOutput.text).toContain("[BLOCKED] verification");
+    expect(defaultDoctorOutput.text).toContain("[PARTIAL] background/tasks");
     expect(defaultDoctorOutput.text).not.toContain("Project Doctor Lite:");
     expect(output.text).toContain("Readiness：本地");
     expect(output.text).toContain("非 smoke/Beta PASS");
@@ -1102,7 +1104,16 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
     expect(output.text).toContain("autoLearning=off; autoAccept=no");
     expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
-    expect(output.text).toContain("自动学习：默认关闭；不逐轮调用模型学习");
+    expect(output.text).toContain("自动学习：默认关闭；不逐轮调用模型学习；autoAccept=no");
+    expect(output.text).toContain(
+      "session-scope：已接受=0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
+    );
+    expect(output.text).toContain(
+      "project/user persistent scope：已接受=1（project=1；user=0）；仅 accepted-only topK 注入 prompt",
+    );
+    expect(output.text).toContain(
+      "candidate：project=0；user=0；session=0；候选不会自动接受或注入",
+    );
     expect(output.text).toContain("prompt 注入：acceptedOnly topK=3；injected=1");
     expect(output.text).toContain("完整候选、聊天、日志和索引 dump 不注入 prompt");
 
@@ -1143,6 +1154,10 @@ describe("Phase 06 TUI slash commands", () => {
       memory: { candidates: 0, accepted: 1 },
     });
     expect(sessionPrompt).toContain("仅当前会话可见的临时偏好");
+    await handleSlashCommand("/memory stats", context, output);
+    expect(output.text).toContain(
+      "session-scope：已接受=1；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
+    );
 
     const nextSession = await store.create({ model: "deepseek-v4-flash" });
     const nextContext = await createTestContext(project, store, nextSession);

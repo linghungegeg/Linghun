@@ -8,7 +8,9 @@ updated: 2026-05-24
 
 ## 本轮定位
 
-本轮是 **Pre-Smoke TUI Polish D**，只收尾 TUI 产品化体验层：
+本轮是 **Pre-Smoke TUI Polish D**，只收尾 TUI 产品化体验层。本报告状态为 `LOCAL_VERIFIED`：执行者本地复核闭合，未声明 independent verifier PASS；independent verifier 不作为真实 smoke 前置条件；不等于 Beta PASS / smoke-ready / open-source-ready。
+
+本轮只处理：
 
 1. 首次 TTY 启动语言选择与用户级持久化。
 2. `/language` 语言切换默认写用户级偏好，并继续复用现有 prompt/runtime language 机制。
@@ -23,7 +25,7 @@ updated: 2026-05-24
 按要求只修改 Polish C 交付文档，不改 Polish C runtime：
 
 - `docs/delivery/pre-smoke-tui-polish-c-output-tone-doctor-details.md`
-  - frontmatter `status` 改为 `FINAL_CLOSE_LOCAL_VERIFIED`。
+  - frontmatter `status` 改为 `LOCAL_VERIFIED`。
   - 明确报告结论为本地验证闭合。
   - 明确不声明 independent verifier PASS。
 
@@ -214,7 +216,7 @@ corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "keeps Polish D 
 ### Focused Polish D / regression tests
 
 ```bash
-corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/job-runner-presenter.test.ts packages/tui/src/natural-command-bridge.test.ts packages/tui/src/terminal-readiness-presenter.test.ts -t "Polish D|language|i18n|memory|narrow|wrap|report|background|job|agent|displayName|help|trust|doctor|hint"
+corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/job-runner-presenter.test.ts packages/tui/src/natural-command-bridge.test.ts -t "Polish D|language|i18n|memory|narrow|wrap|report|background|job|agent|displayName|help|trust|doctor|hint"
 ```
 
 结果：PASS

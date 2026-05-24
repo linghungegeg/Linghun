@@ -148,7 +148,10 @@ function formatTerminalReadinessDoctorSummary(
     (item) => item.status === "fail" || item.status === "blocked",
   );
   const conclusion = hardBlocks.length > 0 ? "BLOCK" : attention.length > 0 ? "WARN" : "OK";
-  const visible = (hardBlocks.length > 0 ? hardBlocks : attention).slice(0, 4);
+  const visible = [
+    ...hardBlocks,
+    ...attention.filter((item) => item.status !== "fail" && item.status !== "blocked"),
+  ];
   const lines = [
     view.language === "en-US"
       ? `Doctor: ${conclusion} — local checks only, not a smoke or Beta verdict.`

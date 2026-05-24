@@ -1,6 +1,6 @@
 ---
 title: Pre-Smoke TUI Polish B - Interactive Controls, Permission Recovery, Workspace Trust
-status: FINAL_CLOSE
+status: LOCAL_VERIFIED
 updated: 2026-05-24
 ---
 
@@ -8,7 +8,9 @@ updated: 2026-05-24
 
 ## 本轮定位
 
-本轮是 **Polish B final close**，只收尾两个已知缺口：
+本轮是 **Polish B final close**，只收尾两个已知缺口。本报告状态统一为 `LOCAL_VERIFIED`：执行者本地复核闭合，未声明 independent verifier PASS；independent verifier 不作为真实 smoke 前置条件；不等于 Beta PASS / smoke-ready / open-source-ready。
+
+本轮只处理：
 
 1. CCB-style 轻量首次 Workspace Trust。
 2. 真实 TUI key handling：Esc / Enter / Shift+Tab。
