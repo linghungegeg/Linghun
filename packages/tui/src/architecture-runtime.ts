@@ -210,6 +210,7 @@ export function createArchitectureRuntimeDirective(card: ArchitectureCard): stri
     "后续动作必须保持与该 card 一致；完整 Architecture Card 仅用于内部记录、details/debug 或验证。",
     "Architecture Runtime 不授权写入、不改变权限模式、不替代 Plan approval、Freshness/Web Evidence 或 verifier。",
     "MaturityDefaults=默认要求成熟方案：信息架构清晰、响应式布局、状态/空态/错误态/加载态完整、可读性优先、语义化结构。避免卡片流水席、营销式 hero、堆内部术语、无意义工程废话。用户不需要额外说'成熟'或'别做丑'。",
+    "AntiCodeBlob=新功能、新页面、新流程、长任务、UI 开发、跨文件改动时，默认不把逻辑堆进已有巨型文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。UI/状态/I-O/provider/runner/doctor/permission/cache/index/verification 等职责边界尽量分清。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。如果必须改大文件，保持局部最小改动并说明为什么不能放到已有更合适模块。不为了优雅新增无收益抽象。每个改动要有可验证边界：focused tests、typecheck、check。这不是授权大重构，仍遵守最小改动、权限管道和 evidence/verifier 边界。",
     "LongTaskHint=若任务涉及多步骤或预计超过 3 轮工具调用，主动提示用户可用 /autopilot 或 /plan 进入托管/规划模式，但不强制。",
     formatArchitectureCard(card),
   ].join("\n");

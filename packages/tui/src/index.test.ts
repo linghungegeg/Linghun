@@ -1728,6 +1728,62 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("verdict=PARTIAL");
   });
 
+  it("includes engineering structure constraints in zh-CN system prompt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt("帮我写代码", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+
+    expect(prompt).toContain("EngineeringStructure=");
+    expect(prompt).toContain("god file");
+    expect(prompt).toContain("code blob");
+    expect(prompt).toContain("超长函数");
+    expect(prompt).toContain("不是授权大重构");
+  });
+
+  it("includes engineering structure constraints in en-US system prompt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.language = "en-US";
+    context.config = { ...context.config, language: "en-US" };
+
+    const prompt = createModelSystemPrompt("help me write code", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+
+    expect(prompt).toContain("EngineeringStructure=");
+    expect(prompt).toContain("god files");
+    expect(prompt).toContain("code blobs");
+    expect(prompt).toContain("deep nesting");
+    expect(prompt).toContain("not authorization for large refactors");
+  });
+
+  it("includes architectureDirective in system prompt when provided", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const directive = "ArchitectureRuntime=triggered\nAntiCodeBlob=test";
+    const prompt = createModelSystemPrompt(
+      "实现跨模块功能",
+      context,
+      {
+        model: { provider: "deepseek", name: "deepseek-v4-flash" },
+      },
+      directive,
+    );
+
+    expect(prompt).toContain("ArchitectureRuntime=triggered");
+    expect(prompt).toContain("AntiCodeBlob=test");
+  });
+
   it("keeps Solution Completeness Gate quiet for normal requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

@@ -147,6 +147,22 @@ describe("architecture card facts and formatting", () => {
     expect(directive).toContain("/autopilot");
     expect(directive).toContain("/plan");
   });
+
+  it("includes anti-code-blob engineering structure constraints in the directive", () => {
+    const directive = createArchitectureRuntimeDirective(baseCard);
+
+    expect(directive).toContain("AntiCodeBlob=");
+    expect(directive).toContain("god file");
+    expect(directive).toContain("code blob");
+    expect(directive).toContain("超长函数");
+    expect(directive).toContain("深层嵌套");
+    expect(directive).toContain("无边界全局状态");
+    expect(directive).toContain("优先复用项目已有模块");
+    expect(directive).toContain("不新建第二套系统");
+    expect(directive).toContain("可验证边界");
+    expect(directive).toContain("不是授权大重构");
+    expect(directive).toContain("最小改动");
+  });
 });
 
 describe("architecture drift detection", () => {
