@@ -575,3 +575,50 @@ describe("Phase 15 RuntimeStatusForModel", () => {
     });
   });
 });
+
+describe("Slice D.9: Long Task / Runner Resilience — Natural Language Route", () => {
+  it.each([
+    ["继续做", "autopilot"],
+    ["持续推进", "autopilot"],
+    ["不用每步都问", "autopilot"],
+    ["长任务", "background"],
+    ["后台任务怎么看", "background"],
+    ["后台", "background"],
+    ["long task", "background"],
+    ["本地任务", "job"],
+    ["长期任务", "job"],
+    ["任务报告", "job"],
+  ])(
+    "routes Chinese natural phrase '%s' to capability '%s' without requiring slash command",
+    (phrase, expectedId) => {
+      const intent = routeNaturalIntent(phrase);
+      expect(intent.capability?.id).toBe(expectedId);
+      expect(intent.action).not.toBe("model");
+    },
+  );
+
+  it("routes autopilot natural phrases through start_gate, not bypassing permission", () => {
+    const intent = routeNaturalIntent("持续推进这个任务");
+    expect(intent.capability?.id).toBe("autopilot");
+    expect(intent.action).toBe("start_gate");
+    expect(intent.riskHandler).not.toBe("model");
+  });
+
+  it("routes job/background status queries as readonly without side effects", () => {
+    const bgIntent = routeNaturalIntent("后台任务怎么看");
+    expect(bgIntent.capability?.id).toBe("background");
+    expect(["answer", "execute_readonly"]).toContain(bgIntent.action);
+
+    const jobIntent = routeNaturalIntent("任务报告");
+    expect(jobIntent.capability?.id).toBe("job");
+    expect(["answer", "execute_readonly"]).toContain(jobIntent.action);
+  });
+
+  it("does not route ordinary development requests to autopilot/job/background", () => {
+    const devIntent = routeNaturalIntent("帮我写一个排序算法");
+    expect(devIntent.action).toBe("model");
+    expect(devIntent.capability?.id).not.toBe("autopilot");
+    expect(devIntent.capability?.id).not.toBe("job");
+    expect(devIntent.capability?.id).not.toBe("background");
+  });
+});

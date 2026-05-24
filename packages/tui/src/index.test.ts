@@ -3638,7 +3638,14 @@ describe("Phase 06 TUI slash commands", () => {
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
     const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
     await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...config,
+        storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      }),
+      "utf8",
+    );
     const output = new MemoryOutput();
 
     await runTui({
@@ -4921,6 +4928,7 @@ describe("Phase 06 TUI slash commands", () => {
             model: "tool-bash-failure-model",
           },
         },
+        storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
       }),
       "utf8",
     );
@@ -4994,6 +5002,12 @@ describe("Phase 06 TUI slash commands", () => {
     await writeFile(
       join(project, "large.json"),
       JSON.stringify({ data: "x".repeat(1_100_000) }),
+      "utf8",
+    );
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({ storage: { ...defaultConfig.storage, jobs: { scope: "project" } } }),
       "utf8",
     );
     const output = new MemoryOutput();
@@ -8003,6 +8017,7 @@ describe("Phase 06 TUI slash commands", () => {
             model: "journey-model",
           },
         },
+        storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
       }),
       "utf8",
     );
@@ -8594,6 +8609,413 @@ describe("D.8 provider circuit breaker integration", () => {
     );
     expect(checkProviderCooldown(context.providerBreaker, "anthropic", "claude-3").blocked).toBe(
       false,
+    );
+  });
+});
+
+describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
+  it("autopilot/job/background enter existing start gate and permission path, not a second system", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-autopilot-gate-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.evidence = [
+      {
+        id: "ev-d9-gate",
+        kind: "test_result",
+        summary: "D9 gate evidence",
+        source: "vitest",
+        supportsClaims: ["d9-gate"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    // /autopilot sets pending state, does NOT immediately start a job
+    await handleSlashCommand(
+      "/autopilot d9 long task gate test --steps 1 --tokens 50000",
+      context,
+      output,
+    );
+    expect(context.pendingAutopilot).toBeTruthy();
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+
+    // /esc cancels pending autopilot without starting job
+    await handleSlashCommand("/esc", context, output);
+    expect(context.pendingAutopilot).toBeUndefined();
+    expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
+    expect(output.text).toContain("已取消持续推进确认");
+  });
+
+  it("runner completed does not equal verification PASS in job background task", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-runner-nonpass-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "ev-d9-nonpass",
+        kind: "test_result",
+        summary: "D9 non-pass evidence",
+        source: "vitest",
+        supportsClaims: ["d9-nonpass"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(
+      "/job run d9 runner completed is not pass --tokens 50000",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+
+    // Cancel the job
+    await handleSlashCommand(`/job cancel ${jobId}`, context, output);
+
+    // Verify cancelled job is never marked as pass
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    expect(output.text).toContain(
+      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
+    );
+  });
+
+  it("timeout does not produce PASS evidence in durable job", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-timeout-nonpass-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "ev-d9-timeout",
+        kind: "test_result",
+        summary: "D9 timeout evidence",
+        source: "vitest",
+        supportsClaims: ["d9-timeout"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    // Create a job with very short max-runtime
+    await handleSlashCommand(
+      "/job create d9 timeout worker --max-runtime-ms 1 --tokens 50000",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+
+    // Simulate timeout by manipulating state
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const seed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    seed.startedAt = new Date(Date.now() - 60_000).toISOString();
+    await writeFile(statePath, `${JSON.stringify(seed, null, 2)}\n`, "utf8");
+
+    await handleSlashCommand(`/job resume ${jobId}`, context, new MemoryOutput());
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      status: string;
+      pauseReason?: string;
+      result?: { status: string; summary?: string };
+    };
+
+    expect(state.status).toBe("timeout");
+    expect(state.pauseReason).toContain("timeout");
+    expect(state.result?.status).toBe("timeout");
+    expect(state.result?.summary).toContain("no PASS evidence");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+  });
+
+  it("Windows mock runner cancel/timeout cleanup path sends stop command to runner", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-win-cleanup-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const mockRunner = await createMockNativeRunner(project);
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      nativeRunner: {
+        ...defaultConfig.nativeRunner,
+        enabled: true,
+        source: "custom",
+        path: mockRunner.path,
+        timeoutMs: 200,
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "ev-d9-win-cleanup",
+        kind: "test_result",
+        summary: "D9 Windows cleanup evidence",
+        source: "vitest",
+        supportsClaims: ["d9-win-cleanup"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(
+      "/job run d9 windows cleanup test --tokens 50000 --timeout 200",
+      context,
+      output,
+    );
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+
+    // Cancel the job — this exercises the runner stop path
+    await handleSlashCommand(`/job cancel ${jobId}`, context, output);
+
+    // Verify runner is marked cancelled, not pass
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      status: string;
+      runner?: { status?: string };
+    };
+    expect(state.status).toBe("cancelled");
+    expect(state.runner?.status).toBe("cancelled");
+    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+
+    // Verify mock runner received stop command (runner is responsible for process cleanup)
+    const calls = await readMockNativeRunnerCalls(mockRunner.callsPath);
+    const stopCall = calls.find((call) => call.argv[0] === "stop");
+    expect(stopCall).toBeTruthy();
+  });
+
+  it("task activity view displays continuing/tool_running/permission_waiting/error phases", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-activity-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+
+    // Verify all RequestActivityPhase values produce human-readable output
+    const { formatRequestActivity } = await import("./request-lifecycle-presenter.js");
+    const phases = [
+      "request_started",
+      "waiting_first_delta",
+      "tool_running",
+      "continuing_after_tool",
+      "permission_waiting",
+    ] as const;
+
+    for (const phase of phases) {
+      const zhText = formatRequestActivity(phase, "zh-CN", { toolName: "Bash" });
+      const enText = formatRequestActivity(phase, "en-US", { toolName: "Bash" });
+      expect(zhText.length).toBeGreaterThan(0);
+      expect(enText.length).toBeGreaterThan(0);
+      // Ensure no raw internal identifiers leak
+      expect(zhText).not.toContain("undefined");
+      expect(enText).not.toContain("undefined");
+    }
+
+    // Verify tool_running shows tool name
+    const toolRunning = formatRequestActivity("tool_running", "zh-CN", { toolName: "Bash" });
+    expect(toolRunning).toContain("Bash");
+
+    // Verify permission_waiting is human-readable
+    const permWaiting = formatRequestActivity("permission_waiting", "zh-CN");
+    expect(permWaiting).toContain("等待");
+
+    // Verify continuing_after_tool is human-readable
+    const continuing = formatRequestActivity("continuing_after_tool", "zh-CN");
+    expect(continuing).toContain("继续");
+  });
+
+  it("runner ready uses runner; runner missing falls back with user-understandable message", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-fallback-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const mockRunner = await createMockNativeRunner(project);
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      nativeRunner: {
+        ...defaultConfig.nativeRunner,
+        enabled: true,
+        source: "custom",
+        path: mockRunner.path,
+        timeoutMs: 60_000,
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "ev-d9-fallback",
+        kind: "test_result",
+        summary: "D9 fallback evidence",
+        source: "vitest",
+        supportsClaims: ["d9-fallback"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    // Runner available — job should use native runner or node fallback
+    await handleSlashCommand("/job run d9 runner available test --tokens 50000", context, output);
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      runner?: { adapter?: string; resolution?: string };
+    };
+    expect(state.runner?.adapter).toBe("native");
+    expect(state.runner?.resolution).toBe("available");
+
+    // Now test missing runner fallback
+    const missingProject = await mkdtemp(join(tmpdir(), "linghun-d9-missing-runner-"));
+    const missingConfig: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      nativeRunner: {
+        ...defaultConfig.nativeRunner,
+        enabled: true,
+        source: "custom",
+        path: join(missingProject, "nonexistent-runner.cjs"),
+        timeoutMs: 60_000,
+      },
+    };
+    const missingStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: missingProject,
+    });
+    const missingSession = await missingStore.create({ model: "deepseek-v4-flash" });
+    const missingContext = await createTestContext(
+      missingProject,
+      missingStore,
+      missingSession,
+      missingConfig,
+    );
+    missingContext.index.status = "ready";
+    missingContext.index.projectName = "F-Linghun";
+    missingContext.lastVerification = createVerificationReportFixture("partial");
+    missingContext.evidence = [...context.evidence];
+
+    await handleSlashCommand(
+      "/job run d9 runner missing fallback --tokens 50000",
+      missingContext,
+      output,
+    );
+    const missingJobId = missingContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(missingJobId).toBeTruthy();
+    const missingStatePath = join(
+      resolveStoragePaths(missingConfig, missingProject).jobs,
+      missingJobId ?? "missing",
+      "state.json",
+    );
+    const missingState = JSON.parse(await readFile(missingStatePath, "utf8")) as {
+      runner?: { adapter?: string; resolution?: string; fallbackReason?: string };
+    };
+    // Runner should fallback to node
+    expect(missingState.runner?.adapter).toBe("node");
+    expect(missingState.runner?.resolution).toBe("unavailable");
+    expect(missingState.runner?.fallbackReason).toBeTruthy();
+    // Background task should not claim pass
+    expect(missingContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+  });
+
+  it("stale job recovery marks runner terminal and does not produce PASS", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d9-stale-recovery-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "ev-d9-stale",
+        kind: "test_result",
+        summary: "D9 stale evidence",
+        source: "vitest",
+        supportsClaims: ["d9-stale"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const output = new MemoryOutput();
+
+    // Create a job
+    await handleSlashCommand("/job run d9 stale recovery test --tokens 50000", context, output);
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    expect(jobId).toBeTruthy();
+
+    // Simulate stale by removing heartbeat and owner info from state
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const seed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    seed.ownerSessionId = undefined;
+    seed.ownerPid = undefined;
+    seed.heartbeatAt = undefined;
+    seed.status = "running";
+    await writeFile(statePath, `${JSON.stringify(seed, null, 2)}\n`, "utf8");
+
+    // Hydrate in a fresh context — should detect stale
+    const freshStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    });
+    const freshSession = await freshStore.create({ model: "deepseek-v4-flash" });
+    const freshContext = await createTestContext(project, freshStore, freshSession, config);
+    freshContext.index.status = "ready";
+    freshContext.index.projectName = "F-Linghun";
+
+    await handleSlashCommand("/job list", freshContext, output);
+
+    // Verify the job was recovered as stale
+    const recoveredState = JSON.parse(await readFile(statePath, "utf8")) as {
+      status: string;
+      result?: { status: string; summary?: string };
+    };
+    expect(recoveredState.status).toBe("stale");
+    expect(recoveredState.result?.status).toBe("stale");
+    expect(recoveredState.result?.summary).toContain("no PASS evidence");
+    expect(freshContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
     );
   });
 });

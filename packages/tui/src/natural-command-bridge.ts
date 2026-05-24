@@ -1208,6 +1208,19 @@ export function routeNaturalIntent(
       riskHandler: "model",
     };
   }
+  if (!explicit && ["autopilot", "job", "background"].includes(capability.id) && topScore >= 5) {
+    const action = capability.id === "autopilot" ? "start_gate" : "execute_readonly";
+    return createIntent(
+      action,
+      capability,
+      Math.min(1, topScore / 8),
+      `${capability.id} natural route`,
+      candidates,
+      language,
+      inquiry,
+      normalized,
+    );
+  }
   if (!explicit && topScore < 2.2) {
     return createIntent(
       "ask_clarify",
@@ -1742,6 +1755,11 @@ function isNaturalControlPlaneIntent(
   if (id === "index") return classification.indexAction === "safe";
   if (id === "mode" && extractPermissionMode(text)) return true;
   if (id === "trust") return true;
+  if (["autopilot", "job", "background"].includes(id)) {
+    return /持续推进|继续做|不用每步都问|autopilot|本地任务|长期任务|任务报告|durable job|job report|后台|background|长任务|long task/u.test(
+      text,
+    );
+  }
   return (
     ["model", "cache", "memory", "mode", "readiness"].includes(id) && !classification.actionRequest
   );
@@ -1832,11 +1850,18 @@ function scoreCapability(
   if (
     capability.id === "todo" &&
     /todo|任务|task/u.test(normalized) &&
-    !/搜索代码|search code|搜索.*todo/u.test(normalized)
+    !/搜索代码|search code|搜索.*todo|本地任务|长期任务|任务报告|后台任务|长任务|durable job|job/u.test(
+      normalized,
+    )
   )
     score += 4;
   if (capability.id === "background" && /后台|background|长任务|long task/u.test(normalized))
     score += 6;
+  if (capability.id === "autopilot" && /持续推进|继续做|不用每步都问|autopilot/u.test(normalized))
+    score += 6;
+  if (capability.id === "job" && /本地任务|长期任务|durable job|job report/u.test(normalized))
+    score += 6;
+  if (capability.id === "job" && /^任务报告$/u.test(normalized)) score += 6;
   if (
     capability.id === "remote" &&
     /远程|remote|飞书|lark|feishu|钉钉|dingtalk|企业微信|wecom/u.test(normalized)
