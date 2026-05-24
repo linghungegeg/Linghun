@@ -92,6 +92,7 @@ export function createShellViewModel(
   const setupHint = setupNeeded ? text.setupHint : undefined;
 
   // blocks 只保留 project-route、background summaries 和 output（最多 1 条）
+  // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
@@ -99,8 +100,10 @@ export function createShellViewModel(
   if (options.backgroundSummaries?.length) {
     blocks.push(...mapBackgroundSummariesToBlocks(options.backgroundSummaries, language));
   }
-  const outputBlocks = (options.outputBlocks ?? []).slice(-1);
-  blocks.push(...outputBlocks);
+  if (!options.permission) {
+    const outputBlocks = (options.outputBlocks ?? []).slice(-1);
+    blocks.push(...outputBlocks);
+  }
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
 
   // Determine view mode: task if explicitly set, or if there are output blocks / activity / permission
@@ -279,7 +282,7 @@ function mapBackgroundSummariesToBlocks(
   return summaries.map((s) => {
     const statusMap: Record<string, ProductBlockViewModel["status"]> = {
       running: "running",
-      completed: "pass",
+      completed: "info",
       failed: "fail",
       cancelled: "partial",
       timeout: "blocked",
@@ -289,12 +292,19 @@ function mapBackgroundSummariesToBlocks(
     const blockStatus = statusMap[s.status] ?? "info";
     const resultSuffix = s.result && s.result !== s.status ? ` (${s.result})` : "";
     const title = language === "zh-CN" ? `后台：${s.title}` : `Background: ${s.title}`;
+    const completedNote =
+      s.status === "completed"
+        ? language === "zh-CN"
+          ? "已结束，非验证通过"
+          : "finished, not a verification pass"
+        : undefined;
     return {
       id: `bg-${s.id}`,
       kind: "run" as const,
       status: blockStatus,
       title,
       summary: `${s.status}${resultSuffix}`,
+      nextAction: completedNote,
     };
   });
 }

@@ -651,6 +651,27 @@ describe("home → task view mode transition", () => {
     expect(rendered).not.toContain("还没有模型配置");
   });
 
+  it("permission pending suppresses output blocks to avoid double display", () => {
+    const block = createOutputBlock("permission prompt text", "zh-CN", "out-perm");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      outputBlocks: [block],
+      permission: {
+        toolName: "Bash",
+        reason: "需要执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp"],
+        hint: "yes / no",
+      },
+    });
+    // output block should be suppressed when permission is present
+    expect(view.blocks.find((b) => b.id === "out-perm")).toBeUndefined();
+    // permission is still present on the view model
+    expect(view.permission?.toolName).toBe("Bash");
+    // viewMode is still task
+    expect(view.viewMode).toBe("task");
+  });
+
   it("resize does not duplicate home page in Ink shell", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
@@ -890,8 +911,9 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[0]?.title).toContain("后台：lint check");
     expect(bgBlocks[1]?.id).toBe("bg-t2");
-    expect(bgBlocks[1]?.status).toBe("pass");
+    expect(bgBlocks[1]?.status).toBe("info");
     expect(bgBlocks[1]?.summary).toContain("pass");
+    expect(bgBlocks[1]?.nextAction).toContain("已结束，非验证通过");
   });
 
   it("maps failed and timeout statuses correctly", () => {
@@ -914,6 +936,16 @@ describe("backgroundSummaries → blocks mapping", () => {
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-t5");
     expect(bgBlock?.title).toContain("Background: build");
+  });
+
+  it("completed tasks use info status with clarification note, not pass", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
+    });
+    const bgBlock = view.blocks.find((b) => b.id === "bg-t6");
+    expect(bgBlock?.status).toBe("info");
+    expect(bgBlock?.nextAction).toContain("not a verification pass");
   });
 });
 
