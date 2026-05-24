@@ -2358,9 +2358,14 @@ async function runInkShell(
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
   const controller: ShellController = {
+    onResize: () => {
+      shell?.clear();
+      shell?.rerender();
+    },
     getViewModel: () =>
       createShellViewModel(context, {
         width: readOutputColumns(output),
+        height: readOutputRows(output),
         noColor: isNoColorTerminal(),
         setupNeeded: startup.setupNeeded,
         projectRouteProblem: startup.projectRouteProblem,
@@ -2373,6 +2378,7 @@ async function runInkShell(
       if (event.type === "escape") {
         await handleTuiKeypress("escape", context, shellOutput);
         shell?.rerender();
+        await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "shift-enter") {
@@ -2387,6 +2393,7 @@ async function runInkShell(
               : "本切片中 Shift+Enter 受终端 host 限制；可粘贴多行文本后按 Enter。",
         });
         shell?.rerender();
+        await shell?.waitUntilRenderFlush();
         return;
       }
       const result = await processTuiLine(
@@ -2400,7 +2407,9 @@ async function runInkShell(
       if (result === "exit") {
         shell?.unmount();
         resolveExit(0);
+        return;
       }
+      await shell?.waitUntilRenderFlush();
     },
   };
 
@@ -2503,6 +2512,11 @@ function readOutputColumns(output: Writable): number {
   return typeof columns === "number" && Number.isFinite(columns) ? columns : 80;
 }
 
+function readOutputRows(output: Writable): number {
+  const rows = (output as { rows?: number }).rows;
+  return typeof rows === "number" && Number.isFinite(rows) ? rows : 24;
+}
+
 class ShellBlockOutput extends Writable {
   constructor(
     private readonly context: TuiContext,
@@ -2517,8 +2531,8 @@ class ShellBlockOutput extends Writable {
     const normalized = text.trim();
     if (normalized) {
       this.blocks.push(createOutputBlock(normalized, this.context.language));
-      if (this.blocks.length > 3) {
-        this.blocks.splice(0, this.blocks.length - 3);
+      if (this.blocks.length > 1) {
+        this.blocks.splice(0, this.blocks.length - 1);
       }
       this.onWrite();
     }

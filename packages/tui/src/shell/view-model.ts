@@ -6,27 +6,18 @@ import type { ProductBlockViewModel, ShellViewModel } from "./types.js";
 
 const shellText = {
   "zh-CN": {
-    title: "Linghun 编程终端",
-    homeSummary: (projectName: string) =>
-      `当前工作区 ${projectName}。可以直接描述目标；需要精确命令时仍可用 /help。`,
+    brand: "Linghun",
     vision: "技术普惠会越来越成熟，而你就是最伟大的梦想家。",
+    visionEn: "Technology will become more accessible, and you are the greatest dreamer.",
+    project: (name: string) => `项目 ${name}`,
+    model: (name: string) => `模型 ${name}`,
+    permission: (mode: string) => `权限 ${mode}`,
+    trust: (value: string) => `信任 ${value}`,
     placeholder: "我能帮您做点什么？",
     prompt: "你",
-    hint: "Enter 发送 · Esc 取消 · / 查看命令",
+    hint: "直接描述目标；需要精确入口时再查看命令。",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
-    homeTitle: "首页",
-    homeBlockSummary: (projectName: string, model: string) =>
-      `项目 ${projectName} · 模型 ${model} · 可以直接描述任务。`,
-    homeCompactSummary: (model: string) => `模型 ${model} · 直接描述任务。`,
-    homeNextAction: "直接输入目标；需要精确入口时再用 /help。",
-    repoTitle: "项目状态",
-    repoSummary: (path: string, trust: string, index: string) => `${path} · ${trust} · ${index}`,
-    repoNextAction: "只显示当前最有用的状态摘要；诊断细节可用 /doctor 或 details。",
-    setupTitle: "需要配置模型",
-    setupSummary: "这是一台电脑的一次模型配置，不是当前仓库配置；保存后其他仓库会默认复用。",
-    setupDetail:
-      "保存位置是用户级 provider.env（默认 ~/.linghun/provider.env 或 $LINGHUN_CONFIG_DIR/provider.env）。",
-    setupNextAction: "主路径：按 Enter 或说“我要配置模型”；高级/恢复：/model setup。",
+    setupHint: "还没有模型配置。按 Enter 开始，或直接说“我要配置模型”。高级入口：/model setup。",
     routeTitle: "项目模型路由需要处理",
     routeSummary: (problem: string) =>
       `${problem}。这是项目级 route/settings 问题，不要重复填写用户 API key。`,
@@ -35,38 +26,25 @@ const shellText = {
     trustTrusted: "已信任",
     trustRestricted: "受限",
     index: (status: string) => `索引 ${status}`,
-    cacheUnknown: "缓存?",
-    cache: (hitRate: number) => `缓存 ${Math.round(hitRate * 100)}%`,
     background: (count: number) => `后台 ${count}`,
     latestOutputTitle: "最近输出",
     noVisibleOutput: "没有可见输出。",
     latestOutputNext: "如需完整运行时输出，可用 /details。",
   },
   "en-US": {
-    title: "Linghun coding shell",
-    homeSummary: (projectName: string) =>
-      `Workspace ${projectName}. Describe a goal directly; exact commands remain available with /help.`,
+    brand: "Linghun",
     vision: "Technology will become more accessible, and you are the greatest dreamer.",
+    visionEn: "Technology will become more accessible, and you are the greatest dreamer.",
+    project: (name: string) => `project ${name}`,
+    model: (name: string) => `model ${name}`,
+    permission: (mode: string) => `permission ${mode}`,
+    trust: (value: string) => `trust ${value}`,
     placeholder: "What can I help you with?",
     prompt: "you",
-    hint: "Enter to send · Esc to cancel · / for commands",
+    hint: "Describe a goal directly; view commands only when you need an exact entry.",
     submittedHint: "Submitted through the shared TUI controller.",
-    homeTitle: "Home",
-    homeBlockSummary: (projectName: string, model: string) =>
-      `Project ${projectName} · Model ${model} · ready for natural-language tasks.`,
-    homeCompactSummary: (model: string) => `Model ${model} · describe a goal.`,
-    homeNextAction: "Type a goal directly; use /help only when you need an exact entry.",
-    repoTitle: "Project state",
-    repoSummary: (path: string, trust: string, index: string) => `${path} · ${trust} · ${index}`,
-    repoNextAction:
-      "Only the most useful state is shown here; use /doctor or details for diagnostics.",
-    setupTitle: "Model setup needed",
-    setupSummary:
-      "This is one-time setup for this computer, not this repository; after saving, other repositories reuse it by default.",
-    setupDetail:
-      "The save location is the user provider.env: ~/.linghun/provider.env or $LINGHUN_CONFIG_DIR/provider.env.",
-    setupNextAction:
-      'Primary: press Enter or say "configure provider"; advanced/recovery: /model setup.',
+    setupHint:
+      'No model configured. Press Enter to start, or say "configure provider". Advanced: /model setup.',
     routeTitle: "Project model route needs attention",
     routeSummary: (problem: string) =>
       `${problem}. This is a project-scoped route/settings issue; do not re-enter the user API key.`,
@@ -75,8 +53,6 @@ const shellText = {
     trustTrusted: "trusted",
     trustRestricted: "restricted",
     index: (status: string) => `index ${status}`,
-    cacheUnknown: "cache?",
-    cache: (hitRate: number) => `cache ${Math.round(hitRate * 100)}%`,
     background: (count: number) => `bg ${count}`,
     latestOutputTitle: "Latest output",
     noVisibleOutput: "No visible output.",
@@ -86,6 +62,7 @@ const shellText = {
 
 export type ShellViewModelOptions = {
   width?: number;
+  height?: number;
   noColor?: boolean;
   outputBlocks?: ProductBlockViewModel[];
   setupNeeded?: boolean;
@@ -99,21 +76,24 @@ export function createShellViewModel(
 ): ShellViewModel {
   const language = context.language;
   const width = normalizeWidth(options.width);
+  const height = normalizeHeight(options.height);
   const projectName = truncateMiddle(
     basename(context.projectPath) || context.projectPath,
     width <= 40 ? 18 : 28,
   );
   const setupNeeded = options.setupNeeded ?? false;
   const text = shellText[language];
-  const repoBlock = createRepoBlock(context, width);
-  const blocks: ProductBlockViewModel[] = [createHomeBlock(context, projectName, width), repoBlock];
-  if (setupNeeded) {
-    blocks.push(createSetupNeededBlock(language));
-  }
+
+  // setup-needed 不再生成 bordered block，改为轻提示
+  const setupHint = setupNeeded ? text.setupHint : undefined;
+
+  // blocks 只保留 project-route 和 output（最多 1 条）
+  const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
-  blocks.push(...(options.outputBlocks ?? []).slice(-3));
+  const outputBlocks = (options.outputBlocks ?? []).slice(-1);
+  blocks.push(...outputBlocks);
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
 
   return {
@@ -121,16 +101,19 @@ export function createShellViewModel(
     projectName,
     projectPath: context.projectPath,
     width,
+    height,
     mode: "ink",
     themeMode: options.noColor ? "no-color" : "color",
-    homeTitle: text.title,
-    homeSummary: `${text.homeSummary(projectName)} ${text.vision}`,
+    brand: text.brand,
+    homeVision: text.vision,
+    homeVisionEn: text.visionEn,
+    setupHint,
     status: {
-      model: truncateMiddle(context.model || "unknown", width <= 40 ? 14 : 24),
-      mode: formatPermissionModeLabel(context.permissionMode, language),
-      trust: formatTrust(context, language),
+      project: text.project(projectName),
+      model: text.model(truncateMiddle(context.model || "unknown", width <= 40 ? 12 : 22)),
+      permission: text.permission(formatPermissionModeLabel(context.permissionMode, language)),
+      trust: text.trust(formatTrust(context, language)),
       index: formatIndex(context.index.status, language),
-      cache: formatCache(context.cache.history.at(-1)?.hitRate ?? null, language),
       background: formatBackground(
         context.backgroundTasks.filter((task) => task.status === "running").length,
         language,
@@ -170,55 +153,6 @@ export function createOutputBlock(
   };
 }
 
-function createHomeBlock(
-  context: TuiContext,
-  projectName: string,
-  width: number,
-): ProductBlockViewModel {
-  const text = shellText[context.language];
-  return {
-    id: "home",
-    kind: "home",
-    status: "info",
-    title: text.homeTitle,
-    summary:
-      width <= 80
-        ? text.homeCompactSummary(truncateMiddle(context.model, width <= 40 ? 14 : 22))
-        : text.homeBlockSummary(projectName, truncateMiddle(context.model, 24)),
-    nextAction: text.homeNextAction,
-  };
-}
-
-function createRepoBlock(context: TuiContext, width: number): ProductBlockViewModel {
-  const text = shellText[context.language];
-  const pathLimit = width <= 40 ? 20 : width <= 60 ? 28 : 44;
-  return {
-    id: "repo-state",
-    kind: "repo",
-    status: context.config.workspaceTrust.level === "trusted" ? "pass" : "partial",
-    title: text.repoTitle,
-    summary: text.repoSummary(
-      truncatePath(context.projectPath, pathLimit),
-      formatTrust(context, context.language),
-      formatIndex(context.index.status, context.language),
-    ),
-    nextAction: width < 60 ? undefined : text.repoNextAction,
-  };
-}
-
-function createSetupNeededBlock(language: Language): ProductBlockViewModel {
-  const text = shellText[language];
-  return {
-    id: "setup-needed",
-    kind: "setup",
-    status: "blocked",
-    title: text.setupTitle,
-    summary: text.setupSummary,
-    detail: text.setupDetail,
-    nextAction: text.setupNextAction,
-  };
-}
-
 function createProjectRouteBlock(language: Language, problem: string): ProductBlockViewModel {
   const text = shellText[language];
   return {
@@ -246,11 +180,6 @@ function formatIndex(status: string, language: Language): string {
   return shellText[language].index(value);
 }
 
-function formatCache(hitRate: number | null, language: Language): string {
-  if (hitRate === null) return shellText[language].cacheUnknown;
-  return shellText[language].cache(hitRate);
-}
-
 function formatBackground(count: number, language: Language): string {
   return shellText[language].background(count);
 }
@@ -258,6 +187,11 @@ function formatBackground(count: number, language: Language): string {
 function normalizeWidth(width: number | undefined): number {
   if (!width || !Number.isFinite(width)) return 80;
   return Math.max(30, Math.floor(width));
+}
+
+function normalizeHeight(height: number | undefined): number {
+  if (!height || !Number.isFinite(height)) return 24;
+  return Math.max(10, Math.floor(height));
 }
 
 function fitBlockToWidth(block: ProductBlockViewModel, width: number): ProductBlockViewModel {
@@ -273,13 +207,6 @@ function fitBlockToWidth(block: ProductBlockViewModel, width: number): ProductBl
 
 function fitLine(value: string, width: number): string {
   return truncateMiddle(value.replace(/\s+/gu, " ").trim(), width);
-}
-
-function truncatePath(value: string, max: number): string {
-  const normalized = value.replace(/\\/gu, "/");
-  const parts = normalized.split("/").filter(Boolean);
-  const tail = parts.slice(-2).join("/") || normalized;
-  return truncateMiddle(tail, max);
 }
 
 function redactSensitiveText(value: string): string {

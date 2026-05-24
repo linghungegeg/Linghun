@@ -15,11 +15,12 @@ export function renderPlainShell(view: ShellViewModel): string {
     ].filter((line): line is string => Boolean(line));
   });
   const lines = [
-    view.homeTitle,
-    view.homeSummary,
+    view.brand,
+    view.homeVision,
+    ...(view.language !== "en-US" ? [view.homeVisionEn] : []),
     formatStatusTray(view),
-    separator,
-    ...blockLines,
+    ...(view.setupHint ? [view.setupHint] : []),
+    ...(blockLines.length > 0 ? [separator, ...blockLines] : []),
     separator,
     `${view.composer.prompt}> ${view.composer.placeholder}`,
     view.composer.hint,
@@ -34,11 +35,11 @@ export function writePlainShell(output: Writable, view: ShellViewModel): void {
 
 function formatStatusTray(view: ShellViewModel): string {
   const items = [
+    view.status.project,
     view.status.model,
-    view.status.mode,
+    view.status.permission,
     view.status.trust,
     view.status.index,
-    view.status.cache,
     view.status.background,
   ];
   const line = items.join(" · ");

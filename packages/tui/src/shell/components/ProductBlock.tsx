@@ -13,13 +13,15 @@ export function ProductBlock({
   width: number;
 }): React.ReactNode {
   const compact = width < 60;
+  // 只有 permission/fail 运行时事件才用 bordered card，setup 不用
+  const emphasized = (block.kind === "permission" || block.status === "fail") && !compact;
   return (
     <Box
       flexDirection="column"
-      borderStyle={compact ? undefined : "round"}
-      borderColor={theme.border}
-      paddingX={compact ? 0 : 1}
-      marginBottom={1}
+      borderStyle={emphasized ? "single" : undefined}
+      borderColor={emphasized ? theme.border : undefined}
+      paddingX={emphasized ? 1 : 0}
+      marginBottom={0}
     >
       <Text color={theme.status[block.status]}>
         {getStatusMarker(block.status, theme.mode === "no-color")} {block.title}

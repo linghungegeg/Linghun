@@ -1,8 +1,44 @@
+import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
-import { shouldUseInkShell } from "./ink-renderer.js";
+import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import { createOutputBlock, createShellViewModel, getComposerPlaceholder } from "./view-model.js";
+
+class TestTtyOutput extends Writable {
+  readonly chunks: string[] = [];
+  isTTY = true;
+  columns = 80;
+  rows = 24;
+
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
+    this.chunks.push(chunk.toString());
+    callback();
+  }
+
+  get text(): string {
+    return this.chunks.join("");
+  }
+}
+
+function createTtyInput(): PassThrough & {
+  isTTY: boolean;
+  setRawMode: (value: boolean) => void;
+  ref: () => void;
+  unref: () => void;
+} {
+  const input = new PassThrough() as PassThrough & {
+    isTTY: boolean;
+    setRawMode: (value: boolean) => void;
+    ref: () => void;
+    unref: () => void;
+  };
+  input.isTTY = true;
+  input.setRawMode = () => undefined;
+  input.ref = () => undefined;
+  input.unref = () => undefined;
+  return input;
+}
 
 function createContext(overrides: Partial<TuiContext> = {}): TuiContext {
   return {
@@ -32,8 +68,13 @@ describe("shell view model", () => {
     const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
 
-    expect(zhView.homeSummary).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
-    expect(enView.homeSummary).toContain(
+    expect(zhView.brand).toBe("Linghun");
+    expect(zhView.homeVision).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
+    expect(zhView.homeVisionEn).toContain(
+      "Technology will become more accessible, and you are the greatest dreamer.",
+    );
+    expect(enView.brand).toBe("Linghun");
+    expect(enView.homeVision).toContain(
       "Technology will become more accessible, and you are the greatest dreamer.",
     );
     expect(getComposerPlaceholder("zh-CN")).toBe("我能帮您做点什么？");
@@ -42,29 +83,29 @@ describe("shell view model", () => {
     expect(enView.composer.placeholder).toBe("What can I help you with?");
   });
 
-  it("projects setup-needed state with natural-language primary path before /model setup", () => {
+  it("projects setup-needed as a light hint, not a bordered block", () => {
     const zhView = createShellViewModel(createContext(), { setupNeeded: true, width: 120 });
     const enView = createShellViewModel(createContext({ language: "en-US" }), {
       setupNeeded: true,
       width: 120,
     });
-    const setupBlock = zhView.blocks.find((block) => block.id === "setup-needed");
-    const enSetupBlock = enView.blocks.find((block) => block.id === "setup-needed");
 
-    expect(zhView.homeTitle).toBe("Linghun 编程终端");
-    expect(zhView.status.mode).toBe("风险确认");
-    expect(zhView.status.trust).toBe("已信任");
+    expect(zhView.brand).toBe("Linghun");
+    expect(zhView.status.project).toContain("项目");
+    expect(zhView.status.model).toContain("模型");
+    expect(zhView.status.permission).toBe("权限 风险确认");
+    expect(zhView.status.trust).toBe("信任 已信任");
     expect(zhView.status.index).toBe("索引 ready");
-    expect(zhView.status.cache).toBe("缓存 42%");
     expect(zhView.status.background).toBe("后台 1");
-    expect(setupBlock?.status).toBe("blocked");
-    expect(setupBlock?.summary).toContain("不是当前仓库配置");
-    expect(setupBlock?.nextAction).toContain("按 Enter");
-    expect(setupBlock?.nextAction).toContain("我要配置模型");
-    expect(setupBlock?.nextAction).toContain("高级/恢复：/model setup");
-    expect(enSetupBlock?.nextAction).toContain("press Enter");
-    expect(enSetupBlock?.nextAction).toContain("configure provider");
-    expect(enSetupBlock?.nextAction).toContain("advanced/recovery: /model setup");
+    // setup-needed 不再生成 block
+    expect(zhView.blocks.some((block) => block.id === "setup-needed")).toBe(false);
+    // 而是生成 setupHint 轻提示
+    expect(zhView.setupHint).toContain("按 Enter");
+    expect(zhView.setupHint).toContain("我要配置模型");
+    expect(zhView.setupHint).toContain("/model setup");
+    expect(enView.setupHint).toContain("Press Enter");
+    expect(enView.setupHint).toContain("configure provider");
+    expect(enView.setupHint).toContain("/model setup");
   });
 
   it("exposes composer masking only during the model setup apiKey step", () => {
@@ -112,19 +153,22 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("full line 2");
   });
 
-  it("keeps 120/80/60/40-column view models stable for long CJK paths and model names", () => {
+  it("keeps 120/80/60/40-column mature shell view models stable without default cards", () => {
     for (const width of [120, 80, 60, 40]) {
       const view = createShellViewModel(createContext(), { width });
+      const rendered = renderPlainShell(view);
 
       expect(view.width).toBe(width);
       expect(view.projectName.length).toBeLessThanOrEqual(width);
+      expect(view.status.project).toContain("项目");
+      expect(view.status.model).toContain("模型");
       expect(view.status.model.length).toBeLessThanOrEqual(width <= 40 ? 15 : 25);
-      expect(view.blocks.map((block) => block.id)).toEqual(["home", "repo-state"]);
-      expect(view.blocks[0]?.summary).toContain("模型");
-      for (const block of view.blocks) {
-        expect(block.title.length).toBeLessThanOrEqual(width);
-        expect(block.summary.length).toBeLessThanOrEqual(width);
-      }
+      expect(view.status.permission).toContain("权限");
+      expect(view.blocks.map((block) => block.id)).toEqual([]);
+      expect(rendered).toContain("Linghun");
+      expect(rendered).toContain("技术普惠会越来越成熟，而你就是最伟大的梦想家。");
+      expect(rendered).not.toContain("首页");
+      expect(rendered).not.toContain("项目状态");
     }
   });
 
@@ -137,8 +181,10 @@ describe("shell view model", () => {
     });
     const rendered = renderPlainShell(view);
 
-    expect(rendered).toContain("[INFO] 首页");
-    expect(rendered).toContain("[BLOCKED] 需要配置模型");
+    expect(rendered).toContain("Linghun");
+    expect(rendered).not.toContain("[INFO] 首页");
+    // setup-needed 现在是 setupHint 轻提示，不是 block
+    expect(view.setupHint).toContain("按 Enter");
     expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).toContain("当前为无颜色模式。");
     expect(rendered).not.toContain("Start Gate");
@@ -176,5 +222,79 @@ describe("Ink shell selection", () => {
         { isTTY: true } as NodeJS.WriteStream,
       ),
     ).toBe(true);
+  });
+
+  it("keeps one Ink render instance while resize updates the view model width and height", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const widths: number[] = [];
+    const heights: number[] = [];
+    const controller = {
+      getViewModel: () => {
+        widths.push(output.columns);
+        heights.push(output.rows);
+        return createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        });
+      },
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    output.columns = 40;
+    output.rows = 15;
+    output.emit("resize");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(widths).toContain(80);
+    expect(widths).toContain(40);
+    expect(heights).toContain(24);
+    expect(heights).toContain(15);
+    // alternateScreen 进入和退出
+    expect(output.text).toContain("\u001B[?1049h");
+    expect(output.text).toContain("\u001B[?1049l");
+  });
+
+  it("renders the mature home without setup or composer border cards", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          setupNeeded: true,
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("Linghun");
+    expect(output.text).toContain("我能帮您做点什么？");
+    expect(output.text).not.toContain("需要配置模型");
+    expect(output.text).not.toContain("╭");
+    expect(output.text).not.toContain("┌");
   });
 });

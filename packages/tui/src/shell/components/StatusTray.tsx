@@ -13,16 +13,16 @@ export function StatusTray({
   width: number;
 }): React.ReactNode {
   const items = [
+    status.project,
     status.model,
-    status.mode,
+    status.permission,
     status.trust,
     status.index,
-    status.cache,
     status.background,
   ];
   const visible = width < 60 ? items.slice(0, 4) : items;
   return (
-    <Box marginTop={1} marginBottom={1}>
+    <Box marginTop={0} marginBottom={0}>
       <Text color={theme.muted}>{visible.join(" · ")}</Text>
     </Box>
   );

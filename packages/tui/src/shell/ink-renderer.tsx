@@ -6,8 +6,10 @@ import type { ShellController, ShellRenderOptions } from "./types.js";
 
 export type InkShellInstance = {
   rerender: () => void;
+  clear: () => void;
   unmount: () => void;
   waitUntilExit: () => Promise<void>;
+  waitUntilRenderFlush: () => Promise<void>;
 };
 
 export function shouldUseInkShell(input: Readable, output: Writable): boolean {
@@ -27,12 +29,17 @@ export function renderInkShell(
     stdout: options.stdout as NodeJS.WriteStream | undefined,
     stderr: options.stderr as NodeJS.WriteStream | undefined,
     exitOnCtrlC: false,
+    alternateScreen: true,
   });
   return {
     rerender: () => instance.rerender(<ShellApp controller={controller} />),
+    clear: () => instance.clear(),
     unmount: () => instance.unmount(),
     waitUntilExit: async () => {
       await instance.waitUntilExit();
+    },
+    waitUntilRenderFlush: async () => {
+      await instance.waitUntilRenderFlush();
     },
   };
 }

@@ -28,11 +28,11 @@ export type ProductBlockViewModel = {
 };
 
 export type StatusTrayViewModel = {
+  project: string;
   model: string;
-  mode: string;
+  permission: string;
   trust: string;
   index: string;
-  cache: string;
   background: string;
 };
 
@@ -49,10 +49,13 @@ export type ShellViewModel = {
   projectName: string;
   projectPath: string;
   width: number;
+  height: number;
   mode: ShellRuntimeMode;
   themeMode: ShellThemeMode;
-  homeTitle: string;
-  homeSummary: string;
+  brand: string;
+  homeVision: string;
+  homeVisionEn: string;
+  setupHint?: string;
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
@@ -68,6 +71,7 @@ export type ShellInputEvent =
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;
   getViewModel: () => ShellViewModel;
+  onResize?: () => void;
 };
 
 export type ShellRenderOptions = {

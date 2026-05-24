@@ -887,56 +887,78 @@ forbidden_next_actions:
   - do not claim Beta PASS, smoke-ready, or open-source-ready
 ```
 
-### Slice D Ink TUI 成熟视觉壳与首屏/面板排版统一（2026-05-24）
+### Slice D Ink TUI 成熟视觉壳与 Windows resize 稳定性返工（2026-05-24）
 
-- 本切片只完成 Ink TUI Product Shell 的成熟视觉壳、首屏/面板排版统一和 focused/local validation；不进入真实 provider smoke，不进入真实项目 smoke，不提交 commit，不声明 Beta PASS / smoke-ready / open-source-ready。
+- 本段是 Slice D rework：针对用户指出的 Windows cmd 拖拽 resize 后可见区域追加/重复首页症状，按参考源事实与当前源码事实返工；不进入 E，不进入真实 provider smoke，不进入真实项目 smoke，不提交 commit，不声明 Beta PASS / smoke-ready / open-source-ready。
 - 开工前按用户要求执行 `git status --short`：无输出，工作区干净。
 - codebase-memory 索引状态：`project=F-Linghun`，`status=ready`，`nodes=2073`，`edges=4481`；索引只用于缩小定位范围，结论仍以源码、文档和测试事实确认。
-- 本轮实际读取的 Linghun 文档：本报告、`docs/delivery/pre-smoke-closure-c-provider-auth-config-center.md`、`START_NEXT_CHAT.md`、`README.md`、`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md`、`LINGHUN_IMPLEMENTATION_SPEC.md`、`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md`、`docs/delivery/README.md`。
-- 本轮用 `rg` 复查了仓库中 OpenCode / Warp / Claude Code / CCB / Slice B / Slice C / TUI Polish / Product Shell 相关段落，不只读标题：
-  - `LINGHUN_PHASED_DELIVERY_BLUEPRINT.md`：参考来源要求 CCB / Claude Code / OpenCode / Warp 只借鉴成熟行为；默认 TUI 使用标准 Ink，不自研终端渲染器。
-  - `LINGHUN_IMPLEMENTATION_SPEC.md`：TUI 输出层必须 primary/details/debug；Phase 15.5 起 block/panel 只是显示形态，不是新事实来源；主屏 summary-first、human-first、action-first。
-  - `LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md`：Linghun 不做 CCB 补丁版；参考 CCB 编码工作流、OpenCode 多模型开放、Warp block/panel 与命令输出可扫读状态，但不复制源码、不做重 GUI。
-  - 本报告 Reference Behavior：OpenCode 的 composer / tray / popover / token density，CCB / Claude Code 的 Ink prompt、permission card、semantic theme 与 terminal host 兼容，Warp 的 surface/text/accent/status 分层和 block/panel 信息组织，均只作为结构与成熟度参考。
-  - Slice B / Slice C 段落：当前已有 `ShellViewModel`、plain renderer、Ink renderer、`ShellApp`、`Composer`、`StatusTray`、`ProductBlock`；Slice C 已把 setup-needed、project route problem、Home/vision、composer placeholder 放进 `shellText` zh-CN / en-US dictionary-style layer，并保持 user-scoped provider.env 边界。
+- 本轮实际读取的 Linghun 文档：`docs/audit/reference-map.md`、`docs/audit/pre-smoke-mature-tui-ux-source-level-audit.md`、本报告、`LINGHUN_PHASED_DELIVERY_BLUEPRINT.md`、`LINGHUN_IMPLEMENTATION_SPEC.md`、`LINGHUN_FINAL_ARCHITECTURE_AND_ROADMAP.md`、`docs/delivery/README.md`。
+- 本轮实际读取的参考源：
+  - `F:\freecodex\opencode-source\packages\app\src\components\prompt-input.tsx`
+  - `F:\freecodex\opencode-source\packages\app\src\components\prompt-input\slash-popover.tsx`
+  - `F:\freecodex\opencode-source\packages\ui\src\components\dock-surface.tsx`
+  - `F:\freecodex\opencode-source\packages\ui\src\components\dock-surface.css`
+  - `F:\freecodex\opencode-source\packages\ui\src\theme\themes\oc-2.json`
+- 参考核对结论：
+  - OpenCode 吸收的是 composer / dock / tray / popover 的信息密度和分层思路，不把首页做成 card wall；未复制 Solid/DOM/CSS/token 实现。
+  - CCB / Claude Code 吸收的是 permission/setup/trust/decision card 边界：卡片用于需要用户决策或异常处理的状态，不把每个首页信息都画成大框；未复制源码、内部 API、遥测或专有 prompt。
+  - Warp 只吸收可扫读输出、轻状态、失败可见、surface/text/accent/status 分层；不采用 Warp block runtime，不新增第二套输出/runner 系统。
+  - Linghun 本轮目标是自有成熟终端：默认简单、自然语言为主路径，高级命令保留但不压到首页主提示。
+- Windows resize 源码根因判断：
+  - 不是普通启动重复：Ink path 走 `renderInkShell()`，不是 plain fallback 的 legacy startup 输出。
+  - 不是 `ShellBlockOutput` 积累首页：该 writable 只在命令/runtime 输出写入时生成 latest output blocks，resize 不写入该流。
+  - 不是 view-model 复用旧首页数组：`createShellViewModel()` 每次构造局部 `blocks`，默认首页不再持久追加 block。
+  - 更直接的源头是 Ink normal buffer 下的 cursor-relative repaint：Ink 的 interactive render 依赖 stdout resize、layout recalculation 和 log-update 清除/重绘；Windows cmd/PowerShell 拖拽窗口时正常滚屏 buffer/cursor 位置容易让旧帧残留在可见区域，看起来像“追加多个首页”。
+- resize 修复：
+  - `packages/tui/src/shell/ink-renderer.tsx` 对正常 TTY Ink path 启用 `alternateScreen: true`，把交互式 shell 放进 alternate screen，避免 Windows normal buffer resize 残留旧帧；没有把 Windows 正常 TTY 退回 plain fallback。
+  - 同文件暴露 `waitUntilRenderFlush()`，`packages/tui/src/index.ts` 在 controller 主动 rerender 后等待 flush，减少输入事件 rerender 与后续输出交错。
+  - `packages/tui/src/index.ts` 现在同时读取 `stdout.columns` 和 `stdout.rows`，把真实 width / height 传入 `createShellViewModel()`；不再只用默认 24 行假装 full-screen。
+  - `packages/tui/src/shell/components/ShellApp.tsx` 监听 stdout `resize`，触发同一个 Ink render instance 的 resize hook；`packages/tui/src/shell/ink-renderer.tsx` 暴露 `clear()`，resize 时先清当前 frame 再 rerender，专门降低 Windows cmd 左右缩放时旧长行残留。
+  - focused harness 覆盖同一个 render instance 初始 80x24、resize 到 40x15、输出 alternate-screen enter/exit escape，不新增第二套 renderer。
 - 本轮实际读取/修改的 TUI shell 源码事实：
   - `packages/tui/src/index.ts` 仍持有唯一 runtime/controller/provider/tool/permission/natural command loop；Ink composer 与 fallback readline 仍复用 `processTuiLine()`，未新增第二套 provider resolver、command router、permission pipeline、runner、cache/index 或 doctor 系统。
-  - `packages/tui/src/shell/view-model.ts` 仍是只读 view-model 映射层；本轮在该层补齐 Home + Repo state + setup-needed + project-route-problem + latest output 摘要化排列，新增 width fitting、长路径/长模型名截断、latest output 脱敏摘要。
-  - `packages/tui/src/shell/plain-renderer.ts` 继续负责 NO_COLOR/plain fallback；本轮复用 `getStatusMarker()`，保证 no-color marker 稳定。
-  - `packages/tui/src/shell/components/ShellApp.tsx` 继续走 Ink/React component tree；本轮只做首屏、面板区、composer 间距收敛，没有退回字符串拼接补丁。
-  - `packages/tui/src/shell/types.ts` 只为现有 ProductBlock 增加 `repo` kind，表示 repo state 面板显示形态，不新增 runtime 事实来源。
+  - `packages/tui/src/shell/view-model.ts` 仍是只读 view-model 映射层；默认首页改为 title + slogan + status tray + composer，`setup-needed` / `project-route-problem` / latest output 才进入轻量 ProductBlock。
+  - `packages/tui/src/shell/plain-renderer.ts` 跟随轻首页结构：无默认 Home card / Repo card；NO_COLOR 继续复用 `getStatusMarker()` 表达异常 block 状态。
+  - `packages/tui/src/shell/components/ShellApp.tsx` 继续走 Ink/React component tree；本轮只做 resize lifecycle 和首页密度收敛，没有退回字符串拼接补丁。
+  - `packages/tui/src/shell/components/Composer.tsx` 去掉默认 round border，不再把主输入区渲染成大卡片；首页主路径是轻 dock / prompt row。
+  - `packages/tui/src/shell/components/ProductBlock.tsx` 不再默认给所有 block 画大圆角框；setup / permission / fail 才轻强调。
+  - `packages/tui/src/shell/components/StatusTray.tsx` 把 project / model / permission / trust / index / background 放入轻 status tray，repo 状态不再默认占一个大卡片。
 - 本轮实际改动文件：
-  - `packages/tui/src/index.ts`：latest output blocks 从最多 6 条收敛为最多 3 条，避免首屏变成重输出墙。
-  - `packages/tui/src/shell/types.ts`：新增 `repo` block kind。
-  - `packages/tui/src/shell/view-model.ts`：统一 zh-CN/en-US Home slogan、setup-needed 主路径文案、repo state 面板、project route problem 分离、latest output 摘要/脱敏、40/60/80/120 width fitting。
-  - `packages/tui/src/shell/plain-renderer.ts`：NO_COLOR/plain renderer 使用统一 status marker。
-  - `packages/tui/src/shell/components/ShellApp.tsx`：首屏 / 面板 / composer 间距统一。
-  - `packages/tui/src/shell/view-model.test.ts`：补 focused tests 覆盖 zh-CN/en-US slogan、composer placeholder、setup-needed Enter/自然语言优先、project route problem 不重复填 key、latest output 摘要与 key masking、40/60/80/120 width、NO_COLOR/plain marker。
+  - `packages/tui/src/index.ts`：controller rerender 后等待 Ink render flush；exit 分支避免继续 flush 已 unmount 的 shell；view-model 接入真实 terminal rows；runtime latest output 裁剪为 1 条。
+  - `packages/tui/src/shell/ink-renderer.tsx`：正常 TTY Ink path 启用 alternate screen，并暴露 `waitUntilRenderFlush()` / `clear()`。
+  - `packages/tui/src/shell/components/ShellApp.tsx`：默认首页收敛为 brand / slogan / tray / setup hint / composer；监听 stdout resize 触发 clear + rerender。
+  - `packages/tui/src/shell/components/Composer.tsx`：去掉默认 round border，输入区改为轻量 prompt row + hint。
+  - `packages/tui/src/shell/components/StatusTray.tsx`：tray 字段调整为 project / model / permission / trust / index / background，减少上下空白。
+  - `packages/tui/src/shell/components/ProductBlock.tsx`：ProductBlock 默认 borderless，仅 setup / permission / fail 轻强调。
+  - `packages/tui/src/shell/types.ts`：StatusTray view-model 字段从 mode/cache 调整为 permission/project。
+  - `packages/tui/src/shell/view-model.ts`：移除默认 Home / Repo blocks；保留 setup-needed、project-route-problem、latest output 摘要/脱敏、40/60/80/120 width fitting。
+  - `packages/tui/src/shell/plain-renderer.ts`：plain/no-color fallback 镜像轻首页；只有异常/output block 存在时才插入 block 区。
+  - `packages/tui/src/shell/view-model.test.ts`：补 focused tests 覆盖默认首页无 Home/Repo card 重复、setup-needed Enter/自然语言优先、project route problem 不重复填 key、latest output 摘要与 key masking、40/60/80/120 width、NO_COLOR marker、TTY Ink resize 同实例 rerender + alternate screen。
 - 体验边界：
-  - 首屏结构保持 Home + Project state + 状态 tray + composer，setup-needed / project-route-problem / latest output 都是 ProductBlock，不再把多段启动输出或完整 tool/runtime 输出堆成墙。
-  - 缺模型配置时主路径是按 Enter 或自然语言“我要配置模型 / configure provider”；`/model setup` 只作为高级/恢复入口。
+  - 默认首页只保留 `Linghun`、`技术普惠会越来越成熟，而你就是最伟大的梦想家。`、英文愿景、轻 status tray、composer placeholder `我能帮您做点什么？`。
+  - repo/project state 默认进入 status tray，不再显示单独大卡；`/help` 不作为强首页提示，轻提示为“直接描述目标；需要精确入口时再查看命令。”
+  - 缺模型配置时主路径仍是按 Enter 或自然语言“我要配置模型 / configure provider”；`/model setup` 只作为高级入口；Ink 首页不再显示 `需要配置模型` bordered block，也不在首页展开 provider.env 路径细节。
   - 项目 route/settings 问题单独显示为 `project-route-problem`，文案明确不要重复填写用户 API key。
-  - trust / language 首次交互仍由 `packages/tui/src/index.ts` 既有 controller 管理，setup-needed 只作为 shell view-model 状态，不新增抢占式 setup flow。
   - latest output 只保留第一行摘要，完整内容引导 details；view-model 对 `sk-...`、`apiKey=...`、Authorization bearer 做输出脱敏，测试使用 fake key 字符串并确认 raw key 不出现在渲染结果。
   - `NO_COLOR` 不强制退出 Ink；plain/no-color 通过文本 marker 表达状态，dumb/non-TTY/plain opt-in 仍走 fallback。
 - 本轮验证是 scoped/local/focused validation，不是真实 provider smoke，不是真实项目 smoke，不是 Beta PASS / smoke-ready / open-source-ready；不得把这些 PASS 写成整体 ready。
-- 按用户最新要求，本轮不启动独立 verifier；以下为本会话单独复检（main-agent self-review）记录，不写成 independent verifier PASS。
 - 当前已运行的本轮 focused validation：
-  - `corepack pnpm exec vitest run packages/tui/src/shell`：PASS，9 tests passed。
-  - `corepack pnpm exec vitest run packages/tui/src/index.test.ts --testNamePattern "shell|home|setup-needed|model setup|provider.env|project route|placeholder|masking|width|no-color"`：PASS，7 tests passed，175 skipped。
-  - `corepack pnpm --filter @linghun/tui build`：PASS，fresh dist 重新生成。
-  - `node -e "import('./packages/tui/dist/index.js').then(()=>console.log('dist-index-import=ok')).catch((err)=>{console.error(err); process.exit(1)})"`：PASS，输出 `dist-index-import=ok`。
+  - `corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts`：PASS，11 tests passed。
+  - `corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/shell/view-model.test.ts`：PASS，193 tests passed。
+  - `corepack pnpm --filter @linghun/tui typecheck`：PASS。
+  - `corepack pnpm --filter @linghun/tui build`：PASS，fresh dist 重新生成，旧 `ink-renderer-AF5VLESO.js` / `ink-renderer-JIE4CVCP.js` 不再存在于 dist。
+  - `corepack pnpm --filter @linghun/cli build`：PASS，CLI dist 重新生成。
   - `corepack pnpm typecheck`：PASS。
-  - `corepack pnpm check`：PASS，Biome checked 79 files。
-  - `git diff --check`：PASS，无输出。
-- 启动产物补充验证：用户截图中的 `Cannot find module ... packages/tui/dist/architecture-runtime.js` 属于 stale dist/build artifact 风险；本轮不要求生成独立 `packages/tui/dist/architecture-runtime.js`，以 fresh build 后最终 `packages/tui/dist/index.js` 可 import 为准，已验证通过。
+  - dist/source search：`Linghun 编程终端`、Ink 首页 `需要配置模型` block、旧 Ink chunks 不再存在于 fresh TUI dist；`需要配置模型：这是本机一次配置` 只剩 plain/non-TTY legacy startup 与对应 focused tests。
+- 启动产物补充验证：用户截图里的旧 setup bordered block 与 stale dist/build artifact 风险一致；fresh TUI/CLI build 后，Ink 首页产物已刷新。`node -e "import('./apps/cli/dist/main.js')"` 会执行 CLI main 并进入 TUI，不适合作为纯 import 验证；CLI dist 验证以 build 与 `--help` / `--version` 快路径为准。
+- 剩余人工复测项：用户需要在 Windows cmd / PowerShell / Windows Terminal 重新拉伸左右宽度，确认 resize clear + real rows 接入后不再残留；如果仍复现，下一步只继续修 Ink lifecycle，不进入 E 或真实 smoke。
 - 安全边界：未进入真实 smoke；未使用真实 provider/API；未保存真实 key；未把 key 写入 docs/reports/logs/evidence/project `.linghun/settings.json`；未提交 commit；未复制 OpenCode / Warp / CCB / Claude Code 源码或内部实现。
 
 ```yaml
 gate: Pre-Smoke Ink TUI Product Shell Gate
-slice: D Ink TUI mature visual shell + first-screen/panel layout
-status: scoped-implementation-self-reviewed
-verdict: PASS_FOR_SLICE_D_ONLY
+slice: D Ink TUI mature visual shell + Windows resize stability rework
+status: scoped-implementation-validated
+verdict: PASS_FOR_SLICE_D_REWORK_ONLY
 can_enter_real_smoke: false
 can_claim_beta_pass: false
 can_claim_smoke_ready: false
@@ -950,30 +972,35 @@ index_status:
 changed_files:
   code:
     - packages/tui/src/index.ts
+    - packages/tui/src/shell/ink-renderer.tsx
     - packages/tui/src/shell/types.ts
     - packages/tui/src/shell/view-model.ts
     - packages/tui/src/shell/plain-renderer.ts
     - packages/tui/src/shell/components/ShellApp.tsx
+    - packages/tui/src/shell/components/StatusTray.tsx
+    - packages/tui/src/shell/components/ProductBlock.tsx
   tests:
     - packages/tui/src/shell/view-model.test.ts
   docs:
     - docs/audit/pre-smoke-ink-tui-product-shell-source-level-reality-check.md
 validation:
-  - command: corepack pnpm exec vitest run packages/tui/src/shell
-    result: PASS; 9 tests passed
-  - command: corepack pnpm exec vitest run packages/tui/src/index.test.ts --testNamePattern "shell|home|setup-needed|model setup|provider.env|project route|placeholder|masking|width|no-color"
-    result: PASS; 7 tests passed, 175 skipped
+  - command: corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts
+    result: PASS; 11 tests passed
+  - command: corepack pnpm exec vitest run packages/tui/src/index.test.ts packages/tui/src/shell/view-model.test.ts
+    result: PASS; 193 tests passed
+  - command: corepack pnpm --filter @linghun/tui typecheck
+    result: PASS
   - command: corepack pnpm --filter @linghun/tui build
     result: PASS; fresh dist regenerated
-  - command: node -e "import('./packages/tui/dist/index.js').then(()=>console.log('dist-index-import=ok')).catch((err)=>{console.error(err); process.exit(1)})"
-    result: PASS; dist-index-import=ok
+  - command: corepack pnpm --filter @linghun/cli build
+    result: PASS; fresh dist regenerated
   - command: corepack pnpm typecheck
     result: PASS
-  - command: corepack pnpm check
-    result: PASS; Biome checked 79 files
-  - command: git diff --check
-    result: PASS; no output
-startup_artifact_note: user screenshot architecture-runtime.js import failure is stale dist/build artifact risk; fresh build plus dist/index.js import is the validation target for this slice
+startup_artifact_note: user screenshot old setup bordered block is consistent with stale dist/build artifact risk; fresh TUI/CLI builds now regenerate the runtime chunks
+manual_retest_required:
+  - Windows cmd horizontal resize
+  - PowerShell horizontal resize
+  - Windows Terminal horizontal resize
 safety:
   real_provider_smoke_run: false
   real_project_smoke_run: false
