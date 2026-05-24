@@ -1,12 +1,14 @@
 # Pre-Smoke Ink TUI Product Shell Source-Level Reality Check
 
-> Scope: Pre-Smoke Ink TUI Product Shell Gate report. Slice A was Source-Level Reality Check + Design System Draft only; Slice B adds Ink Shell Foundation implementation notes and scoped validation. This report still does not claim real smoke readiness, Beta PASS, or open-source readiness.
+> Scope: Pre-Smoke Ink TUI Product Shell Gate report. Slice A was Source-Level Reality Check + Design System Draft only; Slice B added Ink Shell Foundation scoped validation; Slice C adds Home / First Run / Repo State + user-scoped natural model setup intake scoped validation. This report still does not claim real smoke readiness, Beta PASS, smoke-ready, or open-source readiness.
 
 ## 1. Executive Summary
 
 Pre-Smoke Ink TUI Product Shell Gate 的 Slice A baseline 结论：Linghun 当时的终端主链路已经具备 provider/model、permission、Start Gate、tool output、doctor、background/job、readiness、NCB、config 等大量底层能力，但 Slice B 实现前的可见 TUI shell 仍是 `readline` + `writeLine` + 字符串 presenter 的 REPL 形态，不是成熟 Ink/React 产品壳。
 
 Slice B current delta：当前已新增 Ink Shell Foundation scoped implementation：TTY 主路径可进入 `ShellApp`，fallback prompt 已改为使用 `messages.inputPrompt`，composer placeholder 已覆盖 zh-CN / en-US，apiKey step 已通过 `ShellViewModel.composer.masking` + Ink Composer `*` 显示完成可见脱敏。但这只代表 Ink Shell Foundation scoped pass，不代表完整 TUI 成品完成，不代表 real provider smoke ready、Beta PASS、smoke-ready 或 open-source-ready。
+
+Slice C current delta：当前已新增 Home / First Run / Repo State + User-Scoped Natural Model Setup Intake scoped implementation：setup-needed card 明确这是本机用户级 `provider.env` 一次配置，不是当前仓库配置；有效用户 `provider.env` 可跨仓库复用并抑制新仓库 setup-needed；项目 route/settings 问题会单独显示为 project-scoped route problem，不引导重复填写用户 API key；自然语言“我要配置模型 / configure provider”等和 setup-needed 上的空 Enter 复用既有 `startModelSetup`；直接 URL/model/reasoning/key 输入只进入 pending setup 内存，确认页不显示 raw key，只有用户确认 `yes/save/确认` 后才调用既有 `saveProviderEnvSetup()` 写入用户 provider.env。Slice C 未新增第二套 provider writer/resolver，未写 key 到项目 `.linghun/settings.json`，未执行真实 provider smoke，未保存真实 key 到报告/日志/证据。
 
 Slice A 只完成事实核对和设计草案：
 
@@ -494,17 +496,20 @@ Ink renderer 是显示层，不得做重任务：
 
 ### C Home / First Run / Repo State
 
-目标：把启动输出、missing model、repo trust、first install 收敛为成熟 Home/First-run cards。
+目标：把启动输出、missing model、repo trust、first install 收敛为成熟 Home/First-run cards，并让首次模型配置的主路径从 slash-only 变为自然语言优先。
 
-范围：
+当前 scoped delta：
 
-- Home card。
-- Missing model card。
-- Repo trust card。
-- Project rules hint 降噪。
-- Status tray。
+- Home card 已补充主屏愿景文案：zh-CN `技术普惠会越来越成熟，而你就是最伟大的梦想家。`；en-US `Technology will become more accessible, and you are the greatest dreamer.`。
+- Missing model card 已明确 user-scoped provider setup：保存到本机用户 `provider.env`，不是当前仓库配置；一次配置后其他仓库默认复用。
+- 有效用户 `provider.env` 已通过既有 `loadConfig()` / provider.env merge layer 生效；新仓库不再显示 setup-needed。
+- 项目 executor route / project settings 的 legacy route 问题被拆成 `project-route-problem` block；文案明确这是 project-scoped route/settings 问题，不要重复填写用户 API key。
+- 自然语言“我要配置模型 / 配置 API key / setup model / configure provider”和 setup-needed 上的空 Enter 会进入既有 `startModelSetup()`；pending setup 的 Enter 行为仍保持原状态机。
+- 直接 URL / model / 模型 / reasoning / 推理等级 / API key 输入只预填 pending setup 内存值；确认页只显示 present/missing 和 model/reasoning，不输出 raw key；只有用户确认 `yes/save/确认` 后才调用既有 `saveProviderEnvSetup()`。
+- Repo trust / project rules 与 provider setup 保持分离：repo trust 仍是 project-scoped 状态，project rules missing 仍是 light hint，不被当成模型配置阻塞。
+- Shell view model 新文案集中在 `shellText` zh-CN / en-US dictionary-style layer；保留 composer placeholder：`我能帮您做点什么？` / `What can I help you with?`。
 
-禁止：保存 key、扩展 provider 配置 schema、进入真实 smoke。
+禁止/保持：未保存真实 key；未写 `apiKey` 到项目 `.linghun/settings.json`；未新增第二套 provider writer/resolver；未扩展 provider 配置 schema；未进入真实 smoke；未声明 Beta PASS / smoke-ready / open-source-ready。
 
 ### D Interaction Blocks
 
@@ -788,4 +793,96 @@ residual_risks:
   - Ink shell foundation is intentionally minimal; Home/First Run cards and full interaction blocks are later slices.
   - Focused tests validate view model/fallback boundaries, not a recorded real terminal screenshot.
   - Existing plain startup remains for fallback/headless compatibility and still contains legacy detailed hints.
+```
+
+### Slice C 用户级模型配置入口更新（2026-05-24）
+
+- 本切片只完成 Home / First Run / Repo State + User-Scoped Natural Model Setup Intake 的 scoped closure；不进入真实 provider smoke，不进入真实项目 smoke，不提交 commit，不声明 Beta PASS / smoke-ready / open-source-ready。
+- 当前 `git status --short`（文档更新前复查）：
+  - ` M packages/tui/src/index.test.ts`
+  - ` M packages/tui/src/index.ts`
+  - ` M packages/tui/src/shell/view-model.ts`
+- 真实改动文件：
+  - TUI controller / setup intake：`packages/tui/src/index.ts`
+  - TUI focused tests：`packages/tui/src/index.test.ts`
+  - Shell view model i18n / cards：`packages/tui/src/shell/view-model.ts`
+  - 本报告与用户可见文档说明。
+- Provider setup 边界：配置入口复用既有 `getProviderEnvPath()`、`saveProviderEnvSetup()`、`loadConfig()` provider.env layer；默认写入 `~/.linghun/provider.env`，设置 `LINGHUN_CONFIG_DIR` 时写入 `$LINGHUN_CONFIG_DIR/provider.env`；项目 `.linghun/settings.json` 不保存真实 `apiKey`。
+- New repo 行为：当用户 provider.env 已提供有效 `baseUrl`、`apiKey`、`model` 且不是 placeholder model 时，新仓库不会再显示 setup-needed；如果问题来自项目 executor route / legacy settings override，则显示 project route/settings 问题，不引导用户重复填写 key。
+- Slice C boundary fix：当项目 executor route 指向 `openai-compatible`，但缺失的是用户级 provider 必需项 `baseUrl` / `apiKey` / `model` / placeholder model 时，优先进入 user-scoped setupNeeded，不再误判为 project route/settings problem；project route problem 只保留给 missing provider、无效 concrete model、用户 provider 已有效但项目 route 仍错误、或 legacy project settings 明确造成的 route/model override。
+- 主路径变化：缺模型配置时，用户可以直接说“我要配置模型 / 配置 API key / setup model / configure provider”，也可以在 setup-needed 状态按 Enter；`/model setup` 仍保留为高级/恢复入口。
+- 直接值预填：URL 进入 `baseUrl`；`model=xxx` / `model xxx` / `模型 xxx` 进入 model；`reasoning Low|Medium|High` / `推理 低|中|高` 进入 reasoning；key 只进入 pending setup 内存，确认页不打印 raw key。
+- 保存策略：pending setup 信息齐全时先显示摘要；摘要只显示 present/missing、model 和 reasoning，不显示 raw key；只有 `yes/save/确认` 后才调用 `saveProviderEnvSetup()` 写用户 provider.env。
+- Repo state 分离：workspace trust / project rules 是 project-scoped 状态，provider setup 是 user-scoped 状态；project rules missing 只保留 light hint，不作为模型配置阻塞。
+- i18n / shell 文案：setup-needed、project route problem、Home/vision、composer placeholder 进入 `shellText` zh-CN / en-US dictionary-style layer；保留 zh-CN `我能帮您做点什么？` 和 en-US `What can I help you with?`。
+- Key safety：未运行真实 provider/API；未使用真实 key；未把 key 写入 docs/report/log/transcript/evidence；NO_COLOR/plain fallback 和 setup summary 测试覆盖 raw key 不出现在输出中。
+- 已按用户要求停止独立 verifier；本节记录本会话单独复检（main-agent self-review），不声明 independent verifier PASS。
+- 单独复检命令结果：
+  - `corepack pnpm exec vitest run packages/config/src/index.test.ts`：PASS，30 tests passed（Slice C 主收口记录）。
+  - `corepack pnpm exec vitest run packages/tui/src/shell`：PASS，7 tests passed。
+  - `corepack pnpm exec vitest run packages/tui/src/index.test.ts`：PASS，180 tests passed（Slice C 主收口记录）。
+  - `corepack pnpm exec vitest run packages/tui/src/index.test.ts --testNamePattern "user-scoped|model setup|provider.env|project route|configure|route"`：PASS，14 tests passed，168 skipped（Slice C boundary fix）。
+  - `corepack pnpm typecheck`：PASS。
+  - `corepack pnpm check`：PASS，Biome checked 79 files。
+  - `git diff --check`：PASS，无输出。
+
+```yaml
+gate: Pre-Smoke Ink TUI Product Shell Gate
+slice: C Home / First Run / Repo State + User-Scoped Natural Model Setup Intake
+status: scoped-implementation-in-validation
+verdict: PASS_FOR_SLICE_C_ONLY_AFTER_FINAL_VALIDATION
+can_enter_real_smoke: false
+can_claim_beta_pass: false
+can_claim_smoke_ready: false
+can_claim_open_source_ready: false
+explicit_boundary: Slice C only covers local TUI first-run/setup intake behavior; it is not real provider smoke readiness.
+provider_setup_scope:
+  storage: user provider.env
+  default_path: ~/.linghun/provider.env
+  env_override_path: $LINGHUN_CONFIG_DIR/provider.env
+  project_settings_api_key_written: false
+  second_provider_writer_added: false
+  second_provider_resolver_added: false
+natural_setup_entry:
+  zh:
+    - 我要配置模型
+    - 配置 API key
+  en:
+    - setup model
+    - configure provider
+  enter_on_setup_needed: true
+  slash_recovery_entry: /model setup
+safety:
+  real_provider_smoke_run: false
+  real_key_used: false
+  raw_key_in_output: false
+  raw_key_in_docs_or_logs: false
+  raw_key_in_project_settings: false
+validation:
+  - command: corepack pnpm exec vitest run packages/config/src/index.test.ts
+    result: PASS; 30 tests passed
+  - command: corepack pnpm exec vitest run packages/tui/src/shell
+    result: PASS; 7 tests passed
+  - command: corepack pnpm exec vitest run packages/tui/src/index.test.ts
+    result: PASS; 180 tests passed
+  - command: corepack pnpm exec vitest run packages/tui/src/index.test.ts --testNamePattern "user-scoped|model setup|provider.env|project route|configure|route"
+    result: PASS; 14 tests passed, 168 skipped
+  - command: corepack pnpm typecheck
+    result: PASS
+  - command: corepack pnpm check
+    result: PASS; Biome checked 79 files
+  - command: git diff --check
+    result: PASS; no output
+verification_note: independent verifier was stopped by user request; final verification is main-agent self-review only
+index_status:
+  project: F-Linghun
+  status: ready
+  nodes: 2053
+  edges: 4412
+next_slice: D Interaction Blocks, only after user confirmation
+forbidden_next_actions:
+  - do not enter real smoke before user explicitly confirms
+  - do not save provider keys in project settings
+  - do not add another provider config writer or resolver
+  - do not claim Beta PASS, smoke-ready, or open-source-ready
 ```

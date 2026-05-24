@@ -62,13 +62,13 @@ Phase 15 preflight 之后的新对话应优先基于结构化 handoff、agent tr
 
 ## 模型配置
 
-新用户不需要手写 `providers` 或 `modelRoutes` JSON。首次运行发现当前模型配置不可用时，TTY 环境会提示进入模型配置向导；也可以随时运行：
+新用户不需要手写 `providers` 或 `modelRoutes` JSON。首次运行发现当前模型配置不可用时，TUI 会提示这是本机一次配置，不是当前仓库配置；可以直接说“我要配置模型”“配置 API key”或 “configure provider”，也可以在提示状态按 Enter 开始。精确入口仍保留：
 
 ```text
 /model setup
 ```
 
-向导只要求填写 API 地址、API key、模型名称和推理等级。API key 会保存到本机用户目录下的私有 `provider.env`，默认路径为 `~/.linghun/provider.env`；设置 `LINGHUN_CONFIG_DIR` 时路径为 `$LINGHUN_CONFIG_DIR/provider.env`。该文件不应放入项目目录，也不应提交到 git。
+向导只要求填写 API 地址、API key、模型名称和推理等级。API key 会保存到本机用户目录下的私有 `provider.env`，默认路径为 `~/.linghun/provider.env`；设置 `LINGHUN_CONFIG_DIR` 时路径为 `$LINGHUN_CONFIG_DIR/provider.env`。该文件不应放入项目目录，也不应提交到 git；配置一次后，其他仓库默认复用同一个用户 `provider.env`。
 
 配置优先级：shell env 变量最高，其次是用户私有 `provider.env`，最后才是既有 settings/default。支持的变量见 [.env.example](./.env.example)；示例文件不包含真实 key，复制不是必须的，`/model setup` 会自动创建带注释模板。
 

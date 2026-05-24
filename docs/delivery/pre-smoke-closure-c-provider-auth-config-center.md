@@ -214,6 +214,18 @@
 - 独立 verifier 首轮返回 FAIL：`/model setup` 曾允许 quote-prefixed API key 保存成无法解析的 provider.env；已改为拒绝任意首尾单/双引号，并新增 config regression。
 - 独立 verifier 首轮返回 FAIL：headless `linghun model doctor` / `linghun /model doctor` 仍是旧 deepseek-only 诊断；已改为解析当前 provider，并新增 headless OpenAI-compatible provider.env / legacy project settings source regression。
 
+## Slice C 用户级自然语言配置入口补充（2026-05-24）
+
+- Pre-Smoke Ink TUI Product Shell Gate / Slice C 在 Closure C provider.env 基础上补齐首屏入口：setup-needed 明确是本机用户级 provider setup，不是当前仓库配置。
+- provider setup 继续复用既有 `getProviderEnvPath()`、`saveProviderEnvSetup()` 和 `loadConfig()` provider.env layer；没有新增第二套 provider config writer 或 resolver。
+- 默认写入 `~/.linghun/provider.env`；设置 `LINGHUN_CONFIG_DIR` 时写入 `$LINGHUN_CONFIG_DIR/provider.env`；保存一次后其他仓库默认复用同一个用户 provider.env。
+- 新仓库若能从用户 provider.env 得到有效 `baseUrl`、`apiKey`、`model` 且不是 placeholder model，不再显示 setup-needed。
+- Slice C boundary fix：项目 executor route 指向 `openai-compatible` 但用户级 provider 必需项尚未配置时，优先显示 user-scoped setup-needed；只有 missing provider、无效 concrete model、用户 provider 已有效但项目 route 仍错误、或 legacy project settings 明确造成 route/model override 时，才提示 project-scoped route/settings 问题。
+- 如果问题来自项目 executor route / legacy `.linghun/settings.json` override，则提示 project-scoped route/settings 问题，不引导用户重复填写用户 API key。
+- 自然语言“我要配置模型 / 配置 API key / setup model / configure provider”和 setup-needed 上按 Enter 会进入既有模型配置向导；`/model setup` 仍是高级/恢复入口。
+- 直接输入 URL、`model=xxx` / `model xxx` / `模型 xxx`、`reasoning Low|Medium|High` / `推理 低|中|高` 和 key 时，只预填 pending setup 内存；摘要先显示 present/missing 和 model/reasoning，不输出 raw key，确认 `yes/save/确认` 后才保存。
+- 本补充未执行真实 provider/API smoke，未使用真实 key，未把 key 写入 docs/reports/logs/transcript/evidence，也未把真实 `apiKey` 写入项目 `.linghun/settings.json`。
+
 ## 剩余风险和 real smoke watchlist
 
 - 本轮未执行 live provider/API；真实 provider 的 baseUrl/model/tool calling/reasoning/includeUsage 行为仍需用户确认后进入 Real Provider + Real Project Smoke。

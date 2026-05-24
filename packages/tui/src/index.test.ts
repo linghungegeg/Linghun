@@ -6,11 +6,13 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import {
   type LinghunConfig,
   defaultConfig,
+  getProjectSettingsPath,
   getProviderEnvPath,
   getSessionRootDir,
   getUserSettingsPath,
   loadConfig,
   resolveStoragePaths,
+  saveProviderEnvSetup,
 } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
@@ -641,7 +643,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(session.id);
   });
 
-  it("shows light missing model config hint without entering setup", async () => {
+  it("shows user-scoped missing model config hint without entering setup", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -654,14 +656,240 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain(
-      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。",
-    );
-    expect(output.text).toContain("provider.env 模板位置：");
+    expect(output.text).toContain("需要配置模型：这是本机一次配置，不是当前仓库配置。");
+    expect(output.text).toContain("之后进入其他仓库也会默认复用同一个用户 provider.env");
+    expect(output.text).toContain("用户 provider.env 位置：");
     expect(output.text).not.toContain("模型配置向导");
     expect(output.text).not.toContain("runtime");
     expect(output.text).not.toContain("schema");
     expect(output.text).not.toContain("provider contract");
+  });
+
+  it("prefers user-scoped setup-needed when project route uses openai-compatible without user provider.env", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-route-openai-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        modelRoutes: {
+          defaultModel: "route-openai-model",
+          routes: [
+            {
+              role: "executor",
+              provider: "openai-compatible",
+              primaryModel: "route-openai-model",
+              fallbackModels: [],
+              requiredCapabilities: ["text"],
+              allowTools: true,
+              allowWrite: true,
+              allowBash: true,
+              requireApprovalBeforeRun: false,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("需要配置模型：这是本机一次配置，不是当前仓库配置。");
+    expect(output.text).toContain("之后进入其他仓库也会默认复用同一个用户 provider.env");
+    expect(output.text).not.toContain("项目模型路由需要处理");
+  });
+
+  it("starts natural-language model setup when project route uses openai-compatible without user provider.env", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-route-openai-natural-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        modelRoutes: {
+          defaultModel: "route-openai-model",
+          routes: [
+            {
+              role: "executor",
+              provider: "openai-compatible",
+              primaryModel: "route-openai-model",
+              fallbackModels: [],
+              requiredCapabilities: ["text"],
+              allowTools: true,
+              allowWrite: true,
+              allowBash: true,
+              requireApprovalBeforeRun: false,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["我要配置模型\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("模型配置向导");
+    expect(output.text).toContain("缺少 API 地址");
+    expect(output.text).not.toContain("项目模型路由需要处理");
+  });
+
+  it("reuses valid user provider.env in a new project without showing setup-needed", async () => {
+    const firstProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-a-"));
+    const secondProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-b-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await saveProviderEnvSetup(
+      {
+        baseUrl: "https://provider.invalid/v1",
+        apiKey: "sk-user-provider-secret",
+        model: "user-provider-model",
+        reasoningLevel: "Medium",
+      },
+      home,
+    );
+    const firstOutput = new MemoryOutput();
+    const secondOutput = new MemoryOutput();
+
+    await runTui({
+      projectPath: firstProject,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: firstOutput,
+      stderr: new MemoryOutput(),
+    });
+    await runTui({
+      projectPath: secondProject,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: secondOutput,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(firstOutput.text).not.toContain("setup-needed");
+    expect(firstOutput.text).not.toContain("需要配置模型：这是本机一次配置");
+    expect(secondOutput.text).not.toContain("需要配置模型：这是本机一次配置");
+    expect(secondOutput.text).toContain("项目 linghun-tui-project-b-");
+    expect(secondOutput.text).toContain("[hint:info] 缺少 LINGHUN.md 项目规则");
+    expect(secondOutput.text).not.toContain("sk-user-provider-secret");
+  });
+
+  it("starts model setup from natural-language setup intent and Enter on setup-needed", async () => {
+    const naturalProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-natural-"));
+    const enterProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-enter-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const naturalOutput = new MemoryOutput();
+    const enterOutput = new MemoryOutput();
+
+    await runTui({
+      projectPath: naturalProject,
+      stdin: Readable.from(["我要配置模型\n"]),
+      stdout: naturalOutput,
+      stderr: new MemoryOutput(),
+    });
+    await runTui({
+      projectPath: enterProject,
+      stdin: Readable.from(["\n"]),
+      stdout: enterOutput,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(naturalOutput.text).toContain("模型配置向导");
+    expect(naturalOutput.text).toContain("这是本机一次配置");
+    expect(naturalOutput.text).toContain("缺少 API 地址");
+    expect(enterOutput.text).toContain("模型配置向导");
+    expect(enterOutput.text).toContain("缺少 API 地址");
+  });
+
+  it("prefills direct setup values and saves only after confirmation without leaking key", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "我要配置模型 https://provider.invalid/v1 model=direct-setup-model reasoning High key=sk-direct-setup-secret\nyes\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+    const providerEnv = await readFile(getProviderEnvPath(home), "utf8");
+    const projectSettings = await readFile(getProjectSettingsPath(project), "utf8").catch(() => "");
+
+    expect(providerEnv).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
+    expect(providerEnv).toContain("LINGHUN_OPENAI_MODEL=direct-setup-model");
+    expect(providerEnv).toContain("LINGHUN_INFERENCE_LEVEL=High");
+    expect(output.text).toContain("模型配置摘要");
+    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("已保存，请重启 Linghun 后使用新的用户级 provider 配置。");
+    expect(output.text).not.toContain("sk-direct-setup-secret");
+    expect(projectSettings).not.toContain("apiKey");
+    expect(projectSettings).not.toContain("sk-direct-setup-secret");
+  });
+
+  it("shows project route problems without asking users to re-enter a key", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    await saveProviderEnvSetup(
+      {
+        baseUrl: "https://provider.invalid/v1",
+        apiKey: "sk-valid-user-provider-secret",
+        model: "valid-user-provider-model",
+        reasoningLevel: "Medium",
+      },
+      home,
+    );
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        modelRoutes: {
+          defaultModel: "missing-route-model",
+          routes: [
+            {
+              role: "executor",
+              provider: "missing-provider",
+              primaryModel: "missing-route-model",
+              fallbackModels: [],
+              requiredCapabilities: ["text"],
+              allowTools: true,
+              allowWrite: true,
+              allowBash: true,
+              requireApprovalBeforeRun: false,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("项目模型路由需要处理");
+    expect(output.text).toContain("不是让你重复填写本机用户 API key");
+    expect(output.text).not.toContain("需要配置模型：这是本机一次配置");
+    expect(output.text).not.toContain("sk-valid-user-provider-secret");
   });
 
   it("runs /model setup without writing API key to project settings or output", async () => {
@@ -690,8 +918,8 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("模型配置摘要");
     expect(output.text).toContain("apiKey=present");
-    expect(output.text).toContain("已保存，请重启 Linghun 后使用。");
-    expect(output.text).toContain("可选增强：Linghun 支持角色路由");
+    expect(output.text).toContain("已保存，请重启 Linghun 后使用新的用户级 provider 配置。");
+    expect(output.text).toContain("之后进入其他仓库会默认复用");
     expect(output.text).not.toContain("sk-test-setup-secret");
   });
 

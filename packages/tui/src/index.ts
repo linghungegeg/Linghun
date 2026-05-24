@@ -266,6 +266,19 @@ type PendingModelSetup = {
   values: Partial<ProviderEnvSetup>;
 };
 
+type ModelSetupPrefill = Partial<ProviderEnvSetup>;
+
+type ModelSetupMessageKey =
+  | "intro"
+  | "baseUrlPrompt"
+  | "apiKeyPrompt"
+  | "modelPrompt"
+  | "reasoningPrompt"
+  | "auxModelPrompt"
+  | "confirmPrompt"
+  | "cancelled"
+  | "details";
+
 export type BackgroundTaskStatus =
   | "running"
   | "paused"
@@ -2199,6 +2212,7 @@ type TuiStartupState = {
   setupNeeded: boolean;
   providerEnvPath?: string;
   providerEnvWarning?: string;
+  projectRouteProblem?: string;
 };
 
 type TuiLineResult = "continue" | "exit";
@@ -2214,9 +2228,11 @@ async function prepareTuiStartup(
   if (shouldPromptForInitialWorkspaceTrust(input, context)) {
     await promptInitialWorkspaceTrust(input, output, context);
   }
+  const projectRouteProblem = await getStartupProjectRouteProblem(context);
   const startup: TuiStartupState = {
-    setupNeeded: hasSelectedProviderConfigProblem(context),
+    setupNeeded: !projectRouteProblem && hasSelectedProviderConfigProblem(context),
     providerEnvWarning: lastProviderEnvWarning?.reason,
+    projectRouteProblem,
   };
   if (startup.setupNeeded && !shouldEnterProductShellCandidate(input, output)) {
     startup.providerEnvPath =
@@ -2239,19 +2255,57 @@ function writeLegacyStartup(output: Writable, context: TuiContext, startup: TuiS
     writeLine(output, t(context, "projectRulesMissingHint"));
   }
   if (startup.providerEnvWarning) {
-    writeLine(
-      output,
-      `provider.env 读取失败：${startup.providerEnvWarning}。请修正后重启 Linghun，或运行 /model setup 重新配置。`,
-    );
+    writeLine(output, formatProviderEnvWarning(startup.providerEnvWarning, context));
+  }
+  if (startup.projectRouteProblem) {
+    writeLine(output, formatProjectRouteProblem(startup.projectRouteProblem, context));
   }
   if (startup.setupNeeded) {
-    const setupHint =
-      "检测到还没有完成模型配置。输入 /model setup 填写 API 地址、API key、模型名称和推理等级。";
     writeLine(
       output,
-      `${setupHint}\nprovider.env 模板位置：${startup.providerEnvPath ?? getProviderEnvPath()}`,
+      formatUserScopedSetupNeeded(startup.providerEnvPath ?? getProviderEnvPath(), context),
     );
   }
+}
+
+function formatProviderEnvWarning(reason: string, context: TuiContext): string {
+  return context.language === "en-US"
+    ? `provider.env could not be read: ${reason}. Fix it and restart Linghun, or run /model setup to reconfigure the user provider.`
+    : `provider.env 读取失败：${reason}。请修正后重启 Linghun，或运行 /model setup 重新配置本机用户 provider。`;
+}
+
+function formatProjectRouteProblem(problem: string, context: TuiContext): string {
+  return context.language === "en-US"
+    ? [
+        "Project model route needs attention.",
+        `- ${problem}`,
+        "- This is a project-scoped route/settings issue, not a reason to re-enter your user API key.",
+        "- Check /model doctor or update this repo's .linghun/settings.json route/model settings.",
+      ].join("\n")
+    : [
+        "项目模型路由需要处理。",
+        `- ${problem}`,
+        "- 这是当前项目的 route/settings 问题，不是让你重复填写本机用户 API key。",
+        "- 可用 /model doctor 检查，或调整本仓库 .linghun/settings.json 里的 route/model 配置。",
+      ].join("\n");
+}
+
+function formatUserScopedSetupNeeded(providerEnvPath: string, context: TuiContext): string {
+  return context.language === "en-US"
+    ? [
+        "Model setup needed: one-time setup for this computer.",
+        "- This saves provider settings in your user config, not in this repository.",
+        "- After saving once, other repositories will reuse the same user provider.env by default.",
+        '- Say "configure provider" or press Enter to start; /model setup remains the advanced recovery entry.',
+        `- User provider.env path: ${providerEnvPath}`,
+      ].join("\n")
+    : [
+        "需要配置模型：这是本机一次配置，不是当前仓库配置。",
+        "- 配置会保存到本机用户目录，不会写入这个仓库。",
+        "- 配置一次后，之后进入其他仓库也会默认复用同一个用户 provider.env。",
+        "- 可以直接说“我要配置模型”或按 Enter 开始；/model setup 保留为高级/恢复入口。",
+        `- 用户 provider.env 位置：${providerEnvPath}`,
+      ].join("\n");
 }
 
 async function runPlainTui(
@@ -2309,6 +2363,7 @@ async function runInkShell(
         width: readOutputColumns(output),
         noColor: isNoColorTerminal(),
         setupNeeded: startup.setupNeeded,
+        projectRouteProblem: startup.projectRouteProblem,
         outputBlocks: blocks,
         limitations: createShellLimitations(context, startup),
       }),
@@ -2386,6 +2441,10 @@ async function processTuiLine(
     }
     if (hasPendingEnterConfirmation(context)) {
       await confirmPendingInteraction(context, output);
+      return "continue";
+    }
+    if (shouldOfferUserScopedModelSetup(context)) {
+      await startModelSetup(context, output);
     }
     return "continue";
   }
@@ -4316,28 +4375,26 @@ async function handleModelCommand(
   writeStatus(output, context);
 }
 
-async function startModelSetup(context: TuiContext, output: Writable): Promise<void> {
+async function startModelSetup(
+  context: TuiContext,
+  output: Writable,
+  prefill: ModelSetupPrefill = {},
+): Promise<void> {
   const existed = await providerEnvExists();
   const providerEnvPath = existed ? getProviderEnvPath() : await ensureProviderEnvTemplate();
+  const values: Partial<ProviderEnvSetup> = { reasoningLevel: "Medium", ...prefill };
   context.pendingModelSetup = {
-    step: "baseUrl",
+    step: getNextModelSetupStep(values),
     providerEnvPath,
     createdTemplate: !existed,
-    values: { reasoningLevel: "Medium" },
+    values,
   };
-  writeLine(
-    output,
-    [
-      "模型配置向导",
-      "- 只需要填写 API 地址、API key、模型名称和推理等级。",
-      "- API key 会写入本机私密 provider.env，不会写入项目 .linghun/settings.json。",
-      `- 写入位置：${providerEnvPath}`,
-      existed ? "" : "- 已创建带注释模板，后续可直接编辑这个文件。",
-      "API 地址不能为空。请输入 root API 地址，例如 https://example.com/v1。",
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  );
+  writeLine(output, formatModelSetupMessage("intro", context, context.pendingModelSetup));
+  if (context.pendingModelSetup.step === "confirm") {
+    writeLine(output, formatModelSetupSummary(context.pendingModelSetup, context));
+    return;
+  }
+  writeModelSetupPrompt(context.pendingModelSetup, output, context);
 }
 
 async function handleModelSetupInput(
@@ -4351,77 +4408,58 @@ async function handleModelSetupInput(
   const value = setup.step === "apiKey" ? text : trimmed;
   if (/^(cancel|no|n|取消|否)$/iu.test(trimmed)) {
     context.pendingModelSetup = undefined;
-    writeLine(output, "已取消模型配置，未保存任何 key。");
+    writeLine(output, formatModelSetupMessage("cancelled", context, setup));
     return;
   }
-  if (/^(details|detail|详情)$/iu.test(value)) {
-    writeLine(
-      output,
-      [
-        "安全说明",
-        `- provider.env 路径：${setup.providerEnvPath}`,
-        "- shell env 变量优先级最高，其次 provider.env，再走现有 settings/default。",
-        "- 真实 key 不会显示、不写入项目 settings、不写入文档或报告。",
-        "- 不设置角色路由也可以正常使用，角色默认跟随主模型。",
-      ].join("\n"),
-    );
-    writeModelSetupPrompt(setup, output);
+  if (/^(details|detail|详情)$/iu.test(trimmed)) {
+    writeLine(output, formatModelSetupMessage("details", context, setup));
+    writeModelSetupPrompt(setup, output, context);
     return;
   }
+
   try {
+    const parsed = parseModelSetupPrefill(text);
+    if (Object.keys(parsed).length > 0) {
+      applyModelSetupValues(setup, parsed);
+      setup.step = getNextModelSetupStep(setup.values);
+      if (setup.step === "confirm") {
+        writeLine(output, formatModelSetupSummary(setup, context));
+        return;
+      }
+      writeModelSetupPrompt(setup, output, context);
+      return;
+    }
+
     if (setup.step === "baseUrl") {
-      validateProviderEnvSetup({
-        baseUrl: value,
-        apiKey: "temporary-validation-key",
-        model: "temporary-model",
-        reasoningLevel: "Medium",
-      });
-      setup.values.baseUrl = value;
+      applyModelSetupValues(setup, { baseUrl: value });
       setup.step = "apiKey";
-      writeLine(output, "API key 不能为空。请输入 API key（输入时会尽量 mask，不显示原值）。");
+      writeModelSetupPrompt(setup, output, context);
       return;
     }
     if (setup.step === "apiKey") {
-      validateProviderEnvSetup({
-        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
-        apiKey: value,
-        model: "temporary-model",
-        reasoningLevel: "Medium",
-      });
-      setup.values.apiKey = value;
+      applyModelSetupValues(setup, { apiKey: value });
       setup.step = "model";
-      writeLine(output, "模型名称不能为空。请输入模型名称。");
+      writeModelSetupPrompt(setup, output, context);
       return;
     }
     if (setup.step === "model") {
-      validateProviderEnvSetup({
-        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
-        apiKey: setup.values.apiKey ?? "temporary-validation-key",
-        model: value,
-        reasoningLevel: "Medium",
-      });
-      setup.values.model = value;
+      applyModelSetupValues(setup, { model: value });
       setup.step = "reasoning";
-      writeLine(output, "推理等级可选 Low / Medium / High，默认 Medium。直接回车使用 Medium。");
+      writeModelSetupPrompt(setup, output, context);
       return;
     }
     if (setup.step === "reasoning") {
-      const reasoningLevel = value || "Medium";
-      validateProviderEnvSetup({
-        baseUrl: setup.values.baseUrl ?? "https://example.com/v1",
-        apiKey: setup.values.apiKey ?? "temporary-validation-key",
-        model: setup.values.model ?? "temporary-model",
-        reasoningLevel: reasoningLevel as ProviderEnvSetup["reasoningLevel"],
+      applyModelSetupValues(setup, {
+        reasoningLevel: normalizeModelSetupReasoningLevel(value || "Medium"),
       });
-      setup.values.reasoningLevel = normalizeModelSetupReasoningLevel(reasoningLevel);
       setup.step = "auxModel";
-      writeLine(output, "辅助模型可选，直接回车则跟随主模型。");
+      writeModelSetupPrompt(setup, output, context);
       return;
     }
     if (setup.step === "auxModel") {
-      setup.values.auxModel = value || undefined;
+      applyModelSetupValues(setup, { auxModel: value || undefined });
       setup.step = "confirm";
-      writeLine(output, formatModelSetupSummary(setup));
+      writeLine(output, formatModelSetupSummary(setup, context));
       return;
     }
     if (setup.step === "confirm") {
@@ -4430,67 +4468,210 @@ async function handleModelSetupInput(
         context.pendingModelSetup = undefined;
         context.config = await loadConfig(context.projectPath);
         context.model = resolveInitialModel(context.config);
-        writeLine(output, formatModelSetupSaved(savedPath));
-        return;
-      }
-      if (/^(details|detail|详情)$/iu.test(value)) {
-        writeLine(
-          output,
-          "保存后请重启 Linghun 后使用；不会显示 key 原值。shell env 仍可临时覆盖 provider.env。",
-        );
-        writeLine(output, formatModelSetupSummary(setup));
+        writeLine(output, formatModelSetupSaved(savedPath, context));
         return;
       }
       context.pendingModelSetup = undefined;
-      writeLine(output, "已取消模型配置，未保存任何 key。");
+      writeLine(output, formatModelSetupMessage("cancelled", context, setup));
       return;
     }
   } catch (error) {
-    writeLine(output, error instanceof Error ? error.message : "检查未通过，请补全缺失项。");
-    writeModelSetupPrompt(setup, output);
+    writeLine(
+      output,
+      error instanceof Error ? error.message : formatModelSetupFallbackError(context),
+    );
+    writeModelSetupPrompt(setup, output, context);
   }
 }
 
-function writeModelSetupPrompt(setup: PendingModelSetup, output: Writable): void {
-  if (setup.step === "baseUrl") writeLine(output, "请填写 API 地址，例如 https://example.com/v1。");
-  if (setup.step === "apiKey") writeLine(output, "请填写 API key。");
-  if (setup.step === "model") writeLine(output, "请填写模型名称。");
-  if (setup.step === "reasoning")
-    writeLine(output, "请填写 Low / Medium / High，或直接回车使用 Medium。");
-  if (setup.step === "auxModel") writeLine(output, "辅助模型可选，直接回车则跟随主模型。");
-  if (setup.step === "confirm")
-    writeLine(output, "请输入 yes 保存，no 取消，details 查看安全说明。");
+function writeModelSetupPrompt(
+  setup: PendingModelSetup,
+  output: Writable,
+  context: TuiContext,
+): void {
+  const keyByStep: Record<ModelSetupStep, ModelSetupMessageKey> = {
+    baseUrl: "baseUrlPrompt",
+    apiKey: "apiKeyPrompt",
+    model: "modelPrompt",
+    reasoning: "reasoningPrompt",
+    auxModel: "auxModelPrompt",
+    confirm: "confirmPrompt",
+  };
+  writeLine(output, formatModelSetupMessage(keyByStep[setup.step], context, setup));
+}
+
+function applyModelSetupValues(setup: PendingModelSetup, values: ModelSetupPrefill): void {
+  const next = { ...setup.values, ...values };
+  validateModelSetupPartial(next);
+  setup.values = next;
+}
+
+function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): void {
+  validateProviderEnvSetup({
+    baseUrl: values.baseUrl ?? "https://example.com/v1",
+    apiKey: values.apiKey ?? "temporary-validation-key",
+    model: values.model ?? "temporary-model",
+    reasoningLevel: values.reasoningLevel ?? "Medium",
+    endpointProfile: values.endpointProfile,
+    includeUsage: values.includeUsage,
+    auxModel: values.auxModel,
+  });
+}
+
+function getNextModelSetupStep(values: Partial<ProviderEnvSetup>): ModelSetupStep {
+  if (!values.baseUrl) return "baseUrl";
+  if (!values.apiKey) return "apiKey";
+  if (!values.model) return "model";
+  if (!values.reasoningLevel) return "reasoning";
+  return "confirm";
+}
+
+function looksLikeModelSetupInput(text: string): boolean {
+  const prefill = parseModelSetupPrefill(text);
+  if (/正常|状态|doctor|检查|诊断|怎么样|是否|吗|\?|？/iu.test(text)) {
+    return Object.keys(prefill).length > 0;
+  }
+  return (
+    /配置.*(?:模型|api\s*key|key|provider|供应商)|设置.*(?:模型|api\s*key|key|provider|供应商)|我要配置模型|configure\s+(?:model|provider|api\s*key)|setup\s+(?:model|provider)|model\s+setup|api\s*key|apikey/iu.test(
+      text,
+    ) || Object.keys(prefill).length > 0
+  );
+}
+
+function parseModelSetupPrefill(text: string): ModelSetupPrefill {
+  const prefill: ModelSetupPrefill = {};
+  const url = text.match(/https?:\/\/[^\s，,]+/iu)?.[0];
+  if (url) prefill.baseUrl = url;
+
+  const model =
+    text.match(/(?:^|[\s，,;；])model(?:\s*[=:：]\s*|\s+)([^\s，,;；]+)/iu)?.[1] ??
+    text.match(/(?:^|[\s，,;；])模型(?:\s*[=:：]\s*|\s+)([^\s，,;；]+)/iu)?.[1];
+  if (model) prefill.model = model;
+
+  const reasoning = text.match(
+    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|低|中|高)/iu,
+  )?.[1];
+  if (reasoning) prefill.reasoningLevel = normalizeModelSetupReasoningLevel(reasoning);
+
+  const key =
+    text.match(/(?:api\s*key|apikey|key|密钥)\s*[=:：]?\s*([^\s，,;；]+)/iu)?.[1] ??
+    text.match(/\b(sk-[A-Za-z0-9._-]{8,})\b/u)?.[1];
+  if (key) prefill.apiKey = key;
+
+  return prefill;
 }
 
 function normalizeModelSetupReasoningLevel(value: string): "Low" | "Medium" | "High" {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "low") return "Low";
-  if (normalized === "high") return "High";
+  if (normalized === "low" || normalized === "低") return "Low";
+  if (normalized === "high" || normalized === "高") return "High";
   return "Medium";
 }
 
-function formatModelSetupSummary(setup: PendingModelSetup): string {
+function formatModelSetupMessage(
+  key: ModelSetupMessageKey,
+  context: TuiContext,
+  setup: PendingModelSetup,
+): string {
+  const english = context.language === "en-US";
+  const messagesByKey: Record<ModelSetupMessageKey, string> = {
+    intro: english
+      ? [
+          "Model setup wizard",
+          "- One-time setup for this computer; other repositories will reuse the same user provider.env.",
+          "- API key is saved in the private user provider.env, never in project .linghun/settings.json.",
+          `- Save location: ${setup.providerEnvPath}`,
+          setup.createdTemplate ? "- A commented template was created for manual edits later." : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : [
+          "模型配置向导",
+          "- 这是本机一次配置；配置后其他仓库会默认复用同一个用户 provider.env。",
+          "- API key 会写入本机用户私密 provider.env，不会写入项目 .linghun/settings.json。",
+          `- 写入位置：${setup.providerEnvPath}`,
+          setup.createdTemplate ? "- 已创建带注释模板，后续可直接编辑这个文件。" : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+    baseUrlPrompt: english
+      ? "API base URL is missing. Enter the root API URL, for example https://example.com/v1."
+      : "缺少 API 地址。请输入 root API 地址，例如 https://example.com/v1。",
+    apiKeyPrompt: english
+      ? "API key is missing. Enter it now; input is masked when possible and the raw value will not be printed."
+      : "缺少 API key。请输入 API key（输入时会尽量 mask，不显示原值）。",
+    modelPrompt: english
+      ? "Model name is missing. Enter the model name."
+      : "缺少模型名称。请输入模型名称。",
+    reasoningPrompt: english
+      ? "Reasoning level: Low / Medium / High. Press Enter to use Medium."
+      : "推理等级可选 Low / Medium / High，默认 Medium。直接回车使用 Medium。",
+    auxModelPrompt: english
+      ? "Auxiliary model is optional. Press Enter to let helper roles follow the main model."
+      : "辅助模型可选，直接回车则跟随主模型。",
+    confirmPrompt: english
+      ? "Type yes/save to save, no to cancel, or details for safety notes."
+      : "请输入 yes 保存，no 取消，details 查看安全说明。",
+    cancelled: english
+      ? "Model setup cancelled. No key was saved."
+      : "已取消模型配置，未保存任何 key。",
+    details: english
+      ? [
+          "Safety notes",
+          `- provider.env path: ${setup.providerEnvPath}`,
+          "- Shell env has highest priority, then user provider.env, then existing settings/default.",
+          "- The raw key is not displayed and is not written to project settings, docs, reports, or logs.",
+          "- Role routes can stay unset; they follow the main model by default.",
+        ].join("\n")
+      : [
+          "安全说明",
+          `- provider.env 路径：${setup.providerEnvPath}`,
+          "- shell env 变量优先级最高，其次用户 provider.env，再走现有 settings/default。",
+          "- 真实 key 不会显示、不写入项目 settings、不写入文档或报告。",
+          "- 不设置角色路由也可以正常使用，角色默认跟随主模型。",
+        ].join("\n"),
+  };
+  return messagesByKey[key];
+}
+
+function formatModelSetupFallbackError(context: TuiContext): string {
+  return context.language === "en-US"
+    ? "Validation failed. Complete the missing fields and try again."
+    : "检查未通过，请补全缺失项。";
+}
+
+function formatModelSetupSummary(setup: PendingModelSetup, context: TuiContext): string {
+  const english = context.language === "en-US";
   return [
-    "模型配置摘要",
+    english ? "Model setup summary" : "模型配置摘要",
     "- provider=openai-compatible",
     `- baseUrl=${setup.values.baseUrl ? "present" : "missing"}`,
     `- apiKey=${setup.values.apiKey ? "present" : "missing"}`,
     `- model=${setup.values.model ?? "missing"}`,
     `- reasoningLevel=${setup.values.reasoningLevel ?? "Medium"}`,
-    `- 写入位置：${setup.providerEnvPath}`,
-    "请输入 yes 保存，no 取消，details 查看安全说明。",
+    `${english ? "- save location" : "- 写入位置"}：${setup.providerEnvPath}`,
+    english
+      ? "Type yes/save to save. The raw API key is not shown."
+      : "请输入 yes/保存 确认后才会写入；摘要不会显示 key 原值。",
   ].join("\n");
 }
 
-function formatModelSetupSaved(path: string): string {
-  return [
-    "已保存，请重启 Linghun 后使用。",
-    `- 写入位置：${path}`,
-    "- 后续想更换 API 地址、key 或模型名称，可运行 /model setup 重新配置，或编辑上述 provider.env。",
-    "- 检查配置可运行 /model doctor。",
-    "可选增强：Linghun 支持角色路由，可以把规划、执行、复查、验证分给不同模型。这样可以让强模型只用于关键步骤，日常步骤使用更便宜或更快的模型，帮助降低成本。不设置也可以正常使用；以后可运行 `/model route` 调整。",
-    "Optional: Linghun supports role routing, so planning, execution, review, and verification can use different models. Stronger models can handle critical steps while cheaper or faster models handle routine work. You can skip it now and change it later with `/model route`.",
-  ].join("\n");
+function formatModelSetupSaved(path: string, context: TuiContext): string {
+  return context.language === "en-US"
+    ? [
+        "Saved. Restart Linghun to use the new user provider config.",
+        `- User provider.env: ${path}`,
+        "- This is user-scoped and will be reused by other repositories by default.",
+        "- To change API URL, key, or model later, run /model setup or edit provider.env.",
+        "- Check configuration with /model doctor.",
+      ].join("\n")
+    : [
+        "已保存，请重启 Linghun 后使用新的用户级 provider 配置。",
+        `- 用户 provider.env：${path}`,
+        "- 这是用户级配置，之后进入其他仓库会默认复用。",
+        "- 后续想更换 API 地址、key 或模型名称，可运行 /model setup，或编辑上述 provider.env。",
+        "- 检查配置可运行 /model doctor。",
+      ].join("\n");
 }
 
 async function handleModelRouteCommand(
@@ -4734,13 +4915,73 @@ function maskSecret(secret: string): string {
   return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
+function shouldOfferUserScopedModelSetup(context: TuiContext): boolean {
+  return !getProjectModelRouteProblem(context) && hasSelectedProviderConfigProblem(context);
+}
+
+async function getStartupProjectRouteProblem(context: TuiContext): Promise<string | undefined> {
+  const projectRoute = await readProjectExecutorRouteOverride(context.projectPath);
+  if (projectRoute) {
+    return getProjectModelRouteProblemForRoute(projectRoute, context);
+  }
+  return getProjectModelRouteProblem(context);
+}
+
+async function readProjectExecutorRouteOverride(
+  projectPath: string,
+): Promise<RoleModelRoute | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(getProjectSettingsPath(projectPath), "utf8")) as {
+      modelRoutes?: { routes?: RoleModelRoute[] };
+    };
+    return parsed.modelRoutes?.routes?.find((route) => route.role === "executor");
+  } catch {
+    return undefined;
+  }
+}
+
+function getProjectModelRouteProblem(context: TuiContext): string | undefined {
+  const route = getRoleRoute(context, "executor");
+  if (isDefaultExecutorRoute(route, context.config)) return undefined;
+  return getProjectModelRouteProblemForRoute(route, context);
+}
+
+function getProjectModelRouteProblemForRoute(
+  route: RoleModelRoute,
+  context: TuiContext,
+): string | undefined {
+  const providerId = route.provider || resolveProviderForModel(context.config, route.primaryModel);
+  const provider = context.config.providers[providerId];
+  if (!provider) {
+    return `executor route points to provider=${providerId || "unknown"}, but that provider is not configured`;
+  }
+  if (provider.type === "openai-compatible" && hasOpenAiCompatibleProviderSetupProblem(provider)) {
+    return undefined;
+  }
+  if (!route.primaryModel || route.primaryModel === "openai-compatible-model") {
+    return `executor route primaryModel=${route.primaryModel || "missing"} is not a concrete model`;
+  }
+  return undefined;
+}
+
 function hasSelectedProviderConfigProblem(context: TuiContext): boolean {
   const runtime = getSelectedModelRuntime(context);
   const provider = context.config.providers[runtime.provider];
   if (!provider) return true;
-  if (!provider.apiKey) return true;
-  if (provider.type !== "openai-compatible") return false;
-  return !provider.baseUrl || !provider.model || provider.model === "openai-compatible-model";
+  if (provider.type !== "openai-compatible") return !provider.apiKey || !provider.model;
+  return hasOpenAiCompatibleProviderSetupProblem(provider);
+}
+
+function hasOpenAiCompatibleProviderSetupProblem(
+  provider: LinghunConfig["providers"][string],
+): boolean {
+  return (
+    provider.type === "openai-compatible" &&
+    (!provider.baseUrl ||
+      !provider.apiKey ||
+      !provider.model ||
+      provider.model === "openai-compatible-model")
+  );
 }
 
 function hasOpenAiCompatibleDoctorProblem(context: TuiContext): boolean {
@@ -12681,6 +12922,11 @@ export async function handleNaturalInput(
         : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
     );
     writeStatus(output, context);
+    return "handled";
+  }
+
+  if (shouldOfferUserScopedModelSetup(context) && looksLikeModelSetupInput(text)) {
+    await startModelSetup(context, output, parseModelSetupPrefill(text));
     return "handled";
   }
 
