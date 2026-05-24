@@ -27,3 +27,27 @@ export function isRawPermissionMode(value: unknown): value is RawPermissionMode 
     value === "bypass"
   );
 }
+
+export function normalizePathSeparators(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+export function canonicalPathForCompare(
+  path: string,
+  caseInsensitive = process.platform === "win32",
+): string {
+  const normalized = normalizePathSeparators(path);
+  return caseInsensitive ? normalized.toLowerCase() : normalized;
+}
+
+export function isPathInside(
+  candidatePath: string,
+  rootPath: string,
+  caseInsensitive = process.platform === "win32",
+): boolean {
+  const candidate = canonicalPathForCompare(candidatePath, caseInsensitive);
+  const root = canonicalPathForCompare(rootPath, caseInsensitive);
+  if (candidate === root) return true;
+  const rootWithSlash = root.endsWith("/") ? root : `${root}/`;
+  return candidate.startsWith(rootWithSlash);
+}

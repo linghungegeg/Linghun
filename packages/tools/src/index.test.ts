@@ -193,6 +193,22 @@ describe("Phase 05 core tools", () => {
     ).rejects.toThrow("路径越界");
   });
 
+  it("accepts Windows drive-letter casing differences inside the workspace", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const filePath = join(project, "sample.txt");
+    await writeFile(filePath, "alpha\n", "utf8");
+    const context = createToolContext(
+      process.platform === "win32" ? `${project[0]?.toLowerCase()}${project.slice(1)}` : project,
+    );
+    const inputPath =
+      process.platform === "win32" ? `${filePath[0]?.toUpperCase()}${filePath.slice(1)}` : filePath;
+
+    const read = await runTool("Read", { path: inputPath }, context);
+
+    expect(read.output.data).toMatchObject({ path: "sample.txt" });
+    expect(read.output.text).toContain("alpha");
+  });
+
   it("guards edits with read-before-edit and stale file detection", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const filePath = join(project, "sample.txt");

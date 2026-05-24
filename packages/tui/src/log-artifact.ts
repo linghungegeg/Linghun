@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { isPathInside, normalizePathSeparators } from "@linghun/shared";
 
 export type LogArtifactSource = {
   backgroundId?: string;
@@ -169,12 +170,12 @@ async function resolveLogArtifactPath(
 async function ensureAllowedPath(path: string, registry: LogArtifactRegistry): Promise<string> {
   const resolved = resolve(registry.workspaceRoot, path);
   const roots = [registry.workspaceRoot, ...(registry.logRoots ?? [])].map((root) => resolve(root));
-  if (!roots.some((root) => isInside(resolved, root))) {
+  if (!roots.some((root) => isPathInside(resolved, root))) {
     throw new Error("拒绝读取日志 artifact：路径不在 workspace 或已知 log root 内。");
   }
   const realResolved = await realpath(resolved).catch(() => resolved);
   const realRoots = await Promise.all(roots.map((root) => realpath(root).catch(() => root)));
-  if (!realRoots.some((root) => isInside(realResolved, root))) {
+  if (!realRoots.some((root) => isPathInside(realResolved, root))) {
     throw new Error("拒绝读取日志 artifact：路径不在 workspace 或已知 log root 内。");
   }
   return realResolved;
@@ -191,27 +192,11 @@ async function ensureEvidenceSourceArtifactPath(
       : [resolve(registry.workspaceRoot, ".linghun", "logs")]
   ).map((root) => resolve(root));
   const realLogRoots = await Promise.all(logRoots.map((root) => realpath(root).catch(() => root)));
-  if (realLogRoots.some((root) => isInside(resolved, root))) {
+  if (realLogRoots.some((root) => isPathInside(resolved, root))) {
     return resolved;
   }
   throw new Error(
     "Evidence source 不是 log/output artifact：请用 Read 或其他合适工具查看普通 workspace 文件。",
-  );
-}
-
-function normalizePathForCompare(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-function isInside(path: string, root: string): boolean {
-  const normalizedPath = normalizePathForCompare(path);
-  const normalizedRoot = normalizePathForCompare(root);
-  return (
-    normalizedPath === normalizedRoot ||
-    normalizedPath.startsWith(
-      `${normalizedRoot}${normalizedRoot.endsWith("/") || normalizedRoot.endsWith("\\") ? "" : "\\"}`,
-    ) ||
-    normalizedPath.startsWith(`${normalizedRoot}/`)
   );
 }
 
@@ -482,7 +467,7 @@ function clampPositive(value: number | undefined, fallback: number, max: number)
 }
 
 function formatDisplaySourcePath(sourcePath: string): string {
-  const normalized = sourcePath.replace(/\\/g, "/");
+  const normalized = normalizePathSeparators(sourcePath);
   const logRootIndex = normalized.indexOf("/.linghun/logs/");
   if (logRootIndex >= 0) {
     return normalized.slice(logRootIndex + 1);

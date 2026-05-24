@@ -321,4 +321,23 @@ describe("Log Artifact Runtime Lite", () => {
     expect(formatted).not.toContain(logPath);
     expect(formatted).not.toContain("repeat target 60");
   });
+
+  it("keeps Chinese and space project roots redacted in displayed log paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "灵魂 项目 空格-"));
+    const logRoot = join(project, ".linghun", "logs", "tools");
+    const logPath = join(logRoot, "中文 artifact.log");
+    await mkdir(logRoot, { recursive: true });
+    await writeFile(logPath, "中文路径日志\n", "utf8");
+
+    const slice = await readLogArtifactSlice(
+      { path: logPath },
+      { mode: "tail", lines: 1 },
+      { workspaceRoot: project, logRoots: [join(project, ".linghun", "logs")] },
+    );
+    const formatted = formatLogArtifactSlice(slice, "zh-CN");
+
+    expect(formatted).toContain("sourcePath: .linghun/logs/tools/中文 artifact.log");
+    expect(formatted).not.toContain(project);
+    expect(formatted).not.toContain(logPath);
+  });
 });

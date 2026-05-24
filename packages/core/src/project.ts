@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
+import { canonicalPathForCompare, normalizePathSeparators } from "@linghun/shared";
 
 export type ProjectIdentity = {
   projectId: string;
@@ -21,5 +22,5 @@ export function identifyProject(projectPath = process.cwd()): ProjectIdentity {
 }
 
 export function normalizeProjectPath(projectPath: string): string {
-  return resolve(projectPath).replaceAll("\\", "/").toLowerCase();
+  return canonicalPathForCompare(normalizePathSeparators(resolve(projectPath)), true);
 }
