@@ -10936,11 +10936,17 @@ async function refreshWorkspaceReferenceCache(
   });
 }
 
+// Static hash: builtInTools never changes at runtime; avoid recomputing on every probe
+let _builtInToolsHashCache: string | undefined;
+
 function createWorkspaceReferenceDimensions(context: TuiContext) {
   const runtime = getSelectedModelRuntime(context);
+  if (!_builtInToolsHashCache) {
+    _builtInToolsHashCache = stableHash(builtInTools);
+  }
   return {
     configHash: stableHash(createConfigFreshnessSummary(context.config)),
-    toolSchemaHash: stableHash(builtInTools),
+    toolSchemaHash: _builtInToolsHashCache,
     providerModelHash: stableHash({ provider: runtime.provider, model: runtime.model }),
     mcpToolListHash: stableHash(stabilizeMcpToolList(context.mcp.tools)),
     indexFreshnessHash: stableHash({

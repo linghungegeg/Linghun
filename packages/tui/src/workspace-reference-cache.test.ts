@@ -254,6 +254,170 @@ describe("workspace reference cache", () => {
     );
   });
 
+  it("coalesces concurrent probes with identical input into a single scan", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    await writeFile(join(project, "README.md"), "# Coalesce test\n", "utf8");
+    const cache = createWorkspaceReferenceCache();
+    let scanCount = 0;
+    const scan = vi.fn(async (input: { projectPath: string }) => {
+      scanCount += 1;
+      // Simulate async work
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const readmeStat = await stat(join(input.projectPath, "README.md"));
+      return {
+        dimensions: dimensions(),
+        files: [
+          {
+            path: "README.md",
+            exists: true,
+            readable: true,
+            size: readmeStat.size,
+            mtimeMs: Math.trunc(readmeStat.mtimeMs),
+            hash: "coalesce-hash",
+          },
+        ],
+        directories: [],
+        runtimeStatus: { permissionMode: "default" },
+        toolCapabilitySummary: "/read Read files",
+        evidenceRefs: [],
+        logRefs: [],
+      };
+    });
+    const input = {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: { permissionMode: "default" },
+      toolCapabilitySummary: "/read Read files",
+      evidenceRefs: [],
+      logRefs: [],
+      watchedFiles: ["README.md"],
+      watchedDirectories: [],
+    };
+
+    // Fire 3 concurrent calls with identical input
+    const [r1, r2, r3] = await Promise.all([
+      getWorkspaceReferenceSnapshot(cache, input, scan),
+      getWorkspaceReferenceSnapshot(cache, input, scan),
+      getWorkspaceReferenceSnapshot(cache, input, scan),
+    ]);
+
+    // Only one scan should have been triggered
+    expect(scan).toHaveBeenCalledTimes(1);
+    // All results should be identical
+    expect(r1.key).toBe(r2.key);
+    expect(r2.key).toBe(r3.key);
+    expect(r1.files[0]?.hash).toBe("coalesce-hash");
+    expect(r2.files[0]?.hash).toBe("coalesce-hash");
+    expect(r3.files[0]?.hash).toBe("coalesce-hash");
+    // After resolution, pending probe should be cleared
+    expect(cache._pendingProbe).toBeUndefined();
+    expect(cache._pendingProbeInputHash).toBeUndefined();
+  });
+
+  it("does not coalesce concurrent probes when evidenceRefs or logRefs or runtimeStatus differ", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    await writeFile(join(project, "README.md"), "# No-coalesce test\n", "utf8");
+    const cache = createWorkspaceReferenceCache();
+    const scan = vi.fn(
+      async (input: {
+        projectPath: string;
+        evidenceRefs?: string[];
+        logRefs?: string[];
+        runtimeStatus?: unknown;
+      }) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const readmeStat = await stat(join(input.projectPath, "README.md"));
+        return {
+          dimensions: dimensions(),
+          files: [
+            {
+              path: "README.md",
+              exists: true,
+              readable: true,
+              size: readmeStat.size,
+              mtimeMs: Math.trunc(readmeStat.mtimeMs),
+              hash: "no-coalesce-hash",
+            },
+          ],
+          directories: [],
+          runtimeStatus: input.runtimeStatus ?? { permissionMode: "default" },
+          toolCapabilitySummary: "/read Read files",
+          evidenceRefs: input.evidenceRefs ?? [],
+          logRefs: input.logRefs ?? [],
+        };
+      },
+    );
+    const baseInput = {
+      projectPath: project,
+      dimensions: dimensions(),
+      toolCapabilitySummary: "/read Read files",
+      watchedFiles: ["README.md"],
+      watchedDirectories: [],
+    };
+
+    // Concurrent calls with different evidenceRefs
+    const [rA, rB] = await Promise.all([
+      getWorkspaceReferenceSnapshot(
+        cache,
+        { ...baseInput, runtimeStatus: { mode: "a" }, evidenceRefs: ["ev-1"], logRefs: [] },
+        scan,
+      ),
+      getWorkspaceReferenceSnapshot(
+        cache,
+        { ...baseInput, runtimeStatus: { mode: "a" }, evidenceRefs: ["ev-2"], logRefs: [] },
+        scan,
+      ),
+    ]);
+
+    // Must NOT coalesce — scan called at least 2 times
+    expect(scan).toHaveBeenCalledTimes(2);
+    // Each snapshot preserves its own evidence
+    expect(rA.evidenceRefs).toContain("ev-1");
+    expect(rB.evidenceRefs).toContain("ev-2");
+
+    // Reset for logRefs test
+    scan.mockClear();
+    const cache2 = createWorkspaceReferenceCache();
+    const [rC, rD] = await Promise.all([
+      getWorkspaceReferenceSnapshot(
+        cache2,
+        { ...baseInput, runtimeStatus: { mode: "x" }, evidenceRefs: [], logRefs: ["log-a"] },
+        scan,
+      ),
+      getWorkspaceReferenceSnapshot(
+        cache2,
+        { ...baseInput, runtimeStatus: { mode: "x" }, evidenceRefs: [], logRefs: ["log-b"] },
+        scan,
+      ),
+    ]);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(rC.logRefs).toContain("log-a");
+    expect(rD.logRefs).toContain("log-b");
+
+    // Reset for runtimeStatus test
+    scan.mockClear();
+    const cache3 = createWorkspaceReferenceCache();
+    const [rE, rF] = await Promise.all([
+      getWorkspaceReferenceSnapshot(
+        cache3,
+        { ...baseInput, runtimeStatus: { model: "gpt-4" }, evidenceRefs: [], logRefs: [] },
+        scan,
+      ),
+      getWorkspaceReferenceSnapshot(
+        cache3,
+        { ...baseInput, runtimeStatus: { model: "claude" }, evidenceRefs: [], logRefs: [] },
+        scan,
+      ),
+    ]);
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(rE.runtimeStatus).toEqual({ model: "gpt-4" });
+    expect(rF.runtimeStatus).toEqual({ model: "claude" });
+
+    // Pending probe cleared after all
+    expect(cache3._pendingProbe).toBeUndefined();
+    expect(cache3._pendingProbeInputHash).toBeUndefined();
+  });
+
   it("keeps watched file hashing on bounded open/read path", async () => {
     const source = await readFile(
       join(process.cwd(), "packages/tui/src/workspace-reference-cache.ts"),

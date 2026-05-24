@@ -118,6 +118,8 @@ export type WorkspaceReferenceCache = {
   hits: number;
   misses: number;
   failures: number;
+  _pendingProbe?: Promise<WorkspaceReferenceSnapshot>;
+  _pendingProbeInputHash?: string;
 };
 
 export type WorkspaceReferenceInput = {
@@ -151,6 +153,40 @@ export async function getWorkspaceReferenceSnapshot(
   scan: (
     input: WorkspaceReferenceInput,
   ) => Promise<WorkspaceReferenceScan> = scanWorkspaceReference,
+): Promise<WorkspaceReferenceSnapshot> {
+  // Probe coalescing: if an identical probe is already in-flight, reuse it
+  const inputHash = stableHash({
+    projectPath: input.projectPath,
+    dimensions: input.dimensions,
+    runtimeStatus: input.runtimeStatus,
+    toolCapabilitySummary: input.toolCapabilitySummary,
+    evidenceRefs: input.evidenceRefs ?? [],
+    logRefs: input.logRefs ?? [],
+    watchedFiles: input.watchedFiles ?? DEFAULT_WATCHED_FILES,
+    watchedDirectories: input.watchedDirectories ?? DEFAULT_WATCHED_DIRECTORIES,
+    fileHashBytes: input.fileHashBytes ?? DEFAULT_FILE_HASH_BYTES,
+  });
+  if (cache._pendingProbe && cache._pendingProbeInputHash === inputHash) {
+    return cache._pendingProbe;
+  }
+
+  const promise = _getWorkspaceReferenceSnapshotInner(cache, input, scan);
+  cache._pendingProbe = promise;
+  cache._pendingProbeInputHash = inputHash;
+  try {
+    return await promise;
+  } finally {
+    if (cache._pendingProbe === promise) {
+      cache._pendingProbe = undefined;
+      cache._pendingProbeInputHash = undefined;
+    }
+  }
+}
+
+async function _getWorkspaceReferenceSnapshotInner(
+  cache: WorkspaceReferenceCache,
+  input: WorkspaceReferenceInput,
+  scan: (input: WorkspaceReferenceInput) => Promise<WorkspaceReferenceScan>,
 ): Promise<WorkspaceReferenceSnapshot> {
   try {
     if (cache.latest) {

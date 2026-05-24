@@ -927,10 +927,15 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   ),
 ];
 
+let _sortedCatalogCache: CommandCapability[] | undefined;
+
 export function getCommandCapabilityCatalog(): CommandCapability[] {
-  return [...COMMAND_CAPABILITY_DATA].sort(
-    (a, b) => a.slash.localeCompare(b.slash) || a.id.localeCompare(b.id),
-  );
+  if (!_sortedCatalogCache) {
+    _sortedCatalogCache = [...COMMAND_CAPABILITY_DATA].sort(
+      (a, b) => a.slash.localeCompare(b.slash) || a.id.localeCompare(b.id),
+    );
+  }
+  return [..._sortedCatalogCache];
 }
 
 export function validateCommandCapabilityCoverage(
@@ -1040,12 +1045,18 @@ export function buildRuntimeStatusForModel(context: RuntimeStatusSource): Runtim
   };
 }
 
+const _capabilitySummaryCache = new Map<number, string>();
+
 export function createModelCapabilitySummary(limit = 30): string {
-  return getCommandCapabilityCatalog()
+  const cached = _capabilitySummaryCache.get(limit);
+  if (cached !== undefined) return cached;
+  const result = getCommandCapabilityCatalog()
     .filter((item) => item.modelInvocable || item.bridgeSafe)
     .slice(0, limit)
     .map((item) => `${item.slash} ${item.titleEn}: risk=${item.risk}; ${item.whenToUseEn}`)
     .join("\n");
+  _capabilitySummaryCache.set(limit, result);
+  return result;
 }
 
 export function routeNaturalIntent(

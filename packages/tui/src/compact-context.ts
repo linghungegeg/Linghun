@@ -44,19 +44,40 @@ export function microCompactMessages(
     0,
     options.preserveRecentMessages ?? DEFAULT_PRESERVE_RECENT_MESSAGES,
   );
-  const selected: ModelMessage[] = [];
-  for (const group of groups.slice().reverse()) {
-    const next = [...group.messages, ...selected];
-    const nextChars = estimateModelMessagesChars(next);
-    if (selected.length >= keepRecent && nextChars > maxChars) {
-      break;
+
+  // Walk groups in reverse, tracking which groups to keep (avoids O(n²) unshift)
+  const keepFromIndex = (() => {
+    let accumulatedChars = 0;
+    let accumulatedMessages = 0;
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      const group = groups[i];
+      if (!group) continue;
+      const groupChars = estimateModelMessagesChars(group.messages);
+      if (accumulatedMessages >= keepRecent && accumulatedChars + groupChars > maxChars) {
+        return i + 1;
+      }
+      accumulatedChars += groupChars;
+      accumulatedMessages += group.messages.length;
     }
-    selected.unshift(...group.messages);
+    return 0;
+  })();
+
+  // Flatten kept groups in forward order
+  const selected: ModelMessage[] = [];
+  for (let i = keepFromIndex; i < groups.length; i += 1) {
+    const group = groups[i];
+    if (!group) continue;
+    for (const msg of group.messages) {
+      selected.push(msg);
+    }
   }
 
   const system = messages[0]?.role === "system" ? messages[0] : undefined;
   const finalMessages = system && selected[0] !== system ? [system, ...selected] : selected;
-  const removed = messages.filter((message) => !finalMessages.includes(message));
+
+  // Use a Set for O(1) membership check instead of O(n×m) includes
+  const finalSet = new Set(finalMessages);
+  const removed = messages.filter((message) => !finalSet.has(message));
   const preservedEvidenceRefs = collectEvidenceRefs(finalMessages);
   const compactedToolResultIds = removed
     .filter(

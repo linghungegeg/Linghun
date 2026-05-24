@@ -398,14 +398,17 @@ function sliceDisplayEnd(value: string, max: number): string {
   return result;
 }
 
+const CJK_WIDE_CHAR_RE =
+  /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u;
+
 function displayWidth(value: string): number {
-  return Array.from(value).reduce((sum, char) => sum + charWidth(char), 0);
+  let width = 0;
+  for (const char of value) {
+    width += CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
+  }
+  return width;
 }
 
 function charWidth(char: string): number {
-  return /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(
-    char,
-  )
-    ? 2
-    : 1;
+  return CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
 }
