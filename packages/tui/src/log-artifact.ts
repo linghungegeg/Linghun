@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -55,6 +55,9 @@ const DEFAULT_MAX_OUTPUT_LINES = 200;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const MAX_CONTEXT_LINES = 5;
 const UTF8_BOUNDARY_PADDING_BYTES = 4;
+const MAX_EXACT_LINE_PREFIX_BYTES = 256 * 1024;
+const RELATIVE_LINE_NUMBER_WARNING =
+  "Line numbers are relative to the bounded scan window; exact prefix scan was skipped for performance.";
 const COMPLETE_ARTIFACT_WITHHELD_WARNING =
   "Complete artifact withheld; showing a bounded slice only.";
 const ERROR_CANDIDATE_PATTERN =
@@ -65,7 +68,7 @@ export async function readLogArtifactSlice(
   request: LogArtifactRequest,
   registry: LogArtifactRegistry,
 ): Promise<LogArtifactSlice> {
-  const sourcePath = resolveLogArtifactPath(source, registry);
+  const sourcePath = await resolveLogArtifactPath(source, registry);
   const info = await stat(sourcePath).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       throw new Error(`日志 artifact 不存在：${sourcePath}。请确认任务已产生输出。`);
@@ -119,7 +122,10 @@ export function formatLogArtifactSlice(
   return lines.join("\n");
 }
 
-function resolveLogArtifactPath(source: LogArtifactSource, registry: LogArtifactRegistry): string {
+async function resolveLogArtifactPath(
+  source: LogArtifactSource,
+  registry: LogArtifactRegistry,
+): Promise<string> {
   if (source.backgroundId) {
     const background = registry.backgrounds?.find(
       (item) => item.id === source.backgroundId || item.id.endsWith(source.backgroundId ?? ""),
@@ -160,23 +166,32 @@ function resolveLogArtifactPath(source: LogArtifactSource, registry: LogArtifact
   throw new Error("缺少 log artifact source：需要 backgroundId、evidenceId 或 path。");
 }
 
-function ensureAllowedPath(path: string, registry: LogArtifactRegistry): string {
+async function ensureAllowedPath(path: string, registry: LogArtifactRegistry): Promise<string> {
   const resolved = resolve(registry.workspaceRoot, path);
   const roots = [registry.workspaceRoot, ...(registry.logRoots ?? [])].map((root) => resolve(root));
   if (!roots.some((root) => isInside(resolved, root))) {
     throw new Error("拒绝读取日志 artifact：路径不在 workspace 或已知 log root 内。");
   }
-  return resolved;
+  const realResolved = await realpath(resolved).catch(() => resolved);
+  const realRoots = await Promise.all(roots.map((root) => realpath(root).catch(() => root)));
+  if (!realRoots.some((root) => isInside(realResolved, root))) {
+    throw new Error("拒绝读取日志 artifact：路径不在 workspace 或已知 log root 内。");
+  }
+  return realResolved;
 }
 
-function ensureEvidenceSourceArtifactPath(path: string, registry: LogArtifactRegistry): string {
-  const resolved = ensureAllowedPath(path, registry);
+async function ensureEvidenceSourceArtifactPath(
+  path: string,
+  registry: LogArtifactRegistry,
+): Promise<string> {
+  const resolved = await ensureAllowedPath(path, registry);
   const logRoots = (
     registry.logRoots?.length
       ? registry.logRoots
       : [resolve(registry.workspaceRoot, ".linghun", "logs")]
   ).map((root) => resolve(root));
-  if (logRoots.some((root) => isInside(resolved, root))) {
+  const realLogRoots = await Promise.all(logRoots.map((root) => realpath(root).catch(() => root)));
+  if (realLogRoots.some((root) => isInside(resolved, root))) {
     return resolved;
   }
   throw new Error(
@@ -184,11 +199,19 @@ function ensureEvidenceSourceArtifactPath(path: string, registry: LogArtifactReg
   );
 }
 
+function normalizePathForCompare(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
 function isInside(path: string, root: string): boolean {
+  const normalizedPath = normalizePathForCompare(path);
+  const normalizedRoot = normalizePathForCompare(root);
   return (
-    path === root ||
-    path.startsWith(`${root}${root.endsWith("/") || root.endsWith("\\") ? "" : "\\"}`) ||
-    path.startsWith(`${root}/`)
+    normalizedPath === normalizedRoot ||
+    normalizedPath.startsWith(
+      `${normalizedRoot}${normalizedRoot.endsWith("/") || normalizedRoot.endsWith("\\") ? "" : "\\"}`,
+    ) ||
+    normalizedPath.startsWith(`${normalizedRoot}/`)
   );
 }
 
@@ -213,8 +236,8 @@ async function readTail(
   const usableLines = readStart > 0 ? allLines.slice(1) : allLines;
   const selected = preventCompleteLineDump(usableLines.slice(-lines), usableLines.length);
   const truncated = readStart > 0 || usableLines.length > selected.lines.length;
-  const firstUsableLine =
-    readStart > 0 ? (await countLineBreaksBeforeOffset(sourcePath, readStart)) + 2 : 1;
+  const numbering = await resolveLineNumberOffset(sourcePath, readStart);
+  const firstUsableLine = readStart > 0 ? numbering.countBeforeStart + 2 : 1;
   const tailStartLine = firstUsableLine + Math.max(0, usableLines.length - lines);
   const selectedStartLine =
     selected.lines.length > 0 ? tailStartLine + (selected.withheld ? 1 : 0) : undefined;
@@ -223,6 +246,7 @@ async function readTail(
   const warnings = [
     ...(selected.withheld ? [COMPLETE_ARTIFACT_WITHHELD_WARNING] : []),
     ...(truncated ? ["Output capped; increase --tail lines only when necessary."] : []),
+    ...(!numbering.exact ? [RELATIVE_LINE_NUMBER_WARNING] : []),
   ];
   return {
     sourcePath,
@@ -255,7 +279,8 @@ async function readGrep(
     MAX_CONTEXT_LINES,
   );
   const readStart = Math.max(0, fileSize - maxBytes - UTF8_BOUNDARY_PADDING_BYTES);
-  let lineNumber = readStart > 0 ? await countLineBreaksBeforeOffset(sourcePath, readStart) : 0;
+  const numbering = await resolveLineNumberOffset(sourcePath, readStart);
+  let lineNumber = numbering.countBeforeStart;
   const stream = createReadStream(sourcePath, { encoding: "utf8", start: readStart });
   const reader = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
   const before: Array<{ line: number; text: string }> = [];
@@ -317,6 +342,7 @@ async function readGrep(
     ...(truncated
       ? ["Output capped; narrow the pattern or inspect a smaller artifact slice."]
       : []),
+    ...(!numbering.exact ? [RELATIVE_LINE_NUMBER_WARNING] : []),
     ...(matches.length === 0 ? ["No matches found in the bounded scan window."] : []),
   ];
 
@@ -365,10 +391,20 @@ function pushLine(
   outputLines.push({ line: item.line, text: redactLogContent(item.text) });
 }
 
-async function countLineBreaksBeforeOffset(sourcePath: string, offset: number): Promise<number> {
+async function resolveLineNumberOffset(
+  sourcePath: string,
+  offset: number,
+): Promise<{ countBeforeStart: number; exact: boolean }> {
   if (offset <= 0) {
-    return 0;
+    return { countBeforeStart: 0, exact: true };
   }
+  if (offset > MAX_EXACT_LINE_PREFIX_BYTES) {
+    return { countBeforeStart: 0, exact: false };
+  }
+  return { countBeforeStart: await countLineBreaksBeforeOffset(sourcePath, offset), exact: true };
+}
+
+async function countLineBreaksBeforeOffset(sourcePath: string, offset: number): Promise<number> {
   return new Promise((resolveCount, reject) => {
     let count = 0;
     const stream = createReadStream(sourcePath, { start: 0, end: offset - 1 });

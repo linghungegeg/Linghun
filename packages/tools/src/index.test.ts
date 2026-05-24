@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,36 @@ describe("Phase 05 core tools", () => {
     expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
+  it("preserves UTF-8 Chinese stdout and stderr in Bash logs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const progress: string[] = [];
+    context.onProgress = (event) => {
+      progress.push(`${event.stream}:${event.text}`);
+    };
+
+    const bash = await runTool(
+      "Bash",
+      {
+        command:
+          "node -e \"process.stdout.write('标准输出：你好\\n'); process.stderr.write('错误输出：再见\\n');\"",
+      },
+      context,
+    );
+    const fullOutputPath = bash.output.fullOutputPath;
+    if (!fullOutputPath) {
+      throw new Error("Bash full output path was not recorded");
+    }
+    const fullLog = await readFile(fullOutputPath, "utf8");
+
+    expect(progress.join("")).toContain("stdout:标准输出：你好");
+    expect(progress.join("")).toContain("stderr:错误输出：再见");
+    expect(fullLog).toContain("标准输出：你好");
+    expect(fullLog).toContain("错误输出：再见");
+    expect(fullLog).not.toContain("�");
+    expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
+  });
+
   it("marks Bash timeout and cancellation outcomes without pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
@@ -94,6 +124,61 @@ describe("Phase 05 core tools", () => {
     expect(cancelled.output.text).toContain("工具调用已取消");
   });
 
+  it("terminates child and grandchild Bash processes on timeout and cancellation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const scriptPath = join(project, "spawn-grandchild.cjs");
+    await writeFile(
+      scriptPath,
+      [
+        "const { spawn } = require('node:child_process');",
+        "const sentinel = process.argv[2];",
+        "spawn(process.execPath, ['-e', `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'alive'), 1200); setTimeout(() => {}, 5000);`], { stdio: 'ignore' });",
+        "setTimeout(() => {}, 5000);",
+      ].join("\n"),
+      "utf8",
+    );
+    const waitForForceKill = () => new Promise((resolve) => setTimeout(resolve, 1_700));
+
+    const timeoutSentinel = join(project, "timeout-grandchild.txt");
+    const timeout = await runTool(
+      "Bash",
+      {
+        command: `node ${JSON.stringify(scriptPath)} ${JSON.stringify(timeoutSentinel)}`,
+        timeoutMs: 50,
+      },
+      createToolContext(project),
+    );
+    await waitForForceKill();
+
+    expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
+    if (process.platform === "win32") {
+      await expect(readFile(timeoutSentinel, "utf8")).rejects.toThrow();
+    }
+    await rm(timeoutSentinel, { force: true });
+
+    const cancelSentinel = join(project, "cancel-grandchild.txt");
+    const cancelContext = createToolContext(project);
+    const controller = new AbortController();
+    cancelContext.abortSignal = controller.signal;
+    const running = runTool(
+      "Bash",
+      {
+        command: `node ${JSON.stringify(scriptPath)} ${JSON.stringify(cancelSentinel)}`,
+        timeoutMs: 5_000,
+      },
+      cancelContext,
+    );
+    controller.abort();
+    const cancelled = await running;
+    await waitForForceKill();
+
+    expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
+    if (process.platform === "win32") {
+      await expect(readFile(cancelSentinel, "utf8")).rejects.toThrow();
+    }
+    await rm(cancelSentinel, { force: true });
+  });
+
   it("rejects non-unique edits and workspace escape writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await writeFile(join(project, "sample.txt"), "same\nsame\n", "utf8");
@@ -125,6 +210,23 @@ describe("Phase 05 core tools", () => {
     await expect(
       runTool("Edit", { path: "sample.txt", oldText: "external", newText: "gamma" }, context),
     ).rejects.toThrow("自上次 Read 后被修改");
+  });
+
+  it("detects CRLF and mixed-newline source files without rewriting them", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const crlfPath = join(project, "crlf-source.ts");
+    const mixedPath = join(project, "mixed-source.ts");
+    await writeFile(crlfPath, "const one = 1;\r\nconst two = 2;\r\n", "utf8");
+    await writeFile(mixedPath, "const one = 1;\r\nconst two = 2;\n", "utf8");
+    const context = createToolContext(project);
+
+    const crlf = await runTool("Read", { path: "crlf-source.ts" }, context);
+    const mixed = await runTool("Read", { path: "mixed-source.ts" }, context);
+
+    expect(crlf.output.data).toMatchObject({ newline: "crlf" });
+    expect(mixed.output.data).toMatchObject({ newline: "mixed" });
+    expect(await readFile(crlfPath, "utf8")).toContain("\r\n");
+    expect(await readFile(mixedPath, "utf8")).toContain("\r\n");
   });
 
   it("records editing patch summaries, details, and expectedHash guard", async () => {

@@ -354,6 +354,10 @@ function print(value) {
   console.log(JSON.stringify(value));
 }
 if (argv[0] === "version") {
+  if (mode === "corrupt-version") {
+    console.log("not-json native runner version output");
+    process.exit(0);
+  }
   print({ ok: true, protocol: mode === "mismatch" ? "wrong-protocol.v0" : protocol, version: "0.1.0" });
   process.exit(0);
 }
@@ -2226,6 +2230,60 @@ describe("Phase 06 TUI slash commands", () => {
       fallbackReason: "protocol_mismatch",
     });
     expect(mismatchContext.backgroundTasks).not.toContainEqual(
+      expect.objectContaining({ result: "pass" }),
+    );
+    vi.unstubAllEnvs();
+
+    const corruptProject = await mkdtemp(join(tmpdir(), "linghun-bundled-corrupt-"));
+    const corruptRoot = join(corruptProject, "bundled");
+    await createMockNativeRunner(corruptProject, {
+      runnerDir: join(corruptRoot, platformArch),
+      runnerName:
+        process.platform === "win32" ? "linghun-native-runner.cjs" : "linghun-native-runner",
+    });
+    const corruptStore = new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: corruptProject,
+    });
+    const corruptSession = await corruptStore.create({ model: "deepseek-v4-flash" });
+    const corruptContext = await createTestContext(
+      corruptProject,
+      corruptStore,
+      corruptSession,
+      config,
+    );
+    corruptContext.index.status = "ready";
+    corruptContext.index.projectName = "F-Linghun";
+    corruptContext.lastVerification = createVerificationReportFixture("partial");
+    corruptContext.evidence = [...context.evidence];
+    const corruptOutput = new MemoryOutput();
+    vi.stubEnv("LINGHUN_NATIVE_RUNNER_BUNDLED_DIR", corruptRoot);
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "corrupt-version");
+    await handleSlashCommand("/doctor runner", corruptContext, corruptOutput);
+    await handleSlashCommand(
+      "/job run bundled corrupt output fallback --tokens 50000",
+      corruptContext,
+      corruptOutput,
+    );
+    const corruptJobId = corruptContext.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const corruptState = JSON.parse(
+      await readFile(
+        join(
+          resolveStoragePaths(config, corruptProject).jobs,
+          corruptJobId ?? "missing",
+          "state.json",
+        ),
+        "utf8",
+      ),
+    ) as { runner?: { adapter?: string; resolution?: string; fallbackReason?: string } };
+    expect(corruptOutput.text).toContain("Native Runner Doctor：protocol_mismatch");
+    expect(corruptOutput.text).toContain("fallback reason: protocol mismatch");
+    expect(corruptState.runner).toMatchObject({
+      adapter: "node",
+      resolution: "protocol_mismatch",
+      fallbackReason: "protocol_mismatch",
+    });
+    expect(corruptContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
     vi.unstubAllEnvs();

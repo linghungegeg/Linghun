@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -122,6 +122,27 @@ describe("Log Artifact Runtime Lite", () => {
     expect(slice.matches?.[0]?.line).toBe(202);
   });
 
+  it("skips expensive prefix line scans for large bounded log windows", async () => {
+    const { logPath, registry } = await createRegistry();
+    const earlyNoise = Array.from({ length: 20_000 }, (_, index) => `early noise ${index + 1}`);
+    await writeFile(
+      logPath,
+      [...earlyNoise, "near tail context", "late failure target", "after late failure"].join("\n"),
+      "utf8",
+    );
+
+    const slice = await readLogArtifactSlice(
+      { evidenceId: "ev-log" },
+      { mode: "grep", pattern: "late failure", contextLines: 1, maxBytes: 512 },
+      registry,
+    );
+
+    expect(slice.byteRange?.start).toBeGreaterThan(256 * 1024);
+    expect(slice.content).toContain("late failure target");
+    expect(slice.warnings?.join("\n")).toContain("Line numbers are relative");
+    expect(slice.matches?.[0]?.line).toBeLessThan(20_000);
+  });
+
   it("extracts bounded error candidates without changing verification semantics", async () => {
     const { logPath, registry } = await createRegistry();
     await writeFile(
@@ -157,7 +178,7 @@ describe("Log Artifact Runtime Lite", () => {
 
   it("handles CRLF and Chinese UTF-8 output without mojibake", async () => {
     const { logPath, registry } = await createRegistry();
-    await writeFile(logPath, "第一行\r\n错误：中文输出\r\n最后一行\r\n", "utf8");
+    await writeFile(logPath, "第一行\r\n错误：中文输出\n最后一行\r\n", "utf8");
 
     const slice = await readLogArtifactSlice(
       { backgroundId: "bg-log" },
@@ -165,9 +186,44 @@ describe("Log Artifact Runtime Lite", () => {
       registry,
     );
 
+    const tail = await readLogArtifactSlice(
+      { backgroundId: "bg-log" },
+      { mode: "tail", lines: 2 },
+      registry,
+    );
+
+    expect(slice.content).toContain("第一行");
     expect(slice.content).toContain("错误：中文输出");
     expect(slice.content).not.toContain("�");
+    expect(tail.content).toContain("最后一行");
+    expect(tail.content).not.toContain("�");
     expect(slice.warnings?.join("\n")).toContain("Complete artifact withheld");
+  });
+
+  it("rejects symlink or junction log paths that escape the workspace or log roots", async () => {
+    const { project, registry } = await createRegistry();
+    const outsideDir = await mkdtemp(join(tmpdir(), "linghun-log-outside-"));
+    const outsideLog = join(outsideDir, "outside.log");
+    const linkDir = join(project, "escape-link-dir");
+    const linkedLog = join(linkDir, "outside.log");
+    await writeFile(outsideLog, "outside secret log\n", "utf8");
+    try {
+      await symlink(outsideDir, linkDir, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
+        return;
+      }
+      throw error;
+    }
+
+    await expect(
+      readLogArtifactSlice(
+        { backgroundId: "bg-escape" },
+        { mode: "tail", lines: 1 },
+        { ...registry, backgrounds: [{ id: "bg-escape", outputPath: linkedLog }] },
+      ),
+    ).rejects.toThrow("路径不在 workspace 或已知 log root 内");
   });
 
   it("allows evidence sources only when they are log artifacts", async () => {

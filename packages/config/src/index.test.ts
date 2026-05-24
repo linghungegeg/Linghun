@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  defaultConfig,
   ensureConfigDirs,
   getProjectConfigDir,
   getProjectSettingsPath,
@@ -41,6 +42,40 @@ describe("config directories", () => {
     expect(getSessionRootDir("/tmp/home").replaceAll("\\", "/")).toBe(
       "/tmp/home/.linghun/data/sessions",
     );
+  });
+
+  it("keeps Windows path inputs with Chinese characters, spaces, and drive casing", () => {
+    const project = process.platform === "win32" ? "g:\\灵魂 项目 空格" : "/tmp/灵魂 项目 空格";
+    const paths = resolveStoragePaths(defaultConfig, project, "/tmp/home");
+    const normalizedConfig = getProjectConfigDir(project).replaceAll("\\", "/");
+    const normalizedSettings = getProjectSettingsPath(project).replaceAll("\\", "/");
+    const normalizedProjectData = paths.projectData.replaceAll("\\", "/");
+
+    expect(normalizedConfig).toContain("灵魂 项目 空格/.linghun");
+    expect(normalizedSettings).toContain("灵魂 项目 空格/.linghun/settings.json");
+    expect(normalizedProjectData).toContain("灵魂 项目 空格/.linghun");
+    if (process.platform === "win32") {
+      expect(paths.projectData.startsWith("g:\\")).toBe(true);
+    }
+  });
+
+  it("respects long custom user data paths instead of forcing C drive storage", () => {
+    const customDataRoot =
+      process.platform === "win32"
+        ? `G:\\linghun data 空格\\nested\\${"long-segment-".repeat(12)}`
+        : join(tmpdir(), "linghun data 空格", "nested", "long-segment-".repeat(12));
+    vi.stubEnv("LINGHUN_DATA_DIR", customDataRoot);
+
+    const paths = resolveStoragePaths(defaultConfig, "/tmp/project", "/tmp/home");
+
+    expect(getUserDataDir("/tmp/home")).toBe(customDataRoot);
+    expect(getSessionRootDir("/tmp/home")).toBe(join(customDataRoot, "sessions"));
+    expect(paths.sessions).toBe(join(customDataRoot, "sessions"));
+    expect(paths.logs).toBe(join(customDataRoot, "logs"));
+    expect(paths.jobs).toBe(join(customDataRoot, "jobs"));
+    if (process.platform === "win32") {
+      expect(paths.sessions.startsWith("G:\\")).toBe(true);
+    }
   });
 
   it("saves and loads the Phase 03 default model in project settings", async () => {
