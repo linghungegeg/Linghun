@@ -44,7 +44,11 @@ export function renderInkShell(
       resizeTimer = undefined;
     }
     stdout?.off("resize", onResize);
-    instance.unmount();
+    try {
+      instance.unmount();
+    } catch {
+      // stdout/stdin may already be closed (e.g. Windows cmd window close)
+    }
     // Unref stdin to prevent the process from hanging on exit
     const stdin = options.stdin as { unref?: () => void } | undefined;
     stdin?.unref?.();
@@ -52,7 +56,11 @@ export function renderInkShell(
 
   const rerender = () => {
     if (unmounted) return;
-    instance.rerender(<ShellApp controller={controller} />);
+    try {
+      instance.rerender(<ShellApp controller={controller} />);
+    } catch {
+      // Ignore render errors after stream close
+    }
   };
 
   const onResize = () => {
@@ -60,7 +68,11 @@ export function renderInkShell(
     resizeTimer = setTimeout(() => {
       resizeTimer = undefined;
       if (unmounted) return;
-      instance.clear();
+      try {
+        instance.clear();
+      } catch {
+        // Ignore clear errors if stdout is closed
+      }
       rerender();
     }, 60);
   };

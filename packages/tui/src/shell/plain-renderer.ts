@@ -4,7 +4,7 @@ import { getStatusMarker } from "./theme.js";
 import type { ShellViewModel } from "./types.js";
 
 export function renderPlainShell(view: ShellViewModel): string {
-  if (view.viewMode === "task") {
+  if (view.viewMode === "task" || view.viewMode === "pending") {
     return renderPlainTask(view);
   }
   return renderPlainHome(view);
@@ -60,10 +60,11 @@ function renderPlainTask(view: ShellViewModel): string {
     lines.push(`${marker} ${view.activity.text}`);
   }
 
-  // Permission prompt
+  // Permission prompt with risk level
   if (view.permission) {
+    const riskLabel = view.permission.risk.toUpperCase();
     lines.push("");
-    lines.push(`[${view.permission.toolName}] ${view.permission.reason}`);
+    lines.push(`[${view.permission.toolName}] [${riskLabel}] ${view.permission.reason}`);
     if (view.permission.scope.length > 0) {
       lines.push(`  ${view.permission.scope.join(", ")}`);
     }
@@ -110,6 +111,25 @@ function formatStatusTray(view: ShellViewModel): string {
     view.status.background,
   ];
   const line = items.join("  ");
-  if (view.width >= 60) return line;
-  return items.slice(0, 4).join("  ");
+  // P3-2: total length control — truncate items if they exceed width
+  if (line.length <= view.width) return line;
+  if (view.width >= 60) {
+    // Fit by truncating individual items
+    return fitStatusTrayLine(items, view.width);
+  }
+  // Narrow: keep project, model, permission, background (drop index if needed)
+  const narrow = [items[0], items[1], items[2], items[4]];
+  const narrowLine = narrow.join("  ");
+  if (narrowLine.length <= view.width) return narrowLine;
+  return fitStatusTrayLine(narrow, view.width);
+}
+
+function fitStatusTrayLine(items: string[], maxWidth: number): string {
+  const separator = "  ";
+  const separatorTotal = separator.length * (items.length - 1);
+  const available = maxWidth - separatorTotal;
+  const perItem = Math.max(6, Math.floor(available / items.length));
+  return items
+    .map((item) => (item.length > perItem ? `${item.slice(0, perItem - 1)}…` : item))
+    .join(separator);
 }

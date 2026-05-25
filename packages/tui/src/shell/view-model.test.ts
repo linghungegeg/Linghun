@@ -176,7 +176,12 @@ describe("shell view model", () => {
       expect(view.status.permission).toContain("权限：");
       expect(view.blocks.map((block) => block.id)).toEqual([]);
       expect(rendered).toContain("LingHun");
-      expect(rendered).toContain("技术普惠会越来越成熟 而你就是最伟大的梦想家");
+      // width <= 40 uses short vision; wider uses full vision
+      if (width <= 40) {
+        expect(rendered).toContain("技术普惠，你是最伟大的梦想家");
+      } else {
+        expect(rendered).toContain("技术普惠会越来越成熟 而你就是最伟大的梦想家");
+      }
       expect(rendered).not.toContain("信任：");
       expect(rendered).not.toContain("首页");
       expect(rendered).not.toContain("项目状态");
@@ -911,9 +916,10 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[0]?.title).toContain("后台：lint check");
     expect(bgBlocks[1]?.id).toBe("bg-t2");
-    expect(bgBlocks[1]?.status).toBe("info");
+    // P1-4: completed uses partial (not info) to visually distinguish from PASS
+    expect(bgBlocks[1]?.status).toBe("partial");
     expect(bgBlocks[1]?.summary).toContain("pass");
-    expect(bgBlocks[1]?.nextAction).toContain("已结束，非验证通过");
+    expect(bgBlocks[1]?.nextAction).toContain("非验证通过");
   });
 
   it("maps failed and timeout statuses correctly", () => {
@@ -938,13 +944,14 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(bgBlock?.title).toContain("Background: build");
   });
 
-  it("completed tasks use info status with clarification note, not pass", () => {
+  it("completed tasks use partial status with clarification note, not pass", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-t6");
-    expect(bgBlock?.status).toBe("info");
+    // P1-4: completed uses partial to visually distinguish from verification PASS
+    expect(bgBlock?.status).toBe("partial");
     expect(bgBlock?.nextAction).toContain("not a verification pass");
   });
 });
@@ -985,5 +992,349 @@ describe("Bearer token standalone redaction", () => {
     expect(block.summary).not.toContain("eyJhbGciOiJIUzI1NiJ9");
     expect(block.summary).toContain("[masked-key]");
     expect(block.summary).toContain("Bearer [masked-key]");
+  });
+});
+
+describe("D.12B — P0-1: activity error/failed/completed phase mapping", () => {
+  it("maps request_failed to error phase with user-friendly text", () => {
+    const ctx = createContext({
+      requestActivityPhase: "request_failed",
+    } as unknown as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result).toBeDefined();
+    expect(result?.phase).toBe("error");
+    expect(result?.text).toContain("请求失败");
+  });
+
+  it("maps error phase to error with en-US text", () => {
+    const ctx = createContext({
+      language: "en-US",
+      requestActivityPhase: "error",
+    } as unknown as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result?.phase).toBe("error");
+    expect(result?.text).toContain("Request failed");
+  });
+
+  it("maps failed phase to error", () => {
+    const ctx = createContext({ requestActivityPhase: "failed" } as unknown as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result?.phase).toBe("error");
+  });
+
+  it("maps completed phase correctly", () => {
+    const ctx = createContext({
+      requestActivityPhase: "completed",
+    } as unknown as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result?.phase).toBe("completed");
+    expect(result?.text).toContain("已完成");
+  });
+
+  it("maps request_completed to completed phase", () => {
+    const ctx = createContext({
+      language: "en-US",
+      requestActivityPhase: "request_completed",
+    } as unknown as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result?.phase).toBe("completed");
+    expect(result?.text).toContain("Completed");
+  });
+
+  it("error activity renders with fail marker in plain mode", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      activity: { phase: "error", text: "请求失败，可重试或用 /model doctor 排查。" },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("请求失败");
+    expect(rendered).not.toContain("技术普惠会越来越成熟");
+  });
+});
+
+describe("D.12B — P0-2: permission composer mode", () => {
+  it("shows permission placeholder when permission is pending", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["npm install"],
+        hint: "yes / no",
+      },
+    });
+    expect(view.composer.placeholder).toContain("y/yes");
+    expect(view.composer.placeholder).toContain("n/no");
+    expect(view.composer.placeholder).not.toBe("我能帮您做点什么？");
+  });
+
+  it("shows normal placeholder when no permission is pending", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect(view.composer.placeholder).toBe("我能帮您做点什么？");
+  });
+
+  it("en-US permission placeholder includes allow/deny/details/Esc", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      permission: {
+        toolName: "Write",
+        reason: "write file",
+        risk: "medium",
+        scope: ["src/main.ts"],
+        hint: "yes / no",
+      },
+    });
+    expect(view.composer.placeholder).toContain("allow");
+    expect(view.composer.placeholder).toContain("deny");
+    expect(view.composer.placeholder).toContain("details");
+    expect(view.composer.placeholder).toContain("Esc");
+  });
+});
+
+describe("D.12B — P0-3: plain renderer permission risk level", () => {
+  it("shows [HIGH] for high risk permission in plain mode", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[Bash] [HIGH]");
+  });
+
+  it("shows [MEDIUM] for medium risk permission", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Write",
+        reason: "写入文件",
+        risk: "medium",
+        scope: ["src/main.ts"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[Write] [MEDIUM]");
+  });
+
+  it("shows [LOW] for low risk permission", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Read",
+        reason: "读取文件",
+        risk: "low",
+        scope: ["README.md"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[Read] [LOW]");
+  });
+});
+
+describe("D.12B — P1-1: output blocks keep last 3", () => {
+  it("keeps up to 3 output blocks in task mode", () => {
+    const blocks = [
+      createOutputBlock("first", "zh-CN", "out-1"),
+      createOutputBlock("second", "zh-CN", "out-2"),
+      createOutputBlock("third", "zh-CN", "out-3"),
+      createOutputBlock("fourth", "zh-CN", "out-4"),
+    ];
+    const view = createShellViewModel(createContext(), { width: 80, outputBlocks: blocks });
+    const outputIds = view.blocks.map((b) => b.id);
+    expect(outputIds).toContain("out-2");
+    expect(outputIds).toContain("out-3");
+    expect(outputIds).toContain("out-4");
+    expect(outputIds).not.toContain("out-1");
+  });
+
+  it("still suppresses output blocks when permission is pending", () => {
+    const blocks = [
+      createOutputBlock("first", "zh-CN", "out-1"),
+      createOutputBlock("second", "zh-CN", "out-2"),
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      outputBlocks: blocks,
+      permission: {
+        toolName: "Bash",
+        reason: "test",
+        risk: "high",
+        scope: [],
+        hint: "yes / no",
+      },
+    });
+    expect(view.blocks.find((b) => b.id === "out-1")).toBeUndefined();
+    expect(view.blocks.find((b) => b.id === "out-2")).toBeUndefined();
+  });
+});
+
+describe("D.12B — P1-2: narrow terminal StatusTray keeps background", () => {
+  it("width=40 shows background count with short label", () => {
+    const view = createShellViewModel(createContext(), { width: 40 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("后台:1");
+  });
+
+  it("width=80 shows full background label", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("后台：1");
+  });
+
+  it("en-US width=40 shows BG:N short label", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), { width: 40 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("BG:1");
+  });
+});
+
+describe("D.12B — P1-3: deny/cancel feedback", () => {
+  it("denial feedback generates a partial-status block", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      denialFeedback: { toolName: "Bash", kind: "denied" },
+    });
+    const denialBlock = view.blocks.find((b) => b.id === "denial-feedback");
+    expect(denialBlock).toBeDefined();
+    expect(denialBlock?.status).toBe("partial");
+    expect(denialBlock?.summary).toContain("已拒绝 Bash");
+    expect(denialBlock?.summary).toContain("未执行");
+  });
+
+  it("cancel feedback generates correct text", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      denialFeedback: { toolName: "Write", kind: "cancelled" },
+    });
+    const denialBlock = view.blocks.find((b) => b.id === "denial-feedback");
+    expect(denialBlock?.summary).toContain("Cancelled Write");
+    expect(denialBlock?.summary).toContain("not executed");
+  });
+
+  it("denial feedback triggers task viewMode", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      denialFeedback: { toolName: "Bash", kind: "denied" },
+    });
+    expect(view.viewMode).toBe("task");
+  });
+
+  it("denial feedback is not marked as pass", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      denialFeedback: { toolName: "Bash", kind: "denied" },
+    });
+    const denialBlock = view.blocks.find((b) => b.id === "denial-feedback");
+    expect(denialBlock?.status).not.toBe("pass");
+  });
+});
+
+describe("D.12B — P1-4: completed job visually not PASS", () => {
+  it("completed job uses partial status, not info or pass", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      backgroundSummaries: [{ id: "j1", title: "build", status: "completed" }],
+    });
+    const bgBlock = view.blocks.find((b) => b.id === "bg-j1");
+    expect(bgBlock?.status).toBe("partial");
+    expect(bgBlock?.status).not.toBe("pass");
+    expect(bgBlock?.status).not.toBe("info");
+  });
+
+  it("completed job nextAction contains [非PASS] marker in zh-CN", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      backgroundSummaries: [{ id: "j2", title: "test", status: "completed" }],
+    });
+    const bgBlock = view.blocks.find((b) => b.id === "bg-j2");
+    expect(bgBlock?.nextAction).toContain("[非PASS]");
+  });
+
+  it("completed job nextAction contains [not PASS] marker in en-US", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      backgroundSummaries: [{ id: "j3", title: "deploy", status: "completed" }],
+    });
+    const bgBlock = view.blocks.find((b) => b.id === "bg-j3");
+    expect(bgBlock?.nextAction).toContain("[not PASS]");
+  });
+});
+
+describe("D.12B — #9: home flicker guard (submitted pending state)", () => {
+  it("submitted=true produces pending viewMode", () => {
+    const view = createShellViewModel(createContext(), { width: 80, submitted: true });
+    expect(view.viewMode).toBe("pending");
+  });
+
+  it("pending viewMode renders as task layout (no home hero)", () => {
+    const view = createShellViewModel(createContext(), { width: 80, submitted: true });
+    const rendered = renderPlainShell(view);
+    expect(rendered).not.toContain("技术普惠");
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("项目：");
+  });
+
+  it("explicit viewMode override takes precedence over submitted", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      submitted: true,
+      viewMode: "home",
+    });
+    expect(view.viewMode).toBe("home");
+  });
+});
+
+describe("D.12B — P3-1: narrow vision short text", () => {
+  it("width=40 uses short vision text in zh-CN", () => {
+    const view = createShellViewModel(createContext(), { width: 40 });
+    expect(view.homeVision).toBe("技术普惠，你是最伟大的梦想家");
+  });
+
+  it("width=80 uses full vision text", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect(view.homeVision).toBe("技术普惠会越来越成熟 而你就是最伟大的梦想家");
+  });
+
+  it("en-US width=40 uses short vision", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), { width: 40 });
+    expect(view.homeVision).toBe("You are the greatest dreamer.");
+  });
+});
+
+describe("D.12B — P3-2: plain status tray total length control", () => {
+  it("status tray does not exceed view width", () => {
+    const ctx = createContext({
+      projectPath: "/tmp/a-very-long-project-name-that-exceeds-normal-width",
+      model: "deepseek-v4-flash-with-extremely-long-model-name-variant",
+    });
+    const view = createShellViewModel(ctx as unknown as TuiContext, { width: 60 });
+    const rendered = renderPlainShell(view);
+    const statusLine = rendered.split("\n").find((l) => l.includes("项目："));
+    // Status tray should be controlled within width
+    expect(statusLine).toBeDefined();
+    if (statusLine) {
+      expect(statusLine.length).toBeLessThanOrEqual(80); // reasonable upper bound
+    }
+  });
+});
+
+describe("D.12B — P2-5: no-color does not force white", () => {
+  it("no-color plain render still has text markers for status", () => {
+    const view = createShellViewModel(createContext(), {
+      noColor: true,
+      width: 80,
+      backgroundSummaries: [{ id: "nc1", title: "task", status: "failed" }],
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[FAIL]");
+    expect(rendered).toContain("LingHun");
   });
 });

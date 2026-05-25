@@ -15,11 +15,13 @@ const shellText = {
   "zh-CN": {
     brand: "LingHun",
     vision: "技术普惠会越来越成熟 而你就是最伟大的梦想家",
+    visionShort: "技术普惠，你是最伟大的梦想家",
     project: (name: string) => `项目：${name}`,
     model: (name: string) => `模型：${name}`,
     permission: (mode: string) => `权限：${mode}`,
     trust: (value: string) => `信任：${value}`,
     placeholder: "我能帮您做点什么？",
+    permissionPlaceholder: "y/yes 允许 · n/no 拒绝 · details 详情 · Esc 取消",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
     setupHint: "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。",
     routeTitle: "项目模型路由需要处理",
@@ -31,18 +33,25 @@ const shellText = {
     trustRestricted: "受限",
     index: (status: string) => `索引：${status}`,
     background: (count: number) => `后台：${count}`,
+    backgroundShort: (count: number) => `后台:${count}`,
     latestOutputTitle: "最近输出",
     noVisibleOutput: "没有可见输出。",
     latestOutputNext: "如需完整运行时输出，可用 /details。",
+    activityError: "请求失败，可重试或用 /model doctor 排查。",
+    activityCompleted: "已完成。",
+    denied: (tool: string) => `已拒绝 ${tool}，工具未执行。`,
+    cancelled: (tool: string) => `已取消 ${tool}，工具未执行。`,
   },
   "en-US": {
     brand: "LingHun",
     vision: "Technology will become more accessible, and you are the greatest dreamer.",
+    visionShort: "You are the greatest dreamer.",
     project: (name: string) => `Project: ${name}`,
     model: (name: string) => `Model: ${name}`,
     permission: (mode: string) => `Permission: ${mode}`,
     trust: (value: string) => `Trust: ${value}`,
     placeholder: "What can I help you with?",
+    permissionPlaceholder: "y/yes allow · n/no deny · details inspect · Esc cancel",
     submittedHint: "Submitted through the shared TUI controller.",
     setupHint: 'No model configured. Press Enter, or say "configure provider".',
     routeTitle: "Project model route needs attention",
@@ -54,9 +63,14 @@ const shellText = {
     trustRestricted: "restricted",
     index: (status: string) => `Index: ${status}`,
     background: (count: number) => `Background: ${count}`,
+    backgroundShort: (count: number) => `BG:${count}`,
     latestOutputTitle: "Latest output",
     noVisibleOutput: "No visible output.",
     latestOutputNext: "Use /details for full runtime output.",
+    activityError: "Request failed. Retry or use /model doctor.",
+    activityCompleted: "Completed.",
+    denied: (tool: string) => `Denied ${tool}; tool was not executed.`,
+    cancelled: (tool: string) => `Cancelled ${tool}; tool was not executed.`,
   },
 };
 
@@ -72,6 +86,10 @@ export type ShellViewModelOptions = {
   setupNeeded?: boolean;
   projectRouteProblem?: string;
   limitations?: string[];
+  /** Set to true immediately after user submits input to prevent home flicker. */
+  submitted?: boolean;
+  /** Denial/cancel feedback for the most recent permission action. */
+  denialFeedback?: { toolName: string; kind: "denied" | "cancelled" };
 };
 
 export function createShellViewModel(
@@ -91,7 +109,7 @@ export function createShellViewModel(
   // setup-needed 不再生成 bordered block，改为轻提示
   const setupHint = setupNeeded ? text.setupHint : undefined;
 
-  // blocks 只保留 project-route、background summaries 和 output（最多 1 条）
+  // blocks 只保留 project-route、background summaries 和 output（最多 3 条）
   // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
@@ -101,15 +119,47 @@ export function createShellViewModel(
     blocks.push(...mapBackgroundSummariesToBlocks(options.backgroundSummaries, language));
   }
   if (!options.permission) {
-    const outputBlocks = (options.outputBlocks ?? []).slice(-1);
+    const outputBlocks = (options.outputBlocks ?? []).slice(-3);
     blocks.push(...outputBlocks);
   }
+
+  // Denial/cancel feedback as an output block
+  if (options.denialFeedback) {
+    const denialText =
+      options.denialFeedback.kind === "denied"
+        ? text.denied(options.denialFeedback.toolName)
+        : text.cancelled(options.denialFeedback.toolName);
+    blocks.push({
+      id: "denial-feedback",
+      kind: "details",
+      status: "partial",
+      title: denialText,
+      summary: denialText,
+    });
+  }
+
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
 
-  // Determine view mode: task if explicitly set, or if there are output blocks / activity / permission
+  // Determine view mode:
+  // - "pending" if submitted flag is set (prevents home flicker after Enter)
+  // - "task" if explicitly set, or if there are output blocks / activity / permission / denial
+  // - "home" otherwise
   const viewMode: ShellViewMode =
     options.viewMode ??
-    (options.outputBlocks?.length || options.activity || options.permission ? "task" : "home");
+    (options.submitted
+      ? "pending"
+      : options.outputBlocks?.length ||
+          options.activity ||
+          options.permission ||
+          options.denialFeedback
+        ? "task"
+        : "home");
+
+  // Vision: use short version for narrow terminals
+  const homeVision = width <= 40 ? text.visionShort : text.vision;
+
+  // Composer: switch placeholder when permission is pending
+  const composerPlaceholder = options.permission ? text.permissionPlaceholder : text.placeholder;
 
   return {
     language,
@@ -121,7 +171,7 @@ export function createShellViewModel(
     themeMode: options.noColor ? "no-color" : "color",
     viewMode,
     brand: text.brand,
-    homeVision: text.vision,
+    homeVision,
     setupHint,
     activity: options.activity,
     permission: options.permission,
@@ -134,10 +184,11 @@ export function createShellViewModel(
       background: formatBackground(
         context.backgroundTasks.filter((task) => task.status === "running").length,
         language,
+        width,
       ),
     },
     composer: {
-      placeholder: getComposerPlaceholder(language),
+      placeholder: composerPlaceholder,
       submittedHint: text.submittedHint,
       masking: context.pendingModelSetup?.step === "apiKey",
     },
@@ -183,6 +234,11 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     tool_running: "tool_running",
     continuing_after_tool: "continuing",
     permission_waiting: "permission_waiting",
+    request_failed: "error",
+    error: "error",
+    failed: "error",
+    completed: "completed",
+    request_completed: "completed",
   };
   const mapped = phaseMap[phase];
   if (!mapped) return undefined;
@@ -194,12 +250,16 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
       tool_running: toolName ? `正在运行 ${toolName}…` : "正在运行工具…",
       continuing: "工具完成，继续处理…",
       permission_waiting: "等待权限确认…",
+      error: shellText["zh-CN"].activityError,
+      completed: shellText["zh-CN"].activityCompleted,
     },
     "en-US": {
       thinking: "Thinking…",
       tool_running: toolName ? `Running ${toolName}…` : "Running tool…",
       continuing: "Continuing after tool…",
       permission_waiting: "Waiting for permission…",
+      error: shellText["en-US"].activityError,
+      completed: shellText["en-US"].activityCompleted,
     },
   };
   const texts = textMap[context.language] ?? textMap["en-US"];
@@ -282,7 +342,7 @@ function mapBackgroundSummariesToBlocks(
   return summaries.map((s) => {
     const statusMap: Record<string, ProductBlockViewModel["status"]> = {
       running: "running",
-      completed: "info",
+      completed: "partial",
       failed: "fail",
       cancelled: "partial",
       timeout: "blocked",
@@ -295,8 +355,8 @@ function mapBackgroundSummariesToBlocks(
     const completedNote =
       s.status === "completed"
         ? language === "zh-CN"
-          ? "已结束，非验证通过"
-          : "finished, not a verification pass"
+          ? "[非PASS] 已结束，非验证通过"
+          : "[not PASS] finished, not a verification pass"
         : undefined;
     return {
       id: `bg-${s.id}`,
@@ -324,7 +384,10 @@ function formatIndex(status: string, language: Language): string {
   return shellText[language].index(value);
 }
 
-function formatBackground(count: number, language: Language): string {
+function formatBackground(count: number, language: Language, width: number): string {
+  if (width < 60 && count > 0) {
+    return shellText[language].backgroundShort(count);
+  }
   return shellText[language].background(count);
 }
 

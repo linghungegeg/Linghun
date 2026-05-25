@@ -2,30 +2,30 @@ import type { ProductBlockStatus, ShellThemeMode } from "./types.js";
 
 export type ShellTheme = {
   mode: ShellThemeMode;
-  brand: string;
-  accent: string;
-  muted: string;
-  border: string;
-  warning: string;
-  status: Record<ProductBlockStatus, string>;
+  brand: string | undefined;
+  accent: string | undefined;
+  muted: string | undefined;
+  border: string | undefined;
+  warning: string | undefined;
+  status: Record<ProductBlockStatus, string | undefined>;
 };
 
 export function createShellTheme(noColor: boolean): ShellTheme {
   if (noColor) {
     return {
       mode: "no-color",
-      brand: "white",
-      accent: "white",
-      muted: "white",
-      border: "white",
-      warning: "white",
+      brand: undefined,
+      accent: undefined,
+      muted: undefined,
+      border: undefined,
+      warning: undefined,
       status: {
-        info: "white",
-        running: "white",
-        pass: "white",
-        partial: "white",
-        fail: "white",
-        blocked: "white",
+        info: undefined,
+        running: undefined,
+        pass: undefined,
+        partial: undefined,
+        fail: undefined,
+        blocked: undefined,
       },
     };
   }

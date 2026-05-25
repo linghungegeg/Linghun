@@ -2424,6 +2424,7 @@ async function runInkShell(
 
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
+  let submittedPending = false;
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
@@ -2440,6 +2441,7 @@ async function runInkShell(
         outputBlocks: blocks,
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
+        submitted: submittedPending,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (t) =>
@@ -2459,6 +2461,7 @@ async function runInkShell(
       process.removeListener("SIGINT", sigintHandler);
       process.once("SIGINT", sigintHandler);
       if (event.type === "escape") {
+        submittedPending = false;
         await handleTuiKeypress("escape", context, shellOutput);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -2479,6 +2482,10 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      // P1-6: immediately enter pending state to prevent home flicker
+      submittedPending = true;
+      shell?.rerender();
+      await shell?.waitUntilRenderFlush();
       const result = await processTuiLine(
         event.type === "submit" ? event.text : "",
         context,
@@ -2486,6 +2493,7 @@ async function runInkShell(
         shellOutput,
         store,
       );
+      submittedPending = false;
       shell?.rerender();
       if (result === "exit") {
         shell?.unmount();

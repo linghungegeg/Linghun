@@ -16,7 +16,7 @@ export function ShellApp({ controller }: { controller: ShellController }): React
   const view = controller.getViewModel();
   const theme = createShellTheme(view.themeMode === "no-color");
 
-  if (view.viewMode === "task") {
+  if (view.viewMode === "task" || view.viewMode === "pending") {
     return <TaskLayout view={view} theme={theme} controller={controller} />;
   }
   return <HomeLayout view={view} theme={theme} controller={controller} />;
@@ -177,7 +177,7 @@ function ActivityIndicator({
   activity: TaskActivityView;
   theme: ReturnType<typeof createShellTheme>;
 }): React.ReactNode {
-  const colorMap: Record<TaskActivityView["phase"], string> = {
+  const colorMap: Record<TaskActivityView["phase"], string | undefined> = {
     thinking: theme.status.running,
     tool_running: theme.status.running,
     permission_waiting: theme.status.blocked,

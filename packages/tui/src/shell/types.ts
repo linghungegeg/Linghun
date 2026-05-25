@@ -42,7 +42,7 @@ export type ComposerViewModel = {
   masking: boolean;
 };
 
-export type ShellViewMode = "home" | "task";
+export type ShellViewMode = "home" | "task" | "pending";
 
 export type TaskActivityView = {
   phase: "thinking" | "tool_running" | "permission_waiting" | "continuing" | "completed" | "error";

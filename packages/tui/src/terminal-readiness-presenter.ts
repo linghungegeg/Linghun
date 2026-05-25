@@ -402,8 +402,17 @@ function sanitizePrimary(value: string): string {
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***")
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
-    .replace(/[A-Z]:[\\/][^\s)]+/gu, "[local-path]")
-    .replace(/\/[\w.-]*?(?:Linghun|linghun)[^\s)]*/gu, "[local-path]");
+    .replace(/[A-Z]:[\\/][^\s)]+/gu, (match) => {
+      // Preserve the basename for context, hide the full path
+      const parts = match.replace(/\\/g, "/").split("/");
+      const tail = parts.at(-1) ?? "file";
+      return `[…/${tail}]`;
+    })
+    .replace(/\/(?:home|Users|tmp|var|private)\/[^\s)]*/gu, (match) => {
+      const parts = match.split("/");
+      const tail = parts.at(-1) ?? "file";
+      return `[…/${tail}]`;
+    });
 }
 
 function short(value: string, max: number): string {

@@ -25,9 +25,12 @@ type ComposerDecision =
   | { kind: "emit"; event: ShellInputEvent; nextText: string }
   | { kind: "ignore" };
 
+const COMPOSER_MAX_VISIBLE_LINES = 5;
+
 export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
   const [text, setText] = useState("");
   const maxWidth = Math.min(80, Math.max(30, view.width - 4));
+  const noColor = view.themeMode === "no-color";
 
   useInput((input, key) => {
     const decision = handleComposerInput(text, input, key);
@@ -41,16 +44,27 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
     }
   });
 
-  const displayLines = text
+  const allLines = text
     ? formatComposerText(text, view.composer.masking).split("\n")
     : [view.composer.placeholder];
-  const color = text ? "white" : "gray";
+
+  // P2-4: limit visible lines to prevent pushing task area off screen
+  const truncated = text && allLines.length > COMPOSER_MAX_VISIBLE_LINES;
+  const displayLines = truncated ? allLines.slice(-COMPOSER_MAX_VISIBLE_LINES) : allLines;
+  // no-color: use undefined (terminal default) instead of hardcoded "gray"
+  const placeholderColor = noColor ? undefined : "gray";
+  const color = text ? undefined : placeholderColor;
+  // P3-4: cursor fallback — use | for no-color/ASCII, ▌ for modern terminals
+  const cursor = noColor ? "|" : "\u258C";
 
   return (
     <Box width="100%" flexDirection="column">
+      {truncated ? (
+        <Text color="gray">{`… ${allLines.length - COMPOSER_MAX_VISIBLE_LINES} line(s) above`}</Text>
+      ) : null}
       {displayLines.map((line, index) => {
         const isLastLine = index === displayLines.length - 1;
-        const visibleLine = text && isLastLine ? `${line}\u258C` : line;
+        const visibleLine = text && isLastLine ? `${line}${cursor}` : line;
         return (
           <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
             {fitText(visibleLine, maxWidth)}
