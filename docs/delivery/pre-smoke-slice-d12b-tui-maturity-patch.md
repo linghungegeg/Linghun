@@ -169,10 +169,11 @@ view-model 层的 `submitted` flag 已从 `index.ts` Ink shell controller 真实
 - `index.ts` 新增 `let submittedPending = false` 闭包状态
 - `getViewModel()` 传入 `submitted: submittedPending`
 - `onInput` 中：用户 Enter 提交后立即 `submittedPending = true` + `shell.rerender()` + `waitUntilRenderFlush()`，确保 UI 在 `processTuiLine` 异步处理前切换到 `"pending"` viewMode
-- `processTuiLine` 返回后 `submittedPending = false` + `shell.rerender()` 恢复正常 viewMode
+- `processTuiLine` 调用包裹在 `try/finally` 中，`finally` 保证 `submittedPending = false` + `shell.rerender()`，即使 `processTuiLine` 抛异常也不会卡在 pending viewMode
 - Escape 路径同样清除 `submittedPending`
+- 不吞异常、不新增 catch、不改 provider loop/permission/job 语义
 
-效果：用户按 Enter 后不再闪回 home 布局，而是立即进入 task/pending 布局等待响应。
+效果：用户按 Enter 后不再闪回 home 布局，而是立即进入 task/pending 布局等待响应；异常路径下 pending 状态自动恢复。
 
 ### denialFeedback 接线确认
 

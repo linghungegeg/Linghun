@@ -2486,15 +2486,19 @@ async function runInkShell(
       submittedPending = true;
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
-      const result = await processTuiLine(
-        event.type === "submit" ? event.text : "",
-        context,
-        gateway,
-        shellOutput,
-        store,
-      );
-      submittedPending = false;
-      shell?.rerender();
+      let result: Awaited<ReturnType<typeof processTuiLine>>;
+      try {
+        result = await processTuiLine(
+          event.type === "submit" ? event.text : "",
+          context,
+          gateway,
+          shellOutput,
+          store,
+        );
+      } finally {
+        submittedPending = false;
+        shell?.rerender();
+      }
       if (result === "exit") {
         shell?.unmount();
         resolveExit(0);
