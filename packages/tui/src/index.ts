@@ -183,6 +183,43 @@ import {
   readLogArtifactSlice,
 } from "./log-artifact.js";
 import {
+  type ModelDoctorContext,
+  diagnoseConcreteRoute,
+  diagnoseRoute,
+  formatModelRouteDoctor,
+  formatModelRouteSummary,
+  formatModelRoutes,
+  getProviderKeySource,
+  getRoleRoute,
+  getRouteBlockingProblems,
+  hasOpenAiCompatibleDoctorProblem,
+  hasOpenAiCompatiblePlaceholderProblem,
+  hasOpenAiCompatibleProviderSetupProblem,
+  inferProviderForRouteModel,
+  isDefaultExecutorRoute,
+  isModelRole,
+  maskSecret,
+  readProjectSettingsApiKeyProviders,
+  readProviderEnvApiKeyProviders,
+} from "./model-doctor-runtime.js";
+import {
+  type ModelSetupMessageKey,
+  type ModelSetupPrefill,
+  type ModelSetupStep,
+  type PendingModelSetup,
+  applyModelSetupValues,
+  formatModelSetupFallbackError,
+  formatModelSetupMessage,
+  formatModelSetupSaved,
+  formatModelSetupSummary,
+  getModelSetupPromptMessage,
+  getNextModelSetupStep,
+  looksLikeModelSetupInput,
+  normalizeModelSetupReasoningLevel,
+  parseModelSetupPrefill,
+  validateModelSetupPartial,
+} from "./model-setup-runtime.js";
+import {
   type CommandCapability,
   type NaturalIntent,
   type PendingNaturalCommand,
@@ -343,27 +380,12 @@ export type PlanProposal = {
   options: { id: string; title: string; steps: string[]; risks: string[] }[];
 };
 
-type ModelSetupStep = "baseUrl" | "apiKey" | "model" | "reasoning" | "auxModel" | "confirm";
-
-type PendingModelSetup = {
-  step: ModelSetupStep;
-  providerEnvPath: string;
-  createdTemplate: boolean;
-  values: Partial<ProviderEnvSetup>;
-};
-
-type ModelSetupPrefill = Partial<ProviderEnvSetup>;
-
-type ModelSetupMessageKey =
-  | "intro"
-  | "baseUrlPrompt"
-  | "apiKeyPrompt"
-  | "modelPrompt"
-  | "reasoningPrompt"
-  | "auxModelPrompt"
-  | "confirmPrompt"
-  | "cancelled"
-  | "details";
+export type {
+  ModelSetupStep,
+  PendingModelSetup,
+  ModelSetupPrefill,
+  ModelSetupMessageKey,
+} from "./model-setup-runtime.js";
 
 export type BackgroundTaskStatus =
   | "running"
@@ -3860,7 +3882,7 @@ async function handleModelCommand(
       `说明：defaultModel=${context.config.defaultModel}，普通开发请求按 executor route=${runtime.provider}/${runtime.model} 执行。`,
     );
   }
-  writeLine(output, formatModelRouteSummary(context));
+  writeLine(output, formatModelRouteSummary(context.config));
   writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
   writeStatus(output, context);
 }
@@ -3879,12 +3901,12 @@ async function startModelSetup(
     createdTemplate: !existed,
     values,
   };
-  writeLine(output, formatModelSetupMessage("intro", context, context.pendingModelSetup));
+  writeLine(output, formatModelSetupMessage("intro", context.language, context.pendingModelSetup));
   if (context.pendingModelSetup.step === "confirm") {
-    writeLine(output, formatModelSetupSummary(context.pendingModelSetup, context));
+    writeLine(output, formatModelSetupSummary(context.pendingModelSetup, context.language));
     return;
   }
-  writeModelSetupPrompt(context.pendingModelSetup, output, context);
+  writeLine(output, getModelSetupPromptMessage(context.pendingModelSetup, context.language));
 }
 
 async function handleModelSetupInput(
@@ -3898,12 +3920,12 @@ async function handleModelSetupInput(
   const value = setup.step === "apiKey" ? text : trimmed;
   if (/^(cancel|no|n|取消|否)$/iu.test(trimmed)) {
     context.pendingModelSetup = undefined;
-    writeLine(output, formatModelSetupMessage("cancelled", context, setup));
+    writeLine(output, formatModelSetupMessage("cancelled", context.language, setup));
     return;
   }
   if (/^(details|detail|详情)$/iu.test(trimmed)) {
-    writeLine(output, formatModelSetupMessage("details", context, setup));
-    writeModelSetupPrompt(setup, output, context);
+    writeLine(output, formatModelSetupMessage("details", context.language, setup));
+    writeLine(output, getModelSetupPromptMessage(setup, context.language));
     return;
   }
 
@@ -3913,29 +3935,29 @@ async function handleModelSetupInput(
       applyModelSetupValues(setup, parsed);
       setup.step = getNextModelSetupStep(setup.values);
       if (setup.step === "confirm") {
-        writeLine(output, formatModelSetupSummary(setup, context));
+        writeLine(output, formatModelSetupSummary(setup, context.language));
         return;
       }
-      writeModelSetupPrompt(setup, output, context);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }
 
     if (setup.step === "baseUrl") {
       applyModelSetupValues(setup, { baseUrl: value });
       setup.step = "apiKey";
-      writeModelSetupPrompt(setup, output, context);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }
     if (setup.step === "apiKey") {
       applyModelSetupValues(setup, { apiKey: value });
       setup.step = "model";
-      writeModelSetupPrompt(setup, output, context);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }
     if (setup.step === "model") {
       applyModelSetupValues(setup, { model: value });
       setup.step = "reasoning";
-      writeModelSetupPrompt(setup, output, context);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }
     if (setup.step === "reasoning") {
@@ -3943,13 +3965,13 @@ async function handleModelSetupInput(
         reasoningLevel: normalizeModelSetupReasoningLevel(value || "Medium"),
       });
       setup.step = "auxModel";
-      writeModelSetupPrompt(setup, output, context);
+      writeLine(output, getModelSetupPromptMessage(setup, context.language));
       return;
     }
     if (setup.step === "auxModel") {
       applyModelSetupValues(setup, { auxModel: value || undefined });
       setup.step = "confirm";
-      writeLine(output, formatModelSetupSummary(setup, context));
+      writeLine(output, formatModelSetupSummary(setup, context.language));
       return;
     }
     if (setup.step === "confirm") {
@@ -3958,210 +3980,20 @@ async function handleModelSetupInput(
         context.pendingModelSetup = undefined;
         context.config = await loadConfig(context.projectPath);
         context.model = resolveInitialModel(context.config);
-        writeLine(output, formatModelSetupSaved(savedPath, context));
+        writeLine(output, formatModelSetupSaved(savedPath, context.language));
         return;
       }
       context.pendingModelSetup = undefined;
-      writeLine(output, formatModelSetupMessage("cancelled", context, setup));
+      writeLine(output, formatModelSetupMessage("cancelled", context.language, setup));
       return;
     }
   } catch (error) {
     writeLine(
       output,
-      error instanceof Error ? error.message : formatModelSetupFallbackError(context),
+      error instanceof Error ? error.message : formatModelSetupFallbackError(context.language),
     );
-    writeModelSetupPrompt(setup, output, context);
+    writeLine(output, getModelSetupPromptMessage(setup, context.language));
   }
-}
-
-function writeModelSetupPrompt(
-  setup: PendingModelSetup,
-  output: Writable,
-  context: TuiContext,
-): void {
-  const keyByStep: Record<ModelSetupStep, ModelSetupMessageKey> = {
-    baseUrl: "baseUrlPrompt",
-    apiKey: "apiKeyPrompt",
-    model: "modelPrompt",
-    reasoning: "reasoningPrompt",
-    auxModel: "auxModelPrompt",
-    confirm: "confirmPrompt",
-  };
-  writeLine(output, formatModelSetupMessage(keyByStep[setup.step], context, setup));
-}
-
-function applyModelSetupValues(setup: PendingModelSetup, values: ModelSetupPrefill): void {
-  const next = { ...setup.values, ...values };
-  validateModelSetupPartial(next);
-  setup.values = next;
-}
-
-function validateModelSetupPartial(values: Partial<ProviderEnvSetup>): void {
-  validateProviderEnvSetup({
-    baseUrl: values.baseUrl ?? "https://example.com/v1",
-    apiKey: values.apiKey ?? "temporary-validation-key",
-    model: values.model ?? "temporary-model",
-    reasoningLevel: values.reasoningLevel ?? "Medium",
-    endpointProfile: values.endpointProfile,
-    includeUsage: values.includeUsage,
-    auxModel: values.auxModel,
-  });
-}
-
-function getNextModelSetupStep(values: Partial<ProviderEnvSetup>): ModelSetupStep {
-  if (!values.baseUrl) return "baseUrl";
-  if (!values.apiKey) return "apiKey";
-  if (!values.model) return "model";
-  if (!values.reasoningLevel) return "reasoning";
-  return "confirm";
-}
-
-function looksLikeModelSetupInput(text: string): boolean {
-  const prefill = parseModelSetupPrefill(text);
-  if (/正常|状态|doctor|检查|诊断|怎么样|是否|吗|\?|？/iu.test(text)) {
-    return Object.keys(prefill).length > 0;
-  }
-  return (
-    /配置.*(?:模型|api\s*key|key|provider|供应商)|设置.*(?:模型|api\s*key|key|provider|供应商)|我要配置模型|configure\s+(?:model|provider|api\s*key)|setup\s+(?:model|provider)|model\s+setup|api\s*key|apikey/iu.test(
-      text,
-    ) || Object.keys(prefill).length > 0
-  );
-}
-
-function parseModelSetupPrefill(text: string): ModelSetupPrefill {
-  const prefill: ModelSetupPrefill = {};
-  const url = text.match(/https?:\/\/[^\s，,]+/iu)?.[0];
-  if (url) prefill.baseUrl = url;
-
-  const model =
-    text.match(/(?:^|[\s，,;；])model(?:\s*[=:：]\s*|\s+)([^\s，,;；]+)/iu)?.[1] ??
-    text.match(/(?:^|[\s，,;；])模型(?:\s*[=:：]\s*|\s+)([^\s，,;；]+)/iu)?.[1];
-  if (model) prefill.model = model;
-
-  const reasoning = text.match(
-    /(?:reasoning|推理等级|推理)\s*[=:：]?\s*(Low|Medium|High|低|中|高)/iu,
-  )?.[1];
-  if (reasoning) prefill.reasoningLevel = normalizeModelSetupReasoningLevel(reasoning);
-
-  const key =
-    text.match(/(?:api\s*key|apikey|key|密钥)\s*[=:：]?\s*([^\s，,;；]+)/iu)?.[1] ??
-    text.match(/\b(sk-[A-Za-z0-9._-]{8,})\b/u)?.[1];
-  if (key) prefill.apiKey = key;
-
-  return prefill;
-}
-
-function normalizeModelSetupReasoningLevel(value: string): "Low" | "Medium" | "High" {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "low" || normalized === "低") return "Low";
-  if (normalized === "high" || normalized === "高") return "High";
-  return "Medium";
-}
-
-function formatModelSetupMessage(
-  key: ModelSetupMessageKey,
-  context: TuiContext,
-  setup: PendingModelSetup,
-): string {
-  const english = context.language === "en-US";
-  const messagesByKey: Record<ModelSetupMessageKey, string> = {
-    intro: english
-      ? [
-          "Model setup wizard",
-          "- One-time setup for this computer; other repositories will reuse the same user provider.env.",
-          "- API key is saved in the private user provider.env, never in project .linghun/settings.json.",
-          `- Save location: ${setup.providerEnvPath}`,
-          setup.createdTemplate ? "- A commented template was created for manual edits later." : "",
-        ]
-          .filter(Boolean)
-          .join("\n")
-      : [
-          "模型配置向导",
-          "- 这是本机一次配置；配置后其他仓库会默认复用同一个用户 provider.env。",
-          "- API key 会写入本机用户私密 provider.env，不会写入项目 .linghun/settings.json。",
-          `- 写入位置：${setup.providerEnvPath}`,
-          setup.createdTemplate ? "- 已创建带注释模板，后续可直接编辑这个文件。" : "",
-        ]
-          .filter(Boolean)
-          .join("\n"),
-    baseUrlPrompt: english
-      ? "API base URL is missing. Enter the root API URL, for example https://example.com/v1."
-      : "缺少 API 地址。请输入 root API 地址，例如 https://example.com/v1。",
-    apiKeyPrompt: english
-      ? "API key is missing. Enter it now; input is masked when possible and the raw value will not be printed."
-      : "缺少 API key。请输入 API key（输入时会尽量 mask，不显示原值）。",
-    modelPrompt: english
-      ? "Model name is missing. Enter the model name."
-      : "缺少模型名称。请输入模型名称。",
-    reasoningPrompt: english
-      ? "Reasoning level: Low / Medium / High. Press Enter to use Medium."
-      : "推理等级可选 Low / Medium / High，默认 Medium。直接回车使用 Medium。",
-    auxModelPrompt: english
-      ? "Auxiliary model is optional. Press Enter to let helper roles follow the main model."
-      : "辅助模型可选，直接回车则跟随主模型。",
-    confirmPrompt: english
-      ? "Type yes/save to save, no to cancel, or details for safety notes."
-      : "请输入 yes 保存，no 取消，details 查看安全说明。",
-    cancelled: english
-      ? "Model setup cancelled. No key was saved."
-      : "已取消模型配置，未保存任何 key。",
-    details: english
-      ? [
-          "Safety notes",
-          `- provider.env path: ${setup.providerEnvPath}`,
-          "- Shell env has highest priority, then user provider.env, then existing settings/default.",
-          "- The raw key is not displayed and is not written to project settings, docs, reports, or logs.",
-          "- Role routes can stay unset; they follow the main model by default.",
-        ].join("\n")
-      : [
-          "安全说明",
-          `- provider.env 路径：${setup.providerEnvPath}`,
-          "- shell env 变量优先级最高，其次用户 provider.env，再走现有 settings/default。",
-          "- 真实 key 不会显示、不写入项目 settings、不写入文档或报告。",
-          "- 不设置角色路由也可以正常使用，角色默认跟随主模型。",
-        ].join("\n"),
-  };
-  return messagesByKey[key];
-}
-
-function formatModelSetupFallbackError(context: TuiContext): string {
-  return context.language === "en-US"
-    ? "Validation failed. Complete the missing fields and try again."
-    : "检查未通过，请补全缺失项。";
-}
-
-function formatModelSetupSummary(setup: PendingModelSetup, context: TuiContext): string {
-  const english = context.language === "en-US";
-  return [
-    english ? "Model setup summary" : "模型配置摘要",
-    "- provider=openai-compatible",
-    `- baseUrl=${setup.values.baseUrl ? "present" : "missing"}`,
-    `- apiKey=${setup.values.apiKey ? "present" : "missing"}`,
-    `- model=${setup.values.model ?? "missing"}`,
-    `- reasoningLevel=${setup.values.reasoningLevel ?? "Medium"}`,
-    `${english ? "- save location" : "- 写入位置"}：${setup.providerEnvPath}`,
-    english
-      ? "Type yes/save to save. The raw API key is not shown."
-      : "请输入 yes/保存 确认后才会写入；摘要不会显示 key 原值。",
-  ].join("\n");
-}
-
-function formatModelSetupSaved(path: string, context: TuiContext): string {
-  return context.language === "en-US"
-    ? [
-        "Saved. Restart Linghun to use the new user provider config.",
-        `- User provider.env: ${path}`,
-        "- This is user-scoped and will be reused by other repositories by default.",
-        "- To change API URL, key, or model later, run /model setup or edit provider.env.",
-        "- Check configuration with /model doctor.",
-      ].join("\n")
-    : [
-        "已保存，请重启 Linghun 后使用新的用户级 provider 配置。",
-        `- 用户 provider.env：${path}`,
-        "- 这是用户级配置，之后进入其他仓库会默认复用。",
-        "- 后续想更换 API 地址、key 或模型名称，可运行 /model setup，或编辑上述 provider.env。",
-        "- 检查配置可运行 /model doctor。",
-      ].join("\n");
 }
 
 async function handleModelRouteCommand(
@@ -4171,7 +4003,7 @@ async function handleModelRouteCommand(
 ): Promise<void> {
   const action = args[0];
   if (!action) {
-    writeLine(output, formatModelRoutes(context));
+    writeLine(output, formatModelRoutes(context.config));
     return;
   }
   if (action === "doctor") {
@@ -4189,7 +4021,7 @@ async function handleModelRouteCommand(
       return;
     }
     context.config = await saveModelRoute(role, model, context.projectPath);
-    const route = getRoleRoute(context, role);
+    const route = getRoleRoute(context.config, role);
     if (role === "executor") {
       context.model = route.primaryModel || context.model;
     }
@@ -4212,197 +4044,6 @@ async function handleModelRouteCommand(
     return;
   }
   writeLine(output, "用法：/model route | /model route doctor | /model route set <role> <model>");
-}
-
-function isModelRole(value: string): value is ModelRole {
-  return ["planner", "executor", "reviewer", "verifier", "summarizer", "vision", "image"].includes(
-    value,
-  );
-}
-
-function getRoleRoute(context: TuiContext, role: ModelRole): RoleModelRoute {
-  const route = context.config.modelRoutes.routes.find((item) => item.role === role);
-  if (route) {
-    return route;
-  }
-  return {
-    role,
-    provider: "",
-    primaryModel: "",
-    fallbackModels: [],
-    requiredCapabilities: ["text"],
-    allowTools: false,
-    allowWrite: false,
-    allowBash: false,
-    requireApprovalBeforeRun: true,
-  };
-}
-
-function formatModelRouteSummary(context: TuiContext): string {
-  const routes = context.config.modelRoutes.routes
-    .map(
-      (route) =>
-        `${route.role}:${route.provider || "unknown"}/${route.primaryModel || "unconfigured"}`,
-    )
-    .slice(0, 4);
-  return `角色路由摘要：${routes.length > 0 ? routes.join("；") : "未配置"}`;
-}
-
-function formatModelRoutes(context: TuiContext): string {
-  return [
-    "Model routes（多模型按角色触发，不默认乱开）",
-    ...context.config.modelRoutes.routes.map((route) =>
-      [
-        `- ${route.role}: provider=${route.provider || "未配置"}`,
-        `model=${route.primaryModel || "未配置"}`,
-        `capabilities=${route.requiredCapabilities.join("+") || "none"}`,
-        `tools=${route.allowTools ? "yes" : "no"}`,
-        `write=${route.allowWrite ? "yes" : "no"}`,
-        `bash=${route.allowBash ? "yes" : "no"}`,
-        `budget=${route.maxCostCny === undefined ? "unconfigured" : `estimated <= ${route.maxCostCny} CNY`}`,
-      ].join("  "),
-    ),
-    "提示：/model route doctor 诊断缺 provider、能力不足和预算配置。",
-  ].join("\n");
-}
-
-async function formatModelRouteDoctor(context: TuiContext): Promise<string> {
-  const lines = ["Model route doctor"];
-  const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
-    context.projectPath,
-  );
-  const providerEnvApiKeyProviders = await readProviderEnvApiKeyProviders();
-  if (lastProviderEnvWarning) {
-    lines.push(
-      `WARN: provider.env 读取失败；path=${lastProviderEnvWarning.path}；reason=${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
-    );
-  }
-  lines.push("- providers:");
-  for (const [providerId, provider] of Object.entries(context.config.providers)) {
-    const endpointProfile = provider.endpointProfile ?? "chat_completions";
-    const compatibilityProfile =
-      provider.compatibilityProfile ??
-      (provider.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
-    const reasoningLevel = provider.reasoningLevel;
-    const reasoningStatus = reasoningLevel
-      ? endpointProfile === "responses"
-        ? `effective/sent level=${reasoningLevel}`
-        : compatibilityProfile === "permissive_openai_compatible"
-          ? `effective/sent level=${reasoningLevel}`
-          : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
-      : "not configured/未生效";
-    const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
-      provider.baseUrl,
-      endpointProfile as EndpointProfile,
-    );
-    const keySource = provider.apiKey
-      ? getProviderKeySource(providerId, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
-      : undefined;
-    const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
-    lines.push(
-      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
-    );
-    if (projectSettingsApiKeyProviders.has(providerId)) {
-      lines.push(
-        `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
-      );
-    }
-    if (baseUrlDiagnostic.hasQueryOrFragment) {
-      lines.push(
-        "    warning: baseUrl 包含 query/fragment；doctor 不显示原值，请改为不含 query/fragment 的 root baseUrl。",
-      );
-      lines.push(`    recommendation: ${baseUrlDiagnostic.recommendation}`);
-    }
-    if (baseUrlDiagnostic.fullEndpointSuffix) {
-      lines.push(
-        `    warning: baseUrl 包含完整 endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}；已按 root baseUrl 诊断，最终 endpointPath=${baseUrlDiagnostic.endpointPath}`,
-      );
-      lines.push(`    recommendation: ${baseUrlDiagnostic.recommendation}`);
-      if (baseUrlDiagnostic.profileMismatch) {
-        lines.push(
-          `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${endpointProfile}`,
-        );
-      }
-    }
-  }
-  for (const route of context.config.modelRoutes.routes) {
-    const problems = diagnoseRoute(route, context);
-    const level = getRouteDoctorLevel(route, problems, context);
-    lines.push(
-      `- ${route.role}: ${level}${problems.length === 0 ? "" : `：${problems.join("；")}`} provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"} fallback=${route.fallbackModels.length > 0 ? route.fallbackModels.join(",") : "未配置"}`,
-    );
-  }
-  if (context.routeDecisions.length > 0) {
-    lines.push("- recent route decisions:");
-    for (const decision of context.routeDecisions.slice(0, 3)) {
-      lines.push(
-        `  - ${decision.role}: trigger=${decision.triggerReason} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} stop=${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
-      );
-    }
-  }
-  if (context.lastProviderFailure) {
-    const failure = context.lastProviderFailure;
-    lines.push(
-      `- last provider failure: code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
-    );
-  }
-  if (hasOpenAiCompatibleDoctorProblem(context)) {
-    lines.push(
-      "- openai-compatible 修复：设置 LINGHUN_OPENAI_BASE_URL、LINGHUN_OPENAI_API_KEY、LINGHUN_OPENAI_MODEL 后重启 Linghun。",
-    );
-  }
-  if (hasOpenAiCompatiblePlaceholderProblem(context)) {
-    lines.push(
-      "- openai-compatible 占位提示：请检查 .linghun/settings.json，避免 openai-compatible-model 占位值覆盖真实模型。",
-    );
-  }
-  lines.push(
-    "- budget: 未配置预算只作为 WARN；金额仅在 /usage 或 /stats 中以 estimated 展示，状态栏不会显示金额。",
-  );
-  lines.push(
-    "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
-  );
-  return lines.join("\n");
-}
-
-async function readProjectSettingsApiKeyProviders(projectPath: string): Promise<Set<string>> {
-  try {
-    const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");
-    const parsed = JSON.parse(raw) as { providers?: Record<string, { apiKey?: unknown }> };
-    return new Set(
-      Object.entries(parsed.providers ?? {})
-        .filter(([, provider]) => typeof provider.apiKey === "string" && provider.apiKey.length > 0)
-        .map(([providerId]) => providerId),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-async function readProviderEnvApiKeyProviders(): Promise<Set<string>> {
-  try {
-    const values = await readProviderEnvValues();
-    return new Set(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function getProviderKeySource(
-  providerId: string,
-  projectSettingsApiKeyProviders: Set<string>,
-  providerEnvApiKeyProviders: Set<string>,
-): string {
-  const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
-  if (process.env[envName]) return "env";
-  if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
-  if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
-  return "merged-config";
-}
-
-function maskSecret(secret: string): string {
-  if (secret.length <= 8) return "****";
-  return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
 function shouldOfferUserScopedModelSetup(context: TuiContext): boolean {
@@ -4431,7 +4072,7 @@ async function readProjectExecutorRouteOverride(
 }
 
 function getProjectModelRouteProblem(context: TuiContext): string | undefined {
-  const route = getRoleRoute(context, "executor");
+  const route = getRoleRoute(context.config, "executor");
   if (isDefaultExecutorRoute(route, context.config)) return undefined;
   return getProjectModelRouteProblemForRoute(route, context);
 }
@@ -4462,166 +4103,6 @@ function hasSelectedProviderConfigProblem(context: TuiContext): boolean {
   return hasOpenAiCompatibleProviderSetupProblem(provider);
 }
 
-function hasOpenAiCompatibleProviderSetupProblem(
-  provider: LinghunConfig["providers"][string],
-): boolean {
-  return (
-    provider.type === "openai-compatible" &&
-    (!provider.baseUrl ||
-      !provider.apiKey ||
-      !provider.model ||
-      provider.model === "openai-compatible-model")
-  );
-}
-
-function hasOpenAiCompatibleDoctorProblem(context: TuiContext): boolean {
-  const provider = context.config.providers["openai-compatible"];
-  return Boolean(
-    provider &&
-      (!provider.baseUrl ||
-        !provider.apiKey ||
-        !provider.model ||
-        provider.model === "openai-compatible-model"),
-  );
-}
-
-function hasOpenAiCompatiblePlaceholderProblem(context: TuiContext): boolean {
-  return context.config.providers["openai-compatible"]?.model === "openai-compatible-model";
-}
-
-function getRouteDoctorLevel(
-  route: RoleModelRoute,
-  problems: string[],
-  context: TuiContext,
-): "BLOCK" | "WARN" | "ok" {
-  const primaryProblems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, context);
-  const primaryBlocking = getRouteBlockingProblems(primaryProblems);
-  if (primaryBlocking.length > 0) {
-    const hasUsableFallback = route.fallbackModels.some((fallbackModel) => {
-      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
-      const fallbackProblems = diagnoseConcreteRoute(
-        route,
-        fallbackModel,
-        fallbackProvider,
-        context,
-      );
-      return getRouteBlockingProblems(fallbackProblems).length === 0;
-    });
-    return hasUsableFallback ? "WARN" : "BLOCK";
-  }
-  return problems.length > 0 ? "WARN" : "ok";
-}
-
-function diagnoseRoute(route: RoleModelRoute, context: TuiContext): string[] {
-  const problems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, context);
-  if (route.fallbackModels.length === 0) {
-    problems.push("fallbackModels 未配置");
-  }
-  for (const fallbackModel of route.fallbackModels) {
-    const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
-    const fallbackProblems = diagnoseConcreteRoute(route, fallbackModel, fallbackProvider, context);
-    if (getRouteBlockingProblems(fallbackProblems).length > 0) {
-      problems.push(
-        `fallback 不可用 ${fallbackModel}：${getRouteBlockingProblems(fallbackProblems).join("/")}`,
-      );
-    }
-  }
-  if (route.maxCostCny === undefined) {
-    problems.push("预算未配置");
-  }
-  if (
-    (route.role === "planner" || route.role === "reviewer" || route.role === "vision") &&
-    route.allowWrite
-  ) {
-    problems.push("权限过宽：不应写文件");
-  }
-  if (
-    (route.role === "vision" || route.role === "image" || route.role === "planner") &&
-    route.allowBash
-  ) {
-    problems.push("权限过宽：不应执行 Bash");
-  }
-  return problems;
-}
-
-function diagnoseConcreteRoute(
-  route: RoleModelRoute,
-  model: string,
-  providerId: string,
-  context: TuiContext,
-): string[] {
-  const problems: string[] = [];
-  const provider = providerId ? context.config.providers[providerId] : undefined;
-  if (!providerId) {
-    problems.push("缺 provider");
-  } else if (!provider) {
-    problems.push("provider 未配置");
-  }
-  if (!model) {
-    problems.push("缺模型");
-  }
-  if (provider?.type === "openai-compatible") {
-    if (!provider.baseUrl) problems.push("openai-compatible 缺 baseUrl");
-    if (!provider.apiKey) problems.push("openai-compatible 缺 apiKey");
-    if (!provider.model || provider.model === "openai-compatible-model") {
-      problems.push("openai-compatible 缺已确认模型");
-    }
-  }
-  for (const capability of route.requiredCapabilities) {
-    if (!routeSupportsCapability({ ...route, primaryModel: model }, capability)) {
-      problems.push(
-        capability === "tools" ? "能力不足：tools/tool calling" : `能力不足：${capability}`,
-      );
-    }
-  }
-  return problems;
-}
-
-function getRouteBlockingProblems(problems: string[]): string[] {
-  return problems.filter(
-    (problem) =>
-      problem !== "预算未配置" &&
-      problem !== "fallbackModels 未配置" &&
-      (problem.startsWith("缺") ||
-        problem.includes("未配置") ||
-        problem.includes("缺 ") ||
-        problem.includes("缺已确认") ||
-        problem.includes("不匹配") ||
-        problem.startsWith("能力不足")),
-  );
-}
-
-function routeSupportsCapability(route: RoleModelRoute, capability: ModelCapability): boolean {
-  if (capability === "text") {
-    return Boolean(route.primaryModel);
-  }
-  if (capability === "vision") {
-    return /vision|vl|gpt-4o|claude|qwen|glm|kimi/i.test(route.primaryModel);
-  }
-  if (capability === "image") {
-    return /image|dall|gpt-image|flux|sd|comfy/i.test(route.primaryModel);
-  }
-  if (capability === "tools") {
-    return route.allowTools;
-  }
-  if (capability === "thinking") {
-    return /pro|reason|thinking|claude|gpt/i.test(route.primaryModel);
-  }
-  if (capability === "promptCache") {
-    return /claude|gpt|deepseek/i.test(route.primaryModel);
-  }
-  return false;
-}
-
-function inferProviderForRouteModel(model: string, context: TuiContext): string {
-  for (const [providerId, provider] of Object.entries(context.config.providers)) {
-    if (provider.model === model) {
-      return providerId;
-    }
-  }
-  return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
-}
-
 function getRuntimeStatusProvider(context: TuiContext): string {
   const runtime = getSelectedModelRuntime(context);
   return runtime.provider;
@@ -4633,12 +4114,6 @@ function resolveInitialModel(config: LinghunConfig): string {
     return executor.primaryModel;
   }
   return config.defaultModel || executor?.primaryModel || config.providers.deepseek.model;
-}
-
-function isDefaultExecutorRoute(route: RoleModelRoute, _config: LinghunConfig): boolean {
-  return (
-    route.provider === "deepseek" && route.primaryModel === defaultConfig.providers.deepseek.model
-  );
 }
 
 type SelectedModelRuntime = {
@@ -4655,7 +4130,7 @@ function getSelectedModelRuntime(
   context: TuiContext,
   role: ModelRole = "executor",
 ): SelectedModelRuntime {
-  const route = getRoleRoute(context, role);
+  const route = getRoleRoute(context.config, role);
   const useContextModel =
     role === "executor" &&
     isDefaultExecutorRoute(route, context.config) &&
@@ -4730,12 +4205,12 @@ function resolveRoleRoute(
   role: ModelRole,
   triggerReason: string,
 ): ResolvedRoleRoute {
-  const baseRoute = getRoleRoute(context, role);
+  const baseRoute = getRoleRoute(context.config, role);
   const primaryProblems = diagnoseConcreteRoute(
     baseRoute,
     baseRoute.primaryModel,
     baseRoute.provider,
-    context,
+    context.config,
   );
   const primaryBlocking = getRouteBlockingProblems(primaryProblems);
   let selectedProvider = baseRoute.provider;
@@ -4745,12 +4220,12 @@ function resolveRoleRoute(
 
   if (primaryBlocking.length > 0) {
     for (const fallbackModel of baseRoute.fallbackModels) {
-      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context);
+      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context.config);
       const fallbackProblems = diagnoseConcreteRoute(
         baseRoute,
         fallbackModel,
         fallbackProvider,
-        context,
+        context.config,
       );
       const fallbackBlocking = getRouteBlockingProblems(fallbackProblems);
       if (fallbackBlocking.length === 0) {
@@ -7151,7 +6626,11 @@ async function completeAgent(
   addRoleUsage(
     context,
     agent.role,
-    { ...getRoleRoute(context, agent.role), provider: agent.provider, primaryModel: agent.model },
+    {
+      ...getRoleRoute(context.config, agent.role),
+      provider: agent.provider,
+      primaryModel: agent.model,
+    },
     agent.cost.inputTokens,
     agent.cost.outputTokens,
     `${agent.type} agent summary`,
@@ -8759,7 +8238,7 @@ async function handleIndexCommand(
 }
 
 export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheTurnStats {
-  const executorRoute = getRoleRoute(context, "executor");
+  const executorRoute = getRoleRoute(context.config, "executor");
   addRoleUsage(context, "executor", executorRoute, usage.inputTokens, usage.outputTokens);
   const freshness = getCurrentFreshness(context);
   const changedKeys = diffFreshness(context.cache.lastFreshness, freshness);
