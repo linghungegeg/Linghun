@@ -11,7 +11,7 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts src/index-safety-repair.ts src/natural-command-bridge.ts src/permission-presenter.ts src/runtime-status-presenter.ts src/tool-output-presenter.ts --format esm --clean && tsc -p tsconfig.json --emitDeclarationOnly --noEmit false --tsBuildInfoFile dist/tsconfig.tsbuildinfo",
+    "build": "tsup src/index.ts src/index-runtime.ts src/index-safety-repair.ts src/natural-command-bridge.ts src/permission-presenter.ts src/runtime-status-presenter.ts src/tool-output-presenter.ts --format esm --clean && tsc -p tsconfig.json --emitDeclarationOnly --noEmit false --tsBuildInfoFile dist/tsconfig.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
