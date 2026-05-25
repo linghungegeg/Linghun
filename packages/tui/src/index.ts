@@ -330,6 +330,7 @@ import {
   startRunnerForDurableJob as startRunnerForDurableJobImpl,
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
+import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
@@ -413,6 +414,74 @@ export type {
   SolutionCompletenessStatus,
 } from "./model-loop-runtime.js";
 export { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+
+export type {
+  VerificationEvidenceLevel,
+  VerificationLevelClassification,
+  VerificationLevelInput,
+} from "./verification-level.js";
+export {
+  classifyVerificationLevel,
+  isNonUpgradeableStatus,
+  detectVerificationInflation,
+  classifyRunnerVerificationLevel,
+  classifyProviderVerificationLevel,
+  formatVerificationLevel,
+  compareVerificationLevels,
+} from "./verification-level.js";
+
+export type {
+  TuiRuntimePath,
+  RuntimePathKind,
+  RuntimePathMarker,
+  RuntimePathDetectionMethod,
+  RuntimePathInput,
+  StartupPathMarker,
+  StartupPathInput,
+} from "./runtime-path-marker.js";
+export {
+  classifyRuntimePath,
+  classifyStartupPath,
+  canClaimTuiMaturity,
+  canClaimCurrentVerification,
+  detectRuntimePathInflation,
+  formatRuntimePathMarker,
+  formatStartupPathMarker,
+} from "./runtime-path-marker.js";
+
+export type {
+  BoundaryViolationSeverity,
+  BoundaryViolationKind,
+  BoundaryViolation,
+  BoundaryCheckResult,
+  FileMetrics,
+  BoundaryThresholds,
+  ChangeDeclaration,
+} from "./architecture-boundary.js";
+export {
+  DEFAULT_THRESHOLDS as ARCHITECTURE_BOUNDARY_THRESHOLDS,
+  checkFileBoundaries,
+  detectCrossLayerImports,
+  detectCircularDependencyRisk,
+  checkBoundaries,
+  validateChangeDeclaration,
+  formatBoundaryViolations,
+  estimateFileMetrics,
+} from "./architecture-boundary.js";
+
+export type {
+  GuardDoctorItem,
+  CompletionClaimCheck,
+} from "./guard-wiring.js";
+export {
+  formatRuntimePathDoctor,
+  formatStartupPathDoctor,
+  formatVerificationLevelDoctor,
+  formatRunnerGuardSummary,
+  formatProviderGuardSummary,
+  validateCompletionClaim,
+  validateChangeDeclarationHuman,
+} from "./guard-wiring.js";
 
 export type PlanProposal = {
   id: string;
@@ -9701,6 +9770,9 @@ function createTerminalReadinessView(context: TuiContext): TerminalReadinessView
         }
       : undefined,
     freshness: { webSourceEvidence },
+    runtimePath: createRuntimePathForReadiness(context),
+    verificationLevel: createVerificationLevelForReadiness(context),
+    startupPath: createStartupPathForReadiness(),
     projectDoctor,
     sourceDrift,
     contextPicker,
@@ -9713,6 +9785,80 @@ function createTerminalReadinessView(context: TuiContext): TerminalReadinessView
       rollbackCoach,
       costPreview,
     }),
+  };
+}
+
+function createRuntimePathForReadiness(_context: TuiContext): TerminalReadinessView["runtimePath"] {
+  const isTTY = Boolean(process.stdout.isTTY);
+  const isCI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS || process.env.GITLAB_CI);
+  const envOverride = process.env.LINGHUN_TUI_RENDER_MODE;
+  const forcedLegacy = envOverride === "legacy";
+  const inkAvailable = isTTY && !isCI && !forcedLegacy;
+  const marker = classifyRuntimePath({
+    isTTY,
+    inkAvailable,
+    envOverride,
+    forcedLegacy,
+    isCI,
+  });
+  return {
+    path: marker.path,
+    kind: marker.kind,
+    canClaimMature: marker.canClaimMature,
+    degradedReason: marker.degradedReason,
+  };
+}
+
+function createVerificationLevelForReadiness(
+  context: TuiContext,
+): TerminalReadinessView["verificationLevel"] {
+  const lastVerification = context.lastVerification;
+  if (!lastVerification) {
+    return {
+      level: "source",
+      canClaimPass: false,
+      canClaimMature: false,
+      upgradeBlocked: false,
+    };
+  }
+  // Infer level from verification status
+  const status = lastVerification.status;
+  const hasRealSmoke = status === "pass" && lastVerification.unverified.length === 0;
+  const hasBuild = status === "pass" || status === "partial";
+  return {
+    level: hasRealSmoke ? "real-smoke" : hasBuild ? "build" : "local",
+    canClaimPass: hasBuild,
+    canClaimMature: hasRealSmoke,
+    upgradeBlocked: status === "partial" || status === "stale",
+    blockReason:
+      status === "partial"
+        ? "partial-verification"
+        : status === "stale"
+          ? "stale-verification"
+          : undefined,
+  };
+}
+
+function createStartupPathForReadiness(): TerminalReadinessView["startupPath"] {
+  const isSourceExecution = Boolean(
+    process.argv[1]?.endsWith(".ts") || process.env.LINGHUN_DEV_MODE || process.env.VITEST,
+  );
+  const isDistExecution = Boolean(
+    process.argv[1]?.includes("/dist/") || process.argv[1]?.includes("\\dist\\"),
+  );
+  const isGlobalBin = Boolean(
+    process.argv[1]?.includes("/bin/") || process.argv[1]?.includes("\\bin\\"),
+  );
+  const marker = classifyStartupPath({
+    isSourceExecution,
+    isDistExecution,
+    isGlobalBin,
+  });
+  return {
+    entryKind: marker.entryKind,
+    isVerifiedCurrent: marker.isVerifiedCurrent,
+    staleRisk: marker.staleRisk,
+    staleReason: marker.staleReason,
   };
 }
 

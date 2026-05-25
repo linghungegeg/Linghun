@@ -1,4 +1,11 @@
 import type { Language, PermissionMode } from "@linghun/shared";
+import {
+  formatRuntimePathDoctor,
+  formatStartupPathDoctor,
+  formatVerificationLevelDoctor,
+} from "./guard-wiring.js";
+import type { RuntimePathMarker, StartupPathMarker } from "./runtime-path-marker.js";
+import type { VerificationLevelClassification } from "./verification-level.js";
 
 export type ReadinessItemStatus = "pass" | "partial" | "fail" | "unknown" | "stale" | "blocked";
 
@@ -35,6 +42,25 @@ export type TerminalReadinessView = {
     summary: string;
   };
   freshness: { webSourceEvidence: "present" | "missing" };
+  runtimePath?: {
+    path: string;
+    kind: "main" | "fallback";
+    canClaimMature: boolean;
+    degradedReason?: string;
+  };
+  verificationLevel?: {
+    level: string;
+    canClaimPass: boolean;
+    canClaimMature: boolean;
+    upgradeBlocked: boolean;
+    blockReason?: string;
+  };
+  startupPath?: {
+    entryKind: string;
+    isVerifiedCurrent: boolean;
+    staleRisk: boolean;
+    staleReason?: string;
+  };
   projectDoctor: {
     status: ReadinessItemStatus;
     packageManager: string;
@@ -346,6 +372,11 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
       summary: `level=${view.costPreview.level} labels=${view.costPreview.labels.join("+")}`,
       nextAction: view.costPreview.nextAction,
     },
+    ...(view.runtimePath ? [guardRuntimePathToReadinessItem(view.runtimePath, view.language)] : []),
+    ...(view.verificationLevel
+      ? [guardVerificationLevelToReadinessItem(view.verificationLevel, view.language)]
+      : []),
+    ...(view.startupPath ? [guardStartupPathToReadinessItem(view.startupPath, view.language)] : []),
   ];
 }
 
@@ -418,4 +449,78 @@ function sanitizePrimary(value: string): string {
 function short(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+// ---------------------------------------------------------------------------
+// Guard wiring adapters — convert view fields to natural-language readiness items
+// ---------------------------------------------------------------------------
+
+function guardRuntimePathToReadinessItem(
+  rp: NonNullable<TerminalReadinessView["runtimePath"]>,
+  language: Language,
+): TerminalReadinessItem {
+  const marker: RuntimePathMarker = {
+    path: rp.path as RuntimePathMarker["path"],
+    kind: rp.kind,
+    isMainPath: rp.kind === "main",
+    isFallback: rp.kind === "fallback",
+    canClaimMature: rp.canClaimMature,
+    degradedReason: rp.degradedReason,
+    detectionMethod: "default",
+  };
+  const item = formatRuntimePathDoctor(marker, language);
+  return {
+    id: item.id,
+    label: item.label,
+    status: item.ok ? "pass" : ("partial" as ReadinessItemStatus),
+    summary: item.summary,
+    nextAction: item.nextAction,
+  };
+}
+
+function guardVerificationLevelToReadinessItem(
+  vl: NonNullable<TerminalReadinessView["verificationLevel"]>,
+  language: Language,
+): TerminalReadinessItem {
+  const classification: VerificationLevelClassification = {
+    level: vl.level as VerificationLevelClassification["level"],
+    isRealSmoke: vl.level === "real-smoke",
+    canClaimMature: vl.canClaimMature,
+    canClaimPass: vl.canClaimPass,
+    upgradeBlocked: vl.upgradeBlocked,
+    blockReason: vl.blockReason,
+    requiredForMature: vl.canClaimMature ? "already-mature" : "real-smoke-required",
+  };
+  const item = formatVerificationLevelDoctor(classification, language);
+  return {
+    id: item.id,
+    label: item.label,
+    status: (vl.canClaimPass
+      ? vl.canClaimMature
+        ? "pass"
+        : "partial"
+      : "unknown") as ReadinessItemStatus,
+    summary: item.summary,
+    nextAction: item.nextAction,
+  };
+}
+
+function guardStartupPathToReadinessItem(
+  sp: NonNullable<TerminalReadinessView["startupPath"]>,
+  language: Language,
+): TerminalReadinessItem {
+  const marker: StartupPathMarker = {
+    entryKind: sp.entryKind as StartupPathMarker["entryKind"],
+    isVerifiedCurrent: sp.isVerifiedCurrent,
+    staleRisk: sp.staleRisk,
+    staleReason: sp.staleReason,
+  };
+  const item = formatStartupPathDoctor(marker, language);
+  return {
+    id: item.id,
+    label: item.label,
+    status: item.ok ? "pass" : ("partial" as ReadinessItemStatus),
+    summary: item.summary,
+    nextAction: item.nextAction,
+  };
 }
