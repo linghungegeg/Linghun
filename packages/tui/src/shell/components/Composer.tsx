@@ -1,7 +1,7 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useCursor, useInput } from "ink";
 import type React from "react";
 import { useState } from "react";
-import { fitText } from "../text-utils.js";
+import { charWidth, fitText } from "../text-utils.js";
 import type { ShellInputEvent, ShellViewModel } from "../types.js";
 
 type ComposerProps = {
@@ -32,6 +32,7 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
   const [text, setText] = useState("");
   const maxWidth = Math.min(80, Math.max(30, view.width - 4));
   const noColor = view.themeMode === "no-color";
+  const { setCursorPosition } = useCursor();
 
   useInput((input, key) => {
     const decision = handleComposerInput(text, input, key);
@@ -45,12 +46,16 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
     }
   });
 
-  const { lines, truncatedCount } = formatComposerRenderLines({
+  const { lines, truncatedCount, cursorCol, cursorRow } = formatComposerRenderLines({
     text,
     placeholder: view.composer.placeholder,
     masking: view.composer.masking,
     noColor,
   });
+
+  // Position native cursor at end of input text
+  setCursorPosition({ x: cursorCol, y: cursorRow + (truncatedCount > 0 ? 1 : 0) });
+
   // no-color: use undefined (terminal default) instead of hardcoded "gray"
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
@@ -77,21 +82,38 @@ export function formatComposerRenderLines({
   placeholder: string;
   masking: boolean;
   noColor: boolean;
-}): { lines: string[]; truncatedCount: number } {
+}): { lines: string[]; truncatedCount: number; cursorCol: number; cursorRow: number } {
+  void noColor; // kept for API compatibility; no longer affects cursor rendering
   const rawLines = text ? formatComposerText(text, masking).split("\n") : [placeholder];
   const truncated = rawLines.length > COMPOSER_MAX_VISIBLE_LINES;
   const displayLines = truncated ? rawLines.slice(-COMPOSER_MAX_VISIBLE_LINES) : rawLines;
-  const cursor = noColor ? "|" : "\u258C";
+
+  const lines = displayLines.map((line, index) => {
+    const isOriginalFirstLine = !truncated && index === 0;
+    const prefix = isOriginalFirstLine ? PROMPT_MARKER : "  ";
+    return `${prefix}${line}`;
+  });
+
+  // Calculate cursor position: end of last line
+  const lastLine = lines[lines.length - 1] ?? "";
+  const cursorCol = displayWidthOf(lastLine);
+  const cursorRow = lines.length - 1;
 
   return {
-    lines: displayLines.map((line, index) => {
-      const isLastLine = index === displayLines.length - 1;
-      const isOriginalFirstLine = !truncated && index === 0;
-      const prefix = isOriginalFirstLine ? PROMPT_MARKER : "  ";
-      return `${prefix}${line}${isLastLine ? cursor : ""}`;
-    }),
+    lines,
     truncatedCount: truncated ? rawLines.length - COMPOSER_MAX_VISIBLE_LINES : 0,
+    cursorCol,
+    cursorRow,
   };
+}
+
+/** Calculate display width of a string (CJK = 2, others = 1). */
+function displayWidthOf(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    width += charWidth(char);
+  }
+  return width;
 }
 
 function formatComposerText(text: string, masking: boolean): string {

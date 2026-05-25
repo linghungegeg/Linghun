@@ -36,7 +36,6 @@ export function renderInkShell(
       alternateScreen: true,
       kittyKeyboard: { mode: "auto" },
     });
-    hideTerminalCursor(stdout);
   } catch (error) {
     showTerminalCursor(stdout);
     throw error;
@@ -74,7 +73,6 @@ export function renderInkShell(
     try {
       instance.rerender(<ShellApp controller={controller} />);
     } catch {
-      showTerminalCursor(stdout);
       // Ignore Ink rerender errors from stream close / unmount races;
       // business exceptions are handled outside this best-effort path.
     }
@@ -116,14 +114,6 @@ export function renderInkShell(
       await instance.waitUntilRenderFlush();
     },
   };
-}
-
-function hideTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
-  try {
-    stdout?.write("\x1B[?25l");
-  } catch {
-    // stdout may already be closed
-  }
 }
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {

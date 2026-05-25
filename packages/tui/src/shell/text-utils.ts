@@ -32,10 +32,52 @@ export function lineChar(noColor: boolean): string {
   return noColor ? "-" : "\u2500";
 }
 
-/** Home brand wordmark. Keep it ASCII-safe for Windows console resize stability. */
-export function brandWordmark(noColor: boolean): string[] {
-  if (noColor) {
-    return ["LingHun", "--------------"];
+/** Home brand wordmark. Responsive to terminal width. */
+export function brandWordmark(noColor: boolean, width = 80): string[] {
+  if (width >= 80) {
+    return brandWordmarkLarge(noColor);
   }
-  return ["LingHun", "──────────────"];
+  if (width >= 60) {
+    return brandWordmarkCompact(noColor);
+  }
+  return brandWordmarkNarrow(noColor);
+}
+
+/** Large wordmark for wide terminals (≥80 cols). */
+function brandWordmarkLarge(noColor: boolean): string[] {
+  if (noColor) {
+    return [
+      "  _    _       _  _",
+      " | |  (_)_ __ | || |_ _ _ __",
+      " | |  | | '_ \\| || | | | '_ \\",
+      " | |__| | | | | || |_| | | | |",
+      " |____|_|_| |_|_||_\\__,_|_| |_|",
+      "",
+      " LingHun",
+    ];
+  }
+  return [
+    "  ╻   ╻         ╻ ╻",
+    "  ┃   ┃╺┓╺┓┏━┓  ┃━┃╻ ╻╺┓╺┓",
+    "  ┃   ┃ ┃ ┃┃ ┃  ┃ ┃┃ ┃ ┃ ┃",
+    "  ┗━━ ╹ ╹ ╹┗━┛  ┗━┛┗━┛ ╹ ╹",
+    "",
+    "  LingHun",
+  ];
+}
+
+/** Compact wordmark for medium terminals (60-79 cols). */
+function brandWordmarkCompact(noColor: boolean): string[] {
+  if (noColor) {
+    return ["LingHun", "=============="];
+  }
+  return ["LingHun", "━━━━━━━━━━━━━━"];
+}
+
+/** Narrow wordmark for small terminals (<60 cols). */
+function brandWordmarkNarrow(noColor: boolean): string[] {
+  if (noColor) {
+    return ["LingHun"];
+  }
+  return ["LingHun"];
 }

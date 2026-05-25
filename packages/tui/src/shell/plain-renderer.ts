@@ -20,14 +20,13 @@ function renderPlainHome(view: ShellViewModel): string {
   const blockLines = formatBlockLines(view, noColor);
   const composerWidth = composerMaxWidth(view.width);
   const composerLine = lineChar(noColor).repeat(composerWidth);
-  const cursor = noColor ? "|" : "\u258C";
   const lines = [
-    ...brandWordmark(noColor),
+    ...brandWordmark(noColor, view.width),
     "",
     view.homeVision,
     ...(view.setupHint ? [view.setupHint] : []),
     composerLine,
-    `> ${view.composer.placeholder}${cursor}`,
+    `> ${view.composer.placeholder}`,
     composerLine,
     formatStatusTray(view),
     ...(blockLines.length > 0 ? [separator, ...blockLines] : []),
@@ -84,10 +83,10 @@ function renderPlainTask(view: ShellViewModel): string {
     lines.push(...view.limitations.map((item) => `- ${item}`));
   }
 
-  // Composer
-  const cursor = noColor ? "|" : "\u258C";
+  // Composer — plain renderer shows prompt marker without fake cursor
+  // (native cursor is handled by terminal itself in plain mode)
   lines.push(composerLine);
-  lines.push(`> ${view.composer.placeholder}${cursor}`);
+  lines.push(`> ${view.composer.placeholder}`);
   lines.push(composerLine);
 
   return lines.join("\n");

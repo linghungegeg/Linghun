@@ -4,6 +4,7 @@ import type { TuiContext } from "../index.js";
 import { formatComposerRenderLines, handleComposerInput } from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
+import type { ProductBlockViewModel } from "./types.js";
 import {
   createOutputBlock,
   createShellViewModel,
@@ -362,8 +363,9 @@ describe("Ink shell selection", () => {
 
       expect(() => shell.rerender()).not.toThrow();
       expect(rerenderMock).toHaveBeenCalledTimes(1);
-      expect(output.text).toContain("\x1B[?25l");
-      expect(output.text).toContain("\x1B[?25h");
+      // No cursor escapes from our code — Ink manages cursor internally
+      expect(output.text).not.toContain("\x1B[?25l");
+      expect(output.text).not.toContain("\x1B[?25h");
     } finally {
       vi.doUnmock("ink");
       vi.resetModules();
@@ -492,19 +494,15 @@ describe("Ink shell selection", () => {
     await shell.waitUntilExit();
 
     expect(output.text).toContain("LingHun");
-    expect(output.text).toContain("──────────────");
+    expect(output.text).toContain("──");
     expect(output.text).not.toContain("█");
     expect(output.text).not.toContain("▀▄▄▀");
     expect(output.text).not.toContain("L I N G H U N");
-    // No figlet or heavy Unicode card borders
+    // No figlet heavy double-line borders
     expect(output.text).not.toContain("╔");
     expect(output.text).not.toContain("╗");
     expect(output.text).not.toContain("╚");
     expect(output.text).not.toContain("╝");
-    expect(output.text).not.toContain("┏");
-    expect(output.text).not.toContain("┓");
-    expect(output.text).not.toContain("┗");
-    expect(output.text).not.toContain("┛");
 
     // Plain renderer also has wordmark
     const plainView = createShellViewModel(createContext(), { width: 80 });
@@ -976,7 +974,7 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
 });
 
 describe("backgroundSummaries → blocks mapping", () => {
-  it("maps running/completed/failed summaries to ProductBlockViewModels", () => {
+  it("filters out completed background, keeps running", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -986,16 +984,12 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(2);
+    // completed is filtered out — only running shows
+    expect(bgBlocks).toHaveLength(1);
     expect(bgBlocks[0]?.id).toBe("bg-t1");
     expect(bgBlocks[0]?.kind).toBe("run");
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[0]?.title).toContain("后台：lint check");
-    expect(bgBlocks[1]?.id).toBe("bg-t2");
-    // P1-4: completed uses partial (not info) to visually distinguish from PASS
-    expect(bgBlocks[1]?.status).toBe("partial");
-    expect(bgBlocks[1]?.summary).toContain("pass");
-    expect(bgBlocks[1]?.nextAction).toContain("非验证通过");
   });
 
   it("maps failed and timeout statuses correctly", () => {
@@ -1022,16 +1016,15 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(bgBlock?.title).toContain("Background: build");
   });
 
-  it("completed tasks use partial status with clarification note, not pass", () => {
+  it("completed tasks are hidden from task output (no historical noise)", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-t6");
-    // P1-4: completed uses partial to visually distinguish from verification PASS
-    expect(bgBlock?.status).toBe("partial");
-    expect(bgBlock?.nextAction).toContain("not a verification pass");
+    // D.13: completed historical background is filtered out
+    expect(bgBlock).toBeUndefined();
   });
 
   it("home mode does not show background blocks", () => {
@@ -1325,37 +1318,33 @@ describe("D.12B — P1-3: deny/cancel feedback", () => {
   });
 });
 
-describe("D.12B — P1-4: completed job visually not PASS", () => {
-  it("completed job uses partial status, not info or pass", () => {
+describe("D.12B — P1-4: completed job hidden from task output", () => {
+  it("completed job is filtered out (no historical noise)", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [{ id: "j1", title: "build", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-j1");
-    expect(bgBlock?.status).toBe("partial");
-    expect(bgBlock?.status).not.toBe("pass");
-    expect(bgBlock?.status).not.toBe("info");
+    // D.13: completed historical background is hidden
+    expect(bgBlock).toBeUndefined();
   });
 
-  it("completed job nextAction contains [非PASS] marker in zh-CN", () => {
+  it("running/failed/stale/blocked jobs still show", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
-      backgroundSummaries: [{ id: "j2", title: "test", status: "completed" }],
+      backgroundSummaries: [
+        { id: "j2", title: "test", status: "running" },
+        { id: "j3", title: "deploy", status: "failed" },
+        { id: "j4", title: "health", status: "stale" },
+      ],
     });
-    const bgBlock = view.blocks.find((b) => b.id === "bg-j2");
-    expect(bgBlock?.nextAction).toContain("[非PASS]");
-  });
-
-  it("completed job nextAction contains [not PASS] marker in en-US", () => {
-    const view = createShellViewModel(createContext({ language: "en-US" }), {
-      width: 80,
-      viewMode: "task",
-      backgroundSummaries: [{ id: "j3", title: "deploy", status: "completed" }],
-    });
-    const bgBlock = view.blocks.find((b) => b.id === "bg-j3");
-    expect(bgBlock?.nextAction).toContain("[not PASS]");
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(3);
+    expect(bgBlocks[0]?.status).toBe("running");
+    expect(bgBlocks[1]?.status).toBe("fail");
+    expect(bgBlocks[2]?.status).toBe("blocked");
   });
 });
 
@@ -1432,71 +1421,86 @@ describe("D.12B — P2-5: no-color does not force white", () => {
 });
 
 describe("D.12C — Composer cursor alignment closure", () => {
-  it("empty Composer render includes prompt marker and self-drawn cursor (color)", () => {
-    const { lines } = formatComposerRenderLines({
+  it("empty Composer render includes prompt marker without fake cursor", () => {
+    const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
       text: "",
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 我能帮您做点什么？\u258C"]);
+    expect(lines).toEqual(["> 我能帮您做点什么？"]);
+    // No fake cursor characters
+    expect(lines.join("")).not.toContain("\u258C");
+    expect(lines.join("")).not.toContain("|");
+    // cursorCol should be at end of placeholder line
+    expect(cursorRow).toBe(0);
+    expect(cursorCol).toBeGreaterThan(0);
 
     const rendered = renderPlainShell(createShellViewModel(createContext(), { width: 80 }));
-    expect(rendered).toContain("> 我能帮您做点什么？\u258C");
+    expect(rendered).toContain("> 我能帮您做点什么？");
+    expect(rendered).not.toContain("\u258C");
   });
 
-  it("typed Composer render puts cursor after text", () => {
-    const { lines } = formatComposerRenderLines({
+  it("typed Composer render puts cursor position after text", () => {
+    const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
       text: "修复光标",
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 修复光标\u258C"]);
+    expect(lines).toEqual(["> 修复光标"]);
+    // cursor at end of "> 修复光标" (2 + 4*2 = 10)
+    expect(cursorRow).toBe(0);
+    expect(cursorCol).toBe(10);
   });
 
-  it("multiline Composer render only puts cursor on the last line", () => {
-    const { lines } = formatComposerRenderLines({
+  it("multiline Composer render reports cursor on the last line", () => {
+    const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
       text: "第一行\n第二行\n第三行",
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
     });
-    expect(lines).toEqual(["> 第一行", "  第二行", "  第三行\u258C"]);
-    expect(lines.slice(0, -1).join("\n")).not.toContain("\u258C");
+    expect(lines).toEqual(["> 第一行", "  第二行", "  第三行"]);
+    expect(lines.join("\n")).not.toContain("\u258C");
+    expect(cursorRow).toBe(2);
+    // "  第三行" = 2 + 3*2 = 8
+    expect(cursorCol).toBe(8);
   });
 
-  it("no-color Composer render uses | cursor and no block cursor", () => {
-    const { lines } = formatComposerRenderLines({
+  it("no-color Composer render has no fake cursor characters", () => {
+    const { lines, cursorCol } = formatComposerRenderLines({
       text: "修复光标",
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: true,
     });
-    expect(lines).toEqual(["> 修复光标|"]);
+    expect(lines).toEqual(["> 修复光标"]);
     expect(lines.join("\n")).not.toContain("\u258C");
+    expect(lines.join("\n")).not.toContain("|");
+    expect(cursorCol).toBe(10);
 
     const rendered = renderPlainShell(
       createShellViewModel(createContext(), { noColor: true, width: 80 }),
     );
-    expect(rendered).toContain("> 我能帮您做点什么？|");
+    expect(rendered).toContain("> 我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
 
-  it("brand underline to vision has 1-line spacing in plain home render", () => {
+  it("brand wordmark to vision has spacing in plain home render", () => {
     const view = createShellViewModel(createContext(), { width: 80 });
     const rendered = renderPlainShell(view);
     const lines = rendered.split("\n");
-    // brandWordmark produces ["LingHun", "──────────────"]
-    const underlineIdx = lines.findIndex((l) => l.startsWith("─────"));
-    expect(underlineIdx).toBeGreaterThan(0);
+    // Large wordmark ends with "  LingHun" line, followed by empty line, then vision
+    const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
+    expect(brandIdx).toBeGreaterThan(0);
     // Next line should be empty (spacing)
-    expect(lines[underlineIdx + 1]).toBe("");
+    expect(lines[brandIdx + 1]).toBe("");
     // Then vision
-    expect(lines[underlineIdx + 2]).toContain("技术普惠");
+    expect(lines[brandIdx + 2]).toContain("技术普惠");
   });
 
-  it("ink-renderer writes hide cursor escape on render", async () => {
+  it("ink-renderer does not add extra hide cursor — Ink manages cursor via useCursor", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     const output = new TestTtyOutput();
@@ -1516,15 +1520,12 @@ describe("D.12C — Composer cursor alignment closure", () => {
       stderr: new TestTtyOutput(),
     });
     await shell.waitUntilRenderFlush();
-
-    // Hide cursor escape should be written
-    expect(output.text).toContain("\x1B[?25l");
-
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Show cursor escape should be written on unmount
-    expect(output.text).toContain("\x1B[?25h");
+    // After unmount, the last cursor escape must be show (safety restore)
+    const lastShow = output.text.lastIndexOf("\x1B[?25h");
+    expect(lastShow).toBeGreaterThanOrEqual(0);
   });
 
   it("ink-renderer show cursor on unmount path", async () => {
@@ -1616,14 +1617,273 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const view = createShellViewModel(createContext(), { width: 40 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("我能帮您做点什么？\u258C");
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("\u258C");
   });
 
   it("width=40 no-color does not crash", () => {
     const view = createShellViewModel(createContext(), { noColor: true, width: 40 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("|");
     expect(rendered).not.toContain("\u258C");
+  });
+});
+
+describe("D.13 — Home + Task Product Shell Mature Closure", () => {
+  it("Home large wordmark renders for width>=80", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("┗━━");
+  });
+
+  it("Home compact wordmark renders for width 60-79", () => {
+    const view = createShellViewModel(createContext(), { width: 65 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("━━━━━━━━━━━━━━");
+    expect(rendered).not.toContain("┗━━");
+  });
+
+  it("Home narrow wordmark renders for width<60", () => {
+    const view = createShellViewModel(createContext(), { width: 50 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("━━━━━━━━━━━━━━");
+    expect(rendered).not.toContain("┗━━");
+  });
+
+  it("Home no-color uses ASCII fallback wordmark", () => {
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("|____|");
+  });
+
+  it("Task does not render large hero", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "thinking", text: "正在思考…" },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("┗━━");
+    expect(rendered).not.toContain("━━━━━━━━━━━━━━");
+  });
+
+  it("Home does not show background blocks", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "home",
+      backgroundSummaries: [
+        { id: "bg1", title: "running job", status: "running" },
+        { id: "bg2", title: "failed job", status: "failed" },
+      ],
+    });
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(0);
+  });
+
+  it("Task does not show completed historical background noise", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      backgroundSummaries: [
+        { id: "bg1", title: "old job", status: "completed" },
+        { id: "bg2", title: "cancelled job", status: "cancelled" },
+      ],
+    });
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(0);
+  });
+
+  it("Task shows running/failed/timeout/stale/blocked background", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      backgroundSummaries: [
+        { id: "bg1", title: "lint", status: "running" },
+        { id: "bg2", title: "deploy", status: "failed" },
+        { id: "bg3", title: "health", status: "timeout" },
+        { id: "bg4", title: "old", status: "stale" },
+      ],
+    });
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(4);
+    expect(bgBlocks[0]?.status).toBe("running");
+    expect(bgBlocks[1]?.status).toBe("fail");
+    expect(bgBlocks[2]?.status).toBe("blocked");
+    expect(bgBlocks[3]?.status).toBe("blocked");
+  });
+
+  it("fail/blocking output prioritized over normal output", () => {
+    const failBlock: ProductBlockViewModel = {
+      id: "out-fail",
+      kind: "error",
+      status: "fail",
+      title: "Error",
+      summary: "Something failed",
+    };
+    const normalBlocks: ProductBlockViewModel[] = [
+      { id: "out-1", kind: "details", status: "info", title: "Output 1", summary: "ok" },
+      { id: "out-2", kind: "details", status: "info", title: "Output 2", summary: "ok" },
+      { id: "out-3", kind: "details", status: "info", title: "Output 3", summary: "ok" },
+      { id: "out-4", kind: "details", status: "info", title: "Output 4", summary: "ok" },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [failBlock, ...normalBlocks],
+    });
+    const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
+    expect(outputBlocks.find((b) => b.id === "out-fail")).toBeDefined();
+    expect(outputBlocks.length).toBeLessThanOrEqual(3);
+  });
+
+  it("normal output max 3 items", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 5 }, (_, i) => ({
+      id: `out-${i}`,
+      kind: "details" as const,
+      status: "info" as const,
+      title: `Output ${i}`,
+      summary: `result ${i}`,
+    }));
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+    const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
+    expect(outputBlocks.length).toBeLessThanOrEqual(3);
+  });
+
+  it("output blocks have /details hint", () => {
+    const block = createOutputBlock("some output text", "zh-CN", "out-hint");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const outBlock = view.blocks.find((b) => b.id === "out-hint");
+    expect(outBlock?.nextAction).toContain("/details");
+  });
+
+  it("error output has /details hint for full error", () => {
+    const block = createOutputBlock("error: something failed badly", "zh-CN", "out-err");
+    expect(block.status).toBe("fail");
+    expect(block.kind).toBe("error");
+    expect(block.nextAction).toContain("/details");
+  });
+
+  it("permission pending suppresses normal output", () => {
+    const block = createOutputBlock("normal output", "zh-CN", "out-perm");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      outputBlocks: [block],
+      permission: {
+        toolName: "Bash",
+        reason: "需要执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp"],
+        hint: "yes / no",
+      },
+    });
+    expect(view.blocks.find((b) => b.id === "out-perm")).toBeUndefined();
+  });
+
+  it("Composer render lines contain no fake cursor characters", () => {
+    const cases = [
+      { text: "", noColor: false },
+      { text: "hello", noColor: false },
+      { text: "你好", noColor: true },
+      { text: "line1\nline2\nline3", noColor: false },
+    ];
+    for (const { text, noColor } of cases) {
+      const { lines } = formatComposerRenderLines({
+        text,
+        placeholder: "placeholder",
+        masking: false,
+        noColor,
+      });
+      const joined = lines.join("\n");
+      expect(joined).not.toContain("\u258C");
+    }
+  });
+
+  it("CJK cursor position accounts for double-width characters", () => {
+    const { cursorCol } = formatComposerRenderLines({
+      text: "你好世界",
+      placeholder: "placeholder",
+      masking: false,
+      noColor: false,
+    });
+    // "> " (2) + "你好世界" (4*2=8) = 10
+    expect(cursorCol).toBe(10);
+  });
+
+  it("masking cursor position uses masked length", () => {
+    const { cursorCol, lines } = formatComposerRenderLines({
+      text: "secret",
+      placeholder: "placeholder",
+      masking: true,
+      noColor: false,
+    });
+    // "> " (2) + "******" (6) = 8
+    expect(cursorCol).toBe(8);
+    expect(lines[0]).toContain("******");
+  });
+
+  it("truncated multiline shows line count and correct cursor row", () => {
+    const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
+    const { lines, truncatedCount, cursorRow } = formatComposerRenderLines({
+      text,
+      placeholder: "placeholder",
+      masking: false,
+      noColor: false,
+    });
+    expect(truncatedCount).toBe(3);
+    expect(lines).toHaveLength(5);
+    expect(cursorRow).toBe(4);
+  });
+
+  it("plain renderer Home hero fallback is reasonable in no-color", () => {
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("┗");
+    expect(rendered).not.toContain("━");
+  });
+
+  it("plain renderer Task does not show completed background noise", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      backgroundSummaries: [{ id: "bg1", title: "done", status: "completed" }],
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).not.toContain("done");
+  });
+
+  it("plain renderer Task shows fail/details hint", () => {
+    const block = createOutputBlock("error: crash", "zh-CN", "out-plain-err");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("/details");
+    // fail status marker (● in color mode, [FAIL] in no-color)
+    expect(rendered).toContain("●");
+  });
+
+  it("80x24 and 40 width do not squeeze composer", () => {
+    for (const width of [80, 40]) {
+      const view = createShellViewModel(createContext(), { width, height: 24 });
+      const rendered = renderPlainShell(view);
+      expect(rendered).toContain("> ");
+      expect(rendered).toContain("我能帮您做点什么？");
+    }
   });
 });

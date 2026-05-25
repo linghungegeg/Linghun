@@ -37,6 +37,9 @@ const shellText = {
     latestOutputTitle: "最近输出",
     noVisibleOutput: "没有可见输出。",
     latestOutputNext: "如需完整运行时输出，可用 /details。",
+    detailsHint: "用 /details 查看完整内容",
+    errorTitle: (tool: string) => `${tool} 失败`,
+    errorDetailsHint: "用 /details 查看完整错误",
     activityError: "请求失败，可重试或用 /model doctor 排查。",
     activityCompleted: "已完成。",
     denied: (tool: string) => `已拒绝 ${tool}，工具未执行。`,
@@ -67,6 +70,9 @@ const shellText = {
     latestOutputTitle: "Latest output",
     noVisibleOutput: "No visible output.",
     latestOutputNext: "Use /details for full runtime output.",
+    detailsHint: "Use /details for full content",
+    errorTitle: (tool: string) => `${tool} failed`,
+    errorDetailsHint: "Use /details for full error",
     activityError: "Request failed. Retry or use /model doctor.",
     activityCompleted: "Completed.",
     denied: (tool: string) => `Denied ${tool}; tool was not executed.`,
@@ -125,16 +131,33 @@ export function createShellViewModel(
   // blocks 只保留 project-route、background summaries 和 output（最多 3 条）
   // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
   // Home 首屏不显示 background blocks
+  // Task 不显示 completed 历史 background（只显示 running/failed/timeout/stale/blocked）
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
   if (effectiveViewMode !== "home" && options.backgroundSummaries?.length) {
-    blocks.push(...mapBackgroundSummariesToBlocks(options.backgroundSummaries, language));
+    // Filter out completed historical background tasks — only show active/problematic ones
+    const activeBackgrounds = options.backgroundSummaries.filter(
+      (s) => s.status !== "completed" && s.status !== "cancelled",
+    );
+    if (activeBackgrounds.length > 0) {
+      blocks.push(...mapBackgroundSummariesToBlocks(activeBackgrounds, language));
+    }
   }
   if (!options.permission) {
-    const outputBlocks = (options.outputBlocks ?? []).slice(-3);
-    blocks.push(...outputBlocks);
+    const allOutputBlocks = options.outputBlocks ?? [];
+    // Prioritize fail/blocking output over normal output
+    const failBlocks = allOutputBlocks.filter((b) => b.status === "fail" || b.status === "blocked");
+    const normalBlocks = allOutputBlocks.filter(
+      (b) => b.status !== "fail" && b.status !== "blocked",
+    );
+    // Show all fail/blocking + up to 3 most recent normal (total capped at 3)
+    const maxNormal = Math.max(0, 3 - failBlocks.length);
+    const selectedBlocks = [...failBlocks, ...normalBlocks.slice(-maxNormal)];
+    // Add /details hint to truncated blocks
+    const outputWithHints = selectedBlocks.map((b) => addDetailsHint(b, language));
+    blocks.push(...outputWithHints);
   }
 
   // Denial/cancel feedback as an output block
@@ -210,14 +233,35 @@ export function createOutputBlock(
   const normalized = redactSensitiveText(text.replace(/\r/g, "").trim());
   const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
   const copy = shellText[language];
+  const isFail = /错误|失败|error|failed/iu.test(normalized);
   return {
     id,
-    kind: "details",
-    status: /错误|失败|error|failed/iu.test(normalized) ? "fail" : "info",
+    kind: isFail ? "error" : "details",
+    status: isFail ? "fail" : "info",
     title: copy.latestOutputTitle,
     summary: firstLine || copy.noVisibleOutput,
-    nextAction: copy.latestOutputNext,
+    nextAction: isFail ? copy.errorDetailsHint : copy.latestOutputNext,
   };
+}
+
+/**
+ * Adds /details hint to output blocks that have long content or are errors.
+ * Ensures users know how to access full output without screen flooding.
+ */
+function addDetailsHint(block: ProductBlockViewModel, language: Language): ProductBlockViewModel {
+  const copy = shellText[language];
+  // Error blocks always get the error details hint
+  if (block.status === "fail" || block.status === "blocked") {
+    return {
+      ...block,
+      nextAction: block.nextAction || copy.errorDetailsHint,
+    };
+  }
+  // Normal blocks get the generic details hint if they don't already have one
+  if (!block.nextAction) {
+    return { ...block, nextAction: copy.detailsHint };
+  }
+  return block;
 }
 
 /**

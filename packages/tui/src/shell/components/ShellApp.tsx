@@ -33,7 +33,7 @@ function HomeLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = composerMaxWidth(view.width);
-  const brandLines = brandWordmark(noColor);
+  const brandLines = brandWordmark(noColor, view.width);
   const composerLine = lineChar(noColor).repeat(cw);
 
   return (
