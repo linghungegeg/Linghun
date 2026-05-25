@@ -463,7 +463,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     "## Boundaries",
     "- Node/TUI runtime remains default and explicit fallback; Phase 17C only adds a gated native runner resolver/adapter for approved durable job specs.",
     "- Native runner lifecycle completion is not verification PASS; failed/timeout/cancelled/stale/crash/protocol mismatch paths do not create PASS evidence.",
-    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, real daemon supervision, and Unix/macOS process-group cleanup.",
+    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, real native-runner process-guard smoke, and parent hard-kill/crash proof.",
     "- Remote channels / Phase 17B, Fast Workspace Scanner, and Phase 18 desktop are NOT entered.",
     "- Agent context is trimmed to handoff/evidence/cache/index refs; no full transcript/source/index/log output is injected.",
   ];

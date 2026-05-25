@@ -293,6 +293,11 @@ import {
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
 import {
+  createProcessGuard,
+  installProcessGuardExitHandlers,
+  requestTrackedProcessStop,
+} from "./process-guard.js";
+import {
   type ProviderCircuitBreakerState,
   checkProviderCooldown,
   clearProviderBreaker,
@@ -2272,11 +2277,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
   };
+  installProcessGuardExitHandlers();
   await hydrateDurableJobBackgroundTasks(context);
   const gateway = createModelGateway(config);
 
   const startup = await prepareTuiStartup(input, output, context);
   const sigintHandler = () => {
+    requestTrackedProcessStop(false);
     const controller = context.activeAbortController ?? context.activeVerificationAbortController;
     if (!controller) {
       return;
@@ -3184,6 +3191,15 @@ async function installExtensionFromRequest(
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+}
+
+export async function runCommandCaptureForTest(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+): ReturnType<typeof runCommandCapture> {
+  return runCommandCapture(command, args, cwd, timeoutMs);
 }
 
 function githubRepoToUrl(locator: string): string | null {
@@ -5711,6 +5727,7 @@ async function recoverDurableJobForContext(
     return job;
   }
   if (job.runner && job.status === "stale") {
+    await stopRunnerForDurableJob(context, job);
     markJobRunnerTerminal(job, "stale", job.pauseReason ?? "recovered stale job");
   }
   const now = new Date().toISOString();
@@ -9227,8 +9244,10 @@ async function runCommandCapture(
 }> {
   return new Promise((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
+    const guard = createProcessGuard();
     try {
       child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+      guard.track(child, { label: `command:${command}` });
     } catch (error) {
       const nodeError = error as NodeJS.ErrnoException;
       resolvePromise({
@@ -9243,7 +9262,7 @@ async function runCommandCapture(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     const timer = setTimeout(() => {
-      child.kill();
+      guard.requestStop(false);
       resolvePromise({
         exitCode: 124,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -10740,6 +10759,7 @@ async function runVerificationCommand(
   command: string,
   cwd: string,
   signal?: AbortSignal,
+  timeoutMs = VERIFICATION_COMMAND_TIMEOUT_MS,
 ): Promise<{
   exitCode: number;
   output: string;
@@ -10747,24 +10767,15 @@ async function runVerificationCommand(
   runnerError?: string;
 }> {
   return new Promise((resolveCommand) => {
-    const child = spawn(command, { cwd, shell: true, windowsHide: true });
+    const detached = process.platform !== "win32";
+    const child = spawn(command, { cwd, shell: true, detached, windowsHide: true });
+    const guard = createProcessGuard();
+    guard.track(child, { detached, label: "verification" });
     let output = "";
     let settled = false;
     let forceTimer: NodeJS.Timeout | undefined;
-    const requestStop = (force: boolean) => {
-      if (process.platform === "win32" && child.pid) {
-        const args = ["/pid", String(child.pid), "/t"];
-        if (force) {
-          args.push("/f");
-        }
-        const killer = spawn("taskkill", args, { windowsHide: true });
-        killer.on("error", () => child.kill(force ? "SIGKILL" : "SIGTERM"));
-        return;
-      }
-      child.kill(force ? "SIGKILL" : "SIGTERM");
-    };
     const scheduleForceStop = () => {
-      forceTimer = setTimeout(() => requestStop(true), 1_000);
+      forceTimer = setTimeout(() => guard.requestStop(true), 1_000);
     };
     const settle = (result: {
       exitCode: number;
@@ -10786,17 +10797,17 @@ async function runVerificationCommand(
     const onAbort = () => {
       const runnerError = "runner cancelled by interrupt";
       output = output ? `${output}\n${runnerError}` : runnerError;
-      requestStop(false);
+      guard.requestStop(false);
       scheduleForceStop();
       settle({ exitCode: 1, output, outcome: "cancelled", runnerError });
     };
     const timeout = setTimeout(() => {
-      const runnerError = `runner timeout after ${VERIFICATION_COMMAND_TIMEOUT_MS}ms`;
+      const runnerError = `runner timeout after ${timeoutMs}ms`;
       output = output ? `${output}\n${runnerError}` : runnerError;
-      requestStop(false);
+      guard.requestStop(false);
       scheduleForceStop();
       settle({ exitCode: 1, output, outcome: "timeout", runnerError });
-    }, VERIFICATION_COMMAND_TIMEOUT_MS);
+    }, timeoutMs);
     if (signal?.aborted) {
       onAbort();
       return;
@@ -10822,6 +10833,15 @@ async function runVerificationCommand(
       settle({ exitCode, output, runnerError });
     });
   });
+}
+
+export async function runVerificationCommandForTest(
+  command: string,
+  cwd: string,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): ReturnType<typeof runVerificationCommand> {
+  return runVerificationCommand(command, cwd, signal, timeoutMs);
 }
 
 function detectRunnerCompatibilityError(

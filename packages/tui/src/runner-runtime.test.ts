@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LinghunConfig, defaultConfig } from "@linghun/config";
@@ -9,9 +9,11 @@ import {
   type RunnerContext,
   type RunnerRuntimeDeps,
   formatApprovedRunnerSpecLine,
+  formatNativeRunnerProcessGuardContract,
   markJobRunnerFallback,
   markJobRunnerTerminal,
   resolveNativeRunner,
+  stopRunnerForDurableJob,
 } from "./runner-runtime.js";
 
 function createTestRunnerContext(overrides?: Partial<RunnerContext>): RunnerContext {
@@ -20,6 +22,33 @@ function createTestRunnerContext(overrides?: Partial<RunnerContext>): RunnerCont
     projectPath: "/tmp/test-project",
     ...overrides,
   };
+}
+
+async function createMockRunner(project: string): Promise<{ path: string; callsPath: string }> {
+  const runnerPath = join(project, "mock-runner.cjs");
+  const callsPath = join(project, "runner-calls.jsonl");
+  await writeFile(
+    runnerPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const callsPath = ${JSON.stringify(callsPath)};
+fs.appendFileSync(callsPath, JSON.stringify({ argv: process.argv.slice(2) }) + "\\n");
+if (process.argv[2] === "version") {
+  console.log(JSON.stringify({ protocol: "linghun-native-runner-prototype.v1", version: "0.1.0" }));
+  process.exit(0);
+}
+if (process.argv[2] === "stop") {
+  console.log(JSON.stringify({ ok: true }));
+  process.exit(0);
+}
+process.exit(0);
+`,
+    "utf8",
+  );
+  if (process.platform !== "win32") {
+    await chmod(runnerPath, 0o755);
+  }
+  return { path: runnerPath, callsPath };
 }
 
 function createMinimalJob(overrides?: Partial<DurableJobState>): DurableJobState {
@@ -179,6 +208,7 @@ describe("formatApprovedRunnerSpecLine", () => {
     const job = createMinimalJob();
     const result = formatApprovedRunnerSpecLine(job);
     expect(result).toContain("approved spec: none");
+    expect(result).toContain("Windows native runner SHOULD use a Job Object");
   });
 
   it("formats spec fields when present", () => {
@@ -216,5 +246,82 @@ describe("formatApprovedRunnerSpecLine", () => {
     expect(result).toContain("approved spec: id=job-runner-test");
     expect(result).toContain("taskKind=durable_job_supervisor");
     expect(result).toContain("expectedProtocol=linghun-runner-v1");
+    expect(result).toContain("Unix native runner SHOULD create and manage a child process group");
+  });
+});
+
+describe("native runner process guard contract", () => {
+  it("exposes the contract in doctor/report helpers", () => {
+    const contract = formatNativeRunnerProcessGuardContract();
+
+    expect(contract).toContain("Windows native runner SHOULD use a Job Object");
+    expect(contract).toContain("Unix native runner SHOULD create and manage a child process group");
+    expect(contract).toContain("real native runner smoke");
+  });
+
+  it("stopRunnerForDurableJob sends runner stop --id instead of naked pid kill", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-runner-stop-"));
+    const runner = await createMockRunner(project);
+    const context = createTestRunnerContext({
+      projectPath: project,
+      config: {
+        ...structuredClone(defaultConfig),
+        nativeRunner: {
+          ...structuredClone(defaultConfig.nativeRunner),
+          enabled: true,
+          source: "custom",
+          path: runner.path,
+        },
+      },
+    });
+    const job = createMinimalJob({ projectPath: project });
+    job.runner = {
+      enabled: true,
+      status: "running",
+      resolution: "available",
+      adapter: "native",
+      protocol: "linghun-native-runner-prototype.v1",
+      version: "0.1.0",
+      pathRef: "present:mock-runner.cjs",
+      startedAt: "2025-01-01T00:00:00.000Z",
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      spec: {
+        id: job.id,
+        approvedTaskKind: "durable_job_supervisor",
+        cwd: project,
+        envAllowlist: [],
+        redactedEnvRefs: [],
+        timeoutMs: 60_000,
+        logPaths: {
+          state: join(project, "state.json"),
+          stdout: join(project, "stdout.log"),
+          stderr: join(project, "stderr.log"),
+          jobLog: job.logPath,
+          fullOutput: job.fullOutputPath,
+          report: job.reportPath,
+        },
+        expectedProtocol: "linghun-native-runner-prototype.v1",
+        permissionRef: "default",
+        evidenceRefs: [],
+        runnerRoot: project,
+      },
+      nextAction: "running",
+    };
+    const deps: RunnerRuntimeDeps = {
+      appendJobLog: vi.fn(async () => undefined),
+      rescheduleDurableJobAgents: vi.fn(),
+    };
+
+    await stopRunnerForDurableJob(context, job, deps);
+
+    const calls = (await readFile(runner.callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { argv: string[] });
+    expect(calls).toContainEqual({ argv: ["stop", "--id", job.id, "--root", project] });
+    expect(calls.flatMap((call) => call.argv)).not.toContain("taskkill");
+    expect(calls.flatMap((call) => call.argv)).not.toContain("/pid");
+    expect(job.runner?.status).toBe("cancelled");
   });
 });

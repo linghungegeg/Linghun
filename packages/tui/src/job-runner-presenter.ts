@@ -19,6 +19,7 @@ export type RunnerDoctorResolutionView = {
   arch: NodeJS.Architecture;
   platformArch: string;
   nodeFallback: "available";
+  processGuardContract?: readonly string[];
   lastError?: string;
   nextAction: string;
 };
@@ -39,8 +40,9 @@ export function formatRunnerDoctor(
     `- version/protocol: ${resolution.version ?? "unknown"} / ${resolution.protocol ?? expectedProtocol}`,
     `- fallback reason: ${resolution.status === "available" ? "none" : resolution.lastError ? sanitizeDiagnosticText(resolution.lastError) : resolution.status}`,
     `- next action: ${resolution.nextAction}`,
+    ...(resolution.processGuardContract ?? []).map((line) => `- process guard contract: ${line}`),
     "- boundary: runner only accepts Linghun-approved job specs; it is not a second provider/tool/agent runtime and cannot decide verification PASS.",
-    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, and Unix/macOS process-group cleanup.",
+    "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, real native-runner process-guard smoke, and parent hard-kill/crash proof.",
   ].join("\n");
 }
 

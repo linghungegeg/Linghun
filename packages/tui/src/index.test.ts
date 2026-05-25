@@ -41,13 +41,16 @@ import {
   handleTuiKeypress,
   processRemoteApprovalForTest,
   recordModelUsage,
+  runCommandCaptureForTest,
   runTui,
+  runVerificationCommandForTest,
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
   writeLightHintsForTest,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
+import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
 import {
   checkProviderCooldown,
   clearProviderBreaker,
@@ -6893,6 +6896,79 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
   });
+
+  it("verification cancel uses process guard and remains non-PASS", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const controller = new AbortController();
+    consumeProcessGuardStopResultsForTest();
+
+    const running = runVerificationCommandForTest(
+      'node -e "setTimeout(()=>{}, 2000)"',
+      project,
+      controller.signal,
+    );
+    controller.abort();
+    const result = await running;
+    await waitForTestMs(1100);
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(result.outcome).toBe("cancelled");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.runnerError).toContain("cancelled");
+    expect(stopResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ force: false, kind: "graceful" }),
+        expect.objectContaining({ force: true, kind: "force" }),
+      ]),
+    );
+  }, 10_000);
+
+  it("verification timeout uses graceful then force process guard and remains non-PASS", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    consumeProcessGuardStopResultsForTest();
+
+    const result = await runVerificationCommandForTest(
+      'node -e "setTimeout(()=>{}, 2000)"',
+      project,
+      undefined,
+      20,
+    );
+    await waitForTestMs(1100);
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(result.outcome).toBe("timeout");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.runnerError).toContain("runner timeout after 20ms");
+    expect(stopResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ force: false, kind: "graceful" }),
+        expect.objectContaining({ force: true, kind: "force" }),
+      ]),
+    );
+  }, 10_000);
+
+  it("generic command timeout uses process guard without changing result", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    consumeProcessGuardStopResultsForTest();
+
+    const result = await runCommandCaptureForTest(
+      process.execPath,
+      ["-e", "setTimeout(()=>{}, 2000)"],
+      project,
+      20,
+    );
+    const stopResults = consumeProcessGuardStopResultsForTest();
+
+    expect(result).toMatchObject({
+      exitCode: 124,
+      stdout: "",
+      stderr: "",
+      summary: `命令超时：present:${process.execPath.split(/[\\\\/]/u).at(-1)}`,
+    });
+    expect(stopResults).toEqual(
+      expect.arrayContaining([expect.objectContaining({ force: false, kind: "graceful" })]),
+    );
+  }, 10_000);
 
   it("/interrupt cancels active verification without pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));

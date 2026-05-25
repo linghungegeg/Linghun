@@ -29,6 +29,12 @@ const NATIVE_RUNNER_BUNDLED_PLATFORM_ARCHES = new Set([
   "darwin-arm64",
   "darwin-x64",
 ]);
+export const NATIVE_RUNNER_PROCESS_GUARD_CONTRACT = [
+  "Windows native runner SHOULD use a Job Object with kill-on-job-close for supervised children.",
+  "Unix native runner SHOULD create and manage a child process group, then kill that group on stop/exit.",
+  "Parent death cleanup is only proven by a real native runner smoke; Node tests do not prove orphan cleanup.",
+] as const;
+
 const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = [
   "const durationMs = Number(process.argv[1] || '1000');",
   "const heartbeatMs = 100;",
@@ -54,6 +60,7 @@ type NativeRunnerResolution = {
   status: NativeRunnerResolutionStatus;
   enabled: boolean;
   source: NativeRunnerSource;
+  processGuardContract: readonly string[];
   path?: string;
   pathRef: string;
   bundledCandidateRef: string;
@@ -140,6 +147,7 @@ export function resolveNativeRunner(config: LinghunConfig): NativeRunnerResoluti
   const runner = config.nativeRunner;
   const bundledCandidate = getBundledNativeRunnerCandidate();
   const base = {
+    processGuardContract: NATIVE_RUNNER_PROCESS_GUARD_CONTRACT,
     bundledCandidateRef: bundledCandidate.ref,
     platform: process.platform,
     arch: process.arch,
@@ -346,12 +354,21 @@ function createNativeRunnerCommand(
 // Runner spec and lifecycle
 // ---------------------------------------------------------------------------
 
+export function formatNativeRunnerProcessGuardContract(): string {
+  return NATIVE_RUNNER_PROCESS_GUARD_CONTRACT.map(
+    (line) => `- process guard contract: ${line}`,
+  ).join("\n");
+}
+
 export function formatApprovedRunnerSpecLine(job: DurableJobState): string {
   const spec = job.runner?.spec;
   if (!spec) {
-    return "- approved spec: none";
+    return `- approved spec: none\n${formatNativeRunnerProcessGuardContract()}`;
   }
-  return `- approved spec: id=${spec.id}; taskKind=${spec.approvedTaskKind}; cwdRef=${redactedPath(spec.cwd)}; timeoutMs=${spec.timeoutMs}; expectedProtocol=${spec.expectedProtocol}; envAllowlist=${spec.envAllowlist.join(",") || "none"}; redactedEnvRefs=${spec.redactedEnvRefs.join(",") || "none"}; evidenceRefs=${spec.evidenceRefs.join(",") || "none"}; logRefs=state/stdout/stderr/jobLog/fullOutput/report`;
+  return [
+    `- approved spec: id=${spec.id}; taskKind=${spec.approvedTaskKind}; cwdRef=${redactedPath(spec.cwd)}; timeoutMs=${spec.timeoutMs}; expectedProtocol=${spec.expectedProtocol}; envAllowlist=${spec.envAllowlist.join(",") || "none"}; redactedEnvRefs=${spec.redactedEnvRefs.join(",") || "none"}; evidenceRefs=${spec.evidenceRefs.join(",") || "none"}; logRefs=state/stdout/stderr/jobLog/fullOutput/report`,
+    formatNativeRunnerProcessGuardContract(),
+  ].join("\n");
 }
 
 export function createApprovedRunnerJobSpec(
@@ -653,6 +670,7 @@ export async function stopRunnerForDurableJob(
     return;
   }
   const resolution = resolveNativeRunner(context.config);
+  let stopRequested = false;
   if (resolution.status === "available" && resolution.path) {
     const stopCommand = createNativeRunnerCommand(resolution.path, [
       "stop",
@@ -666,9 +684,15 @@ export async function stopRunnerForDurableJob(
       timeout: NATIVE_RUNNER_VERSION_TIMEOUT_MS,
       windowsHide: true,
     });
+    stopRequested = true;
   }
   markJobRunnerTerminal(job, "cancelled", "user_cancelled");
-  await deps.appendJobLog(job, "runner stop requested; cancelled is non-PASS");
+  await deps.appendJobLog(
+    job,
+    stopRequested
+      ? "runner stop --id requested; no historical pid/taskkill fallback used; cancelled is non-PASS"
+      : "runner stop unavailable; no historical pid/taskkill fallback used; cancelled is non-PASS",
+  );
 }
 
 export function markJobRunnerTerminal(
