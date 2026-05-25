@@ -295,6 +295,23 @@ import {
   slashCommandToTool,
 } from "./slash-dispatch.js";
 import {
+  createShellLimitations,
+  formatError,
+  formatProjectRouteProblem,
+  formatProviderEnvWarning,
+  formatUserScopedSetupNeeded,
+  readInputLines,
+  readOutputColumns,
+  readOutputRows,
+  sanitizeDiagnosticText,
+  sanitizeUserFacingError,
+  shouldEnterProductShellCandidate,
+  stripAnsi,
+  truncateDisplay,
+  uniqueStrings,
+  writeLine,
+} from "./startup-runtime.js";
+import {
   type TerminalProblemView,
   type TerminalReadinessView,
   formatTerminalProblemsPanel,
@@ -2333,57 +2350,20 @@ function writeLegacyStartup(output: Writable, context: TuiContext, startup: TuiS
     writeLine(output, t(context, "projectRulesMissingHint"));
   }
   if (startup.providerEnvWarning) {
-    writeLine(output, formatProviderEnvWarning(startup.providerEnvWarning, context));
+    writeLine(output, formatProviderEnvWarning(startup.providerEnvWarning, context.language));
   }
   if (startup.projectRouteProblem) {
-    writeLine(output, formatProjectRouteProblem(startup.projectRouteProblem, context));
+    writeLine(output, formatProjectRouteProblem(startup.projectRouteProblem, context.language));
   }
   if (startup.setupNeeded) {
     writeLine(
       output,
-      formatUserScopedSetupNeeded(startup.providerEnvPath ?? getProviderEnvPath(), context),
+      formatUserScopedSetupNeeded(
+        startup.providerEnvPath ?? getProviderEnvPath(),
+        context.language,
+      ),
     );
   }
-}
-
-function formatProviderEnvWarning(reason: string, context: TuiContext): string {
-  return context.language === "en-US"
-    ? `provider.env could not be read: ${reason}. Fix it and restart Linghun, or run /model setup to reconfigure the user provider.`
-    : `provider.env 读取失败：${reason}。请修正后重启 Linghun，或运行 /model setup 重新配置本机用户 provider。`;
-}
-
-function formatProjectRouteProblem(problem: string, context: TuiContext): string {
-  return context.language === "en-US"
-    ? [
-        "Project model route needs attention.",
-        `- ${problem}`,
-        "- This is a project-scoped route/settings issue, not a reason to re-enter your user API key.",
-        "- Check /model doctor or update this repo's .linghun/settings.json route/model settings.",
-      ].join("\n")
-    : [
-        "项目模型路由需要处理。",
-        `- ${problem}`,
-        "- 这是当前项目的 route/settings 问题，不是让你重复填写本机用户 API key。",
-        "- 可用 /model doctor 检查，或调整本仓库 .linghun/settings.json 里的 route/model 配置。",
-      ].join("\n");
-}
-
-function formatUserScopedSetupNeeded(providerEnvPath: string, context: TuiContext): string {
-  return context.language === "en-US"
-    ? [
-        "Model setup needed: one-time setup for this computer.",
-        "- This saves provider settings in your user config, not in this repository.",
-        "- After saving once, other repositories will reuse the same user provider.env by default.",
-        '- Say "configure provider" or press Enter to start; /model setup remains the advanced recovery entry.',
-        `- User provider.env path: ${providerEnvPath}`,
-      ].join("\n")
-    : [
-        "需要配置模型：这是本机一次配置，不是当前仓库配置。",
-        "- 配置会保存到本机用户目录，不会写入这个仓库。",
-        "- 配置一次后，之后进入其他仓库也会默认复用同一个用户 provider.env。",
-        "- 可以直接说“我要配置模型”或按 Enter 开始；/model setup 保留为高级/恢复入口。",
-        `- 用户 provider.env 位置：${providerEnvPath}`,
-      ].join("\n");
 }
 
 async function runPlainTui(
@@ -2456,7 +2436,10 @@ async function runInkShell(
           )
           .slice(-2)
           .map((t) => ({ id: t.id, title: t.title, status: t.status, result: t.result })),
-        limitations: createShellLimitations(context, startup),
+        limitations: createShellLimitations({
+          language: context.language,
+          providerEnvWarning: startup.providerEnvWarning,
+        }),
       }),
     onInput: async (event: ShellInputEvent) => {
       process.removeListener("SIGINT", sigintHandler);
@@ -2566,41 +2549,6 @@ async function shouldEnterInkShell(input: Readable, output: Writable): Promise<b
   if (!shouldEnterProductShellCandidate(input, output)) return false;
   const { shouldUseInkShell } = await import("./shell/ink-renderer.js");
   return shouldUseInkShell(input, output);
-}
-
-function shouldEnterProductShellCandidate(input: Readable, output: Writable): boolean {
-  if (process.env.LINGHUN_TUI_PLAIN === "1") return false;
-  if (process.env.TERM === "dumb") return false;
-  return (
-    (input as { isTTY?: boolean }).isTTY === true && (output as { isTTY?: boolean }).isTTY === true
-  );
-}
-
-function createShellLimitations(context: TuiContext, startup: TuiStartupState): string[] {
-  const limitations: string[] = [];
-  if (startup.providerEnvWarning) {
-    limitations.push(
-      context.language === "en-US"
-        ? "Provider env could not be read; run /model setup or /model doctor."
-        : "provider.env 读取失败；可用 /model setup 或 /model doctor 处理。",
-    );
-  }
-  if (process.env.NO_COLOR === "1" || process.env.FORCE_COLOR === "0") {
-    limitations.push(
-      context.language === "en-US" ? "No-color mode is active." : "当前为无颜色模式。",
-    );
-  }
-  return limitations;
-}
-
-function readOutputColumns(output: Writable): number {
-  const columns = (output as { columns?: number }).columns;
-  return typeof columns === "number" && Number.isFinite(columns) ? columns : 80;
-}
-
-function readOutputRows(output: Writable): number {
-  const rows = (output as { rows?: number }).rows;
-  return typeof rows === "number" && Number.isFinite(rows) ? rows : 24;
 }
 
 class ShellBlockOutput extends Writable {
@@ -8490,14 +8438,6 @@ function rememberCodebaseMemoryResolution(
           : "missing codebase-memory runtime";
 }
 
-function sanitizeDiagnosticText(text: string): string {
-  return text
-    .replace(/prompt=[^\s&]+/giu, "prompt=***")
-    .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
-    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
-    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
-}
-
 function redactedPath(path: string | undefined): string {
   if (!path) {
     return "-";
@@ -13566,119 +13506,6 @@ function formatFileCandidates(candidates: string[], language: Language): string 
     : ["找到多个可能文件，请用明确命令选择一个：", ...lines, "示例：/read <path>"].join("\n");
 }
 
-type InputKeyHandlers = {
-  prompt?: string;
-  onEsc?: () => void | Promise<void>;
-  onEnter?: () => void | Promise<void>;
-  onShiftTab?: () => void | Promise<void>;
-  shouldMaskInput?: () => boolean;
-};
-
-async function* readInputLines(
-  input: Readable,
-  output: Writable,
-  keyHandlers: InputKeyHandlers = {},
-): AsyncGenerator<string> {
-  if ((input as { isTTY?: boolean }).isTTY !== true) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of input) {
-      chunks.push(toInputBuffer(chunk));
-    }
-    const text = decodeInput(Buffer.concat(chunks));
-    for (const line of text.split(/\r?\n/)) {
-      yield line;
-    }
-    return;
-  }
-
-  if ("setEncoding" in input && typeof input.setEncoding === "function") {
-    input.setEncoding("utf8");
-  }
-
-  const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
-  const wasRaw = rawInput.isRaw === true;
-  if (typeof rawInput.setRawMode === "function") {
-    rawInput.setRawMode(true);
-  }
-
-  const rl = createInterface({ input, output });
-  const cleanupKeypress = installInputKeyHandlers(input, rl, keyHandlers);
-  const prompt = keyHandlers.prompt ?? "你> ";
-  let skipNextEmptyLine = false;
-  try {
-    output.write(prompt);
-    for await (const line of rl) {
-      if (skipNextEmptyLine && line.trim() === "") {
-        skipNextEmptyLine = false;
-        output.write(prompt);
-        continue;
-      }
-      yield line;
-      output.write(prompt);
-    }
-  } finally {
-    cleanupKeypress();
-    if (typeof rawInput.setRawMode === "function" && !wasRaw) {
-      rawInput.setRawMode(false);
-    }
-    rl.close();
-  }
-
-  function installInputKeyHandlers(
-    target: Readable,
-    readline: { line?: string },
-    handlers: InputKeyHandlers,
-  ): () => void {
-    if (!handlers.onEsc && !handlers.onEnter && !handlers.onShiftTab) {
-      return () => undefined;
-    }
-    const onKeypress = (_str: string, key: { name?: string; shift?: boolean } = {}) => {
-      if (key.name === "escape" && handlers.onEsc) {
-        void handlers.onEsc();
-        return;
-      }
-      if (key.name === "tab" && key.shift && handlers.onShiftTab) {
-        void handlers.onShiftTab();
-        return;
-      }
-      if (handlers.shouldMaskInput?.()) {
-        const currentLine = (readline as unknown as { line?: string }).line ?? "";
-        clearLine(output, 0);
-        cursorTo(output, 0);
-        output.write(`${prompt}${"*".repeat(currentLine.length)}`);
-      }
-      if (key.name === "return" && handlers.onEnter) {
-        const currentLine = (readline as unknown as { line?: string }).line ?? "";
-        if (currentLine.trim() === "") {
-          skipNextEmptyLine = true;
-          void handlers.onEnter();
-        }
-      }
-    };
-    emitKeypressEvents(target);
-    target.on("keypress", onKeypress);
-    return () => target.off("keypress", onKeypress);
-  }
-}
-
-function toInputBuffer(chunk: unknown): Buffer {
-  if (Buffer.isBuffer(chunk)) {
-    return chunk;
-  }
-  if (chunk instanceof Uint8Array) {
-    return Buffer.from(chunk);
-  }
-  return Buffer.from(String(chunk), "utf8");
-}
-
-function decodeInput(bytes: Buffer): string {
-  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  if (!utf8.includes("�")) {
-    return utf8;
-  }
-  return new TextDecoder("gb18030", { fatal: false }).decode(bytes);
-}
-
 function formatHomeScreen(context: TuiContext): string {
   const model = getSelectedModelRuntime(context).model;
   const project = basename(context.projectPath) || context.projectPath;
@@ -15013,29 +14840,6 @@ const messages: Record<Language, Record<MessageKey, string>> = {
   },
 };
 
-function truncateDisplay(text: string, maxWidth: number): string {
-  let width = 0;
-  let result = "";
-  for (const char of stripAnsi(text)) {
-    const charWidth = char.charCodeAt(0) > 0xff ? 2 : 1;
-    if (width + charWidth > maxWidth) {
-      return `${result}…`;
-    }
-    width += charWidth;
-    result += char;
-  }
-  return result;
-}
-
-function stripAnsi(text: string): string {
-  const escapeChar = String.fromCharCode(27);
-  return text.replace(new RegExp(`${escapeChar}\\[[0-9;]*m`, "g"), "");
-}
-
-function uniqueStrings(items: string[]): string[] {
-  return [...new Set(items)];
-}
-
 function createUserMessageEvent(text: string): TranscriptEvent {
   return {
     type: "user_message",
@@ -15051,44 +14855,4 @@ function createSessionEndEvent(sessionId: string): TranscriptEvent {
     sessionId,
     createdAt: new Date().toISOString(),
   };
-}
-
-function formatError(error: unknown, language: Language = "zh-CN"): string {
-  const rawMessage =
-    error instanceof Error ? error.message : language === "en-US" ? "unknown error" : "未知错误";
-  const message = sanitizeUserFacingError(rawMessage);
-  const suggestion =
-    error instanceof Error && "suggestion" in error && typeof error.suggestion === "string"
-      ? sanitizeUserFacingError(error.suggestion)
-      : language === "en-US"
-        ? "open the related details/debug command if you need the full trace"
-        : "如需完整 trace，请打开对应 details/debug 入口";
-  if (language === "en-US") {
-    return [
-      "Something went wrong.",
-      `- what happened: ${message}`,
-      "- impact: the current action did not complete.",
-      `- next: ${suggestion}`,
-      "- details: use the related /details or doctor command for the full record.",
-    ].join("\n");
-  }
-  return [
-    "出错了。",
-    `- 发生了什么：${message}`,
-    "- 影响范围：当前操作未完成。",
-    `- 下一步：${suggestion}`,
-    "- 详情：用对应 /details 或 doctor 命令查看完整记录。",
-  ].join("\n");
-}
-
-function sanitizeUserFacingError(value: string): string {
-  return sanitizeDiagnosticText(value)
-    .replace(/gateId=[^\s,;]+/giu, "gateId=***")
-    .replace(/request[_-]?id=[^\s,;]+/giu, "requestId=***")
-    .replace(/token=[^\s&]+/giu, "token=***")
-    .replace(/Authorization:\s*[^\s]+/giu, "Authorization: ***");
-}
-
-function writeLine(output: Writable, text: string): void {
-  output.write(`${text}\n`);
 }
