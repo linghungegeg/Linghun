@@ -55,8 +55,8 @@ function HomeLayout({
         ))}
       </Box>
 
-      {/* Vision */}
-      <Box justifyContent="center" marginTop={1}>
+      {/* Vision — 1-line gap after brand underline for breathing room */}
+      <Box marginTop={1} justifyContent="center">
         <Text color={theme.muted}>{fitText(view.homeVision, cw - 2)}</Text>
       </Box>
 

@@ -25,17 +25,26 @@ export function renderInkShell(
   options: ShellRenderOptions = {},
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
-  const instance = render(<ShellApp controller={controller} />, {
-    stdin: options.stdin as NodeJS.ReadStream | undefined,
-    stdout,
-    stderr: options.stderr as NodeJS.WriteStream | undefined,
-    exitOnCtrlC: false,
-    alternateScreen: true,
-    kittyKeyboard: { mode: "auto" },
-  });
+  let instance: ReturnType<typeof render>;
+
+  try {
+    instance = render(<ShellApp controller={controller} />, {
+      stdin: options.stdin as NodeJS.ReadStream | undefined,
+      stdout,
+      stderr: options.stderr as NodeJS.WriteStream | undefined,
+      exitOnCtrlC: false,
+      alternateScreen: true,
+      kittyKeyboard: { mode: "auto" },
+    });
+    hideTerminalCursor(stdout);
+  } catch (error) {
+    showTerminalCursor(stdout);
+    throw error;
+  }
 
   let unmounted = false;
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  let waitUntilExitPromise: Promise<void> | undefined;
   const doUnmount = () => {
     if (unmounted) return;
     unmounted = true;
@@ -44,11 +53,17 @@ export function renderInkShell(
       resizeTimer = undefined;
     }
     stdout?.off("resize", onResize);
+    stdinStream?.off("close", doUnmount);
+    stdinStream?.off("end", doUnmount);
+    stdinStream?.off("error", doUnmount);
+    stdout?.off("close", doUnmount);
+    stdout?.off("error", doUnmount);
     try {
       instance.unmount();
     } catch {
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
     }
+    showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
     const stdin = options.stdin as { unref?: () => void } | undefined;
     stdin?.unref?.();
@@ -58,8 +73,9 @@ export function renderInkShell(
     if (unmounted) return;
     try {
       instance.rerender(<ShellApp controller={controller} />);
-    } catch {
-      // Ignore render errors after stream close
+    } catch (error) {
+      showTerminalCursor(stdout);
+      throw error;
     }
   };
 
@@ -77,11 +93,13 @@ export function renderInkShell(
     }, 60);
   };
 
-  // Handle stdin close/error (Windows cmd window close, pipe break)
+  // Handle stdin/stdout close/error (Windows cmd window close, pipe break)
   const stdinStream = options.stdin as NodeJS.ReadStream | undefined;
   stdinStream?.on("close", doUnmount);
   stdinStream?.on("end", doUnmount);
   stdinStream?.on("error", doUnmount);
+  stdout?.on("close", doUnmount);
+  stdout?.on("error", doUnmount);
   stdout?.on("resize", onResize);
 
   return {
@@ -89,12 +107,30 @@ export function renderInkShell(
     clear: () => instance.clear(),
     unmount: doUnmount,
     waitUntilExit: async () => {
-      await instance.waitUntilExit();
+      if (unmounted) return;
+      waitUntilExitPromise ??= instance.waitUntilExit().then(() => undefined);
+      await waitUntilExitPromise;
     },
     waitUntilRenderFlush: async () => {
       await instance.waitUntilRenderFlush();
     },
   };
+}
+
+function hideTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
+  try {
+    stdout?.write("\x1B[?25l");
+  } catch {
+    // stdout may already be closed
+  }
+}
+
+function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
+  try {
+    stdout?.write("\x1B[?25h");
+  } catch {
+    // stdout may already be closed
+  }
 }
 
 export function isNoColorTerminal(): boolean {

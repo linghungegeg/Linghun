@@ -1,7 +1,7 @@
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
-import { handleComposerInput } from "./components/Composer.js";
+import { formatComposerRenderLines, handleComposerInput } from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import {
@@ -95,10 +95,15 @@ describe("shell view model", () => {
   });
 
   it("projects setup-needed as a light hint, not a bordered block", () => {
-    const zhView = createShellViewModel(createContext(), { setupNeeded: true, width: 120 });
+    const zhView = createShellViewModel(createContext(), {
+      setupNeeded: true,
+      width: 120,
+      viewMode: "task",
+    });
     const enView = createShellViewModel(createContext({ language: "en-US" }), {
       setupNeeded: true,
       width: 120,
+      viewMode: "task",
     });
 
     expect(zhView.brand).toBe("LingHun");
@@ -110,7 +115,7 @@ describe("shell view model", () => {
     expect(zhView.status.background).toBe("后台：1");
     // setup-needed 不再生成 block
     expect(zhView.blocks.some((block) => block.id === "setup-needed")).toBe(false);
-    // 而是生成 setupHint 轻提示
+    // 而是生成 setupHint 轻提示 (only in task/pending mode, not home)
     expect(zhView.setupHint).toContain("按 Enter");
     expect(zhView.setupHint).toContain("我要配置模型");
     expect(zhView.setupHint).not.toContain("/model setup");
@@ -194,6 +199,7 @@ describe("shell view model", () => {
     const view = createShellViewModel(createContext(), {
       noColor: true,
       setupNeeded: true,
+      viewMode: "task",
       width: 40,
       limitations: ["当前为无颜色模式。"],
     });
@@ -201,7 +207,7 @@ describe("shell view model", () => {
 
     expect(rendered).toContain("LingHun");
     expect(rendered).not.toContain("[INFO] 首页");
-    // setup-needed 现在是 setupHint 轻提示，不是 block
+    // setup-needed 现在是 setupHint 轻提示，不是 block (only in task/pending mode)
     expect(view.setupHint).toContain("按 Enter");
     expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).toContain("当前为无颜色模式。");
@@ -209,7 +215,8 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("endpointProfile");
     expect(rendered).not.toContain("tool_result");
     expect(rendered).not.toContain("local/static only");
-    // no prompt prefix
+    // prompt marker present
+    expect(rendered).toContain("> ");
     expect(rendered).not.toContain("你 >");
     expect(rendered).not.toContain("you >");
   });
@@ -293,6 +300,34 @@ describe("Ink shell selection", () => {
     expect(output.text).toContain("\u001B[?1049l");
     expect(resizeCallbacks).toBe(0);
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
+  });
+
+  it("does not add beforeExit listener when waiting after unmount", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const beforeExitBefore = process.listenerCount("beforeExit");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+    await shell.waitUntilExit();
+
+    expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore);
   });
 
   it("keeps ShellApp as a pure renderer without direct stdout resize handling", async () => {
@@ -904,6 +939,7 @@ describe("backgroundSummaries → blocks mapping", () => {
   it("maps running/completed/failed summaries to ProductBlockViewModels", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [
         { id: "t1", title: "lint check", status: "running" },
         { id: "t2", title: "test suite", status: "completed", result: "pass" },
@@ -925,6 +961,7 @@ describe("backgroundSummaries → blocks mapping", () => {
   it("maps failed and timeout statuses correctly", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [
         { id: "t3", title: "deploy", status: "failed", result: "fail" },
         { id: "t4", title: "health check", status: "timeout" },
@@ -938,6 +975,7 @@ describe("backgroundSummaries → blocks mapping", () => {
   it("uses en-US prefix for background blocks", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-t5");
@@ -947,12 +985,22 @@ describe("backgroundSummaries → blocks mapping", () => {
   it("completed tasks use partial status with clarification note, not pass", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-t6");
     // P1-4: completed uses partial to visually distinguish from verification PASS
     expect(bgBlock?.status).toBe("partial");
     expect(bgBlock?.nextAction).toContain("not a verification pass");
+  });
+
+  it("home mode does not show background blocks", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      backgroundSummaries: [{ id: "t7", title: "lint", status: "running" }],
+    });
+    expect(view.viewMode).toBe("home");
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
   });
 });
 
@@ -1241,6 +1289,7 @@ describe("D.12B — P1-4: completed job visually not PASS", () => {
   it("completed job uses partial status, not info or pass", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "j1", title: "build", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-j1");
@@ -1252,6 +1301,7 @@ describe("D.12B — P1-4: completed job visually not PASS", () => {
   it("completed job nextAction contains [非PASS] marker in zh-CN", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "j2", title: "test", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-j2");
@@ -1261,6 +1311,7 @@ describe("D.12B — P1-4: completed job visually not PASS", () => {
   it("completed job nextAction contains [not PASS] marker in en-US", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "j3", title: "deploy", status: "completed" }],
     });
     const bgBlock = view.blocks.find((b) => b.id === "bg-j3");
@@ -1331,10 +1382,208 @@ describe("D.12B — P2-5: no-color does not force white", () => {
     const view = createShellViewModel(createContext(), {
       noColor: true,
       width: 80,
+      viewMode: "task",
       backgroundSummaries: [{ id: "nc1", title: "task", status: "failed" }],
     });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("[FAIL]");
     expect(rendered).toContain("LingHun");
+  });
+});
+
+describe("D.12C — Composer cursor alignment closure", () => {
+  it("empty Composer render includes prompt marker and self-drawn cursor (color)", () => {
+    const { lines } = formatComposerRenderLines({
+      text: "",
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: false,
+    });
+    expect(lines).toEqual(["> 我能帮您做点什么？\u258C"]);
+
+    const rendered = renderPlainShell(createShellViewModel(createContext(), { width: 80 }));
+    expect(rendered).toContain("> 我能帮您做点什么？\u258C");
+  });
+
+  it("typed Composer render puts cursor after text", () => {
+    const { lines } = formatComposerRenderLines({
+      text: "修复光标",
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: false,
+    });
+    expect(lines).toEqual(["> 修复光标\u258C"]);
+  });
+
+  it("multiline Composer render only puts cursor on the last line", () => {
+    const { lines } = formatComposerRenderLines({
+      text: "第一行\n第二行\n第三行",
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: false,
+    });
+    expect(lines).toEqual(["> 第一行", "  第二行", "  第三行\u258C"]);
+    expect(lines.slice(0, -1).join("\n")).not.toContain("\u258C");
+  });
+
+  it("no-color Composer render uses | cursor and no block cursor", () => {
+    const { lines } = formatComposerRenderLines({
+      text: "修复光标",
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: true,
+    });
+    expect(lines).toEqual(["> 修复光标|"]);
+    expect(lines.join("\n")).not.toContain("\u258C");
+
+    const rendered = renderPlainShell(
+      createShellViewModel(createContext(), { noColor: true, width: 80 }),
+    );
+    expect(rendered).toContain("> 我能帮您做点什么？|");
+    expect(rendered).not.toContain("\u258C");
+  });
+
+  it("brand underline to vision has 1-line spacing in plain home render", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    const rendered = renderPlainShell(view);
+    const lines = rendered.split("\n");
+    // brandWordmark produces ["LingHun", "──────────────"]
+    const underlineIdx = lines.findIndex((l) => l.startsWith("─────"));
+    expect(underlineIdx).toBeGreaterThan(0);
+    // Next line should be empty (spacing)
+    expect(lines[underlineIdx + 1]).toBe("");
+    // Then vision
+    expect(lines[underlineIdx + 2]).toContain("技术普惠");
+  });
+
+  it("ink-renderer writes hide cursor escape on render", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+
+    // Hide cursor escape should be written
+    expect(output.text).toContain("\x1B[?25l");
+
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // Show cursor escape should be written on unmount
+    expect(output.text).toContain("\x1B[?25h");
+  });
+
+  it("ink-renderer show cursor on unmount path", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    // After unmount, the last cursor-related escape should be show
+    const lastHide = output.text.lastIndexOf("\x1B[?25l");
+    const lastShow = output.text.lastIndexOf("\x1B[?25h");
+    expect(lastShow).toBeGreaterThan(lastHide);
+  });
+
+  it("ink-renderer restores cursor when stdout closes", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    output.emit("close");
+    await shell.waitUntilExit();
+
+    const lastHide = output.text.lastIndexOf("\x1B[?25l");
+    const lastShow = output.text.lastIndexOf("\x1B[?25h");
+    expect(lastShow).toBeGreaterThan(lastHide);
+  });
+
+  it("home brand/vision still renders, layout not switched to top bar", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("LingHun");
+    expect(output.text).toContain("技术普惠会越来越成熟");
+    expect(output.text).toContain("我能帮您做点什么？");
+  });
+
+  it("width=40 does not crash", () => {
+    const view = createShellViewModel(createContext(), { width: 40 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("我能帮您做点什么？\u258C");
+  });
+
+  it("width=40 no-color does not crash", () => {
+    const view = createShellViewModel(createContext(), { noColor: true, width: 40 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("|");
+    expect(rendered).not.toContain("\u258C");
   });
 });

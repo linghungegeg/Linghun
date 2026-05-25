@@ -20,12 +20,14 @@ function renderPlainHome(view: ShellViewModel): string {
   const blockLines = formatBlockLines(view, noColor);
   const composerWidth = composerMaxWidth(view.width);
   const composerLine = lineChar(noColor).repeat(composerWidth);
+  const cursor = noColor ? "|" : "\u258C";
   const lines = [
     ...brandWordmark(noColor),
+    "",
     view.homeVision,
     ...(view.setupHint ? [view.setupHint] : []),
     composerLine,
-    view.composer.placeholder,
+    `> ${view.composer.placeholder}${cursor}`,
     composerLine,
     formatStatusTray(view),
     ...(blockLines.length > 0 ? [separator, ...blockLines] : []),
@@ -83,8 +85,9 @@ function renderPlainTask(view: ShellViewModel): string {
   }
 
   // Composer
+  const cursor = noColor ? "|" : "\u258C";
   lines.push(composerLine);
-  lines.push(view.composer.placeholder);
+  lines.push(`> ${view.composer.placeholder}${cursor}`);
   lines.push(composerLine);
 
   return lines.join("\n");

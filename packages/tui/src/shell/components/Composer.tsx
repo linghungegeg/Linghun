@@ -26,6 +26,7 @@ type ComposerDecision =
   | { kind: "ignore" };
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
+const PROMPT_MARKER = "> ";
 
 export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
   const [text, setText] = useState("");
@@ -44,35 +45,53 @@ export function Composer({ view, onInput }: ComposerProps): React.ReactNode {
     }
   });
 
-  const allLines = text
-    ? formatComposerText(text, view.composer.masking).split("\n")
-    : [view.composer.placeholder];
-
-  // P2-4: limit visible lines to prevent pushing task area off screen
-  const truncated = text && allLines.length > COMPOSER_MAX_VISIBLE_LINES;
-  const displayLines = truncated ? allLines.slice(-COMPOSER_MAX_VISIBLE_LINES) : allLines;
+  const { lines, truncatedCount } = formatComposerRenderLines({
+    text,
+    placeholder: view.composer.placeholder,
+    masking: view.composer.masking,
+    noColor,
+  });
   // no-color: use undefined (terminal default) instead of hardcoded "gray"
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
-  // P3-4: cursor fallback — use | for no-color/ASCII, ▌ for modern terminals
-  const cursor = noColor ? "|" : "\u258C";
 
   return (
     <Box width="100%" flexDirection="column">
-      {truncated ? (
-        <Text color="gray">{`… ${allLines.length - COMPOSER_MAX_VISIBLE_LINES} line(s) above`}</Text>
-      ) : null}
-      {displayLines.map((line, index) => {
-        const isLastLine = index === displayLines.length - 1;
-        const visibleLine = text && isLastLine ? `${line}${cursor}` : line;
-        return (
-          <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-            {fitText(visibleLine, maxWidth)}
-          </Text>
-        );
-      })}
+      {truncatedCount > 0 ? <Text color="gray">{`… ${truncatedCount} line(s) above`}</Text> : null}
+      {lines.map((line, index) => (
+        <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+          {fitText(line, maxWidth)}
+        </Text>
+      ))}
     </Box>
   );
+}
+
+export function formatComposerRenderLines({
+  text,
+  placeholder,
+  masking,
+  noColor,
+}: {
+  text: string;
+  placeholder: string;
+  masking: boolean;
+  noColor: boolean;
+}): { lines: string[]; truncatedCount: number } {
+  const rawLines = text ? formatComposerText(text, masking).split("\n") : [placeholder];
+  const truncated = rawLines.length > COMPOSER_MAX_VISIBLE_LINES;
+  const displayLines = truncated ? rawLines.slice(-COMPOSER_MAX_VISIBLE_LINES) : rawLines;
+  const cursor = noColor ? "|" : "\u258C";
+
+  return {
+    lines: displayLines.map((line, index) => {
+      const isLastLine = index === displayLines.length - 1;
+      const isOriginalFirstLine = !truncated && index === 0;
+      const prefix = isOriginalFirstLine ? PROMPT_MARKER : "  ";
+      return `${prefix}${line}${isLastLine ? cursor : ""}`;
+    }),
+    truncatedCount: truncated ? rawLines.length - COMPOSER_MAX_VISIBLE_LINES : 0,
+  };
 }
 
 function formatComposerText(text: string, masking: boolean): string {

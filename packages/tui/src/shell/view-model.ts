@@ -106,16 +106,30 @@ export function createShellViewModel(
   const setupNeeded = options.setupNeeded ?? false;
   const text = shellText[language];
 
-  // setup-needed 不再生成 bordered block，改为轻提示
-  const setupHint = setupNeeded ? text.setupHint : undefined;
+  // Determine effective view mode early to decide block filtering and setupHint visibility
+  const effectiveViewMode: ShellViewMode =
+    options.viewMode ??
+    (options.submitted
+      ? "pending"
+      : options.outputBlocks?.length ||
+          options.activity ||
+          options.permission ||
+          options.denialFeedback
+        ? "task"
+        : "home");
+
+  // setup-needed: only surface as setupHint in task/pending mode (not home first-screen)
+  // In home mode, setup guidance is deferred to the Enter flow or placeholder
+  const setupHint = setupNeeded && effectiveViewMode !== "home" ? text.setupHint : undefined;
 
   // blocks 只保留 project-route、background summaries 和 output（最多 3 条）
   // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
+  // Home 首屏不显示 background blocks
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
-  if (options.backgroundSummaries?.length) {
+  if (effectiveViewMode !== "home" && options.backgroundSummaries?.length) {
     blocks.push(...mapBackgroundSummariesToBlocks(options.backgroundSummaries, language));
   }
   if (!options.permission) {
@@ -140,20 +154,7 @@ export function createShellViewModel(
 
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
 
-  // Determine view mode:
-  // - "pending" if submitted flag is set (prevents home flicker after Enter)
-  // - "task" if explicitly set, or if there are output blocks / activity / permission / denial
-  // - "home" otherwise
-  const viewMode: ShellViewMode =
-    options.viewMode ??
-    (options.submitted
-      ? "pending"
-      : options.outputBlocks?.length ||
-          options.activity ||
-          options.permission ||
-          options.denialFeedback
-        ? "task"
-        : "home");
+  const viewMode = effectiveViewMode;
 
   // Vision: use short version for narrow terminals
   const homeVision = width <= 40 ? text.visionShort : text.vision;
@@ -385,7 +386,8 @@ function formatIndex(status: string, language: Language): string {
 }
 
 function formatBackground(count: number, language: Language, width: number): string {
-  if (width < 60 && count > 0) {
+  if (count === 0) return "";
+  if (width < 60) {
     return shellText[language].backgroundShort(count);
   }
   return shellText[language].background(count);
