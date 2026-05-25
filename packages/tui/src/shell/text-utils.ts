@@ -40,60 +40,23 @@ export function lineChar(noColor: boolean, capability?: TerminalCapability): str
 }
 
 /**
- * Home brand wordmark. Responsive to terminal width and capability.
- * Legacy terminals always get ASCII-safe rendering regardless of noColor.
+ * Home brand wordmark.
+ *
+ * Foundation rule (D13D): the wordmark is a single, deterministic line
+ * "LingHun" at every width and capability tier. ASCII art / Unicode
+ * box-drawing wordmarks were intentionally removed — they break alignment
+ * across terminals (CJK widths, mintty, conhost), introduce empty-string
+ * spacer lines for vertical padding, and inflate the home view above the
+ * fold. No version number is appended; no empty strings are used as
+ * spacers (callers control vertical spacing via Box marginTop).
  */
 export function brandWordmark(
   noColor: boolean,
   width = 80,
   capability?: TerminalCapability,
 ): string[] {
-  const asciiSafe = noColor || (capability ? !capability.unicodeBox : false);
-
-  if (width >= 80) {
-    return brandWordmarkLarge(asciiSafe);
-  }
-  if (width >= 60) {
-    return brandWordmarkCompact(asciiSafe);
-  }
-  return brandWordmarkNarrow();
-}
-
-/** Large wordmark for wide terminals (>=80 cols). */
-function brandWordmarkLarge(asciiSafe: boolean): string[] {
-  if (asciiSafe) {
-    return [
-      " _     _         _  _",
-      "| |   (_)_ __   | || |_   _ _ __",
-      "| |   | | '_ \\  | || | | | | '_ \\",
-      "| |__ | | | | | | || | |_| | | | |",
-      "|____|_|_| |_| |_||_|\\__,_|_| |_|",
-      "",
-      " LingHun",
-    ];
-  }
-  return [
-    "  \u254B   \u254B         \u254B \u254B",
-    "  \u2503   \u2503\u257A\u2513\u257A\u2513\u250F\u2501\u2513  \u2503\u2501\u2503\u257B \u257B\u257A\u2513\u257A\u2513",
-    "  \u2503   \u2503 \u2503 \u2503\u2503 \u2503  \u2503 \u2503\u2503 \u2503 \u2503 \u2503",
-    "  \u2517\u2501\u2501 \u2579 \u2579 \u2579\u2517\u2501\u251B  \u2517\u2501\u251B\u2517\u2501\u251B \u2579 \u2579",
-    "",
-    "  LingHun",
-  ];
-}
-
-/** Compact wordmark for medium terminals (60-79 cols). */
-function brandWordmarkCompact(asciiSafe: boolean): string[] {
-  if (asciiSafe) {
-    return ["LingHun", "=============="];
-  }
-  return [
-    "LingHun",
-    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
-  ];
-}
-
-/** Narrow wordmark for small terminals (<60 cols). */
-function brandWordmarkNarrow(): string[] {
+  void noColor;
+  void width;
+  void capability;
   return ["LingHun"];
 }

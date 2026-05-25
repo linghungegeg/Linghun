@@ -444,8 +444,12 @@ describe("Ink shell selection", () => {
     expect(output.text).toContain("LingHun");
     expect(output.text).not.toContain("L I N G H U N");
     expect(output.text).not.toContain("信任：");
-    // D.13C P2-1: setupNeeded=true in home shows lightweight setup placeholder
-    expect(output.text).toContain("按 Enter 开始配置模型");
+    // D.13D: home no longer overrides composer placeholder with the setup
+    // sentence; the default placeholder remains and the setup entry path is
+    // the Enter-to-start flow plus the explicit setup hint surface (in task
+    // mode). Home keeps the default placeholder even when setupNeeded=true.
+    expect(output.text).toContain("我能帮您做点什么？");
+    expect(output.text).not.toContain("按 Enter 开始配置模型");
     // No large setupHint block or old-style verbose guidance
     expect(output.text).not.toContain("还没有模型配置");
     expect(output.text).not.toContain("我要配置模型");
@@ -672,14 +676,16 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Brand in compact top bar
-    expect(output.text).toContain("LingHun");
+    // D.13D: task mode no longer renders the brand wordmark in a top bar.
+    // Brand identity belongs to the home screen; task mode focuses on the
+    // active flow, output, composer, and status footer.
+    expect(output.text).not.toContain("LingHun");
     // Activity indicator visible
     expect(output.text).toContain("正在思考…");
     // Vision text NOT shown in task mode
     expect(output.text).not.toContain("技术普惠会越来越成熟");
-    // Composer still present
-    expect(output.text).toContain("我能帮您做点什么？");
+    // Composer still present, with the task-mode placeholder
+    expect(output.text).toContain("继续输入…");
   });
 
   it("task mode Ink render shows permission with border", async () => {
@@ -2329,23 +2335,24 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   // P2-1: Home setup guidance maturity
   // =========================================================================
 
-  it("setupNeeded=true in home mode shows lightweight setup placeholder (zh-CN)", () => {
+  it("setupNeeded=true in home mode keeps the default composer placeholder (zh-CN)", () => {
     const view = createShellViewModel(createContext({ language: "zh-CN" }), {
       setupNeeded: true,
       width: 80,
     });
-    // Home mode: placeholder becomes setup guidance
-    expect(view.composer.placeholder).toBe("按 Enter 开始配置模型");
-    // No large setupHint block in home mode
+    // D.13D: home no longer overrides composer placeholder; the default
+    // greeting stays. Setup entry is reachable via Enter-to-start; the
+    // dedicated setupHint banner is reserved for task mode.
+    expect(view.composer.placeholder).toBe("我能帮您做点什么？");
     expect(view.setupHint).toBeUndefined();
   });
 
-  it("setupNeeded=true in home mode shows lightweight setup placeholder (en-US)", () => {
+  it("setupNeeded=true in home mode keeps the default composer placeholder (en-US)", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       setupNeeded: true,
       width: 80,
     });
-    expect(view.composer.placeholder).toBe("Press Enter to configure a model");
+    expect(view.composer.placeholder).toBe("What can I help you with?");
     expect(view.setupHint).toBeUndefined();
   });
 
@@ -2385,8 +2392,10 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     // No large "还没有模型配置" block
     expect(rendered).not.toContain("还没有模型配置");
     expect(rendered).not.toContain("我要配置模型");
-    // But setup placeholder is shown
-    expect(rendered).toContain("按 Enter 开始配置模型");
+    // D.13D: home no longer carries the setup sentence as placeholder.
+    expect(rendered).not.toContain("按 Enter 开始配置模型");
+    // Default greeting remains.
+    expect(rendered).toContain("我能帮您做点什么？");
   });
 
   it("Home visual structure preserved with setup placeholder", () => {
@@ -2722,5 +2731,353 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     expect(brandIdx).toBeGreaterThanOrEqual(0);
     expect(activityIdx).toBeGreaterThan(brandIdx);
     expect(permIdx).toBeGreaterThan(activityIdx);
+  });
+});
+
+// ===========================================================================
+// D.13D foundation: brandWordmark + composer width + anchored cursor parity
+// ===========================================================================
+
+describe("D.13D brandWordmark foundation", () => {
+  it("returns ['LingHun'] at every width and capability", async () => {
+    const { brandWordmark } = await import("./text-utils.js");
+    for (const noColor of [true, false]) {
+      for (const width of [30, 40, 60, 80, 120, 200]) {
+        for (const tier of ["legacy", "basic", "modern"] as const) {
+          vi.stubEnv("LINGHUN_TERMINAL_TIER", tier);
+          resetTerminalCapabilityCache();
+          const cap = (await import("./terminal-capability.js")).detectTerminalCapability();
+          const lines = brandWordmark(noColor, width, cap);
+          expect(lines).toEqual(["LingHun"]);
+          // No empty-string spacers, no version, no ASCII/Unicode art
+          expect(lines.some((line) => line === "")).toBe(false);
+          expect(lines.some((line) => /v?\d+\.\d+\.\d+/.test(line))).toBe(false);
+          expect(lines.some((line) => /[\u2500-\u259F]/.test(line))).toBe(false);
+          expect(lines.some((line) => line.includes("|") || line.includes("_"))).toBe(false);
+          vi.unstubAllEnvs();
+        }
+      }
+    }
+  });
+});
+
+describe("D.13D composer width foundation", () => {
+  it("Composer maxWidth uses composerMaxWidth(view.width) for all widths", async () => {
+    const { composerMaxWidth } = await import("./text-utils.js");
+    for (const w of [30, 40, 60, 80, 120, 200]) {
+      const cw = composerMaxWidth(w);
+      expect(cw).toBeGreaterThanOrEqual(40);
+      expect(cw).toBeLessThanOrEqual(80);
+    }
+  });
+});
+
+describe("D.13D anchored cursor + Task region", () => {
+  it("Composer renders without crash in task mode (no permission, with activity + blocks)", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      height: 24,
+      viewMode: "task",
+      activity: { phase: "tool_running", text: "Running Bash…", toolName: "Bash" },
+      outputBlocks: [
+        { id: "out-1", kind: "details", status: "info", title: "Output", summary: "ok" },
+        { id: "out-2", kind: "details", status: "info", title: "Output", summary: "ok2" },
+      ],
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("Running Bash");
+    expect(rendered).toContain("ok");
+  });
+
+  it("permission + composer coexist: composer placeholder switches to permission hint", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "permission_waiting", text: "等待权限确认…" },
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["ls"],
+        hint: "y/n",
+      },
+    });
+    expect(view.composer.placeholder).toContain("y/yes");
+    expect(view.composer.placeholder).toContain("Esc");
+    expect(view.permission?.toolName).toBe("Bash");
+  });
+
+  it("activity + output blocks + composer coexist", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "tool_running", text: "Running…" },
+      outputBlocks: [{ id: "o1", kind: "details", status: "info", title: "T1", summary: "S1" }],
+    });
+    expect(view.activity?.phase).toBe("tool_running");
+    expect(view.blocks.some((b) => b.id === "o1")).toBe(true);
+    expect(view.composer.placeholder.length).toBeGreaterThan(0);
+  });
+
+  it("status tray narrow width keeps mandatory items", () => {
+    const view = createShellViewModel(createContext(), { width: 40, viewMode: "task" });
+    expect(view.status.project).toContain("项目");
+    expect(view.status.model).toContain("模型");
+    expect(view.status.permission).toContain("权限");
+  });
+
+  it("masking model setup keeps cursor column based on masked width", () => {
+    const view = createShellViewModel(
+      createContext({ pendingModelSetup: { step: "apiKey" } } as Partial<TuiContext>),
+      { width: 80 },
+    );
+    expect(view.composer.masking).toBe(true);
+    const { lines, cursorCol } = formatComposerRenderLines({
+      buffer: createEditBuffer("sk-secret-key"),
+      placeholder: "Enter API key",
+      masking: true,
+      noColor: false,
+    });
+    expect(lines[0]).not.toContain("sk-secret");
+    // "> " prefix (width 2) + masked length
+    expect(cursorCol).toBeGreaterThanOrEqual(2);
+  });
+
+  it("permission pending: composer keeps input ownership (placeholder swap, no fake input)", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      viewMode: "task",
+      permission: {
+        toolName: "Bash",
+        reason: "exec",
+        risk: "high",
+        scope: ["ls"],
+        hint: "y/n",
+      },
+    });
+    expect(view.composer.placeholder).toContain("allow");
+    expect(view.composer.placeholder).toContain("deny");
+    // Ensure permission placeholder is the only composer hint, no double prompt
+    expect(view.composer.placeholder).not.toContain("What can I help you with");
+  });
+});
+
+describe("D.13D useAnchoredCursor parity (pure logic)", () => {
+  type FakeNode = {
+    nodeName: "ink-root" | "ink-box" | "ink-text" | "ink-virtual-text";
+    parentNode?: FakeNode;
+    yogaNode?: { getComputedLayout: () => { left: number; top: number } };
+  };
+
+  // Mirror getAbsoluteOrigin's pure logic for parity testing without React.
+  function getAbsoluteOrigin(node: FakeNode | null): { x: number; y: number } | null {
+    if (!node) return null;
+    let x = 0;
+    let y = 0;
+    let cur: FakeNode | undefined = node;
+    while (cur && cur.nodeName !== "ink-root") {
+      const yogaNode = cur.yogaNode;
+      if (!yogaNode) return null;
+      const layout = yogaNode.getComputedLayout();
+      x += layout.left;
+      y += layout.top;
+      cur = cur.parentNode;
+    }
+    if (!cur || cur.nodeName !== "ink-root") return null;
+    return { x, y };
+  }
+
+  it("accumulates yoga left/top up to ink-root", () => {
+    const root: FakeNode = { nodeName: "ink-root" };
+    const outer: FakeNode = {
+      nodeName: "ink-box",
+      parentNode: root,
+      yogaNode: { getComputedLayout: () => ({ left: 2, top: 3 }) },
+    };
+    const inner: FakeNode = {
+      nodeName: "ink-box",
+      parentNode: outer,
+      yogaNode: { getComputedLayout: () => ({ left: 4, top: 5 }) },
+    };
+    expect(getAbsoluteOrigin(inner)).toEqual({ x: 6, y: 8 });
+  });
+
+  it("returns null when chain is detached (no ink-root)", () => {
+    const orphan: FakeNode = {
+      nodeName: "ink-box",
+      yogaNode: { getComputedLayout: () => ({ left: 1, top: 1 }) },
+    };
+    expect(getAbsoluteOrigin(orphan)).toBeNull();
+  });
+
+  it("returns null when any ancestor lacks yogaNode (e.g. ink-virtual-text)", () => {
+    const root: FakeNode = { nodeName: "ink-root" };
+    const broken: FakeNode = { nodeName: "ink-box", parentNode: root };
+    const child: FakeNode = {
+      nodeName: "ink-box",
+      parentNode: broken,
+      yogaNode: { getComputedLayout: () => ({ left: 1, top: 1 }) },
+    };
+    expect(getAbsoluteOrigin(child)).toBeNull();
+  });
+
+  it("returns null on null input", () => {
+    expect(getAbsoluteOrigin(null)).toBeNull();
+  });
+
+  it("integer-rounds and clamps to non-negative when applied", () => {
+    // Mirrors useAnchoredCursor's final transform.
+    const origin = { x: 1.4, y: 2.6 };
+    const declared = { col: 3.7, row: 0.2 };
+    const x = Math.max(0, Math.round(origin.x + declared.col));
+    const y = Math.max(0, Math.round(origin.y + declared.row));
+    expect(x).toBe(5);
+    expect(y).toBe(3);
+  });
+});
+
+describe("D.13D Final Closure — interaction shell", () => {
+  it("home keeps the default placeholder when setupNeeded=true (no override)", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      setupNeeded: true,
+      width: 80,
+    });
+    expect(view.composer.placeholder).toBe("我能帮您做点什么？");
+    expect(view.composer.taskPlaceholder).toContain("继续输入");
+    expect(view.composer.setupActive).toBe(false);
+    expect(view.composer.setupStep).toBeUndefined();
+  });
+
+  it("composer surfaces a step label and step-specific placeholder when model setup is active", () => {
+    const view = createShellViewModel(
+      createContext({
+        language: "zh-CN",
+        pendingModelSetup: { step: "apiKey" },
+      } as Partial<TuiContext>),
+      { width: 80 },
+    );
+    expect(view.composer.setupActive).toBe(true);
+    expect(view.composer.setupStep).toContain("API Key");
+    expect(view.composer.placeholder).toContain("API Key");
+    expect(view.composer.masking).toBe(true);
+  });
+
+  it("baseUrl/model/reasoning/auxModel/confirm setup steps each map to a distinct label", () => {
+    const steps = ["baseUrl", "model", "reasoning", "auxModel", "confirm"] as const;
+    const labels = steps.map((step) => {
+      const view = createShellViewModel(
+        createContext({
+          language: "zh-CN",
+          pendingModelSetup: { step },
+        } as Partial<TuiContext>),
+        { width: 80 },
+      );
+      return view.composer.setupStep;
+    });
+    // All 5 labels should be distinct, non-empty strings.
+    expect(new Set(labels).size).toBe(steps.length);
+    for (const label of labels) {
+      expect(typeof label).toBe("string");
+      expect(label && label.length > 0).toBe(true);
+    }
+  });
+
+  it("permission placeholder takes precedence over setup placeholder", () => {
+    const view = createShellViewModel(
+      createContext({
+        pendingModelSetup: { step: "apiKey" },
+        pendingLocalApproval: {
+          kind: "model_tool_use",
+          toolName: "Bash",
+          toolCall: { input: { command: "ls" } },
+        },
+      } as Partial<TuiContext>),
+      {
+        width: 80,
+        permission: {
+          toolName: "Bash",
+          reason: "执行命令",
+          risk: "high",
+          scope: ["ls"],
+          hint: "y / n",
+        },
+      },
+    );
+    // permission placeholder wins over setup
+    expect(view.composer.placeholder).toContain("y/yes");
+    // setupActive is still true so step label can render too
+    expect(view.composer.setupActive).toBe(true);
+  });
+
+  it("Task Ink render does NOT show brand wordmark, status appears as footer", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          activity: { phase: "thinking", text: "正在思考…" },
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+    expect(output.text).not.toContain("LingHun");
+    // status tray still visible (project label appears once, footer)
+    expect(output.text).toContain("项目：");
+    // task placeholder used
+    expect(output.text).toContain("继续输入…");
+  });
+
+  it("Home Ink render still shows brand wordmark (no regression)", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+    expect(output.text).toContain("LingHun");
+    expect(output.text).toContain("我能帮您做点什么？");
+  });
+
+  it("useAnchoredCursor implementation file uses render-phase cursor write (no useEffect/useLayoutEffect)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile("packages/tui/src/shell/components/useAnchoredCursor.ts", "utf8");
+    // No effect-based write of the cursor — render phase only.
+    expect(source).not.toContain("useEffect(");
+    expect(source).not.toContain("useLayoutEffect(");
+    expect(source).not.toContain("useInsertionEffect(");
+    // No de-duplication ref left behind.
+    expect(source).not.toContain("lastWrittenRef");
+    // setCursorPosition is called from the hook body (render phase).
+    expect(source).toContain("setCursorPosition(");
   });
 });

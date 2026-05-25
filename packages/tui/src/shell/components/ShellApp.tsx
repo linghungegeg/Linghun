@@ -111,6 +111,22 @@ function HomeLayout({
   );
 }
 
+/**
+ * TaskLayout — production-grade task interaction shell.
+ *
+ * Layout (top → bottom, all centered around the composer column):
+ *   1. activity (optional)
+ *   2. permission card (optional)
+ *   3. output blocks (optional)
+ *   4. limitations (optional)
+ *   5. composer (centered, fixed cw width, accent rules above and below)
+ *   6. status footer (single line under the composer)
+ *
+ * No top bar, no separator above the content. The brand is conveyed through
+ * the home screen on entry; in task mode the focus is the active flow and the
+ * composer. The composer width matches Home's cw to keep cursor coordinates
+ * stable across viewMode transitions.
+ */
 function TaskLayout({
   view,
   theme,
@@ -127,37 +143,22 @@ function TaskLayout({
   const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
-    <Box flexDirection="column" width={view.width} height={view.height}>
-      {/* Compact top bar: brand + status */}
-      <Box justifyContent="space-between" width={view.width} paddingX={1}>
-        <Text color={theme.brand} bold>
-          {view.brand}
-        </Text>
-        <StatusTray status={view.status} theme={theme} width={view.width - 12} />
-      </Box>
+    <Box flexDirection="column" width={view.width} height={view.height} alignItems="center">
+      {/* Top spacer keeps content vertically centered when sparse. */}
+      <Box flexGrow={1} minHeight={0} />
 
-      {/* Separator */}
-      <Box paddingX={1}>
-        <Text color={theme.muted}>
-          {lineChar(noColor, capability).repeat(Math.max(10, view.width - 2))}
-        </Text>
-      </Box>
-
-      {/* Main content area */}
-      <Box flexDirection="column" flexGrow={1} paddingX={1} minHeight={0}>
-        {/* Activity indicator */}
+      {/* Main content column — same width as composer for visual alignment. */}
+      <Box flexDirection="column" width={cw}>
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
-        {/* Permission prompt */}
         {view.permission ? (
           <PermissionPrompt permission={view.permission} theme={theme} width={cw} />
         ) : null}
 
-        {/* Output blocks */}
         {view.blocks.length > 0 ? (
           <Box flexDirection="column" marginTop={view.activity || view.permission ? 1 : 0}>
             {view.blocks.map((block) => (
-              <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 2} />
+              <ProductBlock key={block.id} block={block} theme={theme} width={cw} />
             ))}
           </Box>
         ) : null}
@@ -173,12 +174,24 @@ function TaskLayout({
         ) : null}
       </Box>
 
-      {/* Composer at bottom — single cursor owner for entire shell */}
-      <Box flexDirection="column" width={cw} alignSelf="center">
+      {/* Composer at center column — same width and frame as Home so cursor
+          coordinates and visual rhythm stay consistent across modes. The
+          surrounding Box only sets flexDirection/width; do NOT add alignSelf,
+          paddingX, or any property that adds offset between this Box and
+          ink-root: Composer's anchored cursor accumulates yoga left/top via
+          parent chain. */}
+      <Box flexDirection="column" width={cw} marginTop={1}>
         <Text color={theme.accent}>{composerLine}</Text>
         <Composer view={view} onInput={controller.onInput} capability={capability} />
         <Text color={theme.accent}>{composerLine}</Text>
       </Box>
+
+      {/* Status as footer line, centered under the composer. */}
+      <Box marginTop={1} justifyContent="center">
+        <StatusTray status={view.status} theme={theme} width={view.width} />
+      </Box>
+
+      <Box flexGrow={1} minHeight={0} />
     </Box>
   );
 }

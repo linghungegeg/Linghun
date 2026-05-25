@@ -2622,6 +2622,19 @@ async function runInkShell(
       }
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
+      // Echo: slash commands are user-visible commands, not chat input. Show
+      // them as a kept "details" block so the task region keeps a visible
+      // breadcrumb of what was just submitted, distinct from model output.
+      if (event.type === "submit" && event.text.startsWith("/")) {
+        blocks.push({
+          id: `slash-echo-${Date.now()}`,
+          kind: "details",
+          status: "info",
+          title: context.language === "en-US" ? "Command" : "命令",
+          summary: event.text.length > 80 ? `${event.text.slice(0, 79)}…` : event.text,
+          keep: true,
+        });
+      }
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
       let result: Awaited<ReturnType<typeof processTuiLine>>;

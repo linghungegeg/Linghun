@@ -25,6 +25,8 @@ export type ProductBlockViewModel = {
   summary: string;
   detail?: string;
   nextAction?: string;
+  /** Echo / informational blocks that should not be auto-pruned by the view model. */
+  keep?: boolean;
 };
 
 export type StatusTrayViewModel = {
@@ -38,8 +40,13 @@ export type StatusTrayViewModel = {
 
 export type ComposerViewModel = {
   placeholder: string;
+  taskPlaceholder: string;
   submittedHint: string;
   masking: boolean;
+  /** Active model setup flow (apiKey / baseUrl / model / confirm). */
+  setupActive: boolean;
+  /** Setup step label, surfaced near the composer when setup is active. */
+  setupStep?: string;
 };
 
 export type ShellViewMode = "home" | "task" | "pending";

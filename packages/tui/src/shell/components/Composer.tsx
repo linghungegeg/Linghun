@@ -1,9 +1,13 @@
-import { Box, Text, useCursor, useInput } from "ink";
+import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { formatUnknownSlashCommand, getSlashPrefixCandidates } from "../../slash-dispatch.js";
 import type { TerminalCapability } from "../terminal-capability.js";
-import { charWidth, fitText } from "../text-utils.js";
+import { charWidth, composerMaxWidth, fitText } from "../text-utils.js";
+import { createShellTheme } from "../theme.js";
 import type { ShellInputEvent, ShellViewModel } from "../types.js";
+import { SlashSuggestions } from "./SlashSuggestions.js";
+import { useAnchoredCursor } from "./useAnchoredCursor.js";
 
 type ComposerProps = {
   view: ShellViewModel;
@@ -214,33 +218,80 @@ const PROMPT_MARKER_CONTINUATION = "  ";
 
 export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
+  const [slashSelection, setSlashSelection] = useState(0);
   const historyRef = useRef<InputHistory>(createInputHistory());
-  const maxWidth = Math.min(80, Math.max(30, view.width - 4));
+  const maxWidth = composerMaxWidth(view.width);
   const noColor = view.themeMode === "no-color";
-  const { setCursorPosition } = useCursor();
+  const theme = useMemo(() => createShellTheme(noColor), [noColor]);
+  const anchorRef = useRef<DOMElement | null>(null);
 
-  const resetBuffer = useCallback((text = "") => {
-    setBuffer(createEditBuffer(text));
+  // Slash candidate state — derived from buffer text. Suggestions are visible
+  // when the buffer is exactly one line and starts with "/" with at least one
+  // following character. Empty "/" or "/?" defers to the dispatch help text on
+  // submit; we intentionally do not show inline candidates for the bare "/".
+  const text = bufferToString(buffer);
+  const isSingleLineSlash =
+    text.startsWith("/") && !text.includes("\n") && text.length >= 2 && text !== "/?";
+  const slashCandidates = useMemo(
+    () => (isSingleLineSlash ? getSlashPrefixCandidates(text) : []),
+    [isSingleLineSlash, text],
+  );
+  const slashSelectionClamped =
+    slashCandidates.length === 0
+      ? 0
+      : Math.max(0, Math.min(slashSelection, slashCandidates.length - 1));
+
+  const resetBuffer = useCallback((nextText = "") => {
+    setBuffer(createEditBuffer(nextText));
+    setSlashSelection(0);
+  }, []);
+
+  const setBufferAndResetSelection = useCallback((next: EditBuffer) => {
+    setBuffer(next);
+    setSlashSelection(0);
   }, []);
 
   useInput((input, key) => {
     // Submit: Enter (without shift)
     if (key.return && !key.shift) {
-      const text = bufferToString(buffer).trim();
+      // If a slash candidate is highlighted (via Tab/Up/Down) and the buffer
+      // text differs from the candidate's slash, accept the candidate first.
+      // Plain Enter on the first candidate still submits the current buffer
+      // verbatim — this matches CCB-style behavior boundaries.
+      const submitText = bufferToString(buffer).trim();
       historyRef.current = historyAdd(historyRef.current, bufferToString(buffer));
       resetBuffer();
-      void onInput(text ? { type: "submit", text } : { type: "empty-submit" });
+      void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
       return;
     }
 
     // Multiline: Shift+Enter
     if (key.return && key.shift) {
-      setBuffer(bufferInsert(buffer, "\n"));
+      setBufferAndResetSelection(bufferInsert(buffer, "\n"));
       return;
     }
 
-    // Escape
+    // Tab — accept the highlighted slash candidate (replaces buffer with the
+    // canonical slash). When no candidates are visible, Tab is ignored to
+    // preserve raw composition behavior.
+    if (key.tab && !key.shift) {
+      if (slashCandidates.length > 0) {
+        const picked = slashCandidates[slashSelectionClamped];
+        if (picked) {
+          resetBuffer(picked.slash);
+          return;
+        }
+      }
+      return;
+    }
+
+    // Escape — when slash candidates are visible, hide them by clearing
+    // selection (buffer keeps its text). Otherwise propagate as a shell escape.
     if (key.escape) {
+      if (slashCandidates.length > 0) {
+        setSlashSelection(-1);
+        return;
+      }
       resetBuffer();
       void onInput({ type: "escape" });
       return;
@@ -249,29 +300,37 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     // Navigation: arrow keys
     if (key.leftArrow) {
       if (key.ctrl || key.meta) {
-        setBuffer(bufferWordLeft(buffer));
+        setBufferAndResetSelection(bufferWordLeft(buffer));
       } else {
-        setBuffer(bufferMoveLeft(buffer));
+        setBufferAndResetSelection(bufferMoveLeft(buffer));
       }
       return;
     }
     if (key.rightArrow) {
       if (key.ctrl || key.meta) {
-        setBuffer(bufferWordRight(buffer));
+        setBufferAndResetSelection(bufferWordRight(buffer));
       } else {
-        setBuffer(bufferMoveRight(buffer));
+        setBufferAndResetSelection(bufferMoveRight(buffer));
       }
       return;
     }
 
-    // History: up/down arrows — in multiline, move within lines first
+    // Up arrow:
+    //   - When slash candidates are visible: move selection up (wraps).
+    //   - When buffer cursor is on a non-first line: move within buffer.
+    //   - Otherwise: history navigation.
     if (key.upArrow) {
+      if (slashCandidates.length > 0) {
+        setSlashSelection((current) => {
+          const safe = current < 0 ? 0 : current;
+          return safe === 0 ? slashCandidates.length - 1 : safe - 1;
+        });
+        return;
+      }
       const { row } = getCursorLinePosition(buffer, false);
       if (row > 0) {
-        // Move cursor up one line within the buffer
-        setBuffer(bufferMoveUp(buffer));
+        setBufferAndResetSelection(bufferMoveUp(buffer));
       } else {
-        // First line — trigger history navigation
         const next = historyUp(historyRef.current, bufferToString(buffer));
         if (next) {
           historyRef.current = next;
@@ -282,13 +341,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
     if (key.downArrow) {
+      if (slashCandidates.length > 0) {
+        setSlashSelection((current) => {
+          const safe = current < 0 ? 0 : current;
+          return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
+        });
+        return;
+      }
       const { row } = getCursorLinePosition(buffer, false);
       const totalLines = bufferToString(buffer).split("\n").length;
       if (row < totalLines - 1) {
-        // Move cursor down one line within the buffer
-        setBuffer(bufferMoveDown(buffer));
+        setBufferAndResetSelection(bufferMoveDown(buffer));
       } else {
-        // Last line — trigger history navigation
         const next = historyDown(historyRef.current);
         if (next) {
           historyRef.current = next;
@@ -301,41 +365,41 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
     // Home / End
     if (key.ctrl && input === "a") {
-      setBuffer(bufferHome(buffer));
+      setBufferAndResetSelection(bufferHome(buffer));
       return;
     }
     if (key.ctrl && input === "e") {
-      setBuffer(bufferEnd(buffer));
+      setBufferAndResetSelection(bufferEnd(buffer));
       return;
     }
 
     // Delete operations
     if (key.backspace || key.delete) {
       if (key.ctrl || key.meta) {
-        setBuffer(bufferDeleteWordLeft(buffer));
+        setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
       } else if (key.backspace) {
-        setBuffer(bufferBackspace(buffer));
+        setBufferAndResetSelection(bufferBackspace(buffer));
       } else {
-        setBuffer(bufferDelete(buffer));
+        setBufferAndResetSelection(bufferDelete(buffer));
       }
       return;
     }
 
     // Ctrl+U: clear line
     if (key.ctrl && input === "u") {
-      setBuffer(bufferClearLine(buffer));
+      setBufferAndResetSelection(bufferClearLine(buffer));
       return;
     }
 
     // Ctrl+K: kill to end
     if (key.ctrl && input === "k") {
-      setBuffer(bufferKillToEnd(buffer));
+      setBufferAndResetSelection(bufferKillToEnd(buffer));
       return;
     }
 
     // Ctrl+W: delete word left
     if (key.ctrl && input === "w") {
-      setBuffer(bufferDeleteWordLeft(buffer));
+      setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
       return;
     }
 
@@ -344,36 +408,85 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
     // Regular character input — ignore raw CR/LF (handled by return above)
     if (input && input !== "\r" && input !== "\n") {
-      setBuffer(bufferInsert(buffer, input));
+      setBufferAndResetSelection(bufferInsert(buffer, input));
     }
   });
 
   // Render
-  const text = bufferToString(buffer);
+  // Pick placeholder based on view mode and active flow:
+  //   - permission: composer placeholder is the permission hint
+  //   - setup active: composer placeholder is the per-step setup hint
+  //   - task/pending: composer placeholder is taskPlaceholder
+  //   - home: composer placeholder is the default placeholder
+  const placeholderText =
+    view.permission || view.composer.setupActive
+      ? view.composer.placeholder
+      : view.viewMode === "task" || view.viewMode === "pending"
+        ? view.composer.taskPlaceholder
+        : view.composer.placeholder;
+
   const { lines, truncatedCount, cursorCol, cursorRow } = formatComposerRenderLines({
     buffer,
-    placeholder: view.composer.placeholder,
+    placeholder: placeholderText,
     masking: view.composer.masking,
     noColor,
     maxWidth,
   });
 
-  // Position native cursor — only if terminal supports cursor positioning
-  if (capability.cursorPositioning) {
-    setCursorPosition({ x: cursorCol, y: cursorRow + (truncatedCount > 0 ? 1 : 0) });
-  }
+  // Position native cursor — anchored to Composer's outer Box via parent-chain
+  // accumulation. Composer only declares row/col; absolute coordinates are
+  // resolved by useAnchoredCursor against ink-root in the render phase.
+  const declaredRow = cursorRow + (truncatedCount > 0 ? 1 : 0);
+  useAnchoredCursor({ row: declaredRow, col: cursorCol }, anchorRef, capability);
 
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
 
+  // Show slash suggestions only when we have candidates AND selection is not
+  // explicitly hidden by Esc.
+  const showSuggestions = slashCandidates.length > 0 && slashSelection >= 0;
+
   return (
-    <Box width="100%" flexDirection="column">
-      {truncatedCount > 0 ? <Text color="gray">{`… ${truncatedCount} line(s) above`}</Text> : null}
-      {lines.map((line, index) => (
-        <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-          {fitText(line, maxWidth)}
+    <Box flexDirection="column" width={maxWidth}>
+      {showSuggestions ? (
+        <SlashSuggestions
+          candidates={slashCandidates}
+          selectedIndex={slashSelectionClamped}
+          theme={theme}
+          language={view.language}
+          width={maxWidth}
+          hint={
+            view.language === "en-US"
+              ? "Tab accept · ↑↓ pick · Esc hide · Enter submit"
+              : "Tab 选中 · ↑↓ 切换 · Esc 隐藏 · Enter 提交"
+          }
+        />
+      ) : null}
+      {view.composer.setupActive && view.composer.setupStep ? (
+        <Text color={theme.warning}>{fitText(view.composer.setupStep, maxWidth)}</Text>
+      ) : null}
+      <Box ref={anchorRef} width="100%" flexDirection="column">
+        {truncatedCount > 0 ? (
+          <Text color="gray">
+            {fitText(
+              view.language === "en-US"
+                ? `… ${truncatedCount} line(s) above`
+                : `… 上面还有 ${truncatedCount} 行`,
+              maxWidth,
+            )}
+          </Text>
+        ) : null}
+        {lines.map((line, index) => (
+          <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+            {fitText(line, maxWidth)}
+          </Text>
+        ))}
+      </Box>
+      {isSingleLineSlash && slashCandidates.length === 0 ? (
+        <Text color={theme.muted}>
+          {fitText(formatUnknownSlashCommand(text, view.language), maxWidth)}
         </Text>
-      ))}
+      ) : null}
     </Box>
   );
 }

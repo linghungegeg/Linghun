@@ -21,7 +21,20 @@ const shellText = {
     permission: (mode: string) => `权限：${mode}`,
     trust: (value: string) => `信任：${value}`,
     placeholder: "我能帮您做点什么？",
+    taskPlaceholder: "继续输入… (Shift+Enter 换行)",
     setupPlaceholder: "按 Enter 开始配置模型",
+    setupApiKeyPlaceholder: "粘贴 API Key（输入会被遮蔽）",
+    setupBaseUrlPlaceholder: "输入 Base URL，回车确认",
+    setupModelPlaceholder: "输入模型名，回车确认",
+    setupReasoningPlaceholder: "选择 reasoning level（low/medium/high），回车确认",
+    setupAuxModelPlaceholder: "输入辅助模型，留空跳过",
+    setupConfirmPlaceholder: "y 确认 · n 重填",
+    setupStepApiKey: "配置 · API Key",
+    setupStepBaseUrl: "配置 · Base URL",
+    setupStepModel: "配置 · Model",
+    setupStepReasoning: "配置 · Reasoning",
+    setupStepAuxModel: "配置 · Aux Model",
+    setupStepConfirm: "配置 · 确认",
     permissionPlaceholder: "y/yes 允许 · n/no 拒绝 · details 详情 · Esc 取消",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
     setupHint: "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。",
@@ -55,7 +68,20 @@ const shellText = {
     permission: (mode: string) => `Permission: ${mode}`,
     trust: (value: string) => `Trust: ${value}`,
     placeholder: "What can I help you with?",
+    taskPlaceholder: "Continue… (Shift+Enter for newline)",
     setupPlaceholder: "Press Enter to configure a model",
+    setupApiKeyPlaceholder: "Paste API key (input is masked)",
+    setupBaseUrlPlaceholder: "Enter Base URL, press Enter",
+    setupModelPlaceholder: "Enter model name, press Enter",
+    setupReasoningPlaceholder: "Pick reasoning level (low/medium/high), press Enter",
+    setupAuxModelPlaceholder: "Enter aux model, leave blank to skip",
+    setupConfirmPlaceholder: "y to confirm · n to redo",
+    setupStepApiKey: "Setup · API key",
+    setupStepBaseUrl: "Setup · Base URL",
+    setupStepModel: "Setup · Model",
+    setupStepReasoning: "Setup · Reasoning",
+    setupStepAuxModel: "Setup · Aux model",
+    setupStepConfirm: "Setup · Confirm",
     permissionPlaceholder: "y/yes allow · n/no deny · details inspect · Esc cancel",
     submittedHint: "Submitted through the shared TUI controller.",
     setupHint: 'No model configured. Press Enter, or say "configure provider".',
@@ -184,12 +210,33 @@ export function createShellViewModel(
   // Vision: use short version for narrow terminals
   const homeVision = width <= 40 ? text.visionShort : text.vision;
 
-  // Composer: switch placeholder when permission is pending, or add setup guidance in home
+  // Composer: switch placeholder when permission is pending; setup flow uses
+  // step-specific placeholders. Home no longer overrides with setupPlaceholder
+  // (the setupHint surface and Enter trigger are the entry points).
+  const setupStep = context.pendingModelSetup?.step;
+  const setupActive = Boolean(setupStep);
+  const setupPlaceholderByStep: Record<string, string> = {
+    apiKey: text.setupApiKeyPlaceholder,
+    baseUrl: text.setupBaseUrlPlaceholder,
+    model: text.setupModelPlaceholder,
+    reasoning: text.setupReasoningPlaceholder,
+    auxModel: text.setupAuxModelPlaceholder,
+    confirm: text.setupConfirmPlaceholder,
+  };
+  const setupStepLabelByStep: Record<string, string> = {
+    apiKey: text.setupStepApiKey,
+    baseUrl: text.setupStepBaseUrl,
+    model: text.setupStepModel,
+    reasoning: text.setupStepReasoning,
+    auxModel: text.setupStepAuxModel,
+    confirm: text.setupStepConfirm,
+  };
   const composerPlaceholder = options.permission
     ? text.permissionPlaceholder
-    : setupNeeded && effectiveViewMode === "home"
-      ? text.setupPlaceholder
+    : setupStep
+      ? (setupPlaceholderByStep[setupStep] ?? text.placeholder)
       : text.placeholder;
+  const composerSetupStepLabel = setupStep ? setupStepLabelByStep[setupStep] : undefined;
 
   return {
     language,
@@ -219,8 +266,11 @@ export function createShellViewModel(
     },
     composer: {
       placeholder: composerPlaceholder,
+      taskPlaceholder: text.taskPlaceholder,
       submittedHint: text.submittedHint,
       masking: context.pendingModelSetup?.step === "apiKey",
+      setupActive,
+      setupStep: composerSetupStepLabel,
     },
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
