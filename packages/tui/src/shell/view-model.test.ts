@@ -330,6 +330,46 @@ describe("Ink shell selection", () => {
     expect(process.listenerCount("beforeExit")).toBe(beforeExitBefore);
   });
 
+  it("restores cursor and ignores rerender errors from stream-close races", async () => {
+    vi.resetModules();
+    const rerenderMock = vi.fn(() => {
+      throw new Error("stream closed");
+    });
+    vi.doMock("ink", () => ({
+      render: () => ({
+        rerender: rerenderMock,
+        clear: vi.fn(),
+        unmount: vi.fn(),
+        waitUntilExit: vi.fn(async () => undefined),
+        waitUntilRenderFlush: vi.fn(async () => undefined),
+      }),
+    }));
+
+    try {
+      const { renderInkShell: renderInkShellWithMock } = await import("./ink-renderer.js");
+      const output = new TestTtyOutput();
+      const shell = renderInkShellWithMock(
+        {
+          getViewModel: () => createShellViewModel(createContext(), { width: output.columns }),
+          onInput: () => undefined,
+        },
+        {
+          stdin: createTtyInput(),
+          stdout: output,
+          stderr: new TestTtyOutput(),
+        },
+      );
+
+      expect(() => shell.rerender()).not.toThrow();
+      expect(rerenderMock).toHaveBeenCalledTimes(1);
+      expect(output.text).toContain("\x1B[?25l");
+      expect(output.text).toContain("\x1B[?25h");
+    } finally {
+      vi.doUnmock("ink");
+      vi.resetModules();
+    }
+  });
+
   it("keeps ShellApp as a pure renderer without direct stdout resize handling", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile("packages/tui/src/shell/components/ShellApp.tsx", "utf8");

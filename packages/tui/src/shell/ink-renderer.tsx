@@ -73,9 +73,10 @@ export function renderInkShell(
     if (unmounted) return;
     try {
       instance.rerender(<ShellApp controller={controller} />);
-    } catch (error) {
+    } catch {
       showTerminalCursor(stdout);
-      throw error;
+      // Ignore Ink rerender errors from stream close / unmount races;
+      // business exceptions are handled outside this best-effort path.
     }
   };
 
