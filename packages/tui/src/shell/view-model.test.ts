@@ -2,6 +2,9 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
 import {
+  bufferInsert,
+  bufferMoveDown,
+  bufferMoveUp,
   createEditBuffer,
   formatComposerRenderLines,
   handleComposerInput,
@@ -441,8 +444,11 @@ describe("Ink shell selection", () => {
     expect(output.text).toContain("LingHun");
     expect(output.text).not.toContain("L I N G H U N");
     expect(output.text).not.toContain("信任：");
-    expect(output.text).toContain("我能帮您做点什么？");
-    expect(output.text).not.toContain("需要配置模型");
+    // D.13C P2-1: setupNeeded=true in home shows lightweight setup placeholder
+    expect(output.text).toContain("按 Enter 开始配置模型");
+    // No large setupHint block or old-style verbose guidance
+    expect(output.text).not.toContain("还没有模型配置");
+    expect(output.text).not.toContain("我要配置模型");
     // CCB-style two-line composer: has horizontal lines, no round border
     expect(output.text).toContain("─");
     expect(output.text).not.toContain("╭");
@@ -2260,5 +2266,461 @@ describe("Windows TTY terminal capability detection", () => {
     // No "你 >" old REPL prompt
     expect(rendered).not.toContain("你 >");
     expect(rendered).not.toContain("you >");
+  });
+});
+
+describe("D.13C — TUI Product Shell Final Maturity", () => {
+  // =========================================================================
+  // P1-1: Plain fallback input area closure
+  // =========================================================================
+
+  it("plain fallback Home placeholder has no '> ' prefix (avoids double-input with readline)", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Placeholder present as dim hint
+    expect(rendered).toContain("我能帮您做点什么？");
+    // No "> " prefix on placeholder (readline provides the real prompt)
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    // No old REPL-style prompts
+    expect(rendered).not.toContain("你 >");
+    expect(rendered).not.toContain("REPL");
+  });
+
+  it("plain fallback Task view has no fake composer prompt line", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      noColor: true,
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "thinking", text: "Thinking…" },
+    });
+    const rendered = renderPlainShell(view);
+    // Task view ends with empty line before readline, no fake "> " prompt
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    expect(rendered).not.toContain("> What can I help");
+    // Activity is shown
+    expect(rendered).toContain("Thinking…");
+  });
+
+  it("forced plain (LINGHUN_TUI_PLAIN=1) does not produce double prompt", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    // Even with modern tier, if plain is forced, the renderer should not add "> " prefix
+    const view = createShellViewModel(createContext(), { noColor: false, width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+  });
+
+  it("TERM=dumb plain fallback renders without crash and no double prompt", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+  });
+
+  // =========================================================================
+  // P2-1: Home setup guidance maturity
+  // =========================================================================
+
+  it("setupNeeded=true in home mode shows lightweight setup placeholder (zh-CN)", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      setupNeeded: true,
+      width: 80,
+    });
+    // Home mode: placeholder becomes setup guidance
+    expect(view.composer.placeholder).toBe("按 Enter 开始配置模型");
+    // No large setupHint block in home mode
+    expect(view.setupHint).toBeUndefined();
+  });
+
+  it("setupNeeded=true in home mode shows lightweight setup placeholder (en-US)", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      setupNeeded: true,
+      width: 80,
+    });
+    expect(view.composer.placeholder).toBe("Press Enter to configure a model");
+    expect(view.setupHint).toBeUndefined();
+  });
+
+  it("setupNeeded=false in home mode shows normal placeholder", () => {
+    const zhView = createShellViewModel(createContext({ language: "zh-CN" }), {
+      setupNeeded: false,
+      width: 80,
+    });
+    const enView = createShellViewModel(createContext({ language: "en-US" }), {
+      setupNeeded: false,
+      width: 80,
+    });
+    expect(zhView.composer.placeholder).toBe("我能帮您做点什么？");
+    expect(enView.composer.placeholder).toBe("What can I help you with?");
+  });
+
+  it("setupNeeded=true in task mode shows setupHint (not placeholder override)", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      setupNeeded: true,
+      width: 80,
+      viewMode: "task",
+    });
+    // In task mode, setupHint is shown as a separate hint
+    expect(view.setupHint).toContain("按 Enter");
+    // Placeholder is normal (not setup-specific)
+    expect(view.composer.placeholder).toBe("我能帮您做点什么？");
+  });
+
+  it("Home does not show large setupHint block when setupNeeded=true", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      setupNeeded: true,
+      width: 80,
+    });
+    const rendered = renderPlainShell(view);
+    // No large "还没有模型配置" block
+    expect(rendered).not.toContain("还没有模型配置");
+    expect(rendered).not.toContain("我要配置模型");
+    // But setup placeholder is shown
+    expect(rendered).toContain("按 Enter 开始配置模型");
+  });
+
+  it("Home visual structure preserved with setup placeholder", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      setupNeeded: true,
+      width: 80,
+      height: 24,
+    });
+    const rendered = renderPlainShell(view);
+    // Brand centered
+    expect(rendered).toContain("LingHun");
+    // Vision
+    expect(rendered).toContain("技术普惠会越来越成熟");
+    // Composer box lines (─)
+    expect(rendered).toContain("─");
+    // Status tray
+    expect(rendered).toContain("项目：");
+    expect(rendered).toContain("模型：");
+  });
+
+  // =========================================================================
+  // P2-2: Composer multiline Up/Down inline movement
+  // =========================================================================
+
+  it("bufferMoveUp moves cursor to previous line preserving column", () => {
+    // "hello\nworld" with cursor at end (position 11)
+    const buf = createEditBuffer("hello\nworld");
+    // cursor is at end of "world" (col=5, row=1)
+    const moved = bufferMoveUp(buf);
+    // Should move to row=0, col=5 (end of "hello")
+    expect(moved.cursor).toBe(5);
+  });
+
+  it("bufferMoveUp on first line returns same buffer", () => {
+    const buf = createEditBuffer("hello");
+    const moved = bufferMoveUp(buf);
+    expect(moved.cursor).toBe(buf.cursor);
+  });
+
+  it("bufferMoveDown moves cursor to next line preserving column", () => {
+    // "hello\nworld" with cursor at position 3 (col=3, row=0)
+    const buf = { chars: Array.from("hello\nworld"), cursor: 3 };
+    const moved = bufferMoveDown(buf);
+    // Should move to row=1, col=3 ("wor|ld")
+    expect(moved.cursor).toBe(9); // "hello\n" (6) + 3 = 9
+  });
+
+  it("bufferMoveDown on last line returns same buffer", () => {
+    const buf = createEditBuffer("hello");
+    const moved = bufferMoveDown(buf);
+    expect(moved.cursor).toBe(buf.cursor);
+  });
+
+  it("bufferMoveUp clamps column to shorter target line", () => {
+    // "hi\nhello" with cursor at end of "hello" (position 8, col=5, row=1)
+    const buf = createEditBuffer("hi\nhello");
+    const moved = bufferMoveUp(buf);
+    // Target line "hi" has length 2, so col clamped to 2
+    expect(moved.cursor).toBe(2);
+  });
+
+  it("bufferMoveDown clamps column to shorter target line", () => {
+    // "hello\nhi" with cursor at position 5 (end of "hello", col=5, row=0)
+    const buf = { chars: Array.from("hello\nhi"), cursor: 5 };
+    const moved = bufferMoveDown(buf);
+    // Target line "hi" has length 2, so col clamped to 2
+    expect(moved.cursor).toBe(8); // "hello\n" (6) + 2 = 8
+  });
+
+  it("multiline Up/Down with CJK characters preserves character column", () => {
+    // "你好\n世界啊" — cursor at end of line 2 (position 5, col=3, row=1)
+    const buf = createEditBuffer("你好\n世界啊");
+    const moved = bufferMoveUp(buf);
+    // Target line "你好" has length 2, col clamped to 2
+    expect(moved.cursor).toBe(2);
+  });
+
+  it("three-line buffer: Up from middle goes to first, Down from middle goes to last", () => {
+    // "aaa\nbbb\nccc" with cursor in middle of "bbb" (position 5, col=1, row=1)
+    const buf = { chars: Array.from("aaa\nbbb\nccc"), cursor: 5 };
+    const movedUp = bufferMoveUp(buf);
+    // row=0, col=1 → position 1
+    expect(movedUp.cursor).toBe(1);
+    const movedDown = bufferMoveDown(buf);
+    // row=2, col=1 → "aaa\nbbb\n" (8) + 1 = 9
+    expect(movedDown.cursor).toBe(9);
+  });
+
+  it("Composer formatComposerRenderLines cursor tracks multiline correctly after move", () => {
+    // Simulate: user typed "line1\nline2\nline3", cursor moved up to line2
+    const buf = { chars: Array.from("line1\nline2\nline3"), cursor: 8 }; // middle of "line2"
+    const { cursorRow, cursorCol } = formatComposerRenderLines({
+      buffer: buf,
+      placeholder: "placeholder",
+      masking: false,
+      noColor: false,
+    });
+    // cursor at row=1 (line2), col=2 ("li|ne2")
+    expect(cursorRow).toBe(1);
+    // "> " prefix only on first line; continuation "  " on others
+    // "  " (2) + "li" (2) = 4
+    expect(cursorCol).toBe(4);
+  });
+
+  // =========================================================================
+  // Task view maturity closure
+  // =========================================================================
+
+  it("Task activity phases map to correct semantic status", () => {
+    const ctx = createContext();
+    const thinkingActivity = mapRequestActivityToView({
+      ...ctx,
+      requestActivityPhase: "request_started",
+    } as unknown as TuiContext);
+    expect(thinkingActivity?.phase).toBe("thinking");
+
+    const toolActivity = mapRequestActivityToView({
+      ...ctx,
+      requestActivityPhase: "tool_running",
+      requestActivityToolName: "Bash",
+    } as unknown as TuiContext);
+    expect(toolActivity?.phase).toBe("tool_running");
+    expect(toolActivity?.text).toContain("Bash");
+
+    const errorActivity = mapRequestActivityToView({
+      ...ctx,
+      requestActivityPhase: "request_failed",
+    } as unknown as TuiContext);
+    expect(errorActivity?.phase).toBe("error");
+
+    const completedActivity = mapRequestActivityToView({
+      ...ctx,
+      requestActivityPhase: "completed",
+    } as unknown as TuiContext);
+    expect(completedActivity?.phase).toBe("completed");
+  });
+
+  it("Task permission card includes risk level, reason, scope, and hint", () => {
+    const ctx = createContext();
+    const permission = mapPendingApprovalToPermission({
+      ...ctx,
+      pendingLocalApproval: {
+        kind: "model_tool_use",
+        toolName: "Bash",
+        toolCall: { input: { command: "rm -rf /tmp/test" } },
+      },
+    } as unknown as TuiContext);
+    expect(permission).toBeDefined();
+    expect(permission?.toolName).toBe("Bash");
+    expect(permission?.risk).toBe("high");
+    expect(permission?.reason).toContain("Bash");
+    expect(permission?.scope).toContain("rm -rf /tmp/test");
+    expect(permission?.hint).toBeTruthy();
+  });
+
+  it("Task permission card renders with all fields in plain view", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Write",
+        reason: "写入文件需要确认",
+        risk: "medium",
+        scope: ["src/index.ts"],
+        hint: "输入 y 允许 / n 拒绝",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("[Write]");
+    expect(rendered).toContain("[MEDIUM]");
+    expect(rendered).toContain("写入文件需要确认");
+    expect(rendered).toContain("src/index.ts");
+    expect(rendered).toContain("输入 y 允许 / n 拒绝");
+  });
+
+  it("Task error/fail/blocked output blocks have distinct semantic status", () => {
+    const failBlock = createOutputBlock("error: compilation failed", "zh-CN", "out-fail");
+    expect(failBlock.status).toBe("fail");
+    expect(failBlock.kind).toBe("error");
+
+    const normalBlock = createOutputBlock("build succeeded", "zh-CN", "out-ok");
+    expect(normalBlock.status).toBe("info");
+    expect(normalBlock.kind).toBe("details");
+  });
+
+  it("Task completed(partial) background does not display as PASS", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      backgroundSummaries: [{ id: "bg1", title: "verify", status: "completed", result: "partial" }],
+    });
+    // completed background is filtered out (only active/problematic shown)
+    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(0);
+  });
+
+  it("Task output blocks retain at least 3 items for context", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 5 }, (_, i) => ({
+      id: `out-${i}`,
+      kind: "details" as const,
+      status: "info" as const,
+      title: `Output ${i}`,
+      summary: `result ${i}`,
+    }));
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+    const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
+    // At least 3 (capped at 3)
+    expect(outputBlocks).toHaveLength(3);
+  });
+
+  it("Task Composer in permission pending shows permission placeholder", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      width: 80,
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["ls"],
+        hint: "yes / no",
+      },
+    });
+    expect(view.composer.placeholder).toContain("y/yes 允许");
+    expect(view.composer.placeholder).toContain("n/no 拒绝");
+  });
+
+  it("Task narrow width (<60) does not crash and renders correctly", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 45,
+      viewMode: "task",
+      activity: { phase: "thinking", text: "正在思考…" },
+      outputBlocks: [
+        { id: "out-1", kind: "details", status: "info", title: "Output", summary: "ok" },
+      ],
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("LingHun");
+    expect(rendered).toContain("正在思考");
+  });
+
+  it("Task resize (width change) produces valid render at all widths", () => {
+    for (const width of [30, 45, 60, 80, 120]) {
+      const view = createShellViewModel(createContext(), {
+        width,
+        viewMode: "task",
+        activity: { phase: "tool_running", text: "Running…" },
+        permission: {
+          toolName: "Bash",
+          reason: "exec",
+          risk: "high",
+          scope: ["cmd"],
+          hint: "y/n",
+        },
+      });
+      const rendered = renderPlainShell(view);
+      expect(rendered).toContain("LingHun");
+      // No crash, no empty render
+      expect(rendered.length).toBeGreaterThan(10);
+    }
+  });
+
+  // =========================================================================
+  // Model setup masking still works
+  // =========================================================================
+
+  it("model setup masking still renders correctly after D.13C changes", () => {
+    const { lines, cursorCol } = formatComposerRenderLines({
+      buffer: createEditBuffer("sk-abc123"),
+      placeholder: "Enter API key",
+      masking: true,
+      noColor: false,
+    });
+    expect(lines[0]).toContain("*********");
+    expect(lines[0]).not.toContain("sk-abc123");
+    // "> " (2) + 9 masked chars = 11
+    expect(cursorCol).toBe(11);
+  });
+
+  // =========================================================================
+  // Home/Task structure non-regression
+  // =========================================================================
+
+  it("Home structure: brand → underline → vision → composer → status (no regression)", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), { width: 80, height: 24 });
+    const rendered = renderPlainShell(view);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
+    const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
+    const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
+
+    const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
+    const visionIdx = lines.findIndex((l) => l.includes("技术普惠"));
+    const composerIdx = lines.findIndex((l) => l.includes("我能帮您做点什么？"));
+    const statusIdx = lines.findIndex((l) => l.includes("项目："));
+
+    expect(brandIdx).toBeGreaterThanOrEqual(0);
+    expect(visionIdx).toBeGreaterThan(brandIdx);
+    expect(composerIdx).toBeGreaterThan(visionIdx);
+    expect(statusIdx).toBeGreaterThan(composerIdx);
+  });
+
+  it("Task structure: topbar → separator → activity → permission → output (no regression)", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "tool_running", text: "Running Bash…", toolName: "Bash" },
+      permission: {
+        toolName: "Bash",
+        reason: "exec cmd",
+        risk: "high",
+        scope: ["ls -la"],
+        hint: "y/n",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
+    const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
+    const lines = rendered.split("\n").map((l) => l.replace(ANSI_STRIP, ""));
+
+    const brandIdx = lines.findIndex((l) => l.includes("LingHun"));
+    const activityIdx = lines.findIndex((l) => l.includes("Running Bash"));
+    const permIdx = lines.findIndex((l) => l.includes("[Bash]"));
+
+    expect(brandIdx).toBeGreaterThanOrEqual(0);
+    expect(activityIdx).toBeGreaterThan(brandIdx);
+    expect(permIdx).toBeGreaterThan(activityIdx);
   });
 });

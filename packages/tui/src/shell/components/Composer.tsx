@@ -118,6 +118,44 @@ export function bufferKillToEnd(buf: EditBuffer): EditBuffer {
   return { chars: buf.chars.slice(0, buf.cursor), cursor: buf.cursor };
 }
 
+/** Move cursor up one line, preserving column position (CJK-aware). */
+export function bufferMoveUp(buf: EditBuffer): EditBuffer {
+  const { row, col } = getCursorLinePosition(buf, false);
+  if (row === 0) return buf; // already on first line
+  // Find the start of the target line (row - 1) and move to same column
+  const lines = bufferToString(buf).split("\n");
+  const targetLine = lines[row - 1] ?? "";
+  const targetChars = Array.from(targetLine);
+  // Clamp column to target line length
+  const targetCol = Math.min(col, targetChars.length);
+  // Calculate new cursor position: sum of chars in lines before target + newlines + targetCol
+  let newCursor = 0;
+  for (let i = 0; i < row - 1; i++) {
+    newCursor += Array.from(lines[i] ?? "").length + 1; // +1 for \n
+  }
+  newCursor += targetCol;
+  return { ...buf, cursor: newCursor };
+}
+
+/** Move cursor down one line, preserving column position (CJK-aware). */
+export function bufferMoveDown(buf: EditBuffer): EditBuffer {
+  const { row, col } = getCursorLinePosition(buf, false);
+  const lines = bufferToString(buf).split("\n");
+  if (row >= lines.length - 1) return buf; // already on last line
+  // Find the start of the target line (row + 1) and move to same column
+  const targetLine = lines[row + 1] ?? "";
+  const targetChars = Array.from(targetLine);
+  // Clamp column to target line length
+  const targetCol = Math.min(col, targetChars.length);
+  // Calculate new cursor position: sum of chars in lines before target + newlines + targetCol
+  let newCursor = 0;
+  for (let i = 0; i <= row; i++) {
+    newCursor += Array.from(lines[i] ?? "").length + 1; // +1 for \n
+  }
+  newCursor += targetCol;
+  return { ...buf, cursor: newCursor };
+}
+
 function isWordBoundary(ch: string): boolean {
   return /[\s\p{P}]/u.test(ch);
 }
@@ -226,22 +264,37 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // History: up/down arrows
+    // History: up/down arrows — in multiline, move within lines first
     if (key.upArrow) {
-      const next = historyUp(historyRef.current, bufferToString(buffer));
-      if (next) {
-        historyRef.current = next;
-        const histText = historyCurrentText(next);
-        if (histText !== undefined) resetBuffer(histText);
+      const { row } = getCursorLinePosition(buffer, false);
+      if (row > 0) {
+        // Move cursor up one line within the buffer
+        setBuffer(bufferMoveUp(buffer));
+      } else {
+        // First line — trigger history navigation
+        const next = historyUp(historyRef.current, bufferToString(buffer));
+        if (next) {
+          historyRef.current = next;
+          const histText = historyCurrentText(next);
+          if (histText !== undefined) resetBuffer(histText);
+        }
       }
       return;
     }
     if (key.downArrow) {
-      const next = historyDown(historyRef.current);
-      if (next) {
-        historyRef.current = next;
-        const histText = historyCurrentText(next);
-        resetBuffer(histText ?? next.draft);
+      const { row } = getCursorLinePosition(buffer, false);
+      const totalLines = bufferToString(buffer).split("\n").length;
+      if (row < totalLines - 1) {
+        // Move cursor down one line within the buffer
+        setBuffer(bufferMoveDown(buffer));
+      } else {
+        // Last line — trigger history navigation
+        const next = historyDown(historyRef.current);
+        if (next) {
+          historyRef.current = next;
+          const histText = historyCurrentText(next);
+          resetBuffer(histText ?? next.draft);
+        }
       }
       return;
     }

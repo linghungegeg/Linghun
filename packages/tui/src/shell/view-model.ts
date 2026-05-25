@@ -21,6 +21,7 @@ const shellText = {
     permission: (mode: string) => `权限：${mode}`,
     trust: (value: string) => `信任：${value}`,
     placeholder: "我能帮您做点什么？",
+    setupPlaceholder: "按 Enter 开始配置模型",
     permissionPlaceholder: "y/yes 允许 · n/no 拒绝 · details 详情 · Esc 取消",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
     setupHint: "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。",
@@ -54,6 +55,7 @@ const shellText = {
     permission: (mode: string) => `Permission: ${mode}`,
     trust: (value: string) => `Trust: ${value}`,
     placeholder: "What can I help you with?",
+    setupPlaceholder: "Press Enter to configure a model",
     permissionPlaceholder: "y/yes allow · n/no deny · details inspect · Esc cancel",
     submittedHint: "Submitted through the shared TUI controller.",
     setupHint: 'No model configured. Press Enter, or say "configure provider".',
@@ -182,8 +184,12 @@ export function createShellViewModel(
   // Vision: use short version for narrow terminals
   const homeVision = width <= 40 ? text.visionShort : text.vision;
 
-  // Composer: switch placeholder when permission is pending
-  const composerPlaceholder = options.permission ? text.permissionPlaceholder : text.placeholder;
+  // Composer: switch placeholder when permission is pending, or add setup guidance in home
+  const composerPlaceholder = options.permission
+    ? text.permissionPlaceholder
+    : setupNeeded && effectiveViewMode === "home"
+      ? text.setupPlaceholder
+      : text.placeholder;
 
   return {
     language,
