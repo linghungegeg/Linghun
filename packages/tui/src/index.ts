@@ -70,7 +70,6 @@ import {
   ModelGateway,
   type ModelMessage,
   type ModelToolCall,
-  type ModelToolDefinition,
   type ModelUsage,
   OpenAiCompatibleProvider,
   findKnownModel,
@@ -196,6 +195,32 @@ import {
   readProjectSettingsApiKeyProviders,
   readProviderEnvApiKeyProviders,
 } from "./model-doctor-runtime.js";
+import {
+  type FreshnessLiteState,
+  type SolutionCompletenessClassification,
+  type SolutionCompletenessSeverity,
+  type SolutionCompletenessStatus,
+  createModelToolDefinitions,
+  createModelToolDefinitionsForReportGuard,
+  createModelToolDefinitionsForTools,
+  createSolutionCompletenessStatus,
+  createToolInputSchema,
+  createToolUseDriftSummary,
+  extractFileMentions,
+  extractFileSearchKeywords,
+  extractNaturalReadPath,
+  formatFileCandidates,
+  formatFreshnessLitePrimaryWarning,
+  formatSolutionCompletenessTrigger,
+  hasModelSynthesisIntent,
+  inferSolutionCompletenessImpactAreas,
+  isNaturalReadFileRequest,
+  looksLikeFilePath,
+  matchesFileKeywords,
+  needsFreshnessLiteBoundary,
+  normalizeRelativePath,
+  readToolInputString,
+} from "./model-loop-runtime.js";
 import {
   type ModelSetupMessageKey,
   type ModelSetupPrefill,
@@ -377,36 +402,12 @@ export type {
   PermissionState,
 } from "./permission-continuation-runtime.js";
 
-export type SolutionCompletenessClassification = "single_issue" | "systemic_gap" | "unknown";
-
-export type SolutionCompletenessSeverity =
-  | "P0"
-  | "blocking_P1"
-  | "P1"
-  | "P2"
-  | "later"
-  | "not_do"
-  | "unknown";
-
-export type SolutionCompletenessStatus = {
-  triggered: boolean;
-  triggerReason:
-    | "none"
-    | "user_request"
-    | "repeated_denial"
-    | "smoke_contamination"
-    | "audit_finding";
-  classificationRequired: boolean;
-  classification: SolutionCompletenessClassification;
-  impactAreas: string[];
-  severity: SolutionCompletenessSeverity;
-  requiredBeforeAction: boolean;
-  evidenceRefs: string[];
-  sourceRefs: string[];
-  nextRequiredOutput: string;
-  checklist: string[];
-  lastWarning?: string;
-};
+export type {
+  SolutionCompletenessClassification,
+  SolutionCompletenessSeverity,
+  SolutionCompletenessStatus,
+} from "./model-loop-runtime.js";
+export { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
 
 export type PlanProposal = {
   id: string;
@@ -12436,144 +12437,6 @@ function currentModelSupportsTools(
   return known?.supportsTools !== false;
 }
 
-function createModelToolDefinitions(): ModelToolDefinition[] {
-  return createModelToolDefinitionsForTools(
-    Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
-  );
-}
-
-function createModelToolDefinitionsForReportGuard(
-  guard: ReportWriteGuard | undefined,
-): ModelToolDefinition[] {
-  if (!guard || guard.completed) {
-    return createModelToolDefinitions();
-  }
-  if (!guard.evidenceRead) {
-    return createModelToolDefinitionsForTools([
-      builtInTools.Read,
-      builtInTools.Grep,
-      builtInTools.Glob,
-    ]);
-  }
-  if (guard.nonWriteToolRounds < 1) {
-    return createModelToolDefinitionsForTools(
-      (Object.values(builtInTools) as (typeof builtInTools)[ToolName][]).filter(
-        (tool) => tool.name !== "Bash",
-      ),
-    );
-  }
-  return createModelToolDefinitionsForTools([builtInTools.Write]);
-}
-
-function createModelToolDefinitionsForTools(
-  tools: (typeof builtInTools)[ToolName][],
-): ModelToolDefinition[] {
-  return tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: createToolInputSchema(tool.name),
-  }));
-}
-
-function createToolInputSchema(name: ToolName): unknown {
-  const base = { type: "object", additionalProperties: false } as const;
-  if (name === "Read") {
-    return {
-      ...base,
-      properties: {
-        path: { type: "string" },
-        offset: { type: "number" },
-        limit: { type: "number" },
-      },
-      required: ["path"],
-    };
-  }
-  if (name === "Write") {
-    return {
-      ...base,
-      properties: {
-        path: { type: "string" },
-        content: { type: "string" },
-        expectedHash: { type: "string" },
-      },
-      required: ["path", "content"],
-    };
-  }
-  if (name === "Edit") {
-    return {
-      ...base,
-      properties: {
-        path: { type: "string" },
-        oldText: { type: "string" },
-        newText: { type: "string" },
-        expectedHash: { type: "string" },
-      },
-      required: ["path", "oldText", "newText"],
-    };
-  }
-  if (name === "MultiEdit") {
-    return {
-      ...base,
-      properties: {
-        path: { type: "string" },
-        expectedHash: { type: "string" },
-        edits: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: { oldText: { type: "string" }, newText: { type: "string" } },
-            required: ["oldText", "newText"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["path", "edits"],
-    };
-  }
-  if (name === "Grep") {
-    return {
-      ...base,
-      properties: {
-        pattern: { type: "string" },
-        path: { type: "string" },
-        limit: { type: "number" },
-      },
-      required: ["pattern"],
-    };
-  }
-  if (name === "Glob") {
-    return {
-      ...base,
-      properties: {
-        pattern: { type: "string" },
-        path: { type: "string" },
-        limit: { type: "number" },
-      },
-      required: ["pattern"],
-    };
-  }
-  if (name === "Bash") {
-    return {
-      ...base,
-      properties: { command: { type: "string" }, timeoutMs: { type: "number" } },
-      required: ["command"],
-    };
-  }
-  if (name === "Todo") {
-    return {
-      ...base,
-      properties: {
-        action: { type: "string", enum: ["list", "add", "start", "done", "block"] },
-        content: { type: "string" },
-        id: { type: "string" },
-        evidence: { type: "string" },
-      },
-      required: ["action"],
-    };
-  }
-  return { ...base, properties: { files: { type: "array", items: { type: "string" } } } };
-}
-
 async function executeModelToolUse(
   toolCall: ModelToolCall,
   context: TuiContext,
@@ -12869,11 +12732,6 @@ export function createModelSystemPrompt(
   }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
-type FreshnessLiteState = {
-  sensitive: boolean;
-  webSourceEvidence: "present" | "missing";
-};
-
 function createFreshnessLiteBoundary(text: string, context: TuiContext): string | undefined {
   const state = createFreshnessLiteState(text, context);
   if (!state.sensitive) {
@@ -12909,24 +12767,6 @@ async function recordFreshnessLiteBoundary(
   );
 }
 
-function formatFreshnessLitePrimaryWarning(
-  state: FreshnessLiteState,
-  language: TuiContext["language"],
-): string | undefined {
-  if (!state.sensitive || state.webSourceEvidence === "present") {
-    return undefined;
-  }
-  return language === "en-US"
-    ? "Freshness note: no web_source evidence is available in this session, so any latest/current/external facts above are unverified and need confirmation."
-    : "Freshness 提示：本会话没有 web_source 证据，以上涉及最新/当前/外部事实的内容均未验证，需要进一步确认。";
-}
-
-function needsFreshnessLiteBoundary(text: string): boolean {
-  return /最新|当前|现在|今天|今年|实时|外部资料|网页|官网|官方|新闻|版本|价格|latest|current|today|now|real[-\s]?time|external|web|official|news|price|version/iu.test(
-    text,
-  );
-}
-
 function createEvidenceSummaryForModel(context: TuiContext): string {
   return JSON.stringify(
     context.evidence.slice(0, 5).map((item) => ({
@@ -12937,22 +12777,6 @@ function createEvidenceSummaryForModel(context: TuiContext): string {
       supportsClaims: item.supportsClaims.slice(0, 5),
     })),
   );
-}
-
-export function createSolutionCompletenessStatus(): SolutionCompletenessStatus {
-  return {
-    triggered: false,
-    triggerReason: "none",
-    classificationRequired: false,
-    classification: "unknown",
-    impactAreas: [],
-    severity: "unknown",
-    requiredBeforeAction: false,
-    evidenceRefs: [],
-    sourceRefs: [],
-    nextRequiredOutput: "none",
-    checklist: [],
-  };
 }
 
 function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
@@ -13023,49 +12847,6 @@ function updateSolutionCompletenessGate(text: string, context: TuiContext): stri
   return warning;
 }
 
-function inferSolutionCompletenessImpactAreas(
-  text: string,
-  triggerReason: SolutionCompletenessStatus["triggerReason"],
-): string[] {
-  const areas = new Set<string>();
-  const lower = text.toLowerCase();
-  if (/ccb|opencode|成熟项目|对照|全局|系统性|完整性/u.test(lower)) {
-    areas.add("reference_parity");
-    areas.add("runtime_behavior");
-  }
-  if (/权限|permission|denial|拒绝/u.test(lower) || triggerReason === "repeated_denial") {
-    areas.add("permission_pipeline");
-    areas.add("tool_loop");
-  }
-  if (/smoke|tui|交互|手感|污染|失真/u.test(lower) || triggerReason === "smoke_contamination") {
-    areas.add("tui_smoke");
-    areas.add("natural_command_bridge");
-  }
-  if (/文字补丁|regex|正则|只改文档|verifier|审计|audit/u.test(lower)) {
-    areas.add("implementation_scope");
-    areas.add("verification");
-  }
-  return [...areas];
-}
-
-function formatSolutionCompletenessTrigger(
-  triggerReason: SolutionCompletenessStatus["triggerReason"],
-): string {
-  if (triggerReason === "user_request") {
-    return "用户明确要求成品级/不要缝补/先对照成熟参考/全局检查遗漏。";
-  }
-  if (triggerReason === "smoke_contamination") {
-    return "真实 smoke 已出现污染或交互失真。";
-  }
-  if (triggerReason === "audit_finding") {
-    return "verifier/审计指出文字补丁、regex 补丁或只改文档风险。";
-  }
-  if (triggerReason === "repeated_denial") {
-    return "最近同类权限拒绝反复出现。";
-  }
-  return "未触发。";
-}
-
 function collectSolutionCompletenessEvidenceRefs(context: TuiContext): string[] {
   const evidence = context.evidence.slice(0, 3).map((item) => item.id);
   const denied = context.permissions.recentDenied
@@ -13097,14 +12878,6 @@ function rememberToolFiles(
     ...paths.filter(Boolean),
     ...context.recentlyMentionedFiles,
   ]).slice(0, 10);
-}
-
-function extractFileMentions(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.split(":")[0]?.trim() ?? "")
-    .filter((line) => /[\\/]|\.[a-z0-9]+$/iu.test(line))
-    .map((line) => line.replaceAll("\\", "/"));
 }
 
 type NaturalFileReadResult =
@@ -13144,26 +12917,6 @@ async function resolveNaturalFileRead(
   return { status: "none" };
 }
 
-function isNaturalReadFileRequest(text: string): boolean {
-  return /(?:读|读取|打开|看看|查看|show|read|open|view)\s*(?:一下|下)?/iu.test(text);
-}
-
-function createToolUseDriftSummary(toolName: ToolName, input: unknown): string {
-  const path = readToolInputString(input, "path") ?? readToolInputString(input, "file_path");
-  if ((toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") && path) {
-    return `${toolName}: ${path}`;
-  }
-  return `${toolName}: ${JSON.stringify(input ?? {})}`;
-}
-
-function readToolInputString(input: unknown, key: string): string | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return undefined;
-  }
-  const value = (input as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : undefined;
-}
-
 async function recordReportIncompleteEvidence(
   context: TuiContext,
   sessionId: string,
@@ -13189,27 +12942,6 @@ async function recordReportIncompleteEvidence(
   return formatReportIncompletePrimary(guard.requestedPath, context.language);
 }
 
-function hasModelSynthesisIntent(text: string): boolean {
-  return /总结|摘要|分析|解释|归纳|summary|summari[sz]e|analy[sz]e|explain/iu.test(text);
-}
-
-function extractNaturalReadPath(text: string): string | null {
-  const quoted = /["'“”‘’`]([^"'“”‘’`]+)["'“”‘’`]/u.exec(text)?.[1];
-  if (quoted && looksLikeFilePath(quoted)) {
-    return normalizeRelativePath(quoted);
-  }
-
-  const token = text
-    .split(/\s+/)
-    .map((item) => item.replace(/[，。,.!?；;：:）)]+$/u, ""))
-    .find(looksLikeFilePath);
-  return token ? normalizeRelativePath(token) : null;
-}
-
-function looksLikeFilePath(value: string): boolean {
-  return /[\\/]/u.test(value) || /\.[a-z0-9]{1,12}$/iu.test(value);
-}
-
 async function findNaturalFileCandidates(
   text: string,
   projectPath: string,
@@ -13226,47 +12958,6 @@ async function findNaturalFileCandidates(
 
   const files = await listProjectFiles(projectPath, 300);
   return files.filter((file) => matchesFileKeywords(file, keywords)).slice(0, 5);
-}
-
-function extractFileSearchKeywords(text: string): string[] {
-  return text
-    .replace(/["'“”‘’`]/gu, " ")
-    .split(/[^\p{L}\p{N}_.-]+/u)
-    .map((item) => item.trim().toLowerCase())
-    .filter((item) => item.length >= 2)
-    .filter(
-      (item) =>
-        ![
-          "read",
-          "open",
-          "view",
-          "show",
-          "file",
-          "the",
-          "this",
-          "that",
-          "previous",
-          "recent",
-          "读取",
-          "打开",
-          "查看",
-          "看看",
-          "文件",
-          "这个",
-          "刚才",
-          "上面",
-          "最近",
-        ].includes(item),
-    );
-}
-
-function matchesFileKeywords(file: string, keywords: string[]): boolean {
-  if (keywords.length === 0) {
-    return false;
-  }
-  const normalized = file.toLowerCase();
-  const name = basename(normalized);
-  return keywords.some((keyword) => normalized.includes(keyword) || name.includes(keyword));
 }
 
 async function listProjectFiles(projectPath: string, limit: number): Promise<string[]> {
@@ -13306,21 +12997,6 @@ async function collectProjectFiles(
       files.push(relative(root, fullPath).replaceAll("\\", "/"));
     }
   }
-}
-
-function normalizeRelativePath(path: string): string {
-  return path.trim().replaceAll("\\", "/").replace(/^\.\//u, "");
-}
-
-function formatFileCandidates(candidates: string[], language: Language): string {
-  const lines = candidates.map((candidate) => `- ${candidate}`);
-  return language === "en-US"
-    ? [
-        "Multiple files match that request. Please choose one with an explicit command:",
-        ...lines,
-        "Example: /read <path>",
-      ].join("\n")
-    : ["找到多个可能文件，请用明确命令选择一个：", ...lines, "示例：/read <path>"].join("\n");
 }
 
 function formatHomeScreen(context: TuiContext): string {
