@@ -1,9 +1,14 @@
 import { PassThrough, Writable } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
-import { formatComposerRenderLines, handleComposerInput } from "./components/Composer.js";
+import {
+  createEditBuffer,
+  formatComposerRenderLines,
+  handleComposerInput,
+} from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
+import { resetTerminalCapabilityCache } from "./terminal-capability.js";
 import type { ProductBlockViewModel } from "./types.js";
 import {
   createOutputBlock,
@@ -12,6 +17,15 @@ import {
   mapPendingApprovalToPermission,
   mapRequestActivityToView,
 } from "./view-model.js";
+
+// Reset terminal capability cache after every test to prevent cross-test pollution.
+// On Windows without WT_SESSION, detectTerminalCapability() returns legacy unless
+// LINGHUN_TERMINAL_TIER is explicitly set. Tests that need modern/basic behavior
+// must stub LINGHUN_TERMINAL_TIER accordingly.
+afterEach(() => {
+  resetTerminalCapabilityCache();
+  vi.unstubAllEnvs();
+});
 
 class TestTtyOutput extends Writable {
   readonly chunks: string[] = [];
@@ -210,16 +224,19 @@ describe("shell view model", () => {
     expect(rendered).not.toContain("[INFO] 首页");
     // setup-needed 现在是 setupHint 轻提示，不是 block (only in task/pending mode)
     expect(view.setupHint).toContain("按 Enter");
-    expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).toContain("当前为无颜色模式。");
     expect(rendered).not.toContain("Start Gate");
     expect(rendered).not.toContain("endpointProfile");
     expect(rendered).not.toContain("tool_result");
     expect(rendered).not.toContain("local/static only");
-    // prompt marker present
-    expect(rendered).toContain("> ");
+    // No fake composer in task view
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
     expect(rendered).not.toContain("你 >");
     expect(rendered).not.toContain("you >");
+    // No version number
+    expect(rendered).not.toContain("v0.1.0");
+    // No ANSI escapes in no-color mode
+    expect(rendered).not.toContain("\x1B[");
   });
 });
 
@@ -229,20 +246,32 @@ describe("Ink shell selection", () => {
     const input = { isTTY: true } as NodeJS.ReadStream;
     const output = { isTTY: true } as NodeJS.WriteStream;
 
+    // Non-TTY always falls back regardless of capability
     expect(shouldUseInkShell({ isTTY: false } as NodeJS.ReadStream, output)).toBe(false);
     expect(shouldUseInkShell(input, { isTTY: false } as NodeJS.WriteStream)).toBe(false);
 
+    // TERM=dumb forces legacy (no cursorPositioning)
+    resetTerminalCapabilityCache();
     vi.stubEnv("TERM", "dumb");
     expect(shouldUseInkShell(input, output)).toBe(false);
     vi.unstubAllEnvs();
 
+    // Explicit plain opt-in
+    resetTerminalCapabilityCache();
     vi.stubEnv("LINGHUN_TUI_PLAIN", "1");
+    expect(shouldUseInkShell(input, output)).toBe(false);
+
+    // Legacy tier explicitly
+    vi.unstubAllEnvs();
+    resetTerminalCapabilityCache();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
     expect(shouldUseInkShell(input, output)).toBe(false);
   });
 
   it("allows TTY Ink shell while NO_COLOR stays a render-mode concern", () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     vi.stubEnv("NO_COLOR", "1");
 
     expect(
@@ -256,6 +285,7 @@ describe("Ink shell selection", () => {
   it("keeps one Ink render instance while resize updates the view model width and height", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const widths: number[] = [];
@@ -306,6 +336,7 @@ describe("Ink shell selection", () => {
   it("does not add beforeExit listener when waiting after unmount", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const beforeExitBefore = process.listenerCount("beforeExit");
     const output = new TestTtyOutput();
     const input = createTtyInput();
@@ -385,6 +416,7 @@ describe("Ink shell selection", () => {
   it("renders the mature home without setup or composer border cards", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -426,6 +458,7 @@ describe("Ink shell selection", () => {
   it("hides setupHint when setupNeeded is false", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -473,6 +506,7 @@ describe("Ink shell selection", () => {
   it("keeps the brand wordmark stable without blocky pixel glyphs or duplicate text lines", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -504,12 +538,14 @@ describe("Ink shell selection", () => {
     expect(output.text).not.toContain("╚");
     expect(output.text).not.toContain("╝");
 
-    // Plain renderer also has wordmark
+    // Plain renderer also has compact header (no ASCII art, no version)
     const plainView = createShellViewModel(createContext(), { width: 80 });
     const plainRendered = renderPlainShell(plainView);
     expect(plainRendered).toContain("LingHun");
+    expect(plainRendered).not.toContain("v0.1.0");
     expect(plainRendered).not.toContain("█");
     expect(plainRendered).not.toContain("L I N G H U N");
+    expect(plainRendered).not.toContain("|____|");
   });
 });
 
@@ -563,15 +599,16 @@ describe("home → task view mode transition", () => {
     const view = createShellViewModel(createContext(), { width: 80, outputBlocks: [block] });
     const rendered = renderPlainShell(view);
 
-    // Brand appears in compact top bar, not as centered hero
+    // Brand appears in compact top bar, no version
     expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
     // No vision text in task mode
     expect(rendered).not.toContain("技术普惠会越来越成熟");
     // Status tray preserved
     expect(rendered).toContain("项目：");
     expect(rendered).toContain("模型：");
-    // Composer preserved
-    expect(rendered).toContain("我能帮您做点什么？");
+    // No fake composer input line
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
     // Output block preserved
     expect(rendered).toContain("最近输出");
   });
@@ -607,6 +644,7 @@ describe("home → task view mode transition", () => {
   it("task mode Ink render shows activity and hides brand hero", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -641,6 +679,7 @@ describe("home → task view mode transition", () => {
   it("task mode Ink render shows permission with border", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -678,6 +717,7 @@ describe("home → task view mode transition", () => {
   it("home mode Ink render does NOT show task activity or permission", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -753,6 +793,7 @@ describe("home → task view mode transition", () => {
   it("resize does not duplicate home page in Ink shell", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     let callCount = 0;
@@ -795,6 +836,7 @@ describe("home → task view mode transition", () => {
   it("resize in task mode stays stable without duplicating content", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1176,6 +1218,7 @@ describe("D.12B — P0-2: permission composer mode", () => {
 describe("D.12B — P0-3: plain renderer permission risk level", () => {
   it("shows [HIGH] for high risk permission in plain mode", () => {
     const view = createShellViewModel(createContext(), {
+      noColor: true,
       width: 80,
       permission: {
         toolName: "Bash",
@@ -1186,11 +1229,13 @@ describe("D.12B — P0-3: plain renderer permission risk level", () => {
       },
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("[Bash] [HIGH]");
+    expect(rendered).toContain("[Bash]");
+    expect(rendered).toContain("[HIGH]");
   });
 
   it("shows [MEDIUM] for medium risk permission", () => {
     const view = createShellViewModel(createContext(), {
+      noColor: true,
       width: 80,
       permission: {
         toolName: "Write",
@@ -1201,11 +1246,13 @@ describe("D.12B — P0-3: plain renderer permission risk level", () => {
       },
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("[Write] [MEDIUM]");
+    expect(rendered).toContain("[Write]");
+    expect(rendered).toContain("[MEDIUM]");
   });
 
   it("shows [LOW] for low risk permission", () => {
     const view = createShellViewModel(createContext(), {
+      noColor: true,
       width: 80,
       permission: {
         toolName: "Read",
@@ -1216,7 +1263,8 @@ describe("D.12B — P0-3: plain renderer permission risk level", () => {
       },
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("[Read] [LOW]");
+    expect(rendered).toContain("[Read]");
+    expect(rendered).toContain("[LOW]");
   });
 });
 
@@ -1423,7 +1471,7 @@ describe("D.12B — P2-5: no-color does not force white", () => {
 describe("D.12C — Composer cursor alignment closure", () => {
   it("empty Composer render includes prompt marker without fake cursor", () => {
     const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
-      text: "",
+      buffer: createEditBuffer(""),
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
@@ -1436,14 +1484,16 @@ describe("D.12C — Composer cursor alignment closure", () => {
     expect(cursorRow).toBe(0);
     expect(cursorCol).toBeGreaterThan(0);
 
+    // Plain renderer shows placeholder inside composer box as hint (no "> " prefix)
     const rendered = renderPlainShell(createShellViewModel(createContext(), { width: 80 }));
-    expect(rendered).toContain("> 我能帮您做点什么？");
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
 
   it("typed Composer render puts cursor position after text", () => {
     const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
-      text: "修复光标",
+      buffer: createEditBuffer("修复光标"),
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
@@ -1456,7 +1506,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
 
   it("multiline Composer render reports cursor on the last line", () => {
     const { lines, cursorCol, cursorRow } = formatComposerRenderLines({
-      text: "第一行\n第二行\n第三行",
+      buffer: createEditBuffer("第一行\n第二行\n第三行"),
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: false,
@@ -1470,7 +1520,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
 
   it("no-color Composer render has no fake cursor characters", () => {
     const { lines, cursorCol } = formatComposerRenderLines({
-      text: "修复光标",
+      buffer: createEditBuffer("修复光标"),
       placeholder: "我能帮您做点什么？",
       masking: false,
       noColor: true,
@@ -1483,26 +1533,32 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const rendered = renderPlainShell(
       createShellViewModel(createContext(), { noColor: true, width: 80 }),
     );
-    expect(rendered).toContain("> 我能帮您做点什么？");
+    expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
 
   it("brand wordmark to vision has spacing in plain home render", () => {
-    const view = createShellViewModel(createContext(), { width: 80 });
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
     const rendered = renderPlainShell(view);
     const lines = rendered.split("\n");
-    // Large wordmark ends with "  LingHun" line, followed by empty line, then vision
+    // Compact header "LingHun" (no version) followed by accent line, empty line, then vision
     const brandIdx = lines.findIndex((l) => l.trim() === "LingHun");
-    expect(brandIdx).toBeGreaterThan(0);
-    // Next line should be empty (spacing)
-    expect(lines[brandIdx + 1]).toBe("");
+    expect(brandIdx).toBeGreaterThanOrEqual(0);
+    // Accent underline on next line (ASCII dash for legacy)
+    const accentLine = lines[brandIdx + 1];
+    expect(accentLine).toBeDefined();
+    expect((accentLine as string).trim()).toMatch(/^-+$/);
+    // Then empty line
+    expect(lines[brandIdx + 2]).toBe("");
     // Then vision
-    expect(lines[brandIdx + 2]).toContain("技术普惠");
+    expect(lines[brandIdx + 3]).toContain("技术普惠");
   });
 
   it("ink-renderer does not add extra hide cursor — Ink manages cursor via useCursor", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1531,6 +1587,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
   it("ink-renderer show cursor on unmount path", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1560,6 +1617,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
   it("ink-renderer restores cursor when stdout closes", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1588,6 +1646,7 @@ describe("D.12C — Composer cursor alignment closure", () => {
   it("home brand/vision still renders, layout not switched to top bar", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const output = new TestTtyOutput();
     const input = createTtyInput();
     const controller = {
@@ -1614,9 +1673,10 @@ describe("D.12C — Composer cursor alignment closure", () => {
   });
 
   it("width=40 does not crash", () => {
-    const view = createShellViewModel(createContext(), { width: 40 });
+    const view = createShellViewModel(createContext(), { noColor: true, width: 40 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
     expect(rendered).toContain("我能帮您做点什么？");
     expect(rendered).not.toContain("\u258C");
   });
@@ -1625,49 +1685,67 @@ describe("D.12C — Composer cursor alignment closure", () => {
     const view = createShellViewModel(createContext(), { noColor: true, width: 40 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
     expect(rendered).not.toContain("\u258C");
   });
 });
 
 describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   it("Home large wordmark renders for width>=80", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const view = createShellViewModel(createContext(), { width: 80 });
     const rendered = renderPlainShell(view);
+    // Plain renderer uses compact header, no ASCII art wordmark, no version
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("┗━━");
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).not.toContain("┗━━");
+    expect(rendered).not.toContain("|____|");
   });
 
   it("Home compact wordmark renders for width 60-79", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const view = createShellViewModel(createContext(), { width: 65 });
     const rendered = renderPlainShell(view);
+    // Compact header regardless of width, no version
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("━━━━━━━━━━━━━━");
-    expect(rendered).not.toContain("┗━━");
-  });
-
-  it("Home narrow wordmark renders for width<60", () => {
-    const view = createShellViewModel(createContext(), { width: 50 });
-    const rendered = renderPlainShell(view);
-    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
     expect(rendered).not.toContain("━━━━━━━━━━━━━━");
     expect(rendered).not.toContain("┗━━");
   });
 
-  it("Home no-color uses ASCII fallback wordmark", () => {
-    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+  it("Home narrow wordmark renders for width<60", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const view = createShellViewModel(createContext(), { width: 50 });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
-    expect(rendered).toContain("|____|");
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).not.toContain("━━━━━━━━━━━━━━");
+    expect(rendered).not.toContain("┗━━");
+  });
+
+  it("Home no-color uses ASCII-safe separator", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Compact header, no ASCII art, no version
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).not.toContain("|____|");
+    // ASCII separator (-)
+    expect(rendered).toContain("-".repeat(10));
   });
 
   it("Task does not render large hero", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
     const view = createShellViewModel(createContext(), {
+      noColor: true,
       width: 80,
       viewMode: "task",
       activity: { phase: "thinking", text: "正在思考…" },
     });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
     expect(rendered).not.toContain("┗━━");
     expect(rendered).not.toContain("━━━━━━━━━━━━━━");
   });
@@ -1801,7 +1879,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     ];
     for (const { text, noColor } of cases) {
       const { lines } = formatComposerRenderLines({
-        text,
+        buffer: createEditBuffer(text),
         placeholder: "placeholder",
         masking: false,
         noColor,
@@ -1813,7 +1891,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("CJK cursor position accounts for double-width characters", () => {
     const { cursorCol } = formatComposerRenderLines({
-      text: "你好世界",
+      buffer: createEditBuffer("你好世界"),
       placeholder: "placeholder",
       masking: false,
       noColor: false,
@@ -1824,7 +1902,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("masking cursor position uses masked length", () => {
     const { cursorCol, lines } = formatComposerRenderLines({
-      text: "secret",
+      buffer: createEditBuffer("secret"),
       placeholder: "placeholder",
       masking: true,
       noColor: false,
@@ -1837,7 +1915,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   it("truncated multiline shows line count and correct cursor row", () => {
     const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
     const { lines, truncatedCount, cursorRow } = formatComposerRenderLines({
-      text,
+      buffer: createEditBuffer(text),
       placeholder: "placeholder",
       masking: false,
       noColor: false,
@@ -1874,16 +1952,313 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("/details");
-    // fail status marker (● in color mode, [FAIL] in no-color)
-    expect(rendered).toContain("●");
+    // fail status marker (✗ in color mode, [FAIL] in no-color)
+    expect(rendered).toContain("\u2717");
   });
 
-  it("80x24 and 40 width do not squeeze composer", () => {
+  it("80x24 and 40 width do not squeeze placeholder hint", () => {
     for (const width of [80, 40]) {
       const view = createShellViewModel(createContext(), { width, height: 24 });
       const rendered = renderPlainShell(view);
-      expect(rendered).toContain("> ");
+      // Placeholder shown inside composer box as hint (no "> " prefix)
       expect(rendered).toContain("我能帮您做点什么？");
+      expect(rendered).not.toContain("> 我能帮您做点什么？");
     }
+  });
+});
+
+describe("TTY legacy fallback product shell", () => {
+  it("shouldUseInkShell=false + TTY legacy does NOT output old REPL text", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Must NOT contain old REPL-style startup text
+    expect(rendered).not.toContain("Linghun TUI");
+    expect(rendered).not.toContain("REPL");
+    expect(rendered).not.toContain("Type /help");
+    // Must contain product shell elements
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+    // Composer box with placeholder hint (no "> " prefix to avoid double-input)
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+  });
+
+  it("TTY legacy fallback outputs renderPlainShell Home product layout", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Product shell structure: brand + vision + composer box + status
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).toContain("技术普惠会越来越成熟");
+    // Composer box includes placeholder hint (no "> " prefix — readline provides the real prompt)
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    expect(rendered).toContain("项目：");
+    expect(rendered).toContain("模型：");
+    expect(rendered).toContain("权限：");
+  });
+
+  it("non-TTY pipe mode can still use plain text without product frame", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Even legacy gets structured output, not raw REPL
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+  });
+
+  it("cmd fallback includes ASCII-safe compact header and status, no ASCII art", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // ASCII-safe: uses - for separator, no Unicode box-drawing
+    expect(rendered).toContain("-".repeat(10));
+    // Compact header, no version, no ASCII art wordmark
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).not.toContain("|____|");
+    expect(rendered).not.toContain("_     _");
+    // No hero frame lines (═ or =)
+    expect(rendered).not.toContain("=".repeat(10));
+    // No Unicode box-drawing characters
+    expect(rendered).not.toContain("━");
+    expect(rendered).not.toContain("┗");
+    expect(rendered).not.toContain("─");
+    expect(rendered).not.toContain("═");
+    // Composer box with "> placeholder" inside
+    expect(rendered).toContain("我能帮您做点什么？");
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    // Status tray present
+    expect(rendered).toContain("项目：");
+    expect(rendered).toContain("模型：");
+  });
+
+  it("cmd fallback Task view has structured permission card with ASCII borders", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    const view = createShellViewModel(createContext(), {
+      noColor: true,
+      width: 80,
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    // ASCII card borders for permission
+    expect(rendered).toContain("+");
+    expect(rendered).toContain("|");
+    expect(rendered).toContain("[Bash]");
+    expect(rendered).toContain("[HIGH]");
+    expect(rendered).toContain("执行命令");
+    expect(rendered).toContain("rm -rf /tmp");
+    expect(rendered).toContain("yes / no");
+    // No Unicode box-drawing in permission card
+    expect(rendered).not.toContain("┌");
+    expect(rendered).not.toContain("└");
+    expect(rendered).not.toContain("│");
+    // No fake composer input line
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+  });
+
+  it("modern terminal plain render uses Unicode box-drawing", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      permission: {
+        toolName: "Write",
+        reason: "写入文件",
+        risk: "medium",
+        scope: ["src/main.ts"],
+        hint: "yes / no",
+      },
+    });
+    const rendered = renderPlainShell(view);
+    // Unicode box-drawing for permission card
+    expect(rendered).toContain("┌");
+    expect(rendered).toContain("└");
+    expect(rendered).toContain("│");
+    // Unicode separator lines (─) in task view
+    expect(rendered).toContain("─");
+  });
+
+  it("modern terminal plain Home render uses Unicode separator", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const view = createShellViewModel(createContext(), { width: 80, viewMode: "home" });
+    const rendered = renderPlainShell(view);
+    // Home view has ─ separator lines (no ═ hero frame)
+    expect(rendered).toContain("─");
+    expect(rendered).not.toContain("═");
+    // Compact header without version
+    expect(rendered).toContain("LingHun");
+    expect(rendered).not.toContain("v0.1.0");
+  });
+
+  it("plain Home contains LingHun, short underline, vision, composer cyan lines, status", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const view = createShellViewModel(createContext(), { width: 80, height: 24 });
+    const rendered = renderPlainShell(view);
+    const lines = rendered.split("\n");
+
+    // Brand
+    expect(rendered).toContain("LingHun");
+    // Short underline (─ repeated 12-16 chars)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping requires matching ESC control character
+    const ANSI_STRIP = /\x1B\[[0-9;]*m/g;
+    const underlineIdx = lines.findIndex((l) =>
+      /^[\s]*─{12,16}[\s]*$/.test(l.replace(ANSI_STRIP, "")),
+    );
+    expect(underlineIdx).toBeGreaterThan(0);
+    // Vision
+    expect(rendered).toContain("技术普惠会越来越成熟");
+    // Composer top/bottom cyan lines (─ repeated composerWidth)
+    const composerLineCount = lines.filter((l) => {
+      const stripped = l.replace(ANSI_STRIP, "");
+      return /^─{40,}$/.test(stripped.trim());
+    }).length;
+    expect(composerLineCount).toBeGreaterThanOrEqual(2);
+    // Status tray below composer
+    expect(rendered).toContain("项目：");
+    expect(rendered).toContain("模型：");
+    // No version number
+    expect(rendered).not.toContain("v0.1.0");
+    // No large ASCII art
+    expect(rendered).not.toContain("|____|");
+    expect(rendered).not.toContain("_     _");
+  });
+
+  it("plain Home contains localized composer placeholder", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const zhView = createShellViewModel(createContext({ language: "zh-CN" }), { width: 80 });
+    const enView = createShellViewModel(createContext({ language: "en-US" }), { width: 80 });
+    const zhRendered = renderPlainShell(zhView);
+    const enRendered = renderPlainShell(enView);
+
+    // Placeholder shown as hint (no "> " prefix — readline provides the real prompt)
+    expect(zhRendered).toContain("我能帮您做点什么？");
+    expect(zhRendered).not.toContain("> 我能帮您做点什么？");
+    expect(enRendered).toContain("What can I help you with?");
+    expect(enRendered).not.toContain("> What can I help you with?");
+  });
+
+  it("color plain Home contains ANSI escapes; no-color plain Home does not", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const colorView = createShellViewModel(createContext(), { width: 80 });
+    const noColorView = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const colorRendered = renderPlainShell(colorView);
+    const noColorRendered = renderPlainShell(noColorView);
+
+    expect(colorRendered).toContain("\x1B[");
+    expect(noColorRendered).not.toContain("\x1B[");
+    // Both contain the placeholder (as hint, no "> " prefix)
+    expect(colorRendered).toContain("我能帮您做点什么？");
+    expect(colorRendered).not.toContain("> 我能帮您做点什么？");
+    expect(noColorRendered).toContain("我能帮您做点什么？");
+    expect(noColorRendered).not.toContain("> 我能帮您做点什么？");
+  });
+
+  it("Task plain preserves activity / permission risk / output blocks", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "tool_running", text: "正在运行 Bash…", toolName: "Bash" },
+      permission: {
+        toolName: "Bash",
+        reason: "执行命令",
+        risk: "high",
+        scope: ["rm -rf /tmp"],
+        hint: "yes / no",
+      },
+      outputBlocks: [
+        {
+          id: "out-1",
+          kind: "details",
+          status: "info",
+          title: "Latest output",
+          summary: "build succeeded",
+        },
+      ],
+    });
+    const rendered = renderPlainShell(view);
+
+    // Activity
+    expect(rendered).toContain("正在运行 Bash…");
+    // Permission card with risk
+    expect(rendered).toContain("[Bash]");
+    expect(rendered).toContain("[HIGH]");
+    expect(rendered).toContain("执行命令");
+    // Task does NOT contain composer prompt line
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    // No version, no ASCII art
+    expect(rendered).not.toContain("v0.1.0");
+    expect(rendered).not.toContain("|____|");
+  });
+});
+
+describe("Windows TTY terminal capability detection", () => {
+  it("Windows TTY default (no WT_SESSION, no TERM_PROGRAM) → shouldUseInkShell=true on modern Windows", () => {
+    vi.unstubAllEnvs();
+    resetTerminalCapabilityCache();
+    // Simulate bare Windows cmd.exe on Windows 10 19045 (no WT_SESSION, no TERM_PROGRAM)
+    // On the actual test runner (Windows), this should pass naturally.
+    // On non-Windows CI, we use LINGHUN_TERMINAL_TIER=basic to simulate.
+    if (process.platform === "win32") {
+      // Remove all terminal indicators to simulate bare cmd.exe
+      process.env.WT_SESSION = undefined as unknown as string;
+      process.env.TERM_PROGRAM = undefined as unknown as string;
+      process.env.TERM = undefined as unknown as string;
+      process.env.ConEmuPID = undefined as unknown as string;
+      process.env.CONEMUDIR = undefined as unknown as string;
+      process.env.MSYSTEM = undefined as unknown as string;
+      process.env.ALACRITTY_WINDOW_ID = undefined as unknown as string;
+      resetTerminalCapabilityCache();
+      expect(
+        shouldUseInkShell(
+          { isTTY: true } as NodeJS.ReadStream,
+          { isTTY: true } as NodeJS.WriteStream,
+        ),
+      ).toBe(true);
+    } else {
+      // On non-Windows, verify that LINGHUN_TERMINAL_TIER=basic gives Ink
+      vi.stubEnv("LINGHUN_TERMINAL_TIER", "basic");
+      resetTerminalCapabilityCache();
+      expect(
+        shouldUseInkShell(
+          { isTTY: true } as NodeJS.ReadStream,
+          { isTTY: true } as NodeJS.WriteStream,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("LINGHUN_TERMINAL_TIER=legacy forces shouldUseInkShell=false", () => {
+    vi.unstubAllEnvs();
+    resetTerminalCapabilityCache();
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    expect(
+      shouldUseInkShell(
+        { isTTY: true } as NodeJS.ReadStream,
+        { isTTY: true } as NodeJS.WriteStream,
+      ),
+    ).toBe(false);
+  });
+
+  it("plain fallback does not produce double input (no '> placeholder' + readline prompt)", () => {
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "legacy");
+    resetTerminalCapabilityCache();
+    const view = createShellViewModel(createContext(), { noColor: true, width: 80 });
+    const rendered = renderPlainShell(view);
+    // Placeholder text is present as a hint
+    expect(rendered).toContain("我能帮您做点什么？");
+    // But NOT with "> " prefix (that would duplicate the readline prompt)
+    expect(rendered).not.toContain("> 我能帮您做点什么？");
+    // No "你 >" old REPL prompt
+    expect(rendered).not.toContain("你 >");
+    expect(rendered).not.toContain("you >");
   });
 });

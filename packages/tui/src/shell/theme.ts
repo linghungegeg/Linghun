@@ -1,3 +1,4 @@
+import type { TerminalCapability } from "./terminal-capability.js";
 import type { ProductBlockStatus, ShellThemeMode } from "./types.js";
 
 export type ShellTheme = {
@@ -47,14 +48,36 @@ export function createShellTheme(noColor: boolean): ShellTheme {
   };
 }
 
-export function getStatusMarker(status: ProductBlockStatus, noColor: boolean): string {
-  const labels: Record<ProductBlockStatus, string> = {
-    info: noColor ? "[INFO]" : "●",
-    running: noColor ? "[RUN]" : "●",
-    pass: noColor ? "[OK]" : "●",
-    partial: noColor ? "[PARTIAL]" : "●",
-    fail: noColor ? "[FAIL]" : "●",
-    blocked: noColor ? "[BLOCKED]" : "●",
+/**
+ * Status marker for product blocks.
+ * Uses ASCII labels on legacy/no-color terminals, Unicode dots on modern terminals.
+ */
+export function getStatusMarker(
+  status: ProductBlockStatus,
+  noColor: boolean,
+  capability?: TerminalCapability,
+): string {
+  const useAscii = noColor || (capability ? !capability.unicodeBox : false);
+
+  if (useAscii) {
+    const asciiLabels: Record<ProductBlockStatus, string> = {
+      info: "[INFO]",
+      running: "[..]",
+      pass: "[OK]",
+      partial: "[PARTIAL]",
+      fail: "[FAIL]",
+      blocked: "[BLOCKED]",
+    };
+    return asciiLabels[status];
+  }
+
+  const unicodeLabels: Record<ProductBlockStatus, string> = {
+    info: "\u25CF",
+    running: "\u25CB",
+    pass: "\u2713",
+    partial: "\u25D2",
+    fail: "\u2717",
+    blocked: "\u25A0",
   };
-  return labels[status];
+  return unicodeLabels[status];
 }

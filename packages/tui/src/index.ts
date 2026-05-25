@@ -331,7 +331,7 @@ import {
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
-import { writePlainShell } from "./shell/plain-renderer.js";
+import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
 import {
   createOutputBlock,
@@ -2389,9 +2389,34 @@ async function runPlainTui(
   startup: TuiStartupState,
   sigintHandler: () => void,
 ): Promise<number> {
-  writeLegacyStartup(output, context, startup);
+  const { isNoColorTerminal } = await import("./shell/ink-renderer.js");
+  const isTty = (input as { isTTY?: boolean }).isTTY === true;
+  const blocks: ProductBlockViewModel[] = [];
+
+  // Non-TTY (pipe/script) keeps legacy text startup for scripting compatibility.
+  // TTY legacy (Windows cmd) gets the product-grade plain shell.
+  if (!isTty) {
+    writeLegacyStartup(output, context, startup);
+  } else {
+    const view = createShellViewModel(context, {
+      width: readOutputColumns(output),
+      height: readOutputRows(output),
+      noColor: isNoColorTerminal(),
+      setupNeeded: startup.setupNeeded,
+      projectRouteProblem: startup.projectRouteProblem,
+      outputBlocks: blocks,
+      limitations: createShellLimitations({
+        language: context.language,
+        providerEnvWarning: startup.providerEnvWarning,
+      }),
+    });
+    writePlainShell(output, view);
+  }
+
   for await (const line of readInputLines(input, output, {
-    prompt: t(context, "inputPrompt"),
+    prompt: isTty
+      ? `${computeHomePromptPrefix(readOutputColumns(output))}> `
+      : t(context, "inputPrompt"),
     onEsc: () => handleTuiKeypress("escape", context, output),
     onEnter: () => handleTuiKeypress("return", context, output),
     onShiftTab: () => handleTuiKeypress("shift-tab", context, output),
@@ -2401,6 +2426,40 @@ async function runPlainTui(
     process.once("SIGINT", sigintHandler);
     const result = await processTuiLine(line, context, gateway, output, store);
     if (result === "exit") return 0;
+
+    // After each interaction, refresh the product shell view for TTY legacy terminals
+    if (isTty) {
+      const refreshView = createShellViewModel(context, {
+        width: readOutputColumns(output),
+        height: readOutputRows(output),
+        noColor: isNoColorTerminal(),
+        setupNeeded: startup.setupNeeded,
+        projectRouteProblem: startup.projectRouteProblem,
+        activity: mapRequestActivityToView(context),
+        permission: mapPendingApprovalToPermission(context),
+        outputBlocks: blocks,
+        backgroundSummaries: context.backgroundTasks
+          .filter(
+            (task) =>
+              task.status === "running" ||
+              task.status === "completed" ||
+              task.status === "failed" ||
+              task.status === "timeout",
+          )
+          .slice(-2)
+          .map((task) => ({
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            result: task.result,
+          })),
+        limitations: createShellLimitations({
+          language: context.language,
+          providerEnvWarning: startup.providerEnvWarning,
+        }),
+      });
+      writePlainShell(output, refreshView);
+    }
   }
   return 0;
 }

@@ -2,6 +2,7 @@ import type { Readable, Writable } from "node:stream";
 import { render } from "ink";
 import React from "react";
 import { ShellApp } from "./components/ShellApp.js";
+import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
 import type { ShellController, ShellRenderOptions } from "./types.js";
 
 export type InkShellInstance = {
@@ -17,6 +18,12 @@ export function shouldUseInkShell(input: Readable, output: Writable): boolean {
   if (process.env.TERM === "dumb") return false;
   if ((input as { isTTY?: boolean }).isTTY !== true) return false;
   if ((output as { isTTY?: boolean }).isTTY !== true) return false;
+
+  // Ink works on any TTY with cursor positioning — alternate screen is optional.
+  // Only truly incapable terminals (legacy Windows cmd conhost) fall to plain.
+  const capability = detectTerminalCapability();
+  if (!capability.cursorPositioning) return false;
+
   return true;
 }
 
@@ -25,16 +32,17 @@ export function renderInkShell(
   options: ShellRenderOptions = {},
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
+  const capability = detectTerminalCapability();
   let instance: ReturnType<typeof render>;
 
   try {
-    instance = render(<ShellApp controller={controller} />, {
+    instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
       stdout,
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
-      alternateScreen: true,
-      kittyKeyboard: { mode: "auto" },
+      alternateScreen: capability.alternateScreen,
+      kittyKeyboard: capability.kittyKeyboard ? { mode: "auto" } : undefined,
     });
   } catch (error) {
     showTerminalCursor(stdout);
@@ -71,10 +79,9 @@ export function renderInkShell(
   const rerender = () => {
     if (unmounted) return;
     try {
-      instance.rerender(<ShellApp controller={controller} />);
+      instance.rerender(<ShellApp controller={controller} capability={capability} />);
     } catch {
-      // Ignore Ink rerender errors from stream close / unmount races;
-      // business exceptions are handled outside this best-effort path.
+      // Ignore Ink rerender errors from stream close / unmount races
     }
   };
 
@@ -127,3 +134,7 @@ function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
 export function isNoColorTerminal(): boolean {
   return process.env.NO_COLOR === "1" || process.env.FORCE_COLOR === "0";
 }
+
+/** Re-export for external consumers. */
+export { detectTerminalCapability } from "./terminal-capability.js";
+export type { TerminalCapability } from "./terminal-capability.js";

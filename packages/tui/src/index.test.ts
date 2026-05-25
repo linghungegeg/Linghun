@@ -6203,7 +6203,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(settings).not.toContain('"language"');
     expect(settings).toContain('"level": "restricted"');
     expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
-    expect(output.text).toContain("Status: Session");
+    // TTY legacy path now uses product plain shell instead of writeLegacyStartup
+    expect(output.text).toContain("LingHun");
   });
 
   it("persists first-run language to user settings when workspace trust is already recorded", async () => {
@@ -6235,7 +6236,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(settings).not.toContain('"language"');
     expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "en-US"');
     expect(output.text).not.toContain("Do you trust this project?");
-    expect(output.text).toContain("Status: Session");
+    // TTY legacy path now uses product plain shell instead of writeLegacyStartup
+    expect(output.text).toContain("LingHun");
   });
 
   it("does not show Polish B interactive Workspace Trust prompt for non-TTY input", async () => {

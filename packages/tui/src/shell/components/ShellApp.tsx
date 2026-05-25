@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type React from "react";
+import type { TerminalCapability } from "../terminal-capability.js";
 import { brandWordmark, composerMaxWidth, fitText, lineChar } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type {
@@ -12,29 +13,37 @@ import { Composer } from "./Composer.js";
 import { ProductBlock } from "./ProductBlock.js";
 import { StatusTray } from "./StatusTray.js";
 
-export function ShellApp({ controller }: { controller: ShellController }): React.ReactNode {
+export function ShellApp({
+  controller,
+  capability,
+}: {
+  controller: ShellController;
+  capability: TerminalCapability;
+}): React.ReactNode {
   const view = controller.getViewModel();
   const theme = createShellTheme(view.themeMode === "no-color");
 
   if (view.viewMode === "task" || view.viewMode === "pending") {
-    return <TaskLayout view={view} theme={theme} controller={controller} />;
+    return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
   }
-  return <HomeLayout view={view} theme={theme} controller={controller} />;
+  return <HomeLayout view={view} theme={theme} controller={controller} capability={capability} />;
 }
 
 function HomeLayout({
   view,
   theme,
   controller,
+  capability,
 }: {
   view: ShellViewModel;
   theme: ReturnType<typeof createShellTheme>;
   controller: ShellController;
+  capability: TerminalCapability;
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = composerMaxWidth(view.width);
-  const brandLines = brandWordmark(noColor, view.width);
-  const composerLine = lineChar(noColor).repeat(cw);
+  const brandLines = brandWordmark(noColor, view.width, capability);
+  const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
     <Box
@@ -46,16 +55,16 @@ function HomeLayout({
     >
       <Box flexGrow={1} minHeight={0} />
 
-      {/* Brand wordmark: ASCII-safe visual center */}
+      {/* Brand wordmark: ASCII-safe on legacy terminals */}
       <Box flexDirection="column" alignItems="center">
         {brandLines.map((line) => (
-          <Text key={line} color={theme.brand} bold>
+          <Text key={line || "empty"} color={theme.brand} bold>
             {line}
           </Text>
         ))}
       </Box>
 
-      {/* Vision — 1-line gap after brand underline for breathing room */}
+      {/* Vision */}
       <Box marginTop={1} justifyContent="center">
         <Text color={theme.muted}>{fitText(view.homeVision, cw - 2)}</Text>
       </Box>
@@ -67,10 +76,10 @@ function HomeLayout({
         </Box>
       ) : null}
 
-      {/* Composer: CCB-style two-line input, no round border */}
+      {/* Composer: single cursor owner */}
       <Box marginTop={1} flexDirection="column" width={cw}>
         <Text color={theme.accent}>{composerLine}</Text>
-        <Composer view={view} onInput={controller.onInput} />
+        <Composer view={view} onInput={controller.onInput} capability={capability} />
         <Text color={theme.accent}>{composerLine}</Text>
       </Box>
 
@@ -106,14 +115,16 @@ function TaskLayout({
   view,
   theme,
   controller,
+  capability,
 }: {
   view: ShellViewModel;
   theme: ReturnType<typeof createShellTheme>;
   controller: ShellController;
+  capability: TerminalCapability;
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = composerMaxWidth(view.width);
-  const composerLine = lineChar(noColor).repeat(cw);
+  const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
@@ -127,7 +138,9 @@ function TaskLayout({
 
       {/* Separator */}
       <Box paddingX={1}>
-        <Text color={theme.muted}>{lineChar(noColor).repeat(Math.max(10, view.width - 2))}</Text>
+        <Text color={theme.muted}>
+          {lineChar(noColor, capability).repeat(Math.max(10, view.width - 2))}
+        </Text>
       </Box>
 
       {/* Main content area */}
@@ -160,10 +173,10 @@ function TaskLayout({
         ) : null}
       </Box>
 
-      {/* Composer at bottom */}
+      {/* Composer at bottom — single cursor owner for entire shell */}
       <Box flexDirection="column" width={cw} alignSelf="center">
         <Text color={theme.accent}>{composerLine}</Text>
-        <Composer view={view} onInput={controller.onInput} />
+        <Composer view={view} onInput={controller.onInput} capability={capability} />
         <Text color={theme.accent}>{composerLine}</Text>
       </Box>
     </Box>
@@ -177,19 +190,20 @@ function ActivityIndicator({
   activity: TaskActivityView;
   theme: ReturnType<typeof createShellTheme>;
 }): React.ReactNode {
+  // "completed" uses info color — NOT pass. Only verification results use pass.
   const colorMap: Record<TaskActivityView["phase"], string | undefined> = {
     thinking: theme.status.running,
     tool_running: theme.status.running,
     permission_waiting: theme.status.blocked,
     continuing: theme.status.info,
-    completed: theme.status.pass,
+    completed: theme.status.info,
     error: theme.status.fail,
   };
   const color = colorMap[activity.phase];
   const noColor = theme.mode === "no-color";
   const marker =
     activity.phase === "completed"
-      ? getStatusMarker("pass", noColor)
+      ? getStatusMarker("info", noColor)
       : activity.phase === "error"
         ? getStatusMarker("fail", noColor)
         : getStatusMarker("running", noColor);
