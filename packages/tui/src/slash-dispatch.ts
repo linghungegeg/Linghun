@@ -415,8 +415,10 @@ function formatHelp(language: Language): string {
   /memory               Show memory and handoff status
   /memory storage       Show sessions/memory/log/cache storage paths
   /memory review        Review candidate memories before accepting
+  /memory learn [on|off|status]  Toggle auto-learning or show learning status
   /memory accept <id>   Accept a candidate memory
   /memory delete <id>   Delete a candidate memory in this session
+  /memory forget <id>   Alias for /memory delete
   /memory init          Create a basic LINGHUN.md template on explicit request
   /memory import sessions [source] [query]  Import external AI session summary/evidence only
   /mode                 Show permission mode
@@ -511,8 +513,10 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /memory               查看记忆与 handoff 状态
   /memory storage       查看会话/记忆/日志/cache 存储路径
   /memory review        审查候选记忆
+  /memory learn [on|off|status]  开关自动学习或查看学习状态
   /memory accept <id>   确认写入候选记忆记录
   /memory delete <id>   删除本会话候选/已接收记忆记录
+  /memory forget <id>   等同 /memory delete
   /memory init          显式生成基础 LINGHUN.md 模板
   /memory import sessions [source] [query]  只导入外部 AI 会话摘要和证据引用
   /mode                 查看权限模式

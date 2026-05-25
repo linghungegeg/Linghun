@@ -24,6 +24,7 @@ import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
+  containsSecret,
   createCacheState,
   createHookState,
   createIndexState,
@@ -41,6 +42,7 @@ import {
   handleTuiKeypress,
   processRemoteApprovalForTest,
   recordModelUsage,
+  runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
   runTui,
   runVerificationCommandForTest,
@@ -323,6 +325,7 @@ async function createTestContext(
       rejected: [],
       disabled: [],
       retired: [],
+      learningMode: "off",
     },
     skills: await createSkillState(config, project),
     workflows: createWorkflowState(config),
@@ -1427,9 +1430,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("ControlledMemorySummary=");
     expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
-    expect(output.text).toContain("autoLearning=off; autoAccept=no");
+    expect(output.text).toContain("autoLearning: off; autoAccept=no");
     expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
-    expect(output.text).toContain("自动学习：默认关闭；不逐轮调用模型学习；autoAccept=no");
+    expect(output.text).toContain("自动学习：关闭；autoAccept=no；切换：/memory learn on|off");
     expect(output.text).toContain(
       "session-scope：已接受=0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
     );
@@ -1518,6 +1521,245 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Memory learn（受控 / 只生成候选）");
     expect(output.text).toContain("调用模型：no");
     expect(output.text).toContain("autoAccept=no");
+  });
+
+  it("D.14B: defaults to learning mode off and does not auto-generate candidates", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    expect(context.memory.learningMode).toBe("off");
+
+    const result = await runAutoLearningOnTurnEnd(context, "用 vitest 跑测试");
+    expect(result.candidatesCreated).toBe(0);
+    expect(result.skippedReason).toBe("learning_mode=off");
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: /memory learn on enables auto-learning, /memory learn off disables it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/memory learn on", context, output);
+    expect(context.memory.learningMode).toBe("active");
+    expect(output.text).toContain("自动学习已开启");
+
+    await handleSlashCommand("/memory learn off", context, output);
+    expect(context.memory.learningMode).toBe("off");
+    expect(output.text).toContain("自动学习已关闭");
+  });
+
+  it("D.14B: auto-learning generates candidates from user input when active", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    const result = await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑所有测试");
+    expect(result.candidatesCreated).toBeGreaterThan(0);
+    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    expect(context.memory.candidates[0]?.inferred).toBe(true);
+    expect(context.memory.candidates[0]?.status).toBe("candidate");
+  });
+
+  it("D.14B: candidate not injected into context until accepted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "我偏好：用 pnpm 而不是 npm");
+    expect(context.memory.candidates.length).toBeGreaterThan(0);
+
+    const promptBefore = createModelSystemPrompt("继续", context, {
+      memory: { candidates: context.memory.candidates.length, accepted: 0 },
+    });
+    expect(promptBefore).not.toContain("用 pnpm 而不是 npm");
+
+    const candidateId = context.memory.candidates[0]?.id;
+    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    const promptAfter = createModelSystemPrompt("继续", context, {
+      memory: { candidates: 0, accepted: 1 },
+    });
+    expect(promptAfter).toContain("pnpm");
+  });
+
+  it("D.14B: reject/forget removes candidate permanently", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "我习惯：先看源码再给命令");
+    const candidateId = context.memory.candidates[0]?.id;
+
+    await handleSlashCommand(`/memory forget ${candidateId}`, context, output);
+    expect(context.memory.candidates).toHaveLength(0);
+    expect(output.text).toContain("已删除记忆记录");
+  });
+
+  it("D.14B: secret/key content is never learned", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    const result = await runAutoLearningOnTurnEnd(
+      context,
+      "我偏好用 sk-1234567890abcdefghijklmnopqrstuvwxyz 这个 key",
+    );
+    expect(result.candidatesCreated).toBe(0);
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: deduplicates high-frequency preferences", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
+    const firstCount = context.memory.candidates.length;
+
+    await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
+    expect(context.memory.candidates.length).toBe(firstCount);
+  });
+
+  it("D.14B: doctor/status shows learning mode dynamically", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/memory", context, output);
+    expect(output.text).toContain("autoLearning: off");
+
+    await handleSlashCommand("/memory learn on", context, output);
+    await handleSlashCommand("/memory", context, output);
+    expect(output.text).toContain("autoLearning: on");
+  });
+
+  it("D.14B: disabling learning stops new candidate generation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await runAutoLearningOnTurnEnd(context, "我偏好：中文回答");
+    const countBefore = context.memory.candidates.length;
+
+    await handleSlashCommand("/memory learn off", context, output);
+    await runAutoLearningOnTurnEnd(context, "我偏好：简短回答");
+    expect(context.memory.candidates.length).toBe(countBefore);
+  });
+
+  it("D.14B: containsSecret correctly identifies sensitive content", () => {
+    expect(containsSecret("sk-1234567890abcdefghijklmnopqrstuvwxyz")).toBe(true);
+    expect(containsSecret("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn")).toBe(true);
+    expect(containsSecret("AKIAIOSFODNN7EXAMPLE")).toBe(true);
+    expect(containsSecret("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
+    expect(containsSecret("我喜欢用 vitest")).toBe(false);
+    expect(containsSecret("prefer pnpm over npm")).toBe(false);
+  });
+
+  it("D.14B: real input path does NOT generate candidate when learning is off", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    expect(context.memory.learningMode).toBe("off");
+    const result = await handleNaturalInput("我习惯用 pnpm 而不是 npm", context, output);
+    expect(result).toBe("message");
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: real input path generates candidate when learning is on", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    const result = await handleNaturalInput("我习惯用 pnpm 而不是 npm", context, output);
+    expect(result).toBe("message");
+    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    expect(context.memory.candidates[0]?.inferred).toBe(true);
+    expect(context.memory.candidates[0]?.status).toBe("candidate");
+  });
+
+  it("D.14B: slash/control commands do NOT trigger auto-learning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await handleSlashCommand("/memory", context, output);
+    await handleSlashCommand("/doctor", context, output);
+    await handleSlashCommand("/help", context, output);
+    await handleSlashCommand("/status", context, output);
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: secret/setup input does NOT trigger auto-learning via real path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    // Input containing a secret — whether it reaches model path or gets intercepted,
+    // no candidate should be generated
+    await handleNaturalInput(
+      "我偏好用 sk-abcdefghijklmnopqrstuvwxyz1234567890 这个 key",
+      context,
+      output,
+    );
+    expect(context.memory.candidates).toHaveLength(0);
+  });
+
+  it("D.14B: real-path candidate still not injected into context until accepted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await handleNaturalInput("我偏好：用 vitest 而不是 jest", context, output);
+    expect(context.memory.candidates.length).toBeGreaterThan(0);
+
+    const promptBefore = createModelSystemPrompt("继续", context, {
+      memory: { candidates: context.memory.candidates.length, accepted: 0 },
+    });
+    expect(promptBefore).not.toContain("vitest 而不是 jest");
+
+    const candidateId = context.memory.candidates[0]?.id;
+    await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    const promptAfter = createModelSystemPrompt("继续", context, {
+      memory: { candidates: 0, accepted: 1 },
+    });
+    expect(promptAfter).toContain("vitest");
   });
 
   it("keeps Phase 16 skill evolution as candidate-only metadata", async () => {

@@ -1052,6 +1052,14 @@ export type MemoryLearningRun = {
   createdAt: string;
 };
 
+export type MemoryLearningMode = "off" | "active";
+
+export type MemoryLearningCategory =
+  | "preference"
+  | "frequent_behavior"
+  | "project_habit"
+  | "collaboration_rule";
+
 export type MemoryState = {
   projectRulesPath: string;
   projectRulesExists: boolean;
@@ -1065,6 +1073,7 @@ export type MemoryState = {
   rejected: MemoryCandidate[];
   disabled: MemoryCandidate[];
   retired: MemoryCandidate[];
+  learningMode: MemoryLearningMode;
   lastLearningRun?: MemoryLearningRun;
   lastHandoff?: HandoffPacket;
   lastResumeReadonly?: boolean;
@@ -1731,6 +1740,7 @@ export async function createMemoryState(
     rejected: await loadMemoryByStatus(paths, "rejected"),
     disabled: await loadMemoryByStatus(paths, "disabled"),
     retired: await loadMemoryByStatus(paths, "retired"),
+    learningMode: "off",
   };
 }
 
@@ -7409,6 +7419,40 @@ async function handleMemoryCommand(
     return;
   }
   if (action === "learn") {
+    const subAction = args[1];
+    if (subAction === "on") {
+      context.memory.learningMode = "active";
+      const sessionId = await ensureSession(context);
+      await appendSystemEvent(context, sessionId, "memory_learning_mode=active", "info");
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Auto-learning enabled. New preferences/habits will be captured as candidates (not auto-accepted). Disable with /memory learn off."
+          : "自动学习已开启。新偏好/习惯将作为候选记录（不会自动接受）。关闭：/memory learn off",
+      );
+      return;
+    }
+    if (subAction === "off") {
+      context.memory.learningMode = "off";
+      const sessionId = await ensureSession(context);
+      await appendSystemEvent(context, sessionId, "memory_learning_mode=off", "info");
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Auto-learning disabled. No new candidates will be generated automatically."
+          : "自动学习已关闭。不再自动生成新候选记忆。",
+      );
+      return;
+    }
+    if (subAction === "status") {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? `Learning mode: ${context.memory.learningMode}; candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}`
+          : `学习模式：${context.memory.learningMode === "active" ? "开启" : "关闭"}；候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}`,
+      );
+      return;
+    }
     const result = await runControlledMemoryLearning(context);
     writeLine(output, formatMemoryLearningRun(result, context.language));
     return;
@@ -7518,11 +7562,11 @@ async function handleMemoryCommand(
     writeLine(output, `已回滚启用长期记忆：${id}；仍受受控 prompt 注入预算限制。`);
     return;
   }
-  if (action === "delete") {
+  if (action === "delete" || action === "forget") {
     const id = args[1];
     const memory = findMemoryRecord(context.memory, id);
     if (!memory) {
-      writeLine(output, "未找到该记忆。用法：/memory delete <id>");
+      writeLine(output, "未找到该记忆。用法：/memory delete <id> 或 /memory forget <id>");
       return;
     }
     await removeMemoryRecord(memory, context);
@@ -7543,7 +7587,7 @@ async function handleMemoryCommand(
   }
   writeLine(
     output,
-    "用法：/memory | /memory storage | /memory review | /memory stats | /memory candidate <摘要> [--scope project|user|session] | /memory accept|reject|disable|rollback|delete <id> | /memory init | /memory import sessions [source] [query]",
+    "用法：/memory | /memory storage | /memory review | /memory stats | /memory learn [on|off|status] | /memory candidate <摘要> [--scope project|user|session] | /memory accept|reject|disable|rollback|delete|forget <id> | /memory init | /memory import sessions [source] [query]",
   );
 }
 
@@ -7879,11 +7923,12 @@ function formatMemoryScope(scope: MemoryScope): string {
 
 function formatMemoryStatus(context: TuiContext): string {
   const injected = createControlledMemoryInjection(context);
+  const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
   return [
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary=${formatProjectRulesContext(context)}`,
     `- review queue: candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-    "- default: autoLearning=off; autoAccept=no; long-term memory requires /memory accept <id>",
+    `- autoLearning: ${learningLabel}; autoAccept=no; long-term memory requires /memory accept <id>`,
     `- prompt injection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injected.items.length}; estimatedTokens=${estimateMemoryTokens(injected.text)}; details=/memory stats`,
     "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
@@ -7953,6 +7998,7 @@ function formatMemoryStats(context: TuiContext): string {
   const injection = createControlledMemoryInjection(context);
   const acceptedScopeCounts = countMemoryScopes(context.memory.accepted);
   const candidateScopeCounts = countMemoryScopes(context.memory.candidates);
+  const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
   const lastRun = context.memory.lastLearningRun
     ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
     : "none";
@@ -7965,7 +8011,7 @@ function formatMemoryStats(context: TuiContext): string {
       `- candidate scope: project=${candidateScopeCounts.project}; user=${candidateScopeCounts.user}; session=${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
       `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injection.items.length}; chars=${injection.text.length}; estimatedTokens=${estimateMemoryTokens(injection.text)}`,
       `- lastLearningRun: ${lastRun}`,
-      "- autoLearning: off by default; no per-turn learning model call; autoAccept=no",
+      `- autoLearning: ${learningLabel}; autoAccept=no; toggle with /memory learn on|off`,
       "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
       "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
     ].join("\n");
@@ -7978,7 +8024,7 @@ function formatMemoryStats(context: TuiContext): string {
     `- candidate：project=${candidateScopeCounts.project}；user=${candidateScopeCounts.user}；session=${candidateScopeCounts.session}；候选不会自动接受或注入`,
     `- prompt 注入：acceptedOnly topK=${MEMORY_PROMPT_TOP_K}；injected=${injection.items.length}；chars=${injection.text.length}；estimatedTokens=${estimateMemoryTokens(injection.text)}`,
     `- 上次学习：${lastRun}`,
-    "- 自动学习：默认关闭；不逐轮调用模型学习；autoAccept=no",
+    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；autoAccept=no；切换：/memory learn on|off`,
     "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
     "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
   ].join("\n");
@@ -8059,6 +8105,135 @@ function createEvidenceBackedMemoryCandidates(context: TuiContext): MemoryCandid
   return summaries;
 }
 
+// --- D.14B Controlled Learning: secret filter + auto-learning extraction ---
+
+const MEMORY_SECRET_PATTERNS = [
+  /\b[A-Za-z0-9_-]{20,}(?:key|token|secret|password|credential)/i,
+  /\b(?:sk|pk|api|token|secret|key|password|credential)[_-][A-Za-z0-9_-]{16,}/i,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /\b(?:xox[bpras])-[A-Za-z0-9-]+/,
+  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/,
+  /\b[A-Za-z0-9+/]{40,}={0,2}\b/,
+];
+
+export function containsSecret(text: string): boolean {
+  return MEMORY_SECRET_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export type AutoLearningExtraction = {
+  category: MemoryLearningCategory;
+  summary: string;
+  source: string;
+  sourceRefs: string[];
+};
+
+const PREFERENCE_TRIGGERS = [
+  { pattern: /(?:用|使用|prefer|always use|默认用)\s*(.{3,60})/i, category: "preference" as const },
+  {
+    pattern: /(?:不要|don'?t|never|禁止|avoid)\s+(.{3,60})/i,
+    category: "collaboration_rule" as const,
+  },
+  {
+    pattern: /(?:先|before|每次|always|每轮)\s+(.{3,60})/i,
+    category: "collaboration_rule" as const,
+  },
+  {
+    pattern: /(?:习惯|偏好|喜欢|style|preference)\s*[:：]?\s*(.{3,60})/i,
+    category: "preference" as const,
+  },
+];
+
+export function extractLearningCandidatesFromInput(
+  userInput: string,
+  existingSummaries: Set<string>,
+): AutoLearningExtraction[] {
+  if (!userInput || userInput.length < 8 || userInput.length > 2000) return [];
+  if (containsSecret(userInput)) return [];
+
+  const results: AutoLearningExtraction[] = [];
+  for (const { pattern, category } of PREFERENCE_TRIGGERS) {
+    const match = userInput.match(pattern);
+    if (match?.[1]) {
+      const summary = match[1].trim().replace(/\s+/g, " ").slice(0, 120);
+      if (summary.length < 5) continue;
+      if (containsSecret(summary)) continue;
+      if (existingSummaries.has(summary)) continue;
+      results.push({
+        category,
+        summary,
+        source: "auto-learning:user-input",
+        sourceRefs: ["turn:current"],
+      });
+      existingSummaries.add(summary);
+    }
+  }
+  return results.slice(0, 2);
+}
+
+export async function runAutoLearningOnTurnEnd(
+  context: TuiContext,
+  userInput: string,
+): Promise<MemoryLearningRun> {
+  if (context.memory.learningMode !== "active") {
+    return {
+      trigger: "manual",
+      candidatesCreated: 0,
+      modelCalled: false,
+      skippedReason: "learning_mode=off",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const existingSummaries = new Set(
+    [...context.memory.candidates, ...context.memory.accepted, ...context.memory.disabled].map(
+      (item) => item.summary,
+    ),
+  );
+
+  const extractions = extractLearningCandidatesFromInput(userInput, existingSummaries);
+  if (extractions.length === 0) {
+    return {
+      trigger: "manual",
+      candidatesCreated: 0,
+      modelCalled: false,
+      skippedReason: "no_learnable_content",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const candidates: MemoryCandidate[] = extractions.map((ext) => ({
+    ...createMemoryCandidate("user", ext.summary, ext.source, ext.sourceRefs),
+    inferred: true,
+  }));
+
+  context.memory.candidates.unshift(...candidates);
+  const sessionId = await ensureSession(context);
+  for (const candidate of candidates) {
+    await context.store.appendEvent(sessionId, {
+      type: "memory_candidate",
+      candidate,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  const run: MemoryLearningRun = {
+    trigger: "evidence",
+    candidatesCreated: candidates.length,
+    modelCalled: false,
+    createdAt: new Date().toISOString(),
+  };
+  context.memory.lastLearningRun = run;
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `auto_learning trigger=turn_end candidates=${run.candidatesCreated} mode=active`,
+    "info",
+  );
+  refreshCacheFreshness(context);
+  return run;
+}
+
 function formatMemoryLearningRun(run: MemoryLearningRun, language: Language): string {
   if (language === "en-US") {
     return [
@@ -8085,7 +8260,7 @@ function createControlledMemoryInjection(context: TuiContext): {
   text: string;
 } {
   const items = context.memory.accepted
-    .filter((item) => normalizeMemoryStatus(item) === "accepted" && !item.inferred)
+    .filter((item) => normalizeMemoryStatus(item) === "accepted")
     .sort((a, b) => a.id.localeCompare(b.id))
     .slice(0, MEMORY_PROMPT_TOP_K);
   const text = truncateDisplay(
@@ -11576,6 +11751,9 @@ export async function handleNaturalInput(
   if (modelGuard) {
     writeLine(output, modelGuard);
     return "handled";
+  }
+  if (context.memory.learningMode === "active") {
+    await runAutoLearningOnTurnEnd(context, text);
   }
   return "message";
 }
