@@ -8,7 +8,7 @@ import {
   normalizePermissionMode,
 } from "@linghun/shared";
 
-export type EndpointProfile = "chat_completions" | "responses";
+export type EndpointProfile = "chat_completions" | "responses" | "anthropic_messages";
 export type ProviderCompatibilityProfile =
   | "deepseek"
   | "strict_openai_compatible"
@@ -1075,7 +1075,9 @@ function stableUnique(values: string[]): string[] {
 }
 
 function normalizeEndpointProfile(value: string | undefined): EndpointProfile {
-  return value === "responses" ? "responses" : "chat_completions";
+  if (value === "responses") return "responses";
+  if (value === "anthropic_messages") return "anthropic_messages";
+  return "chat_completions";
 }
 
 async function writeConfig(
@@ -1161,7 +1163,8 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
     if (
       provider.endpointProfile !== undefined &&
       provider.endpointProfile !== "chat_completions" &&
-      provider.endpointProfile !== "responses"
+      provider.endpointProfile !== "responses" &&
+      provider.endpointProfile !== "anthropic_messages"
     ) {
       throw new Error(`settings.providers.${providerId}.endpointProfile is invalid`);
     }

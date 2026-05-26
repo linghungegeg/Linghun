@@ -53,16 +53,18 @@ export type ProviderCapabilities = {
   usage: boolean;
 };
 
-export type EndpointProfile = "chat_completions" | "responses";
+export type EndpointProfile = "chat_completions" | "responses" | "anthropic_messages";
 export type ProviderCompatibilityProfile =
   | "deepseek"
   | "strict_openai_compatible"
-  | "permissive_openai_compatible";
+  | "permissive_openai_compatible"
+  | "anthropic_messages";
 export type ProviderRuntimeProfile =
   | "deepseek_chat_completions"
   | "strict_openai_compatible_chat_completions"
   | "permissive_openai_compatible_chat_completions"
-  | "openai_responses";
+  | "openai_responses"
+  | "anthropic_messages";
 
 export type ProviderConfig = {
   id: string;
@@ -167,23 +169,71 @@ type PendingResponsesToolCall = {
   arguments: string;
 };
 
+// ---------------------------------------------------------------------------
+// Anthropic Messages (/v1/messages) — request / stream event shapes
+// ---------------------------------------------------------------------------
+// 仅覆盖 Linghun 当前需要的字段：text 流、message_start/stop、usage 和 error。
+// Tools 在本轮 anthropic_messages profile 上禁用（contract.supportsTools=false），
+// 因此暂不实现 tool_use / tool_result / input_json_delta 路径。
+type AnthropicMessage = { role: "user"; content: string } | { role: "assistant"; content: string };
+
+export type AnthropicMessagesRequest = {
+  model: string;
+  messages: AnthropicMessage[];
+  max_tokens: number;
+  stream: true;
+  system?: string;
+};
+
+type AnthropicStreamEvent =
+  | { type: "message_start"; message?: { id?: string; usage?: AnthropicUsage } }
+  | { type: "content_block_start"; index?: number }
+  | {
+      type: "content_block_delta";
+      index?: number;
+      delta?: { type?: string; text?: string };
+    }
+  | { type: "content_block_stop"; index?: number }
+  | { type: "message_delta"; delta?: { stop_reason?: string }; usage?: AnthropicUsage }
+  | { type: "message_stop" }
+  | { type: "ping" }
+  | {
+      type: "error";
+      error?: { type?: string; message?: string };
+    };
+
+type AnthropicUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+};
+
 export type ProviderRuntimeContract = {
   profile: ProviderRuntimeProfile;
   endpointProfile: EndpointProfile;
-  endpoint: "/chat/completions" | "/responses";
+  endpoint: "/chat/completions" | "/responses" | "/v1/messages";
   compatibilityProfile: ProviderCompatibilityProfile;
   supportsTools: boolean;
   sendReasoning: boolean;
   includeUsage: boolean;
-  toolSchemaShape: "openai_chat_tools" | "openai_responses_tools";
-  toolResultShape: "chat_tool_message" | "responses_function_call_output";
+  toolSchemaShape:
+    | "openai_chat_tools"
+    | "openai_responses_tools"
+    | "anthropic_tools"
+    | "tools_disabled";
+  toolResultShape:
+    | "chat_tool_message"
+    | "responses_function_call_output"
+    | "anthropic_tool_result"
+    | "tools_disabled";
   retryStatuses: number[];
   maxAttempts: number;
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
 };
 
-export type ProviderBaseUrlEndpointSuffix = "chat_completions" | "responses";
+export type ProviderBaseUrlEndpointSuffix = "chat_completions" | "responses" | "anthropic_messages";
 
 export type ProviderBaseUrlDiagnostic = {
   originalBaseUrl?: string;
@@ -271,6 +321,11 @@ export class ModelGateway {
     const provider = this.findProvider(providerId);
     try {
       const safeRequest = await this.withSupportedTools(provider, request);
+      // 注：空响应识别（chunkCount=0 / 无文本 / 仅 usage）由 model-loop 一侧基于
+      // message_stop 与累计的 assistantText 判定，并走现存的中文友好降级文案，
+      // 详见 tui/src/index.ts streamFinalModelAnswerWithoutTools 与
+      // recordProviderEmptyResponse / formatProviderEmptyResponsePrimary。
+      // 此处不在 gateway 再 yield PROVIDER_EMPTY_RESPONSE error 事件，避免覆盖现存路径。
       yield* provider.stream(safeRequest, signal);
     } catch (error) {
       const linghunError = normalizeProviderError(error);
@@ -329,13 +384,21 @@ export function resolveProviderBaseUrlDiagnostic(
   } else if (normalizedBaseUrl.endsWith("/responses")) {
     normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/responses".length);
     fullEndpointSuffix = "responses";
+  } else if (normalizedBaseUrl.endsWith("/v1/messages")) {
+    normalizedBaseUrl = normalizedBaseUrl.slice(0, -"/v1/messages".length);
+    fullEndpointSuffix = "anthropic_messages";
   }
-  const endpoint = endpointProfile === "responses" ? "/responses" : "/chat/completions";
+  const endpoint =
+    endpointProfile === "responses"
+      ? "/responses"
+      : endpointProfile === "anthropic_messages"
+        ? "/v1/messages"
+        : "/chat/completions";
   const endpointPath = resolveFinalEndpointPath(normalizedBaseUrl, endpoint);
   const profileMismatch = Boolean(fullEndpointSuffix && fullEndpointSuffix !== endpointProfile);
   const hasQueryOrFragment = hasBaseUrlQueryOrFragment(normalizedBaseUrl);
   const recommendation = fullEndpointSuffix
-    ? "baseUrl 应填根路径，例如 https://example.com/v1；endpointProfile 使用 chat_completions 或 responses，不要把完整 endpoint 写进 baseUrl。"
+    ? "baseUrl 应填根路径，例如 https://example.com/v1；endpointProfile 使用 chat_completions / responses / anthropic_messages，不要把完整 endpoint 写进 baseUrl。"
     : hasQueryOrFragment
       ? "baseUrl 应填不含 query/fragment 的根路径，例如 https://example.com/v1；私有 token 或路由参数不要放进 baseUrl。"
       : undefined;
@@ -352,10 +415,35 @@ export function resolveProviderBaseUrlDiagnostic(
 
 function resolveFinalEndpointPath(baseUrl: string, endpoint: string): string {
   try {
-    return new URL(`${baseUrl}${endpoint}`).pathname;
+    return new URL(joinBaseUrlAndEndpoint(baseUrl, endpoint)).pathname;
   } catch {
     return endpoint;
   }
+}
+
+/**
+ * 拼接 baseUrl + endpoint，处理 baseUrl 已经包含 /v1 路径段的情况：
+ *   baseUrl=https://api.anthropic.com         endpoint=/v1/messages → /v1/messages
+ *   baseUrl=https://api.anthropic.com/v1      endpoint=/v1/messages → /v1/messages（去重）
+ *   baseUrl=https://api.anthropic.com/v1/     endpoint=/v1/messages → /v1/messages
+ *   baseUrl=https://relay.example.com/api/v1  endpoint=/v1/messages → /api/v1/messages（去重 path 末尾 /v1）
+ *   baseUrl=https://relay.example.com         endpoint=/chat/completions → /chat/completions
+ *   baseUrl=https://relay.example.com/v1      endpoint=/chat/completions → /v1/chat/completions（不去重）
+ *
+ * normalizedBaseUrl 已经在 resolveProviderBaseUrlDiagnostic 中剥掉了 /v1/messages、
+ * /chat/completions、/responses 完整 endpoint suffix，但保留可能存在的中间 /v1 段。
+ * 仅在 endpoint 自身以 /v1/ 开头时（目前仅 anthropic_messages → /v1/messages）做去重。
+ */
+export function joinBaseUrlAndEndpoint(baseUrl: string, endpoint: string): string {
+  const trimmedBase = baseUrl.replace(/\/+$/, "");
+  if (!endpoint.startsWith("/v1/")) {
+    return `${trimmedBase}${endpoint}`;
+  }
+  // endpoint 形如 /v1/messages：若 baseUrl path 末尾恰好是 /v1，则去重避免 /v1/v1/messages。
+  if (/\/v1$/.test(trimmedBase)) {
+    return `${trimmedBase}${endpoint.slice("/v1".length)}`;
+  }
+  return `${trimmedBase}${endpoint}`;
 }
 
 function hasBaseUrlQueryOrFragment(baseUrl: string): boolean {
@@ -405,30 +493,79 @@ export class OpenAiCompatibleProvider implements Provider {
     return createResponsesProfileRequest(request, this.config);
   }
 
+  createAnthropicMessagesRequest(request: ModelRequest): AnthropicMessagesRequest {
+    return createAnthropicMessagesProfileRequest(request, this.config);
+  }
+
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<LinghunEvent> {
     this.assertReady();
     const contract = resolveProviderRuntimeContract(this.config, request);
-    const body =
-      contract.endpointProfile === "responses"
-        ? this.createResponsesRequest(request)
-        : this.createChatRequest(request);
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       this.config.baseUrl,
       contract.endpointProfile,
     );
-    const response = await fetchWithProviderRetry(
-      `${baseUrlDiagnostic.normalizedBaseUrl}${contract.endpoint}`,
-      {
+    const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
+
+    if (contract.endpointProfile === "anthropic_messages") {
+      const body = this.createAnthropicMessagesRequest(request);
+      const response = await fetchWithProviderRetry(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           ...LINGHUN_REQUEST_IDENTITY_HEADERS,
-          authorization: `Bearer ${this.config.apiKey}`,
+          // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
+          // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
+          // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
+          "x-api-key": this.config.apiKey ?? "",
+          "anthropic-version": "2023-06-01",
+          authorization: `Bearer ${this.config.apiKey ?? ""}`,
+          accept: "text/event-stream",
         },
         body: JSON.stringify(body),
         signal,
+      });
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw createApiKeyError(response.status);
+        }
+        throw createHttpStatusError(
+          response.status,
+          await safeReadResponseText(response),
+          this.config.type,
+        );
+      }
+
+      if (!response.body) {
+        throw new LinghunError({
+          code: "PROVIDER_STREAM_EMPTY",
+          message: "模型请求失败：响应中没有可读取的流。",
+          suggestion: `请确认 base_url 支持 ${contract.profile} 的 ${contract.endpoint} 流式接口。`,
+          recoverable: true,
+        });
+      }
+
+      yield* parseAnthropicMessagesStream(
+        withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
+        contract.endpoint,
+      );
+      return;
+    }
+
+    const body =
+      contract.endpointProfile === "responses"
+        ? this.createResponsesRequest(request)
+        : this.createChatRequest(request);
+    const response = await fetchWithProviderRetry(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+        authorization: `Bearer ${this.config.apiKey}`,
       },
-    );
+      body: JSON.stringify(body),
+      signal,
+    });
 
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
@@ -498,8 +635,45 @@ export function resolveProviderRuntimeContract(
       streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
     };
   }
-  const endpointProfile = request.endpointProfile ?? config.endpointProfile ?? "chat_completions";
-  const compatibilityProfile = config.compatibilityProfile ?? "strict_openai_compatible";
+  // 决策有效协议：调用 resolveEffectiveEndpointProfile，遵循以下优先级（高到低）：
+  //   1. request.endpointProfile（per-request override）
+  //   2. baseUrl suffix（/v1/messages、/chat/completions、/responses 是真实路由）
+  //   3. Claude 模型 + (config.endpointProfile 为空或 chat_completions) → 自动 anthropic_messages
+  //      （chat_completions 一律视为占位，无论来源；与 Claude /v1/messages schema 不兼容）
+  //   4. config.endpointProfile 显式非 chat（responses / anthropic_messages / 非 Claude 的 chat_completions）
+  //   5. 缺省 chat_completions
+  // 决策不改写 config，只返回 effective endpointProfile + source/reason/warnings 给 doctor 展示。
+  const effective = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: request.endpointProfile,
+    configEndpointProfile: config.endpointProfile,
+    configBaseUrl: config.baseUrl,
+    configModel: config.model,
+    requestModel: request.model,
+  });
+  const endpointProfile = effective.endpointProfile;
+  const compatibilityProfile =
+    config.compatibilityProfile ??
+    (endpointProfile === "anthropic_messages" ? "anthropic_messages" : "strict_openai_compatible");
+  if (endpointProfile === "anthropic_messages") {
+    return {
+      profile: "anthropic_messages",
+      endpointProfile,
+      endpoint: "/v1/messages",
+      compatibilityProfile,
+      // 本轮 anthropic_messages profile 强制禁用 tools：
+      // 上游显式声明 supportsTools=false，确保 ModelGateway.withSupportedTools
+      // 在带 tools 的请求上抛 MODEL_TOOLS_UNSUPPORTED 而不是静默丢弃。
+      supportsTools: false,
+      sendReasoning: false,
+      includeUsage: false,
+      toolSchemaShape: "tools_disabled",
+      toolResultShape: "tools_disabled",
+      retryStatuses: [...PROVIDER_RETRY_STATUSES],
+      maxAttempts: PROVIDER_MAX_ATTEMPTS,
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+      streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+    };
+  }
   if (endpointProfile === "responses") {
     return {
       profile: "openai_responses",
@@ -537,6 +711,137 @@ export function resolveProviderRuntimeContract(
     requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
     streamIdleTimeoutMs: PROVIDER_STREAM_IDLE_TIMEOUT_MS,
   };
+}
+
+/**
+ * 决策器：从 (request endpointProfile, config endpointProfile, config baseUrl, model)
+ * 推断当前请求实际生效的 EndpointProfile。
+ *
+ * 规则（高优先级到低）：
+ *   1. request.endpointProfile 显式提供 → 直接生效（per-request override）。
+ *   2. baseUrl suffix（/v1/messages、/chat/completions、/responses）→ 反推 endpointProfile，
+ *      并在与 config.endpointProfile 不一致时给 warning（baseUrl 是用户写死的真实路由）。
+ *   3. 模型名匹配 Claude 系列（claude-* / claude_*）+ config.endpointProfile 为空或
+ *      "chat_completions"（无论来源是 provider.env 旧 setup 默认还是用户 settings 显式声明）
+ *      → 自动选 anthropic_messages，避免 chat_completions 与 Claude /v1/messages 协议不兼容。
+ *      本轮策略：Claude + chat_completions 一律视为占位，不区分声明来源；如果用户确实想
+ *      把 Claude 走 chat_completions，应该改用支持 OpenAI Chat schema 的中转模型（不是 claude-*）。
+ *      此路径下记录 source=auto-claude-model，reason 解释为何覆盖了 chat_completions。
+ *   4. config.endpointProfile 显式提供（responses / anthropic_messages / 非 Claude 的
+ *      chat_completions）→ 直接生效。
+ *   5. 缺省 → chat_completions。
+ *
+ * 同时返回 source、reason、warnings，供 /model doctor 对用户解释当前选择。
+ * 决策不改写 config，调用方自行决定是否要持久化。
+ */
+export type EffectiveEndpointProfileSource =
+  | "request"
+  | "config-explicit"
+  | "base-url-suffix"
+  | "auto-claude-model"
+  | "default-chat-completions";
+
+export type EffectiveEndpointProfileResult = {
+  endpointProfile: EndpointProfile;
+  source: EffectiveEndpointProfileSource;
+  reason: string;
+  warnings: string[];
+};
+
+const CLAUDE_MODEL_PATTERN = /^claude[-_]/i;
+
+export function resolveEffectiveEndpointProfile(input: {
+  requestEndpointProfile?: EndpointProfile;
+  configEndpointProfile?: EndpointProfile;
+  configBaseUrl?: string;
+  configModel?: string;
+  requestModel?: string;
+}): EffectiveEndpointProfileResult {
+  const warnings: string[] = [];
+  const baseUrlSuffix = inferEndpointProfileFromBaseUrl(input.configBaseUrl);
+  const model = input.requestModel ?? input.configModel;
+  const modelLooksClaude = Boolean(model && CLAUDE_MODEL_PATTERN.test(model));
+
+  // 1. request 级 override 最高优先：per-request 显式声明应当生效。
+  if (input.requestEndpointProfile) {
+    if (baseUrlSuffix && baseUrlSuffix !== input.requestEndpointProfile) {
+      warnings.push(
+        `request endpointProfile=${input.requestEndpointProfile} 与 baseUrl suffix=${baseUrlSuffix} 不一致；以 request 为准`,
+      );
+    }
+    return {
+      endpointProfile: input.requestEndpointProfile,
+      source: "request",
+      reason: "request 显式声明 endpointProfile",
+      warnings,
+    };
+  }
+
+  // 2. baseUrl 完整 endpoint suffix 是用户写死的真实路由，应优先反推 endpointProfile，
+  //    避免 provider.env 的 chat_completions 占位与 Anthropic 中转 baseUrl 矛盾时仍走 chat。
+  if (baseUrlSuffix) {
+    if (input.configEndpointProfile && input.configEndpointProfile !== baseUrlSuffix) {
+      warnings.push(
+        `config endpointProfile=${input.configEndpointProfile} 与 baseUrl suffix=${baseUrlSuffix} 不一致；以 baseUrl 为准（baseUrl 是真实路由），建议把 baseUrl 改为根路径或对齐 endpointProfile`,
+      );
+    }
+    return {
+      endpointProfile: baseUrlSuffix,
+      source: "base-url-suffix",
+      reason: `baseUrl 以 ${baseUrlSuffix === "anthropic_messages" ? "/v1/messages" : baseUrlSuffix === "responses" ? "/responses" : "/chat/completions"} 结尾`,
+      warnings,
+    };
+  }
+
+  // 3. Claude 模型 + (config.endpointProfile 为空 / chat_completions) → 自动 anthropic_messages。
+  //    本轮策略：Claude + chat_completions 一律视为占位（无论来自 provider.env 默认还是用户
+  //    settings 显式声明），因为 chat_completions schema 与 Claude /v1/messages 不兼容；
+  //    如需走 OpenAI Chat 协议，应改用非 claude-* 的中转模型。
+  //    用户显式 responses / anthropic_messages 时不会走到这一步（落到第 4 条）。
+  const configIsChatPlaceholder =
+    !input.configEndpointProfile || input.configEndpointProfile === "chat_completions";
+  if (modelLooksClaude && configIsChatPlaceholder) {
+    return {
+      endpointProfile: "anthropic_messages",
+      source: "auto-claude-model",
+      reason: input.configEndpointProfile
+        ? `model=${model} 是 Claude 系列；config endpointProfile=chat_completions 与 Claude /v1/messages schema 不兼容，一律视为占位，自动切 anthropic_messages`
+        : `model=${model} 是 Claude 系列，未配置 endpointProfile，自动选 anthropic_messages`,
+      warnings,
+    };
+  }
+
+  // 4. config 显式声明 endpointProfile（responses / anthropic_messages / 非 Claude 的 chat_completions）。
+  if (input.configEndpointProfile) {
+    if (input.configEndpointProfile !== "anthropic_messages" && modelLooksClaude) {
+      warnings.push(
+        `model=${model} 看起来是 Claude 系列，但 endpointProfile=${input.configEndpointProfile}；如果 base_url 是 Anthropic 中转，建议改为 anthropic_messages`,
+      );
+    }
+    return {
+      endpointProfile: input.configEndpointProfile,
+      source: "config-explicit",
+      reason: "config 显式声明 endpointProfile",
+      warnings,
+    };
+  }
+
+  // 5. 缺省。
+  return {
+    endpointProfile: "chat_completions",
+    source: "default-chat-completions",
+    reason: "未配置 endpointProfile，且模型不像 Claude，缺省 chat_completions",
+    warnings,
+  };
+}
+
+function inferEndpointProfileFromBaseUrl(baseUrl: string | undefined): EndpointProfile | undefined {
+  if (!baseUrl) return undefined;
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  if (trimmed.endsWith("/v1/messages")) return "anthropic_messages";
+  if (trimmed.endsWith("/chat/completions")) return "chat_completions";
+  if (trimmed.endsWith("/responses")) return "responses";
+  return undefined;
 }
 
 async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<Response> {
@@ -732,6 +1037,55 @@ function createResponsesProfileRequest(
   };
 }
 
+function createAnthropicMessagesProfileRequest(
+  request: ModelRequest,
+  config: ProviderConfig,
+): AnthropicMessagesRequest {
+  if (request.endpointProfile && request.endpointProfile !== "anthropic_messages") {
+    throw new LinghunError({
+      code: "PROVIDER_PROFILE_MISMATCH",
+      message:
+        "Provider profile mismatch: anthropic_messages request builder received non-anthropic profile.",
+      suggestion:
+        "请检查 endpointProfile；anthropic_messages 与 chat_completions / responses schema 不能混用。",
+      recoverable: true,
+    });
+  }
+  const contract = resolveProviderRuntimeContract(config, request);
+  // anthropic_messages 强制禁用 tools；如果上游误传 tools，assertToolCapability 会抛
+  // MODEL_TOOLS_UNSUPPORTED；request 没带 tools 时 assert 直接放过。
+  assertToolCapability(request, contract);
+  const model = request.model ?? config.model;
+  // Anthropic 的 system prompt 是顶层字段；从 messages 中抽出第一个 system 文本，
+  // 其余 system 消息合并到 system 字段，剩下 user/assistant 按顺序保留。
+  const systemSegments: string[] = [];
+  const conversation: AnthropicMessage[] = [];
+  for (const message of request.messages) {
+    if (message.role === "system") {
+      if (message.content) systemSegments.push(message.content);
+      continue;
+    }
+    if (message.role === "user" || message.role === "assistant") {
+      conversation.push({
+        role: message.role,
+        content: message.content,
+      });
+    }
+    // 'tool' role 在 anthropic_messages profile 不发生（contract.supportsTools=false 已阻断）。
+    // 即使上游误传，也不进入 conversation，避免破坏 Anthropic 的 user/assistant 交替契约。
+  }
+  const body: AnthropicMessagesRequest = {
+    model,
+    messages: conversation,
+    max_tokens: resolveMaxOutputTokens(model, request, config),
+    stream: true,
+  };
+  if (systemSegments.length > 0) {
+    body.system = systemSegments.join("\n\n");
+  }
+  return body;
+}
+
 function resolveMaxOutputTokens(
   model: string,
   request: ModelRequest,
@@ -902,6 +1256,193 @@ export async function* parseOpenAiStream(
     chunkCount: state.chunkCount,
     hadUsage: state.hadUsage,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic Messages SSE 流解析
+// ---------------------------------------------------------------------------
+// Anthropic 的 SSE 块为 `event: <name>\ndata: <json>\n\n` 形式；data 行的 JSON
+// 自带 `type` 字段，与 event 名一致，因此只需读取 data 行即可。本函数只覆盖
+// 当前 Linghun 在 anthropic_messages profile 下需要的事件：
+//   - message_start：捕获 message id 和首批 usage（input_tokens 等）
+//   - content_block_delta(type=text_delta)：转成 assistant_text_delta
+//   - message_delta：尾部 usage（output_tokens / cache_*）
+//   - message_stop：终结流
+//   - error：转成 PROVIDER_STREAM_ERROR
+// 其他事件（content_block_start / content_block_stop / ping / 非 text_delta）
+// 静默忽略，不产生 LinghunEvent 也不算空响应。
+export async function* parseAnthropicMessagesStream(
+  body: ReadableStream<Uint8Array>,
+  endpoint = "/v1/messages",
+): AsyncGenerator<LinghunEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const state: AnthropicStreamParseState = {
+    chunkCount: 0,
+    hadUsage: false,
+    hadText: false,
+    lastId: "assistant",
+    inputTokens: 0,
+    cacheReadTokens: undefined,
+    cacheWriteTokens: undefined,
+    rawUsage: undefined,
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // SSE 事件以 "\n\n" 分隔；按事件粒度切，避免半截 data 行解析失败。
+    let separatorIndex = buffer.indexOf("\n\n");
+    while (separatorIndex !== -1) {
+      const eventBlock = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      for (const event of parseAnthropicMessagesEventBlock(eventBlock, state, endpoint)) {
+        yield event;
+      }
+      separatorIndex = buffer.indexOf("\n\n");
+    }
+  }
+
+  const tail = decoder.decode();
+  if (tail) buffer += tail;
+  if (buffer.trim().length > 0) {
+    for (const event of parseAnthropicMessagesEventBlock(buffer, state, endpoint)) {
+      yield event;
+    }
+  }
+
+  yield {
+    type: "message_stop",
+    id: state.lastId,
+    finishReason: state.finishReason,
+    chunkCount: state.chunkCount,
+    hadUsage: state.hadUsage,
+  };
+}
+
+type AnthropicStreamParseState = {
+  chunkCount: number;
+  hadUsage: boolean;
+  hadText: boolean;
+  lastId: string;
+  finishReason?: string;
+  inputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  rawUsage?: AnthropicUsage;
+};
+
+function parseAnthropicMessagesEventBlock(
+  block: string,
+  state: AnthropicStreamParseState,
+  endpoint: string,
+): LinghunEvent[] {
+  // 在一个 SSE 事件块里寻找 data 行；忽略 event:、id:、retry: 等头。
+  const lines = block.split("\n");
+  const dataLines: string[] = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trim());
+    }
+  }
+  if (dataLines.length === 0) return [];
+  const payload = dataLines.join("\n");
+  if (!payload || payload === "[DONE]") return [];
+
+  let parsed: AnthropicStreamEvent;
+  try {
+    parsed = JSON.parse(payload) as AnthropicStreamEvent;
+  } catch (error) {
+    return [
+      {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_MALFORMED_STREAM",
+          message: "模型请求失败：provider 返回了无法解析的 Anthropic 流式 JSON。",
+          suggestion:
+            "请运行 /model doctor 检查 base_url 是否为 Anthropic Messages /v1/messages 接口，或切换 provider/model 后重试。",
+          cause: error,
+          recoverable: true,
+        }),
+      },
+    ];
+  }
+
+  state.chunkCount += 1;
+
+  if (parsed.type === "error") {
+    const message = parsed.error?.message;
+    return [
+      {
+        type: "error",
+        error: new LinghunError({
+          code: "PROVIDER_STREAM_ERROR",
+          message: `模型请求失败：Anthropic Messages 流式返回错误${message ? `：${message}` : "。"}`,
+          suggestion:
+            "请运行 /model doctor 检查 provider/model、额度、base_url 和 anthropic-version 头是否正确。",
+          recoverable: true,
+        }),
+      },
+    ];
+  }
+
+  if (parsed.type === "message_start") {
+    const id = parsed.message?.id;
+    if (id) state.lastId = id;
+    const usage = parsed.message?.usage;
+    if (usage) {
+      state.inputTokens = usage.input_tokens ?? 0;
+      state.cacheReadTokens = usage.cache_read_input_tokens;
+      state.cacheWriteTokens = usage.cache_creation_input_tokens;
+      state.rawUsage = usage;
+    }
+    return [];
+  }
+
+  if (parsed.type === "content_block_delta") {
+    const delta = parsed.delta;
+    if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
+      state.hadText = true;
+      return [{ type: "assistant_text_delta", id: state.lastId, text: delta.text }];
+    }
+    return [];
+  }
+
+  if (parsed.type === "message_delta") {
+    const stopReason = parsed.delta?.stop_reason;
+    if (stopReason) state.finishReason = stopReason;
+    const usage = parsed.usage;
+    if (!usage) return [];
+    state.hadUsage = true;
+    const merged: AnthropicUsage = { ...(state.rawUsage ?? {}), ...usage };
+    state.rawUsage = merged;
+    const inputTokens = merged.input_tokens ?? state.inputTokens ?? 0;
+    const outputTokens = merged.output_tokens ?? 0;
+    const cacheReadTokens = merged.cache_read_input_tokens ?? state.cacheReadTokens;
+    const cacheWriteTokensRaw = merged.cache_creation_input_tokens ?? state.cacheWriteTokens;
+    return [
+      {
+        type: "usage",
+        usage: {
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens,
+          cacheReadTokens,
+          cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
+          cacheWriteTokensRaw: cacheWriteTokensRaw ?? null,
+          rawUsage: merged,
+          endpoint,
+        },
+      },
+    ];
+  }
+
+  // message_stop / content_block_start / content_block_stop / ping：忽略，
+  // message_stop 由外层统一发出，避免重复。
+  return [];
 }
 
 type OpenAiStreamParseState = {

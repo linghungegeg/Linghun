@@ -9,8 +9,11 @@ import {
   OpenAiCompatibleProvider,
   type Provider,
   deepSeekModels,
+  joinBaseUrlAndEndpoint,
   normalizeProviderError,
+  parseAnthropicMessagesStream,
   parseOpenAiStream,
+  resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
 } from "./index.js";
@@ -1067,5 +1070,374 @@ describe("ModelGateway", () => {
       message: expect.stringMatching(/sk-test-secret|prompt/),
       suggestion: expect.stringMatching(/sk-test-secret|prompt/),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Anthropic Messages (Commit 1 protocol-layer closure)
+// ---------------------------------------------------------------------------
+async function collectAnthropicEvents(
+  chunks: string[],
+  endpoint = "/v1/messages",
+): Promise<LinghunEvent[]> {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+  const events: LinghunEvent[] = [];
+  for await (const event of parseAnthropicMessagesStream(body, endpoint)) {
+    events.push(event);
+  }
+  return events;
+}
+
+describe("resolveEffectiveEndpointProfile", () => {
+  it("prefers explicit request endpointProfile over config and base url", () => {
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: "anthropic_messages",
+      configEndpointProfile: "chat_completions",
+      configBaseUrl: "https://example.com/v1/chat/completions",
+      configModel: "gpt-4o",
+      requestModel: "gpt-4o",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).toBe("request");
+  });
+
+  it("treats baseUrl /v1/messages suffix as the truth even when config endpointProfile=chat_completions placeholder", () => {
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: "chat_completions",
+      configBaseUrl: "https://example.com/v1/messages",
+      configModel: "claude-3-5-sonnet-latest",
+      requestModel: "claude-3-5-sonnet-latest",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).toBe("base-url-suffix");
+    expect(result.warnings.some((w) => w.includes("不一致"))).toBe(true);
+  });
+
+  it("infers anthropic_messages from base-url /v1/messages suffix", () => {
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: undefined,
+      configBaseUrl: "https://api.anthropic.com/v1/messages",
+      configModel: "custom-relay-model",
+      requestModel: "custom-relay-model",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).toBe("base-url-suffix");
+  });
+
+  it("auto-switches Claude model to anthropic_messages when config is empty endpointProfile", () => {
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: undefined,
+      configBaseUrl: "https://relay.example.com/v1",
+      configModel: undefined,
+      requestModel: "claude-3-5-haiku-latest",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).toBe("auto-claude-model");
+  });
+
+  it("auto-switches Claude model to anthropic_messages even when provider.env wrote chat_completions placeholder", () => {
+    // 复现真实场景：provider.env 由旧 setup 默认写 LINGHUN_OPENAI_ENDPOINT_PROFILE=chat_completions，
+    // 用户后来把 model 改成 claude-opus-4-7，但 endpointProfile 仍是占位 chat_completions。
+    // 决策器必须把 chat_completions 视为占位并自动切 anthropic_messages。
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: "chat_completions",
+      configBaseUrl: "https://relay.example.com/v1",
+      configModel: "claude-opus-4-7",
+      requestModel: "claude-opus-4-7",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).toBe("auto-claude-model");
+    expect(result.reason).toContain("chat_completions");
+  });
+
+  it("respects explicit non-chat config endpointProfile over Claude auto-detection", () => {
+    // 用户显式选 responses，即使模型是 Claude，也保留用户选择，只 warn。
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: "responses",
+      configBaseUrl: "https://relay.example.com/v1",
+      configModel: "claude-opus-4-7",
+      requestModel: "claude-opus-4-7",
+    });
+    expect(result.endpointProfile).toBe("responses");
+    expect(result.source).toBe("config-explicit");
+    expect(result.warnings.some((w) => w.includes("Claude"))).toBe(true);
+  });
+
+  it("falls back to chat_completions when no signal is available", () => {
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: undefined,
+      configBaseUrl: "https://relay.example.com/v1",
+      configModel: "custom-model",
+      requestModel: "custom-model",
+    });
+    expect(result.endpointProfile).toBe("chat_completions");
+    expect(result.source).toBe("default-chat-completions");
+  });
+});
+
+describe("joinBaseUrlAndEndpoint", () => {
+  it("joins anthropic root baseUrl with /v1/messages endpoint without doubling /v1", () => {
+    expect(joinBaseUrlAndEndpoint("https://api.anthropic.com", "/v1/messages")).toBe(
+      "https://api.anthropic.com/v1/messages",
+    );
+  });
+
+  it("dedupes /v1 when baseUrl already ends with /v1 and endpoint starts with /v1/", () => {
+    expect(joinBaseUrlAndEndpoint("https://api.anthropic.com/v1", "/v1/messages")).toBe(
+      "https://api.anthropic.com/v1/messages",
+    );
+  });
+
+  it("dedupes /v1 even with trailing slash on baseUrl", () => {
+    expect(joinBaseUrlAndEndpoint("https://api.anthropic.com/v1/", "/v1/messages")).toBe(
+      "https://api.anthropic.com/v1/messages",
+    );
+  });
+
+  it("joins relay root baseUrl with /v1/messages without dedupe", () => {
+    expect(joinBaseUrlAndEndpoint("https://hk.geek2api.com", "/v1/messages")).toBe(
+      "https://hk.geek2api.com/v1/messages",
+    );
+  });
+
+  it("dedupes /v1 for nested relay /api/v1 path", () => {
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com/api/v1", "/v1/messages")).toBe(
+      "https://relay.example.com/api/v1/messages",
+    );
+  });
+
+  it("does NOT dedupe /v1 for non-anthropic endpoints (chat_completions / responses)", () => {
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com/v1", "/chat/completions")).toBe(
+      "https://relay.example.com/v1/chat/completions",
+    );
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com/v1", "/responses")).toBe(
+      "https://relay.example.com/v1/responses",
+    );
+  });
+
+  it("works alongside diagnostic normalization: full anthropic endpoint baseUrl resolves to single /v1/messages", () => {
+    // 用户把完整 endpoint 写进 baseUrl：先经 resolveProviderBaseUrlDiagnostic 剥掉 /v1/messages，
+    // 再用 joinBaseUrlAndEndpoint 拼回去，确保不会变成 /v1/v1/messages 或丢路径。
+    const diagnostic = resolveProviderBaseUrlDiagnostic(
+      "https://hk.geek2api.com/v1/messages",
+      "anthropic_messages",
+    );
+    const url = joinBaseUrlAndEndpoint(diagnostic.normalizedBaseUrl, "/v1/messages");
+    expect(url).toBe("https://hk.geek2api.com/v1/messages");
+  });
+});
+
+describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
+  it("forces tools off and points at /v1/messages for anthropic_messages profile", () => {
+    const contract = resolveProviderRuntimeContract({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    expect(contract.endpointProfile).toBe("anthropic_messages");
+    expect(contract.endpoint).toBe("/v1/messages");
+    expect(contract.profile).toBe("anthropic_messages");
+    expect(contract.compatibilityProfile).toBe("anthropic_messages");
+    expect(contract.supportsTools).toBe(false);
+    expect(contract.toolSchemaShape).toBe("tools_disabled");
+    expect(contract.toolResultShape).toBe("tools_disabled");
+    expect(contract.sendReasoning).toBe(false);
+    expect(contract.includeUsage).toBe(false);
+  });
+
+  it("recognizes /v1/messages base-url suffix as anthropic_messages in diagnostic", () => {
+    const diagnostic = resolveProviderBaseUrlDiagnostic(
+      "https://api.anthropic.com/v1/messages",
+      "anthropic_messages",
+    );
+    expect(diagnostic.fullEndpointSuffix).toBe("anthropic_messages");
+    expect(diagnostic.normalizedBaseUrl).toBe("https://api.anthropic.com");
+    expect(diagnostic.profileMismatch).toBe(false);
+  });
+});
+
+describe("Anthropic Messages stream parser", () => {
+  it("parses message_start, content_block_delta text and message_delta usage", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":7,"cache_read_input_tokens":3}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+
+    const text = events
+      .filter(
+        (event): event is Extract<LinghunEvent, { type: "assistant_text_delta" }> =>
+          event.type === "assistant_text_delta",
+      )
+      .map((event) => event.text)
+      .join("");
+    expect(text).toBe("你好");
+
+    const usage = events.find(
+      (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
+    );
+    expect(usage?.usage.inputTokens).toBe(7);
+    expect(usage?.usage.outputTokens).toBe(5);
+    expect(usage?.usage.totalTokens).toBe(12);
+    expect(usage?.usage.cacheReadTokens).toBe(3);
+    expect(usage?.usage.endpoint).toBe("/v1/messages");
+
+    const stop = events.at(-1);
+    expect(stop).toMatchObject({
+      type: "message_stop",
+      id: "msg_1",
+      finishReason: "end_turn",
+      hadUsage: true,
+    });
+  });
+
+  it("emits PROVIDER_STREAM_ERROR on Anthropic error events without leaking JSON shape", async () => {
+    const events = await collectAnthropicEvents([
+      'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+
+    const error = events.find(
+      (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
+    );
+    expect(error?.error.code).toBe("PROVIDER_STREAM_ERROR");
+    expect(error?.error.message).toContain("Overloaded");
+  });
+
+  it("emits PROVIDER_MALFORMED_STREAM on unparsable JSON payload", async () => {
+    const events = await collectAnthropicEvents([
+      "event: content_block_delta\ndata: {not-json\n\n",
+    ]);
+
+    const error = events.find(
+      (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
+    );
+    expect(error?.error.code).toBe("PROVIDER_MALFORMED_STREAM");
+  });
+});
+
+describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
+  it("rejects tools requests on anthropic_messages profile via MODEL_TOOLS_UNSUPPORTED", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    expect(() =>
+      provider.createAnthropicMessagesRequest({
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+      }),
+    ).toThrowError(LinghunError);
+  });
+
+  it("builds an anthropic_messages body with system extraction and conversation order", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      maxOutputTokens: 1024,
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "You are Linghun." },
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+        { role: "user", content: "again" },
+      ],
+    });
+    expect(body).toEqual({
+      model: "claude-3-5-sonnet-latest",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+        { role: "user", content: "again" },
+      ],
+      max_tokens: 1024,
+      stream: true,
+      system: "You are Linghun.",
+    });
+  });
+
+  it("sends x-api-key + anthropic-version headers and POSTs to /v1/messages", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode(
+              'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://relay.example.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("test-key");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(headers.authorization).toBe("Bearer test-key");
+    expect(headers["User-Agent"]).toBe(EXPECTED_REQUEST_USER_AGENT);
+    expect(events.some((event) => event.type === "assistant_text_delta")).toBe(true);
   });
 });

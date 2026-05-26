@@ -17,6 +17,7 @@ import {
 } from "@linghun/config";
 import {
   type EndpointProfile,
+  resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
@@ -227,9 +228,24 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       ? getProviderKeySource(providerId, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
       : undefined;
     const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
+    // 决策器输出：source / reason / warnings 让 /model doctor 显示"为什么是这个 endpoint"。
+    // 仅作只读摘要追加，不改 contract / endpointProfile / endpointPath 主行的信号。
+    const decision = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: provider.endpointProfile,
+      configBaseUrl: provider.baseUrl,
+      configModel: provider.model,
+      requestModel: undefined,
+    });
     lines.push(
       `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
     );
+    lines.push(`    endpointProfile decision: source=${decision.source} reason=${decision.reason}`);
+    if (decision.warnings.length > 0) {
+      for (const warning of decision.warnings) {
+        lines.push(`    warning: ${warning}`);
+      }
+    }
     if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
         `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,

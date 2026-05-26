@@ -2616,26 +2616,43 @@ async function runInkShell(
         return;
       }
       if (event.type === "cycle-permission-mode") {
-        // Reuse the existing handleTuiKeypress("shift-tab", ...) chain so the
-        // Ink shell mode-cycle path is identical to the plain TUI's onShiftTab
-        // handler. Permission state is mutated by setPermissionMode inside the
-        // chain; we only need to rerender to reflect the new mode in TaskFooter.
-        await handleTuiKeypress("shift-tab", context, shellOutput);
+        // Ink 路径下的 Shift+Tab 必须 quiet：只切 context.permissionMode，
+        // 不能再走 handleTuiKeypress("shift-tab") → setPermissionMode 那条 plain TUI
+        // 链路；那条链路会 writeLine(modeSwitched) + writeStatus(...)，把
+        // "[Linghun] 会话…" StatusTray 文本写进 shellOutput，污染 Task 区 transcript。
+        // TaskFooter 的 permissionMode 段已经覆盖可见状态，rerender 后用户能看到切换结果。
+        const modes: PermissionMode[] = ["default", "auto-review", "plan"];
+        const idx = modes.indexOf(context.permissionMode);
+        const nextMode = modes[(idx + 1) % modes.length] ?? "default";
+        const guard = getModeChangeGuard(nextMode, context);
+        if (!guard) {
+          const previousMode = context.permissionMode;
+          context.permissionMode = nextMode;
+          context.planAccepted = false;
+          try {
+            const sessionId = await ensureSession(context);
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `permission_mode_change: ${previousMode} -> ${nextMode}; reason=ink shift-tab quiet cycle; boundary=Start Gate and permission pipeline remain active`,
+              "info",
+            );
+          } catch {
+            // 会话/事件写入失败不阻断 UI 切换；底层日志路径不应把用户输入区拖死。
+          }
+        }
+        // guard 命中（例如 full-access 需要 opt-in）也不写 transcript，
+        // TaskSuggestionBar / 后续显式 /mode 命令会暴露详细原因。
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
       }
       if (event.type === "shift-enter") {
-        blocks.push({
-          id: `shift-enter-${Date.now()}`,
-          kind: "details",
-          status: "partial",
-          title: context.language === "en-US" ? "Multiline fallback" : "多行输入降级",
-          summary:
-            context.language === "en-US"
-              ? "Shift+Enter is host-dependent in this foundation slice; paste multiline text and press Enter."
-              : "本切片中 Shift+Enter 受终端 host 限制；可粘贴多行文本后按 Enter。",
-        });
+        // Composer 自己已经在 buffer 里 bufferInsert("\n")（见 Composer.tsx 的
+        // Shift+Enter 分支），上抛 ShellInputEvent 仅作为占位事件，
+        // 不应再 push 任何 transcript fallback block —— 那会在每次换行时往
+        // task transcript 里塞一条 "多行输入降级" 噪音 block。
+        // 这里仅 rerender 让光标 anchor 跟上新 buffer。
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
