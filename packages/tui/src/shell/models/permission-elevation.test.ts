@@ -52,20 +52,16 @@ describe("PermissionElevationModel", () => {
     expect(opts.map((o) => o.id)).toContain("allow_always_tool");
   });
 
-  it("dispatches submit yes + /permissions add allow <tool> <risk> for allow_always_tool", () => {
+  it("dispatches are no longer encoded in the model — controller decides side effects", () => {
+    // v3 contract: dispatches field removed. Composer sends a single
+    // `permission-action` event (actionId = "allow_always_tool") and the
+    // controller atomically calls addAllowRule helper then approves pending.
+    // This test pins the simplified shape — id/shortcut/label/hint only.
     const opts = buildElevationOptions({ ...baseInput, risk: "high" });
     const always = opts.find((o) => o.id === "allow_always_tool");
-    // 复合动作契约：先放行当前 pending（submit yes），再持久化规则（slash）。
-    expect(always?.dispatches).toEqual([
-      { kind: "submit", text: "yes" },
-      { kind: "slash", command: "/permissions add allow Bash high" },
-    ]);
-    // 顺序敏感：第 0 项必须是 submit yes，第 1 项必须是 slash persist。
-    expect(always?.dispatches[0]).toEqual({ kind: "submit", text: "yes" });
-    expect(always?.dispatches[1]).toEqual({
-      kind: "slash",
-      command: "/permissions add allow Bash high",
-    });
+    expect(always).toBeDefined();
+    expect(always?.shortcut).toBe("a");
+    expect(always).not.toHaveProperty("dispatches");
   });
 
   it("uses high-risk wording for allow_always hint when risk = high", () => {
@@ -96,16 +92,20 @@ describe("PermissionElevationModel", () => {
     ).toBe(true);
   });
 
-  it("allow_once dispatches submit yes; deny dispatches submit no", () => {
+  it("allow_once and deny only carry id/shortcut metadata; controller maps id → side effect", () => {
     const opts = buildElevationOptions(baseInput);
-    expect(opts.find((o) => o.id === "allow_once")?.dispatches).toEqual([
-      { kind: "submit", text: "yes" },
-    ]);
-    expect(opts.find((o) => o.id === "deny")?.dispatches).toEqual([{ kind: "submit", text: "no" }]);
+    const once = opts.find((o) => o.id === "allow_once");
+    const deny = opts.find((o) => o.id === "deny");
+    expect(once?.shortcut).toBe("y");
+    expect(deny?.shortcut).toBe("n");
+    expect(once).not.toHaveProperty("dispatches");
+    expect(deny).not.toHaveProperty("dispatches");
   });
 
-  it("details has empty dispatches array (inline expansion only)", () => {
+  it("details has no dispatch payload (controller inlines the expansion)", () => {
     const opts = buildElevationOptions(baseInput);
-    expect(opts.find((o) => o.id === "details")?.dispatches).toEqual([]);
+    const details = opts.find((o) => o.id === "details");
+    expect(details?.shortcut).toBe("d");
+    expect(details).not.toHaveProperty("dispatches");
   });
 });

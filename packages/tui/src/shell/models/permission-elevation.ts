@@ -3,33 +3,31 @@ import type { ToolName } from "@linghun/tools";
 import type { PermissionRule } from "../../permission-continuation-runtime.js";
 
 /**
- * PermissionElevationModel — D.13E Step 1
+ * PermissionElevationModel — D.13E Step 1（v3 修正）
  *
  * 纯函数：根据当前权限上下文（toolName / scope / risk / 现有规则）计算
  * 提权选项菜单。本轮只返回 4 档：
  *   - allow_once          当次同意（不落盘）
- *   - allow_always_tool   当次同意 + 持久落盘（复合动作：submit yes → /permissions add allow）
+ *   - allow_always_tool   当次同意 + 持久落盘（语义由 controller 层 atomic 实现）
  *   - deny                当次拒绝
  *   - details             展开 reason/scope
  *
  * 复用 packages/tui/src/permission-continuation-runtime.ts 中已存在的
  * PermissionRule 类型。本模块不持久化、不写文件、不注册任何 store —
- * "always" 落盘走 /permissions add 现有 handler。
+ * "always" 落盘由 controller 层调用 addAllowRule helper（见 index.ts）。
  *
  * 已存在 effect:"allow" toolName:<x>|"*" 规则时，allow_always_tool 隐藏，
  * 避免重复落盘和误导用户。
  *
- * dispatches 设计为数组：UI 层顺次执行多步副作用，保证选 Allow always 时
- * 既放行当前 pending tool（submit yes），又把规则落到磁盘（/permissions add）。
- * 顺序敏感：必须先 submit yes 让当前 pending 工具放行，再 dispatch slash 持久化，
- * 否则可能出现"已落盘但当前调用仍在 pending"的状态。
+ * v3 契约调整：删除 dispatches 字段。原本"submit yes + slash /permissions add"
+ * 的复合 dispatch 由 model 描述、UI 顺次发两个 onInput 的设计会与
+ * pendingLocalApproval 状态竞争（两个 submit 之间 pending 已被消费）。
+ * 修正后：model 只暴露 `id`（语义），副作用由 controller 在收到
+ * `permission-action` 事件后 atomic 处理（先 addAllowRule 持久化，
+ * 持久化成功才 approve；失败保留 pending）。
  */
 
 export type ElevationOptionId = "allow_once" | "allow_always_tool" | "deny" | "details";
-
-export type ElevationActionDispatch =
-  | { kind: "submit"; text: string }
-  | { kind: "slash"; command: string };
 
 export type ElevationOption = {
   id: ElevationOptionId;
@@ -38,17 +36,6 @@ export type ElevationOption = {
   label: string;
   /** 短提示，用于权限卡 hint 行 / suggestion bar 副标题。 */
   hint: string;
-  /**
-   * 选中后的复合 dispatch 序列。UI 层按数组顺序顺次执行：
-   *   - allow_once: [submit yes]
-   *   - allow_always_tool: [submit yes, slash /permissions add allow ...]
-   *   - deny: [submit no]
-   *   - details: [] —— 在 UI 内 inline 展开，不 dispatch。
-   *
-   * 顺序敏感：allow_always_tool 必须先 submit yes 放行当前 pending 工具，
-   * 再 dispatch slash 持久化规则；否则会出现"已落盘但当前调用仍 pending"。
-   */
-  dispatches: ElevationActionDispatch[];
 };
 
 export type ElevationInput = {
@@ -120,9 +107,22 @@ function buildAllowAlwaysHint(
   return text.hintAllowAlwaysLow;
 }
 
-function buildAllowAlwaysSlash(toolName: ToolName, risk: "low" | "medium" | "high"): string {
-  // /permissions add allow <tool> [risk] —— 已在 index.ts 5368-5384 落地
+function buildAllowAlwaysSlashCommand(toolName: ToolName, risk: "low" | "medium" | "high"): string {
+  // Documented for tooling/help; controller side now invokes addAllowRule helper
+  // directly instead of dispatching this slash text through onInput.
   return `/permissions add allow ${toolName} ${risk}`;
+}
+
+/**
+ * 暴露 allow_always_tool 等价 slash 命令（仅文档/调试用途）。
+ * controller 端不再通过 onInput 派发该 slash；直接调 addAllowRule helper 完成
+ * "持久化 + approve" 的 atomic 操作。
+ */
+export function describeAllowAlwaysCommand(
+  toolName: ToolName,
+  risk: "low" | "medium" | "high",
+): string {
+  return buildAllowAlwaysSlashCommand(toolName, risk);
 }
 
 /**
@@ -140,7 +140,6 @@ export function buildElevationOptions(input: ElevationInput): ElevationOption[] 
     shortcut: "y",
     label: text.allowOnce,
     hint: text.hintAllowOnce,
-    dispatches: [{ kind: "submit", text: "yes" }],
   });
 
   if (!alreadyAllowed) {
@@ -149,12 +148,6 @@ export function buildElevationOptions(input: ElevationInput): ElevationOption[] 
       shortcut: "a",
       label: text.allowAlways,
       hint: buildAllowAlwaysHint(text, input.risk),
-      // 复合动作：先 submit yes 放行当前 pending 工具，再 dispatch slash 持久化规则。
-      // 顺序敏感，UI 层必须按数组顺序顺次执行。
-      dispatches: [
-        { kind: "submit", text: "yes" },
-        { kind: "slash", command: buildAllowAlwaysSlash(input.toolName, input.risk) },
-      ],
     });
   }
 
@@ -163,15 +156,12 @@ export function buildElevationOptions(input: ElevationInput): ElevationOption[] 
     shortcut: "n",
     label: text.deny,
     hint: text.hintDeny,
-    dispatches: [{ kind: "submit", text: "no" }],
   });
   options.push({
     id: "details",
     shortcut: "d",
     label: text.details,
     hint: text.hintDetails,
-    // details 在 UI 内展开，不 dispatch。
-    dispatches: [],
   });
 
   return options;

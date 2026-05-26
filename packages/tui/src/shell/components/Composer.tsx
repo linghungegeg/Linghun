@@ -6,6 +6,7 @@ import {
   getCoreSlashCandidates,
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
+import { selectInputOwner } from "../models/input-owner-controller.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
@@ -282,8 +283,13 @@ const PROMPT_MARKER_CONTINUATION = "  ";
 const PERMISSION_ACTION_ORDER: PermissionActionId[] = ["yes", "no", "details", "cancel"];
 
 const PERMISSION_TEXT_MAP: Record<PermissionActionId, string> = {
+  // legacy 别名
   yes: "yes",
   no: "no",
+  // 4 档 elevation
+  allow_once: "allow_once",
+  allow_always_tool: "allow_always_tool",
+  deny: "deny",
   details: "details",
   cancel: "cancel",
 };
@@ -325,6 +331,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     () => buildPermissionActions(view.permission?.actions),
     [view.permission],
   );
+
+  // D.13E Step 2 修正 #1：ConfigPanel 渲染时 Composer.useInput 必须 isActive=false，
+  // 让 ConfigPanel 自己的 useInput 成为 ↑↓/Enter/Esc 的唯一消费者，避免双消费窗口。
+  // permission 优先级最高（permission 渲染时 ConfigPanel 不渲染，ShellApp 互斥保证）。
+  const configPanelActive = Boolean(view.configPanel);
 
   const text = bufferToString(buffer);
   const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
@@ -445,298 +456,380 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     };
   }, []);
 
-  useInput((input, key) => {
-    // ─── 1. Permission selector mode（最高优先级）────────────────────────
-    if (permissionActive) {
-      if (key.escape) {
-        submitPermissionAction("cancel");
+  useInput(
+    (input, key) => {
+      // D.13E Step 2 — Owner-priority dispatcher 显式化：
+      // 用 selectInputOwner 决定本次事件归属，permission > paste > slash > composer。
+      const owner = selectInputOwner(input, key, {
+        permissionActive,
+        pastePending: pastePendingRef.current,
+        slashVisible: slashCandidates.length > 0 && !slashHidden,
+      });
+
+      // ─── 1. Permission selector mode（最高优先级）────────────────────────
+      if (owner === "permission") {
+        if (key.escape) {
+          submitPermissionAction("cancel");
+          return;
+        }
+        if (key.return) {
+          submitPermissionAction(permissionFocus);
+          return;
+        }
+        if (key.tab && !key.shift) {
+          setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
+          return;
+        }
+        if (key.tab && key.shift) {
+          setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
+          return;
+        }
+        if (key.leftArrow || key.upArrow) {
+          setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
+          return;
+        }
+        if (key.rightArrow || key.downArrow) {
+          setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
+          return;
+        }
+        if (!key.ctrl && !key.meta && input && input.length === 1) {
+          const lower = input.toLowerCase();
+          // D.13E Step 2 — 4 档 elevation 单字母快捷键（向后兼容旧 yes/no）：
+          //   y → allow_once（旧 yes 别名同义）
+          //   a → allow_always_tool（持久化 allow rule + 当次 approve）
+          //   n → deny（旧 no 别名同义）
+          //   d → details
+          if (lower === "y") {
+            submitPermissionAction(resolveActionId(permissionActions, "allow_once", "yes"));
+            return;
+          }
+          if (lower === "a") {
+            if (permissionActions.some((act) => act.id === "allow_always_tool")) {
+              submitPermissionAction("allow_always_tool");
+              return;
+            }
+          }
+          if (lower === "n") {
+            submitPermissionAction(resolveActionId(permissionActions, "deny", "no"));
+            return;
+          }
+          if (lower === "d") {
+            submitPermissionAction("details");
+            return;
+          }
+        }
+        // 其他按键吞掉，避免 buffer 被污染。
         return;
       }
-      if (key.return) {
-        submitPermissionAction(permissionFocus);
+
+      // ─── 2. Paste 聚合（次高优先级）────────────────────────────────────
+      // owner === "paste" 表示进入 paste 路径，包含 pending 期 Enter / Esc /
+      // 普通字符聚合 / 大 chunk 4 种情况。
+      if (owner === "paste") {
+        // pending 期间 Enter 被吞掉（CCB BaseTextInput 的 paste-blocks-Enter 模式）。
+        if (pastePendingRef.current && key.return) {
+          enqueuePasteChunk("");
+          return;
+        }
+        // pending 期间 Esc 主动取消粘贴。
+        if (pastePendingRef.current && key.escape) {
+          cancelPaste();
+          return;
+        }
+        enqueuePasteChunk(input);
         return;
       }
+
+      // ─── 3. Slash candidates owner（统一消费并 return；禁止 fall-through）────
+      const slashVisible = slashCandidates.length > 0 && !slashHidden;
+      if (owner === "slash") {
+        if (key.escape) {
+          setSlashHidden(true);
+          setSlashSelection(-1);
+          return;
+        }
+        if (key.tab && !key.shift) {
+          if (slashSelection >= 0) {
+            const picked = slashCandidates[slashSelectionClamped];
+            if (picked) {
+              const spaceIndex = text.indexOf(" ");
+              const args = spaceIndex >= 0 ? text.slice(spaceIndex) : "";
+              const next = args ? `${picked.slash}${args}` : `${picked.slash} `;
+              resetBuffer(next);
+              setSlashHidden(false);
+              return;
+            }
+          }
+          return;
+        }
+        if (key.upArrow) {
+          if (slashSelection >= 0) {
+            setSlashSelection((current) => {
+              const safe = current < 0 ? 0 : current;
+              return safe === 0 ? slashCandidates.length - 1 : safe - 1;
+            });
+          }
+          return;
+        }
+        if (key.downArrow) {
+          if (slashSelection >= 0) {
+            setSlashSelection((current) => {
+              const safe = current < 0 ? 0 : current;
+              return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
+            });
+          }
+          return;
+        }
+        if (key.return && !key.shift) {
+          if (slashSelection >= 0 && !text.includes(" ")) {
+            const picked = slashCandidates[slashSelectionClamped];
+            if (picked && picked.slash !== text) {
+              const submitText = picked.slash;
+              historyRef.current = historyAdd(historyRef.current, submitText);
+              resetBuffer();
+              setSlashHidden(false);
+              clearHintNotice();
+              void onInput({ type: "submit", text: submitText });
+              return;
+            }
+          }
+          const submitText = text.trim();
+          historyRef.current = historyAdd(historyRef.current, text);
+          resetBuffer();
+          setSlashHidden(false);
+          clearHintNotice();
+          void onInput(
+            submitText ? { type: "submit", text: submitText } : { type: "empty-submit" },
+          );
+          return;
+        }
+        // 兜底 — slash owner 内未命中明确分支：吞掉，避免 fall-through 到 composer。
+        return;
+      }
+
+      // ─── 4. Composer default owner ────────────────────────────────────────
+
+      // ─── Submit: Enter（无 shift）─────────────────────────────────────
+      if (key.return && !key.shift) {
+        // slash 可见且光标只在 head 上 → 接受候选再提交。
+        if (slashVisible && slashSelection >= 0 && !text.includes(" ")) {
+          const picked = slashCandidates[slashSelectionClamped];
+          if (picked && picked.slash !== text) {
+            const submitText = picked.slash;
+            historyRef.current = historyAdd(historyRef.current, submitText);
+            resetBuffer();
+            setSlashHidden(false);
+            clearHintNotice();
+            void onInput({ type: "submit", text: submitText });
+            return;
+          }
+        }
+        const submitText = text.trim();
+        historyRef.current = historyAdd(historyRef.current, text);
+        resetBuffer();
+        setSlashHidden(false);
+        clearHintNotice();
+        void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
+        return;
+      }
+
+      // Multiline: Shift+Enter
+      if (key.return && key.shift) {
+        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        return;
+      }
+
+      // Tab — 接受 slash 候选 head（保留 args）。
       if (key.tab && !key.shift) {
-        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
+        if (slashVisible && slashSelection >= 0) {
+          const picked = slashCandidates[slashSelectionClamped];
+          if (picked) {
+            const spaceIndex = text.indexOf(" ");
+            const args = spaceIndex >= 0 ? text.slice(spaceIndex) : "";
+            const next = args ? `${picked.slash}${args}` : `${picked.slash} `;
+            resetBuffer(next);
+            setSlashHidden(false);
+            return;
+          }
+        }
         return;
       }
+
+      // Shift+Tab — 切换 permission mode。
       if (key.tab && key.shift) {
-        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
+        void onInput({ type: "cycle-permission-mode" });
         return;
       }
-      if (key.leftArrow || key.upArrow) {
-        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
-        return;
-      }
-      if (key.rightArrow || key.downArrow) {
-        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
-        return;
-      }
-      if (!key.ctrl && !key.meta && input && input.length === 1) {
-        const lower = input.toLowerCase();
-        if (lower === "y") {
-          submitPermissionAction("yes");
+
+      // Escape — 分层归属：slash 可见 → 仅隐藏；buffer 非空 → 双击清空；空 → 上抛 escape。
+      if (key.escape) {
+        if (slashVisible && slashSelection >= 0) {
+          setSlashHidden(true);
+          setSlashSelection(-1);
           return;
         }
-        if (lower === "n") {
-          submitPermissionAction("no");
+        if (text.length > 0) {
+          const now = Date.now();
+          if (now - lastEscAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
+            lastEscAtRef.current = 0;
+            resetBuffer();
+            clearHintNotice();
+            return;
+          }
+          lastEscAtRef.current = now;
+          showHintNotice(view.language === "en-US" ? "Esc again to clear" : "再按 Esc 清空输入");
           return;
         }
-        if (lower === "d") {
-          submitPermissionAction("details");
-          return;
-        }
-      }
-      // 其他按键吞掉，避免 buffer 被污染。
-      return;
-    }
-
-    // ─── 2. Paste 聚合（次高优先级）────────────────────────────────────
-    // pending 期间 Enter 被吞掉（CCB BaseTextInput 的 paste-blocks-Enter 模式）。
-    // pending 期间 Esc 主动取消粘贴。
-    if (pastePendingRef.current && key.return) {
-      // 把剩余 chunk 一并 flush 但不提交。
-      enqueuePasteChunk("");
-      return;
-    }
-    if (pastePendingRef.current && key.escape) {
-      cancelPaste();
-      return;
-    }
-    // 大 chunk 或已在 pending 期内的任意输入 → 进 paste 路径（不识别为按键）。
-    const looksLikePasteChunk =
-      input.length > PASTE_THRESHOLD ||
-      (pastePendingRef.current &&
-        input.length > 0 &&
-        !key.ctrl &&
-        !key.meta &&
-        !key.escape &&
-        !key.tab);
-    if (looksLikePasteChunk) {
-      enqueuePasteChunk(input);
-      return;
-    }
-
-    // ─── 3. Slash candidates（仅在可见时拦截 ↑↓ Tab Esc Enter）─────────
-    const slashVisible = slashCandidates.length > 0 && !slashHidden;
-
-    // ─── Submit: Enter（无 shift）─────────────────────────────────────
-    if (key.return && !key.shift) {
-      // slash 可见且光标只在 head 上 → 接受候选再提交。
-      if (slashVisible && slashSelection >= 0 && !text.includes(" ")) {
-        const picked = slashCandidates[slashSelectionClamped];
-        if (picked && picked.slash !== text) {
-          const submitText = picked.slash;
-          historyRef.current = historyAdd(historyRef.current, submitText);
-          resetBuffer();
-          setSlashHidden(false);
-          clearHintNotice();
-          void onInput({ type: "submit", text: submitText });
-          return;
-        }
-      }
-      const submitText = text.trim();
-      historyRef.current = historyAdd(historyRef.current, text);
-      resetBuffer();
-      setSlashHidden(false);
-      clearHintNotice();
-      void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
-      return;
-    }
-
-    // Multiline: Shift+Enter
-    if (key.return && key.shift) {
-      setBufferAndResetSelection(bufferInsert(buffer, "\n"));
-      return;
-    }
-
-    // Tab — 接受 slash 候选 head（保留 args）。
-    if (key.tab && !key.shift) {
-      if (slashVisible && slashSelection >= 0) {
-        const picked = slashCandidates[slashSelectionClamped];
-        if (picked) {
-          const spaceIndex = text.indexOf(" ");
-          const args = spaceIndex >= 0 ? text.slice(spaceIndex) : "";
-          const next = args ? `${picked.slash}${args}` : `${picked.slash} `;
-          resetBuffer(next);
-          setSlashHidden(false);
-          return;
-        }
-      }
-      return;
-    }
-
-    // Shift+Tab — 切换 permission mode。
-    if (key.tab && key.shift) {
-      void onInput({ type: "cycle-permission-mode" });
-      return;
-    }
-
-    // Escape — 分层归属：slash 可见 → 仅隐藏；buffer 非空 → 双击清空；空 → 上抛 escape。
-    if (key.escape) {
-      if (slashVisible && slashSelection >= 0) {
-        setSlashHidden(true);
-        setSlashSelection(-1);
+        // 空 buffer → 走上层 escape 链路（既有交互行为）。
+        clearHintNotice();
+        void onInput({ type: "escape" });
         return;
       }
-      if (text.length > 0) {
-        const now = Date.now();
-        if (now - lastEscAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
-          lastEscAtRef.current = 0;
-          resetBuffer();
-          clearHintNotice();
+
+      // Navigation: arrow keys / Ctrl+B/F
+      if (key.leftArrow || (key.ctrl && input === "b")) {
+        if ((key.ctrl && key.leftArrow) || key.meta) {
+          setBufferAndResetSelection(bufferWordLeft(buffer));
+        } else {
+          setBufferAndResetSelection(bufferMoveLeft(buffer));
+        }
+        return;
+      }
+      if (key.rightArrow || (key.ctrl && input === "f")) {
+        if ((key.ctrl && key.rightArrow) || key.meta) {
+          setBufferAndResetSelection(bufferWordRight(buffer));
+        } else {
+          setBufferAndResetSelection(bufferMoveRight(buffer));
+        }
+        return;
+      }
+
+      // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
+      if (key.upArrow) {
+        if (slashVisible && slashSelection >= 0) {
+          setSlashSelection((current) => {
+            const safe = current < 0 ? 0 : current;
+            return safe === 0 ? slashCandidates.length - 1 : safe - 1;
+          });
           return;
         }
-        lastEscAtRef.current = now;
-        showHintNotice(view.language === "en-US" ? "Esc again to clear" : "再按 Esc 清空输入");
-        return;
-      }
-      // 空 buffer → 走上层 escape 链路（既有交互行为）。
-      clearHintNotice();
-      void onInput({ type: "escape" });
-      return;
-    }
-
-    // Navigation: arrow keys / Ctrl+B/F
-    if (key.leftArrow || (key.ctrl && input === "b")) {
-      if ((key.ctrl && key.leftArrow) || key.meta) {
-        setBufferAndResetSelection(bufferWordLeft(buffer));
-      } else {
-        setBufferAndResetSelection(bufferMoveLeft(buffer));
-      }
-      return;
-    }
-    if (key.rightArrow || (key.ctrl && input === "f")) {
-      if ((key.ctrl && key.rightArrow) || key.meta) {
-        setBufferAndResetSelection(bufferWordRight(buffer));
-      } else {
-        setBufferAndResetSelection(bufferMoveRight(buffer));
-      }
-      return;
-    }
-
-    // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
-    if (key.upArrow) {
-      if (slashVisible && slashSelection >= 0) {
-        setSlashSelection((current) => {
-          const safe = current < 0 ? 0 : current;
-          return safe === 0 ? slashCandidates.length - 1 : safe - 1;
-        });
-        return;
-      }
-      const { row } = getCursorLinePosition(buffer);
-      if (row > 0) {
-        setBufferAndResetSelection(bufferMoveUp(buffer));
-      } else {
-        const next = historyUp(historyRef.current, text);
-        if (next) {
-          historyRef.current = next;
-          const histText = historyCurrentText(next);
-          if (histText !== undefined) resetBuffer(histText);
+        const { row } = getCursorLinePosition(buffer);
+        if (row > 0) {
+          setBufferAndResetSelection(bufferMoveUp(buffer));
+        } else {
+          const next = historyUp(historyRef.current, text);
+          if (next) {
+            historyRef.current = next;
+            const histText = historyCurrentText(next);
+            if (histText !== undefined) resetBuffer(histText);
+          }
         }
-      }
-      return;
-    }
-    if (key.downArrow) {
-      if (slashVisible && slashSelection >= 0) {
-        setSlashSelection((current) => {
-          const safe = current < 0 ? 0 : current;
-          return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
-        });
         return;
       }
-      const { row } = getCursorLinePosition(buffer);
-      const totalLines = text.split("\n").length;
-      if (row < totalLines - 1) {
-        setBufferAndResetSelection(bufferMoveDown(buffer));
-      } else {
-        const next = historyDown(historyRef.current);
-        if (next) {
-          historyRef.current = next;
-          const histText = historyCurrentText(next);
-          resetBuffer(histText ?? next.draft);
+      if (key.downArrow) {
+        if (slashVisible && slashSelection >= 0) {
+          setSlashSelection((current) => {
+            const safe = current < 0 ? 0 : current;
+            return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
+          });
+          return;
         }
+        const { row } = getCursorLinePosition(buffer);
+        const totalLines = text.split("\n").length;
+        if (row < totalLines - 1) {
+          setBufferAndResetSelection(bufferMoveDown(buffer));
+        } else {
+          const next = historyDown(historyRef.current);
+          if (next) {
+            historyRef.current = next;
+            const histText = historyCurrentText(next);
+            resetBuffer(histText ?? next.draft);
+          }
+        }
+        return;
       }
-      return;
-    }
 
-    // Home / End
-    if (key.ctrl && input === "a") {
-      setBufferAndResetSelection(bufferHome(buffer));
-      return;
-    }
-    if (key.ctrl && input === "e") {
-      setBufferAndResetSelection(bufferEnd(buffer));
-      return;
-    }
+      // Home / End
+      if (key.ctrl && input === "a") {
+        setBufferAndResetSelection(bufferHome(buffer));
+        return;
+      }
+      if (key.ctrl && input === "e") {
+        setBufferAndResetSelection(bufferEnd(buffer));
+        return;
+      }
 
-    // Delete operations
-    if (key.backspace || key.delete) {
-      if (key.ctrl || key.meta) {
+      // Delete operations
+      if (key.backspace || key.delete) {
+        if (key.ctrl || key.meta) {
+          setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
+        } else if (key.backspace) {
+          setBufferAndResetSelection(bufferBackspace(buffer));
+        } else {
+          setBufferAndResetSelection(bufferDelete(buffer));
+        }
+        return;
+      }
+
+      // Ctrl+U / Ctrl+K / Ctrl+W
+      if (key.ctrl && input === "u") {
+        setBufferAndResetSelection(bufferClearLine(buffer));
+        return;
+      }
+      if (key.ctrl && input === "k") {
+        setBufferAndResetSelection(bufferKillToEnd(buffer));
+        return;
+      }
+      if (key.ctrl && input === "w") {
         setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
-      } else if (key.backspace) {
-        setBufferAndResetSelection(bufferBackspace(buffer));
-      } else {
-        setBufferAndResetSelection(bufferDelete(buffer));
-      }
-      return;
-    }
-
-    // Ctrl+U / Ctrl+K / Ctrl+W
-    if (key.ctrl && input === "u") {
-      setBufferAndResetSelection(bufferClearLine(buffer));
-      return;
-    }
-    if (key.ctrl && input === "k") {
-      setBufferAndResetSelection(bufferKillToEnd(buffer));
-      return;
-    }
-    if (key.ctrl && input === "w") {
-      setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
-      return;
-    }
-
-    // Ctrl+C — 不是复制（复制走终端选区 / Ctrl+Shift+C）。
-    //  - buffer 非空：第一次显示提示；窗口内第二次清空 buffer。不走上层 escape。
-    //  - buffer 空 + 请求运行中：走既有 escape/interrupt 链路。
-    //  - buffer 空 + 空闲：交既有上层链路（exit 由控制器决定）。
-    if (key.ctrl && input === "c") {
-      if (text.length > 0) {
-        const now = Date.now();
-        if (now - lastCtrlCAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
-          lastCtrlCAtRef.current = 0;
-          resetBuffer();
-          clearHintNotice();
-          return;
-        }
-        lastCtrlCAtRef.current = now;
-        showHintNotice(
-          view.language === "en-US" ? "Ctrl+C again to clear" : "再按 Ctrl+C 清空输入",
-        );
         return;
       }
-      clearHintNotice();
-      void onInput({ type: "escape" });
-      return;
-    }
 
-    // Ctrl+V — 终端 host 通常拦截系统粘贴；这里不写入 "v"。
-    // 真实粘贴会进 paste 路径（looksLikePasteChunk 已处理）。
-    if (key.ctrl && input === "v") {
-      return;
-    }
-
-    // 其他 ctrl/meta 不处理
-    if (key.ctrl || key.meta) return;
-
-    // 普通字符输入：去掉 ANSI、\r → \n（处理终端粘贴 SSH coalesce）。
-    if (input && input !== "\r" && input !== "\n") {
-      const sanitized = stripAnsi(input).replace(/\r\n?/g, "\n");
-      if (sanitized) {
-        setBufferAndResetSelection(bufferInsert(buffer, sanitized));
+      // Ctrl+C — 不是复制（复制走终端选区 / Ctrl+Shift+C）。
+      //  - buffer 非空：第一次显示提示；窗口内第二次清空 buffer。不走上层 escape。
+      //  - buffer 空 + 请求运行中：走既有 escape/interrupt 链路。
+      //  - buffer 空 + 空闲：交既有上层链路（exit 由控制器决定）。
+      if (key.ctrl && input === "c") {
+        if (text.length > 0) {
+          const now = Date.now();
+          if (now - lastCtrlCAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
+            lastCtrlCAtRef.current = 0;
+            resetBuffer();
+            clearHintNotice();
+            return;
+          }
+          lastCtrlCAtRef.current = now;
+          showHintNotice(
+            view.language === "en-US" ? "Ctrl+C again to clear" : "再按 Ctrl+C 清空输入",
+          );
+          return;
+        }
+        clearHintNotice();
+        void onInput({ type: "escape" });
+        return;
       }
-    }
-  });
+
+      // Ctrl+V — 终端 host 通常拦截系统粘贴；这里不写入 "v"。
+      // 真实粘贴会进 paste 路径（looksLikePasteChunk 已处理）。
+      if (key.ctrl && input === "v") {
+        return;
+      }
+
+      // 其他 ctrl/meta 不处理
+      if (key.ctrl || key.meta) return;
+
+      // 普通字符输入：去掉 ANSI、\r → \n（处理终端粘贴 SSH coalesce）。
+      if (input && input !== "\r" && input !== "\n") {
+        const sanitized = stripAnsi(input).replace(/\r\n?/g, "\n");
+        if (sanitized) {
+          setBufferAndResetSelection(bufferInsert(buffer, sanitized));
+        }
+      }
+    },
+    // D.13E Step 2 修正 #1：ConfigPanel 渲染时 isActive=false，让 ConfigPanel
+    // 自己的 useInput 独占 ↑↓/Enter/Esc，避免双消费。
+    { isActive: !configPanelActive },
+  );
 
   // ─── Render ─────────────────────────────────────────────────────────────
   // Pick placeholder. Permission active wins over setup, which wins over task.
@@ -915,6 +1008,20 @@ function cyclePermissionFocus(
   const safeIdx = idx < 0 ? 0 : idx;
   const next = (safeIdx + delta + ids.length) % ids.length;
   return ids[next] ?? ids[0] ?? "yes";
+}
+
+// D.13E Step 2 — y/n 单字母在新 4 档 elevation（allow_once / allow_always_tool /
+// deny / details）与旧 fallback（yes / no / details / cancel）之间做兼容映射：
+// 优先返回 primary（新 id），不存在则回退到 legacy（旧 id），都不存在仍返回 primary
+// 让 submitPermissionAction 的 unknown action 路径吞掉而不污染 buffer。
+function resolveActionId(
+  actions: { id: PermissionActionId }[],
+  primary: PermissionActionId,
+  legacy: PermissionActionId,
+): PermissionActionId {
+  if (actions.some((a) => a.id === primary)) return primary;
+  if (actions.some((a) => a.id === legacy)) return legacy;
+  return primary;
 }
 
 function slashHead(value: string): string {

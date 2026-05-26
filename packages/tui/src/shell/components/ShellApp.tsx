@@ -17,8 +17,10 @@ import type {
   TaskPermissionView,
 } from "../types.js";
 import { Composer } from "./Composer.js";
+import { ConfigPanel } from "./ConfigPanel.js";
 import { ProductBlock } from "./ProductBlock.js";
 import { StatusTray } from "./StatusTray.js";
+import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
 
 export function ShellApp({
   controller,
@@ -170,11 +172,22 @@ function TaskLayout({
       >
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
+        {/* Permission > ConfigPanel 互斥渲染（D.13E Step 2 修正 #1）：
+            permission 优先级最高；ConfigPanel 只在没有 permission 时渲染。
+            Composer 在 ConfigPanel 渲染时 useInput { isActive: false }，避免双消费。 */}
         {view.permission ? (
           <PermissionPrompt
             permission={view.permission}
             theme={theme}
             width={view.width - 4}
+            language={view.language}
+          />
+        ) : view.configPanel ? (
+          <ConfigPanel
+            panel={view.configPanel}
+            controller={controller}
+            width={view.width - 4}
+            noColor={noColor}
             language={view.language}
           />
         ) : null}
@@ -185,6 +198,16 @@ function TaskLayout({
               <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
             ))}
           </Box>
+        ) : null}
+
+        {/* TaskSuggestionBar — 静态只读 hint 行；不接 useInput；空数组时不渲染。
+            permission / tool_error / setup / slash 优先级，最多 4 条。 */}
+        {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+          <TaskSuggestionBar
+            suggestions={view.taskSuggestions}
+            width={view.width}
+            noColor={noColor}
+          />
         ) : null}
 
         {view.limitations.length > 0 ? (

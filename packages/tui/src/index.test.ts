@@ -24,6 +24,7 @@ import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
+  addAllowRuleForTest,
   containsSecret,
   createCacheState,
   createHookState,
@@ -9337,5 +9338,132 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
     expect(freshContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
+  });
+});
+
+// ─── D.13E Step 2 修正 #4 — addAllowRule helper 覆盖 ───────────────────────
+//   1. 已存在等价 allow 规则 → duplicate（不重复落盘，rules.length 不变）
+//   2. savePermissionState 抛错 → save_failed（内存中的 push 已回滚）
+//   3. 正常路径 → added（rules 包含新规则；message 含 "已添加"）
+// 这里直接打 addAllowRuleForTest（来自 ./index.js 测试导出），避免误把
+// /permissions add allow 当成 helper 单测的代理路径。
+describe("D.13E Step 2 — addAllowRule helper", () => {
+  it("returns duplicate when an equivalent allow rule already exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    // 通过 /permissions add allow 落第一条规则；helper 同源，应去重不再 push
+    await handleSlashCommand("/permissions add allow Bash high", context, output);
+    const baseline = context.permissions.rules.length;
+    expect(baseline).toBeGreaterThanOrEqual(1);
+
+    const result = await addAllowRuleForTest(context, "Bash", "high");
+    expect(result.kind).toBe("duplicate");
+    if (result.kind === "duplicate") {
+      expect(result.message).toContain("已存在等价 allow 规则");
+    }
+    expect(context.permissions.rules.length).toBe(baseline);
+  });
+
+  it("rolls back the in-memory push when savePermissionState throws (save_failed)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 把 storage 设为只读触发 savePermissionState 抛错（Windows 上 chmod 0o444
+    // 不一定生效，所以用一个不存在的 projectPath 让 mkdir/write 失败）。
+    context.projectPath = join(tmpdir(), "linghun-nonexistent", "\0invalid-path-segment");
+    const baseline = context.permissions.rules.length;
+
+    const result = await addAllowRuleForTest(context, "Write", "medium");
+    expect(result.kind).toBe("save_failed");
+    // 关键不变量：内存中的 rules 不能因失败而保留半状态。
+    expect(context.permissions.rules.length).toBe(baseline);
+  });
+
+  it("adds and persists the rule on success (added)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const baseline = context.permissions.rules.length;
+    const result = await addAllowRuleForTest(context, "Edit", "low");
+    expect(result.kind).toBe("added");
+    expect(context.permissions.rules.length).toBe(baseline + 1);
+    if (result.kind === "added") {
+      expect(result.rule.effect).toBe("allow");
+      expect(result.rule.toolName).toBe("Edit");
+      expect(result.rule.risk).toBe("low");
+      expect(result.message).toContain("已添加权限规则");
+    }
+  });
+});
+
+// ─── D.13E Step 2 修正 #4 — /permissions add allow 路径覆盖 ────────────────
+// `/permissions add allow` 已通过 addAllowRule helper 实现去重；旧的"两次相同
+// 命令落两条规则"行为已收紧为去重，覆盖一次新行为防回归。
+describe("D.13E Step 2 — /permissions add allow dedup via addAllowRule", () => {
+  it("does not duplicate when same allow rule is added twice via slash command", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/permissions add allow Bash high", context, output);
+    const afterFirst = context.permissions.rules.length;
+    expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+    output.text = "";
+    await handleSlashCommand("/permissions add allow Bash high", context, output);
+    expect(context.permissions.rules.length).toBe(afterFirst);
+    expect(output.text).toContain("已存在等价 allow 规则");
+  });
+
+  it("returns invalid for unknown tool name without mutating rules", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const baseline = context.permissions.rules.length;
+    const result = await addAllowRuleForTest(context, "TotallyNotARealTool" as never, "medium");
+    expect(result.kind).toBe("invalid");
+    expect(context.permissions.rules.length).toBe(baseline);
+  });
+
+  // D.13E Step 2 修正 #5（去重语义统一）：
+  // PermissionElevationModel.hasExistingAllowRule 把"已有 allow <tool> 且 risk
+  // 为空"视为可覆盖任意 risk（umbrella allow）。addAllowRule 之前只做精确
+  // (effect+toolName+risk) 三元组比较，会让 add allow Bash 之后再 add allow
+  // Bash high 落两条规则；与 buildElevationOptions 隐藏 allow_always_tool 的
+  // 判断不一致。修正后两侧语义一致：umbrella allow 覆盖具体 risk → duplicate。
+  it("treats an umbrella allow rule (risk=undefined) as duplicate for any specific risk", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 先落一条 umbrella allow Bash（risk 为空）。
+    const umbrella = await addAllowRuleForTest(context, "Bash", undefined);
+    expect(umbrella.kind).toBe("added");
+    const baseline = context.permissions.rules.length;
+
+    // 再 add allow Bash high / medium / low 都应去重，rules.length 不变。
+    for (const risk of ["high", "medium", "low"] as const) {
+      const result = await addAllowRuleForTest(context, "Bash", risk);
+      expect(result.kind).toBe("duplicate");
+      if (result.kind === "duplicate") {
+        expect(result.rule.toolName).toBe("Bash");
+        // umbrella 规则 risk 为空
+        expect(result.rule.risk).toBeUndefined();
+      }
+      expect(context.permissions.rules.length).toBe(baseline);
+    }
   });
 });

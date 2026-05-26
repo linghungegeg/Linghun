@@ -332,6 +332,8 @@ import {
 } from "./runner-runtime.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { createCommandBlock } from "./shell/models/command-transcript-presenter.js";
+import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
 import {
@@ -1440,6 +1442,12 @@ export type TuiContext = {
   pendingLocalApproval?: PendingLocalApproval;
   pendingAutopilot?: PendingAutopilotRequest;
   pendingModelSetup?: PendingModelSetup;
+  // D.13E Step 2 — ConfigPanel 当前状态。undefined = 未打开。
+  // 由 runInkShell.onInput 拦截 /config 与 config-* 事件，经
+  // reduceConfigState 推进；view-model 用 mapConfigPanelState 映射给 UI。
+  configPanelState?:
+    | { phase: "panel_list"; cursor: number }
+    | { phase: "panel_detail"; panelId: ConfigPanelId; actionCursor: number };
   workspaceTrustEnforced?: boolean;
   activeAbortController?: AbortController;
   backgroundAbortControllers?: Map<string, AbortController>;
@@ -2563,6 +2571,8 @@ async function runInkShell(
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
   let submittedPending = false;
+  // D.13E Step 2 — command transcript 行序号；createCommandBlock 用 sequence 生成稳定 id。
+  let commandSequence = 0;
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
@@ -2630,6 +2640,137 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      // ─── D.13E Step 2 修正 #2 — /config 拦截：在 ink 模式下打开真 panel UI ────
+      // handleSlashCommand("/config") 仍然只 writeLine(formatConfigOverview(...))，
+      // 保留 plain TUI 与 index.test 不破。这里只在 ink 路径上用 panel 接管。
+      if (event.type === "submit" && event.text.trim() === "/config") {
+        const trimmed = event.text;
+        // 推 transcript 命令行（与其它 slash 一致），让用户能看到他敲了 /config
+        blocks.push(createCommandBlock(commandSequence++, trimmed));
+        context.configPanelState = { phase: "panel_list", cursor: 0 };
+        submittedPending = false;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13E Step 2 — config-* 三类事件：ConfigPanel 自带 useInput 上抛 ─────
+      if (event.type === "config-move") {
+        if (!context.configPanelState) return;
+        const step = reduceConfigState(context.configPanelState, {
+          type: "move",
+          delta: event.delta,
+        });
+        context.configPanelState =
+          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "config-enter") {
+        if (!context.configPanelState) return;
+        const step = reduceConfigState(context.configPanelState, { type: "enter" });
+        context.configPanelState =
+          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
+        if (step.dispatch.kind === "slash") {
+          // 关闭面板再派 slash，避免 panel UI 与 slash 输出叠加。
+          context.configPanelState = undefined;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          // 推 transcript 命令行，与用户手敲 slash 保持一致的视觉反馈。
+          blocks.push(createCommandBlock(commandSequence++, step.dispatch.command));
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          await processTuiLine(step.dispatch.command, context, gateway, shellOutput, store);
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "config-back") {
+        if (!context.configPanelState) return;
+        const step = reduceConfigState(context.configPanelState, { type: "back" });
+        context.configPanelState =
+          step.next.phase === "idle" ? undefined : (step.next as typeof context.configPanelState);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13E Step 2 修正 #3 — permission-action atomic 路由 ────────────────
+      if (event.type === "permission-action") {
+        const approval = context.pendingLocalApproval;
+        if (!approval) return;
+        switch (event.actionId) {
+          case "details":
+            writeLine(shellOutput, formatPendingApprovalDetails(approval, context));
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            return;
+          case "cancel": {
+            context.pendingLocalApproval = undefined;
+            await executePermissionDeny(approval, context, gateway, shellOutput, true);
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            return;
+          }
+          case "deny":
+          case "no": {
+            context.pendingLocalApproval = undefined;
+            await executePermissionDeny(approval, context, gateway, shellOutput, false);
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            return;
+          }
+          case "allow_once":
+          case "yes": {
+            context.pendingLocalApproval = undefined;
+            await executePermissionApprove(approval, context, gateway, shellOutput);
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            return;
+          }
+          case "allow_always_tool": {
+            // 修正 #3：先持久化 allow rule，成功后再 approve；失败则不 approve、保留 pending
+            if (approval.kind !== "model_tool_use") {
+              // 非 model_tool_use 没有"工具规则持久化"语义，退化为 allow_once
+              context.pendingLocalApproval = undefined;
+              await executePermissionApprove(approval, context, gateway, shellOutput);
+              shell?.rerender();
+              await shell?.waitUntilRenderFlush();
+              return;
+            }
+            const tool = approval.toolName;
+            const risk: PermissionRule["risk"] = tool === "Bash" ? "high" : "medium";
+            const result = await addAllowRule(context, tool, risk);
+            writeLine(shellOutput, result.message);
+            if (result.kind === "save_failed") {
+              writeLine(
+                shellOutput,
+                context.language === "en-US"
+                  ? "Permission rule was not persisted; pending approval kept."
+                  : "权限规则未保存；当前 pending 仍保留，可重试或选择其它动作。",
+              );
+              shell?.rerender();
+              await shell?.waitUntilRenderFlush();
+              return;
+            }
+            if (result.kind === "invalid") {
+              shell?.rerender();
+              await shell?.waitUntilRenderFlush();
+              return;
+            }
+            // duplicate / added 都视为持久化成功 → approve
+            context.pendingLocalApproval = undefined;
+            await executePermissionApprove(approval, context, gateway, shellOutput);
+            shell?.rerender();
+            await shell?.waitUntilRenderFlush();
+            return;
+          }
+        }
+        return;
+      }
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
       // Slash commands are user-visible commands, not chat input. Push a
@@ -2637,15 +2778,8 @@ async function runInkShell(
       // transcript so it survives ShellBlockOutput splice and renders as an
       // independent `❯ /command` row above the tool/output blocks.
       if (event.type === "submit" && event.text.startsWith("/")) {
-        const trimmed = event.text.length > 120 ? `${event.text.slice(0, 119)}…` : event.text;
-        blocks.push({
-          id: `command-${Date.now()}`,
-          kind: "command",
-          status: "info",
-          title: trimmed,
-          summary: "",
-          keep: true,
-        });
+        // D.13E Step 2 — 用 createCommandBlock 替代手写 push，统一 transcript 行格式。
+        blocks.push(createCommandBlock(commandSequence++, event.text));
       }
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
@@ -5326,6 +5460,263 @@ async function handleLanguageCommand(
   writeStatus(output, context);
 }
 
+// ---------------------------------------------------------------------------
+// D.13E Step 2 — permission helpers（修正 #3 + #4）
+// ---------------------------------------------------------------------------
+// addAllowRule:
+//   - 校验工具名（"*" 或在 builtInTools 内）
+//   - 等价规则去重（同 effect+toolName+risk）
+//   - 落盘（savePermissionState）失败则回滚内存中的 push，避免与磁盘不一致
+//   - 返回判别 union，messages 由调用方决定向用户怎么回报
+// executePermissionApprove / executePermissionDeny:
+//   - 把 handleNaturalInput 的 yes/no 分支主体抽出，让 controller 端
+//     permission-action 路由可以直接复用，不重复实现 approve/deny 行为
+// ---------------------------------------------------------------------------
+
+type AddAllowRuleResult =
+  | { kind: "added"; rule: PermissionRule; message: string }
+  | { kind: "duplicate"; rule: PermissionRule; message: string }
+  | { kind: "invalid"; message: string }
+  | { kind: "save_failed"; error: Error; message: string };
+
+// 测试导出：让 index.test.ts 直接覆盖去重 / 失败回滚 / 成功落盘三条核心路径。
+export async function addAllowRuleForTest(
+  context: TuiContext,
+  toolName: ToolName | "*",
+  risk: PermissionRule["risk"] | undefined,
+): Promise<AddAllowRuleResult> {
+  return addAllowRule(context, toolName, risk);
+}
+
+async function addAllowRule(
+  context: TuiContext,
+  toolName: ToolName | "*",
+  risk: PermissionRule["risk"] | undefined,
+): Promise<AddAllowRuleResult> {
+  // 1. 校验工具名
+  if (toolName !== "*" && !(toolName in builtInTools)) {
+    return { kind: "invalid", message: `未知工具：${toolName}` };
+  }
+  // 2. 去重（与 PermissionElevationModel.hasExistingAllowRule 同语义）：
+  //    - effect 必须是 allow
+  //    - toolName 精确匹配，或既有规则是 "*" 通配（umbrella tool）
+  //    - 既有规则 risk 为空（umbrella risk）视为覆盖任意 risk；否则要求精确匹配
+  //    这样 add allow Bash 之后再 add allow Bash high 应被识别为 duplicate，
+  //    避免与 buildElevationOptions 看到 alreadyAllowed=true 时隐藏 allow_always_tool
+  //    的判断不一致。
+  const existing = context.permissions.rules.find((r) => {
+    if (r.effect !== "allow") return false;
+    if (r.toolName !== toolName && r.toolName !== "*") return false;
+    if (r.risk && r.risk !== risk) return false;
+    return true;
+  });
+  if (existing) {
+    return {
+      kind: "duplicate",
+      rule: existing,
+      message: `已存在等价 allow 规则：${existing.id} allow ${existing.toolName}${existing.risk ? ` ${existing.risk}` : ""}`,
+    };
+  }
+  // 3. push + persist；失败则回滚
+  const rule: PermissionRule = { id: randomUUID(), effect: "allow", toolName, risk };
+  context.permissions.rules.push(rule);
+  try {
+    await savePermissionState(context.projectPath, context.permissions);
+  } catch (error) {
+    context.permissions.rules = context.permissions.rules.filter((r) => r.id !== rule.id);
+    return {
+      kind: "save_failed",
+      error: error as Error,
+      message: `保存权限规则失败：${(error as Error).message}`,
+    };
+  }
+  return {
+    kind: "added",
+    rule,
+    message: `已添加权限规则：${rule.id} allow ${toolName}${risk ? ` ${risk}` : ""}`,
+  };
+}
+
+/**
+ * executePermissionApprove — 把 handleNaturalInput 的 yes 分支主体抽成
+ * 函数。语义与原 yes 路径完全一致。**调用方负责清空 pendingLocalApproval**
+ * （与原 inline 分支保持一致，避免双清空）。
+ */
+async function executePermissionApprove(
+  approval: PendingLocalApproval,
+  context: TuiContext,
+  gateway: ModelGateway | undefined,
+  output: Writable,
+): Promise<void> {
+  if (approval.kind === "index_ignore_write") {
+    const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
+    if (written) {
+      await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
+      writeLine(output, formatIndexRefreshSummary(context));
+    }
+    writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "architecture_drift") {
+    const result = await executeModelToolUse(
+      approval.toolCall,
+      context,
+      approval.sessionId,
+      output,
+      approval.continuation,
+      true,
+    );
+    const reportWriteGuard = approval.continuation?.reportWriteGuard;
+    if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
+      reportWriteGuard.completed = true;
+    }
+    if (gateway && approval.continuation && !result.pendingApproval) {
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(result),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    }
+    writeLightHints(output, context);
+    writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "model_tool_use") {
+    const result = await executeApprovedModelToolUse(
+      approval.toolCall,
+      approval.toolName,
+      context,
+      approval.sessionId,
+      output,
+      undefined,
+      approval.continuation?.reportWriteGuard,
+    );
+    const reportWriteGuard = approval.continuation?.reportWriteGuard;
+    if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
+      reportWriteGuard.completed = true;
+    }
+    if (gateway && approval.continuation) {
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(result),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    }
+    writeLightHints(output, context);
+    writeStatus(output, context);
+    return;
+  }
+}
+
+/**
+ * executePermissionDeny — 把 handleNaturalInput 的 no 分支主体抽成函数。
+ * 与原 no 路径行为一致；cancelled=true 写 "cancelled by user"，否则
+ * "denied by user"。**调用方负责清空 pendingLocalApproval**。
+ */
+async function executePermissionDeny(
+  approval: PendingLocalApproval,
+  context: TuiContext,
+  gateway: ModelGateway | undefined,
+  output: Writable,
+  cancelled: boolean,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
+  if (approval.kind === "index_ignore_write") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `${outcomeText}: ${approval.plan.path}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Permission denied. No file was written and the index was not refreshed."
+        : "已拒绝权限。本轮未写入文件，也未刷新索引。",
+    );
+    writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "architecture_drift") {
+    const evidence = await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      approval.toolName,
+      `${outcomeText}: architecture drift confirmation required`,
+    );
+    const deniedResult = {
+      ok: false,
+      tool: approval.toolName,
+      text: outcomeText,
+      outcome: cancelled ? "cancelled" : "denied",
+      evidenceId: evidence.id,
+      architectureDrift: approval.warnings,
+    };
+    await appendToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      approval.toolName,
+      deniedResult.text,
+      true,
+      evidence.id,
+    );
+    if (gateway && approval.continuation) {
+      writeLine(output, formatPermissionDenialPrimary(context.language));
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(deniedResult),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+      writeLightHints(output, context);
+      writeStatus(output, context);
+      return;
+    }
+  }
+  if (approval.kind === "model_tool_use") {
+    const evidence = await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      approval.toolName,
+      `${outcomeText}: ${approval.toolName}`,
+    );
+    const deniedResult = {
+      ok: false,
+      tool: approval.toolName,
+      text: outcomeText,
+      outcome: cancelled ? "cancelled" : "denied",
+      evidenceId: evidence.id,
+    };
+    await appendToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      approval.toolName,
+      deniedResult.text,
+      true,
+      evidence.id,
+    );
+    if (gateway && approval.continuation) {
+      writeLine(output, formatPermissionDenialPrimary(context.language));
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(deniedResult),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+      writeLightHints(output, context);
+      writeStatus(output, context);
+      return;
+    }
+  }
+  writeLine(output, formatPermissionDenialPrimary(context.language));
+  writeStatus(output, context);
+}
+
 async function handlePermissionsCommand(
   args: string[],
   context: TuiContext,
@@ -5373,6 +5764,13 @@ async function handlePermissionsCommand(
       writeLine(output, "用法：/permissions add allow|ask|deny <tool|*> [low|medium|high]");
       return;
     }
+    if (effect === "allow") {
+      // D.13E Step 2 修正 #4：复用 addAllowRule helper（去重 + 失败回滚 + 审计文案）
+      const result = await addAllowRule(context, toolName, risk);
+      writeLine(output, result.message);
+      return;
+    }
+    // ask / deny 仍走原 inline 逻辑（去重语义只对 allow 收紧）
     if (toolName !== "*" && !(toolName in builtInTools)) {
       writeLine(output, `未知工具：${toolName}`);
       return;
@@ -11607,164 +12005,15 @@ export async function handleNaturalInput(
     if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(normalized)) {
       const approval = pendingLocalApproval;
       context.pendingLocalApproval = undefined;
-      if (approval.kind === "index_ignore_write") {
-        const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
-        if (written) {
-          await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-          writeLine(output, formatIndexRefreshSummary(context));
-        }
-        writeStatus(output, context);
-        return "handled";
-      }
-      if (approval.kind === "architecture_drift") {
-        const result = await executeModelToolUse(
-          approval.toolCall,
-          context,
-          approval.sessionId,
-          output,
-          approval.continuation,
-          true,
-        );
-        const reportWriteGuard = approval.continuation?.reportWriteGuard;
-        if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
-          reportWriteGuard.completed = true;
-        }
-        if (gateway && approval.continuation && !result.pendingApproval) {
-          approval.continuation.messages.push({
-            role: "tool",
-            tool_call_id: approval.toolCall.id,
-            content: JSON.stringify(result),
-          });
-          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
-        }
-        writeLightHints(output, context);
-        writeStatus(output, context);
-        return "handled";
-      }
-      if (approval.kind === "model_tool_use") {
-        const result = await executeApprovedModelToolUse(
-          approval.toolCall,
-          approval.toolName,
-          context,
-          approval.sessionId,
-          output,
-          undefined,
-          approval.continuation?.reportWriteGuard,
-        );
-        const reportWriteGuard = approval.continuation?.reportWriteGuard;
-        if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
-          reportWriteGuard.completed = true;
-        }
-        if (gateway && approval.continuation) {
-          approval.continuation.messages.push({
-            role: "tool",
-            tool_call_id: approval.toolCall.id,
-            content: JSON.stringify(result),
-          });
-          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
-        }
-        writeLightHints(output, context);
-        writeStatus(output, context);
-        return "handled";
-      }
+      // D.13E Step 2 修正 #4：复用 executePermissionApprove，避免双实现漂移
+      await executePermissionApprove(approval, context, gateway, output);
+      return "handled";
     }
     if (/^(no|n|deny|取消|拒绝|不|否|cancel)$/iu.test(normalized)) {
       const approval = pendingLocalApproval;
       context.pendingLocalApproval = undefined;
-      const sessionId = await ensureSession(context);
       const cancelled = /^(cancel|取消)$/iu.test(normalized);
-      const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
-      if (approval.kind === "index_ignore_write") {
-        await recordToolFailureEvidence(
-          context,
-          sessionId,
-          "Write",
-          `${outcomeText}: ${approval.plan.path}`,
-        );
-        writeLine(
-          output,
-          context.language === "en-US"
-            ? "Permission denied. No file was written and the index was not refreshed."
-            : "已拒绝权限。本轮未写入文件，也未刷新索引。",
-        );
-        writeStatus(output, context);
-        return "handled";
-      }
-      if (approval.kind === "architecture_drift") {
-        const evidence = await recordToolFailureEvidence(
-          context,
-          approval.sessionId,
-          approval.toolName,
-          `${outcomeText}: architecture drift confirmation required`,
-        );
-        const deniedResult = {
-          ok: false,
-          tool: approval.toolName,
-          text: outcomeText,
-          outcome: cancelled ? "cancelled" : "denied",
-          evidenceId: evidence.id,
-          architectureDrift: approval.warnings,
-        };
-        await appendToolResultEvent(
-          context,
-          approval.sessionId,
-          approval.toolCall.id,
-          approval.toolName,
-          deniedResult.text,
-          true,
-          evidence.id,
-        );
-        if (gateway && approval.continuation) {
-          writeLine(output, formatPermissionDenialPrimary(context.language));
-          approval.continuation.messages.push({
-            role: "tool",
-            tool_call_id: approval.toolCall.id,
-            content: JSON.stringify(deniedResult),
-          });
-          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
-          writeLightHints(output, context);
-          writeStatus(output, context);
-          return "handled";
-        }
-      }
-      if (approval.kind === "model_tool_use") {
-        const evidence = await recordToolFailureEvidence(
-          context,
-          approval.sessionId,
-          approval.toolName,
-          `${outcomeText}: ${approval.toolName}`,
-        );
-        const deniedResult = {
-          ok: false,
-          tool: approval.toolName,
-          text: outcomeText,
-          outcome: cancelled ? "cancelled" : "denied",
-          evidenceId: evidence.id,
-        };
-        await appendToolResultEvent(
-          context,
-          approval.sessionId,
-          approval.toolCall.id,
-          approval.toolName,
-          deniedResult.text,
-          true,
-          evidence.id,
-        );
-        if (gateway && approval.continuation) {
-          writeLine(output, formatPermissionDenialPrimary(context.language));
-          approval.continuation.messages.push({
-            role: "tool",
-            tool_call_id: approval.toolCall.id,
-            content: JSON.stringify(deniedResult),
-          });
-          await continueModelAfterToolResults(approval.continuation, context, gateway, output);
-          writeLightHints(output, context);
-          writeStatus(output, context);
-          return "handled";
-        }
-      }
-      writeLine(output, formatPermissionDenialPrimary(context.language));
-      writeStatus(output, context);
+      await executePermissionDeny(approval, context, gateway, output, cancelled);
       return "handled";
     }
     writeLine(

@@ -1090,13 +1090,41 @@ export function routeNaturalIntent(
     .map((capability) => ({ capability, score: scoreCapability(capability, normalized, text) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.capability.slash.localeCompare(b.capability.slash));
+  // Doctor-targeted re-rank: a "doctor" inquiry (是否配好/configured/working/connected)
+  // about a specific subject (model/mode/index/...) should route to that subject's
+  // first-batch-status capability, not the generic /config overview. Without this,
+  // the alias "config" matches inside "configured" and lets /config out-score
+  // /model by ~0.4 ("multiple close candidates"), regressing the existing contract
+  // sample "is the model configured correctly" → /model route doctor.
+  let scoredAdjusted = scored;
+  if (
+    !explicit &&
+    inquiry === "doctor" &&
+    scored.length >= 2 &&
+    scored[0]?.capability.id === "config"
+  ) {
+    const doctorTarget = scored.find(
+      (item) =>
+        isFirstBatchStatusCapability(item.capability.id) &&
+        scored[0] !== undefined &&
+        scored[0].score - item.score < 1.5,
+    );
+    if (doctorTarget) {
+      scoredAdjusted = [
+        doctorTarget,
+        ...scored.filter((item) => item.capability.id !== doctorTarget.capability.id),
+      ];
+    }
+  }
   const candidates = uniqueCapabilities([
     ...(explicit ? [explicit] : []),
-    ...scored.map((item) => item.capability),
+    ...scoredAdjusted.map((item) => item.capability),
   ]).slice(0, 5);
   const capability = explicit ?? candidates[0];
-  const topScore = explicit ? Math.max(8, scored[0]?.score ?? 0) : (scored[0]?.score ?? 0);
-  const secondScore = scored[1]?.score ?? 0;
+  const topScore = explicit
+    ? Math.max(8, scoredAdjusted[0]?.score ?? 0)
+    : (scoredAdjusted[0]?.score ?? 0);
+  const secondScore = scoredAdjusted[1]?.score ?? 0;
 
   if (!capability) {
     return {

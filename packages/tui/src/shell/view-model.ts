@@ -1,9 +1,19 @@
 import { basename } from "node:path";
 import type { Language } from "@linghun/shared";
+import type { ToolName } from "@linghun/tools";
 import type { TuiContext } from "../index.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
+import {
+  findConfigPanel,
+  getActionLabel,
+  getConfigPanels,
+  getPanelText,
+} from "./models/config-control-plane.js";
+import { buildElevationOptions } from "./models/permission-elevation.js";
+import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import type {
   BackgroundTaskSummary,
+  ConfigPanelView,
   PermissionAction,
   ProductBlockViewModel,
   ShellViewMode,
@@ -134,6 +144,19 @@ export type ShellViewModelOptions = {
   submitted?: boolean;
   /** Denial/cancel feedback for the most recent permission action. */
   denialFeedback?: { toolName: string; kind: "denied" | "cancelled" };
+  /**
+   * D.13E Step 2 — slash candidates that are currently visible in the Composer
+   * suggestion list. View-model uses this to assemble TaskSuggestionBar entries
+   * (read-only mirror, no keyboard focus).
+   */
+  slashCandidates?: { slash: string; label: string }[];
+  /**
+   * D.13E Step 2 — ConfigPanel state (panel_list / panel_detail / undefined).
+   * View-model maps this to ShellViewModel.configPanel via mapConfigPanelState.
+   */
+  configPanelState?:
+    | { phase: "panel_list"; cursor: number }
+    | { phase: "panel_detail"; panelId: string; actionCursor: number };
 };
 
 export function createShellViewModel(
@@ -273,6 +296,29 @@ export function createShellViewModel(
           index: formatIndex(context.index.status, language),
         };
 
+  // D.13E Step 2 — TaskSuggestionBar 数据（只读，UI 不接键盘）。
+  // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
+  const failBlocksForSuggestions = fittedBlocks.filter(
+    (b) => b.status === "fail" || b.status === "blocked",
+  );
+  const taskSuggestions: TaskSuggestion[] | undefined =
+    viewMode === "home"
+      ? undefined
+      : buildTaskSuggestions({
+          language,
+          setupHint,
+          permission: options.permission,
+          failBlocks: failBlocksForSuggestions,
+          slashCandidates: options.slashCandidates,
+          // 修正 v3 #6：不在 SuggestionBar 暴露 14 panel 作为 configHints
+        });
+
+  // D.13E Step 2 — ConfigPanel view 装配（runInkShell.onInput 拦截 /config 后填充
+  // configPanelState；与 view.permission 互斥渲染由 ShellApp 保证）。
+  const configPanel: ConfigPanelView | undefined = options.configPanelState
+    ? mapConfigPanelState(options.configPanelState, language)
+    : undefined;
+
   return {
     language,
     projectName,
@@ -287,7 +333,7 @@ export function createShellViewModel(
     setupHint,
     activity: options.activity,
     permission: options.permission
-      ? withPermissionActions(options.permission, language)
+      ? withPermissionActions(options.permission, language, context)
       : undefined,
     status: {
       project: text.project(projectName),
@@ -312,21 +358,68 @@ export function createShellViewModel(
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
     taskFooter,
+    taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
+    configPanel,
+  };
+}
+
+/**
+ * D.13E Step 2 — 把 controller 持有的 configPanelState 映射成 ShellViewModel.configPanel。
+ * 只装配 i18n / 列表数据，不带任何键盘事件；导航事件由 ConfigPanel 组件自己 useInput
+ * → controller.onInput({ type: "config-*" }) 触发。
+ */
+function mapConfigPanelState(
+  state:
+    | { phase: "panel_list"; cursor: number }
+    | { phase: "panel_detail"; panelId: string; actionCursor: number },
+  language: Language,
+): ConfigPanelView | undefined {
+  if (state.phase === "panel_list") {
+    const panels = getConfigPanels().map((p) => {
+      const t = getPanelText(p, language);
+      return { id: p.id, title: t.title, summary: t.summary };
+    });
+    const total = panels.length;
+    const cursor = total === 0 ? 0 : Math.min(Math.max(0, state.cursor), total - 1);
+    return { phase: "panel_list", cursor, panels };
+  }
+  const panel = findConfigPanel(state.panelId as Parameters<typeof findConfigPanel>[0]);
+  if (!panel) return undefined;
+  const text = getPanelText(panel, language);
+  const actions = panel.actions.map((a) => ({ id: a.id, label: getActionLabel(a, language) }));
+  const total = actions.length;
+  const actionCursor = total === 0 ? 0 : Math.min(Math.max(0, state.actionCursor), total - 1);
+  return {
+    phase: "panel_detail",
+    panel: { id: panel.id, title: text.title, summary: text.summary },
+    actionCursor,
+    actions,
   };
 }
 
 function withPermissionActions(
   permission: TaskPermissionView,
   language: Language,
+  context: TuiContext,
 ): TaskPermissionView {
   if (permission.actions && permission.actions.length > 0) return permission;
-  const text = shellText[language];
-  const actions: PermissionAction[] = [
-    { id: "yes", label: text.permissionActionYes, shortcut: "y" },
-    { id: "no", label: text.permissionActionNo, shortcut: "n" },
-    { id: "details", label: text.permissionActionDetails, shortcut: "d" },
-    { id: "cancel", label: text.permissionActionCancel },
-  ];
+  // D.13E Step 2 — 用 PermissionElevationModel 替代旧 y/n/d/cancel 默认集合。
+  // 现有 rules 注入后，allow_always_tool 在已存在等价 allow 规则时自动隐藏。
+  // 测试 stub context 可能没有 permissions 字段，这里防御性回退到空数组，
+  // 保持 view-model.test.ts 既有 22 条 stub 用例不破。
+  const existingRules = context.permissions?.rules ?? [];
+  const elevation = buildElevationOptions({
+    toolName: permission.toolName as ToolName,
+    scope: permission.scope,
+    risk: permission.risk,
+    existingRules,
+    language,
+  });
+  const actions: PermissionAction[] = elevation.map((o) => ({
+    id: o.id,
+    label: o.label,
+    shortcut: o.shortcut,
+  }));
   return { ...permission, actions };
 }
 
