@@ -183,13 +183,36 @@ type PendingResponsesToolCall = {
 // ---------------------------------------------------------------------------
 // Anthropic Messages (/v1/messages) — request / stream event shapes
 // ---------------------------------------------------------------------------
-// 仅覆盖 Linghun 当前需要的字段：text 流、message_start/stop、usage 和 error。
-// Tools 在本轮 anthropic_messages profile 上禁用（contract.supportsTools=false），
-// 因此暂不实现 tool_use / tool_result / input_json_delta 路径。
+// D.13G：anthropic_messages profile 现在原生支持 tools（tool_use / tool_result /
+// input_json_delta 路径全部启用）。message content 既支持 string 形态也支持
+// content block array 形态（block 形态承载 tool_use 与 tool_result）。
 // D.13F：system 字段支持 string 与 block-array 两种形态，block 形态用于挂 cache_control。
 // 默认 5m：cache_control 只传 { type: "ephemeral" }，不传 ttl: "5m" 字面量。
 // 1h 仅在用户显式 promptCache.systemTtl="1h" 时设 ttl: "1h"，不附加 beta header。
-type AnthropicMessage = { role: "user"; content: string } | { role: "assistant"; content: string };
+export type AnthropicTextBlock = { type: "text"; text: string };
+
+export type AnthropicToolUseBlock = {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+};
+
+export type AnthropicToolResultBlock = {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+};
+
+export type AnthropicContentBlock =
+  | AnthropicTextBlock
+  | AnthropicToolUseBlock
+  | AnthropicToolResultBlock;
+
+type AnthropicMessage =
+  | { role: "user"; content: string | AnthropicContentBlock[] }
+  | { role: "assistant"; content: string | AnthropicContentBlock[] };
 
 export type AnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" };
 
@@ -199,21 +222,45 @@ export type AnthropicSystemBlock = {
   cache_control?: AnthropicCacheControl;
 };
 
+export type AnthropicToolDefinition = {
+  name: string;
+  description: string;
+  input_schema: unknown;
+};
+
+export type AnthropicToolChoice =
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "none" }
+  | { type: "tool"; name: string };
+
 export type AnthropicMessagesRequest = {
   model: string;
   messages: AnthropicMessage[];
   max_tokens: number;
   stream: true;
   system?: string | AnthropicSystemBlock[];
+  tools?: AnthropicToolDefinition[];
+  tool_choice?: AnthropicToolChoice;
 };
 
 type AnthropicStreamEvent =
   | { type: "message_start"; message?: { id?: string; usage?: AnthropicUsage } }
-  | { type: "content_block_start"; index?: number }
+  | {
+      type: "content_block_start";
+      index?: number;
+      content_block?: {
+        type?: string;
+        id?: string;
+        name?: string;
+        input?: unknown;
+        text?: string;
+      };
+    }
   | {
       type: "content_block_delta";
       index?: number;
-      delta?: { type?: string; text?: string };
+      delta?: { type?: string; text?: string; partial_json?: string };
     }
   | { type: "content_block_stop"; index?: number }
   | { type: "message_delta"; delta?: { stop_reason?: string }; usage?: AnthropicUsage }
@@ -683,19 +730,21 @@ export function resolveProviderRuntimeContract(
     config.compatibilityProfile ??
     (endpointProfile === "anthropic_messages" ? "anthropic_messages" : "strict_openai_compatible");
   if (endpointProfile === "anthropic_messages") {
+    // D.13G：anthropic_messages profile 现在原生支持 tools/tool calling。
+    // 默认 supportsTools=true（与 OpenAI 路径行为一致），仅当用户显式
+    // config.supportsTools=false 时才禁用；toolSchemaShape="anthropic_tools"
+    // 走 Anthropic 原生 schema（{name, description, input_schema}），
+    // toolResultShape="anthropic_tool_result" 走 user content block 形态。
     return {
       profile: "anthropic_messages",
       endpointProfile,
       endpoint: "/v1/messages",
       compatibilityProfile,
-      // 本轮 anthropic_messages profile 强制禁用 tools：
-      // 上游显式声明 supportsTools=false，确保 ModelGateway.withSupportedTools
-      // 在带 tools 的请求上抛 MODEL_TOOLS_UNSUPPORTED 而不是静默丢弃。
-      supportsTools: false,
+      supportsTools,
       sendReasoning: false,
       includeUsage: false,
-      toolSchemaShape: "tools_disabled",
-      toolResultShape: "tools_disabled",
+      toolSchemaShape: supportsTools ? "anthropic_tools" : "tools_disabled",
+      toolResultShape: supportsTools ? "anthropic_tool_result" : "tools_disabled",
       retryStatuses: [...PROVIDER_RETRY_STATUSES],
       maxAttempts: PROVIDER_MAX_ATTEMPTS,
       requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
@@ -790,20 +839,46 @@ export function resolveEffectiveEndpointProfile(input: {
   const model = input.requestModel ?? input.configModel;
   const modelLooksClaude = Boolean(model && CLAUDE_MODEL_PATTERN.test(model));
 
-  // 1. request 级 override 最高优先：per-request 显式声明应当生效。
-  if (input.requestEndpointProfile) {
-    if (baseUrlSuffix && baseUrlSuffix !== input.requestEndpointProfile) {
+  // 1. request 级 override：
+  //    - anthropic_messages / responses 保持最高优先（per-request 显式声明应当生效）；
+  //    - chat_completions 在 Claude 模型 + (config 为空 / chat_completions) 时一律视为占位，
+  //      不阻断 auto anthropic_messages：TUI 旧 SelectedModelRuntime narrow 为
+  //      chat_completions | responses，会把 "chat_completions" 默认值带进 request；
+  //      这里若直接信任 request.chat_completions，Claude 真实路径就会被带偏到 OpenAI chat。
+  //    - 其它 request.chat_completions（非 Claude）仍按显式声明生效。
+  const requestProfile = input.requestEndpointProfile;
+  if (requestProfile === "anthropic_messages" || requestProfile === "responses") {
+    if (baseUrlSuffix && baseUrlSuffix !== requestProfile) {
       warnings.push(
-        `request endpointProfile=${input.requestEndpointProfile} 与 baseUrl suffix=${baseUrlSuffix} 不一致；以 request 为准`,
+        `request endpointProfile=${requestProfile} 与 baseUrl suffix=${baseUrlSuffix} 不一致；以 request 为准`,
       );
     }
     return {
-      endpointProfile: input.requestEndpointProfile,
+      endpointProfile: requestProfile,
       source: "request",
       reason: "request 显式声明 endpointProfile",
       warnings,
     };
   }
+  const requestIsChatPlaceholderForClaude =
+    requestProfile === "chat_completions" &&
+    modelLooksClaude &&
+    (!input.configEndpointProfile || input.configEndpointProfile === "chat_completions");
+  if (requestProfile === "chat_completions" && !requestIsChatPlaceholderForClaude) {
+    if (baseUrlSuffix && baseUrlSuffix !== requestProfile) {
+      warnings.push(
+        `request endpointProfile=${requestProfile} 与 baseUrl suffix=${baseUrlSuffix} 不一致；以 request 为准`,
+      );
+    }
+    return {
+      endpointProfile: requestProfile,
+      source: "request",
+      reason: "request 显式声明 endpointProfile",
+      warnings,
+    };
+  }
+  // requestProfile === "chat_completions" 且 Claude placeholder：继续走 baseUrl / auto-claude
+  // 决策；不在这里直接生效，避免被 TUI selectedRuntime placeholder 带偏到 OpenAI chat。
 
   // 2. baseUrl 完整 endpoint suffix 是用户写死的真实路由，应优先反推 endpointProfile，
   //    避免 provider.env 的 chat_completions 占位与 Anthropic 中转 baseUrl 矛盾时仍走 chat。
@@ -1069,7 +1144,20 @@ function createAnthropicMessagesProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
 ): AnthropicMessagesRequest {
-  if (request.endpointProfile && request.endpointProfile !== "anthropic_messages") {
+  // D.13G：guard 不能只看 raw request.endpointProfile —— TUI 真实路径会从
+  // SelectedModelRuntime 透传 endpointProfile=chat_completions placeholder（type 还是
+  // chat_completions | responses），但决策器会把 Claude + chat_completions 视为占位
+  // 切回 anthropic_messages。如果在这里只比对 raw 值，placeholder continuation 就会
+  // 误抛 PROFILE_MISMATCH。改用 resolveEffectiveEndpointProfile 得到的 effective 值，
+  // 仅当真正不是 anthropic_messages（例如 request 显式 responses）时才抛。
+  const effectiveProfile = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: request.endpointProfile,
+    configEndpointProfile: config.endpointProfile,
+    configBaseUrl: config.baseUrl,
+    configModel: config.model,
+    requestModel: request.model,
+  }).endpointProfile;
+  if (effectiveProfile !== "anthropic_messages") {
     throw new LinghunError({
       code: "PROVIDER_PROFILE_MISMATCH",
       message:
@@ -1080,27 +1168,100 @@ function createAnthropicMessagesProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
-  // anthropic_messages 强制禁用 tools；如果上游误传 tools，assertToolCapability 会抛
-  // MODEL_TOOLS_UNSUPPORTED；request 没带 tools 时 assert 直接放过。
+  // D.13G：anthropic_messages 现在原生支持 tools；只有 contract.supportsTools=false（用户
+  // 显式禁用）时才让 assertToolCapability 抛 MODEL_TOOLS_UNSUPPORTED；否则直接放过。
   assertToolCapability(request, contract);
   const model = request.model ?? config.model;
   // Anthropic 的 system prompt 是顶层字段；从 messages 中抽出第一个 system 文本，
   // 其余 system 消息合并到 system 字段，剩下 user/assistant 按顺序保留。
   const systemSegments: string[] = [];
   const conversation: AnthropicMessage[] = [];
+  // D.13G：跨消息追踪 assistant 已经发起但还未配对 tool_result 的 tool_use id 集合，
+  // 用于 minimal pairing repair（仅在 builder 边界）：
+  //   - 如果 assistant 之后没有任何 tool_result 配对该 id → 在末尾注入合成 is_error tool_result
+  //   - 如果出现 orphan tool_result（id 不在已发起集合里）→ 直接丢弃；不产生 user 消息
+  const pendingToolUseIds = new Set<string>();
   for (const message of request.messages) {
     if (message.role === "system") {
       if (message.content) systemSegments.push(message.content);
       continue;
     }
-    if (message.role === "user" || message.role === "assistant") {
-      conversation.push({
-        role: message.role,
+    if (message.role === "user") {
+      const blocks: AnthropicContentBlock[] = [];
+      if (message.content) {
+        blocks.push({ type: "text", text: message.content });
+      }
+      if (blocks.length > 0) {
+        conversation.push({ role: "user", content: blocks.length === 1 && blocks[0].type === "text" ? message.content : blocks });
+      }
+      continue;
+    }
+    if (message.role === "assistant") {
+      const toolCalls = message.toolCalls ?? [];
+      if (toolCalls.length === 0) {
+        // 纯文本 assistant：保留 string 形态，避免对纯对话场景产生 block-array 噪声。
+        conversation.push({ role: "assistant", content: message.content });
+        continue;
+      }
+      const blocks: AnthropicContentBlock[] = [];
+      if (message.content) {
+        blocks.push({ type: "text", text: message.content });
+      }
+      for (const toolCall of toolCalls) {
+        blocks.push({
+          type: "tool_use",
+          id: toolCall.id,
+          name: toolCall.name,
+          input: toolCall.input ?? {},
+        });
+        pendingToolUseIds.add(toolCall.id);
+      }
+      conversation.push({ role: "assistant", content: blocks });
+      continue;
+    }
+    if (message.role === "tool") {
+      // tool role 必须配对到 user 消息的 tool_result block。
+      if (!pendingToolUseIds.has(message.tool_call_id)) {
+        // Orphan tool_result：没有对应的 assistant tool_use（可能上游历史被截断/重排）。
+        // 最小修复：直接丢弃该 tool 消息，避免 Anthropic 400；不静默吞错误，
+        // 但本 builder 边界不引入"折叠为 text summary"等结构改动。
+        continue;
+      }
+      pendingToolUseIds.delete(message.tool_call_id);
+      const toolResultBlock: AnthropicToolResultBlock = {
+        type: "tool_result",
+        tool_use_id: message.tool_call_id,
         content: message.content,
+      };
+      // 末位 user 消息合并 tool_result block，避免在 Anthropic 强制 user/assistant 交替时
+      // 因为多个 tool 消息被拆成多个独立 user 消息而违反契约。
+      const last = conversation[conversation.length - 1];
+      if (last && last.role === "user" && Array.isArray(last.content)) {
+        last.content.push(toolResultBlock);
+      } else {
+        conversation.push({ role: "user", content: [toolResultBlock] });
+      }
+      continue;
+    }
+  }
+  // D.13G：assistant 已经发起 tool_use 但流尾没有配对 tool_result → 注入合成 is_error
+  // tool_result，让 Anthropic 在下一轮可以稳定继续；不静默丢弃 tool_use。
+  if (pendingToolUseIds.size > 0) {
+    const repairBlocks: AnthropicToolResultBlock[] = [];
+    for (const toolUseId of pendingToolUseIds) {
+      repairBlocks.push({
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        content: "<missing tool_result; synthesized by Linghun>",
+        is_error: true,
       });
     }
-    // 'tool' role 在 anthropic_messages profile 不发生（contract.supportsTools=false 已阻断）。
-    // 即使上游误传，也不进入 conversation，避免破坏 Anthropic 的 user/assistant 交替契约。
+    const last = conversation[conversation.length - 1];
+    if (last && last.role === "user" && Array.isArray(last.content)) {
+      last.content.push(...repairBlocks);
+    } else {
+      conversation.push({ role: "user", content: repairBlocks });
+    }
   }
   const body: AnthropicMessagesRequest = {
     model,
@@ -1108,6 +1269,15 @@ function createAnthropicMessagesProfileRequest(
     max_tokens: resolveMaxOutputTokens(model, request, config),
     stream: true,
   };
+  // D.13G：tools 走 Anthropic 原生 schema，按 name 字典序稳定排序（与 OpenAI 路径一致），
+  // 用于保护 prompt cache 前缀 hash。tool_choice 默认 "auto"；显式 "none" 时同步透传。
+  if (contract.supportsTools && request.tools && request.tools.length > 0) {
+    body.tools = createAnthropicTools(request);
+    body.tool_choice = request.toolChoice === "none" ? { type: "none" } : { type: "auto" };
+  } else if (contract.supportsTools && request.toolChoice) {
+    // 没有 tools 但显式声明 tool_choice：不附带 tools 字段时 tool_choice 单独发送会被
+    // Anthropic 拒绝；与 OpenAI 路径一致，此处不输出 tool_choice。
+  }
   if (systemSegments.length > 0) {
     // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
     // cache_control（5m 默认不写 ttl 字面量；1h 显式时才写 ttl: "1h"）。
@@ -1134,6 +1304,21 @@ function createAnthropicMessagesProfileRequest(
     }
   }
   return body;
+}
+
+function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] | undefined {
+  // D.13G：tools 数组按 name 字典序稳定排序，与 OpenAI chat/responses 路径一致；
+  // 用于稳定 Anthropic prompt cache 的前缀 hash（cache_control 与 tools 共存时，
+  // tools 顺序变化会破坏前缀 hash 命中率）。
+  const tools = request.tools;
+  if (!tools || tools.length === 0) return undefined;
+  return [...tools]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
 }
 
 function resolveMaxOutputTokens(
@@ -1349,6 +1534,7 @@ export async function* parseAnthropicMessagesStream(
     cacheReadTokens: undefined,
     cacheWriteTokens: undefined,
     rawUsage: undefined,
+    pendingToolUses: new Map(),
   };
 
   while (true) {
@@ -1384,6 +1570,12 @@ export async function* parseAnthropicMessagesStream(
   };
 }
 
+type AnthropicPendingToolUse = {
+  id: string;
+  name: string;
+  argsBuffer: string;
+};
+
 type AnthropicStreamParseState = {
   chunkCount: number;
   hadUsage: boolean;
@@ -1394,6 +1586,10 @@ type AnthropicStreamParseState = {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   rawUsage?: AnthropicUsage;
+  // D.13G：跨事件追踪每个 content_block index 上的 tool_use 状态。
+  // content_block_start(tool_use) 时建立 entry，input_json_delta 累积 partial_json，
+  // content_block_stop 时 JSON.parse 并 emit 单个 LinghunEvent.tool_use。
+  pendingToolUses: Map<number, AnthropicPendingToolUse>;
 };
 
 function parseAnthropicMessagesEventBlock(
@@ -1464,13 +1660,94 @@ function parseAnthropicMessagesEventBlock(
     return [];
   }
 
+  if (parsed.type === "content_block_start") {
+    // D.13G：tool_use 块开始时建立 pendingToolUses entry；text/其它块不产 LinghunEvent。
+    const block = parsed.content_block;
+    const blockIndex = parsed.index;
+    if (block?.type === "tool_use" && typeof blockIndex === "number") {
+      const id = typeof block.id === "string" ? block.id : "";
+      const name = typeof block.name === "string" ? block.name : "";
+      if (!id || !name) {
+        return [
+          {
+            type: "error",
+            error: new LinghunError({
+              code: "PROVIDER_MALFORMED_STREAM",
+              message: "模型请求失败：Anthropic 流式 tool_use 缺 id 或 name。",
+              suggestion:
+                "请运行 /model doctor 检查 provider 是否完整支持 Anthropic Messages tool_use 流式协议；如持续出现请切换 provider/model。",
+              recoverable: true,
+            }),
+          },
+        ];
+      }
+      state.pendingToolUses.set(blockIndex, { id, name, argsBuffer: "" });
+    }
+    return [];
+  }
+
   if (parsed.type === "content_block_delta") {
     const delta = parsed.delta;
     if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
       state.hadText = true;
       return [{ type: "assistant_text_delta", id: state.lastId, text: delta.text }];
     }
+    if (delta?.type === "input_json_delta") {
+      // D.13G：input_json_delta 累积 partial_json 到对应 index 上的 pendingToolUses。
+      // 如果 index 上没有 tool_use entry → 视为协议错乱，emit PROVIDER_MALFORMED_STREAM。
+      const blockIndex = parsed.index;
+      if (typeof blockIndex !== "number") return [];
+      const pending = state.pendingToolUses.get(blockIndex);
+      if (!pending) {
+        return [
+          {
+            type: "error",
+            error: new LinghunError({
+              code: "PROVIDER_MALFORMED_STREAM",
+              message:
+                "模型请求失败：Anthropic 流式 input_json_delta 落在非 tool_use 内容块上。",
+              suggestion:
+                "请运行 /model doctor 检查 provider 的 Anthropic Messages 流式实现是否完整；如持续出现请切换 provider/model。",
+              recoverable: true,
+            }),
+          },
+        ];
+      }
+      if (typeof delta.partial_json === "string") {
+        pending.argsBuffer += delta.partial_json;
+      }
+      return [];
+    }
     return [];
+  }
+
+  if (parsed.type === "content_block_stop") {
+    // D.13G：tool_use 块结束 → JSON.parse 累积的 partial_json，emit 单个 LinghunEvent.tool_use。
+    const blockIndex = parsed.index;
+    if (typeof blockIndex !== "number") return [];
+    const pending = state.pendingToolUses.get(blockIndex);
+    if (!pending) return [];
+    state.pendingToolUses.delete(blockIndex);
+    const argsRaw = pending.argsBuffer.length > 0 ? pending.argsBuffer : "{}";
+    let input: unknown;
+    try {
+      input = JSON.parse(argsRaw);
+    } catch (error) {
+      return [
+        {
+          type: "error",
+          error: new LinghunError({
+            code: "PROVIDER_MALFORMED_STREAM",
+            message: "模型请求失败：Anthropic 流式 tool_use input_json 无法解析为 JSON。",
+            suggestion:
+              "请运行 /model doctor 检查 provider 的 Anthropic Messages 流式实现是否完整；如持续出现请切换 provider/model。",
+            cause: error,
+            recoverable: true,
+          }),
+        },
+      ];
+    }
+    return [{ type: "tool_use", id: pending.id, name: pending.name, input }];
   }
 
   if (parsed.type === "message_delta") {

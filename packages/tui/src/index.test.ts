@@ -5159,6 +5159,204 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已写入 report.md 并读取 package.json。");
   });
 
+  it("D.13G real path: Claude placeholder dispatches anthropic tools through executeModelToolUse and continues with /v1/messages tool_result body without chat_completions divert", async () => {
+    // 复现 D.13G 真实路径：
+    //   - provider.env 旧 setup 默认 endpointProfile=chat_completions（占位）；
+    //   - SelectedModelRuntime 把 endpointProfile 收窄为 chat_completions/responses，
+    //     即使 Claude 模型最终也会以 chat_completions 透传给 gateway.stream；
+    //   - 决策器必须把 Claude + chat_completions 视为占位、自动切 anthropic_messages，
+    //     第一轮 fetch 走 /v1/messages 并解析 Anthropic SSE tool_use；
+    //   - TUI 既有 executeModelToolUse / 权限 / tool_result 链路被复用（不引入二级 runner）；
+    //   - 第二轮 body 必须以 Anthropic user content block { type:"tool_result", tool_use_id, content }
+    //     回灌，URL 仍是 /v1/messages（不能被带偏到 /chat/completions），
+    //     assistant block 必须携带 tool_use(id, name, input)；
+    //   - 不能打印"不支持 tool calling"提示。
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    // 把可能干扰本测试的环境变量稳定到本测试期望的值。
+    // 注意：vi.stubEnv("X", "") 不等于 unset；config 用 process.env.X ?? settings.X 合并，
+    // 空字符串会原样透传，所以这里直接 stub 为期望值。
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    // provider.env 旧 setup 默认值就是 chat_completions，这里也保持这个占位
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "chat_completions");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            // 关键：provider.env 旧 setup 默认值，本身就是 chat_completions 占位
+            endpointProfile: "chat_completions",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: Array<{
+      url: string;
+      body: { messages?: Array<{ role: string; content: unknown }> };
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role: string; content: unknown }>;
+        };
+        requests.push({ url: String(url), body });
+        const encoder = new TextEncoder();
+        if (requests.length === 1) {
+          // 第一轮：Anthropic SSE 单个 tool_use（content_block_start + input_json_delta + stop）
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10}}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_test_1","name":"Read"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"package.json\\"}"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+              );
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        // 第二轮：Anthropic SSE 仅 text_delta，最终 stop_reason=end_turn
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":20}}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"已读取 package.json，分析完成。"}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 必须发了两轮请求
+    expect(requests).toHaveLength(2);
+    // 两轮 URL 都是 /v1/messages，不是 /chat/completions（占位不能带偏 Claude 路径）
+    expect(requests[0].url).toBe("https://relay.example.com/v1/messages");
+    expect(requests[1].url).toBe("https://relay.example.com/v1/messages");
+    expect(requests[0].url.endsWith("/chat/completions")).toBe(false);
+    expect(requests[1].url.endsWith("/chat/completions")).toBe(false);
+
+    // 第二轮 body 必须存在 Anthropic user content block 形态的 tool_result（{type:"tool_result", tool_use_id, content}）
+    const secondMessages = requests[1].body.messages ?? [];
+    const userToolResultMessages = secondMessages.filter(
+      (m) => m.role === "user" && Array.isArray(m.content),
+    );
+    const allUserBlocks = userToolResultMessages.flatMap(
+      (m) =>
+        (m.content as Array<{ type?: string; tool_use_id?: string; content?: unknown }>) ?? [],
+    );
+    const toolResult = allUserBlocks.find(
+      (b) => b.type === "tool_result" && b.tool_use_id === "toolu_test_1",
+    );
+    expect(toolResult).toBeTruthy();
+    expect(toolResult?.content).toBeDefined();
+
+    // 第二轮 assistant 必须携带 tool_use block（id/name/input）
+    const assistantBlocks = secondMessages
+      .filter((m) => m.role === "assistant" && Array.isArray(m.content))
+      .flatMap(
+        (m) =>
+          (m.content as Array<{ type?: string; id?: string; name?: string; input?: unknown }>) ??
+          [],
+      );
+    const toolUseBlock = assistantBlocks.find(
+      (b) => b.type === "tool_use" && b.id === "toolu_test_1" && b.name === "Read",
+    );
+    expect(toolUseBlock).toBeTruthy();
+
+    // 不能打印"不支持 tool calling"提示（zh+en 两路都断言）
+    expect(output.text).not.toContain("不支持 tool calling");
+    expect(output.text).not.toContain("Tool calling is not supported");
+
+    // 占位不能让 body 退化为 OpenAI chat schema：第二轮 body 不应有 choices/openai 风格 tool_calls
+    const rawSecondBody = requests[1].body as unknown as {
+      tools?: Array<{ name?: string; function?: unknown; input_schema?: unknown }>;
+    };
+    if (rawSecondBody.tools && rawSecondBody.tools.length > 0) {
+      // tools schema 必须是 Anthropic（{name, input_schema}），不是 OpenAI 的 {type:"function", function:{...}}
+      expect(rawSecondBody.tools[0].function).toBeUndefined();
+      expect(rawSecondBody.tools[0].input_schema).toBeDefined();
+    }
+
+    // 最终 assistant 文本应进入 stdout
+    expect(output.text).toContain("已读取 package.json");
+  });
+
   it("returns Bash non-zero exits as failed model-visible tool_results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });

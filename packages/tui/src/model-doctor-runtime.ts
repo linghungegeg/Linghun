@@ -246,13 +246,20 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
     );
     lines.push(`    endpointProfile decision: source=${decision.source} reason=${decision.reason}`);
-    // D.13F：tools=disabled 时显式标注原因；anthropic_messages profile 永远不接 tools。
+    // D.13G：tools=disabled 时显式标注原因；anthropic_messages profile 现已原生支持 tools，
+    // 仅在 contract.supportsTools=false（用户显式禁用）时才印 reason。
     if (!contract.supportsTools) {
       const reason =
         contract.endpointProfile === "anthropic_messages"
-          ? "anthropic_messages profile 不支持 OpenAI 风格 tools/tool calling；请切到 chat_completions/responses profile 或换 supportsTools=true 的 provider"
+          ? "anthropic_messages profile 已原生支持 tools，但当前 provider 显式声明 supportsTools=false；如需启用请把配置改为 supportsTools=true 或删除该字段"
           : `runtime contract supportsTools=false (profile=${contract.profile})`;
       lines.push(`    tools disabled reason: ${reason}`);
+    }
+    // D.13G：anthropic_messages tools 启用时显式标注 schema/sort 属性，便于诊断。
+    if (contract.endpointProfile === "anthropic_messages" && contract.supportsTools) {
+      lines.push(
+        "    anthropic tools: enabled schema=anthropic_tools(input_schema) tool_choice=auto/none sort=name-asc(stable for prompt cache)",
+      );
     }
     // D.13F：Anthropic prompt cache 可观察字段说明（与 promptCache.enabled 联动）。
     // 显示是否会附加 cache_control 和 ephemeral_5m / ephemeral_1h usage 计数透出情况。

@@ -1242,8 +1242,10 @@ describe("joinBaseUrlAndEndpoint", () => {
 });
 
 describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
-  it("forces tools off and points at /v1/messages for anthropic_messages profile", () => {
-    const contract = resolveProviderRuntimeContract({
+  it("D.13G: defaults to supportsTools=true with anthropic schema shapes; respects explicit supportsTools=false", () => {
+    // D.13G：anthropic_messages 现已原生支持 tools，contract 默认 supportsTools=true
+    // 并使用 Anthropic 原生 schema；只有当用户显式 supportsTools=false 时才禁用。
+    const enabled = resolveProviderRuntimeContract({
       id: "claude-relay",
       type: "openai-compatible",
       baseUrl: "https://relay.example.com/v1",
@@ -1251,15 +1253,28 @@ describe("resolveProviderRuntimeContract anthropic_messages branch", () => {
       model: "claude-3-5-sonnet-latest",
       endpointProfile: "anthropic_messages",
     });
-    expect(contract.endpointProfile).toBe("anthropic_messages");
-    expect(contract.endpoint).toBe("/v1/messages");
-    expect(contract.profile).toBe("anthropic_messages");
-    expect(contract.compatibilityProfile).toBe("anthropic_messages");
-    expect(contract.supportsTools).toBe(false);
-    expect(contract.toolSchemaShape).toBe("tools_disabled");
-    expect(contract.toolResultShape).toBe("tools_disabled");
-    expect(contract.sendReasoning).toBe(false);
-    expect(contract.includeUsage).toBe(false);
+    expect(enabled.endpointProfile).toBe("anthropic_messages");
+    expect(enabled.endpoint).toBe("/v1/messages");
+    expect(enabled.profile).toBe("anthropic_messages");
+    expect(enabled.compatibilityProfile).toBe("anthropic_messages");
+    expect(enabled.supportsTools).toBe(true);
+    expect(enabled.toolSchemaShape).toBe("anthropic_tools");
+    expect(enabled.toolResultShape).toBe("anthropic_tool_result");
+    expect(enabled.sendReasoning).toBe(false);
+    expect(enabled.includeUsage).toBe(false);
+
+    const disabled = resolveProviderRuntimeContract({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      supportsTools: false,
+    });
+    expect(disabled.supportsTools).toBe(false);
+    expect(disabled.toolSchemaShape).toBe("tools_disabled");
+    expect(disabled.toolResultShape).toBe("tools_disabled");
   });
 
   it("recognizes /v1/messages base-url suffix as anthropic_messages in diagnostic", () => {
@@ -1338,7 +1353,10 @@ describe("Anthropic Messages stream parser", () => {
 });
 
 describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
-  it("rejects tools requests on anthropic_messages profile via MODEL_TOOLS_UNSUPPORTED", () => {
+  it("D.13G: builds an anthropic tools request without throwing MODEL_TOOLS_UNSUPPORTED", () => {
+    // 验收 #2：anthropic_messages contract 现已 supportsTools=true（默认），
+    // 带 tools 的请求 builder 不再抛 MODEL_TOOLS_UNSUPPORTED；request body 走
+    // Anthropic 原生 tools schema，而不是被搬到 OpenAI chat schema。
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
@@ -1346,6 +1364,37 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       apiKey: "test-key",
       model: "claude-3-5-sonnet-latest",
       endpointProfile: "anthropic_messages",
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { name: "Read", description: "Read file", inputSchema: { type: "object" } },
+        { name: "Bash", description: "Run bash", inputSchema: { type: "object" } },
+      ],
+    });
+    expect(body.tools).toBeDefined();
+    // tools 必须按 name 字典序稳定排序（用于稳定 prompt cache 前缀 hash）。
+    expect(body.tools?.map((tool) => tool.name)).toEqual(["Bash", "Read"]);
+    // tools 走 Anthropic 原生 schema：{name, description, input_schema}，
+    // 而不是 OpenAI 的 {type:"function", function:{...}} 包装。
+    expect(body.tools?.[0]).toMatchObject({
+      name: "Bash",
+      description: "Run bash",
+      input_schema: { type: "object" },
+    });
+    expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("D.13G: still throws MODEL_TOOLS_UNSUPPORTED when provider explicitly disables tools", () => {
+    // 用户显式 supportsTools=false 时仍要走 MODEL_TOOLS_UNSUPPORTED，避免静默忽略。
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      supportsTools: false,
     });
     expect(() =>
       provider.createAnthropicMessagesRequest({
@@ -1439,6 +1488,159 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(headers.authorization).toBe("Bearer test-key");
     expect(headers["User-Agent"]).toBe(EXPECTED_REQUEST_USER_AGENT);
     expect(events.some((event) => event.type === "assistant_text_delta")).toBe(true);
+  });
+
+  it("D.13G(real path): Claude config endpointProfile=chat_completions placeholder + request endpointProfile=chat_completions + tools → still POSTs /v1/messages with anthropic tools schema", async () => {
+    // 复现 TUI selectedRuntime placeholder 路径：provider.env 写了 chat_completions 占位、
+    // SelectedModelRuntime narrow 为 chat_completions | responses 也会把 chat_completions
+    // 透传给 gateway.stream。决策器必须把 Claude + chat_completions 视为占位、自动切
+    // anthropic_messages，最终 fetch URL 是 /v1/messages，body 是 Anthropic tools schema，
+    // 不能被带偏到 OpenAI chat schema。
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_p"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      // Anthropic root baseUrl，没有 /v1 后缀也常见；用 /v1 后缀是 relay 常见配置。
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      // provider.env 旧 setup 默认值：仍是 chat_completions 占位。
+      endpointProfile: "chat_completions",
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        // TUI SelectedModelRuntime 真实路径会把 placeholder 透传给 gateway.stream。
+        endpointProfile: "chat_completions",
+        tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+      },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    // 真实路径必须切到 /v1/messages，不能停留在 /chat/completions。
+    expect(url).toBe("https://relay.example.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("test-key");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    // body 必须是 Anthropic tools schema：{name, description, input_schema}，
+    // 而不是 OpenAI chat 的 {type:"function", function:{...}} 包装。
+    const body = JSON.parse(init.body as string) as {
+      tools?: Array<{ name?: string; input_schema?: unknown; function?: unknown }>;
+      tool_choice?: unknown;
+    };
+    expect(body.tools?.[0]).toMatchObject({
+      name: "Read",
+      input_schema: { type: "object" },
+    });
+    expect(body.tools?.[0].function).toBeUndefined();
+    expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("D.13G(real path): createAnthropicMessagesRequest does NOT throw PROFILE_MISMATCH when Claude placeholder + request.endpointProfile=chat_completions", () => {
+    // builder guard 必须先 resolve effective profile，placeholder 不应抛 PROFILE_MISMATCH。
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "chat_completions",
+    });
+    expect(() =>
+      provider.createAnthropicMessagesRequest({
+        messages: [{ role: "user", content: "hi" }],
+        endpointProfile: "chat_completions",
+        tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+      }),
+    ).not.toThrow();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      endpointProfile: "chat_completions",
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+    });
+    expect(body.tools?.[0]).toMatchObject({ name: "Read", input_schema: { type: "object" } });
+    expect(JSON.stringify(body.tools)).not.toContain('"function"');
+  });
+
+  it("D.13G(real path): non-Claude model + request endpointProfile=chat_completions stays on OpenAI chat /chat/completions schema", async () => {
+    // 反向回归：占位策略只对 Claude 生效；非 Claude 模型 + chat_completions 仍走 OpenAI chat。
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\n',
+            ),
+          );
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "test-key",
+      model: "gpt-4o-mini",
+      endpointProfile: "chat_completions",
+    });
+    for await (const _event of provider.stream(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        endpointProfile: "chat_completions",
+        tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+      },
+      new AbortController().signal,
+    )) {
+      // drain stream
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://api.openai.com/v1/chat/completions");
+    const body = JSON.parse(init.body as string) as {
+      tools?: Array<{ type?: string; function?: { name?: string } }>;
+    };
+    // OpenAI chat 仍是 {type:"function", function:{name,...}} 包装。
+    expect(body.tools?.[0]).toMatchObject({
+      type: "function",
+      function: { name: "Read" },
+    });
   });
 });
 
@@ -1705,5 +1907,241 @@ describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
     expect(Array.isArray(sent.system)).toBe(true);
     expect(sent.system.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(sent.system.at(-1)?.text).toContain("<!-- linghun-break-cache:wire-nonce-9 -->");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D.13G — Anthropic Messages tools (Claude agent parity)
+// ---------------------------------------------------------------------------
+describe("D.13G Anthropic tools contract + builder + stream parser", () => {
+  function buildAnthropicProvider(
+    overrides: Partial<Parameters<typeof resolveProviderRuntimeContract>[0]> = {},
+  ) {
+    return new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      ...overrides,
+    });
+  }
+
+  it("contract: anthropic_messages defaults to supportsTools=true and anthropic schema shapes", () => {
+    const contract = resolveProviderRuntimeContract({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    expect(contract.endpointProfile).toBe("anthropic_messages");
+    expect(contract.supportsTools).toBe(true);
+    expect(contract.toolSchemaShape).toBe("anthropic_tools");
+    expect(contract.toolResultShape).toBe("anthropic_tool_result");
+  });
+
+  it("regression(验收 #1): Claude config with chat_completions placeholder + continuation hint still resolves to anthropic_messages with anthropic tools schema", () => {
+    // Claude provider 配置 endpointProfile=chat_completions（provider.env 旧 setup 占位），
+    // request.endpointProfile=chat_completions 看似 continuation 沿用 chat 形态，
+    // 但决策器必须把 chat_completions 视为占位并切回 anthropic_messages，
+    // 同时 builder 必须走 Anthropic schema（input_schema），不被带偏到 OpenAI chat schema。
+    const baseUrlAuto = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: undefined,
+      configEndpointProfile: "chat_completions",
+      configBaseUrl: "https://api.anthropic.com",
+      configModel: "claude-3-5-sonnet-latest",
+    });
+    expect(baseUrlAuto.endpointProfile).toBe("anthropic_messages");
+    expect(baseUrlAuto.source).toBe("auto-claude-model");
+
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "chat_completions",
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      // 注意：request.endpointProfile 不显式传入；让 provider 自己走 builder。
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+    });
+    expect(body.tools?.[0]).toMatchObject({ name: "Read", input_schema: { type: "object" } });
+    // OpenAI chat shape 的 function 包装绝对不应出现在 anthropic body 上。
+    expect(JSON.stringify(body.tools)).not.toContain('"function"');
+    expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("builder: tool_choice='none' is honored when explicit", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+      toolChoice: "none",
+    });
+    expect(body.tool_choice).toEqual({ type: "none" });
+  });
+
+  it("builder: assistant.toolCalls converts to user|assistant tool_use blocks; tool role converts to user tool_result block", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "user", content: "list README" },
+        {
+          role: "assistant",
+          content: "let me read it",
+          toolCalls: [
+            { id: "call-1", name: "Read", input: { path: "README.md" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call-1", content: '{"ok":true}' },
+        { role: "assistant", content: "done" },
+      ],
+      tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+    });
+    // assistant 转换：text + tool_use 混合 block
+    const assistantTurn = body.messages[1];
+    expect(assistantTurn.role).toBe("assistant");
+    expect(Array.isArray(assistantTurn.content)).toBe(true);
+    const assistantBlocks = assistantTurn.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>;
+    expect(assistantBlocks).toEqual([
+      { type: "text", text: "let me read it" },
+      { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
+    ]);
+    // tool 消息：必须折叠到下一个 user 消息的 tool_result block
+    const toolResultTurn = body.messages[2];
+    expect(toolResultTurn.role).toBe("user");
+    const userBlocks = toolResultTurn.content as Array<{ type: string; tool_use_id?: string; content?: string }>;
+    expect(userBlocks).toEqual([
+      { type: "tool_result", tool_use_id: "call-1", content: '{"ok":true}' },
+    ]);
+  });
+
+  it("builder: orphan assistant tool_use (no following tool_result) → synthesized is_error tool_result appended", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call-orphan", name: "Read", input: {} }],
+        },
+      ],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+    });
+    // 末尾合成 user 消息 + tool_result is_error=true
+    const last = body.messages.at(-1);
+    expect(last?.role).toBe("user");
+    const blocks = last?.content as Array<{ type: string; tool_use_id?: string; is_error?: boolean; content?: string }>;
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        type: "tool_result",
+        tool_use_id: "call-orphan",
+        is_error: true,
+      }),
+    ]);
+    expect(blocks[0].content).toContain("synthesized by Linghun");
+  });
+
+  it("builder: orphan tool_result (no matching tool_use) is dropped to avoid Anthropic 400", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "user", content: "go" },
+        { role: "tool", tool_call_id: "call-ghost", content: '{"x":1}' },
+        { role: "assistant", content: "ok" },
+      ],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+    });
+    // tool 消息直接被丢弃；只剩 user + assistant
+    expect(body.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("builder: cache_control on system + tools array coexist in same request", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "You are Linghun." },
+        { role: "user", content: "hi" },
+      ],
+      tools: [{ name: "Read", description: "Read", inputSchema: { type: "object" } }],
+      promptCacheEnabled: true,
+    });
+    expect(Array.isArray(body.system)).toBe(true);
+    const systemBlocks = body.system as Array<{ type: string; cache_control?: unknown }>;
+    expect(systemBlocks.at(-1)?.cache_control).toEqual({ type: "ephemeral" });
+    expect(body.tools?.[0]).toMatchObject({ name: "Read", input_schema: { type: "object" } });
+    expect(body.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("stream parser: content_block_start(tool_use) + multiple input_json_delta + content_block_stop emits one tool_use event", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_t"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-7","name":"Read"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\\"README.md\\"}"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const toolUse = events.find(
+      (event): event is Extract<LinghunEvent, { type: "tool_use" }> => event.type === "tool_use",
+    );
+    expect(toolUse).toEqual({
+      type: "tool_use",
+      id: "call-7",
+      name: "Read",
+      input: { path: "README.md" },
+    });
+  });
+
+  it("stream parser: mixed text_delta + tool_use stream emits both event types in order", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_m"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"思考中"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-mix","name":"Bash"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const types = events.map((event) => event.type);
+    const textIdx = types.indexOf("assistant_text_delta");
+    const toolIdx = types.indexOf("tool_use");
+    expect(textIdx).toBeGreaterThanOrEqual(0);
+    expect(toolIdx).toBeGreaterThan(textIdx);
+  });
+
+  it("stream parser: malformed input_json_delta JSON (unparseable at stop) → PROVIDER_MALFORMED_STREAM", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_e"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-bad","name":"Read"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{not-json"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const error = events.find(
+      (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
+    );
+    expect(error?.error.code).toBe("PROVIDER_MALFORMED_STREAM");
+  });
+
+  it("stream parser: input_json_delta on non-tool_use index → PROVIDER_MALFORMED_STREAM", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const error = events.find(
+      (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
+    );
+    expect(error?.error.code).toBe("PROVIDER_MALFORMED_STREAM");
   });
 });

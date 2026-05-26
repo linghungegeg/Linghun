@@ -569,7 +569,9 @@ describe("model-doctor-runtime", () => {
       expect(output).toContain("cache_control=off");
     });
 
-    it("emits tools-disabled-reason for anthropic_messages provider", async () => {
+    it("D.13G: anthropic_messages provider does NOT emit tools-disabled-reason; emits 'anthropic tools: enabled' annotation by default", async () => {
+      // 验收 #2：anthropic_messages contract 现在默认 supportsTools=true，
+      // /model doctor 输出必须显式标注 enabled，不能再印旧的 "tools disabled reason"。
       const config: LinghunConfig = {
         ...baseConfig,
         providers: {
@@ -584,8 +586,31 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).not.toContain("tools disabled reason:");
+      expect(output).toContain("anthropic tools: enabled schema=anthropic_tools");
+      expect(output).toContain("tools=enabled");
+      expect(output).toContain("toolSchema=anthropic_tools");
+      expect(output).toContain("toolResult=anthropic_tool_result");
+    });
+
+    it("D.13G: anthropic_messages provider with explicit supportsTools=false still emits tools-disabled-reason", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+            supportsTools: false,
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
       expect(output).toContain("tools disabled reason:");
-      expect(output).toContain("anthropic_messages profile 不支持 OpenAI 风格 tools/tool calling");
+      expect(output).toContain("anthropic_messages profile 已原生支持 tools");
     });
 
     it("never leaks raw apiKey or prompt text", async () => {
