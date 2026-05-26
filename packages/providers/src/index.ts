@@ -9,6 +9,11 @@ export type ModelUsage = {
   cacheWriteTokens?: number;
   cacheWriteTokensRaw?: number | null;
   cacheWriteTokensEstimated?: boolean;
+  // D.13F：Anthropic prompt cache 显式 cache_control 时，message_start/message_delta 的
+  // usage.cache_creation 会带上 ephemeral_5m_input_tokens / ephemeral_1h_input_tokens；
+  // 仅作只读统计使用，OpenAI 兼容路径不会写这两个字段。
+  cacheCreationEphemeral5mTokens?: number;
+  cacheCreationEphemeral1hTokens?: number;
   rawUsage?: unknown;
   endpoint?: string;
 };
@@ -106,6 +111,12 @@ export type ModelRequest = {
   toolChoice?: "auto" | "none";
   endpointProfile?: EndpointProfile;
   reasoningLevel?: string;
+  // D.13F：prompt cache 输入。enabled 默认由上层（TUI/runtime）解析后注入；
+  // promptCacheTtl 只支持 "1h" 显式传，不传等于 5m 默认（cache_control 不写 ttl 字面量）。
+  // cacheBreakNonce 由 TUI/runtime 根据 once/always 标记文件计算后注入；provider 不读不写文件。
+  promptCacheEnabled?: boolean;
+  promptCacheTtl?: "1h";
+  cacheBreakNonce?: string;
 };
 
 export type Provider = {
@@ -175,14 +186,25 @@ type PendingResponsesToolCall = {
 // 仅覆盖 Linghun 当前需要的字段：text 流、message_start/stop、usage 和 error。
 // Tools 在本轮 anthropic_messages profile 上禁用（contract.supportsTools=false），
 // 因此暂不实现 tool_use / tool_result / input_json_delta 路径。
+// D.13F：system 字段支持 string 与 block-array 两种形态，block 形态用于挂 cache_control。
+// 默认 5m：cache_control 只传 { type: "ephemeral" }，不传 ttl: "5m" 字面量。
+// 1h 仅在用户显式 promptCache.systemTtl="1h" 时设 ttl: "1h"，不附加 beta header。
 type AnthropicMessage = { role: "user"; content: string } | { role: "assistant"; content: string };
+
+export type AnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" };
+
+export type AnthropicSystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: AnthropicCacheControl;
+};
 
 export type AnthropicMessagesRequest = {
   model: string;
   messages: AnthropicMessage[];
   max_tokens: number;
   stream: true;
-  system?: string;
+  system?: string | AnthropicSystemBlock[];
 };
 
 type AnthropicStreamEvent =
@@ -207,6 +229,12 @@ type AnthropicUsage = {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  // D.13F：Anthropic explicit cache_control 时，cache_creation 会按 ttl 拆分到这两个子字段。
+  // 不传 ttl 时仍只看 cache_creation_input_tokens；ephemeral_5m / 1h 字段为只读统计。
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
 };
 
 export type ProviderRuntimeContract = {
@@ -1081,7 +1109,29 @@ function createAnthropicMessagesProfileRequest(
     stream: true,
   };
   if (systemSegments.length > 0) {
-    body.system = systemSegments.join("\n\n");
+    // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
+    // cache_control（5m 默认不写 ttl 字面量；1h 显式时才写 ttl: "1h"）。
+    // 关闭时仍走 string 形态，request body 不会出现 cache_control 字段，避免误触发缓存计费。
+    // cacheBreakNonce 仅在 enabled 且非空时附加为最后一个 block 的注释式后缀，破坏前缀 hash。
+    if (request.promptCacheEnabled) {
+      const lastIndex = systemSegments.length - 1;
+      const blocks: AnthropicSystemBlock[] = systemSegments.map((segment, index) => {
+        const isLast = index === lastIndex;
+        const text =
+          isLast && request.cacheBreakNonce
+            ? `${segment}\n<!-- linghun-break-cache:${request.cacheBreakNonce} -->`
+            : segment;
+        if (!isLast) {
+          return { type: "text", text };
+        }
+        const cacheControl: AnthropicCacheControl =
+          request.promptCacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+        return { type: "text", text, cache_control: cacheControl };
+      });
+      body.system = blocks;
+    } else {
+      body.system = systemSegments.join("\n\n");
+    }
   }
   return body;
 }
@@ -1102,14 +1152,21 @@ function createOpenAiChatTools(
   contract: ProviderRuntimeContract,
 ): OpenAiToolDefinition[] | undefined {
   assertToolCapability(request, contract);
-  return request.tools?.map((tool) => ({
-    type: "function" as const,
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema,
-    },
-  }));
+  // D.13F：tools 数组按 name 字典序稳定排序，避免上层迭代顺序波动破坏 OpenAI 隐式
+  // prompt cache 的前缀 hash。Linghun 不传 prompt_cache_key/prompt_cache_retention，
+  // 仅靠稳定顺序和 cached_tokens 观察隐式缓存命中。
+  const tools = request.tools;
+  if (!tools) return undefined;
+  return [...tools]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((tool) => ({
+      type: "function" as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
 }
 
 function createOpenAiResponsesTools(
@@ -1117,12 +1174,17 @@ function createOpenAiResponsesTools(
   contract: ProviderRuntimeContract,
 ): OpenAiResponsesToolDefinition[] | undefined {
   assertToolCapability(request, contract);
-  return request.tools?.map((tool) => ({
-    type: "function" as const,
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.inputSchema,
-  }));
+  // D.13F：与 chat tools 一致，按 name 字典序稳定排序。
+  const tools = request.tools;
+  if (!tools) return undefined;
+  return [...tools]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((tool) => ({
+      type: "function" as const,
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    }));
 }
 
 function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeContract): void {
@@ -1423,6 +1485,9 @@ function parseAnthropicMessagesEventBlock(
     const outputTokens = merged.output_tokens ?? 0;
     const cacheReadTokens = merged.cache_read_input_tokens ?? state.cacheReadTokens;
     const cacheWriteTokensRaw = merged.cache_creation_input_tokens ?? state.cacheWriteTokens;
+    // D.13F：cache_creation 拆分到 ephemeral_5m / ephemeral_1h，仅作只读统计透出。
+    const ephemeral5m = merged.cache_creation?.ephemeral_5m_input_tokens;
+    const ephemeral1h = merged.cache_creation?.ephemeral_1h_input_tokens;
     return [
       {
         type: "usage",
@@ -1433,6 +1498,8 @@ function parseAnthropicMessagesEventBlock(
           cacheReadTokens,
           cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
           cacheWriteTokensRaw: cacheWriteTokensRaw ?? null,
+          cacheCreationEphemeral5mTokens: ephemeral5m,
+          cacheCreationEphemeral1hTokens: ephemeral1h,
           rawUsage: merged,
           endpoint,
         },

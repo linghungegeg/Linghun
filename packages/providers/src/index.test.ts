@@ -1441,3 +1441,269 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(events.some((event) => event.type === "assistant_text_delta")).toBe(true);
   });
 });
+
+describe("D.13F Anthropic prompt cache cache_control injection", () => {
+  function buildAnthropicProvider() {
+    return new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      maxOutputTokens: 1024,
+    });
+  }
+
+  it("emits string system when promptCacheEnabled is false (no cache_control)", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "You are Linghun." },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: false,
+    });
+    expect(typeof body.system).toBe("string");
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("cache_control");
+    expect(serialized).not.toContain("ephemeral");
+    expect(serialized).not.toContain("linghun-break-cache");
+  });
+
+  it("attaches ephemeral cache_control without ttl literal on default 5m", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "system", content: "beta" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+    });
+    expect(Array.isArray(body.system)).toBe(true);
+    const blocks = body.system as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.cache_control).toBeUndefined();
+    expect(blocks[1]?.cache_control).toEqual({ type: "ephemeral" });
+    // 5m 默认禁止 ttl 字面量
+    expect(JSON.stringify(blocks[1])).not.toContain('"ttl"');
+    expect(JSON.stringify(blocks[1])).not.toContain('"5m"');
+  });
+
+  it("sets ttl: \"1h\" only when promptCacheTtl is explicitly 1h", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+    });
+    const blocks = body.system as Array<{
+      type: "text";
+      text: string;
+      cache_control?: { type: "ephemeral"; ttl?: string };
+    }>;
+    expect(blocks[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  it("appends linghun-break-cache nonce to last system block when cacheBreakNonce provided", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "system", content: "beta" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+      cacheBreakNonce: "nonce-xyz-123",
+    });
+    const blocks = body.system as Array<{ type: "text"; text: string }>;
+    expect(blocks[0]?.text).toBe("alpha");
+    expect(blocks[1]?.text).toContain("beta");
+    expect(blocks[1]?.text).toContain("<!-- linghun-break-cache:nonce-xyz-123 -->");
+  });
+
+  it("does not append nonce when promptCacheEnabled is false", () => {
+    const provider = buildAnthropicProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [
+        { role: "system", content: "alpha" },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: false,
+      cacheBreakNonce: "nonce-xyz-123",
+    });
+    expect(typeof body.system).toBe("string");
+    expect(body.system as string).not.toContain("linghun-break-cache");
+  });
+});
+
+describe("D.13F Anthropic ephemeral cache_creation usage parsing", () => {
+  it("emits cacheCreationEphemeral5m/1hTokens from message_delta cache_creation", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":10}}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":120,"ephemeral_1h_input_tokens":7}}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const usage = events.find(
+      (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
+    );
+    expect(usage?.usage.cacheCreationEphemeral5mTokens).toBe(120);
+    expect(usage?.usage.cacheCreationEphemeral1hTokens).toBe(7);
+  });
+
+  it("leaves ephemeral fields undefined when cache_creation missing", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_3","usage":{"input_tokens":5}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const usage = events.find(
+      (event): event is Extract<LinghunEvent, { type: "usage" }> => event.type === "usage",
+    );
+    expect(usage?.usage.cacheCreationEphemeral5mTokens).toBeUndefined();
+    expect(usage?.usage.cacheCreationEphemeral1hTokens).toBeUndefined();
+  });
+});
+
+describe("D.13F OpenAI tools stable ordering for prompt cache prefix", () => {
+  it("sorts chat tools alphabetically regardless of input order", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+    });
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { name: "Zeta", description: "z", inputSchema: { type: "object" } },
+        { name: "Alpha", description: "a", inputSchema: { type: "object" } },
+        { name: "Mike", description: "m", inputSchema: { type: "object" } },
+      ],
+    });
+    const names = request.tools?.map((tool) => tool.function.name);
+    expect(names).toEqual(["Alpha", "Mike", "Zeta"]);
+  });
+
+  it("sorts responses tools alphabetically regardless of input order", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+      endpointProfile: "responses",
+    });
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { name: "Zeta", description: "z", inputSchema: { type: "object" } },
+        { name: "Alpha", description: "a", inputSchema: { type: "object" } },
+        { name: "Mike", description: "m", inputSchema: { type: "object" } },
+      ],
+    });
+    const names = request.tools?.map((tool) => tool.name);
+    expect(names).toEqual(["Alpha", "Mike", "Zeta"]);
+  });
+
+  it("does not include OpenAI-side prompt_cache_key or prompt_cache_retention", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+    });
+    const chat = provider.createChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+      cacheBreakNonce: "nonce-abc",
+    });
+    const responses = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-x",
+      endpointProfile: "responses",
+    }).createResponsesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+      cacheBreakNonce: "nonce-abc",
+    });
+    for (const body of [chat, responses] as unknown[]) {
+      const serialized = JSON.stringify(body);
+      expect(serialized).not.toContain("prompt_cache_key");
+      expect(serialized).not.toContain("prompt_cache_retention");
+      expect(serialized).not.toContain("cache_control");
+      expect(serialized).not.toContain("linghun-break-cache");
+    }
+  });
+});
+
+describe("D.13F end-to-end Anthropic POST body with cache_control", () => {
+  it("sends cache_control on last system block over the wire", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_5"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    const request: ModelRequest = {
+      messages: [
+        { role: "system", content: "You are Linghun." },
+        { role: "user", content: "hi" },
+      ],
+      promptCacheEnabled: true,
+      promptCacheTtl: "1h",
+      cacheBreakNonce: "wire-nonce-9",
+    };
+    for await (const _ of provider.stream(request, new AbortController().signal)) {
+      // drain
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [, init] = call;
+    const sent = JSON.parse(String(init.body)) as {
+      system: Array<{ text: string; cache_control?: { type: string; ttl?: string } }>;
+    };
+    expect(Array.isArray(sent.system)).toBe(true);
+    expect(sent.system.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(sent.system.at(-1)?.text).toContain("<!-- linghun-break-cache:wire-nonce-9 -->");
+  });
+});

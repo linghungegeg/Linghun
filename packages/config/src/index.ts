@@ -229,6 +229,13 @@ export type LinghunConfig = {
     mode: "fast" | "moderate" | "full";
     ignoreFile: ".linghunignore" | ".cbmignore";
   };
+  // D.13F：prompt cache 总开关与 Anthropic system block 的 ttl 选择。
+  // enabled=false 时，provider 不会输出 cache_control 字段；systemTtl="1h" 仅在用户显式选择时
+  // 写入 cache_control.ttl: "1h"，默认 "5m" 表示不传 ttl 字面量（Anthropic 默认 5m）。
+  promptCache: {
+    enabled: boolean;
+    systemTtl: "5m" | "1h";
+  };
   skills: SkillConfig;
   workflows: WorkflowConfig;
   hooks: HookConfig;
@@ -413,6 +420,10 @@ export const defaultConfig: LinghunConfig = {
     enabled: true,
     mode: "fast",
     ignoreFile: ".linghunignore",
+  },
+  promptCache: {
+    enabled: true,
+    systemTtl: "5m",
   },
   skills: {
     enabled: true,
@@ -1135,6 +1146,7 @@ function validateConfig(config: LinghunConfig): LinghunConfig {
   validateMcp(config.mcp);
   validateStorage(config.storage);
   validateIndex(config.index);
+  validatePromptCache(config.promptCache);
   validateExtensions(config.skills, "settings.skills", true);
   validateExtensions(config.plugins, "settings.plugins", true);
   validateExtensions(config.workflows, "settings.workflows", false);
@@ -1295,6 +1307,14 @@ function validateIndex(index: LinghunConfig["index"]): void {
   }
   if (index.ignoreFile !== ".linghunignore" && index.ignoreFile !== ".cbmignore") {
     throw new Error("settings.index.ignoreFile is invalid");
+  }
+}
+
+function validatePromptCache(promptCache: LinghunConfig["promptCache"]): void {
+  assertRecord(promptCache, "settings.promptCache");
+  assertBoolean(promptCache.enabled, "settings.promptCache.enabled");
+  if (promptCache.systemTtl !== "5m" && promptCache.systemTtl !== "1h") {
+    throw new Error("settings.promptCache.systemTtl must be '5m' or '1h'");
   }
 }
 
@@ -1676,6 +1696,10 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
     index: {
       ...defaultConfig.index,
       ...input.index,
+    },
+    promptCache: {
+      ...defaultConfig.promptCache,
+      ...input.promptCache,
     },
     skills: {
       ...defaultConfig.skills,

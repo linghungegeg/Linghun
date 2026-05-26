@@ -12,6 +12,11 @@ export type CacheFreshness = {
   memoryHash?: string;
   compactHash?: string;
   pluginListHash?: string;
+  // D.13F：附加维度，用于 /break-cache status 展示导致缓存失效的具体来源。
+  // 不替换原有 9 个维度，仅追加；缺失时按 hash("none") 处理，保持向后兼容。
+  endpointProfileHash?: string;
+  cacheControlHash?: string;
+  cacheTtlHash?: string;
   changedKeys: string[];
 };
 

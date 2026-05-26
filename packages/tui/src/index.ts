@@ -73,6 +73,7 @@ import {
   type ModelUsage,
   OpenAiCompatibleProvider,
   findKnownModel,
+  resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
@@ -4490,6 +4491,23 @@ function getRuntimeStatusProvider(context: TuiContext): string {
   return runtime.provider;
 }
 
+// D.13F：返回当前 executor runtime 的 effective endpoint profile，用于 cache-freshness 维度。
+// 必须用 resolveEffectiveEndpointProfile 得到的 effective profile（而非 provider 配置原值），
+// 否则 Claude + chat_completions placeholder 时 hash 会被误算成 chat_completions，
+// 与真实请求的 anthropic_messages 不一致，破坏 /break-cache status 的诊断价值。
+function getActiveEndpointProfileLabel(context: TuiContext): string {
+  const runtime = getSelectedModelRuntime(context);
+  const provider = context.config.providers[runtime.provider];
+  const decision = resolveEffectiveEndpointProfile({
+    requestEndpointProfile: undefined,
+    configEndpointProfile: provider?.endpointProfile,
+    configBaseUrl: provider?.baseUrl,
+    configModel: provider?.model,
+    requestModel: runtime.model,
+  });
+  return decision.endpointProfile;
+}
+
 function resolveInitialModel(config: LinghunConfig): string {
   const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
   if (executor && !isDefaultExecutorRoute(executor, config) && executor.primaryModel) {
@@ -4523,7 +4541,12 @@ function getSelectedModelRuntime(
     ? resolveProviderForModel(context.config, model)
     : route.provider || resolveProviderForModel(context.config, model);
   const providerConfig = context.config.providers[provider];
-  const endpointProfile = providerConfig?.endpointProfile ?? "chat_completions";
+  // SelectedModelRuntime 仅描述 OpenAI-style runtime（chat_completions / responses）；
+  // 若 provider 已切到 anthropic_messages，仍以 chat_completions 暴露给上层（reasoning/decision
+  // 路径不依赖该字段做协议分流），避免 SelectedModelRuntime 类型扩散到 Anthropic profile。
+  const rawEndpointProfile = providerConfig?.endpointProfile ?? "chat_completions";
+  const endpointProfile: "chat_completions" | "responses" =
+    rawEndpointProfile === "responses" ? "responses" : "chat_completions";
   const compatibilityProfile =
     providerConfig?.compatibilityProfile ??
     (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
@@ -7787,11 +7810,53 @@ async function handleBreakCacheCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  if (args[0] !== "status") {
-    writeLine(output, "用法：/break-cache status");
+  const action = args[0] ?? "status";
+  // D.13F：standalone /break-cache 子命令。marker 写入与 event log 全部在 TUI/runtime 层完成；
+  // packages/providers 不读不写本地文件。--clear 可放在第一个或第二个位置。
+  const clearFlag = args.includes("--clear");
+  if (action === "status" && !clearFlag) {
+    writeLine(output, formatBreakCacheStatus(context));
     return;
   }
-  writeLine(output, formatBreakCacheStatus(context));
+  if (clearFlag) {
+    // /break-cache --clear 或 /break-cache <mode> --clear：清掉 once+always 两个 marker。
+    await clearBreakCacheMarker(context, "all");
+    await appendBreakCacheEvent(context, "cleared");
+    refreshCacheFreshness(context);
+    writeLine(output, "已清除 break-cache marker（once + always）。下次请求不再附加 nonce。");
+    writeLine(output, formatBreakCacheStatus(context));
+    return;
+  }
+  if (action === "once") {
+    const nonce = randomUUID();
+    await writeBreakCacheMarker(context, "once", nonce);
+    await appendBreakCacheEvent(context, "once_set");
+    refreshCacheFreshness(context);
+    writeLine(output, "已设置 once：下一次模型请求将附加 cacheBreakNonce 破坏前缀缓存，命中后自动消费。");
+    return;
+  }
+  if (action === "always") {
+    const nonce = randomUUID();
+    await writeBreakCacheMarker(context, "always", nonce);
+    await appendBreakCacheEvent(context, "always_set");
+    refreshCacheFreshness(context);
+    writeLine(
+      output,
+      "已设置 always：固定 break-cache namespace（stable nonce），所有请求共享同一 cacheBreakNonce，相当于切到一个新的 cache 命名空间，并在该命名空间内继续命中前缀缓存；不会每次请求都破坏缓存。运行 /break-cache off 或 --clear 取消。",
+    );
+    return;
+  }
+  if (action === "off") {
+    await clearBreakCacheMarker(context, "all");
+    await appendBreakCacheEvent(context, "off");
+    refreshCacheFreshness(context);
+    writeLine(output, "已关闭 break-cache：下次请求不再附加 nonce。");
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/break-cache status | /break-cache once | /break-cache always | /break-cache off | /break-cache --clear",
+  );
 }
 
 async function handleMcpCommand(
@@ -10269,6 +10334,11 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
       ...createExtensionFreshnessSummary(context),
       workspaceReferenceHash: workspaceReferenceHash(context.cache.workspaceReference.latest),
     },
+    // D.13F：附加 endpointProfile / cacheControl / cacheTtl 维度，
+    // 用于 /break-cache status 直接展示 prompt cache 配置变化。
+    endpointProfile: getActiveEndpointProfileLabel(context),
+    cacheControl: context.config.promptCache.enabled ? "ephemeral" : "off",
+    cacheTtl: context.config.promptCache.systemTtl,
   });
 }
 
@@ -10974,6 +11044,231 @@ function formatCompactStatus(context: TuiContext): string {
   ].join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// D.13F：/break-cache marker 文件 + 有界事件 jsonl 助手
+// ---------------------------------------------------------------------------
+// 设计要点：
+// - marker 文件位于 .linghun/，文件存在即代表对应模式生效；once 命中后由 runtime 删除。
+// - event log 仅记录动作类型与时间戳；不记录 prompt / api key / raw request / raw response。
+// - 容量上限 200 行（按行截断），写入失败不抛；读取失败返回空数组。
+// - 全部 IO 集中在 TUI/runtime 层，packages/providers 只接收最终的 cacheBreakNonce 输入。
+
+type BreakCacheMode = "off" | "once" | "always";
+type BreakCacheMarker = { mode: BreakCacheMode; nonce?: string };
+type BreakCacheEvent = { action: string; createdAt: string };
+
+const BREAK_CACHE_ONCE_FILENAME = ".break-cache-once";
+const BREAK_CACHE_ALWAYS_FILENAME = ".break-cache-always";
+const BREAK_CACHE_EVENTS_FILENAME = "break-cache-events.jsonl";
+const BREAK_CACHE_EVENTS_MAX_LINES = 200;
+
+function getBreakCacheDir(context: TuiContext): string {
+  return join(context.projectPath, ".linghun");
+}
+
+function getBreakCacheOncePath(context: TuiContext): string {
+  return join(getBreakCacheDir(context), BREAK_CACHE_ONCE_FILENAME);
+}
+
+function getBreakCacheAlwaysPath(context: TuiContext): string {
+  return join(getBreakCacheDir(context), BREAK_CACHE_ALWAYS_FILENAME);
+}
+
+function getBreakCacheEventsPath(context: TuiContext): string {
+  return join(getBreakCacheDir(context), BREAK_CACHE_EVENTS_FILENAME);
+}
+
+function readBreakCacheMarkerSync(context: TuiContext): BreakCacheMarker {
+  // always 优先于 once；off 表示无 marker。任何读取错误一律视为 off。
+  try {
+    const alwaysPath = getBreakCacheAlwaysPath(context);
+    if (existsSync(alwaysPath)) {
+      const nonce = readFileSync(alwaysPath, "utf8").trim();
+      return { mode: "always", nonce: nonce || undefined };
+    }
+    const oncePath = getBreakCacheOncePath(context);
+    if (existsSync(oncePath)) {
+      const nonce = readFileSync(oncePath, "utf8").trim();
+      return { mode: "once", nonce: nonce || undefined };
+    }
+  } catch {
+    // 静默降级到 off；marker 不可读不应阻断主流程。
+  }
+  return { mode: "off" };
+}
+
+function readRecentBreakCacheEventsSync(context: TuiContext, limit: number): BreakCacheEvent[] {
+  try {
+    const path = getBreakCacheEventsPath(context);
+    if (!existsSync(path)) return [];
+    const raw = readFileSync(path, "utf8");
+    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+    const recent = lines.slice(-Math.max(1, limit));
+    const events: BreakCacheEvent[] = [];
+    for (const line of recent) {
+      try {
+        const parsed = JSON.parse(line) as Partial<BreakCacheEvent>;
+        if (typeof parsed.action === "string" && typeof parsed.createdAt === "string") {
+          events.push({ action: parsed.action, createdAt: parsed.createdAt });
+        }
+      } catch {
+        // 跳过损坏行，不抛
+      }
+    }
+    return events;
+  } catch {
+    return [];
+  }
+}
+
+async function appendBreakCacheEvent(context: TuiContext, action: string): Promise<void> {
+  // 有界 jsonl：先 append，再按 200 行截断重写。失败不抛，避免破坏主流程。
+  try {
+    await mkdir(getBreakCacheDir(context), { recursive: true });
+    const path = getBreakCacheEventsPath(context);
+    const event: BreakCacheEvent = { action, createdAt: new Date().toISOString() };
+    await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
+    const raw = await readFile(path, "utf8").catch(() => "");
+    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+    if (lines.length > BREAK_CACHE_EVENTS_MAX_LINES) {
+      const trimmed = lines.slice(-BREAK_CACHE_EVENTS_MAX_LINES).join("\n");
+      await writeFile(path, `${trimmed}\n`, "utf8");
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function writeBreakCacheMarker(
+  context: TuiContext,
+  mode: "once" | "always",
+  nonce: string,
+): Promise<void> {
+  await mkdir(getBreakCacheDir(context), { recursive: true });
+  const path = mode === "once" ? getBreakCacheOncePath(context) : getBreakCacheAlwaysPath(context);
+  await writeFile(path, nonce, "utf8");
+}
+
+async function clearBreakCacheMarker(context: TuiContext, mode: BreakCacheMode | "all"): Promise<void> {
+  const targets: string[] = [];
+  if (mode === "once" || mode === "all") targets.push(getBreakCacheOncePath(context));
+  if (mode === "always" || mode === "all") targets.push(getBreakCacheAlwaysPath(context));
+  for (const target of targets) {
+    try {
+      if (existsSync(target)) {
+        await rm(target, { force: true });
+      }
+    } catch {
+      // ignore；下次状态读取仍能反映真实文件状态
+    }
+  }
+}
+
+// D.13F：导出 path-based pure helper 仅供 model-doctor / break-cache 单元测试使用。
+// 不依赖 TuiContext，避免测试构造庞大的运行时上下文。生产代码继续使用 context-based 形态。
+export type BreakCacheTestHooks = {
+  writeMarker: (
+    projectPath: string,
+    mode: "once" | "always",
+    nonce: string,
+  ) => Promise<void>;
+  clearMarker: (projectPath: string, mode: "off" | "once" | "always" | "all") => Promise<void>;
+  readMarker: (projectPath: string) => { mode: "off" | "once" | "always"; nonce?: string };
+  consumeNonce: (projectPath: string) => Promise<string | undefined>;
+  appendEvent: (projectPath: string, action: string) => Promise<void>;
+  readRecentEvents: (
+    projectPath: string,
+    limit: number,
+  ) => Array<{ action: string; createdAt: string }>;
+  buildPromptCacheFields: (
+    projectPath: string,
+    enabled: boolean,
+    systemTtl: "5m" | "1h",
+  ) => Promise<{
+    promptCacheEnabled?: boolean;
+    promptCacheTtl?: "1h";
+    cacheBreakNonce?: string;
+  }>;
+  paths: (projectPath: string) => {
+    onceMarker: string;
+    alwaysMarker: string;
+    eventsLog: string;
+  };
+  eventsMaxLines: number;
+};
+
+function makeFakeContextForPath(projectPath: string): TuiContext {
+  // 单元测试专用：仅提供 break-cache 助手所需的 projectPath 字段。
+  // 其它字段访问会抛 TypeError，迫使新依赖在测试覆盖中显式增加。
+  return { projectPath } as unknown as TuiContext;
+}
+
+export const breakCacheTestHooks: BreakCacheTestHooks = {
+  writeMarker: (projectPath, mode, nonce) =>
+    writeBreakCacheMarker(makeFakeContextForPath(projectPath), mode, nonce),
+  clearMarker: (projectPath, mode) =>
+    clearBreakCacheMarker(makeFakeContextForPath(projectPath), mode),
+  readMarker: (projectPath) => readBreakCacheMarkerSync(makeFakeContextForPath(projectPath)),
+  consumeNonce: (projectPath) =>
+    consumeBreakCacheNonceForRequest(makeFakeContextForPath(projectPath)),
+  appendEvent: (projectPath, action) =>
+    appendBreakCacheEvent(makeFakeContextForPath(projectPath), action),
+  readRecentEvents: (projectPath, limit) =>
+    readRecentBreakCacheEventsSync(makeFakeContextForPath(projectPath), limit),
+  buildPromptCacheFields: async (projectPath, enabled, systemTtl) => {
+    if (!enabled) return {};
+    const nonce = await consumeBreakCacheNonceForRequest(makeFakeContextForPath(projectPath));
+    return {
+      promptCacheEnabled: true,
+      ...(systemTtl === "1h" ? { promptCacheTtl: "1h" as const } : {}),
+      ...(nonce ? { cacheBreakNonce: nonce } : {}),
+    };
+  },
+  paths: (projectPath) => {
+    const ctx = makeFakeContextForPath(projectPath);
+    return {
+      onceMarker: getBreakCacheOncePath(ctx),
+      alwaysMarker: getBreakCacheAlwaysPath(ctx),
+      eventsLog: getBreakCacheEventsPath(ctx),
+    };
+  },
+  eventsMaxLines: BREAK_CACHE_EVENTS_MAX_LINES,
+};
+
+// 由请求 dispatch 路径调用：返回当轮要写进 ModelRequest 的 cacheBreakNonce，
+// 并在 once 命中后立即消费 marker（删除 once 文件）。always 不消费。
+async function consumeBreakCacheNonceForRequest(context: TuiContext): Promise<string | undefined> {
+  const marker = readBreakCacheMarkerSync(context);
+  if (marker.mode === "off") return undefined;
+  const nonce = marker.nonce && marker.nonce.length > 0 ? marker.nonce : randomUUID();
+  if (marker.mode === "once") {
+    try {
+      await rm(getBreakCacheOncePath(context), { force: true });
+    } catch {
+      // ignore
+    }
+    await appendBreakCacheEvent(context, "once_consumed");
+  }
+  return nonce;
+}
+
+// D.13F：把 promptCache 配置 + 当轮 nonce 折叠成 ModelRequest 片段。
+// enabled=false 时返回空对象，请求体不会带 cache_control / nonce。
+async function buildPromptCacheRequestFields(context: TuiContext): Promise<{
+  promptCacheEnabled?: boolean;
+  promptCacheTtl?: "1h";
+  cacheBreakNonce?: string;
+}> {
+  const config = context.config.promptCache;
+  if (!config.enabled) return {};
+  const nonce = await consumeBreakCacheNonceForRequest(context);
+  return {
+    promptCacheEnabled: true,
+    ...(config.systemTtl === "1h" ? { promptCacheTtl: "1h" as const } : {}),
+    ...(nonce ? { cacheBreakNonce: nonce } : {}),
+  };
+}
+
 function formatBreakCacheStatus(context: TuiContext): string {
   const current = getCurrentFreshness(context);
   const changed = diffFreshness(context.cache.lastFreshness, current);
@@ -10983,6 +11278,9 @@ function formatBreakCacheStatus(context: TuiContext): string {
       : context.cache.lastFreshness?.changedKeys.length
         ? context.cache.lastFreshness.changedKeys
         : (context.cache.history.at(-1)?.freshness.changedKeys ?? []);
+  // D.13F：standalone marker mode 与最近事件摘要，仅作只读展示。
+  const marker = readBreakCacheMarkerSync(context);
+  const recentEvents = readRecentBreakCacheEventsSync(context, 3);
   return [
     "Break-cache status",
     `- systemPromptHash: ${current.systemPromptHash}`,
@@ -10994,8 +11292,15 @@ function formatBreakCacheStatus(context: TuiContext): string {
     `- memoryHash: ${current.memoryHash ?? "-"}`,
     `- compactHash: ${current.compactHash ?? "-"}`,
     `- pluginListHash: ${current.pluginListHash ?? "-"}`,
+    `- endpointProfileHash: ${current.endpointProfileHash ?? "-"}`,
+    `- cacheControlHash: ${current.cacheControlHash ?? "-"}`,
+    `- cacheTtlHash: ${current.cacheTtlHash ?? "-"}`,
+    `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl}`,
+    `- mode: ${marker.mode}${marker.nonce ? ` nonce=${marker.nonce.slice(0, 8)}…` : ""}${marker.mode === "always" ? "（固定 break-cache namespace；不会每次请求都破坏缓存）" : ""}`,
+    `- recent break-cache events: ${recentEvents.length === 0 ? "none" : recentEvents.map((event) => `${event.action}@${event.createdAt}`).join("; ")}`,
     `- changedKeys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
-    "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
+    "- usage: /break-cache status | once | always | off | --clear；marker 与 event 仅记录动作，不记录 prompt/key/raw request/response。always=固定 nonce 切到新 cache namespace（stable nonce），不是每次请求都破坏缓存。",
+    "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list / endpoint profile / cacheControl / cacheTtl 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
   ].join("\n");
 }
 
@@ -12594,6 +12899,7 @@ async function sendMessage(
             : "当前 provider/model 不支持 tool calling；本轮降级为纯文本，不发送 tools/toolChoice。可运行 /model doctor 查看详情。",
         );
       }
+      const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         selectedRuntime.provider,
         {
@@ -12609,6 +12915,7 @@ async function sendMessage(
                 toolChoice: "auto" as const,
               }
             : {}),
+          ...promptCacheFields,
         },
         controller.signal,
       )) {
@@ -12912,6 +13219,7 @@ async function streamFinalModelAnswerWithoutTools(
   let hadUsage = false;
   let finishReason: string | undefined;
   let hadThinking = false;
+  const promptCacheFields = await buildPromptCacheRequestFields(context);
   for await (const event of gateway.stream(
     continuation.provider,
     {
@@ -12920,6 +13228,7 @@ async function streamFinalModelAnswerWithoutTools(
       endpointProfile: continuation.endpointProfile,
       ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
       toolChoice: "none",
+      ...promptCacheFields,
     },
     signal,
   )) {
@@ -13010,6 +13319,7 @@ async function continueModelAfterToolResults(
     for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         continuation.provider,
         {
@@ -13019,6 +13329,7 @@ async function continueModelAfterToolResults(
           ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
           tools: createModelToolDefinitionsForReportGuard(continuation.reportWriteGuard),
           toolChoice: "auto",
+          ...promptCacheFields,
         },
         controller.signal,
       )) {

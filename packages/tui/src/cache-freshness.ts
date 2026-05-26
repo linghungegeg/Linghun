@@ -30,6 +30,11 @@ export function createCacheFreshness(input: {
   memory?: unknown;
   compact?: unknown;
   plugins?: unknown;
+  // D.13F：可选附加维度。endpointProfile / cacheControl / cacheTtl 用于追踪 prompt cache
+  // 影响因素；不传时按 "none" 处理，保持向后兼容。
+  endpointProfile?: unknown;
+  cacheControl?: unknown;
+  cacheTtl?: unknown;
   _precomputedToolSchemaHash?: string;
 }): CacheFreshness {
   return {
@@ -42,6 +47,9 @@ export function createCacheFreshness(input: {
     memoryHash: stableHash(input.memory ?? "none"),
     compactHash: stableHash(input.compact ?? "none"),
     pluginListHash: stableHash(input.plugins ?? []),
+    endpointProfileHash: stableHash(input.endpointProfile ?? "none"),
+    cacheControlHash: stableHash(input.cacheControl ?? "none"),
+    cacheTtlHash: stableHash(input.cacheTtl ?? "none"),
     changedKeys: [],
   };
 }
@@ -63,6 +71,9 @@ export function diffFreshness(
     "memoryHash",
     "compactHash",
     "pluginListHash",
+    "endpointProfileHash",
+    "cacheControlHash",
+    "cacheTtlHash",
   ];
   return keys.filter((key) => previous[key] !== current[key]);
 }

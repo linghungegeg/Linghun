@@ -206,6 +206,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       `WARN: provider.env 读取失败；path=${lastProviderEnvWarning.path}；reason=${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
     );
   }
+  // D.13F：顶层 promptCache 摘要（仅展示 enabled / systemTtl，与具体 provider 无关）。
+  // 不输出 apiKey、prompt 明文、cacheBreakNonce、raw request/response，仅状态字段。
+  lines.push(
+    `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl} (5m 默认 cache_control 无 ttl 字面量；1h 才显式写 ttl)`,
+  );
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
     const endpointProfile = provider.endpointProfile ?? "chat_completions";
@@ -241,15 +246,34 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
     );
     lines.push(`    endpointProfile decision: source=${decision.source} reason=${decision.reason}`);
-    if (decision.warnings.length > 0) {
-      for (const warning of decision.warnings) {
-        lines.push(`    warning: ${warning}`);
-      }
+    // D.13F：tools=disabled 时显式标注原因；anthropic_messages profile 永远不接 tools。
+    if (!contract.supportsTools) {
+      const reason =
+        contract.endpointProfile === "anthropic_messages"
+          ? "anthropic_messages profile 不支持 OpenAI 风格 tools/tool calling；请切到 chat_completions/responses profile 或换 supportsTools=true 的 provider"
+          : `runtime contract supportsTools=false (profile=${contract.profile})`;
+      lines.push(`    tools disabled reason: ${reason}`);
+    }
+    // D.13F：Anthropic prompt cache 可观察字段说明（与 promptCache.enabled 联动）。
+    // 显示是否会附加 cache_control 和 ephemeral_5m / ephemeral_1h usage 计数透出情况。
+    if (contract.endpointProfile === "anthropic_messages") {
+      const promptCacheEnabled = context.config.promptCache.enabled;
+      const ttl = context.config.promptCache.systemTtl;
+      lines.push(
+        `    anthropic prompt cache: cache_control=${
+          promptCacheEnabled ? `injected ttl=${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}` : "off"
+        } usage_fields=cache_creation.ephemeral_5m_input_tokens/ephemeral_1h_input_tokens (read-only when emitted by upstream)`,
+      );
     }
     if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
         `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
       );
+    }
+    if (decision.warnings.length > 0) {
+      for (const warning of decision.warnings) {
+        lines.push(`    warning: ${warning}`);
+      }
     }
     if (baseUrlDiagnostic.hasQueryOrFragment) {
       lines.push(

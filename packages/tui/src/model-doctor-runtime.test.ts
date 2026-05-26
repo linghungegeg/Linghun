@@ -1,9 +1,15 @@
 import { defaultConfig } from "@linghun/config";
 import type { LinghunConfig, RoleModelRoute } from "@linghun/config";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { breakCacheTestHooks } from "./index.js";
 import {
   diagnoseConcreteRoute,
   diagnoseRoute,
+  formatModelRouteDoctor,
   formatModelRouteSummary,
   formatModelRoutes,
   getProviderKeySource,
@@ -486,6 +492,268 @@ describe("model-doctor-runtime", () => {
     });
     it("defaults to openai-compatible for unknown models", () => {
       expect(inferProviderForRouteModel("llama-3-70b", baseConfig)).toBe("openai-compatible");
+    });
+  });
+
+  describe("formatModelRouteDoctor D.13F prompt cache section", () => {
+    function makeContext(config: LinghunConfig) {
+      return {
+        config,
+        projectPath: "F:/__no_such_dir__",
+        language: "zh-CN" as const,
+        routeDecisions: [],
+      };
+    }
+
+    it("shows promptCache enabled=yes systemTtl=5m by default", async () => {
+      const output = await formatModelRouteDoctor(makeContext(baseConfig));
+      expect(output).toContain("- promptCache: enabled=yes systemTtl=5m");
+      expect(output).toContain("5m 默认 cache_control 无 ttl 字面量");
+    });
+
+    it("shows promptCache enabled=no when disabled", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        promptCache: { enabled: false, systemTtl: "5m" },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("- promptCache: enabled=no systemTtl=5m");
+    });
+
+    it("shows promptCache systemTtl=1h when configured", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        promptCache: { enabled: true, systemTtl: "1h" },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("- promptCache: enabled=yes systemTtl=1h");
+    });
+
+    it("annotates anthropic_messages provider with cache_control + usage fields", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+        promptCache: { enabled: true, systemTtl: "1h" },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("anthropic prompt cache:");
+      expect(output).toContain("cache_control=injected ttl=1h");
+      expect(output).toContain("ephemeral_5m_input_tokens/ephemeral_1h_input_tokens");
+    });
+
+    it("shows cache_control=off when promptCache disabled, even on anthropic_messages", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+        promptCache: { enabled: false, systemTtl: "5m" },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("cache_control=off");
+    });
+
+    it("emits tools-disabled-reason for anthropic_messages provider", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("tools disabled reason:");
+      expect(output).toContain("anthropic_messages profile 不支持 OpenAI 风格 tools/tool calling");
+    });
+
+    it("never leaks raw apiKey or prompt text", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com",
+            apiKey: "sk-very-secret-VALUE-DO-NOT-LEAK",
+            model: "deepseek-chat",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).not.toContain("sk-very-secret-VALUE-DO-NOT-LEAK");
+      // doctor 摘要不应出现请求体 / system prompt 关键字
+      expect(output.toLowerCase()).not.toContain("system prompt content");
+      expect(output).not.toContain("cacheBreakNonce=");
+    });
+
+    it("shows effective endpointProfile decision and reason", async () => {
+      const output = await formatModelRouteDoctor(makeContext(baseConfig));
+      expect(output).toContain("endpointProfile decision:");
+      expect(output).toContain("source=");
+      expect(output).toContain("reason=");
+    });
+  });
+
+  describe("D.13F break-cache marker + event log persistence", () => {
+    let projectPath = "";
+
+    afterEach(async () => {
+      if (projectPath) {
+        await rm(projectPath, { recursive: true, force: true }).catch(() => undefined);
+        projectPath = "";
+      }
+    });
+
+    async function makeProject(): Promise<string> {
+      const dir = await mkdtemp(join(tmpdir(), "linghun-break-cache-test-"));
+      projectPath = dir;
+      return dir;
+    }
+
+    it("once: writes marker, consumeNonce returns it once and deletes marker", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "once", "nonce-once-1");
+      const beforeMarker = breakCacheTestHooks.readMarker(dir);
+      expect(beforeMarker.mode).toBe("once");
+      expect(beforeMarker.nonce).toBe("nonce-once-1");
+
+      const consumed = await breakCacheTestHooks.consumeNonce(dir);
+      expect(consumed).toBe("nonce-once-1");
+
+      // marker 文件应已被删除
+      expect(existsSync(breakCacheTestHooks.paths(dir).onceMarker)).toBe(false);
+      const afterMarker = breakCacheTestHooks.readMarker(dir);
+      expect(afterMarker.mode).toBe("off");
+
+      // 第二次消费应为 undefined
+      const second = await breakCacheTestHooks.consumeNonce(dir);
+      expect(second).toBeUndefined();
+    });
+
+    it("once: buildPromptCacheRequestFields injects nonce only once", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "once", "nonce-bp-1");
+      const first = await breakCacheTestHooks.buildPromptCacheFields(dir, true, "5m");
+      expect(first.promptCacheEnabled).toBe(true);
+      expect(first.cacheBreakNonce).toBe("nonce-bp-1");
+      expect(first.promptCacheTtl).toBeUndefined();
+
+      const second = await breakCacheTestHooks.buildPromptCacheFields(dir, true, "5m");
+      expect(second.promptCacheEnabled).toBe(true);
+      expect(second.cacheBreakNonce).toBeUndefined();
+    });
+
+    it("buildPromptCacheRequestFields returns empty object when enabled=false", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "always", "nonce-disabled-1");
+      const fields = await breakCacheTestHooks.buildPromptCacheFields(dir, false, "5m");
+      expect(fields).toEqual({});
+    });
+
+    it("always: marker is NOT consumed, persists across calls (stable nonce / fixed namespace)", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "always", "nonce-always-1");
+      const first = await breakCacheTestHooks.consumeNonce(dir);
+      const second = await breakCacheTestHooks.consumeNonce(dir);
+      expect(first).toBe("nonce-always-1");
+      expect(second).toBe("nonce-always-1");
+      expect(existsSync(breakCacheTestHooks.paths(dir).alwaysMarker)).toBe(true);
+    });
+
+    it("off + clear: deletes both once and always markers", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "once", "nonce-c-1");
+      await breakCacheTestHooks.writeMarker(dir, "always", "nonce-c-2");
+      await breakCacheTestHooks.clearMarker(dir, "all");
+      expect(existsSync(breakCacheTestHooks.paths(dir).onceMarker)).toBe(false);
+      expect(existsSync(breakCacheTestHooks.paths(dir).alwaysMarker)).toBe(false);
+      expect(breakCacheTestHooks.readMarker(dir).mode).toBe("off");
+    });
+
+    it("event log only contains action/createdAt — no nonce, prompt, apiKey, raw request/response", async () => {
+      const dir = await makeProject();
+      await breakCacheTestHooks.writeMarker(dir, "once", "secret-nonce-AAA-BBB-CCC");
+      // 触发 once_consumed 事件
+      await breakCacheTestHooks.consumeNonce(dir);
+      await breakCacheTestHooks.appendEvent(dir, "always_set");
+      await breakCacheTestHooks.appendEvent(dir, "off");
+
+      const eventsLogPath = breakCacheTestHooks.paths(dir).eventsLog;
+      const raw = await readFile(eventsLogPath, "utf8");
+      // 不能泄露 nonce / 任何敏感原文
+      expect(raw).not.toContain("secret-nonce-AAA-BBB-CCC");
+      expect(raw).not.toContain("apiKey");
+      expect(raw).not.toContain("api_key");
+      expect(raw).not.toContain("prompt:");
+      expect(raw).not.toContain("system:");
+      expect(raw).not.toContain("authorization");
+      expect(raw).not.toContain("Bearer ");
+
+      // 解析每行：仅含 action + createdAt 两个字段
+      const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        expect(Object.keys(obj).sort()).toEqual(["action", "createdAt"]);
+        expect(typeof obj.action).toBe("string");
+        expect(typeof obj.createdAt).toBe("string");
+      }
+    });
+
+    it("event log truncates to 200 lines (BREAK_CACHE_EVENTS_MAX_LINES)", async () => {
+      const dir = await makeProject();
+      const max = breakCacheTestHooks.eventsMaxLines;
+      expect(max).toBe(200);
+      // 写入 max + 25 条事件
+      for (let i = 0; i < max + 25; i++) {
+        await breakCacheTestHooks.appendEvent(dir, `bulk_${i}`);
+      }
+      const raw = await readFile(breakCacheTestHooks.paths(dir).eventsLog, "utf8");
+      const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+      expect(lines.length).toBeLessThanOrEqual(max);
+      // 应保留最近的事件（bulk_<max+24>），裁掉早期的（bulk_0）
+      expect(raw).toContain(`bulk_${max + 24}`);
+      expect(raw).not.toContain('"action":"bulk_0"');
+    });
+
+    it("readRecentEvents returns only the requested tail length", async () => {
+      const dir = await makeProject();
+      for (let i = 0; i < 10; i++) {
+        await breakCacheTestHooks.appendEvent(dir, `step_${i}`);
+      }
+      const recent = breakCacheTestHooks.readRecentEvents(dir, 3);
+      expect(recent).toHaveLength(3);
+      expect(recent[0]?.action).toBe("step_7");
+      expect(recent[2]?.action).toBe("step_9");
+    });
+
+    it("readMarker returns off when project dir has no marker files", async () => {
+      const dir = await makeProject();
+      expect(breakCacheTestHooks.readMarker(dir).mode).toBe("off");
+      const fields = await breakCacheTestHooks.buildPromptCacheFields(dir, true, "1h");
+      expect(fields).toEqual({ promptCacheEnabled: true, promptCacheTtl: "1h" });
     });
   });
 });
