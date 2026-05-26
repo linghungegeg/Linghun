@@ -11,7 +11,10 @@ import {
   type ModelRole,
   type RoleModelRoute,
   defaultConfig,
+  defaultPlaceholderModelNames,
   getProjectSettingsPath,
+  isDefaultPlaceholderModel,
+  lastProviderEnvMerge,
   lastProviderEnvWarning,
   readProviderEnvValues,
 } from "@linghun/config";
@@ -53,6 +56,14 @@ export type ModelDoctorContext = {
     total: number;
     byKind: { "codebase-memory": number; mcp: number; skill: number; plugin: number };
     executableCount: number;
+  };
+  // D.13J Block 2：本 session 通过 SearchExtraTools 已发现的 deferred 工具名摘要。
+  // 由 index.ts 通过 snapshotDiscoveredDeferredToolsSummary 注入；doctor 仅做 read-only 渲染。
+  // 仅 sanitized 名字 + total + truncated 标志，**不**输出 raw 参数 / schema / 调用计数。
+  discoveredDeferredToolsSummary?: {
+    total: number;
+    names: string[];
+    truncated: boolean;
   };
 };
 
@@ -203,6 +214,33 @@ export function hasOpenAiCompatiblePlaceholderProblem(config: LinghunConfig): bo
   return config.providers["openai-compatible"]?.model === "openai-compatible-model";
 }
 
+// D.13J Block 1：检查任意 provider / role route 是否仍在使用占位 / 未成熟模型名。
+// `defaultPlaceholderModelNames` 涵盖 deepseek-v4-flash / deepseek-v4-pro / openai-compatible-model 等，
+// 这些名字需要被 doctor 显式标记，避免用户在 smoke 中第一次发请求就 404。
+export function collectPlaceholderModelHits(config: LinghunConfig): {
+  providers: Array<{ providerId: string; model: string }>;
+  routes: Array<{ role: string; field: "primary" | "fallback"; model: string }>;
+} {
+  const providers: Array<{ providerId: string; model: string }> = [];
+  for (const [providerId, provider] of Object.entries(config.providers)) {
+    if (isDefaultPlaceholderModel(provider.model)) {
+      providers.push({ providerId, model: provider.model });
+    }
+  }
+  const routes: Array<{ role: string; field: "primary" | "fallback"; model: string }> = [];
+  for (const route of config.modelRoutes.routes) {
+    if (isDefaultPlaceholderModel(route.primaryModel)) {
+      routes.push({ role: route.role, field: "primary", model: route.primaryModel });
+    }
+    for (const fallbackModel of route.fallbackModels) {
+      if (isDefaultPlaceholderModel(fallbackModel)) {
+        routes.push({ role: route.role, field: "fallback", model: fallbackModel });
+      }
+    }
+  }
+  return { providers, routes };
+}
+
 export async function formatModelRouteDoctor(context: ModelDoctorContext): Promise<string> {
   const lines = ["Model route doctor"];
   const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
@@ -212,6 +250,36 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   if (lastProviderEnvWarning) {
     lines.push(
       `WARN: provider.env 读取失败；path=${lastProviderEnvWarning.path}；reason=${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
+    );
+  }
+  // D.13J Block 1：provider.env 合并可见化。
+  // 用户在 ~/.linghun/provider.env 写的内容会覆盖项目级 modelRoutes/defaultModel/providers，
+  // 之前没有任何 doctor 输出能告诉用户"被覆盖了"——sm​oke 第一次请求 404 才发现。
+  // 现在 doctor 摘要明确给出 applied 状态、是否覆盖了 modelRoutes/defaultModel、引入了哪些 provider id。
+  // 仅记录布尔与 provider id 列表，**不**输出任何 apiKey/baseUrl/model 值。
+  if (lastProviderEnvMerge && lastProviderEnvMerge.applied) {
+    const ids = lastProviderEnvMerge.providerIds;
+    lines.push(
+      `- provider.env merge: applied=yes overrodeModelRoutes=${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"} overrodeDefaultModel=${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"} providers=${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请先 cat 确认或临时改名该文件)`,
+    );
+  } else if (lastProviderEnvMerge && !lastProviderEnvMerge.applied) {
+    lines.push(
+      "- provider.env merge: applied=no (~/.linghun/provider.env 未覆盖项目 settings；如需切换 provider 请使用 /model setup)",
+    );
+  }
+  // D.13J Block 1：占位 / 未成熟模型名 doctor 标记。
+  // deepseek-v4-flash / deepseek-v4-pro / openai-compatible-model 都是占位符；
+  // 出现在 provider.model 或 route.primary/fallback 上时，必须显式提示用户用环境变量替换为现役模型名。
+  const placeholderHits = collectPlaceholderModelHits(context.config);
+  if (placeholderHits.providers.length > 0 || placeholderHits.routes.length > 0) {
+    const providerHits = placeholderHits.providers
+      .map((hit) => `${hit.providerId}=${hit.model}`)
+      .join(",");
+    const routeHits = placeholderHits.routes
+      .map((hit) => `${hit.role}.${hit.field}=${hit.model}`)
+      .join(",");
+    lines.push(
+      `- WARN placeholder model: providers=[${providerHits || "none"}] routes=[${routeHits || "none"}] (这些是占位/未成熟模型名；smoke 前请用 LINGHUN_DEEPSEEK_MODEL/LINGHUN_DEFAULT_MODEL 替换为现役模型名，例如 deepseek-chat/deepseek-reasoner)`,
     );
   }
   // D.13F：顶层 promptCache 摘要（仅展示 enabled / systemTtl，与具体 provider 无关）。
@@ -226,6 +294,23 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     lines.push(
       `- deferredTools: total=${summary.total} executable=${summary.executableCount} codebase-memory=${summary.byKind["codebase-memory"]} mcp=${summary.byKind.mcp} skill=${summary.byKind.skill} plugin=${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
     );
+  }
+  // D.13J Block 2：本 session 通过 SearchExtraTools 已发现的 deferred 工具名摘要。
+  // 解决 ExecuteExtraTool 被拒时无法直接看出"是没发现还是参数错"的可见性问题。
+  // discoveredDeferredToolNames 是 session-scoped Set；session 重启即清零。
+  if (context.discoveredDeferredToolsSummary) {
+    const ds = context.discoveredDeferredToolsSummary;
+    if (ds.total === 0) {
+      lines.push(
+        "- discoveredDeferredTools: 0 (本 session 还没运行过 SearchExtraTools；ExecuteExtraTool 现在会全部拒绝。请先 SearchExtraTools)",
+      );
+    } else {
+      const visible = ds.names.join(",");
+      const tail = ds.truncated ? `,…+${ds.total - ds.names.length} more` : "";
+      lines.push(
+        `- discoveredDeferredTools: total=${ds.total} names=[${visible}${tail}] (本 session 经 SearchExtraTools 记录过的工具名；session 重启即清零)`,
+      );
+    }
   }
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
@@ -375,12 +460,22 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
 
 export function diagnoseRoute(route: RoleModelRoute, config: LinghunConfig): string[] {
   const problems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, config);
+  // D.13J tail fix（Block D）：doctor-only placeholder 检查。
+  // 只在 doctor 报告层把 placeholder 模型升级为 blocking；不下沉到 diagnoseConcreteRoute，
+  // 否则 runRoleModelRoute 也会把所有用 fixture 模型名（deepseek-v4-flash/pro）
+  // 的链路一刀切 short-circuit，破坏 agent / permission / verify / review。
+  if (route.primaryModel && isDefaultPlaceholderModel(route.primaryModel)) {
+    problems.push(`模型 placeholder 未替换为现役模型：${route.primaryModel}`);
+  }
   if (route.fallbackModels.length === 0) {
     problems.push("fallbackModels 未配置");
   }
   for (const fallbackModel of route.fallbackModels) {
     const fallbackProvider = inferProviderForRouteModel(fallbackModel, config);
     const fallbackProblems = diagnoseConcreteRoute(route, fallbackModel, fallbackProvider, config);
+    if (isDefaultPlaceholderModel(fallbackModel)) {
+      fallbackProblems.push(`模型 placeholder 未替换为现役模型：${fallbackModel}`);
+    }
     if (getRouteBlockingProblems(fallbackProblems).length > 0) {
       problems.push(
         `fallback 不可用 ${fallbackModel}：${getRouteBlockingProblems(fallbackProblems).join("/")}`,
@@ -444,6 +539,10 @@ export function getRouteDoctorLevel(
   config: LinghunConfig,
 ): "BLOCK" | "WARN" | "ok" {
   const primaryProblems = diagnoseConcreteRoute(route, route.primaryModel, route.provider, config);
+  // D.13J tail fix（Block D）：doctor-only placeholder 升级为 blocking。
+  if (route.primaryModel && isDefaultPlaceholderModel(route.primaryModel)) {
+    primaryProblems.push(`模型 placeholder 未替换为现役模型：${route.primaryModel}`);
+  }
   const primaryBlocking = getRouteBlockingProblems(primaryProblems);
   if (primaryBlocking.length > 0) {
     const hasUsableFallback = route.fallbackModels.some((fallbackModel) => {
@@ -454,6 +553,9 @@ export function getRouteDoctorLevel(
         fallbackProvider,
         config,
       );
+      if (isDefaultPlaceholderModel(fallbackModel)) {
+        fallbackProblems.push(`模型 placeholder 未替换为现役模型：${fallbackModel}`);
+      }
       return getRouteBlockingProblems(fallbackProblems).length === 0;
     });
     return hasUsableFallback ? "WARN" : "BLOCK";
@@ -471,7 +573,9 @@ export function getRouteBlockingProblems(problems: string[]): string[] {
         problem.includes("缺 ") ||
         problem.includes("缺已确认") ||
         problem.includes("不匹配") ||
-        problem.startsWith("能力不足")),
+        problem.startsWith("能力不足") ||
+        // D.13J tail fix（Block D）：placeholder 模型属于 blocking，不能被当成可用 route。
+        problem.startsWith("模型 placeholder")),
   );
 }
 

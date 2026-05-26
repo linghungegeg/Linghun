@@ -749,4 +749,71 @@ describe("config directories", () => {
       "settings.providers.deepseek.anthropicBetaHeaders",
     );
   });
+
+  it("D.13J Block 1 isDefaultPlaceholderModel flags deepseek v4 / openai-compatible-model placeholders", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-v4-flash")).toBe(true);
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-v4-pro")).toBe(true);
+    expect(indexModule.isDefaultPlaceholderModel("openai-compatible-model")).toBe(true);
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-chat")).toBe(false);
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-reasoner")).toBe(false);
+    expect(indexModule.isDefaultPlaceholderModel(undefined)).toBe(false);
+    expect(indexModule.isDefaultPlaceholderModel("")).toBe(false);
+    // 占位集合本身可被 doctor 直接读取（仅做存在性断言，不依赖具体大小避免维护噪声）
+    expect(indexModule.defaultPlaceholderModelNames.has("deepseek-v4-flash")).toBe(true);
+    expect(indexModule.defaultPlaceholderModelNames.has("openai-compatible-model")).toBe(true);
+  });
+
+  it("D.13J Block 1 records lastProviderEnvMerge applied=no when no provider.env values are set", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    // 确保 provider.env / settings.json 都没引入 OPENAI_*：直接对一个全新 mkdtemp 项目跑 loadConfig，
+    // home 也用一个全新 mkdtemp 替换 HOME（避免把当前用户的 ~/.linghun/provider.env 卷进来）。
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    const indexModule = await import("./index.js");
+    await indexModule.loadConfig(project);
+    expect(indexModule.lastProviderEnvMerge?.applied).toBe(false);
+    expect(indexModule.lastProviderEnvMerge?.providerIds).toEqual([]);
+    expect(indexModule.lastProviderEnvMerge?.overrodeModelRoutes).toBe(false);
+    expect(indexModule.lastProviderEnvMerge?.overrodeDefaultModel).toBe(false);
+  });
+
+  it("D.13J Block 1 records lastProviderEnvMerge applied=yes + provider id list when provider.env defines openai-compatible", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    // 写一个有效的 ~/.linghun/provider.env：会触发 mergeProviderEnvConfig 落入 applied=true 分支。
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      join(home, ".linghun", "provider.env"),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://relay.example.com",
+        "LINGHUN_OPENAI_API_KEY=sk-merge-test-1234567890",
+        "LINGHUN_OPENAI_MODEL=gpt-test",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const indexModule = await import("./index.js");
+    const config = await indexModule.loadConfig(project);
+    expect(indexModule.lastProviderEnvMerge?.applied).toBe(true);
+    expect(indexModule.lastProviderEnvMerge?.providerIds).toContain("openai-compatible");
+    // 仅记录布尔 + provider id；apiKey/baseUrl 等不应出现在摘要里
+    expect(JSON.stringify(indexModule.lastProviderEnvMerge ?? {})).not.toContain(
+      "sk-merge-test-1234567890",
+    );
+    expect(JSON.stringify(indexModule.lastProviderEnvMerge ?? {})).not.toContain(
+      "relay.example.com",
+    );
+    // provider.env 接管 defaultModel 时，不再保留占位
+    expect(config.defaultModel).toBe("gpt-test");
+  });
 });

@@ -216,6 +216,38 @@ export type ProviderEnvSetup = {
 export let lastConfigRecoveryWarning: ConfigRecoveryWarning | undefined;
 export let lastProviderEnvWarning: ProviderEnvWarning | undefined;
 
+// D.13J Block 1：占位 / 未成熟模型名集合。
+// 这些名字会出现在默认配置里（例如 deepseek-v4-flash / deepseek-v4-pro），
+// 但 DeepSeek 官方目前没有 v4 系列；如果用户没有用 LINGHUN_DEEPSEEK_MODEL 覆盖，
+// 第一次发请求就会 404。doctor 必须能把这种"占位状态"标出来，让用户在 smoke 之前
+// 显式替换为现役模型名（例如 deepseek-chat / deepseek-reasoner）。
+export const defaultPlaceholderModelNames: ReadonlySet<string> = new Set([
+  "deepseek-v4-flash",
+  "deepseek-v4-pro",
+  "openai-compatible-model",
+]);
+
+export function isDefaultPlaceholderModel(model: string | undefined): boolean {
+  if (!model) return false;
+  return defaultPlaceholderModelNames.has(model);
+}
+
+// D.13J Block 1：上一次 mergeProviderEnvConfig 的合并摘要。
+// doctor 能据此明确告诉用户："你 ~/.linghun/provider.env 覆盖了 modelRoutes / providers / defaultModel"。
+// 仅记录字段是否覆盖、provider id 列表，**绝不**记录 apiKey、baseUrl、modelRoutes 内容等敏感数据。
+export type ProviderEnvMergeSummary = {
+  // provider.env 是否参与了合并（即 readProviderEnvConfig 返回非空）。
+  applied: boolean;
+  // provider.env 是否覆盖了项目级 modelRoutes。
+  overrodeModelRoutes: boolean;
+  // provider.env 是否覆盖了项目级 defaultModel。
+  overrodeDefaultModel: boolean;
+  // provider.env 引入的 provider id 列表（不含 apiKey、baseUrl、model 值）。
+  providerIds: string[];
+};
+
+export let lastProviderEnvMerge: ProviderEnvMergeSummary | undefined;
+
 export type LinghunConfig = {
   language: Language;
   defaultModel: string;
@@ -834,6 +866,28 @@ function mergeProviderEnvConfig(
   projectSettings: Partial<LinghunConfig>,
   providerEnv: Partial<LinghunConfig>,
 ): Partial<LinghunConfig> {
+  // D.13J Block 1：记录 provider.env 在本次合并中真正覆盖了哪些字段。
+  // doctor 据此对用户说明"~/.linghun/provider.env 已合并/覆盖了 modelRoutes/defaultModel/providers"。
+  // 仅记录 provider id 列表，不记录任何 apiKey/baseUrl/model 值。
+  const providerEnvProviderIds = providerEnv.providers
+    ? Object.keys(providerEnv.providers)
+    : [];
+  const applied =
+    Boolean(providerEnv.defaultModel) ||
+    Boolean(providerEnv.modelRoutes) ||
+    providerEnvProviderIds.length > 0;
+  if (applied) {
+    lastProviderEnvMerge = {
+      applied: true,
+      overrodeModelRoutes:
+        Boolean(providerEnv.modelRoutes) && Boolean(projectSettings.modelRoutes),
+      overrodeDefaultModel:
+        Boolean(providerEnv.defaultModel) && Boolean(projectSettings.defaultModel),
+      providerIds: providerEnvProviderIds,
+    };
+  } else {
+    lastProviderEnvMerge = { applied: false, overrodeModelRoutes: false, overrodeDefaultModel: false, providerIds: [] };
+  }
   return {
     ...projectSettings,
     ...providerEnv,

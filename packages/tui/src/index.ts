@@ -1467,6 +1467,13 @@ export type TuiContext = {
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
   // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
   discoveredDeferredToolNames: Set<string>;
+  // D.13J Block 3 — codebase-memory mutating 工具的 session 权限授予标记。
+  // order: whitelist → required-args → permission gate → spawn。readonly 工具不看此 flag。
+  codebaseMemoryMutatingGranted?: boolean;
+  // D.13J Block 4 — 通用 MCP stdio mutating 工具 session 权限授予标记。
+  // 不知道具体 server 的工具语义，按工具名 keyword（write/delete/update/index_*）保守判定 mutating；
+  // 命中 mutating heuristic 时必须显式 session 授予才放行。
+  mcpStdioMutatingGranted?: boolean;
 };
 
 type ProviderFailureSummary = {
@@ -4254,7 +4261,7 @@ async function handleModelCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context) }));
+    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }));
     return;
   }
   const runtime = getSelectedModelRuntime(context);
@@ -4398,7 +4405,7 @@ async function handleModelRouteCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context) }));
+    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }));
     return;
   }
   if (action === "set") {
@@ -9402,11 +9409,56 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
     server.error = resolution.status === "ready" ? undefined : resolution.summary;
   }
   context.mcp.lastDoctor = new Date().toISOString();
-  context.mcp.tools = stabilizeMcpToolList(
-    context.mcp.servers
-      .filter((server) => server.status === "configured")
-      .flatMap((server) => createMcpToolPlaceholders(server.name, "discovered")),
-  );
+  // D.13J tail fix（Block A）：local stdio MCP server 走真实 tools/list 把 server 公布的工具
+  // 翻译为 mcp.tools；非 local stdio（无 command / disabled / 远程）保留旧 placeholder 行为。
+  // 仅把 server 真实公布的工具名进入 mcp.tools；description / inputSchema 不进入缓存
+  // （由 stabilizeMcpToolList 截断 description 防 raw schema 泄露）。
+  // tools/list 失败时 fall back 到 placeholder 命名以保留可见性，但 schemaLoaded=false 让
+  // listMcpDeferredTools 认定为不可执行（discovery !== "discovered"），从而拒绝 ExecuteExtraTool。
+  const discoveredTools: McpToolState[] = [];
+  for (const server of context.mcp.servers) {
+    if (server.status !== "configured") continue;
+    if (server.name === "codebase-memory") {
+      discoveredTools.push(...createMcpToolPlaceholders(server.name, "discovered"));
+      continue;
+    }
+    const serverConfig = context.config.mcp.servers[server.name];
+    if (!isLocalStdioMcpServer(serverConfig)) {
+      // 非 local stdio：保留 placeholder 行为，executable 由 listMcpDeferredTools 在渲染时再裁决。
+      discoveredTools.push(...createMcpToolPlaceholders(server.name, "discovered"));
+      continue;
+    }
+    const listResult = await runMcpStdioToolList(
+      serverConfig as McpServerConfig,
+      context.projectPath,
+    );
+    if (listResult.ok && listResult.toolNames.length > 0) {
+      for (const toolName of listResult.toolNames) {
+        discoveredTools.push({
+          server: server.name,
+          name: toolName,
+          description: `MCP tool ${server.name}:${toolName}`,
+          discovery: "discovered",
+          trusted: true,
+          schemaLoaded: true,
+          runtimeVersion: "compatible",
+        });
+      }
+    } else {
+      // tools/list 失败：暴露 server 仍可被 doctor 看见（status / error），但 deferred 入口
+      // 不会标 schemaLoaded=true，因此 listMcpDeferredTools 自然过滤掉。
+      discoveredTools.push({
+        server: server.name,
+        name: `${server.name}.status`,
+        description: `MCP server tools/list failed: ${truncateDisplay(listResult.summary, 80)}`,
+        discovery: "placeholder",
+        trusted: false,
+        schemaLoaded: false,
+        runtimeVersion: "unknown",
+      });
+    }
+  }
+  context.mcp.tools = stabilizeMcpToolList(discoveredTools);
   refreshCacheFreshness(context);
 }
 
@@ -10120,6 +10172,30 @@ function codebaseMemoryRequiredArgs(): Record<string, string[]> {
   };
 }
 
+// D.13J Block 3 — codebase-memory 工具 risk 分层。
+// readonly = 只读查询，无 session 权限门槛；mutating = 可能写入索引/触发昂贵操作，
+// 必须显式权限授予。order: whitelist → required-args → permission gate → spawn。
+function codebaseMemoryRiskClass(): Record<string, "readonly" | "mutating"> {
+  return {
+    list_projects: "readonly",
+    index_status: "readonly",
+    search_code: "readonly",
+    get_architecture: "readonly",
+    get_code_snippet: "readonly",
+    query_graph: "readonly",
+    trace_path: "readonly",
+    search_graph: "readonly",
+    index_repository: "mutating",
+    detect_changes: "mutating",
+  };
+}
+
+export function getCodebaseMemoryToolRisk(
+  tool: string,
+): "readonly" | "mutating" | "unknown" {
+  return codebaseMemoryRiskClass()[tool] ?? "unknown";
+}
+
 export function validateCodebaseMemoryToolExecution(
   tool: string,
   input: Record<string, unknown>,
@@ -10216,17 +10292,35 @@ function listMcpDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
     .filter((tool) => tool.discovery === "discovered")
     .filter((tool) => tool.schemaLoaded === true)
     .filter((tool) => tool.trusted === true)
-    .map((tool) => ({
-      name: `mcp:${tool.server}:${tool.name}`,
-      kind: "mcp" as const,
-      // truncate is already enforced by stabilizeMcpToolList; do not echo raw schema
-      description: tool.description || `MCP tool ${tool.server}:${tool.name}`,
-      requiredArgs: [],
-      executable: false,
-      reason:
-        "MCP server tool discovered with schema and trusted, but Linghun has no generic MCP runtime adapter yet; use /mcp validate or codebase-memory whitelist to execute.",
-    }))
+    .map((tool) => {
+      // D.13J Block 4 — local stdio MCP runtime adapter.
+      // Server is executable iff它在 config 里且有 command（即本地 stdio 启动方式）。
+      // 远程/HTTP MCP 仍保持 executable=false：这是 D.13J Block 4 的明确范围边界。
+      const serverConfig = context.config.mcp.servers[tool.server];
+      const localStdio = isLocalStdioMcpServer(serverConfig);
+      return {
+        name: `mcp:${tool.server}:${tool.name}`,
+        kind: "mcp" as const,
+        // truncate is already enforced by stabilizeMcpToolList; do not echo raw schema
+        description: tool.description || `MCP tool ${tool.server}:${tool.name}`,
+        requiredArgs: [],
+        executable: localStdio,
+        reason: localStdio
+          ? "MCP server tool discovered (local stdio); JSON-RPC tools/call adapter available. Mutating use needs session permission."
+          : "MCP server tool discovered with schema and trusted, but server is not local stdio (no command); Linghun has no remote MCP transport adapter yet.",
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// D.13J Block 4 — local stdio identification. command 必须是非空字符串；若 command 缺失
+// 表示 server 仅以远程 HTTP 形式注册（不在本 Block 范围）。
+function isLocalStdioMcpServer(server: McpServerConfig | undefined): boolean {
+  if (!server) return false;
+  if (server.disabled === true) return false;
+  if (typeof server.command !== "string") return false;
+  if (server.command.trim() === "") return false;
+  return true;
 }
 
 function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
@@ -10245,10 +10339,24 @@ function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
       ),
       requiredArgs: [],
       executable: false,
-      reason:
-        "Skill manifest discovered (enabled+trusted), but Linghun has no safe skill execution adapter; review the skill file manually or run /skills status.",
+      reason: skillManifestHasContribution(skill)
+        ? "Skill manifest contributes commands/tools (enabled+trusted), but Linghun has no safe skill execution adapter yet; review manifest manually or run /skills status."
+        : "Skill manifest is metadata-only (no command/tool contribution); not executable. Run /skills status for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// D.13J Block 5 — manifest 事实裁决：根据 manifest 字段区分"贡献了 command/tool"
+// 与"纯 metadata"。仅读取已加载的 manifest 字段，不执行 postinstall/hook。
+// SkillSummary 上没有显式 commands 字段，但 triggers 是 skill 的命令/工具触发入口；
+// 同时兼容 manifest 上可能存在的 commands/tools 数组（通过 raw 字段读取）。
+function skillManifestHasContribution(skill: SkillSummary): boolean {
+  const triggers = skill.triggers ?? [];
+  if (Array.isArray(triggers) && triggers.length > 0) return true;
+  const raw = skill as unknown as { commands?: unknown; tools?: unknown };
+  if (Array.isArray(raw.commands) && raw.commands.length > 0) return true;
+  if (Array.isArray(raw.tools) && raw.tools.length > 0) return true;
+  return false;
 }
 
 function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
@@ -10267,10 +10375,24 @@ function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] 
       ),
       requiredArgs: [],
       executable: false,
-      reason:
-        "Plugin manifest discovered (enabled+trusted), but Linghun has no safe plugin execution adapter; review contributions or run /plugins doctor.",
+      reason: pluginManifestHasContribution(plugin)
+        ? "Plugin manifest contributes commands/tools (enabled+trusted), but Linghun has no safe plugin execution adapter yet; review contributions manually or run /plugins doctor."
+        : "Plugin manifest is metadata-only (no command/tool contribution); not executable. Run /plugins doctor for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function pluginManifestHasContribution(plugin: PluginSummary): boolean {
+  const c = plugin.contributions;
+  if (!c) return false;
+  return (
+    (c.commands?.length ?? 0) > 0 ||
+    (c.mcpServers?.length ?? 0) > 0 ||
+    (c.providers?.length ?? 0) > 0 ||
+    (c.hooks?.length ?? 0) > 0 ||
+    (c.workflows?.length ?? 0) > 0 ||
+    (c.skills?.length ?? 0) > 0
+  );
 }
 
 export function listDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
@@ -10313,6 +10435,47 @@ export function snapshotDeferredToolsSummary(
     total: snapshot.total,
     byKind: snapshot.byKind,
     executableCount: snapshot.executableCount,
+  };
+}
+
+// D.13J Block 2：D.13I session-scoped discovered Set 的 doctor 摘要。
+// `executeSearchExtraTools` 把匹配上的 deferred 工具名写入 `context.discoveredDeferredToolNames`，
+// `executeExtraTool` 必须先看 Set 才放行。出于排查 ExecuteExtraTool 拒绝的需要，doctor 必须能看见
+// 当前 session "已发现"了哪些工具。但只能输出"经过 sanitize 的工具名 + 数量"——
+// 不能输出 raw 参数、不能透出 secret，因为发现集合里有可能包含将来引入的非 codebase-memory 工具名。
+//
+// sanitize 规则：
+//   - 仅保留字母/数字/下划线/冒号/连字符/点号；其他字符替换为 "_"
+//   - 长度上限 80；超长直接截断（避免日志爆炸）
+//   - 总数上限 32；超过则按字典序保留前 32 项 + 一个 "+N more" 提示位
+export type DiscoveredDeferredToolsSummary = {
+  total: number;
+  names: string[];
+  truncated: boolean;
+};
+
+const DISCOVERED_NAME_MAX_LEN = 80;
+const DISCOVERED_NAMES_MAX_COUNT = 32;
+
+export function sanitizeDiscoveredDeferredToolName(name: string): string {
+  // 仅保留 A-Za-z0-9_:.- ；其他都替换为 "_"，避免在 doctor 输出里出现奇怪字符。
+  const cleaned = name.replace(/[^A-Za-z0-9_:.\-]/g, "_");
+  if (cleaned.length <= DISCOVERED_NAME_MAX_LEN) return cleaned;
+  return `${cleaned.slice(0, DISCOVERED_NAME_MAX_LEN)}…`;
+}
+
+export function snapshotDiscoveredDeferredToolsSummary(
+  context: TuiContext,
+): DiscoveredDeferredToolsSummary {
+  const sorted = Array.from(context.discoveredDeferredToolNames).sort();
+  const sanitized = sorted.map(sanitizeDiscoveredDeferredToolName);
+  if (sanitized.length <= DISCOVERED_NAMES_MAX_COUNT) {
+    return { total: sanitized.length, names: sanitized, truncated: false };
+  }
+  return {
+    total: sanitized.length,
+    names: sanitized.slice(0, DISCOVERED_NAMES_MAX_COUNT),
+    truncated: true,
   };
 }
 
@@ -10446,6 +10609,15 @@ export async function executeExtraTool(
     if (!guard.ok) {
       return { ok: false, text: guard.summary };
     }
+    // D.13J Block 3 — mutating 工具需要 session 权限授予。order: whitelist
+    // (Set + listDeferredTools) → required-args → permission gate → spawn。
+    const risk = getCodebaseMemoryToolRisk(target.name);
+    if (risk === "mutating" && !context.codebaseMemoryMutatingGranted) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool: codebase-memory tool ${target.name} 需要 mutating 权限。当前 session 默认拒绝 mutating；如果你确实要刷新索引，请使用真实的 slash 命令 /index refresh 或 /index init fast --force（这两个命令会走 Linghun 受控路径，不需要本入口）。`,
+      };
+    }
     const cliResult = await runCodebaseMemoryCli(context, target.name, params, context.projectPath);
     if (!cliResult.ok) {
       return {
@@ -10460,10 +10632,487 @@ export async function executeExtraTool(
     };
   }
   // 防御：MCP/skill/plugin 已在上面被 executable=false 拦截，理论上不会到这里。
+  if (target.kind === "mcp") {
+    // D.13J Block 4 — local stdio MCP runtime adapter.
+    // mcp:<server>:<tool> 形态：从 target.name 解析出 server 和 tool name。
+    // server 必须存在于 context.config.mcp.servers 且为 local stdio；同时 mutating
+    // 工具默认拒绝（沿用 codebase-memory 的 mutating gate 思路）。
+    const parsed = parseMcpDeferredToolName(target.name);
+    if (!parsed) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool: 无法解析 MCP 工具名 ${target.name}，期望格式 mcp:<server>:<tool>。`,
+      };
+    }
+    const serverConfig = context.config.mcp.servers[parsed.server];
+    if (!isLocalStdioMcpServer(serverConfig)) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool: MCP server ${parsed.server} 不是本地 stdio（缺少 command 或已禁用），当前没有远程 MCP 传输适配器。`,
+      };
+    }
+    if (!context.mcpStdioMutatingGranted && isPotentiallyMutatingMcpTool(parsed.tool)) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool: MCP 工具 ${target.name} 看起来是 mutating（write/delete/update/index/create 类）。当前 session 默认拒绝 mcp 写权限，无 slash 入口可显式授予；如果该工具是 codebase-memory 索引写入，请改用 /index refresh 或 /index init fast --force 走受控路径，否则请在 server 自身或 .linghun/settings.json 中关闭对应 mutating 工具。`,
+      };
+    }
+    const stdio = await runMcpStdioToolCall(
+      serverConfig as McpServerConfig,
+      parsed.tool,
+      params,
+      context.projectPath,
+    );
+    if (!stdio.ok) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool(${target.name}) 失败：${stdio.summary}${stdio.errorCode ? ` [${stdio.errorCode}]` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      text: `ExecuteExtraTool(${target.name}) 完成。`,
+      data: stdio.data,
+    };
+  }
   return {
     ok: false,
     text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 没有可用的安全执行适配器。`,
   };
+}
+
+// D.13J Block 4 — `mcp:<server>:<tool>` 名称解析。server 不能含冒号，tool 名允许出现冒号
+// 以兼容 `server.tool` 形态（如 `codebase-memory.list_projects` 或 `srv:tool:sub`）。
+export function parseMcpDeferredToolName(
+  name: string,
+): { server: string; tool: string } | undefined {
+  if (!name.startsWith("mcp:")) return undefined;
+  const rest = name.slice(4);
+  const idx = rest.indexOf(":");
+  if (idx <= 0) return undefined;
+  const server = rest.slice(0, idx);
+  const tool = rest.slice(idx + 1);
+  if (server.trim() === "" || tool.trim() === "") return undefined;
+  return { server, tool };
+}
+
+// D.13J Block 4 — mutating heuristic for generic MCP tools。我们不知道具体 server 的工具语义，
+// 只能依赖工具名前缀/关键字保守判定：write/delete/update/create/remove/index 等被视为 mutating。
+// 默认守门：mutating → 必须 session 权限授予。readonly heuristic miss 不是问题（继续走 spawn）；
+// mutating heuristic miss 才是问题（用户明确点名 codebase-memory 的 index_repository / detect_changes
+// 必须默认拒绝），因此误报偏 mutating 比误报偏 readonly 更安全。
+const MUTATING_MCP_TOOL_KEYWORDS: ReadonlyArray<string> = [
+  "write",
+  "delete",
+  "update",
+  "create",
+  "remove",
+  "index_repository",
+  "detect_changes",
+  "ingest",
+  "manage_adr",
+];
+
+export function isPotentiallyMutatingMcpTool(toolName: string): boolean {
+  const lower = toolName.toLowerCase();
+  return MUTATING_MCP_TOOL_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+// D.13J Block 4 — JSON-RPC 2.0 over stdio MCP client。最小可用：
+//   1. spawn server with command/args/env (cwd = project)
+//   2. send `initialize` (capabilities + clientInfo)，等 result
+//   3. send `tools/list`，校验目标 tool 在 server 公布的 list 内（防止虚假发现）
+//   4. send `tools/call` (name + arguments)，等 result
+//   5. 直接 kill 子进程；不维持长连接（每次 ExecuteExtraTool 一次性 spawn）。
+// 设计说明：长连接需要管理 reconnect / inflight 字典 / pendingRequests 状态机，超出 D.13J Block 4
+// 范围。一次性 spawn 简单、安全、可测；性能代价由后续 Block 优化。
+// D.13J tail fix（Block A）：tools/list 是 tail fix 新增链路，server 必须能返回包含目标 tool 的列表，
+// 否则视为 schema 不一致并拒绝执行；这样 deferred discovery 不再依赖 placeholder。
+type McpStdioResult = {
+  ok: boolean;
+  data?: unknown;
+  summary: string;
+  errorCode?: string;
+};
+
+// D.13J tail fix（Block A）：仅探测 tools/list 用于 discovery。仅返回工具名集合 +
+// 是否存在 noise/error，不写入 stdio adapter 缓存；调用方负责把它喂给 stabilizeMcpToolList。
+type McpStdioToolListResult = {
+  ok: boolean;
+  toolNames: string[];
+  summary: string;
+  errorCode?: string;
+};
+
+const MCP_STDIO_CALL_TIMEOUT_MS = 15_000;
+const MCP_STDIO_PROTOCOL_VERSION = "2025-06-18";
+
+async function runMcpStdioToolCall(
+  server: McpServerConfig,
+  toolName: string,
+  params: Record<string, unknown>,
+  cwd: string,
+  timeoutMs: number = MCP_STDIO_CALL_TIMEOUT_MS,
+): Promise<McpStdioResult> {
+  return new Promise((resolvePromise) => {
+    let child: ReturnType<typeof spawn>;
+    const guard = createProcessGuard();
+    try {
+      child = spawn(server.command, server.args ?? [], {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        env: server.env ? { ...process.env, ...server.env } : process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      guard.track(child, { label: `mcp-stdio:${server.command}` });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      resolvePromise({
+        ok: false,
+        summary: `spawn failed: ${sanitizeDiagnosticText(nodeError.message)}`,
+        errorCode: nodeError.code,
+      });
+      return;
+    }
+
+    let settled = false;
+    const settle = (result: McpStdioResult): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        guard.requestStop(false);
+      } catch {
+        // ignore
+      }
+      resolvePromise(result);
+    };
+
+    const stderrChunks: Buffer[] = [];
+    let stdoutBuffer = "";
+    const stdin = child.stdin;
+    const stdout = child.stdout;
+    const stderr = child.stderr;
+    if (!stdin || !stdout || !stderr) {
+      settle({ ok: false, summary: "MCP stdio streams unavailable" });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      settle({
+        ok: false,
+        summary: `MCP stdio timeout after ${timeoutMs}ms (no result for tools/call ${toolName})`,
+        errorCode: "ETIMEDOUT",
+      });
+    }, timeoutMs);
+
+    type Pending = {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+    };
+    const pending = new Map<number, Pending>();
+    let nextId = 1;
+
+    const sendRequest = (method: string, params2?: unknown): Promise<unknown> => {
+      return new Promise((resolveReq, rejectReq) => {
+        const id = nextId++;
+        pending.set(id, { resolve: resolveReq, reject: rejectReq });
+        const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
+        try {
+          stdin.write(`${message}\n`);
+        } catch (error) {
+          pending.delete(id);
+          rejectReq(error as Error);
+        }
+      });
+    };
+
+    stdout.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      let newlineIdx: number;
+      // line-delimited JSON-RPC; each newline is a frame.
+      while ((newlineIdx = stdoutBuffer.indexOf("\n")) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIdx).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        if (line === "") continue;
+        let frame: unknown;
+        try {
+          frame = JSON.parse(line);
+        } catch {
+          // ignore non-JSON noise (some MCP servers print banners on first line)
+          continue;
+        }
+        const obj = frame as {
+          id?: number;
+          result?: unknown;
+          error?: { message?: string; code?: number | string };
+        };
+        if (typeof obj.id !== "number") continue;
+        const handler = pending.get(obj.id);
+        if (!handler) continue;
+        pending.delete(obj.id);
+        if (obj.error) {
+          handler.reject(
+            new Error(
+              `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
+            ),
+          );
+        } else {
+          handler.resolve(obj.result);
+        }
+      }
+    });
+    stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+    });
+    child.on("error", (error: Error) => {
+      const nodeError = error as NodeJS.ErrnoException;
+      clearTimeout(timer);
+      settle({
+        ok: false,
+        summary: `MCP stdio error: ${sanitizeDiagnosticText(nodeError.message)}`,
+        errorCode: nodeError.code,
+      });
+    });
+    child.on("exit", (code, signal) => {
+      // 让 settle 决定 outcome：如果 tools/call 已经 resolve 过，settle 会被忽略。
+      if (!settled) {
+        clearTimeout(timer);
+        const stderrText = sanitizeDiagnosticText(
+          Buffer.concat(stderrChunks).toString("utf8").slice(0, 400),
+        );
+        settle({
+          ok: false,
+          summary: `MCP stdio child exited prematurely (code=${code ?? "?"} signal=${signal ?? "-"})${stderrText ? `: ${stderrText}` : ""}`,
+        });
+      }
+    });
+
+    (async () => {
+      try {
+        await sendRequest("initialize", {
+          protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "linghun-tui", version: "0.0.0" },
+        });
+        // D.13J tail fix（Block A）：tools/list 校验目标 tool 在 server 公布的列表内。
+        // 防御 server 静默接受 tools/call 但工具名不存在 / 拼写错误 / server 已下线该工具。
+        const listResult = await sendRequest("tools/list", {});
+        const toolNames = extractMcpToolNames(listResult);
+        if (!toolNames.includes(toolName)) {
+          clearTimeout(timer);
+          settle({
+            ok: false,
+            summary: `tools/list does not contain ${toolName} (server published ${toolNames.length} tools); refusing tools/call`,
+            errorCode: "MCP_TOOL_NOT_FOUND",
+          });
+          return;
+        }
+        const result = await sendRequest("tools/call", {
+          name: toolName,
+          arguments: params,
+        });
+        clearTimeout(timer);
+        settle({
+          ok: true,
+          summary: `tools/call ${toolName} ok`,
+          data: result,
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        settle({
+          ok: false,
+          summary: sanitizeDiagnosticText((error as Error).message),
+        });
+      }
+    })();
+  });
+}
+
+// D.13J tail fix（Block A）：从 MCP `tools/list` result 中提取工具名集合。
+// MCP 规范：result.tools 是 { name: string; description?: string; inputSchema?: object }[]。
+// 我们仅取 name，丢弃其余字段（description/inputSchema 不进入 stdio adapter 缓存，避免 raw schema 泄露）。
+function extractMcpToolNames(listResult: unknown): string[] {
+  if (!listResult || typeof listResult !== "object") return [];
+  const tools = (listResult as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) return [];
+  const names: string[] = [];
+  for (const tool of tools) {
+    if (tool && typeof tool === "object") {
+      const name = (tool as { name?: unknown }).name;
+      if (typeof name === "string" && name.length > 0) names.push(name);
+    }
+  }
+  return names;
+}
+
+// D.13J tail fix（Block A）：仅探测 server 的 tools/list，用于 discovery 真实化。
+// 与 runMcpStdioToolCall 共享 spawn / settle / JSON-RPC 解析逻辑；区别：不发 tools/call，
+// 只回返工具名集合。失败时不抛错，返回 ok=false + errorCode + summary，由调用方决定是否
+// 在 deferred discovery 中标 schemaLoaded=false。仅 5s timeout，避免拖慢启动。
+async function runMcpStdioToolList(
+  server: McpServerConfig,
+  cwd: string,
+  timeoutMs = 5_000,
+): Promise<McpStdioToolListResult> {
+  return new Promise((resolvePromise) => {
+    let child: ReturnType<typeof spawn>;
+    const guard = createProcessGuard();
+    try {
+      child = spawn(server.command, server.args ?? [], {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        env: server.env ? { ...process.env, ...server.env } : process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      guard.track(child, { label: `mcp-stdio-list:${server.command}` });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      resolvePromise({
+        ok: false,
+        toolNames: [],
+        summary: `spawn failed: ${sanitizeDiagnosticText(nodeError.message)}`,
+        errorCode: nodeError.code,
+      });
+      return;
+    }
+
+    let settled = false;
+    const settle = (result: McpStdioToolListResult): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        guard.requestStop(false);
+      } catch {
+        // ignore
+      }
+      resolvePromise(result);
+    };
+
+    let stdoutBuffer = "";
+    const stdin = child.stdin;
+    const stdout = child.stdout;
+    const stderr = child.stderr;
+    if (!stdin || !stdout || !stderr) {
+      settle({ ok: false, toolNames: [], summary: "MCP stdio streams unavailable" });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      settle({
+        ok: false,
+        toolNames: [],
+        summary: `MCP stdio tools/list timeout after ${timeoutMs}ms`,
+        errorCode: "ETIMEDOUT",
+      });
+    }, timeoutMs);
+
+    type Pending = {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+    };
+    const pending = new Map<number, Pending>();
+    let nextId = 1;
+
+    const sendRequest = (method: string, params2?: unknown): Promise<unknown> => {
+      return new Promise((resolveReq, rejectReq) => {
+        const id = nextId++;
+        pending.set(id, { resolve: resolveReq, reject: rejectReq });
+        const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
+        try {
+          stdin.write(`${message}\n`);
+        } catch (error) {
+          pending.delete(id);
+          rejectReq(error as Error);
+        }
+      });
+    };
+
+    stdout.setEncoding("utf8");
+    stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      let newlineIdx: number;
+      while ((newlineIdx = stdoutBuffer.indexOf("\n")) >= 0) {
+        const line = stdoutBuffer.slice(0, newlineIdx).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        if (line === "") continue;
+        let frame: unknown;
+        try {
+          frame = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const obj = frame as {
+          id?: number;
+          result?: unknown;
+          error?: { message?: string; code?: number | string };
+        };
+        if (typeof obj.id !== "number") continue;
+        const handler = pending.get(obj.id);
+        if (!handler) continue;
+        pending.delete(obj.id);
+        if (obj.error) {
+          handler.reject(
+            new Error(
+              `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
+            ),
+          );
+        } else {
+          handler.resolve(obj.result);
+        }
+      }
+    });
+    stderr.on("data", () => {
+      // discard noise; tools/list discovery prefers silent failure over noisy summaries
+    });
+    child.on("error", (error: Error) => {
+      const nodeError = error as NodeJS.ErrnoException;
+      clearTimeout(timer);
+      settle({
+        ok: false,
+        toolNames: [],
+        summary: `MCP stdio error: ${sanitizeDiagnosticText(nodeError.message)}`,
+        errorCode: nodeError.code,
+      });
+    });
+    child.on("exit", (code, signal) => {
+      if (!settled) {
+        clearTimeout(timer);
+        settle({
+          ok: false,
+          toolNames: [],
+          summary: `MCP stdio child exited prematurely (code=${code ?? "?"} signal=${signal ?? "-"})`,
+        });
+      }
+    });
+
+    (async () => {
+      try {
+        await sendRequest("initialize", {
+          protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "linghun-tui", version: "0.0.0" },
+        });
+        const listResult = await sendRequest("tools/list", {});
+        const toolNames = extractMcpToolNames(listResult);
+        clearTimeout(timer);
+        settle({
+          ok: true,
+          toolNames,
+          summary: `tools/list ok (${toolNames.length} tools)`,
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        settle({
+          ok: false,
+          toolNames: [],
+          summary: sanitizeDiagnosticText((error as Error).message),
+        });
+      }
+    })();
+  });
 }
 
 async function runCommandCapture(

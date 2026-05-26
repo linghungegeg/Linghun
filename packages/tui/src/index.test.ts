@@ -44,10 +44,13 @@ import {
   executeSearchExtraTools,
   findDeferredTool,
   formatDeferredToolsSystemReminder,
+  getCodebaseMemoryToolRisk,
   handleNaturalInput,
   handleSlashCommand,
   handleTuiKeypress,
+  isPotentiallyMutatingMcpTool,
   listDeferredTools,
+  parseMcpDeferredToolName,
   processRemoteApprovalForTest,
   recordModelUsage,
   runAutoLearningOnTurnEnd,
@@ -57,6 +60,8 @@ import {
   searchDeferredTools,
   snapshotDeferredTools,
   snapshotDeferredToolsSummary,
+  snapshotDiscoveredDeferredToolsSummary,
+  sanitizeDiscoveredDeferredToolName,
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
   writeLightHintsForTest,
@@ -6029,7 +6034,7 @@ describe("Phase 06 TUI slash commands", () => {
             ? {
                 ...route,
                 provider: "deepseek",
-                primaryModel: "deepseek-v4-pro",
+                primaryModel: "deepseek-chat",
                 fallbackModels: ["gpt-4o"],
               }
             : route,
@@ -6037,6 +6042,10 @@ describe("Phase 06 TUI slash commands", () => {
       },
       providers: {
         ...defaultConfig.providers,
+        deepseek: {
+          ...defaultConfig.providers.deepseek,
+          model: "deepseek-chat",
+        },
         "openai-compatible": {
           ...defaultConfig.providers["openai-compatible"],
           baseUrl: undefined,
@@ -9727,6 +9736,54 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     expect(filtered.data.matches.some((m) => m.name === "trace_path")).toBe(true);
   });
 
+  it("D.13J Block 2 sanitizeDiscoveredDeferredToolName 仅保留安全字符，超长截断", () => {
+    expect(sanitizeDiscoveredDeferredToolName("list_projects")).toBe("list_projects");
+    expect(sanitizeDiscoveredDeferredToolName("mcp__server__action")).toBe("mcp__server__action");
+    expect(sanitizeDiscoveredDeferredToolName("server:tool-1.2")).toBe("server:tool-1.2");
+    // 控制字符 / 引号 / 反斜杠都换成下划线
+    expect(sanitizeDiscoveredDeferredToolName("evil\\name'with\"chars\n")).toBe(
+      "evil_name_with_chars_",
+    );
+    // 长度上限 80：第 81 个字符触发截断
+    const longName = "a".repeat(120);
+    const sanitized = sanitizeDiscoveredDeferredToolName(longName);
+    expect(sanitized.length).toBeLessThanOrEqual(82); // 80 + 1 ellipsis 字符（"…" 占 1 个 JS char）
+    expect(sanitized.endsWith("…")).toBe(true);
+  });
+
+  it("D.13J Block 2 snapshotDiscoveredDeferredToolsSummary 排序、上限 32、截断标记", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 0 项时
+    const empty = snapshotDiscoveredDeferredToolsSummary(context);
+    expect(empty.total).toBe(0);
+    expect(empty.names).toEqual([]);
+    expect(empty.truncated).toBe(false);
+
+    // 注入若干工具名（直接操作 Set，不走 SearchExtraTools，避免依赖具体白名单工具）
+    for (let i = 0; i < 5; i++) {
+      context.discoveredDeferredToolNames.add(`zeta_${i}`);
+    }
+    context.discoveredDeferredToolNames.add("alpha_tool");
+    const small = snapshotDiscoveredDeferredToolsSummary(context);
+    expect(small.total).toBe(6);
+    // 字典序排序：alpha_tool 必须排第一
+    expect(small.names[0]).toBe("alpha_tool");
+    expect(small.truncated).toBe(false);
+
+    // 注入 40 项触发上限 32 + truncated=true
+    for (let i = 0; i < 40; i++) {
+      context.discoveredDeferredToolNames.add(`gen_${i.toString().padStart(2, "0")}`);
+    }
+    const big = snapshotDiscoveredDeferredToolsSummary(context);
+    expect(big.total).toBeGreaterThanOrEqual(40);
+    expect(big.names.length).toBe(32);
+    expect(big.truncated).toBe(true);
+  });
+
   it("D.13I rejection: ExecuteExtraTool rejects undiscovered tool names", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -10262,5 +10319,684 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     ]);
     expect(findDeferredTool("trace_path", tools)?.name).toBe("trace_path");
     expect(findDeferredTool("nope", tools)).toBeUndefined();
+  });
+});
+
+// ─── D.13J Block 3 — codebase-memory 10 tools risk 分层 ──────────────────────
+// readonly 工具放行；mutating 工具必须先获得 session 权限授予。
+// order: whitelist (Set + listDeferredTools) → required-args → permission gate → spawn
+// ----------------------------------------------------------------------------
+describe("D.13J Block 3 — codebase-memory mutating permission gate", () => {
+  it("D.13J Block 3 risk classifier: readonly vs mutating split (8 readonly + 2 mutating)", () => {
+    expect(getCodebaseMemoryToolRisk("list_projects")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("index_status")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("search_code")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("get_architecture")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("get_code_snippet")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("query_graph")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("trace_path")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("search_graph")).toBe("readonly");
+    expect(getCodebaseMemoryToolRisk("index_repository")).toBe("mutating");
+    expect(getCodebaseMemoryToolRisk("detect_changes")).toBe("mutating");
+    expect(getCodebaseMemoryToolRisk("nonexistent_tool")).toBe("unknown");
+  });
+
+  it("D.13J Block 3 required-args wins over permission denial", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 必须先 SearchExtraTools 才能穿过 Set gating
+    executeSearchExtraTools("index_repository", context);
+    // 不授予权限，且 params 缺 repo_path
+    expect(context.codebaseMemoryMutatingGranted).toBeFalsy();
+
+    const result = await executeExtraTool(
+      { tool_name: "index_repository", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    // required-args 必须在 permission gate 之前出现
+    expect(result.text).toContain("缺少 required args");
+    expect(result.text).toContain("repo_path");
+    expect(result.text).not.toContain("权限");
+    expect(result.text).not.toContain("mutating 权限");
+  });
+
+  it("D.13J Block 3 mutating tool denied without permission grant", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    executeSearchExtraTools("detect_changes", context);
+    expect(context.codebaseMemoryMutatingGranted).toBeFalsy();
+
+    // params 满足 required args (project)，但权限缺失
+    const result = await executeExtraTool(
+      { tool_name: "detect_changes", params: { project: "foo" } },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("权限");
+    expect(result.text).toContain("detect_changes");
+    expect(result.text).toContain("mutating");
+    // D.13J tail fix（Block B）：codebase-memory mutating 死路必须重定向到真实 slash 命令，
+    // 而不是写不存在的 /mcp permission / /codebase-memory permission。
+    expect(result.text).not.toContain("/mcp permission");
+    expect(result.text).not.toContain("/codebase-memory permission");
+    expect(result.text).toContain("/index refresh");
+  });
+
+  it("D.13J Block 3 readonly tool dispatches without permission grant", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+
+    executeSearchExtraTools("list_projects", context);
+    expect(context.codebaseMemoryMutatingGranted).toBeFalsy();
+
+    // readonly 工具 list_projects 不需要权限 → 必须放行
+    const result = await executeExtraTool(
+      { tool_name: "list_projects", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("list_projects");
+  });
+
+  it("D.13J Block 3 mutating tool dispatches when permission granted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+
+    executeSearchExtraTools("detect_changes", context);
+    context.codebaseMemoryMutatingGranted = true;
+
+    const result = await executeExtraTool(
+      { tool_name: "detect_changes", params: { project: "foo" } },
+      context,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("detect_changes");
+  });
+});
+
+// ─── D.13J Block 5 — Skill / Plugin 按 manifest 事实裁决 reason ────────────
+// 区分 manifest 是否声明了 commands/tools/contributions。两类都 executable=false。
+// ----------------------------------------------------------------------------
+describe("D.13J Block 5 — skill/plugin manifest contribution reason", () => {
+  it("D.13J Block 5 skill with triggers/commands → reason mentions contributes commands/tools", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.skills.enabled = true;
+    context.skills.skills = [
+      {
+        id: "skill-with-cmd",
+        name: "Skill With Cmd",
+        description: "skill that exposes commands",
+        triggers: ["cmd-a", "cmd-b"],
+      } as unknown as (typeof context.skills.skills)[number],
+    ];
+    context.skills.trustedIds = ["skill-with-cmd"];
+    context.skills.disabledIds = [];
+
+    const tools = listDeferredTools(context);
+    const skill = tools.find((t) => t.name === "skill:skill-with-cmd");
+    expect(skill).toBeTruthy();
+    expect(skill?.executable).toBe(false);
+    expect(skill?.reason).toContain("contributes commands/tools");
+  });
+
+  it("D.13J Block 5 skill with no commands/triggers → reason mentions metadata-only", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.skills.enabled = true;
+    context.skills.skills = [
+      {
+        id: "skill-meta-only",
+        name: "Skill Meta Only",
+        description: "metadata-only skill",
+        triggers: [],
+      } as unknown as (typeof context.skills.skills)[number],
+    ];
+    context.skills.trustedIds = ["skill-meta-only"];
+    context.skills.disabledIds = [];
+
+    const tools = listDeferredTools(context);
+    const skill = tools.find((t) => t.name === "skill:skill-meta-only");
+    expect(skill).toBeTruthy();
+    expect(skill?.executable).toBe(false);
+    expect(skill?.reason).toContain("metadata-only");
+  });
+
+  it("D.13J Block 5 plugin with contributions → reason mentions contributes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.plugins.enabled = true;
+    context.plugins.plugins = [
+      {
+        id: "plugin-with-cmd",
+        name: "Plugin With Cmd",
+        description: "plugin with command contributions",
+        contributions: {
+          commands: ["plugin-cmd"],
+          mcpServers: [],
+          providers: [],
+          hooks: [],
+          workflows: [],
+          skills: [],
+        },
+      } as unknown as (typeof context.plugins.plugins)[number],
+    ];
+    context.plugins.trustedIds = ["plugin-with-cmd"];
+    context.plugins.disabledIds = [];
+
+    const tools = listDeferredTools(context);
+    const plugin = tools.find((t) => t.name === "plugin:plugin-with-cmd");
+    expect(plugin).toBeTruthy();
+    expect(plugin?.executable).toBe(false);
+    expect(plugin?.reason).toContain("contributes");
+    expect(plugin?.reason).not.toContain("metadata-only");
+  });
+
+  it("D.13J Block 5 plugin with empty contributions → reason mentions metadata-only", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    context.plugins.enabled = true;
+    context.plugins.plugins = [
+      {
+        id: "plugin-meta-only",
+        name: "Plugin Meta Only",
+        description: "plugin metadata-only",
+        contributions: {
+          commands: [],
+          mcpServers: [],
+          providers: [],
+          hooks: [],
+          workflows: [],
+          skills: [],
+        },
+      } as unknown as (typeof context.plugins.plugins)[number],
+    ];
+    context.plugins.trustedIds = ["plugin-meta-only"];
+    context.plugins.disabledIds = [];
+
+    const tools = listDeferredTools(context);
+    const plugin = tools.find((t) => t.name === "plugin:plugin-meta-only");
+    expect(plugin).toBeTruthy();
+    expect(plugin?.executable).toBe(false);
+    expect(plugin?.reason).toContain("metadata-only");
+  });
+});
+
+// ─── D.13J Block 4 — local stdio MCP runtime adapter ──────────────────────
+
+async function createMockMcpStdioBinary(
+  mockDir: string,
+  options: {
+    fileName?: string;
+    failInitialize?: boolean;
+    failToolCall?: boolean;
+    failToolList?: boolean;
+    toolCallResult?: unknown;
+    bannerLine?: string;
+    publishedTools?: string[];
+  } = {},
+): Promise<{ mockPath: string; callsPath: string }> {
+  const fileName = options.fileName ?? "mock-mcp-stdio";
+  const mockPath = join(mockDir, `${fileName}.cjs`);
+  const callsPath = join(mockDir, `${fileName}-calls.jsonl`);
+  const failInit = options.failInitialize === true;
+  const failCall = options.failToolCall === true;
+  const failList = options.failToolList === true;
+  const callResult = options.toolCallResult ?? {
+    content: [{ type: "text", text: "ok-from-mock" }],
+  };
+  const banner = options.bannerLine ?? "";
+  // D.13J tail fix（Block A）：mock 默认公布常见 readonly + mutating + Block 4 兼容工具，
+  // 调用方可通过 publishedTools 显式注入"server 不公布该工具"场景。
+  const publishedTools = options.publishedTools ?? [
+    "list_things",
+    "write_value",
+    "list_projects",
+    "search_code",
+    "index_repository",
+  ];
+  await writeFile(
+    mockPath,
+    `const fs = require("node:fs");
+const callsPath = ${JSON.stringify(callsPath)};
+const banner = ${JSON.stringify(banner)};
+const publishedTools = ${JSON.stringify(publishedTools)};
+if (banner) process.stdout.write(banner + "\\n");
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let idx;
+  while ((idx = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, idx).trim();
+    buffer = buffer.slice(idx + 1);
+    if (!line) continue;
+    let frame;
+    try { frame = JSON.parse(line); } catch { continue; }
+    fs.appendFileSync(callsPath, JSON.stringify({ method: frame.method, params: frame.params, id: frame.id }) + "\\n");
+    if (frame.method === "initialize") {
+      if (${failInit ? "true" : "false"}) {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, error: { code: -32000, message: "initialize-fail" } }) + "\\n");
+      } else {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: "2025-06-18", capabilities: {} } }) + "\\n");
+      }
+      continue;
+    }
+    if (frame.method === "tools/list") {
+      if (${failList ? "true" : "false"}) {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, error: { code: -32002, message: "tools-list-fail" } }) + "\\n");
+      } else {
+        const tools = publishedTools.map((name) => ({ name, description: "mock tool " + name, inputSchema: { type: "object" } }));
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: { tools } }) + "\\n");
+      }
+      continue;
+    }
+    if (frame.method === "tools/call") {
+      if (${failCall ? "true" : "false"}) {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, error: { code: -32001, message: "tool-call-fail" } }) + "\\n");
+      } else {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: ${JSON.stringify(callResult)} }) + "\\n");
+      }
+      continue;
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`,
+    "utf8",
+  );
+  return { mockPath, callsPath };
+}
+
+describe("D.13J Block 4 — local stdio MCP runtime adapter", () => {
+  it("D.13J Block 4 parseMcpDeferredToolName: parses mcp:server:tool and rejects malformed", () => {
+    expect(parseMcpDeferredToolName("mcp:server:tool_name")).toEqual({
+      server: "server",
+      tool: "tool_name",
+    });
+    expect(parseMcpDeferredToolName("mcp:my-server:nested:tool:sub")).toEqual({
+      server: "my-server",
+      tool: "nested:tool:sub",
+    });
+    expect(parseMcpDeferredToolName("not-mcp:server:tool")).toBeUndefined();
+    expect(parseMcpDeferredToolName("mcp:")).toBeUndefined();
+    expect(parseMcpDeferredToolName("mcp:onlyserver")).toBeUndefined();
+    expect(parseMcpDeferredToolName("mcp::tool")).toBeUndefined();
+    expect(parseMcpDeferredToolName("mcp:server:")).toBeUndefined();
+  });
+
+  it("D.13J Block 4 isPotentiallyMutatingMcpTool: keyword detection (case-insensitive)", () => {
+    expect(isPotentiallyMutatingMcpTool("write_file")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("delete_node")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("Update_Schema")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("create_thing")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("remove_x")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("index_repository")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("detect_changes")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("ingest_traces")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("manage_adr")).toBe(true);
+    expect(isPotentiallyMutatingMcpTool("list_projects")).toBe(false);
+    expect(isPotentiallyMutatingMcpTool("get_architecture")).toBe(false);
+    expect(isPotentiallyMutatingMcpTool("search_code")).toBe(false);
+    expect(isPotentiallyMutatingMcpTool("trace_path")).toBe(false);
+  });
+
+  it("D.13J Block 4 listMcpDeferredTools: local stdio server → executable=true; missing command → false", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "local-stdio": { command: "node", args: ["mock.cjs"] },
+          "no-command": { command: "", args: [] } as unknown as (typeof defaultConfig.mcp.servers)[string],
+          "disabled-srv": { command: "node", disabled: true } as unknown as (typeof defaultConfig.mcp.servers)[string],
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [
+      { name: "local-stdio", command: "node", status: "configured" },
+      { name: "no-command", command: "", status: "configured" },
+      { name: "disabled-srv", command: "node", status: "configured" },
+    ];
+    context.mcp.tools = [
+      {
+        server: "local-stdio",
+        name: "list_things",
+        description: "list things",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+      {
+        server: "no-command",
+        name: "list_things",
+        description: "list things",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+      {
+        server: "disabled-srv",
+        name: "list_things",
+        description: "list things",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+
+    const tools = listDeferredTools(context);
+    const localStdio = tools.find((t) => t.name === "mcp:local-stdio:list_things");
+    const noCommand = tools.find((t) => t.name === "mcp:no-command:list_things");
+    const disabled = tools.find((t) => t.name === "mcp:disabled-srv:list_things");
+    expect(localStdio?.executable).toBe(true);
+    expect(noCommand?.executable).toBe(false);
+    expect(disabled?.executable).toBe(false);
+  });
+
+  it("D.13J Block 4 executeExtraTool readonly mcp tool: dispatches through stdio adapter", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-tui-mcp-mock-"));
+    const { mockPath, callsPath } = await createMockMcpStdioBinary(mockDir, {
+      toolCallResult: { content: [{ type: "text", text: "readonly-result" }] },
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "test-srv": { command: process.execPath, args: [mockPath] },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "test-srv", command: process.execPath, status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "test-srv",
+        name: "list_things",
+        description: "readonly list",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    executeSearchExtraTools("mcp:test-srv:list_things", context);
+    const result = await executeExtraTool(
+      { tool_name: "mcp:test-srv:list_things", params: { foo: "bar" } },
+      context,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("完成");
+    const calls = (await readFile(callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { method: string; params: unknown; id: number });
+    // D.13J tail fix（Block A）：链路顺序必须是 initialize → tools/list → tools/call。
+    const methodOrder = calls.map((c) => c.method);
+    const initIdx = methodOrder.indexOf("initialize");
+    const listIdx = methodOrder.indexOf("tools/list");
+    const callIdx = methodOrder.indexOf("tools/call");
+    expect(initIdx).toBeGreaterThanOrEqual(0);
+    expect(listIdx).toBeGreaterThan(initIdx);
+    expect(callIdx).toBeGreaterThan(listIdx);
+    const toolCall = calls.find((c) => c.method === "tools/call");
+    expect(toolCall?.params).toMatchObject({
+      name: "list_things",
+      arguments: { foo: "bar" },
+    });
+  });
+
+  it("D.13J Block 4 tail-fix executeExtraTool: rejects when tools/list does not contain target tool", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-tui-mcp-mock-"));
+    // server 仅公布 list_things；尝试调 unpublished_tool 必须在 tools/call 之前被拒绝。
+    const { mockPath, callsPath } = await createMockMcpStdioBinary(mockDir, {
+      publishedTools: ["list_things"],
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "test-srv": { command: process.execPath, args: [mockPath] },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "test-srv", command: process.execPath, status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "test-srv",
+        name: "unpublished_tool",
+        description: "stale discovery; server no longer publishes this tool",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    executeSearchExtraTools("mcp:test-srv:unpublished_tool", context);
+    const result = await executeExtraTool(
+      { tool_name: "mcp:test-srv:unpublished_tool", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("失败");
+    expect(result.text).toContain("tools/list");
+    const calls = (await readFile(callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { method: string });
+    // tools/list 必须发出过；tools/call 不能发出。
+    expect(calls.find((c) => c.method === "tools/list")).toBeTruthy();
+    expect(calls.find((c) => c.method === "tools/call")).toBeUndefined();
+  });
+
+  it("D.13J Block 4 executeExtraTool mutating mcp tool: denied without grant", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-tui-mcp-mock-"));
+    const { mockPath } = await createMockMcpStdioBinary(mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "test-srv": { command: process.execPath, args: [mockPath] },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "test-srv", command: process.execPath, status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "test-srv",
+        name: "write_value",
+        description: "mutating writer",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    executeSearchExtraTools("mcp:test-srv:write_value", context);
+    const result = await executeExtraTool(
+      { tool_name: "mcp:test-srv:write_value", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("mutating");
+    expect(result.text).toContain("mcp 写权限");
+    // D.13J tail fix（Block B）：mutating 死路文案禁止再出现 /mcp permission 这种不存在的 slash 入口。
+    expect(result.text).not.toContain("/mcp permission");
+    expect(result.text).not.toContain("/codebase-memory permission");
+  });
+
+  it("D.13J Block 4 executeExtraTool mutating mcp tool: dispatches when permission granted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-tui-mcp-mock-"));
+    const { mockPath, callsPath } = await createMockMcpStdioBinary(mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "test-srv": { command: process.execPath, args: [mockPath] },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "test-srv", command: process.execPath, status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "test-srv",
+        name: "write_value",
+        description: "mutating writer",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    context.mcpStdioMutatingGranted = true;
+    executeSearchExtraTools("mcp:test-srv:write_value", context);
+    const result = await executeExtraTool(
+      { tool_name: "mcp:test-srv:write_value", params: { x: 1 } },
+      context,
+    );
+    expect(result.ok).toBe(true);
+    const calls = (await readFile(callsPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { method: string });
+    expect(calls.find((c) => c.method === "tools/call")).toBeTruthy();
+  });
+
+  it("D.13J Block 4 executeExtraTool: rejects mcp tool when server not local stdio", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "remote-srv": {
+            command: "",
+            args: [],
+          } as unknown as (typeof defaultConfig.mcp.servers)[string],
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "remote-srv", command: "", status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "remote-srv",
+        name: "list_things",
+        description: "ro",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    // Bypass discovery gate so the test reaches the local-stdio check below.
+    context.discoveredDeferredToolNames.add("mcp:remote-srv:list_things");
+    const result = await executeExtraTool(
+      { tool_name: "mcp:remote-srv:list_things", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("not local stdio");
+  });
+
+  it("D.13J Block 4 executeExtraTool: surfaces server tools/call error", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-tui-mcp-mock-"));
+    const { mockPath } = await createMockMcpStdioBinary(mockDir, { failToolCall: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      mcp: {
+        ...defaultConfig.mcp,
+        servers: {
+          ...defaultConfig.mcp.servers,
+          "test-srv": { command: process.execPath, args: [mockPath] },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.mcp.enabled = true;
+    context.mcp.servers = [{ name: "test-srv", command: process.execPath, status: "configured" }];
+    context.mcp.tools = [
+      {
+        server: "test-srv",
+        name: "list_things",
+        description: "ro",
+        discovery: "discovered",
+        trusted: true,
+        schemaLoaded: true,
+      },
+    ];
+    executeSearchExtraTools("mcp:test-srv:list_things", context);
+    const result = await executeExtraTool(
+      { tool_name: "mcp:test-srv:list_things", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("失败");
+    expect(result.text).toContain("tool-call-fail");
   });
 });

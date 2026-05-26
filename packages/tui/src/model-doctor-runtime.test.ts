@@ -480,6 +480,62 @@ describe("model-doctor-runtime", () => {
       const problems = diagnoseRoute(route, baseConfig);
       expect(getRouteDoctorLevel(route, problems, baseConfig)).toBe("BLOCK");
     });
+    // D.13J tail fix（Block D）：placeholder primaryModel 必须 BLOCK，不能 WARN 后假装可请求。
+    it("D.13J tail fix Block D: placeholder primary with placeholder fallback → BLOCK", () => {
+      const placeholderConfig: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          deepseek: {
+            type: "deepseek",
+            baseUrl: "https://api.deepseek.com",
+            apiKey: "sk-test-key-12345678",
+            model: "deepseek-v4-flash",
+          },
+        },
+      };
+      const route: RoleModelRoute = {
+        role: "executor",
+        provider: "deepseek",
+        primaryModel: "deepseek-v4-flash",
+        fallbackModels: ["deepseek-v4-pro"],
+        requiredCapabilities: ["text"],
+        allowTools: true,
+        allowWrite: true,
+        allowBash: true,
+        requireApprovalBeforeRun: false,
+      };
+      const problems = diagnoseRoute(route, placeholderConfig);
+      expect(problems.some((p) => p.includes("placeholder"))).toBe(true);
+      expect(getRouteDoctorLevel(route, problems, placeholderConfig)).toBe("BLOCK");
+    });
+    // D.13J tail fix（Block D）：placeholder primary + 现役 fallback 应 WARN（fallback 可救场）。
+    it("D.13J tail fix Block D: placeholder primary with valid fallback → WARN", () => {
+      const route: RoleModelRoute = {
+        role: "executor",
+        provider: "deepseek",
+        primaryModel: "deepseek-v4-flash",
+        fallbackModels: ["deepseek-chat"],
+        requiredCapabilities: ["text"],
+        allowTools: true,
+        allowWrite: true,
+        allowBash: true,
+        requireApprovalBeforeRun: false,
+      };
+      const problems = diagnoseRoute(route, baseConfig);
+      expect(getRouteDoctorLevel(route, problems, baseConfig)).toBe("WARN");
+    });
+  });
+
+  describe("getRouteBlockingProblems D.13J tail fix Block D", () => {
+    it("treats placeholder model as blocking", () => {
+      const blocking = getRouteBlockingProblems([
+        "模型 placeholder 未替换为现役模型：deepseek-v4-flash",
+        "预算未配置",
+      ]);
+      expect(blocking.some((p) => p.includes("placeholder"))).toBe(true);
+      expect(blocking).not.toContain("预算未配置");
+    });
   });
 
   describe("inferProviderForRouteModel", () => {
@@ -896,6 +952,187 @@ describe("model-doctor-runtime", () => {
         };
         const text = await formatModelRouteDoctor(ctx);
         expect(text).not.toContain("deferredTools:");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("D.13J Block 1 placeholder model + provider.env merge surfacing", () => {
+    it("doctor 标记 deepseek-v4-flash / deepseek-v4-pro 占位模型", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-placeholder-"));
+      try {
+        const placeholderConfig: LinghunConfig = {
+          ...baseConfig,
+          providers: {
+            deepseek: {
+              type: "deepseek",
+              baseUrl: "https://api.deepseek.com",
+              apiKey: "sk-deepseek-key-12345678",
+              model: "deepseek-v4-flash",
+            },
+          },
+          modelRoutes: {
+            ...baseConfig.modelRoutes,
+            routes: [
+              {
+                role: "executor",
+                provider: "deepseek",
+                primaryModel: "deepseek-v4-pro",
+                fallbackModels: ["deepseek-v4-flash"],
+                requiredCapabilities: ["text", "tools"],
+                allowTools: true,
+                allowWrite: true,
+                allowBash: true,
+                requireApprovalBeforeRun: false,
+              },
+            ],
+          },
+        };
+        const ctx = {
+          config: placeholderConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).toContain("WARN placeholder model:");
+        expect(text).toContain("deepseek=deepseek-v4-flash");
+        expect(text).toContain("executor.primary=deepseek-v4-pro");
+        expect(text).toContain("executor.fallback=deepseek-v4-flash");
+        expect(text).toContain("LINGHUN_DEEPSEEK_MODEL");
+        expect(text).toContain("现役模型名");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("doctor 在使用现役模型名时不打 placeholder 警告", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-no-placeholder-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).not.toContain("WARN placeholder model:");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("provider.env merge 摘要：applied=no 时显式提示未覆盖", async () => {
+      // 通过真实的 loadConfig 路径触发 lastProviderEnvMerge 写入；ESM 的 let export 在消费端是只读绑定，
+      // 直接赋值会抛 "has only a getter"，所以必须走 mergeProviderEnvConfig 真实路径。
+      // 临时切换 HOME 到空目录，确保 ~/.linghun/provider.env 不存在 → applied=false。
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-merge-no-"));
+      const homePath = await mkdtemp(join(tmpdir(), "linghun-home-merge-no-"));
+      const originalHome = process.env.HOME;
+      const originalUserProfile = process.env.USERPROFILE;
+      try {
+        process.env.HOME = homePath;
+        process.env.USERPROFILE = homePath;
+        const cfgModule = await import("@linghun/config");
+        await cfgModule.loadConfig(projectPath);
+        const doctorModule = await import("./model-doctor-runtime.js");
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        };
+        const text = await doctorModule.formatModelRouteDoctor(ctx);
+        expect(text).toContain("provider.env merge: applied=no");
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+        if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = originalUserProfile;
+        await rm(projectPath, { recursive: true, force: true });
+        await rm(homePath, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("D.13J Block 2 discovered deferred tools doctor surfacing", () => {
+    it("discoveredDeferredToolsSummary total=0 时输出排查指引", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-discovered-empty-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+          discoveredDeferredToolsSummary: { total: 0, names: [], truncated: false },
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).toContain("discoveredDeferredTools: 0");
+        expect(text).toContain("SearchExtraTools");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("discoveredDeferredToolsSummary 有内容时按 names 列出，提示 session-scoped", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-discovered-some-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+          discoveredDeferredToolsSummary: {
+            total: 3,
+            names: ["alpha_tool", "list_projects", "trace_path"],
+            truncated: false,
+          },
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).toContain("discoveredDeferredTools: total=3");
+        expect(text).toContain("alpha_tool");
+        expect(text).toContain("list_projects");
+        expect(text).toContain("trace_path");
+        expect(text).toContain("session 重启即清零");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("discoveredDeferredToolsSummary truncated=true 时附加 +N more 标记", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-discovered-trunc-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+          discoveredDeferredToolsSummary: {
+            total: 50,
+            names: Array.from({ length: 32 }, (_, i) => `tool_${i.toString().padStart(2, "0")}`),
+            truncated: true,
+          },
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).toContain("discoveredDeferredTools: total=50");
+        expect(text).toContain("+18 more");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("discoveredDeferredToolsSummary 缺省时 doctor 不输出 discoveredDeferredTools 行（向后兼容）", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-discovered-absent-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).not.toContain("discoveredDeferredTools");
       } finally {
         await rm(projectPath, { recursive: true, force: true });
       }
