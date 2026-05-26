@@ -687,14 +687,18 @@ export class OpenAiCompatibleProvider implements Provider {
       });
 
       if (!response.ok) {
+        const responseText = await safeReadResponseText(response);
         if (response.status === 401 || response.status === 403) {
-          throw createApiKeyError(response.status);
+          throw createApiKeyError(response.status, undefined, {
+            endpointProfile: contract.endpointProfile,
+            endpoint: contract.endpoint,
+            responseText,
+          });
         }
-        throw createHttpStatusError(
-          response.status,
-          await safeReadResponseText(response),
-          this.config.type,
-        );
+        throw createHttpStatusError(response.status, responseText, this.config.type, {
+          endpointProfile: contract.endpointProfile,
+          endpoint: contract.endpoint,
+        });
       }
 
       if (!response.body) {
@@ -729,14 +733,18 @@ export class OpenAiCompatibleProvider implements Provider {
     });
 
     if (!response.ok) {
+      const responseText = await safeReadResponseText(response);
       if (response.status === 401 || response.status === 403) {
-        throw createApiKeyError(response.status);
+        throw createApiKeyError(response.status, undefined, {
+          endpointProfile: contract.endpointProfile,
+          endpoint: contract.endpoint,
+          responseText,
+        });
       }
-      throw createHttpStatusError(
-        response.status,
-        await safeReadResponseText(response),
-        this.config.type,
-      );
+      throw createHttpStatusError(response.status, responseText, this.config.type, {
+        endpointProfile: contract.endpointProfile,
+        endpoint: contract.endpoint,
+      });
     }
 
     if (!response.body) {
@@ -2269,11 +2277,40 @@ export function normalizeProviderError(error: unknown): LinghunError {
   });
 }
 
-function createApiKeyError(status: number, cause?: unknown): LinghunError {
+interface ProviderErrorContext {
+  endpointProfile: EndpointProfile;
+  endpoint: string;
+  responseText?: string;
+}
+
+function formatErrorContextSuffix(context?: ProviderErrorContext): string {
+  if (!context) {
+    return "";
+  }
+  return `（endpointProfile=${context.endpointProfile}，endpoint=${context.endpoint}）`;
+}
+
+function maskSensitiveFragments(value: string): string {
+  return value
+    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-***")
+    .replace(/Bearer\s+[A-Za-z0-9_.\-+/=]+/gi, "Bearer ***")
+    .replace(/x-api-key\s*[:=]\s*[A-Za-z0-9_.\-+/=]+/gi, "x-api-key: ***")
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "eyJ***");
+}
+
+function createApiKeyError(
+  status: number,
+  cause?: unknown,
+  context?: ProviderErrorContext,
+): LinghunError {
+  const suffix = formatErrorContextSuffix(context);
   return new LinghunError({
     code: "PROVIDER_API_KEY_ERROR",
-    message: `模型请求失败：API Key 无效或没有权限（HTTP ${status}）。`,
-    suggestion: "请检查当前 provider 的 api_key 是否正确，或运行 /model doctor 复查配置。",
+    message: `模型请求失败：API Key 无效或没有权限（HTTP ${status}${suffix ? "，" + suffix.slice(1, -1) : ""}）。`,
+    suggestion:
+      context && context.endpointProfile === "anthropic_messages"
+        ? "请检查当前 provider 的 api_key 是否对该网关有效；anthropic_messages 同时使用 x-api-key 和 Authorization Bearer，确认两个都被网关接受，再运行 /model doctor 复查配置。"
+        : "请检查当前 provider 的 api_key 是否正确，或运行 /model doctor 复查配置。",
     cause,
     recoverable: true,
   });
@@ -2283,14 +2320,31 @@ function sanitizeProviderBadRequestHint(responseText?: string): string | undefin
   if (!responseText) {
     return undefined;
   }
-  const compact = responseText
-    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-***")
+  const compact = maskSensitiveFragments(responseText)
     .replace(/\s+/g, " ")
     .trim();
   if (!compact) {
     return undefined;
   }
   const lower = compact.toLowerCase();
+  if (lower.includes("authentication_error")) {
+    return "provider returned authentication_error";
+  }
+  if (lower.includes("permission_error")) {
+    return "provider returned permission_error";
+  }
+  if (lower.includes("not_found_error")) {
+    return "provider returned not_found_error (check baseUrl/endpoint/model)";
+  }
+  if (lower.includes("invalid_request_error")) {
+    return "provider returned invalid_request_error; check anthropic schema/model/tool_choice";
+  }
+  if (lower.includes("overloaded_error")) {
+    return "provider returned overloaded_error";
+  }
+  if (lower.includes("anthropic-version") || lower.includes("x-api-key")) {
+    return "provider rejected anthropic auth/version headers";
+  }
   if (lower.includes("tool_choice") || lower.includes("tools")) {
     return "provider rejected tools/tool_choice fields";
   }
@@ -2303,6 +2357,9 @@ function sanitizeProviderBadRequestHint(responseText?: string): string | undefin
   if (lower.includes("model")) {
     return "provider rejected model/profile combination";
   }
+  if (lower.includes("api_error")) {
+    return "provider returned generic api_error";
+  }
   return "provider rejected request body; check schema/profile/model";
 }
 
@@ -2310,21 +2367,35 @@ function createHttpStatusError(
   status: number,
   responseText?: string,
   providerType?: ProviderConfig["type"],
+  context?: ProviderErrorContext,
 ): LinghunError {
+  const suffix = formatErrorContextSuffix(context);
+  const isAnthropicMessages = context?.endpointProfile === "anthropic_messages";
   if (status === 400) {
     const hint = sanitizeProviderBadRequestHint(responseText);
     return new LinghunError({
       code: "PROVIDER_BAD_REQUEST",
-      message: `模型请求失败：HTTP 400，请求格式不被 provider 接受${hint ? `（${hint}）` : "。"}`,
-      suggestion:
-        "请运行 /model doctor；重点检查 endpointProfile、compatibilityProfile、model、tools/tool_choice 支持、reasoning/thinking 字段、tool_result 回灌格式和 OpenAI-compatible 网关兼容性。",
+      message: `模型请求失败：HTTP 400，请求格式不被 provider 接受${suffix}${hint ? `（${hint}）` : "。"}`,
+      suggestion: isAnthropicMessages
+        ? "请运行 /model doctor；重点检查 model 名是否被网关接受、anthropic Messages schema（messages/system/tool_use/tool_result）、tool_choice、thinking/reasoning 字段、anthropic-version header 是否匹配。"
+        : "请运行 /model doctor；重点检查 endpointProfile、compatibilityProfile、model、tools/tool_choice 支持、reasoning/thinking 字段、tool_result 回灌格式和 OpenAI-compatible 网关兼容性。",
+      recoverable: true,
+    });
+  }
+  if (status === 404) {
+    return new LinghunError({
+      code: "PROVIDER_NOT_FOUND",
+      message: `模型请求失败：HTTP 404，endpoint 不存在或不被 provider 支持${suffix}。`,
+      suggestion: isAnthropicMessages
+        ? "请运行 /model doctor；确认 base_url 不含完整 endpoint（例如不要把 /v1/messages 拼到 base_url），网关确实支持 /v1/messages，且 model 名拼写正确。"
+        : "请运行 /model doctor；确认 base_url 没有误填完整 endpoint，且网关支持当前 endpointProfile 对应的路径。",
       recoverable: true,
     });
   }
   if (status === 429) {
     return new LinghunError({
       code: "PROVIDER_RATE_LIMITED",
-      message: "模型请求失败：HTTP 429，已触发 provider 限流或额度限制。",
+      message: `模型请求失败：HTTP 429，已触发 provider 限流或额度限制${suffix}。`,
       suggestion: "请稍后重试，或运行 /usage 与 /model doctor 检查当前 provider/model 配置。",
       recoverable: true,
     });
@@ -2332,7 +2403,7 @@ function createHttpStatusError(
   if (status >= 500) {
     return new LinghunError({
       code: "PROVIDER_SERVER_ERROR",
-      message: `模型请求失败：HTTP ${status}，provider 服务端异常。`,
+      message: `模型请求失败：HTTP ${status}，provider 服务端异常${suffix}。`,
       suggestion:
         providerType === "openai-compatible"
           ? "请稍后重试；如持续失败，运行 /model doctor 检查 provider/baseUrl/model、endpointProfile 是否被网关支持，以及 base_url 是否误填了完整 endpoint。"
@@ -2342,7 +2413,7 @@ function createHttpStatusError(
   }
   return new LinghunError({
     code: "PROVIDER_HTTP_ERROR",
-    message: `模型请求失败：HTTP ${status}。`,
+    message: `模型请求失败：HTTP ${status}${suffix}。`,
     suggestion: "请运行 /model doctor 检查 API Key、base_url、model 和 provider 能力。",
     recoverable: status >= 400 && status < 500,
   });

@@ -1643,6 +1643,195 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       function: { name: "Read" },
     });
   });
+
+  it("HTTP 401 anthropic_messages: 错误对象暴露 endpointProfile/endpoint/状态码，不泄漏 apiKey 或 Bearer token", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          '{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-test-secret Bearer test-secret"}}',
+          { status: 401 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    const collect = async () => {
+      const events: LinghunEvent[] = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_API_KEY_ERROR",
+      message: expect.stringContaining("HTTP 401"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("anthropic_messages"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("/v1/messages"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      suggestion: expect.stringContaining("x-api-key"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret|test-secret/),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      suggestion: expect.stringMatching(/sk-test-secret|test-secret/),
+    });
+  });
+
+  it("HTTP 404 anthropic_messages: 暴露 endpoint 路径并提示 baseUrl 配置错位，不泄漏 apiKey", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          '{"type":"error","error":{"type":"not_found_error","message":"endpoint not found sk-test-secret"}}',
+          { status: 404 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    const collect = async () => {
+      const events: LinghunEvent[] = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_NOT_FOUND",
+      message: expect.stringContaining("HTTP 404"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("anthropic_messages"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("/v1/messages"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      suggestion: expect.stringContaining("base_url"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret/),
+    });
+  });
+
+  it("HTTP 400 anthropic_messages: 暴露 invalid_request_error 摘要并指向 anthropic schema 字段，不泄漏 apiKey", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          '{"type":"error","error":{"type":"invalid_request_error","message":"invalid model claude-opus-4-7 sk-test-secret tool_choice unsupported"}}',
+          { status: 400 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    const collect = async () => {
+      const events: LinghunEvent[] = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_BAD_REQUEST",
+      message: expect.stringContaining("HTTP 400"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("anthropic_messages"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      message: expect.stringContaining("invalid_request_error"),
+    });
+    await expect(collect()).rejects.toMatchObject({
+      suggestion: expect.stringContaining("anthropic"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret/),
+    });
+  });
+
+  it("malformed stream anthropic_messages: 不是 SSE/Anthropic 协议时给出诊断，不泄漏 apiKey", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // 网关返回 SSE 包裹但 payload 不是合法 Anthropic JSON：模拟网关
+          // 把非 Anthropic message events（含 apiKey 的脏数据）回灌成事件流。
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {not-json sk-test-secret leak}\n\n',
+            ),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    const errorEvent = events.find((event) => event.type === "error");
+    expect(errorEvent).toBeDefined();
+    if (!errorEvent || errorEvent.type !== "error") {
+      throw new Error("expected error event");
+    }
+    const error = errorEvent.error as LinghunError;
+    expect(["PROVIDER_MALFORMED_STREAM", "PROVIDER_STREAM_ERROR"]).toContain(error.code);
+    expect(error.suggestion ?? "").toMatch(/Anthropic|messages|\/v1\/messages/);
+    expect(error.message).not.toMatch(/sk-test-secret/);
+    expect(error.suggestion ?? "").not.toMatch(/sk-test-secret/);
+  });
 });
 
 describe("D.13F Anthropic prompt cache cache_control injection", () => {

@@ -4813,25 +4813,40 @@ async function promptInitialWorkspaceTrust(
   context: TuiContext,
 ): Promise<void> {
   const project = context.projectPath;
-  writeLine(
-    output,
-    context.language === "en-US"
-      ? [
-          "Workspace trust",
-          `- Current directory: ${project}`,
-          "- Do you trust this project?",
-          "- If trusted, Linghun can read, edit, and run commands here, but Start Gate, Plan approval, and the permission pipeline still apply.",
-          "- Enter/yes: trust this project. Esc/no: keep restricted for this project.",
-        ].join("\n")
-      : [
-          "工作区信任",
-          `- 当前目录：${project}`,
-          "- 是否信任这个项目？",
-          "- 信任后 Linghun 可以在这里读、改、运行命令，但仍受 Start Gate、Plan approval 和权限管道约束。",
-          "- Enter/yes：信任此项目。Esc/no：对此项目保持 restricted。",
-        ].join("\n"),
-  );
-  const trusted = await readInitialWorkspaceTrustDecision(input, output);
+  const isEnglish = context.language === "en-US";
+  const lines = isEnglish
+    ? [
+        "",
+        "┌─ Workspace trust ───────────────────────────────────────────",
+        `│  Current directory: ${project}`,
+        "│",
+        "│  Do you trust this project?",
+        "│  - Trusted: Linghun can read, edit, and run commands here.",
+        "│  - Restricted: file writes and shell commands stay blocked.",
+        "│  Start Gate, Plan approval, and the permission pipeline still apply.",
+        "│",
+        "│  ↑/↓ or j/k to switch · Enter to confirm",
+        "│  Enter/yes: trust this project. Esc/no: keep restricted.",
+        "└─────────────────────────────────────────────────────────────",
+        "",
+      ]
+    : [
+        "",
+        "┌─ 工作区信任 ────────────────────────────────────────────────",
+        `│  当前目录：${project}`,
+        "│",
+        "│  是否信任这个项目？",
+        "│  - 信任此项目：Linghun 可以在这里读、改、运行命令。",
+        "│  - 保持 restricted：文件写入和 shell 命令仍被拦截。",
+        "│  即使信任，仍受 Start Gate、Plan approval 和权限管道约束。",
+        "│",
+        "│  ↑/↓ 或 j/k 切换选项 · Enter 确认",
+        "│  Enter/yes：信任此项目。Esc/no：对此项目保持 restricted。",
+        "└─────────────────────────────────────────────────────────────",
+        "",
+      ];
+  writeLine(output, lines.join("\n"));
+  const trusted = await readInitialWorkspaceTrustDecision(input, output, isEnglish);
   context.config = await saveWorkspaceTrust(
     trusted ? "trusted" : "restricted",
     context.projectPath,
@@ -4843,6 +4858,7 @@ async function promptInitialWorkspaceTrust(
 async function readInitialWorkspaceTrustDecision(
   input: Readable,
   output: Writable,
+  isEnglish = false,
 ): Promise<boolean> {
   if ("setEncoding" in input && typeof input.setEncoding === "function") {
     input.setEncoding("utf8");
@@ -4851,6 +4867,17 @@ async function readInitialWorkspaceTrustDecision(
   const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
   const wasRaw = rawInput.isRaw === true;
   let settled = false;
+  let selectedIndex = 0; // 0 = trust, 1 = restricted
+  const renderChoices = (): void => {
+    const trustLabel = isEnglish ? "Trust this project (yes)" : "信任此项目 (yes)";
+    const restrictedLabel = isEnglish ? "Keep restricted (no)" : "保持 restricted (no)";
+    const cursor = (active: boolean) => (active ? "❯" : " ");
+    const lines = [
+      `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] ${trustLabel}`,
+      `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] ${restrictedLabel}`,
+    ];
+    output.write(lines.join("\n") + "\n");
+  };
   return await new Promise<boolean>((resolveDecision) => {
     const finish = (trusted: boolean) => {
       if (settled) return;
@@ -4863,15 +4890,44 @@ async function readInitialWorkspaceTrustDecision(
       rl.close();
       resolveDecision(trusted);
     };
-    const onKeypress = (_str: string, key: { name?: string } = {}) => {
-      if (key.name === "escape") {
+    const onKeypress = (str: string, key: { name?: string } = {}) => {
+      const name = key.name;
+      if (name === "escape") {
         finish(false);
+        return;
       }
+      if (name === "up" || name === "k") {
+        if (selectedIndex !== 0) {
+          selectedIndex = 0;
+          renderChoices();
+        }
+        return;
+      }
+      if (name === "down" || name === "j") {
+        if (selectedIndex !== 1) {
+          selectedIndex = 1;
+          renderChoices();
+        }
+        return;
+      }
+      if (name === "y") {
+        finish(true);
+        return;
+      }
+      if (name === "n") {
+        finish(false);
+        return;
+      }
+      // Enter 由 readline 'line' 事件处理；此处忽略其他原始输入。
+      void str;
     };
     const onLine = (line: string) => {
       const normalized = line.trim().toLowerCase();
+      if (normalized === "") {
+        finish(selectedIndex === 0);
+        return;
+      }
       if (
-        normalized === "" ||
         /^(yes|y|confirm|ok|okay|trust|trusted|确认|是|信任)$/iu.test(normalized)
       ) {
         finish(true);
@@ -4883,7 +4939,13 @@ async function readInitialWorkspaceTrustDecision(
         finish(false);
         return;
       }
-      writeLine(output, "请输入 yes/Enter 信任，或 no/Esc 保持 restricted。");
+      writeLine(
+        output,
+        isEnglish
+          ? "Use ↑/↓ to switch, Enter to confirm; or type yes/no."
+          : "请用 ↑/↓ 切换，Enter 确认；或输入 yes/no。",
+      );
+      renderChoices();
     };
     emitKeypressEvents(input);
     input.on("keypress", onKeypress);
@@ -4891,6 +4953,7 @@ async function readInitialWorkspaceTrustDecision(
     if (typeof rawInput.setRawMode === "function") {
       rawInput.setRawMode(true);
     }
+    renderChoices();
     output.write("> ");
   });
 }
