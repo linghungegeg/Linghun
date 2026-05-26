@@ -154,6 +154,86 @@ describe("cache-freshness", () => {
     });
   });
 
+  describe("D.13H context editing dimensions", () => {
+    it("D.13H cache freshness exposes contextEditing and cacheEditingBeta hashes without regressing existing keys", () => {
+      const baseInput = {
+        systemPrompt: "system",
+        toolSchema: [{ name: "Read" }],
+        mcpToolList: [],
+        model: "claude-3-5-sonnet-latest",
+        provider: "claude-relay",
+        reasoningEffort: "default",
+        projectRules: "rules",
+        memory: "mem",
+        compact: { compacted: false },
+        plugins: [],
+        endpointProfile: "anthropic_messages",
+        cacheControl: { type: "ephemeral" },
+        cacheTtl: "5m",
+        contextEditing: { enabled: false, sendable: false },
+        cacheEditingBeta: { count: 0 },
+      };
+      const fresh = createCacheFreshness(baseInput);
+      // 新维度
+      expect(fresh.contextEditingHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.cacheEditingBetaHash).toMatch(/^[0-9a-f]{12}$/);
+      // D.13F 既有维度仍存在
+      expect(fresh.endpointProfileHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.cacheControlHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.cacheTtlHash).toMatch(/^[0-9a-f]{12}$/);
+      // 原 9 维度仍存在
+      expect(fresh.systemPromptHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.toolSchemaHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.mcpToolListHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.modelProviderHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.reasoningEffortHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.projectRulesHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.memoryHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.compactHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(fresh.pluginListHash).toMatch(/^[0-9a-f]{12}$/);
+
+      // 改 contextEditing → diff 必须包含 contextEditingHash，其它键不应被错误标记。
+      const after = createCacheFreshness({
+        ...baseInput,
+        contextEditing: { enabled: true, sendable: false },
+      });
+      const changed = diffFreshness(fresh, after);
+      expect(changed).toContain("contextEditingHash");
+      expect(changed).not.toContain("cacheEditingBetaHash");
+      expect(changed).not.toContain("systemPromptHash");
+      expect(changed).not.toContain("toolSchemaHash");
+
+      // 改 cacheEditingBeta → diff 必须包含 cacheEditingBetaHash。
+      const after2 = createCacheFreshness({
+        ...baseInput,
+        cacheEditingBeta: { count: 1 },
+      });
+      const changed2 = diffFreshness(fresh, after2);
+      expect(changed2).toContain("cacheEditingBetaHash");
+      expect(changed2).not.toContain("contextEditingHash");
+
+      // 不传新维度时仍按 "none" 处理，hash 稳定（默认值确定）。
+      const minimal = createCacheFreshness({
+        systemPrompt: "x",
+        toolSchema: [],
+        mcpToolList: [],
+        model: "m",
+        provider: "p",
+      });
+      expect(minimal.contextEditingHash).toMatch(/^[0-9a-f]{12}$/);
+      expect(minimal.cacheEditingBetaHash).toMatch(/^[0-9a-f]{12}$/);
+      const minimal2 = createCacheFreshness({
+        systemPrompt: "x",
+        toolSchema: [],
+        mcpToolList: [],
+        model: "m",
+        provider: "p",
+      });
+      expect(minimal2.contextEditingHash).toBe(minimal.contextEditingHash);
+      expect(minimal2.cacheEditingBetaHash).toBe(minimal.cacheEditingBetaHash);
+    });
+  });
+
   describe("createConfigFreshnessSummary", () => {
     it("produces deterministic summary for same config", () => {
       const config = {

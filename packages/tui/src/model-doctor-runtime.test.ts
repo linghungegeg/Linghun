@@ -639,6 +639,74 @@ describe("model-doctor-runtime", () => {
       expect(output).toContain("source=");
       expect(output).toContain("reason=");
     });
+
+    it("D.13H model doctor shows anthropic context editing disabled reason without leaking apiKey", async () => {
+      // 默认 contextEditingEnabled 未配置 → enabled=no、sendable=no、reason="disabled by config"。
+      // 即使 apiKey 配置了完整字符串，doctor 也不能在输出里出现 raw apiKey 或 raw beta header。
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-secret-DO-NOT-LEAK-AAAA",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      // 必须出现 D.13H 诊断行，且明确 disabled。
+      expect(output).toContain("anthropic context editing:");
+      expect(output).toContain("enabled=no");
+      expect(output).toContain("sendable=no");
+      expect(output).toContain("betaHeaders=0");
+      expect(output).toContain("reason=disabled by config");
+      expect(output).toContain("cache_edits/cache_reference body 字段 hard-disabled");
+      // 严禁泄露 raw apiKey。
+      expect(output).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
+
+      // 配置 enabled=true 但全空 beta header → reason="missing non-empty beta header"，不出现 raw header。
+      const configEmptyBeta: LinghunConfig = {
+        ...config,
+        providers: {
+          ...config.providers,
+          "claude-relay": {
+            ...config.providers["claude-relay"],
+            contextEditingEnabled: true,
+            anthropicBetaHeaders: [""],
+          },
+        },
+      };
+      const output2 = await formatModelRouteDoctor(makeContext(configEmptyBeta));
+      expect(output2).toContain("enabled=yes");
+      expect(output2).toContain("sendable=no");
+      expect(output2).toContain("betaHeaders=0");
+      expect(output2).toContain("reason=missing non-empty beta header");
+      expect(output2).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
+
+      // 配置 enabled=true + 非空 beta header → sendable=yes、betaHeaders 计数=1，但 raw header 不输出。
+      const sentinelBetaHeader = "context-editing-2025-SENTINEL-XYZ";
+      const configReal: LinghunConfig = {
+        ...config,
+        providers: {
+          ...config.providers,
+          "claude-relay": {
+            ...config.providers["claude-relay"],
+            contextEditingEnabled: true,
+            anthropicBetaHeaders: [sentinelBetaHeader],
+          },
+        },
+      };
+      const output3 = await formatModelRouteDoctor(makeContext(configReal));
+      expect(output3).toContain("enabled=yes");
+      expect(output3).toContain("sendable=yes");
+      expect(output3).toContain("betaHeaders=1");
+      expect(output3).toContain("reason=ok");
+      expect(output3).not.toContain(sentinelBetaHeader);
+      expect(output3).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
+    });
   });
 
   describe("D.13F break-cache marker + event log persistence", () => {

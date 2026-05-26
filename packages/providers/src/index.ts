@@ -84,6 +84,17 @@ export type ProviderConfig = {
   compatibilityProfile?: ProviderCompatibilityProfile;
   reasoningLevel?: string;
   includeUsage?: boolean;
+  // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。
+  // 默认 contextEditingEnabled=false，anthropicBetaHeaders=[]。仅在
+  //   contextEditingEnabled === true
+  //   AND endpointProfile === "anthropic_messages"
+  //   AND anthropicBetaHeaders.filter(Boolean).length > 0
+  // 三者同时成立时才会在请求 headers 上追加 anthropic-beta；
+  // 即使 enabled=true，请求 body 永不写入 cache_edits / cache_reference
+  // （CCB 上游 CACHE_EDITING_BETA_HEADER 仍是空字符串，写入会触发 Anthropic 400）。
+  // OpenAI chat / responses 路径硬隔离，永不输出这些字段。
+  contextEditingEnabled?: boolean;
+  anthropicBetaHeaders?: string[];
 };
 
 export type ModelToolCall = {
@@ -488,6 +499,63 @@ export function resolveProviderBaseUrlDiagnostic(
   };
 }
 
+// D.13H：Anthropic Context Editing / cache_edits 诊断（hard-disabled 收口）。
+// 仅在 endpointProfile === "anthropic_messages"、contextEditingEnabled === true、
+// 且 anthropicBetaHeaders 至少包含一个非空字符串时，sendable=true，stream() 才会
+// 在请求 headers 上追加 anthropic-beta：<headers.join(",")>。
+// 即使 sendable=true，请求 body 仍然永远不写入 cache_edits / cache_reference —— CCB
+// 上游 CACHE_EDITING_BETA_HEADER 仍是空字符串，写入会触发 Anthropic 400
+//   tool_result.cache_reference: Extra inputs are not permitted
+// 不输出 raw beta header 字符串、不输出 apiKey、不输出 prompt；仅输出 count + 原因。
+export type AnthropicContextEditingDiagnostic = {
+  enabled: boolean;
+  sendable: boolean;
+  betaHeaderCount: number;
+  disabledReason: string | null;
+};
+
+export function resolveAnthropicContextEditingDiagnostic(
+  config: Pick<ProviderConfig, "contextEditingEnabled" | "anthropicBetaHeaders">,
+  contract: Pick<ProviderRuntimeContract, "endpointProfile">,
+): AnthropicContextEditingDiagnostic {
+  const enabled = config.contextEditingEnabled === true;
+  const headers = (config.anthropicBetaHeaders ?? []).filter(
+    (header) => typeof header === "string" && header.length > 0,
+  );
+  const betaHeaderCount = headers.length;
+  if (contract.endpointProfile !== "anthropic_messages") {
+    return {
+      enabled,
+      sendable: false,
+      betaHeaderCount,
+      disabledReason:
+        "unsupported endpoint profile (chat_completions / responses 不支持 cache_edits)",
+    };
+  }
+  if (!enabled) {
+    return {
+      enabled: false,
+      sendable: false,
+      betaHeaderCount,
+      disabledReason: "disabled by config",
+    };
+  }
+  if (betaHeaderCount === 0) {
+    return {
+      enabled: true,
+      sendable: false,
+      betaHeaderCount: 0,
+      disabledReason: "missing non-empty beta header",
+    };
+  }
+  return {
+    enabled: true,
+    sendable: true,
+    betaHeaderCount,
+    disabledReason: null,
+  };
+}
+
 function resolveFinalEndpointPath(baseUrl: string, endpoint: string): string {
   try {
     return new URL(joinBaseUrlAndEndpoint(baseUrl, endpoint)).pathname;
@@ -583,19 +651,37 @@ export class OpenAiCompatibleProvider implements Provider {
 
     if (contract.endpointProfile === "anthropic_messages") {
       const body = this.createAnthropicMessagesRequest(request);
+      // D.13H：Anthropic Context Editing / cache_edits 收口。仅在
+      //   contextEditingEnabled === true
+      //   AND endpointProfile === "anthropic_messages"
+      //   AND anthropicBetaHeaders.filter(Boolean).length > 0
+      // 三者同时成立时，才把 anthropic-beta: <headers.join(",")> 附加进 headers；
+      // 永不发空的 anthropic-beta header（即使长度 1 但全空字符串也按 0 处理）。
+      // 即使 sendable=true，请求 body 仍然由 createAnthropicMessagesProfileRequest
+      // 硬禁止 cache_edits / cache_reference 字段（hard-disabled）。
+      const contextEditing = resolveAnthropicContextEditingDiagnostic(this.config, contract);
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+        // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
+        // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
+        // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
+        "x-api-key": this.config.apiKey ?? "",
+        "anthropic-version": "2023-06-01",
+        authorization: `Bearer ${this.config.apiKey ?? ""}`,
+        accept: "text/event-stream",
+      };
+      if (contextEditing.sendable) {
+        const filteredBetaHeaders = (this.config.anthropicBetaHeaders ?? []).filter(
+          (header) => typeof header === "string" && header.length > 0,
+        );
+        if (filteredBetaHeaders.length > 0) {
+          headers["anthropic-beta"] = filteredBetaHeaders.join(",");
+        }
+      }
       const response = await fetchWithProviderRetry(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...LINGHUN_REQUEST_IDENTITY_HEADERS,
-          // Anthropic Messages 鉴权头：x-api-key + anthropic-version。
-          // 部分中转网关沿用 OpenAI 风格 Authorization: Bearer，因此并发发送两套头，
-          // Anthropic 官方接口忽略 Authorization，OpenAI 风格中转忽略 x-api-key/version。
-          "x-api-key": this.config.apiKey ?? "",
-          "anthropic-version": "2023-06-01",
-          authorization: `Bearer ${this.config.apiKey ?? ""}`,
-          accept: "text/event-stream",
-        },
+        headers,
         body: JSON.stringify(body),
         signal,
       });
@@ -1144,6 +1230,10 @@ function createAnthropicMessagesProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
 ): AnthropicMessagesRequest {
+  // D.13H：cache_edits / cache_reference 已硬禁，无论 contextEditingEnabled 是否 true、
+  // anthropicBetaHeaders 是否非空，本 builder 永不在 body 写入这两个字段；只有
+  // stream() 在 sendable=true 时才会附加 anthropic-beta header。详见
+  // resolveAnthropicContextEditingDiagnostic 与 model-doctor。
   // D.13G：guard 不能只看 raw request.endpointProfile —— TUI 真实路径会从
   // SelectedModelRuntime 透传 endpointProfile=chat_completions placeholder（type 还是
   // chat_completions | responses），但决策器会把 Claude + chat_completions 视为占位

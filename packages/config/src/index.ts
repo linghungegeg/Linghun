@@ -25,6 +25,11 @@ export type ProviderConfig = {
   compatibilityProfile?: ProviderCompatibilityProfile;
   reasoningLevel?: string;
   includeUsage?: boolean;
+  // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。
+  // 默认未配置；只读字段，model-doctor / providers 运行时透传给
+  // resolveAnthropicContextEditingDiagnostic。具体语义见 packages/providers ProviderConfig。
+  contextEditingEnabled?: boolean;
+  anthropicBetaHeaders?: string[];
 };
 
 export type ModelRole =
@@ -1193,6 +1198,24 @@ function validateProviders(providers: Record<string, ProviderConfig>): void {
       `settings.providers.${providerId}.reasoningLevel`,
     );
     assertOptionalBoolean(provider.includeUsage, `settings.providers.${providerId}.includeUsage`);
+    // D.13H：Anthropic Context Editing / cache_edits 字段校验。
+    // contextEditingEnabled 必须是布尔；anthropicBetaHeaders 若存在必须是 string[]，
+    // 允许空字符串（CCB filter(Boolean) 语义保留），由 providers 运行时自行过滤。
+    assertOptionalBoolean(
+      provider.contextEditingEnabled,
+      `settings.providers.${providerId}.contextEditingEnabled`,
+    );
+    if (provider.anthropicBetaHeaders !== undefined) {
+      const headersPath = `settings.providers.${providerId}.anthropicBetaHeaders`;
+      if (!Array.isArray(provider.anthropicBetaHeaders)) {
+        throw new Error(`${headersPath} must be an array of strings`);
+      }
+      for (const [headerIndex, headerValue] of provider.anthropicBetaHeaders.entries()) {
+        if (typeof headerValue !== "string") {
+          throw new Error(`${headersPath}.${headerIndex} must be a string`);
+        }
+      }
+    }
   }
 }
 

@@ -17,6 +17,7 @@ import {
 } from "@linghun/config";
 import {
   type EndpointProfile,
+  resolveAnthropicContextEditingDiagnostic,
   resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
@@ -270,6 +271,19 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
         `    anthropic prompt cache: cache_control=${
           promptCacheEnabled ? `injected ttl=${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}` : "off"
         } usage_fields=cache_creation.ephemeral_5m_input_tokens/ephemeral_1h_input_tokens (read-only when emitted by upstream)`,
+      );
+      // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。
+      // 仅输出 enabled / sendable / betaHeaders count / disabled reason；不输出
+      // raw beta header 字符串、不输出 apiKey、不输出 prompt。
+      const contextEditing = resolveAnthropicContextEditingDiagnostic(
+        {
+          contextEditingEnabled: provider.contextEditingEnabled,
+          anthropicBetaHeaders: provider.anthropicBetaHeaders,
+        },
+        contract,
+      );
+      lines.push(
+        `    anthropic context editing: enabled=${contextEditing.enabled ? "yes" : "no"} sendable=${contextEditing.sendable ? "yes" : "no"} betaHeaders=${contextEditing.betaHeaderCount} reason=${contextEditing.disabledReason ?? "ok"} (cache_edits/cache_reference body 字段 hard-disabled)`,
       );
     }
     if (projectSettingsApiKeyProviders.has(providerId)) {

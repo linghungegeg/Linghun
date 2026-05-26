@@ -35,6 +35,11 @@ export function createCacheFreshness(input: {
   endpointProfile?: unknown;
   cacheControl?: unknown;
   cacheTtl?: unknown;
+  // D.13H：可选附加维度。contextEditing / cacheEditingBeta 用于追踪 Anthropic context
+  // editing 配置变化是否影响缓存键。即使 hard-disabled，hash 仍会暴露给 /break-cache
+  // status，便于诊断；不传时按 "none" 处理，保持向后兼容。
+  contextEditing?: unknown;
+  cacheEditingBeta?: unknown;
   _precomputedToolSchemaHash?: string;
 }): CacheFreshness {
   return {
@@ -50,6 +55,8 @@ export function createCacheFreshness(input: {
     endpointProfileHash: stableHash(input.endpointProfile ?? "none"),
     cacheControlHash: stableHash(input.cacheControl ?? "none"),
     cacheTtlHash: stableHash(input.cacheTtl ?? "none"),
+    contextEditingHash: stableHash(input.contextEditing ?? "none"),
+    cacheEditingBetaHash: stableHash(input.cacheEditingBeta ?? "none"),
     changedKeys: [],
   };
 }
@@ -74,6 +81,8 @@ export function diffFreshness(
     "endpointProfileHash",
     "cacheControlHash",
     "cacheTtlHash",
+    "contextEditingHash",
+    "cacheEditingBetaHash",
   ];
   return keys.filter((key) => previous[key] !== current[key]);
 }

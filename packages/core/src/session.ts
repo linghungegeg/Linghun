@@ -17,6 +17,11 @@ export type CacheFreshness = {
   endpointProfileHash?: string;
   cacheControlHash?: string;
   cacheTtlHash?: string;
+  // D.13H：附加 Anthropic context editing 维度。Hard-disabled 收口阶段也一并暴露 hash，
+  // 便于诊断 contextEditingEnabled / anthropicBetaHeaders 变化是否会影响缓存键。
+  // 缺失时按 hash("none") 处理，保持向后兼容；不影响 D.13F 既有 keys 顺序。
+  contextEditingHash?: string;
+  cacheEditingBetaHash?: string;
   changedKeys: string[];
 };
 

@@ -13,6 +13,7 @@ import {
   normalizeProviderError,
   parseAnthropicMessagesStream,
   parseOpenAiStream,
+  resolveAnthropicContextEditingDiagnostic,
   resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
   resolveProviderRuntimeContract,
@@ -2143,5 +2144,291 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
       (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
     );
     expect(error?.error.code).toBe("PROVIDER_MALFORMED_STREAM");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D.13H — Anthropic Context Editing / cache_edits 事实对齐收口（hard-disabled）
+// 默认禁用；即使 contextEditingEnabled=true，但没有非空 anthropicBetaHeaders 时仍不发；
+// 永远不发空的 anthropic-beta header；body 永不写入 cache_edits / cache_reference；
+// OpenAI chat / responses 路径硬隔离；D.13F prompt cache 与 D.13G tools 行为保留。
+// ---------------------------------------------------------------------------
+
+describe("D.13H Anthropic context editing hard-disabled closure", () => {
+  function makeAnthropicMessageStreamResponse(): Response {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_h"}}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+        );
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  function makeOpenAiChatStreamResponse(): Response {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+        );
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
+  it("D.13H anthropic context editing default disabled does not send cache_edits cache_reference or anthropic-beta", async () => {
+    const fetchMock = vi.fn(async () => makeAnthropicMessageStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "sk-test-secret",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      // 默认：contextEditingEnabled / anthropicBetaHeaders 都未配置。
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    // 严禁出现 anthropic-beta header（任何写入都会让上游半接 cache_edits 报 400）。
+    expect(headers["anthropic-beta"]).toBeUndefined();
+    expect(Object.keys(headers).map((key) => key.toLowerCase())).not.toContain("anthropic-beta");
+    // body JSON 不能包含 cache_edits / cache_reference 任何字符串。
+    const bodyText = init.body as string;
+    expect(bodyText).not.toContain("cache_edits");
+    expect(bodyText).not.toContain("cache_reference");
+
+    // 同时验证诊断 helper 默认行为。
+    const contract = resolveProviderRuntimeContract(
+      {
+        id: "claude-relay",
+        type: "openai-compatible",
+        baseUrl: "https://api.anthropic.com",
+        apiKey: "sk-test-secret",
+        model: "claude-3-5-sonnet-latest",
+        endpointProfile: "anthropic_messages",
+      },
+      { messages: [] },
+    );
+    const diagnostic = resolveAnthropicContextEditingDiagnostic({}, contract);
+    expect(diagnostic).toEqual({
+      enabled: false,
+      sendable: false,
+      betaHeaderCount: 0,
+      disabledReason: "disabled by config",
+    });
+  });
+
+  it("D.13H anthropic context editing enabled but empty beta header still does not send cache_edits or anthropic-beta", async () => {
+    const fetchMock = vi.fn(async () => makeAnthropicMessageStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "sk-test-secret",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      // 即使打开开关，但 beta header 全空，仍按 hard-disabled 处理。
+      contextEditingEnabled: true,
+      anthropicBetaHeaders: ["", ""],
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["anthropic-beta"]).toBeUndefined();
+    const bodyText = init.body as string;
+    expect(bodyText).not.toContain("cache_edits");
+    expect(bodyText).not.toContain("cache_reference");
+
+    const contract = resolveProviderRuntimeContract(
+      {
+        id: "claude-relay",
+        type: "openai-compatible",
+        baseUrl: "https://api.anthropic.com",
+        apiKey: "sk-test-secret",
+        model: "claude-3-5-sonnet-latest",
+        endpointProfile: "anthropic_messages",
+      },
+      { messages: [] },
+    );
+    const diagnostic = resolveAnthropicContextEditingDiagnostic(
+      {
+        contextEditingEnabled: true,
+        anthropicBetaHeaders: [""], // 仅含空字符串
+      },
+      contract,
+    );
+    expect(diagnostic).toEqual({
+      enabled: true,
+      sendable: false,
+      betaHeaderCount: 0,
+      disabledReason: "missing non-empty beta header",
+    });
+
+    // 即使传 [] 也走相同 disabled 分支。
+    expect(
+      resolveAnthropicContextEditingDiagnostic(
+        { contextEditingEnabled: true, anthropicBetaHeaders: [] },
+        contract,
+      ),
+    ).toEqual({
+      enabled: true,
+      sendable: false,
+      betaHeaderCount: 0,
+      disabledReason: "missing non-empty beta header",
+    });
+  });
+
+  it("D.13H openai chat completions does not include cache_edits cache_reference or anthropic-beta even when context editing is enabled", async () => {
+    const fetchMock = vi.fn(async () => makeOpenAiChatStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-test-secret",
+      model: "gpt-4o-mini",
+      endpointProfile: "chat_completions",
+      // 即使强行打开 context editing 开关并配置 beta header：
+      // OpenAI chat / responses 路径必须硬隔离，永远不输出这些字段。
+      contextEditingEnabled: true,
+      anthropicBetaHeaders: ["context-editing-2025-01-01"],
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://api.openai.com/v1/chat/completions");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["anthropic-beta"]).toBeUndefined();
+    expect(Object.keys(headers).map((key) => key.toLowerCase())).not.toContain("anthropic-beta");
+    const bodyText = init.body as string;
+    expect(bodyText).not.toContain("cache_edits");
+    expect(bodyText).not.toContain("cache_reference");
+
+    // 诊断 helper 在非 anthropic_messages profile 下也强制返回 sendable=false。
+    const contract = resolveProviderRuntimeContract(
+      {
+        id: "openai-compatible",
+        type: "openai-compatible",
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-test-secret",
+        model: "gpt-4o-mini",
+        endpointProfile: "chat_completions",
+      },
+      { messages: [] },
+    );
+    const diagnostic = resolveAnthropicContextEditingDiagnostic(
+      {
+        contextEditingEnabled: true,
+        anthropicBetaHeaders: ["context-editing-2025-01-01"],
+      },
+      contract,
+    );
+    expect(diagnostic.sendable).toBe(false);
+    expect(diagnostic.disabledReason).toBe(
+      "unsupported endpoint profile (chat_completions / responses 不支持 cache_edits)",
+    );
+  });
+
+  it("D.13H anthropic tools and prompt cache coexist with context editing disabled remains v1 messages with input_schema and cache_control", async () => {
+    const fetchMock = vi.fn(async () => makeAnthropicMessageStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "sk-test-secret",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      // 默认 context editing 关闭；D.13G tools + D.13F prompt cache 不应受影响。
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      {
+        messages: [
+          { role: "system", content: "you are helpful" },
+          { role: "user", content: "hi" },
+        ],
+        tools: [{ name: "Read", description: "Read file", inputSchema: { type: "object" } }],
+        toolChoice: "auto",
+        promptCacheEnabled: true,
+      },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["anthropic-beta"]).toBeUndefined();
+    const body = JSON.parse(init.body as string) as {
+      tools?: Array<{ name?: string; input_schema?: unknown }>;
+      system?: unknown;
+    };
+    // D.13G：tools 仍按 Anthropic 原生 schema（name + input_schema）。
+    expect(body.tools?.[0]).toMatchObject({
+      name: "Read",
+      input_schema: { type: "object" },
+    });
+    // D.13F：system 末块仍挂 cache_control: { type: "ephemeral" }。
+    expect(Array.isArray(body.system)).toBe(true);
+    const systemBlocks = body.system as Array<{
+      type: string;
+      text: string;
+      cache_control?: { type: string; ttl?: string };
+    }>;
+    const lastBlock = systemBlocks[systemBlocks.length - 1];
+    expect(lastBlock?.cache_control).toEqual({ type: "ephemeral" });
+    // body 不能包含 cache_edits / cache_reference。
+    const bodyText = init.body as string;
+    expect(bodyText).not.toContain("cache_edits");
+    expect(bodyText).not.toContain("cache_reference");
   });
 });

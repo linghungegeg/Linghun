@@ -652,4 +652,87 @@ describe("config directories", () => {
     expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
     expect(lastConfigRecoveryWarning?.reason).toContain("settings.modelRoutes");
   });
+
+  it("D.13H accepts valid contextEditingEnabled + anthropicBetaHeaders on provider config", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            model: "deepseek-v4-flash",
+            contextEditingEnabled: true,
+            // 包含空字符串：CCB filter(Boolean) 语义保留，校验层不应拒绝
+            anthropicBetaHeaders: ["context-editing-2025-06-01", ""],
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.providers.deepseek.contextEditingEnabled).toBe(true);
+    expect(config.providers.deepseek.anthropicBetaHeaders).toEqual([
+      "context-editing-2025-06-01",
+      "",
+    ]);
+    // 合法形态不应触发 recovery warning（针对该字段路径）
+    expect(lastConfigRecoveryWarning?.reason ?? "").not.toContain(
+      "settings.providers.deepseek.contextEditingEnabled",
+    );
+    expect(lastConfigRecoveryWarning?.reason ?? "").not.toContain(
+      "settings.providers.deepseek.anthropicBetaHeaders",
+    );
+  });
+
+  it("D.13H rejects invalid contextEditingEnabled / non-string anthropicBetaHeaders item", async () => {
+    const projectA = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(projectA), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(projectA),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            model: "deepseek-v4-flash",
+            contextEditingEnabled: "yes",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    await loadConfig(projectA);
+
+    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(projectA));
+    expect(lastConfigRecoveryWarning?.reason).toContain(
+      "settings.providers.deepseek.contextEditingEnabled",
+    );
+
+    const projectB = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(projectB), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(projectB),
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            type: "deepseek",
+            model: "deepseek-v4-flash",
+            anthropicBetaHeaders: ["context-editing-2025-06-01", 42],
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    await loadConfig(projectB);
+
+    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(projectB));
+    expect(lastConfigRecoveryWarning?.reason).toContain(
+      "settings.providers.deepseek.anthropicBetaHeaders",
+    );
+  });
 });
