@@ -1,11 +1,15 @@
 import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { formatUnknownSlashCommand, getSlashPrefixCandidates } from "../../slash-dispatch.js";
+import {
+  formatUnknownSlashCommand,
+  getCoreSlashCandidates,
+  getSlashPrefixCandidates,
+} from "../../slash-dispatch.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
-import type { ShellInputEvent, ShellViewModel } from "../types.js";
+import type { PermissionActionId, ShellInputEvent, ShellViewModel } from "../types.js";
 import { SlashSuggestions } from "./SlashSuggestions.js";
 import { useAnchoredCursor } from "./useAnchoredCursor.js";
 
@@ -124,15 +128,12 @@ export function bufferKillToEnd(buf: EditBuffer): EditBuffer {
 
 /** Move cursor up one line, preserving column position (CJK-aware). */
 export function bufferMoveUp(buf: EditBuffer): EditBuffer {
-  const { row, col } = getCursorLinePosition(buf, false);
+  const { row, col } = getCursorLinePosition(buf);
   if (row === 0) return buf; // already on first line
-  // Find the start of the target line (row - 1) and move to same column
   const lines = bufferToString(buf).split("\n");
   const targetLine = lines[row - 1] ?? "";
   const targetChars = Array.from(targetLine);
-  // Clamp column to target line length
   const targetCol = Math.min(col, targetChars.length);
-  // Calculate new cursor position: sum of chars in lines before target + newlines + targetCol
   let newCursor = 0;
   for (let i = 0; i < row - 1; i++) {
     newCursor += Array.from(lines[i] ?? "").length + 1; // +1 for \n
@@ -143,15 +144,12 @@ export function bufferMoveUp(buf: EditBuffer): EditBuffer {
 
 /** Move cursor down one line, preserving column position (CJK-aware). */
 export function bufferMoveDown(buf: EditBuffer): EditBuffer {
-  const { row, col } = getCursorLinePosition(buf, false);
+  const { row, col } = getCursorLinePosition(buf);
   const lines = bufferToString(buf).split("\n");
   if (row >= lines.length - 1) return buf; // already on last line
-  // Find the start of the target line (row + 1) and move to same column
   const targetLine = lines[row + 1] ?? "";
   const targetChars = Array.from(targetLine);
-  // Clamp column to target line length
   const targetCol = Math.min(col, targetChars.length);
-  // Calculate new cursor position: sum of chars in lines before target + newlines + targetCol
   let newCursor = 0;
   for (let i = 0; i <= row; i++) {
     newCursor += Array.from(lines[i] ?? "").length + 1; // +1 for \n
@@ -182,7 +180,6 @@ export function createInputHistory(): InputHistory {
 
 export function historyAdd(history: InputHistory, text: string): InputHistory {
   if (!text.trim()) return { ...history, position: -1, draft: "" };
-  // Deduplicate consecutive
   const entries =
     history.entries[0] === text
       ? history.entries
@@ -216,26 +213,50 @@ const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "> ";
 const PROMPT_MARKER_CONTINUATION = "  ";
 
+const PERMISSION_ACTION_ORDER: PermissionActionId[] = ["yes", "no", "details", "cancel"];
+
+const PERMISSION_TEXT_MAP: Record<PermissionActionId, string> = {
+  yes: "yes",
+  no: "no",
+  details: "details",
+  cancel: "cancel",
+};
+
 export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
   const [slashSelection, setSlashSelection] = useState(0);
+  const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("yes");
   const historyRef = useRef<InputHistory>(createInputHistory());
   const maxWidth = composerMaxWidth(view.width);
   const noColor = view.themeMode === "no-color";
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const anchorRef = useRef<DOMElement | null>(null);
 
-  // Slash candidate state — derived from buffer text. Suggestions are visible
-  // when the buffer is exactly one line and starts with "/" with at least one
-  // following character. Empty "/" or "/?" defers to the dispatch help text on
-  // submit; we intentionally do not show inline candidates for the bare "/".
-  const text = bufferToString(buffer);
-  const isSingleLineSlash =
-    text.startsWith("/") && !text.includes("\n") && text.length >= 2 && text !== "/?";
-  const slashCandidates = useMemo(
-    () => (isSingleLineSlash ? getSlashPrefixCandidates(text) : []),
-    [isSingleLineSlash, text],
+  // Permission active = a permission card is on screen and the composer is in
+  // selector mode (key bindings change; ordinary chars do NOT enter the buffer).
+  const permissionActive = Boolean(view.permission);
+  const permissionActions = useMemo(
+    () => buildPermissionActions(view.permission?.actions),
+    [view.permission],
   );
+
+  const text = bufferToString(buffer);
+  // Slash candidates surface in two cases:
+  //   1. Bare "/" — show the core 5 entries as a soft onboarding affordance.
+  //   2. "/<prefix>" with at least one non-slash char — prefix-match candidates.
+  // "/?" is reserved for inline help and never triggers candidates here.
+  const isBareSlash = !permissionActive && text === "/";
+  const isSingleLineSlash =
+    !permissionActive &&
+    text.startsWith("/") &&
+    !text.includes("\n") &&
+    text.length >= 2 &&
+    text !== "/?";
+  const slashCandidates = useMemo(() => {
+    if (isBareSlash) return getCoreSlashCandidates();
+    if (isSingleLineSlash) return getSlashPrefixCandidates(slashHead(text));
+    return [];
+  }, [isBareSlash, isSingleLineSlash, text]);
   const slashSelectionClamped =
     slashCandidates.length === 0
       ? 0
@@ -251,15 +272,88 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     setSlashSelection(0);
   }, []);
 
+  const submitPermissionAction = useCallback(
+    (id: PermissionActionId) => {
+      if (id === "cancel") {
+        void onInput({ type: "escape" });
+        return;
+      }
+      void onInput({ type: "submit", text: PERMISSION_TEXT_MAP[id] });
+    },
+    [onInput],
+  );
+
   useInput((input, key) => {
+    // ─── Permission selector mode ─────────────────────────────────────────
+    if (permissionActive) {
+      // Esc cancels the prompt regardless of focus.
+      if (key.escape) {
+        submitPermissionAction("cancel");
+        return;
+      }
+      // Enter confirms the currently focused action.
+      if (key.return) {
+        submitPermissionAction(permissionFocus);
+        return;
+      }
+      // Tab / arrows cycle the focus.
+      if (key.tab && !key.shift) {
+        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
+        return;
+      }
+      if (key.tab && key.shift) {
+        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
+        return;
+      }
+      if (key.leftArrow || key.upArrow) {
+        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, -1));
+        return;
+      }
+      if (key.rightArrow || key.downArrow) {
+        setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
+        return;
+      }
+      // Single-letter shortcuts. We accept ONLY when the keystroke is a single
+      // character matching y/n/d (case-insensitive) and no modifiers are held.
+      // This avoids the "the user typed a sentence starting with y" trap.
+      if (!key.ctrl && !key.meta && input && input.length === 1) {
+        const lower = input.toLowerCase();
+        if (lower === "y") {
+          submitPermissionAction("yes");
+          return;
+        }
+        if (lower === "n") {
+          submitPermissionAction("no");
+          return;
+        }
+        if (lower === "d") {
+          submitPermissionAction("details");
+          return;
+        }
+      }
+      // All other keys are intentionally swallowed: we do NOT mutate the edit
+      // buffer while a permission card is on screen, to avoid "ordinary text
+      // submitted as approval" mistakes.
+      return;
+    }
+
+    // ─── Normal composer mode ─────────────────────────────────────────────
     // Submit: Enter (without shift)
     if (key.return && !key.shift) {
-      // If a slash candidate is highlighted (via Tab/Up/Down) and the buffer
-      // text differs from the candidate's slash, accept the candidate first.
-      // Plain Enter on the first candidate still submits the current buffer
-      // verbatim — this matches CCB-style behavior boundaries.
-      const submitText = bufferToString(buffer).trim();
-      historyRef.current = historyAdd(historyRef.current, bufferToString(buffer));
+      // If a slash candidate is highlighted and the user has only typed the
+      // slash prefix (no args yet), accept the candidate first then submit.
+      if (slashCandidates.length > 0 && slashSelection >= 0 && !text.includes(" ")) {
+        const picked = slashCandidates[slashSelectionClamped];
+        if (picked && picked.slash !== text) {
+          const submitText = picked.slash;
+          historyRef.current = historyAdd(historyRef.current, submitText);
+          resetBuffer();
+          void onInput({ type: "submit", text: submitText });
+          return;
+        }
+      }
+      const submitText = text.trim();
+      historyRef.current = historyAdd(historyRef.current, text);
       resetBuffer();
       void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
       return;
@@ -271,24 +365,35 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // Tab — accept the highlighted slash candidate (replaces buffer with the
-    // canonical slash). When no candidates are visible, Tab is ignored to
-    // preserve raw composition behavior.
+    // Tab — accept the highlighted slash candidate. If the user has already
+    // typed args (a space after the slash), Tab only completes the slash head
+    // and preserves the args, keeping intent intact.
     if (key.tab && !key.shift) {
-      if (slashCandidates.length > 0) {
+      if (slashCandidates.length > 0 && slashSelection >= 0) {
         const picked = slashCandidates[slashSelectionClamped];
         if (picked) {
-          resetBuffer(picked.slash);
+          const spaceIndex = text.indexOf(" ");
+          const args = spaceIndex >= 0 ? text.slice(spaceIndex) : "";
+          const next = args ? `${picked.slash}${args}` : `${picked.slash} `;
+          resetBuffer(next);
           return;
         }
       }
       return;
     }
 
+    // Shift+Tab — cycle the permission mode in both Home and Task. Reuses the
+    // existing handleTuiKeypress("shift-tab", ...) chain via a new shell event,
+    // so the dispatch path is identical to the plain TUI's onShiftTab handler.
+    if (key.tab && key.shift) {
+      void onInput({ type: "cycle-permission-mode" });
+      return;
+    }
+
     // Escape — when slash candidates are visible, hide them by clearing
     // selection (buffer keeps its text). Otherwise propagate as a shell escape.
     if (key.escape) {
-      if (slashCandidates.length > 0) {
+      if (slashCandidates.length > 0 && slashSelection >= 0) {
         setSlashSelection(-1);
         return;
       }
@@ -315,23 +420,20 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // Up arrow:
-    //   - When slash candidates are visible: move selection up (wraps).
-    //   - When buffer cursor is on a non-first line: move within buffer.
-    //   - Otherwise: history navigation.
+    // Up / Down — slash list takes priority only when visible.
     if (key.upArrow) {
-      if (slashCandidates.length > 0) {
+      if (slashCandidates.length > 0 && slashSelection >= 0) {
         setSlashSelection((current) => {
           const safe = current < 0 ? 0 : current;
           return safe === 0 ? slashCandidates.length - 1 : safe - 1;
         });
         return;
       }
-      const { row } = getCursorLinePosition(buffer, false);
+      const { row } = getCursorLinePosition(buffer);
       if (row > 0) {
         setBufferAndResetSelection(bufferMoveUp(buffer));
       } else {
-        const next = historyUp(historyRef.current, bufferToString(buffer));
+        const next = historyUp(historyRef.current, text);
         if (next) {
           historyRef.current = next;
           const histText = historyCurrentText(next);
@@ -341,15 +443,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
     if (key.downArrow) {
-      if (slashCandidates.length > 0) {
+      if (slashCandidates.length > 0 && slashSelection >= 0) {
         setSlashSelection((current) => {
           const safe = current < 0 ? 0 : current;
           return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
         });
         return;
       }
-      const { row } = getCursorLinePosition(buffer, false);
-      const totalLines = bufferToString(buffer).split("\n").length;
+      const { row } = getCursorLinePosition(buffer);
+      const totalLines = text.split("\n").length;
       if (row < totalLines - 1) {
         setBufferAndResetSelection(bufferMoveDown(buffer));
       } else {
@@ -412,12 +514,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     }
   });
 
-  // Render
-  // Pick placeholder based on view mode and active flow:
-  //   - permission: composer placeholder is the permission hint
-  //   - setup active: composer placeholder is the per-step setup hint
-  //   - task/pending: composer placeholder is taskPlaceholder
-  //   - home: composer placeholder is the default placeholder
+  // ─── Render ─────────────────────────────────────────────────────────────
+  // Pick placeholder. Permission active wins over setup, which wins over task.
   const placeholderText =
     view.permission || view.composer.setupActive
       ? view.composer.placeholder
@@ -425,29 +523,50 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         ? view.composer.taskPlaceholder
         : view.composer.placeholder;
 
-  const { lines, truncatedCount, cursorCol, cursorRow } = formatComposerRenderLines({
-    buffer,
-    placeholder: placeholderText,
-    masking: view.composer.masking,
-    noColor,
-    maxWidth,
-  });
+  const { lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow } = formatComposerRenderLines(
+    {
+      buffer,
+      placeholder: placeholderText,
+      masking: view.composer.masking,
+      noColor,
+      maxWidth,
+    },
+  );
 
   // Position native cursor — anchored to Composer's outer Box via parent-chain
   // accumulation. Composer only declares row/col; absolute coordinates are
   // resolved by useAnchoredCursor against ink-root in the render phase.
-  const declaredRow = cursorRow + (truncatedCount > 0 ? 1 : 0);
-  useAnchoredCursor({ row: declaredRow, col: cursorCol }, anchorRef, capability);
+  // Above-truncation marker shifts the visible row by 1.
+  // Permission-exclusive focus: while a permission card is on screen, the
+  // selector row owns the visible focus. The native cursor MUST NOT also be
+  // positioned over the buffer line; otherwise the user sees two competing
+  // focus owners. We pass null so useAnchoredCursor hides the cursor instead.
+  const declaredRow = cursorRow + (truncatedAbove > 0 ? 1 : 0);
+  useAnchoredCursor(
+    permissionActive ? null : { row: declaredRow, col: cursorCol },
+    anchorRef,
+    capability,
+  );
 
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
 
-  // Show slash suggestions only when we have candidates AND selection is not
-  // explicitly hidden by Esc.
-  const showSuggestions = slashCandidates.length > 0 && slashSelection >= 0;
+  const showSuggestions = !permissionActive && slashCandidates.length > 0 && slashSelection >= 0;
+
+  // Unknown slash hint: only after the user pressed Enter with an unknown
+  // command. The composer no longer pesters the user mid-typing.
+  const showUnknownHint = false;
 
   return (
     <Box flexDirection="column" width={maxWidth}>
+      {permissionActive ? (
+        <PermissionActionRow
+          actions={permissionActions}
+          focused={permissionFocus}
+          theme={theme}
+          width={maxWidth}
+        />
+      ) : null}
       {showSuggestions ? (
         <SlashSuggestions
           candidates={slashCandidates}
@@ -462,16 +581,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
         />
       ) : null}
-      {view.composer.setupActive && view.composer.setupStep ? (
-        <Text color={theme.warning}>{fitText(view.composer.setupStep, maxWidth)}</Text>
-      ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
-        {truncatedCount > 0 ? (
+        {truncatedAbove > 0 ? (
           <Text color="gray">
             {fitText(
               view.language === "en-US"
-                ? `… ${truncatedCount} line(s) above`
-                : `… 上面还有 ${truncatedCount} 行`,
+                ? `… ${truncatedAbove} line(s) above`
+                : `… 上面还有 ${truncatedAbove} 行`,
               maxWidth,
             )}
           </Text>
@@ -481,8 +597,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             {fitText(line, maxWidth)}
           </Text>
         ))}
+        {truncatedBelow > 0 ? (
+          <Text color="gray">
+            {fitText(
+              view.language === "en-US"
+                ? `… ${truncatedBelow} line(s) below`
+                : `… 下面还有 ${truncatedBelow} 行`,
+              maxWidth,
+            )}
+          </Text>
+        ) : null}
       </Box>
-      {isSingleLineSlash && slashCandidates.length === 0 ? (
+      {showUnknownHint ? (
         <Text color={theme.muted}>
           {fitText(formatUnknownSlashCommand(text, view.language), maxWidth)}
         </Text>
@@ -491,9 +617,93 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 }
 
+function PermissionActionRow({
+  actions,
+  focused,
+  theme,
+  width,
+}: {
+  actions: { id: PermissionActionId; label: string; shortcut?: string }[];
+  focused: PermissionActionId;
+  theme: ReturnType<typeof createShellTheme>;
+  width: number;
+}): React.ReactNode {
+  const segments = actions.map((action) => {
+    const isFocused = action.id === focused;
+    const shortcut = action.shortcut ? ` (${action.shortcut})` : "";
+    const text = isFocused ? `[ ${action.label}${shortcut} ]` : `  ${action.label}${shortcut}  `;
+    return { text, focused: isFocused, id: action.id };
+  });
+  // Narrow-screen guard: at 40/60 columns the inline action row would overflow.
+  // Fall back to a vertical column layout below ~64 columns so each action
+  // gets its own line and stays inside the composer width.
+  const inlineLine = segments.map((s) => s.text).join(" ");
+  const compact = width < 64 || inlineLine.length > Math.max(20, width - 2);
+  if (compact) {
+    return (
+      <Box flexDirection="column" width={width}>
+        {segments.map((s) => (
+          <Text key={s.id} color={s.focused ? theme.accent : theme.muted} bold={s.focused}>
+            {fitText(s.text, Math.max(8, width - 2))}
+          </Text>
+        ))}
+      </Box>
+    );
+  }
+  return (
+    <Box width={width}>
+      <Text>
+        {segments.map((s) => (
+          <Text key={s.id} color={s.focused ? theme.accent : theme.muted} bold={s.focused}>
+            {`${s.text} `}
+          </Text>
+        ))}
+      </Text>
+    </Box>
+  );
+}
+
+function buildPermissionActions(
+  actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
+): { id: PermissionActionId; label: string; shortcut?: string }[] {
+  if (actions && actions.length > 0) return actions;
+  return [
+    { id: "yes", label: "Allow", shortcut: "y" },
+    { id: "no", label: "Deny", shortcut: "n" },
+    { id: "details", label: "Details", shortcut: "d" },
+    { id: "cancel", label: "Cancel" },
+  ];
+}
+
+function cyclePermissionFocus(
+  actions: { id: PermissionActionId }[],
+  current: PermissionActionId,
+  delta: number,
+): PermissionActionId {
+  const order = actions.map((a) => a.id);
+  const ids = order.length > 0 ? order : PERMISSION_ACTION_ORDER;
+  const idx = ids.indexOf(current);
+  const safeIdx = idx < 0 ? 0 : idx;
+  const next = (safeIdx + delta + ids.length) % ids.length;
+  return ids[next] ?? ids[0] ?? "yes";
+}
+
+function slashHead(value: string): string {
+  const space = value.indexOf(" ");
+  return space >= 0 ? value.slice(0, space) : value;
+}
+
 // ---------------------------------------------------------------------------
 // Render helpers (exported for testing)
 // ---------------------------------------------------------------------------
+
+export type ComposerRenderResult = {
+  lines: string[];
+  truncatedAbove: number;
+  truncatedBelow: number;
+  cursorCol: number;
+  cursorRow: number;
+};
 
 export function formatComposerRenderLines({
   buffer,
@@ -507,65 +717,178 @@ export function formatComposerRenderLines({
   masking: boolean;
   noColor: boolean;
   maxWidth?: number;
-}): { lines: string[]; truncatedCount: number; cursorCol: number; cursorRow: number } {
+}): ComposerRenderResult {
   void noColor;
   const text = bufferToString(buffer);
   const displayText = text ? (masking ? "*".repeat(buffer.chars.length) : text) : "";
 
   if (!displayText) {
-    // Show placeholder
     const line = `${PROMPT_MARKER}${placeholder}`;
     return {
       lines: [line],
-      truncatedCount: 0,
+      truncatedAbove: 0,
+      truncatedBelow: 0,
       cursorCol: displayWidthOf(PROMPT_MARKER),
       cursorRow: 0,
     };
   }
 
   const rawLines = displayText.split("\n");
-  const truncated = rawLines.length > COMPOSER_MAX_VISIBLE_LINES;
-  const skipCount = truncated ? rawLines.length - COMPOSER_MAX_VISIBLE_LINES : 0;
-  const displayLines = truncated ? rawLines.slice(-COMPOSER_MAX_VISIBLE_LINES) : rawLines;
+  const { row: cursorLineIndex, col: cursorCharCol } = getCursorLinePosition(buffer);
 
-  const lines = displayLines.map((line, index) => {
-    const isFirstVisible = !truncated && index === 0;
-    const prefix = isFirstVisible ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
-    return `${prefix}${line}`;
-  });
+  // ─── Multi-line viewport: cursor-centered ────────────────────────────────
+  const totalLines = rawLines.length;
+  let startLine = 0;
+  let endLineExclusive = totalLines;
+  if (totalLines > COMPOSER_MAX_VISIBLE_LINES) {
+    const half = Math.floor(COMPOSER_MAX_VISIBLE_LINES / 2);
+    startLine = Math.max(0, cursorLineIndex - half);
+    endLineExclusive = startLine + COMPOSER_MAX_VISIBLE_LINES;
+    if (endLineExclusive > totalLines) {
+      endLineExclusive = totalLines;
+      startLine = endLineExclusive - COMPOSER_MAX_VISIBLE_LINES;
+    }
+  }
+  const truncatedAbove = startLine;
+  const truncatedBelow = totalLines - endLineExclusive;
 
-  // Calculate cursor position based on buffer.cursor
-  // Find which line and column the cursor is on
-  const { row: cursorLineIndex, col: cursorCharCol } = getCursorLinePosition(buffer, masking);
+  const visibleLines = rawLines.slice(startLine, endLineExclusive);
+  const isFirstVisibleAtTop = startLine === 0;
 
-  // Adjust for truncation
-  const adjustedRow = cursorLineIndex - skipCount;
-  const visibleRow = Math.max(0, Math.min(adjustedRow, lines.length - 1));
+  // ─── Single-line horizontal viewport ─────────────────────────────────────
+  const composerWidth = Math.max(8, maxWidth ?? 80);
+  // Reserve room for the prompt marker on the cursor's line.
+  const promptForCursor =
+    cursorLineIndex === startLine && isFirstVisibleAtTop
+      ? PROMPT_MARKER
+      : PROMPT_MARKER_CONTINUATION;
+  const promptWidth = displayWidthOf(promptForCursor);
+  const lineBudget = Math.max(4, composerWidth - promptWidth);
 
-  // Calculate display width up to cursor column on that line
-  const lineChars = rawLines[cursorLineIndex]
-    ? Array.from(masking ? "*".repeat(rawLines[cursorLineIndex].length) : rawLines[cursorLineIndex])
-    : [];
-  const prefix = cursorLineIndex === 0 && !truncated ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
-  let cursorCol = displayWidthOf(prefix);
-  for (let i = 0; i < cursorCharCol && i < lineChars.length; i++) {
-    cursorCol += charWidth(lineChars[i] ?? "");
+  // Compute display width of the cursor column on its raw line.
+  const cursorRawLineRaw = rawLines[cursorLineIndex] ?? "";
+  const cursorRawLineDisplay = masking ? "*".repeat(cursorRawLineRaw.length) : cursorRawLineRaw;
+  const cursorRawChars = Array.from(cursorRawLineDisplay);
+  let cursorDisplayCol = 0;
+  for (let i = 0; i < cursorCharCol && i < cursorRawChars.length; i++) {
+    cursorDisplayCol += charWidth(cursorRawChars[i] ?? "");
   }
 
-  // Clamp to maxWidth if provided
-  if (maxWidth && cursorCol > maxWidth) cursorCol = maxWidth;
+  // Choose horizontal window per visible line. We only horizontally clip the
+  // cursor's line aggressively; non-cursor lines are clipped to the same
+  // budget but with a left-anchored window for a stable visual.
+  const ELLIPSIS = "…";
+  const ELLIPSIS_WIDTH = 1;
+
+  const renderedLines: string[] = [];
+  let cursorOutCol = 0;
+  for (let visibleIndex = 0; visibleIndex < visibleLines.length; visibleIndex++) {
+    const lineRaw = visibleLines[visibleIndex] ?? "";
+    const lineDisplay = masking ? "*".repeat(lineRaw.length) : lineRaw;
+    const isFirstLine = isFirstVisibleAtTop && visibleIndex === 0;
+    const linePrompt = isFirstLine ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
+    const linePromptWidth = displayWidthOf(linePrompt);
+    const budget = Math.max(4, composerWidth - linePromptWidth);
+    const isCursorLine = startLine + visibleIndex === cursorLineIndex;
+
+    if (displayWidthOf(lineDisplay) <= budget) {
+      renderedLines.push(`${linePrompt}${lineDisplay}`);
+      if (isCursorLine) {
+        cursorOutCol = linePromptWidth + cursorDisplayCol;
+      }
+      continue;
+    }
+
+    if (!isCursorLine) {
+      // Non-cursor line: left-anchored, right-ellipsis.
+      const sliced = sliceWidth(lineDisplay, budget - ELLIPSIS_WIDTH);
+      renderedLines.push(`${linePrompt}${sliced}${ELLIPSIS}`);
+      continue;
+    }
+
+    // Cursor line: cursor-centered horizontal viewport with side ellipses.
+    const lineWidth = displayWidthOf(lineDisplay);
+    const half = Math.max(2, Math.floor(budget / 2));
+    let windowStart = Math.max(0, cursorDisplayCol - half);
+    let windowEnd = windowStart + budget;
+    if (windowEnd > lineWidth) {
+      windowEnd = lineWidth;
+      windowStart = Math.max(0, windowEnd - budget);
+    }
+
+    let leftEllipsis = "";
+    let rightEllipsis = "";
+    let effectiveStart = windowStart;
+    let effectiveEnd = windowEnd;
+    if (windowStart > 0) {
+      leftEllipsis = ELLIPSIS;
+      effectiveStart += ELLIPSIS_WIDTH;
+    }
+    if (windowEnd < lineWidth) {
+      rightEllipsis = ELLIPSIS;
+      effectiveEnd -= ELLIPSIS_WIDTH;
+    }
+
+    const sliced = sliceWindow(
+      lineDisplay,
+      effectiveStart,
+      Math.max(0, effectiveEnd - effectiveStart),
+    );
+    renderedLines.push(`${linePrompt}${leftEllipsis}${sliced}${rightEllipsis}`);
+
+    // Map cursor column into the rendered window.
+    const cursorWithinWindow = cursorDisplayCol - effectiveStart;
+    const clamped = Math.max(0, Math.min(cursorWithinWindow, effectiveEnd - effectiveStart));
+    cursorOutCol = linePromptWidth + (leftEllipsis ? ELLIPSIS_WIDTH : 0) + clamped;
+  }
+
+  const cursorVisibleRow = Math.max(
+    0,
+    Math.min(cursorLineIndex - startLine, renderedLines.length - 1),
+  );
 
   return {
-    lines,
-    truncatedCount: skipCount,
-    cursorCol,
-    cursorRow: visibleRow,
+    lines: renderedLines,
+    truncatedAbove,
+    truncatedBelow,
+    cursorCol: maxWidth && cursorOutCol > maxWidth ? maxWidth : cursorOutCol,
+    cursorRow: cursorVisibleRow,
   };
 }
 
+/** Slice the leading portion of `value` whose display width <= max. */
+function sliceWidth(value: string, max: number): string {
+  let width = 0;
+  let result = "";
+  for (const ch of value) {
+    const next = width + charWidth(ch);
+    if (next > max) break;
+    result += ch;
+    width = next;
+  }
+  return result;
+}
+
+/** Slice a window starting at display column `start` for up to `width` columns. */
+function sliceWindow(value: string, start: number, width: number): string {
+  let consumed = 0;
+  let used = 0;
+  let result = "";
+  for (const ch of value) {
+    const w = charWidth(ch);
+    if (consumed < start) {
+      consumed += w;
+      continue;
+    }
+    if (used + w > width) break;
+    result += ch;
+    used += w;
+  }
+  return result;
+}
+
 /** Find which line and character column the cursor is on. */
-function getCursorLinePosition(buffer: EditBuffer, masking: boolean): { row: number; col: number } {
-  void masking;
+function getCursorLinePosition(buffer: EditBuffer): { row: number; col: number } {
   let row = 0;
   let col = 0;
   for (let i = 0; i < buffer.cursor && i < buffer.chars.length; i++) {

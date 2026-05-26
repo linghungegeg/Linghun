@@ -56,7 +56,7 @@ function getAbsoluteOrigin(node: DOMElement | null): { x: number; y: number } | 
  * Its left/top values are never used as absolute coordinates.
  */
 export function useAnchoredCursor(
-  declared: { row: number; col: number },
+  declared: { row: number; col: number } | null,
   anchorRef: React.RefObject<DOMElement | null>,
   capability: TerminalCapability,
 ): void {
@@ -67,8 +67,10 @@ export function useAnchoredCursor(
 
   // Render-phase calculation. setCursorPosition is a ref-write callback in
   // Ink, not a React state setter — calling it during render is safe.
+  // When `declared` is null the caller is yielding the cursor (e.g. permission
+  // selector owns focus); pass undefined so Ink hides the native cursor.
   let desired: { x: number; y: number } | undefined;
-  if (capability.cursorPositioning && hasMeasured) {
+  if (declared && capability.cursorPositioning && hasMeasured) {
     let origin: { x: number; y: number } | null = null;
     try {
       origin = getAbsoluteOrigin(anchorRef.current);

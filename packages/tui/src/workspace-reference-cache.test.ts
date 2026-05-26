@@ -1,7 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 import {
   type WorkspaceReferenceDimensions,
   createWorkspaceReferenceCache,
@@ -419,10 +423,7 @@ describe("workspace reference cache", () => {
   });
 
   it("keeps watched file hashing on bounded open/read path", async () => {
-    const source = await readFile(
-      join(process.cwd(), "packages/tui/src/workspace-reference-cache.ts"),
-      "utf8",
-    );
+    const source = await readFile(join(__dirname, "workspace-reference-cache.ts"), "utf8");
 
     expect(source).toContain('await open(absolutePath, "r")');
     expect(source).toContain("handle.read(buffer, 0, bytesToRead, 0)");

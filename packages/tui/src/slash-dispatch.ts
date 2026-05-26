@@ -166,6 +166,16 @@ export function getSlashPrefixCandidates(prefix: string): CommandCapability[] {
     .slice(0, 8);
 }
 
+/**
+ * Core slash candidates surfaced when the user types just `/` and nothing else.
+ * Returns the same DEFAULT_HELP_SLASHES set used by /help discovery, capped at
+ * 5 entries to keep the inline overlay narrow. Used by the Composer as a soft
+ * onboarding affordance — not an alternate dispatch path.
+ */
+export function getCoreSlashCandidates(): CommandCapability[] {
+  return getDefaultVisibleCommandCapabilities().slice(0, 5);
+}
+
 export function formatUnknownSlashCommand(command: string, language: Language): string {
   const suggestions = suggestSlashCommands(command);
   if (suggestions.length === 0) {

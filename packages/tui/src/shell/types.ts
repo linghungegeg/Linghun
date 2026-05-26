@@ -57,12 +57,45 @@ export type TaskActivityView = {
   toolName?: string;
 };
 
+export type PermissionActionId = "yes" | "no" | "details" | "cancel";
+
+export type PermissionAction = {
+  id: PermissionActionId;
+  label: string;
+  /** Single-letter shortcut, e.g. "y" / "n" / "d". Esc handled separately. */
+  shortcut?: string;
+};
+
 export type TaskPermissionView = {
   toolName: string;
   reason: string;
   risk: "low" | "medium" | "high";
   scope: string[];
   hint: string;
+  /**
+   * Selectable actions surfaced as a button row under the card.
+   * If absent/empty, the view-model auto-fills the default y/n/d/cancel set
+   * via `withPermissionActions(...)`.
+   */
+  actions?: PermissionAction[];
+};
+
+/** Lightweight echo of the most recent slash command, surfaced above the task output. */
+export type SlashEchoView = {
+  id: string;
+  text: string;
+};
+
+/**
+ * TaskFooter — minimal status footer rendered under the composer in task mode.
+ * Only carries the small set of always-on signals: permission mode, index
+ * status, optional one-line hint. The full StatusTray noise stays out of the
+ * task region so the composer + permission flow keep focus.
+ */
+export type TaskFooterView = {
+  permissionMode: string;
+  index: string;
+  hint?: string;
 };
 
 export type ShellViewModel = {
@@ -83,13 +116,18 @@ export type ShellViewModel = {
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
   limitations: string[];
+  /** Most recent slash command echo, surfaced above task output (not in blocks). */
+  slashEcho?: SlashEchoView;
+  /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */
+  taskFooter?: TaskFooterView;
 };
 
 export type ShellInputEvent =
   | { type: "submit"; text: string }
   | { type: "empty-submit" }
   | { type: "escape" }
-  | { type: "shift-enter" };
+  | { type: "shift-enter" }
+  | { type: "cycle-permission-mode" };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;

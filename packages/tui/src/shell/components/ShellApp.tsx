@@ -7,6 +7,7 @@ import type {
   ShellController,
   ShellViewModel,
   TaskActivityView,
+  TaskFooterView,
   TaskPermissionView,
 } from "../types.js";
 import { Composer } from "./Composer.js";
@@ -114,18 +115,23 @@ function HomeLayout({
 /**
  * TaskLayout — production-grade task interaction shell.
  *
- * Layout (top → bottom, all centered around the composer column):
- *   1. activity (optional)
- *   2. permission card (optional)
- *   3. output blocks (optional)
- *   4. limitations (optional)
- *   5. composer (centered, fixed cw width, accent rules above and below)
- *   6. status footer (single line under the composer)
+ * Layout (top → bottom, full-page top-left):
+ *   1. output region (flexGrow=1, overflow=hidden) — slashEcho, activity,
+ *      permission card, blocks, limitations.
+ *   2. composer band (flexShrink=0) — accent rule, Composer (which renders
+ *      the permission action row above the buffer when permission is active),
+ *      accent rule.
+ *   3. task footer (flexShrink=0) — single low-key line: permission mode ·
+ *      index · optional hint. NOT the full StatusTray.
  *
- * No top bar, no separator above the content. The brand is conveyed through
- * the home screen on entry; in task mode the focus is the active flow and the
- * composer. The composer width matches Home's cw to keep cursor coordinates
- * stable across viewMode transitions.
+ * The whole task region is left-aligned: no `alignItems="center"` and no
+ * symmetric width clamp on the output column, so long output uses the full
+ * terminal width. The composer band is the only thing that keeps the cw width
+ * for cursor-coordinate stability with Home.
+ *
+ * Permission exclusivity: the Composer hides the native cursor while the
+ * permission card is on screen (see useAnchoredCursor's null branch), so the
+ * permission selector row is the sole focus owner.
  */
 function TaskLayout({
   view,
@@ -143,22 +149,40 @@ function TaskLayout({
   const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
-    <Box flexDirection="column" width={view.width} height={view.height} alignItems="center">
-      {/* Top spacer keeps content vertically centered when sparse. */}
-      <Box flexGrow={1} minHeight={0} />
+    <Box flexDirection="column" width={view.width} height={view.height}>
+      {/* Output region: top-left, fills remaining vertical space. Long output
+          gets the full terminal width; padding keeps the visual breathing room.
+          overflow=hidden + minHeight=0 prevents Yoga from shrinking children
+          to zero when content overflows. */}
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        minHeight={0}
+        overflow="hidden"
+        paddingX={2}
+        paddingTop={1}
+      >
+        {view.slashEcho ? (
+          <Box marginBottom={1}>
+            <Text color={theme.muted}>{fitText(`› ${view.slashEcho.text}`, view.width - 4)}</Text>
+          </Box>
+        ) : null}
 
-      {/* Main content column — same width as composer for visual alignment. */}
-      <Box flexDirection="column" width={cw}>
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
         {view.permission ? (
-          <PermissionPrompt permission={view.permission} theme={theme} width={cw} />
+          <PermissionPrompt
+            permission={view.permission}
+            theme={theme}
+            width={view.width - 4}
+            language={view.language}
+          />
         ) : null}
 
         {view.blocks.length > 0 ? (
           <Box flexDirection="column" marginTop={view.activity || view.permission ? 1 : 0}>
             {view.blocks.map((block) => (
-              <ProductBlock key={block.id} block={block} theme={theme} width={cw} />
+              <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
             ))}
           </Box>
         ) : null}
@@ -174,24 +198,42 @@ function TaskLayout({
         ) : null}
       </Box>
 
-      {/* Composer at center column — same width and frame as Home so cursor
-          coordinates and visual rhythm stay consistent across modes. The
-          surrounding Box only sets flexDirection/width; do NOT add alignSelf,
-          paddingX, or any property that adds offset between this Box and
-          ink-root: Composer's anchored cursor accumulates yoga left/top via
-          parent chain. */}
-      <Box flexDirection="column" width={cw} marginTop={1}>
-        <Text color={theme.accent}>{composerLine}</Text>
-        <Composer view={view} onInput={controller.onInput} capability={capability} />
-        <Text color={theme.accent}>{composerLine}</Text>
-      </Box>
+      {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
+          Yoga from collapsing the band when output is tall. Left alignment
+          matches the Task page's full-width top-left output rhythm. */}
+      <Box flexShrink={0} flexDirection="column">
+        <Box flexDirection="column" width={cw}>
+          <Text color={theme.accent}>{composerLine}</Text>
+          <Composer view={view} onInput={controller.onInput} capability={capability} />
+          <Text color={theme.accent}>{composerLine}</Text>
+        </Box>
 
-      {/* Status as footer line, centered under the composer. */}
-      <Box marginTop={1} justifyContent="center">
-        <StatusTray status={view.status} theme={theme} width={view.width} />
+        {/* Task footer — minimal status line: permission mode · index · hint.
+            NOT the full StatusTray; the noisy line was identified as the
+            "[Linghun] 会话…" leak source and stays out of Task mode. */}
+        {view.taskFooter ? (
+          <TaskFooter footer={view.taskFooter} theme={theme} width={view.width} />
+        ) : null}
       </Box>
+    </Box>
+  );
+}
 
-      <Box flexGrow={1} minHeight={0} />
+function TaskFooter({
+  footer,
+  theme,
+  width,
+}: {
+  footer: TaskFooterView;
+  theme: ReturnType<typeof createShellTheme>;
+  width: number;
+}): React.ReactNode {
+  const segments: string[] = [footer.permissionMode, footer.index];
+  if (footer.hint) segments.push(footer.hint);
+  const line = segments.join(" · ");
+  return (
+    <Box width={width} paddingX={2}>
+      <Text color={theme.muted}>{fitText(line, Math.max(20, width - 4))}</Text>
     </Box>
   );
 }
@@ -234,10 +276,12 @@ function PermissionPrompt({
   permission,
   theme,
   width,
+  language,
 }: {
   permission: TaskPermissionView;
   theme: ReturnType<typeof createShellTheme>;
   width: number;
+  language: ShellViewModel["language"];
 }): React.ReactNode {
   const riskColor =
     permission.risk === "high"
@@ -245,6 +289,19 @@ function PermissionPrompt({
       : permission.risk === "medium"
         ? theme.status.blocked
         : theme.status.info;
+
+  const riskLabel =
+    permission.risk === "high"
+      ? language === "en-US"
+        ? "HIGH"
+        : "高"
+      : permission.risk === "medium"
+        ? language === "en-US"
+          ? "MEDIUM"
+          : "中"
+        : language === "en-US"
+          ? "LOW"
+          : "低";
 
   return (
     <Box
@@ -256,7 +313,7 @@ function PermissionPrompt({
       width={Math.min(width, 76)}
     >
       <Text color={riskColor} bold>
-        {permission.toolName}
+        {permission.toolName} · {riskLabel}
       </Text>
       <Text>{fitText(permission.reason, width - 4)}</Text>
       {permission.scope.length > 0 ? (

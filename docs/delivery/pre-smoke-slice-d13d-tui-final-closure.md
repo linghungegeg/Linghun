@@ -315,3 +315,216 @@ budget:
 6. permission：模拟一次实际工具调用，y/n/details/Esc 全部走完。
 7. setup：首次启动 + 不带 ENV 凭据时，setup 6 步是否依次走完，apiKey 是否 mask，confirm 后能否正常进入 Home。
 8. plain fallback：`linghun --plain` / `TERM=dumb` / 非 TTY 下 readline prompt 与 placeholder 是否仍单一无双 prompt。
+
+---
+
+## D.13D 返修（2026-05-26）
+
+前次闭环存在 5 个用户级硬问题与一个布局问题，本节记录返修事实，纠正前文中已不再准确的描述。
+
+### 返修动机
+
+1. Task 页"垂直居中"与"内容稀疏时正中显示"造成 composer 漂移：用户输入时焦点位置不稳定。
+2. setup 引导有三处重复（setupHint 行 + step label + step placeholder），同一信息被重复呈现。
+3. Task 页常态出现噪音 line：`后台：Job: d9 timeout worker`、`timeout`、`最近输出`、`缺少 API 地址...`、`/details`，与"不要主动渲染底层机制"的产品定调冲突。
+4. slash echo 用 `keep:true` 写入 `blocks`，但 `ShellBlockOutput.write` 在每次模型输出时都会 splice 至最后一条，导致 echo 被吞。
+5. permission approval 走"普通文本"分支可能在用户键入"yes please"等长句时误同意。
+6. 之前文档中提到的 `Composer.test.tsx` / `useAnchoredCursor.test.tsx` 实际不存在；`view-model.test.ts` 内的"useAnchoredCursor parity (pure logic)"是对真实 hook 的镜像复刻，不能作为实测证据。
+
+### 返修事实清单
+
+#### Task 布局：output-first / composer-fixed-bottom
+
+- `ShellApp.tsx` `TaskLayout` 重写：移除顶部 `flexGrow={1}` 居中 spacer；内容列在顶部依序渲染 `slashEcho → activity → permission → blocks → limitations`；中段 `flexGrow={1}` 把 composer + footer 推到底部；composer 与 Home 等宽。
+- StatusTray 改为 footer 直接贴在 composer 下方，无 marginTop。
+
+#### Setup 重复合并
+
+- `view-model.ts` 引入 `setupActiveFlow = Boolean(context.pendingModelSetup?.step)`。
+- `setupHint` 仅在 `setupNeeded && viewMode !== "home" && !setupActiveFlow` 时设置；setup 流程一旦进入步骤，就只剩 step label + step placeholder 两个面，避免三层重复。
+
+#### Task 页噪音过滤
+
+- backgroundSummaries 仅保留 `running | failed`；`timeout / stale / cancelled / completed` 一律降级到 `/details`。
+- `setupActiveFlow` 时跳过整个 backgrounds 区块，让用户专注 setup。
+- `permission` 出现时跳过 output blocks，避免与 permission card 重复显示。
+- `addDetailsHint`：仅 error / blocked 块带 `errorDetailsHint`；info 类不再带 `/details` 行尾尾巴。
+
+#### slashEcho 不再走 blocks
+
+- `runInkShell` 维护本地 `let slashEcho: { id; text } | undefined;`；submit 以 `/` 开头时 set 一次。
+- `createShellViewModel` options 接收 `slashEcho`，原样回填到 `ShellViewModel.slashEcho`。
+- `TaskLayout` 在内容列顶部按 `view.slashEcho` 渲染 `› {text}`。
+- 完全绕过 `ShellBlockOutput.blocks.splice(...)` 的清理，模型输出不再吞掉 echo。
+
+#### Permission Selector 成品级化
+
+- `types.ts` 新增 `PermissionActionId = "yes" | "no" | "details" | "cancel"`、`PermissionAction = { id; label; shortcut? }`，`TaskPermissionView.actions?: PermissionAction[]`（可选；缺省由 view-model 自动注入）。
+- `view-model.ts` `withPermissionActions` 在缺省/空时按 i18n 文案注入 4 个默认 action。
+- `Composer.tsx` 增加 `permissionActive` 选择器模式：
+  - `Esc` → 提交 `escape`，由 `handleTuiKeypress("escape")` 消费 pending（已存在路径）。
+  - `Enter` → 按当前焦点 action 提交 `submit:{yes|no|details|cancel}`，由 `handleNaturalInput` 消费 pending（已存在路径）。
+  - `Tab` / `Shift+Tab` / `↑/↓/←/→` 在 4 个 action 间循环焦点。
+  - 单字符 `y/n/d`（不带 ctrl/meta）直接 dispatch 对应 action；其它字符全部 swallowed。
+  - 长句"yes please"再不会触发同意（首字符 `y` 单独成一帧才触发，多字符 paste 走 swallowed 分支）。
+- placeholder 改为 `选择操作：y 同意 · n 拒绝 · d 详情 · Esc 取消` / `Choose: y allow · n deny · d details · Esc cancel`。
+
+#### Composer cursor-centered viewport
+
+- `formatComposerRenderLines` 返回 `{ lines, truncatedAbove, truncatedBelow, cursorCol, cursorRow }`。
+- 多行：以 cursor 所在行为中心 + 总宽 `COMPOSER_MAX_VISIBLE_LINES = 5`，cursor 移至前几行时窗口同步上滑；上方折叠数 / 下方折叠数分别提示。
+- 单行超 cw：cursor 行使用左右两侧 `…` 省略号 + cursor-centered 水平窗口；非 cursor 行左对齐 + 右 `…`；EditBuffer 全文保留，submit 仍输出全文。
+
+#### slash 交互修正
+
+- 未知 slash 提示不再在键入中段闪现：`showUnknownHint` 永远 false，未知命令通过 submit 后业务层处理。
+- `Tab` 在已有 args 时保留 args（不再被空格覆盖）；无 args 时填入 slash + 空格。
+- `Enter` 在候选可见且无空格时先 accept 候选再 submit，避免"按 Enter 没反应"的错觉。
+- `slashCandidates` 用 `slashHead(text)` 解析，trailing args 不再破坏候选匹配。
+
+#### 删除前文不实测试
+
+- 删除 `view-model.test.ts` 中 `D.13D useAnchoredCursor parity (pure logic)` describe block（73 行）。该 block 镜像 hook 内部纯函数逻辑，并非对真实 React 树测试，与"实测证据"定位不符。真正的 render-phase 写入断言保留为源码 grep（无 useEffect / useLayoutEffect / useInsertionEffect / lastWrittenRef）。
+- 修正 `truncated multiline` 用例以匹配新 viewport 返回结构（`truncatedAbove + truncatedBelow`），保留对 cursor-centered 窗口的行为断言。
+
+### 返修后涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `packages/tui/src/shell/types.ts` | 新增 `PermissionActionId / PermissionAction / SlashEchoView`；`TaskPermissionView.actions?` 改为可选；`ShellViewModel.slashEcho?` |
+| `packages/tui/src/shell/view-model.ts` | i18n permissionPlaceholder + permissionAction\*；`setupActiveFlow` 抑制 setupHint；backgrounds 仅 running/failed；permission/setupActive 时跳过 output；`withPermissionActions` 自动注入；`slashEcho` options 透传 |
+| `packages/tui/src/shell/components/ShellApp.tsx` | TaskLayout 改为 output-first / composer-fixed-bottom；slashEcho 渲染；PermissionPrompt 显式 risk label |
+| `packages/tui/src/shell/components/Composer.tsx` | `permissionActive` selector 模式；cursor-centered viewport（多行 + 单行水平）；slash Tab 保留 args；候选 head 解析；统一 swallow 行为 |
+| `packages/tui/src/index.ts` | `runInkShell` 维护本地 `slashEcho`；submit 以 `/` 开头时 set；通过 options 透传，不再写 blocks |
+| `packages/tui/src/shell/view-model.test.ts` | 删除 useAnchoredCursor mirror block；修正 truncated multiline 用例；调整 background 过滤用例匹配新行为；placeholder 文案统一 |
+
+### 返修后验证
+
+| 项 | 命令 | 结果 |
+|----|------|------|
+| 类型检查 | `corepack pnpm --filter @linghun/tui exec tsc --noEmit` | ✅ |
+| 代码风格 | `corepack pnpm --filter @linghun/tui exec biome check src/shell` | ✅ |
+| 单元测试 | `corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts` | ✅ 179/179 |
+| 全量测试 | `corepack pnpm exec vitest run` | ✅ 1249 passed / 2 skipped |
+| 包构建 | `corepack pnpm --filter @linghun/tui build` | ✅ index.js 715.23 KB |
+
+### 仍未自动化覆盖（需真实 smoke）
+
+- 真实 ink-testing-library 集成测试：当前 viewport / permission selector / slashEcho 行为以纯函数 + 源码事实覆盖，未模拟键盘事件流；后续如需补完应在新切片内引入 `ink-testing-library.render(<Composer>)` 和 keypress driver。
+- Task 页 output-first 布局在不同终端的视觉对齐（30/45/60/80/120 列）仅通过 plain renderer + Ink 渲染断言；视觉位置需肉眼复核。
+- permission selector 多 action 焦点循环在不同终端 Tab/Shift+Tab 行为：依赖 ink-testing 真实键流。
+
+### 行为参考核对（返修）
+
+- 阅读：`F:\Linghun\packages\tui\src\index.ts` 中 `handleNaturalInput / handleTuiKeypress` 在 `pendingLocalApproval` 上的现有 `y/yes/n/no/details/cancel` + `escape` 消费链路，确认无需新增 approval API，Composer 只需 dispatch 既有 shell 事件。
+- 阅读：`ShellBlockOutput.write` 中 `if (this.blocks.length > 1) this.blocks.splice(0, this.blocks.length - 1)` 的最后一行 splice，确认必须绕过 blocks 才能保留 slashEcho。
+- 行为参考：CCB / OpenCode permission UI 的 button-row + keyboard shortcut 思路（仅交互边界，未复制源码）。
+- 未引入新依赖；未改 plain renderer；未引入 fake cursor；未改业务层的权限消费链路。
+
+## D.13D 返修补丁（TaskWorkspace full-page + 5 硬问题）
+
+### 范围
+
+D.13D 主体合入后的真实使用反馈：Task 页仍是"Home 居中骨架的轻 patch"，不是真正的 full-page workspace；裸 `/` 不出候选；Shift+Tab 在 Home/Task 都不生效；`/model` 输出后跟一行 `[Linghun] 会话…` 噪音；permission 与 composer 同时占用焦点；鼠标点击影响光标；composer 半居中 + 顶部空白过多。本次返修按"行为边界 + 最小改动"原则，先看完三个本地参考源（CCB / OpenCode / Warp）实测各自的 full-page 骨架、permission 排他焦点、footer 降噪、bare slash、Shift+Tab 路径，再做 LingHun 自研实现。
+
+### 参考源观察（仅行为边界，未复制源码 / 未复制视觉）
+
+- CCB 本地源（`F:\ccb-source`）：FullscreenLayout `ScrollBox(flexGrow=1) + Bottom(flexShrink=0, maxHeight=50%)` 是 full-page 骨架；PromptInputFooterSuggestions `OVERLAY_MAX_ITEMS=5` + 中央窗口 `startIndex = max(0, min(selected - floor(maxVisible/2), len - maxVisible))`；`<Box height={1} overflow="hidden">` + `wrap="truncate"`；PermissionPrompt 的 `Esc 取消 [· Tab 修改]` 一行 hint。
+- OpenCode 本地源（`F:\freecodex\opencode-source`）：session/index.tsx 用 `scrollbox flexGrow=1 stickyStart="bottom"` + `bottom box flexShrink=0` + 严格 mutex 优先级 `Permission > Question > SubagentFooter > Prompt`；session/permission.tsx `narrow = width < 80` 列翻折；session/footer.tsx 仅 `directory + permission count + LSP + MCP + /status`，没有 model/project/permission-mode 全行。
+- Warp 本地源（`F:\freecodex\warp-source`）：`AIAssistantPanelView` 的 `PanelFocusState::Editor | Transcript` 互斥焦点；`RequestStatus::NotInFlight` gating editor render；按 Up-on-first-row 触发 history；`RequestFinished` 清空并设 `FOLLOWUP_PLACEHOLDER_TEXT`。
+
+### 修正后实现要点
+
+| 修正 # | 主题 | 落点 |
+|------|------|------|
+| 1 | 裸 `/` 出核心候选 ≤5 | `slash-dispatch.ts` 新增 `getCoreSlashCandidates()`；`Composer.tsx` `isBareSlash` 走该函数 |
+| 2 | permission 唯一焦点 | `useAnchoredCursor` 接受 `null` 参数；`Composer` 在 `permissionActive` 时传 `null`，native cursor 隐藏，permission selector 独占焦点 |
+| 3 | Shift+Tab 切换权限模式 | `Composer` 用 Ink `key.tab && key.shift` 触发新事件 `cycle-permission-mode`；`runInkShell.onInput` 复用既有 `handleTuiKeypress("shift-tab", ...)` 链 |
+| 4 | `/model` 局部降噪 | 仅在 `handleModelCommand` 末尾删去 `writeStatus(output, context)`；shared `writeStatus` 不动 |
+| 5 | TaskFooter 移到 view-model | `types.ts` 新增 `TaskFooterView`，`ShellViewModel.taskFooter?` 字段；`view-model.ts` 在 task/pending 模式下从 `context.permissionMode` + `context.index.status` + `setupHint` 注入；`ShellApp.TaskLayout` 渲染 `TaskFooter`，不再用 `StatusTray` |
+| 6 | IME double-setTimeout | 不动 — 真实 smoke 出现尾字符丢失再处理 |
+| 7 | 鼠标/光标实测 | 见下文鼠标实测结论 |
+| 8 | 文件 scope | `types.ts / view-model.ts / Composer.tsx / ShellApp.tsx / index.ts / slash-dispatch.ts / view-model.test.ts / useAnchoredCursor.ts`，未引入第二个输入模型 |
+
+TaskLayout 改造：移除 `alignItems="center"`；output 区 `flexGrow={1} overflow="hidden" paddingX={2} paddingTop={1} minHeight={0}` 占满剩余高度并左对齐 full-width；composer band `flexShrink={0} alignItems="center"` + 内层 `width={cw}` 保持与 Home 同列以维持光标坐标稳定；footer 单行 `permissionMode · index · hint`，不再用 StatusTray 全行。
+
+### 鼠标/光标实测结论（修正 #7）
+
+- `ink-renderer.tsx:39-46` 调用 `render()` 未传任何启用 mouse reporting 的参数（无 `enableMouseTracking`、无 `\x1b[?1000h/?1006h` 转义）。
+- LingHun 自身代码内（`packages/tui/src`）唯一出现 `setRawMode` 的位置是 `view-model.test.ts` 的测试 stub；产线渲染依赖 Ink 内部首次 `useInput` 时自动 `setRawMode(true)`，未启用鼠标。
+- 结论：用户观察到"点击影响光标/选择"是**终端宿主层**行为，不是 LingHun / Ink bug：
+  - Windows Terminal / VS Code Terminal / WezTerm：默认拦截鼠标做"选中复制"，不传给应用。
+  - legacy cmd.exe (conhost) QuickEdit：开启时点击进入"标记选择"模式，影响 conhost 本地光标，不影响 Ink anchored cursor 的位置计算。
+  - tmux：mouse mode `on` 时把鼠标事件转 SGR 序列发到 stdin；当前 LingHun 不消费这些序列（`useInput` 不识别），会被丢弃，不会跑出"应用层光标移动"。
+- LingHun 不主动 enable mouse tracking，本切片不引入；如果未来需要鼠标支持，应在新切片显式开启并提供 disable 通道。
+- smoke 边界：用户若禁用 conhost QuickEdit 或在 Windows Terminal 内运行，点击只会触发宿主选中，松开后 cursor 仍在 anchored 位置；不需要 LingHun 干预。
+
+### 涉及文件（返修）
+
+| 文件 | 关键改动 |
+|------|----------|
+| `packages/tui/src/shell/types.ts` | 新增 `TaskFooterView`；`ShellViewModel.taskFooter?`；`ShellInputEvent` 新增 `cycle-permission-mode` 变体 |
+| `packages/tui/src/shell/view-model.ts` | 在 task/pending 模式下注入 `taskFooter`（permissionMode + index + hint） |
+| `packages/tui/src/slash-dispatch.ts` | 新增 `getCoreSlashCandidates()`，返回 DEFAULT_HELP_SLASHES 前 5 项 |
+| `packages/tui/src/shell/components/Composer.tsx` | 裸 `/` 走核心候选；`key.tab && key.shift` 触发 `cycle-permission-mode`；`permissionActive` 时 `useAnchoredCursor` 传 `null`，让 permission 独占焦点 |
+| `packages/tui/src/shell/components/useAnchoredCursor.ts` | 接收 `{row,col} \| null`，`null` 时 cursor 隐藏 |
+| `packages/tui/src/shell/components/ShellApp.tsx` | TaskLayout 改 full-page top-left；输出区 `flexGrow=1 overflow=hidden`；composer 区 `flexShrink=0` 贴底；新增 `TaskFooter` 渲染替代 StatusTray |
+| `packages/tui/src/index.ts` | `runInkShell.onInput` 处理 `cycle-permission-mode` → `handleTuiKeypress("shift-tab", ...)`；`handleModelCommand` 末尾删除 `writeStatus(output, context)` |
+| `packages/tui/src/shell/view-model.test.ts` | 8 个新断言覆盖 taskFooter / bare slash / Shift+Tab 事件 / 排他焦点 / `/model` 降噪 / TaskLayout 全页骨架；修正 2 个 pre-existing 路径前缀 |
+| `packages/tui/src/workspace-reference-cache.test.ts` | 修正 1 个 pre-existing 路径前缀（vitest cwd 是 `packages/tui`） |
+
+### 返修后验证
+
+| 项 | 命令 | 结果 |
+|----|------|------|
+| 类型检查 | `corepack pnpm --filter @linghun/tui exec tsc --noEmit` | ✅ EXIT=0 |
+| 代码风格 | `corepack pnpm --filter @linghun/tui exec biome check src/shell src/index.ts src/slash-dispatch.ts src/runtime-status-presenter.ts` | ✅ Checked 17 files, no fixes |
+| view-model 单测 | `corepack pnpm --filter @linghun/tui exec vitest run src/shell/view-model.test.ts --reporter=basic` | ✅ 188/188 |
+| 全量单测 | `corepack pnpm --filter @linghun/tui exec vitest run --reporter=basic` | ✅ 1158/1158（27 文件全绿） |
+| 包构建 | `corepack pnpm --filter @linghun/tui run build` | ✅ index.js 715.63 KB |
+| 空白冲突 | `git diff --check` | 仅 pre-existing 文档结尾空行（不在本次 scope 内） |
+
+### 用户验收对应
+
+| 验收项 | 实现位置 | 测试 |
+|--------|----------|------|
+| Task 真正 full-page 左上输出 | `ShellApp.TaskLayout` 移除 `alignItems="center"`，output `flexGrow=1 overflow=hidden paddingX=2 paddingTop=1` | `ShellApp TaskLayout uses full-page top-left layout (no alignItems=center)` |
+| composer 贴底不半居中 | composer band `flexShrink=0 alignItems=center` 包裹内层 `width={cw}`，`flexGrow=1` 输出区把它推到底部 | 同上 |
+| permission 唯一焦点 | `useAnchoredCursor(permissionActive ? null : ...)` 隐藏 native cursor | `Composer hides anchored cursor while permission is active` |
+| 裸 `/` 出核心候选 | `getCoreSlashCandidates()` + `Composer.isBareSlash` | `bare slash '/' surfaces 5 core candidates` |
+| Shift+Tab Home/Task 切换权限模式 | Ink `key.tab && key.shift` → `cycle-permission-mode` → `handleTuiKeypress("shift-tab", ...)` | `ShellInputEvent type union includes cycle-permission-mode` + `Composer Shift+Tab emits cycle-permission-mode` |
+| `/model` 不再裸 `[Linghun] 会话…` | 删除 `handleModelCommand` 末尾 `writeStatus(output, context)`，TaskFooter 在 task 模式下接管 mode + index | `/model handler no longer calls writeStatus` |
+| footer 仅显示权限/索引/轻提示 | `TaskFooter` 组件仅渲染 `permissionMode · index · hint?` | `task view exposes taskFooter with permission mode + index` + `setupHint surfaces as taskFooter.hint` |
+| 鼠标/光标实测结论 | LingHun 不启用 mouse reporting；问题归因终端宿主层（QuickEdit / 选中复制） | 见上文鼠标实测结论小节 |
+
+### 仍未自动覆盖（smoke 边界）
+
+- Ink 真实键盘事件流（`ink-testing-library`）下的 Shift+Tab 多次循环、permission selector 焦点循环：源码事实断言 + 既有 keypress 链路单测覆盖 dispatch 路径，但未模拟 Ink raw stdin。
+- TaskLayout 在 30/45/60/80/120 列、不同终端宿主下的视觉对齐：plain renderer + 源码断言覆盖结构，肉眼复核留给真实 smoke。
+- 鼠标在 tmux mouse mode `on` 下的字符注入（极少数用户场景）：未消费、丢弃，但若用户主动启用 tmux mouse 且预期 LingHun 处理，需新切片。
+
+### 行为参考核对（返修）
+
+- 阅读：`F:\ccb-source` 的 FullscreenLayout / PromptInput\* / PermissionPrompt（仅行为边界）。
+- 阅读：`F:\freecodex\opencode-source/packages/opencode/src/cli/cmd/tui/routes/session/{index.tsx,permission.tsx,footer.tsx}` 与 `component/prompt/index.tsx`（仅行为边界）。
+- 阅读：`F:\freecodex\warp-source/app/src/ai_assistant/{panel.rs,transcript.rs}`（仅行为边界）。
+- 未复制可疑源码 / 未复制视觉 / 未引入新依赖 / 未改业务层权限消费链路 / 未引入第二个输入模型 / 未改 plain renderer。
+
+### TaskSummary / 轻提示 实现范围说明
+
+- 本切片**未**新增 `TaskSummary` 独立组件，也未新增 hint 来源。
+- 本切片**新增**的是 `TaskFooterView.hint` 这一可选字段（`packages/tui/src/shell/types.ts`）和 `view-model.ts:264-271` 的 hint 通道：`taskFooter.hint = setupHint`。
+- 当前唯一的 hint 生产者是既有 `setupHint`，仅在 `setupNeeded === true`（首次 Trust 流程）时出现；常规运行时 hint 为空。
+- 既有 `BackgroundTaskSummary`（`packages/tui/src/shell/types.ts:144`、`view-model.ts:130/492`）是独立的后台任务摘要数据结构，未在本切片中被改动或重命名。
+- 后续若需要"轻提示"承载更多场景（如 verifier 进度、长任务背景态、最近 evidence ref），应在新切片中扩展 hint 生产者，不再扩大本切片范围。
+
+### Pre-smoke 二轮修复（用户阻断项）
+
+- 修：`packages/tui/src/shell/view-model.test.ts` 与 `packages/tui/src/workspace-reference-cache.test.ts` 的源码断言改用 `import.meta.url`-relative 路径，从仓库根目录跑 vitest 不再 ENOENT。
+- 修：`packages/tui/src/shell/components/ShellApp.tsx` Task 页 composer band 移除 `alignItems="center"`、`TaskFooter` 改为左对齐（`paddingX={2}`），任务页贴底底部仅左对齐显示 权限·索引·轻提示。
+- 修：`packages/tui/src/shell/components/Composer.tsx` `PermissionActionRow` 在 `< 64` 列或拼接行超过 `width - 2` 时降级为单列 compact，`fitText` 截断每条 action，杜绝 40/60 列溢出。
+- 修：`docs/delivery/pre-smoke-slice-d13d-tui-final-closure.md` 末尾多余空行清理，`git diff --check` 干净。
+- 用户强制 gates：
+  - `corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts packages/tui/src/index.test.ts --reporter=basic` → 2 files, 403/403 passed。
+  - `git -C F:\Linghun diff --check` → 无输出，干净。
+  - `corepack pnpm --filter @linghun/tui exec biome check src` → 1 pre-existing warning，0 error。

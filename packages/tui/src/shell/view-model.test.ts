@@ -1,4 +1,6 @@
+import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TuiContext } from "../index.js";
 import {
@@ -29,6 +31,11 @@ afterEach(() => {
   resetTerminalCapabilityCache();
   vi.unstubAllEnvs();
 });
+
+// Resolve src/ root from this test file's location so source-invariant
+// assertions work regardless of vitest cwd (root run vs --filter run).
+const __testDirname = dirname(fileURLToPath(import.meta.url));
+const SRC_ROOT = join(__testDirname, "..");
 
 class TestTtyOutput extends Writable {
   readonly chunks: string[] = [];
@@ -408,7 +415,7 @@ describe("Ink shell selection", () => {
 
   it("keeps ShellApp as a pure renderer without direct stdout resize handling", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile("packages/tui/src/shell/components/ShellApp.tsx", "utf8");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
 
     expect(source).not.toContain("useStdout");
     expect(source).not.toContain('stdout.on("resize"');
@@ -1046,7 +1053,10 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(bgBlocks[0]?.title).toContain("后台：lint check");
   });
 
-  it("maps failed and timeout statuses correctly", () => {
+  it("maps failed status to fail; timeout/stale/cancelled/completed are demoted (D.13D)", () => {
+    // D.13D rework: only running/failed surface in the task region. Other
+    // background statuses (timeout/stale/cancelled/completed) are demoted to
+    // /details to keep the active task flow uncluttered.
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1056,8 +1066,8 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
+    expect(bgBlocks).toHaveLength(1);
     expect(bgBlocks[0]?.status).toBe("fail");
-    expect(bgBlocks[1]?.status).toBe("blocked");
   });
 
   it("uses en-US prefix for background blocks", () => {
@@ -1197,10 +1207,11 @@ describe("D.12B — P0-2: permission composer mode", () => {
         risk: "high",
         scope: ["npm install"],
         hint: "yes / no",
+        actions: [],
       },
     });
-    expect(view.composer.placeholder).toContain("y/yes");
-    expect(view.composer.placeholder).toContain("n/no");
+    expect(view.composer.placeholder).toContain("y 同意");
+    expect(view.composer.placeholder).toContain("n 拒绝");
     expect(view.composer.placeholder).not.toBe("我能帮您做点什么？");
   });
 
@@ -1218,6 +1229,7 @@ describe("D.12B — P0-2: permission composer mode", () => {
         risk: "medium",
         scope: ["src/main.ts"],
         hint: "yes / no",
+        actions: [],
       },
     });
     expect(view.composer.placeholder).toContain("allow");
@@ -1390,7 +1402,10 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/failed/stale/blocked jobs still show", () => {
+  it("running/failed jobs still show; stale demoted to /details (D.13D)", () => {
+    // D.13D rework: only running/failed surface in the task region. stale and
+    // cancelled are demoted to /details. This keeps the active task region
+    // focused on what the user must act on now.
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1401,10 +1416,9 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(3);
+    expect(bgBlocks).toHaveLength(2);
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[1]?.status).toBe("fail");
-    expect(bgBlocks[2]?.status).toBe("blocked");
   });
 });
 
@@ -1788,7 +1802,9 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task shows running/failed/timeout/stale/blocked background", () => {
+  it("Task shows running/failed background; timeout/stale demoted (D.13D)", () => {
+    // D.13D rework: only running/failed surface in the task region. timeout
+    // and stale are demoted to /details to keep the active flow focused.
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1800,11 +1816,9 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(4);
+    expect(bgBlocks).toHaveLength(2);
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[1]?.status).toBe("fail");
-    expect(bgBlocks[2]?.status).toBe("blocked");
-    expect(bgBlocks[3]?.status).toBe("blocked");
   });
 
   it("fail/blocking output prioritized over normal output", () => {
@@ -1926,13 +1940,15 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("truncated multiline shows line count and correct cursor row", () => {
     const text = Array.from({ length: 8 }, (_, i) => `line${i}`).join("\n");
-    const { lines, truncatedCount, cursorRow } = formatComposerRenderLines({
+    const { lines, truncatedAbove, truncatedBelow, cursorRow } = formatComposerRenderLines({
       buffer: createEditBuffer(text),
       placeholder: "placeholder",
       masking: false,
       noColor: false,
     });
-    expect(truncatedCount).toBe(3);
+    // Buffer cursor is at end of last line; window is cursor-centered with size 5.
+    // 8 lines, cursor at line 7 → window covers lines 3..7 → 3 lines above truncated.
+    expect(truncatedAbove + truncatedBelow).toBe(3);
     expect(lines).toHaveLength(5);
     expect(cursorRow).toBe(4);
   });
@@ -2624,8 +2640,8 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
         hint: "yes / no",
       },
     });
-    expect(view.composer.placeholder).toContain("y/yes 允许");
-    expect(view.composer.placeholder).toContain("n/no 拒绝");
+    expect(view.composer.placeholder).toContain("y 同意");
+    expect(view.composer.placeholder).toContain("n 拒绝");
   });
 
   it("Task narrow width (<60) does not crash and renders correctly", () => {
@@ -2805,7 +2821,7 @@ describe("D.13D anchored cursor + Task region", () => {
         hint: "y/n",
       },
     });
-    expect(view.composer.placeholder).toContain("y/yes");
+    expect(view.composer.placeholder).toContain("y 同意");
     expect(view.composer.placeholder).toContain("Esc");
     expect(view.permission?.toolName).toBe("Bash");
   });
@@ -2862,80 +2878,6 @@ describe("D.13D anchored cursor + Task region", () => {
     expect(view.composer.placeholder).toContain("deny");
     // Ensure permission placeholder is the only composer hint, no double prompt
     expect(view.composer.placeholder).not.toContain("What can I help you with");
-  });
-});
-
-describe("D.13D useAnchoredCursor parity (pure logic)", () => {
-  type FakeNode = {
-    nodeName: "ink-root" | "ink-box" | "ink-text" | "ink-virtual-text";
-    parentNode?: FakeNode;
-    yogaNode?: { getComputedLayout: () => { left: number; top: number } };
-  };
-
-  // Mirror getAbsoluteOrigin's pure logic for parity testing without React.
-  function getAbsoluteOrigin(node: FakeNode | null): { x: number; y: number } | null {
-    if (!node) return null;
-    let x = 0;
-    let y = 0;
-    let cur: FakeNode | undefined = node;
-    while (cur && cur.nodeName !== "ink-root") {
-      const yogaNode = cur.yogaNode;
-      if (!yogaNode) return null;
-      const layout = yogaNode.getComputedLayout();
-      x += layout.left;
-      y += layout.top;
-      cur = cur.parentNode;
-    }
-    if (!cur || cur.nodeName !== "ink-root") return null;
-    return { x, y };
-  }
-
-  it("accumulates yoga left/top up to ink-root", () => {
-    const root: FakeNode = { nodeName: "ink-root" };
-    const outer: FakeNode = {
-      nodeName: "ink-box",
-      parentNode: root,
-      yogaNode: { getComputedLayout: () => ({ left: 2, top: 3 }) },
-    };
-    const inner: FakeNode = {
-      nodeName: "ink-box",
-      parentNode: outer,
-      yogaNode: { getComputedLayout: () => ({ left: 4, top: 5 }) },
-    };
-    expect(getAbsoluteOrigin(inner)).toEqual({ x: 6, y: 8 });
-  });
-
-  it("returns null when chain is detached (no ink-root)", () => {
-    const orphan: FakeNode = {
-      nodeName: "ink-box",
-      yogaNode: { getComputedLayout: () => ({ left: 1, top: 1 }) },
-    };
-    expect(getAbsoluteOrigin(orphan)).toBeNull();
-  });
-
-  it("returns null when any ancestor lacks yogaNode (e.g. ink-virtual-text)", () => {
-    const root: FakeNode = { nodeName: "ink-root" };
-    const broken: FakeNode = { nodeName: "ink-box", parentNode: root };
-    const child: FakeNode = {
-      nodeName: "ink-box",
-      parentNode: broken,
-      yogaNode: { getComputedLayout: () => ({ left: 1, top: 1 }) },
-    };
-    expect(getAbsoluteOrigin(child)).toBeNull();
-  });
-
-  it("returns null on null input", () => {
-    expect(getAbsoluteOrigin(null)).toBeNull();
-  });
-
-  it("integer-rounds and clamps to non-negative when applied", () => {
-    // Mirrors useAnchoredCursor's final transform.
-    const origin = { x: 1.4, y: 2.6 };
-    const declared = { col: 3.7, row: 0.2 };
-    const x = Math.max(0, Math.round(origin.x + declared.col));
-    const y = Math.max(0, Math.round(origin.y + declared.row));
-    expect(x).toBe(5);
-    expect(y).toBe(3);
   });
 });
 
@@ -3007,7 +2949,7 @@ describe("D.13D Final Closure — interaction shell", () => {
       },
     );
     // permission placeholder wins over setup
-    expect(view.composer.placeholder).toContain("y/yes");
+    expect(view.composer.placeholder).toContain("y 同意");
     // setupActive is still true so step label can render too
     expect(view.composer.setupActive).toBe(true);
   });
@@ -3036,8 +2978,11 @@ describe("D.13D Final Closure — interaction shell", () => {
     shell.unmount();
     await shell.waitUntilExit();
     expect(output.text).not.toContain("LingHun");
-    // status tray still visible (project label appears once, footer)
-    expect(output.text).toContain("项目：");
+    // Task footer (D.13D rework): minimal mode + index line, NOT the full
+    // StatusTray. The "[Linghun] 会话…" noise is gone from Task mode.
+    expect(output.text).toContain("风险确认");
+    expect(output.text).toContain("索引：ready");
+    expect(output.text).not.toContain("项目：");
     // task placeholder used
     expect(output.text).toContain("继续输入…");
   });
@@ -3070,7 +3015,7 @@ describe("D.13D Final Closure — interaction shell", () => {
 
   it("useAnchoredCursor implementation file uses render-phase cursor write (no useEffect/useLayoutEffect)", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile("packages/tui/src/shell/components/useAnchoredCursor.ts", "utf8");
+    const source = await readFile(join(SRC_ROOT, "shell/components/useAnchoredCursor.ts"), "utf8");
     // No effect-based write of the cursor — render phase only.
     expect(source).not.toContain("useEffect(");
     expect(source).not.toContain("useLayoutEffect(");
@@ -3079,5 +3024,105 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(source).not.toContain("lastWrittenRef");
     // setCursorPosition is called from the hook body (render phase).
     expect(source).toContain("setCursorPosition(");
+  });
+});
+
+describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permission focus", () => {
+  it("home view does NOT carry taskFooter (taskFooter is task-mode only)", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect(view.viewMode).toBe("home");
+    expect(view.taskFooter).toBeUndefined();
+  });
+
+  it("task view exposes taskFooter with permission mode + index, no [Linghun] 会话 noise", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      activity: { phase: "thinking", text: "正在思考…" },
+    });
+    expect(view.taskFooter).toBeDefined();
+    expect(view.taskFooter?.permissionMode).toBe("风险确认");
+    expect(view.taskFooter?.index).toBe("索引：ready");
+    // Critical: TaskFooter must not pull in the noisy session/model/cache/gate/bg line.
+    expect(view.taskFooter?.permissionMode ?? "").not.toContain("[Linghun]");
+    expect(view.taskFooter?.permissionMode ?? "").not.toContain("会话");
+  });
+
+  it("setupHint surfaces as taskFooter.hint in task mode", () => {
+    const view = createShellViewModel(createContext(), {
+      setupNeeded: true,
+      width: 120,
+      viewMode: "task",
+    });
+    expect(view.taskFooter?.hint).toBe(view.setupHint);
+    expect(view.taskFooter?.hint).toContain("按 Enter");
+  });
+
+  it("bare slash '/' surfaces 5 core candidates from getCoreSlashCandidates()", async () => {
+    const { getCoreSlashCandidates } = await import("../slash-dispatch.js");
+    const candidates = getCoreSlashCandidates();
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.length).toBeLessThanOrEqual(5);
+    const slashes = candidates.map((c) => c.slash);
+    // Bare-slash surface is the first 5 entries of DEFAULT_HELP_SLASHES.
+    // /model, /mode, /doctor, /problems, /help — /exit drops off at the cap.
+    expect(slashes).toContain("/model");
+    expect(slashes).toContain("/mode");
+    expect(slashes).toContain("/help");
+    expect(slashes).toContain("/problems");
+  });
+
+  it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/types.ts"), "utf8");
+    expect(source).toContain('"cycle-permission-mode"');
+  });
+
+  it("Composer hides anchored cursor while permission is active (permission is sole focus owner)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    // The render path passes null to useAnchoredCursor when permissionActive,
+    // so the cursor is hidden while the permission selector owns focus.
+    expect(source).toMatch(/permissionActive\s*\?\s*null\s*:\s*\{\s*row/);
+  });
+
+  it("Composer Shift+Tab emits cycle-permission-mode (not raw escape sequences)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    // Shift+Tab path uses Ink's key.tab && key.shift, not raw \x1b[Z parsing.
+    expect(source).toContain('type: "cycle-permission-mode"');
+    expect(source).not.toContain("\\x1b[Z");
+  });
+
+  it("/model handler no longer calls writeStatus (Task-mode denoise)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    // Locate the handleModelCommand body and verify the closing writeStatus
+    // call was removed. The function body ends right after the
+    // "/model doctor" hint line.
+    const fnStart = source.indexOf("async function handleModelCommand(");
+    expect(fnStart).toBeGreaterThan(0);
+    // Find the next top-level "async function" — the body ends before it.
+    const nextFn = source.indexOf("async function ", fnStart + 30);
+    const body = source.slice(fnStart, nextFn);
+    expect(body).toContain("formatModelRouteSummary");
+    expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
+  });
+
+  it("ShellApp TaskLayout uses full-page top-left layout (no alignItems=center)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    // The TaskLayout outer Box must not center the whole region.
+    const taskLayoutStart = source.indexOf("function TaskLayout(");
+    expect(taskLayoutStart).toBeGreaterThan(0);
+    const nextFn = source.indexOf("function ", taskLayoutStart + 20);
+    const body = source.slice(taskLayoutStart, nextFn);
+    // Output region uses flexGrow=1 + overflow=hidden, composer band uses flexShrink=0.
+    expect(body).toContain("flexGrow={1}");
+    expect(body).toContain('overflow="hidden"');
+    expect(body).toContain("flexShrink={0}");
+    // The original `alignItems="center"` on the outer wrapper is gone.
+    const outerWrapper = body.split("\n").slice(0, 4).join("\n");
+    expect(outerWrapper).not.toContain('alignItems="center"');
   });
 });

@@ -2563,6 +2563,7 @@ async function runInkShell(
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
   let submittedPending = false;
+  let slashEcho: { id: string; text: string } | undefined;
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
@@ -2580,6 +2581,7 @@ async function runInkShell(
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
+        slashEcho,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (t) =>
@@ -2605,6 +2607,16 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "cycle-permission-mode") {
+        // Reuse the existing handleTuiKeypress("shift-tab", ...) chain so the
+        // Ink shell mode-cycle path is identical to the plain TUI's onShiftTab
+        // handler. Permission state is mutated by setPermissionMode inside the
+        // chain; we only need to rerender to reflect the new mode in TaskFooter.
+        await handleTuiKeypress("shift-tab", context, shellOutput);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       if (event.type === "shift-enter") {
         blocks.push({
           id: `shift-enter-${Date.now()}`,
@@ -2623,17 +2635,15 @@ async function runInkShell(
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
       // Echo: slash commands are user-visible commands, not chat input. Show
-      // them as a kept "details" block so the task region keeps a visible
-      // breadcrumb of what was just submitted, distinct from model output.
+      // the most recent slash submission as a slim echo line above the task
+      // output (rendered through view.slashEcho, NOT pushed into blocks — the
+      // ShellBlockOutput stream may splice the blocks array down to its last
+      // model output and would otherwise drop the echo).
       if (event.type === "submit" && event.text.startsWith("/")) {
-        blocks.push({
+        slashEcho = {
           id: `slash-echo-${Date.now()}`,
-          kind: "details",
-          status: "info",
-          title: context.language === "en-US" ? "Command" : "命令",
-          summary: event.text.length > 80 ? `${event.text.slice(0, 79)}…` : event.text,
-          keep: true,
-        });
+          text: event.text.length > 80 ? `${event.text.slice(0, 79)}…` : event.text,
+        };
       }
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
@@ -4018,7 +4028,12 @@ async function handleModelCommand(
   }
   writeLine(output, formatModelRouteSummary(context.config));
   writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
-  writeStatus(output, context);
+  // Task-mode denoise: previously this called writeStatus(output, context),
+  // which emits the full `[Linghun] 会话 … 模型 … 模式 … 缓存 … 索引 … 确认
+  // … 后台 …` line and is the dominant noise source above the composer.
+  // /model already prints role / provider / model / reasoning above; the
+  // remaining signals users need (permission mode + index) live in the
+  // TaskFooter beneath the composer. We omit the status echo here entirely.
 }
 
 async function startModelSetup(

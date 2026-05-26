@@ -4,10 +4,13 @@ import type { TuiContext } from "../index.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import type {
   BackgroundTaskSummary,
+  PermissionAction,
   ProductBlockViewModel,
   ShellViewMode,
   ShellViewModel,
+  SlashEchoView,
   TaskActivityView,
+  TaskFooterView,
   TaskPermissionView,
 } from "./types.js";
 
@@ -35,7 +38,11 @@ const shellText = {
     setupStepReasoning: "配置 · Reasoning",
     setupStepAuxModel: "配置 · Aux Model",
     setupStepConfirm: "配置 · 确认",
-    permissionPlaceholder: "y/yes 允许 · n/no 拒绝 · details 详情 · Esc 取消",
+    permissionPlaceholder: "选择操作：y 同意 · n 拒绝 · d 详情 · Esc 取消",
+    permissionActionYes: "同意",
+    permissionActionNo: "拒绝",
+    permissionActionDetails: "详情",
+    permissionActionCancel: "取消",
     submittedHint: "已通过同一条 TUI controller 路径提交。",
     setupHint: "还没有模型配置。按 Enter 开始，或说\u201c我要配置模型\u201d。",
     routeTitle: "项目模型路由需要处理",
@@ -82,7 +89,11 @@ const shellText = {
     setupStepReasoning: "Setup · Reasoning",
     setupStepAuxModel: "Setup · Aux model",
     setupStepConfirm: "Setup · Confirm",
-    permissionPlaceholder: "y/yes allow · n/no deny · details inspect · Esc cancel",
+    permissionPlaceholder: "Choose: y allow · n deny · d details · Esc cancel",
+    permissionActionYes: "Allow",
+    permissionActionNo: "Deny",
+    permissionActionDetails: "Details",
+    permissionActionCancel: "Cancel",
     submittedHint: "Submitted through the shared TUI controller.",
     setupHint: 'No model configured. Press Enter, or say "configure provider".',
     routeTitle: "Project model route needs attention",
@@ -124,6 +135,8 @@ export type ShellViewModelOptions = {
   submitted?: boolean;
   /** Denial/cancel feedback for the most recent permission action. */
   denialFeedback?: { toolName: string; kind: "denied" | "cancelled" };
+  /** Most recent slash command echo, surfaced above task output. */
+  slashEcho?: SlashEchoView;
 };
 
 export function createShellViewModel(
@@ -152,28 +165,34 @@ export function createShellViewModel(
         ? "task"
         : "home");
 
-  // setup-needed: only surface as setupHint in task/pending mode (not home first-screen)
-  // In home mode, setup guidance is deferred to the Enter flow or placeholder
-  const setupHint = setupNeeded && effectiveViewMode !== "home" ? text.setupHint : undefined;
+  // setup-needed: only surface as setupHint in task/pending mode (not home first-screen).
+  // While the model setup flow is actively running (pendingModelSetup), the
+  // composer's step label + step placeholder is the single source of truth, so
+  // we suppress the redundant setupHint to keep the task region clean.
+  const setupActiveFlow = Boolean(context.pendingModelSetup?.step);
+  const setupHint =
+    setupNeeded && effectiveViewMode !== "home" && !setupActiveFlow ? text.setupHint : undefined;
 
   // blocks 只保留 project-route、background summaries 和 output（最多 3 条）
   // 当 permission pending 时，不显示 output block 以避免权限提示双重显示
   // Home 首屏不显示 background blocks
-  // Task 不显示 completed 历史 background（只显示 running/failed/timeout/stale/blocked）
+  // setup 进行中时，background / 最近输出噪音被收敛，让用户专注配置流程
   const blocks: ProductBlockViewModel[] = [];
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
-  if (effectiveViewMode !== "home" && options.backgroundSummaries?.length) {
-    // Filter out completed historical background tasks — only show active/problematic ones
-    const activeBackgrounds = options.backgroundSummaries.filter(
-      (s) => s.status !== "completed" && s.status !== "cancelled",
+  if (effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length) {
+    // Only surface backgrounds the user must act on: running / failed.
+    // timeout / stale / cancelled / completed are demoted to /details so the
+    // task region keeps focus on the active flow.
+    const focusBackgrounds = options.backgroundSummaries.filter(
+      (s) => s.status === "running" || s.status === "failed",
     );
-    if (activeBackgrounds.length > 0) {
-      blocks.push(...mapBackgroundSummariesToBlocks(activeBackgrounds, language));
+    if (focusBackgrounds.length > 0) {
+      blocks.push(...mapBackgroundSummariesToBlocks(focusBackgrounds, language));
     }
   }
-  if (!options.permission) {
+  if (!options.permission && !setupActiveFlow) {
     const allOutputBlocks = options.outputBlocks ?? [];
     // Prioritize fail/blocking output over normal output
     const failBlocks = allOutputBlocks.filter((b) => b.status === "fail" || b.status === "blocked");
@@ -183,7 +202,7 @@ export function createShellViewModel(
     // Show all fail/blocking + up to 3 most recent normal (total capped at 3)
     const maxNormal = Math.max(0, 3 - failBlocks.length);
     const selectedBlocks = [...failBlocks, ...normalBlocks.slice(-maxNormal)];
-    // Add /details hint to truncated blocks
+    // Add /details hint only to error/blocked blocks (avoid noise on info rows).
     const outputWithHints = selectedBlocks.map((b) => addDetailsHint(b, language));
     blocks.push(...outputWithHints);
   }
@@ -238,6 +257,19 @@ export function createShellViewModel(
       : text.placeholder;
   const composerSetupStepLabel = setupStep ? setupStepLabelByStep[setupStep] : undefined;
 
+  // TaskFooter — minimal status footer for task/pending viewMode. The full
+  // StatusTray noise stays out of the task region; this only carries the
+  // signals a user wants while a flow is active: permission mode, index,
+  // optional one-line hint (currently the setupHint when surfaced).
+  const taskFooter: TaskFooterView | undefined =
+    viewMode === "home"
+      ? undefined
+      : {
+          permissionMode: formatPermissionModeLabel(context.permissionMode, language),
+          index: formatIndex(context.index.status, language),
+          hint: setupHint,
+        };
+
   return {
     language,
     projectName,
@@ -251,7 +283,9 @@ export function createShellViewModel(
     homeVision,
     setupHint,
     activity: options.activity,
-    permission: options.permission,
+    permission: options.permission
+      ? withPermissionActions(options.permission, language)
+      : undefined,
     status: {
       project: text.project(projectName),
       model: text.model(truncateMiddle(context.model || "unknown", width <= 40 ? 12 : 22)),
@@ -274,7 +308,24 @@ export function createShellViewModel(
     },
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
+    slashEcho: options.slashEcho,
+    taskFooter,
   };
+}
+
+function withPermissionActions(
+  permission: TaskPermissionView,
+  language: Language,
+): TaskPermissionView {
+  if (permission.actions && permission.actions.length > 0) return permission;
+  const text = shellText[language];
+  const actions: PermissionAction[] = [
+    { id: "yes", label: text.permissionActionYes, shortcut: "y" },
+    { id: "no", label: text.permissionActionNo, shortcut: "n" },
+    { id: "details", label: text.permissionActionDetails, shortcut: "d" },
+    { id: "cancel", label: text.permissionActionCancel },
+  ];
+  return { ...permission, actions };
 }
 
 export function getComposerPlaceholder(language: Language): string {
@@ -419,6 +470,7 @@ export function mapPendingApprovalToPermission(
       risk: toolName === "Bash" ? "high" : "medium",
       scope,
       hint,
+      actions: [],
     };
   }
   return undefined;
