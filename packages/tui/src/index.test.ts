@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   type BackgroundTaskState,
+  type DeferredToolDescriptor,
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
@@ -38,15 +39,24 @@ import {
   createSkillState,
   createSolutionCompletenessStatus,
   createWorkflowState,
+  deferredToolListHashInput,
+  executeExtraTool,
+  executeSearchExtraTools,
+  findDeferredTool,
+  formatDeferredToolsSystemReminder,
   handleNaturalInput,
   handleSlashCommand,
   handleTuiKeypress,
+  listDeferredTools,
   processRemoteApprovalForTest,
   recordModelUsage,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
   runTui,
   runVerificationCommandForTest,
+  searchDeferredTools,
+  snapshotDeferredTools,
+  snapshotDeferredToolsSummary,
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
   writeLightHintsForTest,
@@ -344,6 +354,7 @@ async function createTestContext(
     lastProviderFailure: undefined,
     providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
+    discoveredDeferredToolNames: new Set<string>(),
   };
 }
 
@@ -9663,5 +9674,593 @@ describe("D.13E Step 2 — /permissions add allow dedup via addAllowRule", () =>
       }
       expect(context.permissions.rules.length).toBe(baseline);
     }
+  });
+});
+
+// ─── D.13I — Self-built deferred tools dispatch ─────────────────────────────
+// SearchExtraTools / ExecuteExtraTool 是 Linghun 自研 deferred 调用层，模型必须先
+// discover 再 execute；不发 Anthropic defer_loading / tool_reference / anthropic-beta；
+// 不新建 runner；执行分层：
+//   - codebase-memory：白名单 10 个工具，可执行
+//   - MCP server tools：discover-only（无通用 adapter）
+//   - skills/plugins：discover-only（无安全 adapter）
+// ----------------------------------------------------------------------------
+describe("D.13I — Self-built deferred tools dispatch", () => {
+  it("D.13I discovery: snapshotDeferredTools returns codebase-memory whitelist + sanitized fields (no raw schema/secret)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const snapshot = snapshotDeferredTools(context);
+    // codebase-memory whitelist 必须出现
+    expect(snapshot.byKind["codebase-memory"]).toBeGreaterThanOrEqual(10);
+    expect(snapshot.executableCount).toBe(snapshot.byKind["codebase-memory"]);
+
+    // 任何 descriptor 不得泄露 raw schema / api_key / Bearer 等敏感字段
+    const json = JSON.stringify(snapshot);
+    expect(json).not.toContain("apiKey");
+    expect(json).not.toContain("api_key");
+    expect(json).not.toContain("Bearer ");
+    expect(json).not.toContain("input_schema");
+    expect(json).not.toContain("inputSchema");
+
+    // 每个 descriptor 仅暴露 name/kind/description/requiredArgs/executable/reason
+    for (const tool of snapshot.tools) {
+      expect(Object.keys(tool).sort()).toEqual(
+        ["description", "executable", "kind", "name", "reason", "requiredArgs"].sort(),
+      );
+    }
+
+    const summary = snapshotDeferredToolsSummary(context);
+    expect(summary.total).toBe(snapshot.total);
+    expect(summary.byKind).toEqual(snapshot.byKind);
+    expect(summary.executableCount).toBe(snapshot.executableCount);
+
+    // SearchExtraTools(query) 仅过滤；空 query 返回全部
+    const all = executeSearchExtraTools("", context);
+    expect(all.ok).toBe(true);
+    expect(all.data.total).toBeGreaterThanOrEqual(snapshot.byKind["codebase-memory"]);
+
+    const filtered = executeSearchExtraTools("trace_path", context);
+    expect(filtered.ok).toBe(true);
+    expect(filtered.data.matches.some((m) => m.name === "trace_path")).toBe(true);
+  });
+
+  it("D.13I rejection: ExecuteExtraTool rejects undiscovered tool names", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 即使先跑过 SearchExtraTools 但 query 没匹配，目标名也不会被记入 Set。
+    executeSearchExtraTools("totally_made_up", context);
+    const result = await executeExtraTool(
+      { tool_name: "totally_made_up_tool", params: { whatever: 1 } },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("totally_made_up_tool");
+    expect(result.text).toContain("SearchExtraTools");
+
+    // 空/非字符串 tool_name 也必须拒绝
+    const blank = await executeExtraTool({ tool_name: "" }, context);
+    expect(blank.ok).toBe(false);
+    const wrongType = await executeExtraTool({ tool_name: 42 as unknown as string }, context);
+    expect(wrongType.ok).toBe(false);
+  });
+
+  it("D.13I gating: ExecuteExtraTool rejects whitelisted tool when SearchExtraTools 未跑过 (Set 为空)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // list_projects 在白名单里、executable=true，但本 session 还没 SearchExtraTools。
+    expect(context.discoveredDeferredToolNames.size).toBe(0);
+    const tool = findDeferredTool("list_projects", listDeferredTools(context));
+    expect(tool?.executable).toBe(true);
+
+    const result = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("SearchExtraTools");
+    expect(result.text).toContain("list_projects");
+  });
+
+  it("D.13I gating: search-with-no-match 不写 Set；search-then-execute 才放行", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = join(project, "mock");
+    await mkdir(mockDir, { recursive: true });
+    const { mockPath } = await createMockCodebaseMemoryBinary(project, mockDir);
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "deepseek-v4-flash",
+        index: { codebaseMemoryBinary: mockPath },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+
+    // 1) search 没匹配 → Set 空 → execute 拒绝
+    const noMatch = executeSearchExtraTools("absolutely-nope-no-such-tool", context);
+    expect(noMatch.ok).toBe(true);
+    expect(noMatch.data.total).toBe(0);
+    expect(context.discoveredDeferredToolNames.has("list_projects")).toBe(false);
+
+    const blocked = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.text).toContain("SearchExtraTools");
+
+    // 2) search 命中 → Set 含 list_projects → execute 放行
+    const hit = executeSearchExtraTools("list_projects", context);
+    expect(hit.ok).toBe(true);
+    expect(hit.data.matches.some((m) => m.name === "list_projects")).toBe(true);
+    expect(context.discoveredDeferredToolNames.has("list_projects")).toBe(true);
+
+    const allowed = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
+    expect(allowed.ok).toBe(true);
+  });
+
+  it("D.13I rejection: ExecuteExtraTool rejects codebase-memory call with missing required args (re-uses validateCodebaseMemoryToolExecution)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // get_code_snippet 需要 project + qualified_name；缺 qualified_name
+    const tool = findDeferredTool("get_code_snippet", listDeferredTools(context));
+    expect(tool).toBeTruthy();
+    expect(tool?.executable).toBe(true);
+
+    // D.13I tail fix — 必须先 SearchExtraTools 让 Set 记录该名字，否则会被 gating 提前拦截。
+    executeSearchExtraTools("get_code_snippet", context);
+
+    const result = await executeExtraTool(
+      { tool_name: "get_code_snippet", params: { project: "test" } },
+      context,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("required args");
+    expect(result.text).toContain("qualified_name");
+  });
+
+  it("D.13I execution: codebase-memory tool dispatches through runCodebaseMemoryCli (existing chain) and returns ok with data", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = join(project, "mock");
+    await mkdir(mockDir, { recursive: true });
+    const { mockPath } = await createMockCodebaseMemoryBinary(project, mockDir);
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "deepseek-v4-flash",
+        index: { codebaseMemoryBinary: mockPath },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+
+    // D.13I tail fix — 必须先 SearchExtraTools 让 Set 记录 list_projects。
+    executeSearchExtraTools("list_projects", context);
+
+    const result = await executeExtraTool(
+      { tool_name: "list_projects", params: {} },
+      context,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain("list_projects");
+  });
+
+  it("D.13I execution layering: skill/plugin/MCP entries are discoverable but not blindly executable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 模拟 enabled+trusted 的 skill / plugin / MCP 工具发现
+    context.skills.enabled = true;
+    context.skills.skills = [
+      {
+        id: "test-skill",
+        name: "Test Skill",
+        description: "A test skill manifest",
+        version: "0.0.0",
+        path: "/tmp/skill",
+        scope: "project",
+        autoExecute: false,
+      } as unknown as (typeof context.skills.skills)[number],
+    ];
+    context.skills.trustedIds = ["test-skill"];
+    context.skills.disabledIds = [];
+
+    context.plugins.enabled = true;
+    context.plugins.plugins = [
+      {
+        id: "test-plugin",
+        name: "Test Plugin",
+        description: "A test plugin manifest",
+        version: "0.0.0",
+        path: "/tmp/plugin",
+        scope: "project",
+      } as unknown as (typeof context.plugins.plugins)[number],
+    ];
+    context.plugins.trustedIds = ["test-plugin"];
+    context.plugins.disabledIds = [];
+
+    context.mcp.enabled = true;
+    context.mcp.servers = [
+      {
+        name: "fake-mcp",
+        status: "ready",
+      } as unknown as (typeof context.mcp.servers)[number],
+    ];
+    context.mcp.tools = [
+      {
+        server: "fake-mcp",
+        name: "fake_tool",
+        description: "fake tool",
+        discovery: "discovered",
+        schemaLoaded: true,
+        trusted: true,
+      } as unknown as (typeof context.mcp.tools)[number],
+    ];
+
+    const tools = listDeferredTools(context);
+    const skill = tools.find((t) => t.name === "skill:test-skill");
+    const plugin = tools.find((t) => t.name === "plugin:test-plugin");
+    const mcp = tools.find((t) => t.name === "mcp:fake-mcp:fake_tool");
+    expect(skill).toBeTruthy();
+    expect(plugin).toBeTruthy();
+    expect(mcp).toBeTruthy();
+
+    // 三类必须都是 executable=false
+    expect(skill?.executable).toBe(false);
+    expect(plugin?.executable).toBe(false);
+    expect(mcp?.executable).toBe(false);
+
+    // 先通过 SearchExtraTools 把这三个名字写入 discoveredDeferredToolNames，
+    // 这样 ExecuteExtraTool 才能穿过 Set gating 走到 executable=false 分支。
+    executeSearchExtraTools("skill:test-skill", context);
+    executeSearchExtraTools("plugin:test-plugin", context);
+    executeSearchExtraTools("mcp:fake-mcp:fake_tool", context);
+
+    // ExecuteExtraTool 必须拒绝（适配器不存在）
+    const skillResult = await executeExtraTool({ tool_name: "skill:test-skill" }, context);
+    expect(skillResult.ok).toBe(false);
+    expect(skillResult.text).toContain("没有安全执行适配器");
+
+    const pluginResult = await executeExtraTool({ tool_name: "plugin:test-plugin" }, context);
+    expect(pluginResult.ok).toBe(false);
+    expect(pluginResult.text).toContain("没有安全执行适配器");
+
+    const mcpResult = await executeExtraTool(
+      { tool_name: "mcp:fake-mcp:fake_tool", params: {} },
+      context,
+    );
+    expect(mcpResult.ok).toBe(false);
+    expect(mcpResult.text).toContain("没有安全执行适配器");
+  });
+
+  it("D.13I claude path 真 3 轮：Search → Execute(codebase-memory) → text，全程 /v1/messages，dispatcher 真正穿过 Set gating + tool_result 回灌", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    const mockDir = join(project, "mock");
+    await mkdir(mockDir, { recursive: true });
+    const { mockPath } = await createMockCodebaseMemoryBinary(project, mockDir);
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "chat_completions");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        index: { codebaseMemoryBinary: mockPath },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "chat_completions",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const requests: Array<{
+      url: string;
+      body: { messages?: Array<{ role: string; content: unknown }>; tools?: unknown };
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role: string; content: unknown }>;
+          tools?: unknown;
+        };
+        requests.push({ url: String(url), body });
+        const encoder = new TextEncoder();
+        if (requests.length === 1) {
+          // 第 1 轮：模型请求 SearchExtraTools(query="list_projects")
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10}}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_search_1","name":"SearchExtraTools"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"list_projects\\"}"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+              );
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        if (requests.length === 2) {
+          // 第 2 轮：模型请求 ExecuteExtraTool(tool_name="list_projects", params={})
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","usage":{"input_tokens":20}}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_exec_1","name":"ExecuteExtraTool"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"tool_name\\":\\"list_projects\\",\\"params\\":{}}"}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}\n\n',
+                ),
+              );
+              controller.enqueue(
+                encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+              );
+              controller.close();
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        // 第 3 轮：text_delta 收尾
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_3","usage":{"input_tokens":30}}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"已通过 ExecuteExtraTool 拿到 list_projects 结果，结束。"}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\nyes\n/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 严格 3 轮请求，全部走 /v1/messages，不得分流到 /chat/completions
+    expect(requests.length).toBe(3);
+    for (const req of requests) {
+      expect(req.url).toBe("https://relay.example.com/v1/messages");
+      expect(req.url.endsWith("/chat/completions")).toBe(false);
+    }
+
+    // tools schema 必须 Anthropic input_schema 形态，含 SearchExtraTools / ExecuteExtraTool
+    const firstTools =
+      (requests[0].body.tools as Array<{
+        name?: string;
+        function?: unknown;
+        input_schema?: unknown;
+      }>) ?? [];
+    expect(firstTools.length).toBeGreaterThan(0);
+    expect(firstTools[0].function).toBeUndefined();
+    expect(firstTools[0].input_schema).toBeDefined();
+    const names = firstTools.map((t) => t.name ?? "");
+    expect(names).toContain("SearchExtraTools");
+    expect(names).toContain("ExecuteExtraTool");
+
+    // 第 2 轮 messages 必须含 tool_result(toolu_search_1)
+    const round2User = (requests[1].body.messages ?? [])
+      .filter((m) => m.role === "user" && Array.isArray(m.content))
+      .flatMap((m) => (m.content as Array<{ type?: string; tool_use_id?: string }>) ?? []);
+    const r2ToolResult = round2User.find(
+      (b) => b.type === "tool_result" && b.tool_use_id === "toolu_search_1",
+    );
+    expect(r2ToolResult).toBeTruthy();
+
+    // 第 3 轮 messages 必须含 tool_result(toolu_exec_1)，证明 dispatcher 真的执行了 ExecuteExtraTool 并把结果回灌
+    const round3User = (requests[2].body.messages ?? [])
+      .filter((m) => m.role === "user" && Array.isArray(m.content))
+      .flatMap((m) => (m.content as Array<{ type?: string; tool_use_id?: string }>) ?? []);
+    const r3ToolResult = round3User.find(
+      (b) => b.type === "tool_result" && b.tool_use_id === "toolu_exec_1",
+    );
+    expect(r3ToolResult).toBeTruthy();
+
+    // 不能输出占位话
+    expect(output.text).not.toContain("不支持 tool calling");
+    expect(output.text).not.toContain("Tool calling is not supported");
+  });
+
+  it("D.13I system reminder + hash input: only emit reminder when deferred list non-empty; hash input contains only name/kind/executable/requiredArgs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // Default state has codebase-memory whitelist → reminder emitted
+    const snapshot = snapshotDeferredTools(context);
+    const reminder = formatDeferredToolsSystemReminder(context.language, snapshot);
+    expect(reminder).toBeDefined();
+    expect(reminder).toContain("SearchExtraTools");
+    expect(reminder).toContain("ExecuteExtraTool");
+
+    // Empty snapshot → no reminder
+    const empty = formatDeferredToolsSystemReminder(context.language, {
+      generatedAt: new Date().toISOString(),
+      total: 0,
+      byKind: { "codebase-memory": 0, mcp: 0, skill: 0, plugin: 0 },
+      executableCount: 0,
+      tools: [],
+    });
+    expect(empty).toBeUndefined();
+
+    // hash input 仅含 name/kind/executable/requiredArgs，且按 name 排序
+    const tools: DeferredToolDescriptor[] = [
+      {
+        name: "z_tool",
+        kind: "codebase-memory",
+        description: "should not appear in hash",
+        requiredArgs: ["b", "a"],
+        executable: true,
+        reason: "should-not-appear",
+      },
+      {
+        name: "a_tool",
+        kind: "mcp",
+        description: "raw description not in hash",
+        requiredArgs: [],
+        executable: false,
+        reason: "raw-reason-not-in-hash",
+      },
+    ];
+    const hashInput = deferredToolListHashInput(tools) as Array<Record<string, unknown>>;
+    expect(hashInput).toHaveLength(2);
+    expect(hashInput[0].name).toBe("a_tool");
+    expect(hashInput[1].name).toBe("z_tool");
+    // requiredArgs 排序后输出
+    expect(hashInput[1].requiredArgs).toEqual(["a", "b"]);
+    // 不含 description / reason
+    const json = JSON.stringify(hashInput);
+    expect(json).not.toContain("should not appear");
+    expect(json).not.toContain("raw description");
+    expect(json).not.toContain("raw-reason");
+  });
+
+  it("D.13I system prompt injection: createModelSystemPrompt embeds DeferredToolsReminder when deferred tools exist", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // Default codebase-memory whitelist → reminder must be embedded
+    const prompt = createModelSystemPrompt("hello", context, { runtime: "test" });
+    expect(prompt).toContain("DeferredToolsReminder=");
+    expect(prompt).toContain("SearchExtraTools");
+    expect(prompt).toContain("ExecuteExtraTool");
+  });
+
+  it("D.13I searchDeferredTools / findDeferredTool helpers behave deterministically", () => {
+    const tools: DeferredToolDescriptor[] = [
+      {
+        name: "trace_path",
+        kind: "codebase-memory",
+        description: "trace function",
+        requiredArgs: [],
+        executable: true,
+        reason: "ok",
+      },
+      {
+        name: "search_code",
+        kind: "codebase-memory",
+        description: "search across project",
+        requiredArgs: [],
+        executable: true,
+        reason: "ok",
+      },
+    ];
+    expect(searchDeferredTools("", tools)).toEqual(tools);
+    expect(searchDeferredTools("trace", tools).map((t) => t.name)).toEqual(["trace_path"]);
+    expect(searchDeferredTools("memory", tools).map((t) => t.name).sort()).toEqual([
+      "search_code",
+      "trace_path",
+    ]);
+    expect(findDeferredTool("trace_path", tools)?.name).toBe("trace_path");
+    expect(findDeferredTool("nope", tools)).toBeUndefined();
   });
 });

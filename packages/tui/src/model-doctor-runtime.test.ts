@@ -849,4 +849,56 @@ describe("model-doctor-runtime", () => {
       expect(fields).toEqual({ promptCacheEnabled: true, promptCacheTtl: "1h" });
     });
   });
+
+  describe("D.13I deferredTools doctor reporting", () => {
+    it("D.13I formatModelRouteDoctor 输出 deferredTools 摘要：仅 total/byKind/executableCount，不暴露 raw schema/secret", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-deferred-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+          deferredToolsSummary: {
+            total: 12,
+            byKind: { "codebase-memory": 10, mcp: 2, skill: 0, plugin: 0 },
+            executableCount: 10,
+          },
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        // 必须出现 deferredTools 行 + 三个 count 字段
+        expect(text).toContain("deferredTools:");
+        expect(text).toContain("total=12");
+        expect(text).toContain("executable=10");
+        expect(text).toContain("codebase-memory=10");
+        expect(text).toContain("mcp=2");
+        expect(text).toContain("skill=0");
+        expect(text).toContain("plugin=0");
+        // 不允许暴露 raw schema / 参数原文 / apiKey 字面量
+        expect(text).not.toContain("input_schema");
+        expect(text).not.toContain("inputSchema");
+        expect(text).not.toContain("requiredArgs");
+        expect(text).not.toContain("sk-test-key-12345678");
+        expect(text).not.toContain("sk-openai-key-12345678");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("D.13I deferredToolsSummary 缺省时 doctor 不输出 deferredTools 行（向后兼容）", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-deferred-"));
+      try {
+        const ctx = {
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        };
+        const text = await formatModelRouteDoctor(ctx);
+        expect(text).not.toContain("deferredTools:");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+  });
 });

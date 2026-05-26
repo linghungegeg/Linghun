@@ -40,6 +40,11 @@ export function createCacheFreshness(input: {
   // status，便于诊断；不传时按 "none" 处理，保持向后兼容。
   contextEditing?: unknown;
   cacheEditingBeta?: unknown;
+  // D.13I：deferred tools (MCP/skill/plugin/codebase-memory) 列表变化追踪。
+  // 与 toolSchemaHash / mcpToolListHash 解耦：固定的 builtIn + SearchExtraTools/
+  // ExecuteExtraTool schema 进 toolSchemaHash；动态发现的 deferred 列表（仅 name/
+  // kind/executable/requiredArgs）进 deferredToolListHash。不传时按 "none" 处理。
+  deferredToolList?: unknown;
   _precomputedToolSchemaHash?: string;
 }): CacheFreshness {
   return {
@@ -57,6 +62,7 @@ export function createCacheFreshness(input: {
     cacheTtlHash: stableHash(input.cacheTtl ?? "none"),
     contextEditingHash: stableHash(input.contextEditing ?? "none"),
     cacheEditingBetaHash: stableHash(input.cacheEditingBeta ?? "none"),
+    deferredToolListHash: stableHash(input.deferredToolList ?? "none"),
     changedKeys: [],
   };
 }
@@ -83,6 +89,7 @@ export function diffFreshness(
     "cacheTtlHash",
     "contextEditingHash",
     "cacheEditingBetaHash",
+    "deferredToolListHash",
   ];
   return keys.filter((key) => previous[key] !== current[key]);
 }

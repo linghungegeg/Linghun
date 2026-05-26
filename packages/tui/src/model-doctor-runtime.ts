@@ -47,6 +47,13 @@ export type ModelDoctorContext = {
     model: string;
     endpointProfile: string;
   };
+  // D.13I：deferred 工具发现快照摘要。仅含 total / byKind / executableCount，不含 raw schema/secret/参数；
+  // 由调用方（index.ts）注入 snapshotDeferredTools(context) 的摘要字段，doctor 仅做 read-only 渲染。
+  deferredToolsSummary?: {
+    total: number;
+    byKind: { "codebase-memory": number; mcp: number; skill: number; plugin: number };
+    executableCount: number;
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -212,6 +219,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   lines.push(
     `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl} (5m 默认 cache_control 无 ttl 字面量；1h 才显式写 ttl)`,
   );
+  // D.13I：deferred 工具发现摘要。仅展示 total / byKind / executableCount，
+  // 不含 raw schema/secret/参数；用户 /model doctor 时才看到 deferred 命名空间是否被发现。
+  if (context.deferredToolsSummary) {
+    const summary = context.deferredToolsSummary;
+    lines.push(
+      `- deferredTools: total=${summary.total} executable=${summary.executableCount} codebase-memory=${summary.byKind["codebase-memory"]} mcp=${summary.byKind.mcp} skill=${summary.byKind.skill} plugin=${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
+    );
+  }
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
     const endpointProfile = provider.endpointProfile ?? "chat_completions";

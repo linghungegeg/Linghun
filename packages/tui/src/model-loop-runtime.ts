@@ -179,10 +179,65 @@ export function createToolInputSchema(name: ToolName): unknown {
   };
 }
 
+// D.13I：Self-built deferred tools。两个固定 schema 工具，进入 toolSchemaHash 时排序稳定。
+// 不发 Anthropic defer_loading / tool_reference / anthropic-beta；只是 Linghun 自己的两个常规工具。
+// 动态发现的 MCP/skill/plugin 列表不进 toolSchemaHash，进 deferredToolListHash。
+export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
+export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
+
+export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
+  "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
+
+export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
+  "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
+
+export function createSearchExtraToolsInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      query: { type: "string" },
+    },
+    required: ["query"],
+  };
+}
+
+export function createExecuteExtraToolInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      tool_name: { type: "string" },
+      params: { type: "object" },
+    },
+    required: ["tool_name"],
+  };
+}
+
+export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
+  return [
+    {
+      name: SEARCH_EXTRA_TOOLS_NAME,
+      description: SEARCH_EXTRA_TOOLS_DESCRIPTION,
+      inputSchema: createSearchExtraToolsInputSchema(),
+    },
+    {
+      name: EXECUTE_EXTRA_TOOL_NAME,
+      description: EXECUTE_EXTRA_TOOL_DESCRIPTION,
+      inputSchema: createExecuteExtraToolInputSchema(),
+    },
+  ];
+}
+
 export function createModelToolDefinitions(): ModelToolDefinition[] {
-  return createModelToolDefinitionsForTools(
-    Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
-  );
+  // D.13I：full-tool 模式才附加 deferred dispatch（SearchExtraTools / ExecuteExtraTool）；
+  // reportGuard 受限子集走 createModelToolDefinitionsForTools，不附加。
+  return [
+    ...createModelToolDefinitionsForTools(
+      Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
+    ),
+    ...createDeferredToolDispatchDefinitions(),
+  ];
 }
 
 export function createModelToolDefinitionsForTools(

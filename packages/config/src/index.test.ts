@@ -145,10 +145,16 @@ describe("config directories", () => {
   });
 
   it("saves and loads a Phase 13 role route", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const { saveModelRoute: cleanSaveModelRoute, loadConfig: cleanLoadConfig } = await import(
+      "./index.js"
+    );
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 
-    const saved = await saveModelRoute("planner", "deepseek-v4-pro", project);
-    const loaded = await loadConfig(project);
+    const saved = await cleanSaveModelRoute("planner", "deepseek-v4-pro", project);
+    const loaded = await cleanLoadConfig(project);
 
     expect(saved.modelRoutes.routes.find((route) => route.role === "planner")?.primaryModel).toBe(
       "deepseek-v4-pro",
@@ -162,6 +168,8 @@ describe("config directories", () => {
   });
 
   it("allows env to override default DeepSeek model and Linghun default model", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
     vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-v4-pro");
     vi.stubEnv("LINGHUN_DEFAULT_MODEL", "gpt-5.5");
     vi.resetModules();
@@ -635,10 +643,14 @@ describe("config directories", () => {
   });
 
   it("recovers from invalid nested settings shape with a visible warning", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const indexModule = await import("./index.js");
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
-    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await mkdir(indexModule.getProjectConfigDir(project), { recursive: true });
     await writeFile(
-      getProjectSettingsPath(project),
+      indexModule.getProjectSettingsPath(project),
       JSON.stringify({
         providers: { deepseek: { type: "deepseek", model: "deepseek-v4-flash" } },
         modelRoutes: { routes: [{ role: "executor", allowTools: "yes" }] },
@@ -646,11 +658,13 @@ describe("config directories", () => {
       "utf8",
     );
 
-    const config = await loadConfig(project);
+    const config = await indexModule.loadConfig(project);
 
     expect(config.defaultModel).toBeTruthy();
-    expect(lastConfigRecoveryWarning?.path).toBe(getProjectSettingsPath(project));
-    expect(lastConfigRecoveryWarning?.reason).toContain("settings.modelRoutes");
+    expect(indexModule.lastConfigRecoveryWarning?.path).toBe(
+      indexModule.getProjectSettingsPath(project),
+    );
+    expect(indexModule.lastConfigRecoveryWarning?.reason).toContain("settings.modelRoutes");
   });
 
   it("D.13H accepts valid contextEditingEnabled + anthropicBetaHeaders on provider config", async () => {

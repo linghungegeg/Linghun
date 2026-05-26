@@ -201,6 +201,9 @@ import {
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
+  EXECUTE_EXTRA_TOOL_NAME,
+  SEARCH_EXTRA_TOOLS_NAME,
+  createDeferredToolDispatchDefinitions,
   createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
   createModelToolDefinitionsForTools,
@@ -1460,6 +1463,10 @@ export type TuiContext = {
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
   requestActivityPhase?: RequestActivityPhase;
   requestActivityToolName?: string;
+  // D.13I tail fix — 记录本 session 通过 SearchExtraTools 真正发现过的 deferred 工具名。
+  // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
+  // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
+  discoveredDeferredToolNames: Set<string>;
 };
 
 type ProviderFailureSummary = {
@@ -2364,6 +2371,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
+    discoveredDeferredToolNames: new Set<string>(),
   };
   installProcessGuardExitHandlers();
   await hydrateDurableJobBackgroundTasks(context);
@@ -4246,7 +4254,7 @@ async function handleModelCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor(context));
+    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context) }));
     return;
   }
   const runtime = getSelectedModelRuntime(context);
@@ -4390,7 +4398,7 @@ async function handleModelRouteCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor(context));
+    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context) }));
     return;
   }
   if (action === "set") {
@@ -10135,6 +10143,329 @@ export function validateCodebaseMemoryToolExecution(
   return { ok: true };
 }
 
+// ===========================================================================
+// D.13I — Self-built deferred tools dispatch
+// ---------------------------------------------------------------------------
+// SearchExtraTools / ExecuteExtraTool 是 Linghun 自研的 deferred 调用层。模型必须
+// 先调用 SearchExtraTools 获得 executable=true 的工具，再用 ExecuteExtraTool 调用。
+// 不发 Anthropic defer_loading / tool_reference / anthropic-beta；不新建 runner；
+// 仍走既有 permission / tool_result / evidence / continuation 链路。
+// 执行分层：
+//   - codebase-memory：白名单 10 个工具，复用 runCodebaseMemoryCli + validateCodebaseMemoryToolExecution
+//   - MCP server tools：仅 schemaLoaded+trusted+server.enabled 时 discoverable；本阶段
+//     不接通用 MCP 调用 adapter，所以 executable=false
+//   - skills：discover trusted manifest，autoExecute=no，executable=false
+//   - plugins：discover trusted manifest contribution，autoExecute=no，executable=false
+// ===========================================================================
+
+export type DeferredToolKind = "codebase-memory" | "mcp" | "skill" | "plugin";
+
+export type DeferredToolDescriptor = {
+  name: string;
+  kind: DeferredToolKind;
+  description: string;
+  requiredArgs: string[];
+  executable: boolean;
+  reason: string;
+};
+
+export type DeferredToolDiscoverySnapshot = {
+  generatedAt: string;
+  total: number;
+  byKind: Record<DeferredToolKind, number>;
+  executableCount: number;
+  tools: DeferredToolDescriptor[];
+};
+
+const CODEBASE_MEMORY_DESCRIPTIONS: Record<string, string> = {
+  list_projects: "List indexed projects in codebase-memory.",
+  index_status: "Get current index status (nodes/edges/status) for a project.",
+  detect_changes: "Detect uncovered file changes for a project's index.",
+  index_repository: "Build or refresh the codebase-memory index for a repo path.",
+  search_code: "Pattern search across an indexed project.",
+  get_architecture: "Project architecture summary (modules, entry points).",
+  get_code_snippet: "Read a code snippet by qualified name in an indexed project.",
+  query_graph: "Run a graph query (CALLS / IMPORTS) on an indexed project.",
+  trace_path: "Trace a function call chain from -> to in an indexed project.",
+  search_graph: "Find similar implementations / SIMILAR_TO entries in a project.",
+};
+
+function listCodebaseMemoryDeferredTools(): DeferredToolDescriptor[] {
+  const required = codebaseMemoryRequiredArgs();
+  return Object.keys(required)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({
+      name,
+      kind: "codebase-memory" as const,
+      description: CODEBASE_MEMORY_DESCRIPTIONS[name] ?? `codebase-memory tool: ${name}`,
+      requiredArgs: [...required[name]],
+      executable: true,
+      reason: "codebase-memory static whitelist; required args validated before execution.",
+    }));
+}
+
+function listMcpDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
+  if (!context.mcp.enabled) return [];
+  const enabledServers = new Set(
+    context.mcp.servers
+      .filter((server) => server.status !== "disabled" && server.status !== "missing")
+      .map((server) => server.name),
+  );
+  return context.mcp.tools
+    .filter((tool) => enabledServers.has(tool.server))
+    .filter((tool) => tool.discovery === "discovered")
+    .filter((tool) => tool.schemaLoaded === true)
+    .filter((tool) => tool.trusted === true)
+    .map((tool) => ({
+      name: `mcp:${tool.server}:${tool.name}`,
+      kind: "mcp" as const,
+      // truncate is already enforced by stabilizeMcpToolList; do not echo raw schema
+      description: tool.description || `MCP tool ${tool.server}:${tool.name}`,
+      requiredArgs: [],
+      executable: false,
+      reason:
+        "MCP server tool discovered with schema and trusted, but Linghun has no generic MCP runtime adapter yet; use /mcp validate or codebase-memory whitelist to execute.",
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
+  if (!context.skills.enabled) return [];
+  const disabled = new Set(context.skills.disabledIds);
+  const trusted = new Set(context.skills.trustedIds);
+  return context.skills.skills
+    .filter((skill) => !disabled.has(skill.id))
+    .filter((skill) => trusted.has(skill.id))
+    .map((skill) => ({
+      name: `skill:${skill.id}`,
+      kind: "skill" as const,
+      description: truncateDisplay(
+        (skill.description ?? skill.name ?? skill.id).replace(/\s+/g, " "),
+        160,
+      ),
+      requiredArgs: [],
+      executable: false,
+      reason:
+        "Skill manifest discovered (enabled+trusted), but Linghun has no safe skill execution adapter; review the skill file manually or run /skills status.",
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
+  if (!context.plugins.enabled) return [];
+  const disabled = new Set(context.plugins.disabledIds);
+  const trusted = new Set(context.plugins.trustedIds);
+  return context.plugins.plugins
+    .filter((plugin) => !disabled.has(plugin.id))
+    .filter((plugin) => trusted.has(plugin.id))
+    .map((plugin) => ({
+      name: `plugin:${plugin.id}`,
+      kind: "plugin" as const,
+      description: truncateDisplay(
+        (plugin.description ?? plugin.name ?? plugin.id).replace(/\s+/g, " "),
+        160,
+      ),
+      requiredArgs: [],
+      executable: false,
+      reason:
+        "Plugin manifest discovered (enabled+trusted), but Linghun has no safe plugin execution adapter; review contributions or run /plugins doctor.",
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function listDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
+  return [
+    ...listCodebaseMemoryDeferredTools(),
+    ...listMcpDeferredTools(context),
+    ...listSkillDeferredTools(context),
+    ...listPluginDeferredTools(context),
+  ];
+}
+
+export function snapshotDeferredTools(context: TuiContext): DeferredToolDiscoverySnapshot {
+  const tools = listDeferredTools(context);
+  const byKind: Record<DeferredToolKind, number> = {
+    "codebase-memory": 0,
+    mcp: 0,
+    skill: 0,
+    plugin: 0,
+  };
+  let executableCount = 0;
+  for (const tool of tools) {
+    byKind[tool.kind] += 1;
+    if (tool.executable) executableCount += 1;
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    total: tools.length,
+    byKind,
+    executableCount,
+    tools,
+  };
+}
+
+// D.13I：仅用于 doctor 的非泄漏摘要——不含 raw schema/secret/参数，只输出 total/byKind/executableCount。
+export function snapshotDeferredToolsSummary(
+  context: TuiContext,
+): { total: number; byKind: Record<DeferredToolKind, number>; executableCount: number } {
+  const snapshot = snapshotDeferredTools(context);
+  return {
+    total: snapshot.total,
+    byKind: snapshot.byKind,
+    executableCount: snapshot.executableCount,
+  };
+}
+
+export function searchDeferredTools(
+  query: string,
+  tools: DeferredToolDescriptor[],
+): DeferredToolDescriptor[] {
+  const trimmed = query.trim().toLowerCase();
+  if (trimmed === "") return tools;
+  return tools.filter((tool) => {
+    const haystack = `${tool.name} ${tool.description} ${tool.kind}`.toLowerCase();
+    return haystack.includes(trimmed);
+  });
+}
+
+export function findDeferredTool(
+  toolName: string,
+  tools: DeferredToolDescriptor[],
+): DeferredToolDescriptor | undefined {
+  return tools.find((tool) => tool.name === toolName);
+}
+
+// stableHash 输入：仅暴露 name/kind/executable/requiredArgs；不进 raw schema/secret。
+export function deferredToolListHashInput(tools: DeferredToolDescriptor[]): unknown {
+  return tools
+    .map((tool) => ({
+      name: tool.name,
+      kind: tool.kind,
+      executable: tool.executable,
+      requiredArgs: [...tool.requiredArgs].sort((a, b) => a.localeCompare(b)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// 仅当 deferred 列表非空时给出 system reminder。core tools 仍直接调用，不进 ExecuteExtraTool。
+export function formatDeferredToolsSystemReminder(
+  language: Language,
+  snapshot: DeferredToolDiscoverySnapshot,
+): string | undefined {
+  if (snapshot.total === 0) return undefined;
+  return language === "en-US"
+    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
+    : "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool.";
+}
+
+function isCodebaseMemoryToolName(name: string): boolean {
+  return name in codebaseMemoryRequiredArgs();
+}
+
+function summarizeDeferredToolMatch(tool: DeferredToolDescriptor): Record<string, unknown> {
+  return {
+    name: tool.name,
+    kind: tool.kind,
+    description: tool.description,
+    requiredArgs: tool.requiredArgs,
+    executable: tool.executable,
+    reason: tool.reason,
+  };
+}
+
+export function executeSearchExtraTools(
+  query: string,
+  context: TuiContext,
+): {
+  ok: boolean;
+  text: string;
+  data: { matches: ReturnType<typeof summarizeDeferredToolMatch>[]; total: number };
+} {
+  const all = listDeferredTools(context);
+  const filtered = searchDeferredTools(query, all);
+  // D.13I tail fix — 仅把"匹配上的"工具名记入本 session 已发现集合。
+  // ExecuteExtraTool 需要这个证据来证明模型确实通过 SearchExtraTools 发现过该工具。
+  for (const tool of filtered) {
+    context.discoveredDeferredToolNames.add(tool.name);
+  }
+  return {
+    ok: true,
+    text: `SearchExtraTools matched ${filtered.length}/${all.length} deferred tools (query=${JSON.stringify(query)}).`,
+    data: { matches: filtered.map(summarizeDeferredToolMatch), total: filtered.length },
+  };
+}
+
+export type ExecuteExtraToolResult =
+  | { ok: true; text: string; data?: unknown }
+  | { ok: false; text: string };
+
+export async function executeExtraTool(
+  args: { tool_name: unknown; params?: unknown },
+  context: TuiContext,
+): Promise<ExecuteExtraToolResult> {
+  if (typeof args.tool_name !== "string" || args.tool_name.trim() === "") {
+    return {
+      ok: false,
+      text: "ExecuteExtraTool: tool_name 缺失或为空，请先运行 SearchExtraTools 找到目标工具。",
+    };
+  }
+  // D.13I tail fix — gating: 必须先看本 session 的"已发现"集合。
+  // listDeferredTools 等价于"白名单存在"，不能等同于"模型已通过 SearchExtraTools 发现过"。
+  // Set 命中 → 才允许进入白名单/适配器/必填参数检查。
+  if (!context.discoveredDeferredToolNames.has(args.tool_name)) {
+    return {
+      ok: false,
+      text: `ExecuteExtraTool: 工具 ${args.tool_name} 未在本 session 通过 SearchExtraTools 发现过。请先运行 SearchExtraTools 发现该工具。`,
+    };
+  }
+  const all = listDeferredTools(context);
+  const target = findDeferredTool(args.tool_name, all);
+  if (!target) {
+    return {
+      ok: false,
+      text: `ExecuteExtraTool: 工具 ${args.tool_name} 已被本 session 记为发现过，但已不在当前可用 deferred 工具清单中（白名单或会话状态可能已变化）。请重新运行 SearchExtraTools。`,
+    };
+  }
+  if (!target.executable) {
+    return {
+      ok: false,
+      text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 已发现但当前没有安全执行适配器：${target.reason}`,
+    };
+  }
+  const params = (args.params && typeof args.params === "object" && !Array.isArray(args.params)
+    ? args.params
+    : {}) as Record<string, unknown>;
+  if (target.kind === "codebase-memory") {
+    if (!isCodebaseMemoryToolName(target.name)) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool: ${target.name} 未通过 codebase-memory 白名单。`,
+      };
+    }
+    const guard = validateCodebaseMemoryToolExecution(target.name, params);
+    if (!guard.ok) {
+      return { ok: false, text: guard.summary };
+    }
+    const cliResult = await runCodebaseMemoryCli(context, target.name, params, context.projectPath);
+    if (!cliResult.ok) {
+      return {
+        ok: false,
+        text: `ExecuteExtraTool(codebase-memory:${target.name}) 失败：${cliResult.summary}${cliResult.errorCode ? ` [${cliResult.errorCode}]` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      text: `ExecuteExtraTool(codebase-memory:${target.name}) 完成。`,
+      data: cliResult.data,
+    };
+  }
+  // 防御：MCP/skill/plugin 已在上面被 executable=false 拦截，理论上不会到这里。
+  return {
+    ok: false,
+    text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 没有可用的安全执行适配器。`,
+  };
+}
+
 async function runCommandCapture(
   command: string,
   args: string[],
@@ -10339,6 +10670,9 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     endpointProfile: getActiveEndpointProfileLabel(context),
     cacheControl: context.config.promptCache.enabled ? "ephemeral" : "off",
     cacheTtl: context.config.promptCache.systemTtl,
+    // D.13I：deferred tools list 仅记录 name/kind/executable/requiredArgs，
+    // 不含 raw schema/secret；与 toolSchemaHash（固定 builtIn + dispatch 两件套）解耦。
+    deferredToolList: deferredToolListHashInput(listDeferredTools(context)),
   });
 }
 
@@ -13554,6 +13888,16 @@ async function executeModelToolUse(
   evidenceId?: string;
   pendingApproval?: boolean;
 }> {
+  // D.13I：SearchExtraTools / ExecuteExtraTool 不走 builtInTools / runTool / permission 分支，
+  // 但仍走既有 tool_call_start / tool_result / evidence 链路；不重复 architecture drift /
+  // permission 状态机，因为这两个工具本身不写文件、不执行 shell——它们的"风险"由其分发到的
+  // 子工具承担（codebase-memory 只读 + 命令白名单 + required args 校验）。
+  if (
+    toolCall.name === SEARCH_EXTRA_TOOLS_NAME ||
+    toolCall.name === EXECUTE_EXTRA_TOOL_NAME
+  ) {
+    return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
+  }
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
@@ -13791,6 +14135,172 @@ function toPermissionPromptView(permission: PermissionCheck) {
   };
 }
 
+// D.13I：deferred dispatch 的特殊执行路径。复用 tool_call_start / tool_result / evidence
+// 三件套，但不调用 runTool（因为 SearchExtraTools / ExecuteExtraTool 不在 builtInTools 里）。
+// 失败仍写 evidence，便于 verifier / /details 排查。
+async function executeDeferredDispatchToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+}> {
+  const dispatchName = toolCall.name;
+  startRequestActivity(output, context, "tool_running", { toolName: dispatchName });
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: dispatchName,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    const input = (toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
+      ? toolCall.input
+      : {}) as Record<string, unknown>;
+    if (dispatchName === SEARCH_EXTRA_TOOLS_NAME) {
+      const queryRaw = input.query;
+      if (typeof queryRaw !== "string") {
+        const text = "SearchExtraTools: query 必须是字符串（可为空字符串）。";
+        const evidence = await recordToolFailureEvidence(
+          context,
+          sessionId,
+          "Read",
+          `${dispatchName}: ${text}`,
+        );
+        await appendDeferredToolResultEvent(
+          context,
+          sessionId,
+          toolCall.id,
+          dispatchName,
+          text,
+          true,
+          evidence.id,
+        );
+        clearRequestActivity(context);
+        return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
+      }
+      const result = executeSearchExtraTools(queryRaw, context);
+      const evidence = await recordToolEvidence(context, sessionId, "Read", {
+        text: result.text,
+        data: result.data,
+      } as ToolOutput);
+      await appendDeferredToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        dispatchName,
+        { text: result.text, data: result.data },
+        false,
+        evidence?.id,
+      );
+      clearRequestActivity(context);
+      writeLine(output, result.text);
+      return {
+        ok: true,
+        tool: dispatchName,
+        text: result.text,
+        data: result.data,
+        evidenceId: evidence?.id,
+      };
+    }
+    // ExecuteExtraTool
+    const result = await executeExtraTool(
+      { tool_name: input.tool_name, params: input.params },
+      context,
+    );
+    if (!result.ok) {
+      const evidence = await recordToolFailureEvidence(
+        context,
+        sessionId,
+        "Read",
+        `${dispatchName}: ${result.text}`,
+      );
+      await appendDeferredToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        dispatchName,
+        result.text,
+        true,
+        evidence.id,
+      );
+      clearRequestActivity(context);
+      writeLine(output, result.text);
+      return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
+    }
+    const evidence = await recordToolEvidence(context, sessionId, "Read", {
+      text: result.text,
+      data: result.data,
+    } as ToolOutput);
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      dispatchName,
+      { text: result.text, data: result.data },
+      false,
+      evidence?.id,
+    );
+    clearRequestActivity(context);
+    writeLine(output, result.text);
+    return {
+      ok: true,
+      tool: dispatchName,
+      text: result.text,
+      data: result.data,
+      evidenceId: evidence?.id,
+    };
+  } catch (error) {
+    clearRequestActivity(context);
+    const text = formatError(error, context.language);
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Read",
+      `${dispatchName}: ${text}`,
+    );
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      dispatchName,
+      text,
+      true,
+      evidence.id,
+    );
+    return { ok: false, tool: dispatchName, text, evidenceId: evidence.id };
+  }
+}
+
+async function appendDeferredToolResultEvent(
+  context: TuiContext,
+  sessionId: string,
+  toolUseId: string,
+  dispatchName: string,
+  content: unknown,
+  isError: boolean,
+  evidenceId?: string,
+): Promise<void> {
+  // 复用既有 tool_result store schema；toolName 字段塞 dispatchName 字符串以便排查（doctor /
+  // details / verifier 都已基于 toolName 字段读取）。store 类型对 toolName 是 string 标签，
+  // 所以这里用 cast 的方式保持向后兼容，不引入新 event kind。
+  await context.store.appendEvent(sessionId, {
+    type: "tool_result",
+    toolUseId,
+    toolName: dispatchName as unknown as ToolName,
+    content,
+    isError,
+    evidenceId,
+    createdAt: new Date().toISOString(),
+  });
+}
+
 async function appendToolResultEvent(
   context: TuiContext,
   sessionId: string,
@@ -13819,6 +14329,12 @@ export function createModelSystemPrompt(
 ): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   const freshnessBoundary = createFreshnessLiteBoundary(text, context);
+  // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
+  // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
+  const deferredReminder = formatDeferredToolsSystemReminder(
+    context.language,
+    snapshotDeferredTools(context),
+  );
   return `${
     context.language === "en-US"
       ? "You are Linghun, a coding assistant with tool-use capabilities. Answer in English by default unless the user explicitly requests another language. Use evidence before code claims; avoid unverified claims. Natural command execution is decided by local RuntimeStatus and Command Capability Catalog, not by guessing. Use real tool_use events when file/search/edit/bash/todo facts or actions are needed; never describe a tool call as text instead of using a tool event."
@@ -13831,7 +14347,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "EngineeringStructure=Do not pile logic into existing large files by default. Avoid god files, code blobs, overly long functions (>200 lines), deep nesting (>3 levels), and unbounded global state. Keep responsibility boundaries clear: UI/state/IO/provider/runner/permission/cache/verification. Prefer reusing existing project modules, helpers, presenters, and runtimes over creating a second system. Do not add zero-benefit abstractions for elegance. Each change must have a verifiable boundary (focused tests, typecheck, check). This is not authorization for large refactors."
       : "EngineeringStructure=默认不把逻辑堆进已有大文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。职责边界保持清晰：UI/状态/IO/provider/runner/permission/cache/verification。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。不为了优雅新增无收益抽象。每个改动要有可验证边界（focused tests、typecheck、check）。这不是授权大重构。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 function createFreshnessLiteBoundary(text: string, context: TuiContext): string | undefined {

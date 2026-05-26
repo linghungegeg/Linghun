@@ -234,6 +234,68 @@ describe("cache-freshness", () => {
     });
   });
 
+  describe("D.13I deferred tool list dimension", () => {
+    it("D.13I deferredToolListHash 与 toolSchemaHash 解耦：fixed schema 稳定，deferred 列表变化才改 deferredToolListHash", () => {
+      const baseToolSchema = [
+        { name: "Read" },
+        { name: "Write" },
+        { name: "SearchExtraTools" },
+        { name: "ExecuteExtraTool" },
+      ];
+      const baseInput = {
+        systemPrompt: "system",
+        toolSchema: baseToolSchema,
+        mcpToolList: [],
+        model: "claude-3-5-sonnet-latest",
+        provider: "claude-relay",
+        deferredToolList: [
+          { name: "mcp__codebase-memory-mcp__trace_path", kind: "codebase-memory", executable: true, requiredArgs: ["function_name"] },
+        ],
+      };
+      const fresh = createCacheFreshness(baseInput);
+      expect(fresh.deferredToolListHash).toMatch(/^[0-9a-f]{12}$/);
+
+      // 改 deferred 列表 → 仅 deferredToolListHash 变化；toolSchemaHash 不动。
+      const after = createCacheFreshness({
+        ...baseInput,
+        deferredToolList: [
+          { name: "mcp__codebase-memory-mcp__trace_path", kind: "codebase-memory", executable: true, requiredArgs: ["function_name"] },
+          { name: "mcp__some-mcp__tool_x", kind: "mcp", executable: false, requiredArgs: [] },
+        ],
+      });
+      const changed = diffFreshness(fresh, after);
+      expect(changed).toContain("deferredToolListHash");
+      expect(changed).not.toContain("toolSchemaHash");
+      expect(changed).not.toContain("mcpToolListHash");
+
+      // 改固定 toolSchema（builtIn + dispatch 两件套数量变化）→ toolSchemaHash 变化，deferredToolListHash 不动。
+      const after2 = createCacheFreshness({
+        ...baseInput,
+        toolSchema: [...baseToolSchema, { name: "FAKE_NEW_BUILTIN" }],
+      });
+      const changed2 = diffFreshness(fresh, after2);
+      expect(changed2).toContain("toolSchemaHash");
+      expect(changed2).not.toContain("deferredToolListHash");
+
+      // 不传 deferredToolList 时按 "none" 处理，hash 稳定。
+      const minimal = createCacheFreshness({
+        systemPrompt: "x",
+        toolSchema: [],
+        mcpToolList: [],
+        model: "m",
+        provider: "p",
+      });
+      const minimal2 = createCacheFreshness({
+        systemPrompt: "x",
+        toolSchema: [],
+        mcpToolList: [],
+        model: "m",
+        provider: "p",
+      });
+      expect(minimal.deferredToolListHash).toBe(minimal2.deferredToolListHash);
+    });
+  });
+
   describe("createConfigFreshnessSummary", () => {
     it("produces deterministic summary for same config", () => {
       const config = {

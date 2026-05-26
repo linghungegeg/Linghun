@@ -22,6 +22,11 @@ export type CacheFreshness = {
   // 缺失时按 hash("none") 处理，保持向后兼容；不影响 D.13F 既有 keys 顺序。
   contextEditingHash?: string;
   cacheEditingBetaHash?: string;
+  // D.13I：deferred tools (MCP/skill/plugin/codebase-memory) 列表变化追踪。
+  // 仅记录 name/kind/executable/requiredArgs（不含 raw schema/secret），
+  // 与 toolSchemaHash 解耦——固定的 builtIn + SearchExtraTools/ExecuteExtraTool schema 不变，
+  // deferred 列表变化只反映在这个 hash 上。缺失时按 hash("none") 处理，向后兼容。
+  deferredToolListHash?: string;
   changedKeys: string[];
 };
 
