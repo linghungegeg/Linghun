@@ -28,6 +28,12 @@ export type ProductBlockViewModel = {
   nextAction?: string;
   /** Echo / informational blocks that should not be auto-pruned by the view model. */
   keep?: boolean;
+  /**
+   * Full normalized text the summary was derived from. Preserved on the block
+   * so `/details` (and future Ctrl+O) can reveal the entire body without
+   * round-tripping through the (potentially-truncated) summary line.
+   */
+  fullText?: string;
 };
 
 export type StatusTrayViewModel = {

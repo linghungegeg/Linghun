@@ -710,6 +710,8 @@ export class OpenAiCompatibleProvider implements Provider {
         });
       }
 
+      await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
+
       yield* parseAnthropicMessagesStream(
         withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
         contract.endpoint,
@@ -755,6 +757,8 @@ export class OpenAiCompatibleProvider implements Provider {
         recoverable: true,
       });
     }
+
+    await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
     yield* parseOpenAiStream(
       withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
@@ -935,10 +939,12 @@ export function resolveEffectiveEndpointProfile(input: {
 
   // 1. request 级 override：
   //    - anthropic_messages / responses 保持最高优先（per-request 显式声明应当生效）；
-  //    - chat_completions 在 Claude 模型 + (config 为空 / chat_completions) 时一律视为占位，
-  //      不阻断 auto anthropic_messages：TUI 旧 SelectedModelRuntime narrow 为
-  //      chat_completions | responses，会把 "chat_completions" 默认值带进 request；
-  //      这里若直接信任 request.chat_completions，Claude 真实路径就会被带偏到 OpenAI chat。
+  //    - chat_completions 在 Claude 模型上一律视为占位（无论 config 是空 / chat_completions /
+  //      anthropic_messages / responses），不阻断后续 baseUrl/config/auto-claude 决策：
+  //      TUI 旧 SelectedModelRuntime narrow 为 chat_completions | responses，会把
+  //      "chat_completions" 默认值带进 request；如果这里信任 request.chat_completions，
+  //      即使 config.endpointProfile=anthropic_messages，Claude 真实路径仍会被 placeholder
+  //      带偏到 OpenAI chat。
   //    - 其它 request.chat_completions（非 Claude）仍按显式声明生效。
   const requestProfile = input.requestEndpointProfile;
   if (requestProfile === "anthropic_messages" || requestProfile === "responses") {
@@ -955,9 +961,7 @@ export function resolveEffectiveEndpointProfile(input: {
     };
   }
   const requestIsChatPlaceholderForClaude =
-    requestProfile === "chat_completions" &&
-    modelLooksClaude &&
-    (!input.configEndpointProfile || input.configEndpointProfile === "chat_completions");
+    requestProfile === "chat_completions" && modelLooksClaude;
   if (requestProfile === "chat_completions" && !requestIsChatPlaceholderForClaude) {
     if (baseUrlSuffix && baseUrlSuffix !== requestProfile) {
       warnings.push(
@@ -1134,6 +1138,46 @@ async function safeReadResponseText(response: Response): Promise<string | undefi
   } catch {
     return undefined;
   }
+}
+
+const NON_SSE_BODY_PREVIEW_LIMIT = 480;
+
+function summarizeNonSseBodyForError(body: string | undefined): string {
+  if (!body) return "<空响应体>";
+  const collapsed = body.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "<空响应体>";
+  // 去除可能出现的密钥碎片（sk- / Bearer ...），避免错误信息把 token 回显出去。
+  const redacted = collapsed
+    .replace(/sk-[A-Za-z0-9_-]{6,}/g, "sk-***")
+    .replace(/Bearer\s+[A-Za-z0-9._-]{6,}/gi, "Bearer ***");
+  if (redacted.length <= NON_SSE_BODY_PREVIEW_LIMIT) return redacted;
+  return `${redacted.slice(0, NON_SSE_BODY_PREVIEW_LIMIT)}…`;
+}
+
+async function assertSseContentType(
+  response: Response,
+  endpointProfile: EndpointProfile,
+  endpoint: string,
+): Promise<void> {
+  const rawContentType = response.headers.get("content-type") ?? "";
+  const lower = rawContentType.toLowerCase();
+  // 兼容 `text/event-stream`、`application/event-stream`、带 charset 后缀，
+  // 以及部分网关写成 `event-stream` 的情况。
+  if (lower.includes("event-stream")) return;
+
+  const bodyText = await safeReadResponseText(response);
+  const preview = summarizeNonSseBodyForError(bodyText);
+  const contentTypeLabel = rawContentType.trim() || "<未声明>";
+  throw new LinghunError({
+    code: "PROVIDER_NON_SSE_STREAM",
+    message:
+      `模型请求失败：endpointProfile=${endpointProfile}，endpoint=${endpoint}，` +
+      `网关返回 200 但 content-type=${contentTypeLabel}，不是 SSE 流。响应体预览：${preview}`,
+    suggestion:
+      "请检查 base_url 是否指向了正确的流式端点（Anthropic Messages 应为 /v1/messages，OpenAI Chat 为 /chat/completions），" +
+      "或运行 /model doctor 复查 provider 路由。",
+    recoverable: true,
+  });
 }
 
 function withStreamIdleTimeout(

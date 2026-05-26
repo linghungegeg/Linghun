@@ -77,6 +77,7 @@ import {
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
+import { createOutputBlock } from "./shell/view-model.js";
 import {
   type TerminalReadinessView,
   createReadinessItems,
@@ -10998,5 +10999,457 @@ describe("D.13J Block 4 — local stdio MCP runtime adapter", () => {
     expect(result.ok).toBe(false);
     expect(result.text).toContain("失败");
     expect(result.text).toContain("tool-call-fail");
+  });
+});
+
+// ─── P0-A / P0-B regression: /details lastFullOutput + control-plane ─────────
+//
+// 这 6 条测试覆盖：
+//   1. /model doctor → /details 默认分支可以看到完整正文
+//   2. /details 自身不覆盖 lastFullOutput；连续 /details 不套娃
+//   3. "你好，只回复：连接成功" → handleNaturalInput 返回 "message"（必须发模型）
+//   4. "测试一下" → handleNaturalInput 返回 "message"（必须发模型）
+//   5. 明确控制面意图（"/permissions 是什么"）→ handled，并显式输出"已本地处理"
+//   6. createOutputBlock 现在保留 fullText（错误正文也能被 /details 展开）
+
+describe("P0-A /details full output + P0-B control-plane intercept", () => {
+  it("P0-A 1: /model doctor 之后 /details 默认分支包含完整正文（provider.env / providers / endpointPath）", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 首次写入 /model doctor 的"完整正文"（多行）。
+    // ShellBlockOutput 的等价行为是：每次 writeLine 把 normalized 整段挂到
+    // context.lastFullOutput，让后续 /details 默认分支可以展开。这里用一个
+    // 简化的 capturing output 直接驱动 lastFullOutput，等价于 ShellBlockOutput。
+    const doctorBody = [
+      "Model route doctor",
+      "- provider.env merge: openai-compatible -> https://relay.example.com/v1",
+      "- endpointPath=/v1/messages",
+      "- providers: openai-compatible (claude-3-5-sonnet-latest), deepseek (different-model)",
+      "- promptCache: hits=0, misses=0",
+      "- deferredTools: 0 discovered",
+    ].join("\n");
+    context.lastFullOutput = doctorBody;
+
+    const output = new MemoryOutput();
+    await handleSlashCommand("/details", context, output);
+
+    expect(output.text).toContain("最近一次输出（完整正文）");
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("provider.env merge");
+    expect(output.text).toContain("endpointPath=/v1/messages");
+    expect(output.text).toContain("providers: openai-compatible");
+  });
+
+  it("P0-A 2: /details 自身不覆盖 lastFullOutput，连续 /details 不套娃", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const original = "Model route doctor\n- endpointPath=/v1/messages\n- providers: openai-compatible";
+    context.lastFullOutput = original;
+
+    const out1 = new MemoryOutput();
+    await handleSlashCommand("/details", context, out1);
+    expect(out1.text).toContain("endpointPath=/v1/messages");
+    // 关键不变量：/details 没把"上一次 /details 的总览"写进 lastFullOutput
+    expect(context.lastFullOutput).toBe(original);
+
+    const out2 = new MemoryOutput();
+    await handleSlashCommand("/details", context, out2);
+    // 连续 /details 仍然展开同一条原始正文，没出现套娃（不会出现"最近一次输出"两次嵌套）。
+    expect(out2.text).toContain("endpointPath=/v1/messages");
+    expect(out2.text).not.toContain("Linghun details\n- evidence:" + "\nLinghun details");
+    expect(context.lastFullOutput).toBe(original);
+  });
+
+  it("P0-B 3: 普通问候 \"你好，只回复：连接成功\" 必须放行到模型 (handleNaturalInput → message)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleNaturalInput("你好，只回复：连接成功", context, output);
+
+    expect(result).toBe("message");
+    // 不应该产生本地控制面截胡的提示
+    expect(output.text).not.toContain("已本地处理");
+    expect(output.text).not.toContain("Handled locally");
+  });
+
+  it("P0-B 4: 短句 \"测试一下\" 必须放行到模型 (handleNaturalInput → message)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleNaturalInput("测试一下", context, output);
+
+    expect(result).toBe("message");
+    expect(output.text).not.toContain("已本地处理");
+  });
+
+  it("P0-B 5: 普通对话短句 \"/help 怎么用是吗\" 不带前导 / → 必须放行到模型", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    // CCB 边界：自然语言里"提到 /help"不是 slash 命令；只有以 "/" 开头的输入才进
+    // handleSlashCommand。这条普通问话应该放行到模型，不再有"自然语言→本地 capability"
+    // 的截胡路径。
+    const result = await handleNaturalInput("说一下 /help 这个东西怎么用", context, output);
+
+    expect(result).toBe("message");
+    expect(output.text).not.toContain("已本地处理");
+    expect(output.text).not.toContain("Handled locally");
+  });
+
+  it("P0-A 6: createOutputBlock 同时保留 summary 和 fullText（错误正文也可由 /details 展开）", async () => {
+    const errorBody = [
+      "Provider request failed",
+      "- code: PROVIDER_NETWORK_ERROR",
+      "- provider: openai-compatible",
+      "- endpointPath=/v1/messages",
+      "- detail: ECONNRESET while streaming",
+    ].join("\n");
+    const block = createOutputBlock(errorBody, "zh-CN");
+
+    expect(block.summary).toBe("Provider request failed");
+    expect(block.fullText).toBe(errorBody);
+    expect(block.kind).toBe("error");
+
+    // 模拟 ShellBlockOutput 把这条错误写到 lastFullOutput，然后 /details 展开
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastFullOutput = errorBody;
+
+    const output = new MemoryOutput();
+    await handleSlashCommand("/details", context, output);
+
+    expect(output.text).toContain("Provider request failed");
+    expect(output.text).toContain("ECONNRESET while streaming");
+    expect(output.text).toContain("endpointPath=/v1/messages");
+  });
+});
+
+// ─── natural control routing — CCB 边界对齐回归 ─────────────────────────────────
+//
+// 这一组测试对齐 CCB：普通自然语言（中英）默认必须发送给模型，本地控制面只处理
+// pending approval / pending Start Gate / 显式 slash 命令。这些断言会捕捉历史上
+// 的两类回归：
+//   (a) routeNaturalIntent 把含 "模型/配置/诊断/doctor/status" 的普通句子误识别
+//       为本地 capability，再被 readonly 路径吞掉；
+//   (b) 中英文新关键词被加进白名单后又把普通对话截胡。
+//
+// handleNaturalInput 在 (text, context, output) 重载下：返回 "message" 等价于
+// processTuiLine 会进入 sendMessage → gateway.stream（即 CCB 行为）。"handled"
+// 表示本地控制面或 pending gate 截走，不发模型。
+
+describe("natural control routing — ordinary prompts must reach gateway.stream", () => {
+  const ordinaryPromptsZh = [
+    "你好，只回复：连接成功",
+    "模型这里是不是有问题",
+    "帮我看看模型为什么连不上",
+    "这个配置怎么写",
+    "诊断一下这个 bug",
+    "本地控制是不是太强",
+  ];
+
+  for (const prompt of ordinaryPromptsZh) {
+    it(`zh-CN ordinary prompt 必须放行到模型 (handleNaturalInput → message): ${prompt}`, async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session);
+
+      const result = await handleNaturalInput(prompt, context, output);
+
+      expect(result).toBe("message");
+      expect(output.text).not.toContain("已本地处理");
+      expect(output.text).not.toContain("Handled locally");
+    });
+  }
+
+  const ordinaryPromptsEn = [
+    "is the model okay or not",
+    "explain how the local control plane works in plain words",
+    "tell me what is going wrong here right now",
+    "describe the runtime behaviour for me",
+  ];
+
+  for (const prompt of ordinaryPromptsEn) {
+    it(`en-US ordinary prompt 必须放行到模型 (handleNaturalInput → message): ${prompt}`, async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "gpt-4.1" });
+      const output = new MemoryOutput();
+      // 配齐 provider，绕过 shouldOfferUserScopedModelSetup 的本地引导路径——
+      // 该路径属于 CCB 的 setup wizard，与控制面截胡无关。这里测试的是普通对话不被
+      // 截胡到 routeNaturalIntent。
+      const context = await createTestContext(project, store, session, {
+        ...defaultConfig,
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            ...defaultConfig.providers["openai-compatible"],
+            apiKey: "test-openai-key",
+            baseUrl: "https://example.test/v1",
+            model: "gpt-4.1",
+          },
+        },
+      });
+      context.language = "en-US";
+
+      const result = await handleNaturalInput(prompt, context, output);
+
+      expect(result).toBe("message");
+      expect(output.text).not.toContain("已本地处理");
+      expect(output.text).not.toContain("Handled locally");
+    });
+  }
+
+  it("/model doctor 必须本地处理（handleSlashCommand → handled），不会进 gateway.stream", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleSlashCommand("/model doctor", context, output);
+
+    // handleSlashCommand 返回 "handled" 表示已被 slash 派发处理；只有 "message" 才会
+    // 让 processTuiLine 继续走 sendMessage → gateway.stream。
+    expect(result).toBe("handled");
+    expect(output.text).toContain("Model route doctor");
+  });
+
+  it("/model doctor 之后 /details 必须展开完整 doctor 正文（含 endpointPath=/v1/messages）", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 模拟 ShellBlockOutput 把 /model doctor 的 normalized 全文挂上 lastFullOutput。
+    const doctorBody = [
+      "Model route doctor",
+      "- provider.env merge: applied=yes overrodeModelRoutes=yes providers=openai-compatible",
+      "- providers:",
+      "  - openai-compatible: type=openai-compatible runtimeProfile=anthropic_messages endpointProfile=anthropic_messages endpointPath=/v1/messages apiKey=present",
+      "- planner: provider=openai-compatible model=claude-opus-4-7",
+    ].join("\n");
+    context.lastFullOutput = doctorBody;
+
+    const output = new MemoryOutput();
+    await handleSlashCommand("/details", context, output);
+
+    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toContain("provider.env merge");
+    expect(output.text).toContain("endpointPath=/v1/messages");
+    expect(output.text).toContain("openai-compatible");
+  });
+
+  it("/details 自身不污染 lastFullOutput（连续 /details 仍展开同一原始正文）", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const original = "Model route doctor\n- endpointPath=/v1/messages";
+    context.lastFullOutput = original;
+
+    const out1 = new MemoryOutput();
+    await handleSlashCommand("/details", context, out1);
+    expect(context.lastFullOutput).toBe(original);
+
+    const out2 = new MemoryOutput();
+    await handleSlashCommand("/details", context, out2);
+    expect(out2.text).toContain("endpointPath=/v1/messages");
+    expect(context.lastFullOutput).toBe(original);
+  });
+});
+
+// LINGHUN_TUI_PIPELINE_TRACE — 用于诊断"普通自然语言为什么没走到 gateway.stream"
+// 这条 P0。普通对话经 processTuiLine → handleNaturalInput("message") 后必须走到
+// sendMessage；sendMessage 入口本身的 4 个 provider-front guard
+// （resource / cooldown / evidence / budget）若被触发，应在 trace 中有清晰原因。
+//
+// 这两个测试用 LINGHUN_TUI_PIPELINE_TRACE=1 让 trace 同时写入 stderr 和 session
+// system_event。早期节点（processTuiLine / handleNaturalInput / sendMessage 入口）
+// 在 sessionId 落盘前只能落到 stderr；后期节点（guard=none / gateway.stream）
+// 才能写到 transcript。两路合并起来正好覆盖完整链路。
+describe("LINGHUN_TUI_PIPELINE_TRACE — pipeline diagnostics", () => {
+  it("普通对话从 handleNaturalInput 放行后，sendMessage 至少跑到 'guard=none' / 'gateway.stream before' 节点", async () => {
+    vi.stubEnv("LINGHUN_TUI_PIPELINE_TRACE", "1");
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "trace-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test-trace",
+            model: "trace-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    // tracePipelineEvent 写入 Node 全局 process.stderr（不是 runTui 的 stderr 选项），
+    // 因为早期节点 sessionId 还没落盘时，唯一可观测通道就是 stderr。这里劫持
+    // process.stderr.write 收集 [linghun-tui-pipeline] 行，配合 transcript 拼出全链路。
+    const stderrCaptured: string[] = [];
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: Buffer | string) => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (text.includes("[linghun-tui-pipeline] ")) {
+        stderrCaptured.push(text);
+      }
+      return true;
+    }) as typeof process.stderr.write;
+    // mockOpenAiTextFetch 会返回一条 done 文本响应；此处只验证 trace 走到了
+    // gateway.stream before / done 节点，不验证模型回答内容。
+    mockOpenAiTextFetch("连接成功");
+
+    try {
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["你好，只回复：连接成功\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
+    } finally {
+      process.stderr.write = originalStderrWrite;
+    }
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    // 后期节点（sessionId 已落盘后）会出现在 transcript 的 system_event 里。
+    const transcriptLines = transcript
+      .filter(
+        (event): event is Extract<typeof event, { type: "system_event" }> =>
+          event.type === "system_event" && event.message.startsWith("pipeline_trace "),
+      )
+      .map((event) => event.message);
+    // 早期节点（processTuiLine / handleNaturalInput / sendMessage 入口）的 sessionId
+    // 还是 undefined，只会写到 stderr `[linghun-tui-pipeline] ` 前缀行；这里把两路
+    // 合并成一个完整链路再做断言。
+    const stderrLines = stderrCaptured
+      .join("")
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("[linghun-tui-pipeline] "))
+      .map((line) => line.replace(/^\[linghun-tui-pipeline\] /u, "pipeline_trace "));
+    const allTrace = [...stderrLines, ...transcriptLines];
+
+    // 必经节点：handleNaturalInput → message（passThrough），然后 sendMessage entered，
+    // 再到 guard=none、gateway.stream before。中间任何一处缺失就说明被某个 guard
+    // 静默截走，trace 会在断言失败时直接告诉我们到哪一步停了。
+    expect(allTrace.some((m) => m.includes("handleNaturalInput result=message"))).toBe(true);
+    expect(allTrace.some((m) => m.includes("sendMessage entered=yes"))).toBe(true);
+    expect(allTrace.some((m) => m.includes("sendMessage guard=none"))).toBe(true);
+    expect(
+      allTrace.some(
+        (m) => m.includes("gateway.stream before") && m.includes("provider=openai-compatible"),
+      ),
+    ).toBe(true);
+    // trace 入口字段必须脱敏，不能把原始 sk- key 写进 trace（无论 stderr 还是 session）。
+    expect(allTrace.every((m) => !m.includes("sk-test-trace"))).toBe(true);
+  });
+
+  it("sendMessage 各 provider-front guard 触发时，trace 写出明确 reason", async () => {
+    vi.stubEnv("LINGHUN_TUI_PIPELINE_TRACE", "1");
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "trace-error-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test-trace-err",
+            model: "trace-error-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // 让 fetch 直接返回 429（rate-limit），第一条普通对话会以
+    // gateway.stream error 收尾，trace 必须写出 "gateway.stream error code=..."；
+    // 这条 trace 对应"被 provider-front 接住但出现错误"的诊断分支，与 cooldown /
+    // resource / evidence / budget 共用同一个 redact + appendSystemEvent 通路。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("rate limit", { status: 429 })),
+    );
+
+    const output = new MemoryOutput();
+    // tracePipelineEvent 写入 Node 全局 process.stderr，不是 runTui 的 stderr 选项。
+    // 这里劫持 process.stderr.write 收集 [linghun-tui-pipeline] 行。
+    const stderrCaptured: string[] = [];
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: Buffer | string) => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (text.includes("[linghun-tui-pipeline] ")) {
+        stderrCaptured.push(text);
+      }
+      return true;
+    }) as typeof process.stderr.write;
+
+    try {
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["你好，只回复:连接成功\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
+    } finally {
+      process.stderr.write = originalStderrWrite;
+    }
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    const transcriptLines = transcript
+      .filter(
+        (event): event is Extract<typeof event, { type: "system_event" }> =>
+          event.type === "system_event" && event.message.startsWith("pipeline_trace "),
+      )
+      .map((event) => event.message);
+    const stderrLines = stderrCaptured
+      .join("")
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("[linghun-tui-pipeline] "))
+      .map((line) => line.replace(/^\[linghun-tui-pipeline\] /u, "pipeline_trace "));
+    const allTrace = [...stderrLines, ...transcriptLines];
+
+    // 必经节点：sendMessage entered=yes、guard=none、gateway.stream before；
+    // 然后 stream error 节点必须写出错误 code，方便用户从 trace 直接看出
+    // "走到了 provider，但 provider 拒绝了"。
+    expect(allTrace.some((m) => m.includes("sendMessage entered=yes"))).toBe(true);
+    expect(allTrace.some((m) => m.includes("sendMessage guard=none"))).toBe(true);
+    expect(
+      allTrace.some((m) => m.includes("gateway.stream before") && m.includes("provider=")),
+    ).toBe(true);
+    expect(
+      allTrace.some((m) => m.startsWith("pipeline_trace gateway.stream error code=")),
+    ).toBe(true);
+    // 仍然不能泄漏 sk- key（无论 stderr 还是 session）。
+    expect(allTrace.every((m) => !m.includes("sk-test-trace-err"))).toBe(true);
   });
 });

@@ -1188,6 +1188,51 @@ describe("resolveEffectiveEndpointProfile", () => {
     expect(result.endpointProfile).toBe("chat_completions");
     expect(result.source).toBe("default-chat-completions");
   });
+
+  it("Fix A: Claude + config endpointProfile=anthropic_messages + request endpointProfile=chat_completions placeholder → stays anthropic_messages, source != request", () => {
+    // 复现 root cause：用户 provider.env 已经显式声明 anthropic_messages，
+    // 但 TUI SelectedModelRuntime narrow 把 chat_completions 当 placeholder 透传给 gateway.stream。
+    // 决策器必须把这种 placeholder 视为占位，不能让 request.chat_completions 把
+    // config.anthropic_messages 翻盘成 OpenAI chat。
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: "chat_completions",
+      configEndpointProfile: "anthropic_messages",
+      configBaseUrl: "https://hk.geek2api.com",
+      configModel: "claude-opus-4-7",
+      requestModel: "claude-opus-4-7",
+    });
+    expect(result.endpointProfile).toBe("anthropic_messages");
+    expect(result.source).not.toBe("request");
+    // 既然 baseUrl 没有 /v1/messages 后缀也没有 chat_completions/responses 后缀，
+    // 决策应落到 config-explicit（用户 provider.env 显式声明）。
+    expect(result.source).toBe("config-explicit");
+  });
+
+  it("Fix A: Claude + config endpointProfile=responses + request endpointProfile=chat_completions placeholder → stays responses, source != request", () => {
+    // 同上 placeholder 路径但 config 是 responses；request.chat_completions 不能翻盘成 chat。
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: "chat_completions",
+      configEndpointProfile: "responses",
+      configBaseUrl: "https://relay.example.com/v1",
+      configModel: "claude-opus-4-7",
+      requestModel: "claude-opus-4-7",
+    });
+    expect(result.endpointProfile).toBe("responses");
+    expect(result.source).not.toBe("request");
+  });
+
+  it("Fix A: non-Claude model + request endpointProfile=chat_completions still honors request explicitly", () => {
+    // 反向回归：占位策略只对 Claude 生效；非 Claude 显式 request.chat_completions 仍按 request 生效。
+    const result = resolveEffectiveEndpointProfile({
+      requestEndpointProfile: "chat_completions",
+      configEndpointProfile: "anthropic_messages",
+      configBaseUrl: "https://api.openai.com/v1",
+      configModel: "gpt-4o-mini",
+      requestModel: "gpt-4o-mini",
+    });
+    expect(result.endpointProfile).toBe("chat_completions");
+    expect(result.source).toBe("request");
+  });
 });
 
 describe("joinBaseUrlAndEndpoint", () => {
@@ -1831,6 +1876,167 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(error.suggestion ?? "").toMatch(/Anthropic|messages|\/v1\/messages/);
     expect(error.message).not.toMatch(/sk-test-secret/);
     expect(error.suggestion ?? "").not.toMatch(/sk-test-secret/);
+  });
+
+  it("Fix C: anthropic_messages 200 + content-type=text/html → PROVIDER_NON_SSE_STREAM with content-type and endpoint, no apiKey leak", async () => {
+    // 复现 hk.geek2api.com 网关在 /v1/messages 返回 200 + SPA HTML 的真实场景：
+    // response.ok=true 但 content-type 不是 SSE，必须立即抛 PROVIDER_NON_SSE_STREAM，
+    // 不能让 parser silent 出 message_stop 把 TUI 弄成"连不上"。
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        '<!doctype html><html><head><title>Geek2API</title></head><body>Bearer sk-leak-should-be-redacted</body></html>',
+        {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    let caught: unknown;
+    try {
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        // drain
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(LinghunError);
+    const error = caught as LinghunError;
+    expect(error.code).toBe("PROVIDER_NON_SSE_STREAM");
+    expect(error.message).toContain("text/html");
+    expect(error.message).toContain("/v1/messages");
+    expect(error.message).toContain("anthropic_messages");
+    expect(error.message).not.toMatch(/sk-test-secret/);
+    expect(error.message).not.toMatch(/sk-leak-should-be-redacted/);
+    expect(error.suggestion ?? "").not.toMatch(/sk-test-secret/);
+  });
+
+  it("Fix C: chat_completions 200 + content-type=text/html → PROVIDER_NON_SSE_STREAM with content-type and endpoint", async () => {
+    // 反向回归：chat/responses 分支也要有相同 non-SSE 防御，避免 parseOpenAiStream
+    // 在 HTML 响应里找不到 data: 行 silent 收尾。
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        '<!doctype html><html><body>Authorization: Bearer sk-relay-leak</body></html>',
+        {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-test-secret",
+      model: "gpt-4o-mini",
+      endpointProfile: "chat_completions",
+    });
+    let caught: unknown;
+    try {
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        // drain
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(LinghunError);
+    const error = caught as LinghunError;
+    expect(error.code).toBe("PROVIDER_NON_SSE_STREAM");
+    expect(error.message).toContain("text/html");
+    expect(error.message).toContain("/chat/completions");
+    expect(error.message).toContain("chat_completions");
+    expect(error.message).not.toMatch(/sk-test-secret/);
+    expect(error.message).not.toMatch(/sk-relay-leak/);
+  });
+
+  it("Fix C: 200 + content-type=application/json (non-SSE) also rejected so partial JSON gateways do not silent-fail", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response('{"error":"not streaming"}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://hk.geek2api.com",
+      apiKey: "sk-test-secret",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    let caught: unknown;
+    try {
+      for await (const _event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        // drain
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(LinghunError);
+    const error = caught as LinghunError;
+    expect(error.code).toBe("PROVIDER_NON_SSE_STREAM");
+    expect(error.message).toContain("application/json");
+  });
+
+  it("Fix C: 200 + content-type=text/event-stream;charset=utf-8 still passes through to parser", async () => {
+    // 防御不能误伤合法 SSE：带 charset 后缀仍应放行，让 parser 正常吐事件。
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_pass"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+    });
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream(
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+    // 至少能成功结束、不应抛 NON_SSE。
+    expect(events.some((event) => event.type === "error")).toBe(false);
   });
 });
 

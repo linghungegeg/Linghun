@@ -1474,6 +1474,22 @@ export type TuiContext = {
   // 不知道具体 server 的工具语义，按工具名 keyword（write/delete/update/index_*）保守判定 mutating；
   // 命中 mutating heuristic 时必须显式 session 授予才放行。
   mcpStdioMutatingGranted?: boolean;
+  /**
+   * 最近一条 user-visible writeLine 的完整正文，由 ShellBlockOutput 在每次写入时
+   * 缓存。`/details` 默认分支会展开这段全文，让 `/model doctor` 这种长正文不会
+   * 被压成 summary（firstLine）。
+   *
+   * `/details` 自身的 writeLine 不应该覆盖这条记录，否则 `/details` 会陷入
+   * "看到的就是我自己" 的套娃。`captureLastFullOutput` 负责把 /details 期间
+   * 的写入跳过。
+   */
+  lastFullOutput?: string;
+  /**
+   * 标记位：handleDetailsCommand 执行期间的 writeLine 不应该覆盖
+   * `lastFullOutput`。命中此标记后，ShellBlockOutput 会保留前一次的全文，
+   * 让连续 `/details` 不会自我覆盖。
+   */
+  suppressLastFullOutputCapture?: boolean;
 };
 
 type ProviderFailureSummary = {
@@ -2884,6 +2900,13 @@ async function processTuiLine(
   }
 
   const commandResult = await handleSlashCommand(text, context, output);
+  if (isPipelineTraceEnabled()) {
+    await tracePipelineEvent(
+      context,
+      context.sessionId,
+      `processTuiLine input=${redactPipelineUserInput(text)} commandResult=${commandResult}`,
+    );
+  }
   if (commandResult === "exit") {
     if (context.sessionId && !context.sessionEnded) {
       await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
@@ -2894,6 +2917,13 @@ async function processTuiLine(
   }
   if (commandResult === "message") {
     const naturalResult = await handleNaturalInput(text, context, gateway, output);
+    if (isPipelineTraceEnabled()) {
+      await tracePipelineEvent(
+        context,
+        context.sessionId,
+        `processTuiLine handleNaturalInput=${naturalResult}`,
+      );
+    }
     if (naturalResult === "message") {
       await sendMessage(text, context, gateway, output);
     }
@@ -2908,6 +2938,17 @@ async function shouldEnterInkShell(input: Readable, output: Writable): Promise<b
 }
 
 class ShellBlockOutput extends Writable {
+  /**
+   * 当前 active 的 assistant streaming block id（keep:true，由
+   * beginAssistantStream 注册）。endAssistantStream 之后清空，下一轮
+   * 再 begin 时换新 id。
+   *
+   * 这条路径专门绕开 _write 的 createOutputBlock + ephemeral splice 逻辑：
+   * 流式 assistant_text_delta 不应被当作普通 writeLine 反复 push/splice，
+   * 否则只会留下最后一片 chunk 而非完整文本。
+   */
+  private assistantBlockId: string | undefined;
+
   constructor(
     private readonly context: TuiContext,
     private readonly blocks: ProductBlockViewModel[],
@@ -2921,6 +2962,14 @@ class ShellBlockOutput extends Writable {
     const normalized = text.trim();
     if (normalized) {
       this.blocks.push(createOutputBlock(normalized, this.context.language));
+      // 缓存"最近一次普通 writeLine 的完整正文"，让 /details 默认分支可以展开
+      // 长正文（如 /model doctor 的 provider.env merge / providers / endpointPath
+      // 等多行 body）。/details 自身不能覆盖这条记录，否则连续 /details 会陷入
+      // 套娃；handleDetailsCommand 在执行期间设置 suppressLastFullOutputCapture
+      // 标记位跳过缓存。
+      if (!this.context.suppressLastFullOutputCapture) {
+        this.context.lastFullOutput = normalized;
+      }
       // 只回收非 keep 的 ephemeral 输出，让 keep:true 的 transcript row（slash
       // command 行等）穿透 splice，保住分层。回收策略：保留所有 keep 块 + 最后
       // 一条 ephemeral 块。
@@ -2935,6 +2984,96 @@ class ShellBlockOutput extends Writable {
       this.onWrite();
     }
     callback();
+  }
+
+  /**
+   * 注册一个 keep:true 的 assistant streaming block。后续每个
+   * appendAssistantDelta 都会 mutate 同一条 block.fullText / summary，
+   * 不再走 _write → createOutputBlock + splice 这条 ephemeral 路径，
+   * 因此 splice 不会把流式正文淘汰为最后一片 chunk。
+   *
+   * id 由调用方传入（每个 request 用一个稳定 id），便于多轮请求各自占用
+   * 独立 block，互不覆盖。
+   */
+  beginAssistantStream(id: string): void {
+    this.assistantBlockId = id;
+    // 复用 createOutputBlock 拿到 i18n 后的 title / 占位 summary，再补 keep:true。
+    // 初始 fullText 用空串，后续 appendAssistantDelta 会累计实际正文。
+    const initial = createOutputBlock("", this.context.language, id);
+    initial.keep = true;
+    initial.fullText = "";
+    initial.nextAction = undefined;
+    this.blocks.push(initial);
+    this.onWrite();
+  }
+
+  /**
+   * 将一段 assistant_text_delta 追加到当前 streaming block。
+   * - fullText 累计完整正文
+   * - summary 取累计正文的首个非空行
+   * - 找不到 active block 时静默 fallback 到 _write，保持非交互回退
+   */
+  appendAssistantDelta(text: string): void {
+    if (!text) return;
+    const id = this.assistantBlockId;
+    if (!id) {
+      this._write(text, "utf8", () => {});
+      return;
+    }
+    const block = this.blocks.find((b) => b.id === id);
+    if (!block) {
+      this.assistantBlockId = undefined;
+      this._write(text, "utf8", () => {});
+      return;
+    }
+    const nextFull = `${block.fullText ?? ""}${text}`;
+    const firstLine = nextFull.split("\n").find((line) => line.trim()) ?? nextFull;
+    block.fullText = nextFull;
+    block.summary = firstLine || block.summary;
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = nextFull;
+    }
+    this.onWrite();
+  }
+
+  /**
+   * 结束当前 streaming block 的 active 状态。block 保留在 this.blocks
+   * 中作为 transcript row（keep:true 已确保 view-model 不会 slice 它），
+   * 只清掉 active id，下一轮 beginAssistantStream 会换新 id。
+   */
+  endAssistantStream(): void {
+    this.assistantBlockId = undefined;
+    this.onWrite();
+  }
+}
+
+/**
+ * Duck-typed helpers for assistant streaming. Ink shell 注入 ShellBlockOutput
+ * 时走 begin/append/end 三段式，把每个 assistant_text_delta 累积到同一条
+ * keep:true block；其他 Writable（plain TUI、MemoryOutput、tests）走原始
+ * output.write 路径，保持非交互行为不变。
+ */
+function beginAssistantStream(output: Writable, id: string): void {
+  const candidate = output as { beginAssistantStream?: (id: string) => void };
+  if (typeof candidate.beginAssistantStream === "function") {
+    candidate.beginAssistantStream(id);
+  }
+}
+
+function writeAssistantDelta(output: Writable, _id: string, text: string): void {
+  if (!text) return;
+  const candidate = output as { appendAssistantDelta?: (text: string) => void };
+  if (typeof candidate.appendAssistantDelta === "function") {
+    candidate.appendAssistantDelta(text);
+    return;
+  }
+  output.write(text);
+}
+
+function endAssistantStream(output: Writable): void {
+  const candidate = output as { endAssistantStream?: () => void };
+  if (typeof candidate.endAssistantStream === "function") {
+    candidate.endAssistantStream();
   }
 }
 
@@ -6859,6 +6998,21 @@ async function handleDetailsCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  // /details 的所有 writeLine 都不应该覆盖 lastFullOutput，否则连续 /details
+  // 会把"最近一次正文"替换成"上一次的 /details 总览"，陷入套娃。
+  context.suppressLastFullOutputCapture = true;
+  try {
+    await runDetailsCommandBody(args, context, output);
+  } finally {
+    context.suppressLastFullOutputCapture = false;
+  }
+}
+
+async function runDetailsCommandBody(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
   const action = args[0];
   const id = args[1];
   if (action === "evidence") {
@@ -6923,7 +7077,20 @@ async function handleDetailsCommand(
     return;
   }
 
-  const lines = [
+  // 默认分支：先展开最近一次完整正文（lastFullOutput），让 /model doctor →
+  // /details 这种链路可以看到 provider.env merge / providers / endpointPath
+  // 等被 summary 行截断的内容。再附上 evidence/background 的简短摘要。
+  const sections: string[] = [];
+  if (context.lastFullOutput) {
+    sections.push(
+      context.language === "en-US"
+        ? "Latest output (full body):"
+        : "最近一次输出（完整正文）：",
+    );
+    sections.push(context.lastFullOutput);
+    sections.push("");
+  }
+  const summary = [
     "Linghun details",
     `- evidence: ${context.evidence.length}/${MAX_EVIDENCE_RECORDS}`,
     `- background: ${context.backgroundTasks.length}/${MAX_BACKGROUND_TASKS}`,
@@ -6932,18 +7099,19 @@ async function handleDetailsCommand(
     "- full output: /details evidence <id> | /details background <id> | /details output <id>",
   ];
   if (context.evidence.length > 0) {
-    lines.push("- recent evidence:");
+    summary.push("- recent evidence:");
     for (const evidence of context.evidence.slice(0, 5)) {
-      lines.push(`  - ${evidence.id} ${evidence.kind} ${evidence.source}: ${evidence.summary}`);
+      summary.push(`  - ${evidence.id} ${evidence.kind} ${evidence.source}: ${evidence.summary}`);
     }
   }
   if (context.backgroundTasks.length > 0) {
-    lines.push("- recent background:");
+    summary.push("- recent background:");
     for (const task of context.backgroundTasks.slice(0, 5)) {
-      lines.push(`  - ${task.id} ${task.kind} ${task.status}: ${task.userVisibleSummary}`);
+      summary.push(`  - ${task.id} ${task.kind} ${task.status}: ${task.userVisibleSummary}`);
     }
   }
-  writeLine(output, lines.join("\n"));
+  sections.push(summary.join("\n"));
+  writeLine(output, sections.join("\n"));
 }
 
 function findEvidence(context: TuiContext, id: string | undefined): EvidenceRecord | undefined {
@@ -13362,12 +13530,22 @@ export async function handleNaturalInput(
 ): Promise<"handled" | "message"> {
   const gateway = maybeOutput ? (gatewayOrOutput as ModelGateway) : undefined;
   const output = maybeOutput ?? (gatewayOrOutput as Writable);
+  const traceEnabled = isPipelineTraceEnabled();
+  const traceBranch = async (branch: string, result: "handled" | "message"): Promise<void> => {
+    if (!traceEnabled) return;
+    await tracePipelineEvent(
+      context,
+      context.sessionId,
+      `handleNaturalInput result=${result} reason=${branch}`,
+    );
+  };
   const pendingLocalApproval = context.pendingLocalApproval;
   if (pendingLocalApproval) {
     const normalized = text.trim().toLowerCase();
     if (/^(details|detail|详情|细节)$/iu.test(normalized)) {
       writeLine(output, formatPendingApprovalDetails(pendingLocalApproval, context));
       writeStatus(output, context);
+      await traceBranch("pendingLocalApproval_details", "handled");
       return "handled";
     }
     if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(normalized)) {
@@ -13375,6 +13553,7 @@ export async function handleNaturalInput(
       context.pendingLocalApproval = undefined;
       // D.13E Step 2 修正 #4：复用 executePermissionApprove，避免双实现漂移
       await executePermissionApprove(approval, context, gateway, output);
+      await traceBranch("pendingLocalApproval_approve", "handled");
       return "handled";
     }
     if (/^(no|n|deny|取消|拒绝|不|否|cancel)$/iu.test(normalized)) {
@@ -13382,6 +13561,7 @@ export async function handleNaturalInput(
       context.pendingLocalApproval = undefined;
       const cancelled = /^(cancel|取消)$/iu.test(normalized);
       await executePermissionDeny(approval, context, gateway, output, cancelled);
+      await traceBranch("pendingLocalApproval_deny", "handled");
       return "handled";
     }
     writeLine(
@@ -13391,6 +13571,7 @@ export async function handleNaturalInput(
         : "当前有本地权限审批待处理。输入 yes/确认/继续 可本次允许，输入 no/取消 可拒绝；这条输入不会发送给模型。",
     );
     writeStatus(output, context);
+    await traceBranch("pendingLocalApproval_other", "handled");
     return "handled";
   }
 
@@ -13399,6 +13580,7 @@ export async function handleNaturalInput(
     if (/^(details|detail|详情|细节)$/iu.test(text.trim())) {
       writeLine(output, formatPendingNaturalCommandDetails(gate, context));
       writeStatus(output, context);
+      await traceBranch("pendingNaturalCommand_details", "handled");
       return "handled";
     }
     const decision = matchesNaturalGateConfirmation(gate, text);
@@ -13406,16 +13588,19 @@ export async function handleNaturalInput(
       context.pendingNaturalCommand = undefined;
       writeLine(output, t(context, "startGateExpired"));
       writeStatus(output, context);
+      await traceBranch("pendingNaturalCommand_expired", "handled");
       return "handled";
     }
     if (decision === "exact_required") {
       if (/^(yes|y|confirm|确认|是|执行|继续)$/iu.test(text.trim())) {
         writeLine(output, t(context, "startGatePlainConfirmationRejected"));
         writeStatus(output, context);
+        await traceBranch("pendingNaturalCommand_exactRequired_yes", "handled");
         return "handled";
       }
       writeLine(output, t(context, "startGateExactRequired"));
       writeStatus(output, context);
+      await traceBranch("pendingNaturalCommand_exactRequired", "handled");
       return "handled";
     }
     if (decision === "confirmed") {
@@ -13423,7 +13608,9 @@ export async function handleNaturalInput(
       writeLine(output, t(context, "startGateConfirmed"));
       await appendNaturalGateDebugEvent(context, gate, "confirmed");
       const result = await handleSlashCommand(gate.exactCommand, context, output);
-      return result === "message" ? "message" : "handled";
+      const mapped = result === "message" ? "message" : "handled";
+      await traceBranch(`pendingNaturalCommand_confirmed_${result}`, mapped);
+      return mapped;
     }
     context.pendingNaturalCommand = undefined;
   }
@@ -13436,102 +13623,41 @@ export async function handleNaturalInput(
         : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
     );
     writeStatus(output, context);
+    await traceBranch("bareYesWithoutGate", "handled");
     return "handled";
   }
 
   if (shouldOfferUserScopedModelSetup(context) && looksLikeModelSetupInput(text)) {
     await startModelSetup(context, output, parseModelSetupPrefill(text));
+    await traceBranch("modelSetupWizard", "handled");
     return "handled";
   }
 
   const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
   if (indexRepair === "handled") {
+    await traceBranch("indexSafetyRepair", "handled");
     return "handled";
   }
 
-  const compositeStatus = formatCompositeStatusQuery(text, context);
-  if (compositeStatus) {
-    writeLine(output, compositeStatus);
-    writeStatus(output, context);
-    return "handled";
-  }
-
-  const fileRead = await resolveNaturalFileRead(text, context);
-  if (fileRead.status === "resolved") {
-    await handleToolCommand("Read", [fileRead.path], context, output);
-    return "handled";
-  }
-  if (fileRead.status === "ambiguous") {
-    writeLine(output, formatFileCandidates(fileRead.candidates, context.language));
-    return "handled";
-  }
-
-  const localPreprocess = await handleLocalControlPlaneInput(text, context, output);
-  if (localPreprocess === "handled") {
-    return "handled";
-  }
-
+  // CCB 输入路由边界：普通自然语言（不以 "/" 开头、无 pending approval/Start Gate）
+  // 默认必须发送给模型。本地控制面（routeNaturalIntent / capability answer / composite
+  // status / 文件读取兜底）不再前置截胡——历史上这条路径会把 "你好"/"模型这里是不是
+  // 有问题"/"how do I configure model" 这种普通对话误识别成本地命令意图，让 gateway.stream
+  // 永远不被触发。要使用本地控制面，请输入精确 slash command（例如 `/model doctor`）。
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
+    await traceBranch("resourceGuard_model", "handled");
     return "handled";
   }
   if (context.memory.learningMode === "active") {
     await runAutoLearningOnTurnEnd(context, text);
   }
+  await traceBranch("passThrough", "message");
   return "message";
-}
-
-async function handleLocalControlPlaneInput(
-  text: string,
-  context: TuiContext,
-  output: Writable,
-): Promise<"handled" | "pass"> {
-  if (looksLikeOrdinaryDevelopmentRequest(text) && !looksLikeWorkspaceTrustNaturalRequest(text)) {
-    return "pass";
-  }
-
-  const intent = routeNaturalIntent(text, context.language);
-  const capabilityId = intent.capability?.id;
-  if (!capabilityId || !LOCAL_CONTROL_PLANE_CAPABILITY_IDS.has(capabilityId)) {
-    return "pass";
-  }
-  if (intent.confidence < 0.75 || intent.riskHandler === "model") {
-    return "pass";
-  }
-
-  if (shouldDispatchLocalReadonlyIntent(intent)) {
-    const result = await handleSlashCommand(intent.command, context, output);
-    return result === "message" ? "pass" : "handled";
-  }
-
-  if (isReadonlyPermissionsStatus(intent)) {
-    await handleSlashCommand("/permissions", context, output);
-    return "handled";
-  }
-
-  if (isAllowedModeStartGate(intent) || isWorkspaceTrustNaturalStartGate(intent)) {
-    const gate = createPendingNaturalCommand(intent, context);
-    if (!gate) {
-      return "pass";
-    }
-    context.pendingNaturalCommand = gate;
-    await appendNaturalGateDebugEvent(context, gate, "created");
-    writeLine(output, formatNaturalStartGate(intent, context, gate));
-    writeStatus(output, context);
-    return "handled";
-  }
-
-  if (intent.action === "answer" && isAllowedLocalCapabilityAnswer(intent)) {
-    writeLine(output, formatCapabilityAnswer(intent));
-    writeStatus(output, context);
-    return "handled";
-  }
-
-  return "pass";
 }
 
 async function handleIndexSafetyRepairContinuation(
@@ -13819,8 +13945,19 @@ async function sendMessage(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
+  const traceEnabled = isPipelineTraceEnabled();
+  if (traceEnabled) {
+    await tracePipelineEvent(
+      context,
+      context.sessionId,
+      `sendMessage entered=yes input=${redactPipelineUserInput(text)}`,
+    );
+  }
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
+    if (traceEnabled) {
+      await tracePipelineEvent(context, context.sessionId, "sendMessage guard=resource");
+    }
     writeLine(output, modelGuard);
     return;
   }
@@ -13837,6 +13974,13 @@ async function sendMessage(
       cooldownCheck.remainingMs,
       context.language,
     );
+    if (traceEnabled) {
+      await tracePipelineEvent(
+        context,
+        context.sessionId,
+        `sendMessage guard=cooldown remainingMs=${cooldownCheck.remainingMs}`,
+      );
+    }
     writeLine(output, cooldownMsg);
     return;
   }
@@ -13845,6 +13989,9 @@ async function sendMessage(
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
   const gate = checkEvidenceGate(text, context);
   if (gate) {
+    if (traceEnabled) {
+      await tracePipelineEvent(context, sessionId, "sendMessage guard=evidence");
+    }
     await appendSystemEvent(context, sessionId, gate, "warning");
     writeLine(output, gate);
     writeStatus(output, context);
@@ -13863,6 +14010,12 @@ async function sendMessage(
     "info",
   );
   const assistantEventId = randomUUID();
+  // 当 output 是 ShellBlockOutput（Ink task shell）时，每轮 request 用一个稳定的
+  // streaming block id，让 assistant_text_delta 累计写入同一条 keep:true block，
+  // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。plain TUI / 测试
+  // MemoryOutput 上没有 beginAssistantStream，writeAssistantDelta 会回退到 write。
+  const assistantStreamBlockId = `assistant-stream-${assistantEventId}`;
+  beginAssistantStream(output, assistantStreamBlockId);
   let assistantText = "";
   const controller = new AbortController();
   context.activeAbortController = controller;
@@ -13908,6 +14061,13 @@ async function sendMessage(
   );
   const budget = estimateModelMessageChars(messages);
   if (budget > MAX_CONTEXT_CHARS) {
+    if (traceEnabled) {
+      await tracePipelineEvent(
+        context,
+        sessionId,
+        `sendMessage guard=budget budget=${budget} max=${MAX_CONTEXT_CHARS}`,
+      );
+    }
     const warning =
       context.language === "en-US"
         ? `Context budget exceeded before provider call: ${budget}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
@@ -13920,6 +14080,9 @@ async function sendMessage(
     writeLine(output, warning);
     writeStatus(output, context);
     return;
+  }
+  if (traceEnabled) {
+    await tracePipelineEvent(context, sessionId, "sendMessage guard=none");
   }
 
   if (reportWriteGuard) {
@@ -13946,6 +14109,13 @@ async function sendMessage(
         );
       }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
+      if (traceEnabled) {
+        await tracePipelineEvent(
+          context,
+          sessionId,
+          `gateway.stream before provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile}`,
+        );
+      }
       for await (const event of gateway.stream(
         selectedRuntime.provider,
         {
@@ -13974,7 +14144,7 @@ async function sendMessage(
           clearRequestActivity(context);
           assistantText += event.text;
           roundAssistantText += event.text;
-          output.write(event.text);
+          writeAssistantDelta(output, assistantStreamBlockId, event.text);
           continue;
         }
         if (event.type === "tool_use") {
@@ -13996,10 +14166,24 @@ async function sendMessage(
           roundChunkCount = event.chunkCount;
           roundHadUsage = roundHadUsage || event.hadUsage;
           roundFinishReason = event.finishReason;
+          if (traceEnabled) {
+            await tracePipelineEvent(
+              context,
+              sessionId,
+              `gateway.stream done chunkCount=${event.chunkCount} finishReason=${event.finishReason ?? "none"}`,
+            );
+          }
           continue;
         }
         if (event.type === "error") {
           clearRequestActivity(context);
+          if (traceEnabled) {
+            await tracePipelineEvent(
+              context,
+              sessionId,
+              `gateway.stream error code=${event.error.code ?? "UNKNOWN"} message=${redactPipelineUserInput(event.error.message ?? "")}`,
+            );
+          }
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
           recordProviderFailure(
             context.providerBreaker,
@@ -14113,6 +14297,7 @@ async function sendMessage(
       }
     }
   } finally {
+    endAssistantStream(output);
     clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
@@ -14261,6 +14446,10 @@ async function streamFinalModelAnswerWithoutTools(
   signal: AbortSignal,
 ): Promise<string> {
   let assistantText = "";
+  // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
+  // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
+  const assistantStreamBlockId = `assistant-stream-final-${randomUUID()}`;
+  beginAssistantStream(output, assistantStreamBlockId);
   let chunkCount = 0;
   let hadUsage = false;
   let finishReason: string | undefined;
@@ -14286,7 +14475,7 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "assistant_text_delta") {
       clearRequestActivity(context);
       assistantText += event.text;
-      output.write(event.text);
+      writeAssistantDelta(output, assistantStreamBlockId, event.text);
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -14344,6 +14533,7 @@ async function streamFinalModelAnswerWithoutTools(
     );
     writeLine(output, message);
   }
+  endAssistantStream(output);
   return assistantText;
 }
 
@@ -14360,9 +14550,16 @@ async function continueModelAfterToolResults(
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   const assistantEventId = randomUUID();
+  // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
+  let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
+  beginAssistantStream(output, assistantStreamBlockId);
   const sessionId = await ensureSession(context);
   try {
     for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
+      if (round > 0) {
+        assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
+        beginAssistantStream(output, assistantStreamBlockId);
+      }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const promptCacheFields = await buildPromptCacheRequestFields(context);
@@ -14383,7 +14580,7 @@ async function continueModelAfterToolResults(
           clearRequestActivity(context);
           assistantText += event.text;
           roundAssistantText += event.text;
-          output.write(event.text);
+          writeAssistantDelta(output, assistantStreamBlockId, event.text);
           continue;
         }
         if (event.type === "tool_use") {
@@ -14502,6 +14699,7 @@ async function continueModelAfterToolResults(
         createdAt: new Date().toISOString(),
       });
     }
+    endAssistantStream(output);
   } finally {
     clearRequestActivity(context);
     context.activeAbortController = undefined;
@@ -16079,6 +16277,56 @@ async function appendSystemEvent(
   });
 }
 
+/**
+ * Env-gated pipeline trace (LINGHUN_TUI_PIPELINE_TRACE=1).
+ *
+ * 用于诊断"普通自然语言为什么没有走到 gateway.stream"这条 P0：
+ * processTuiLine → handleSlashCommand → handleNaturalInput → sendMessage 的每个
+ * 节点都会调用 tracePipelineEvent，写入 session system_event + stderr。仅当 env
+ * 开启时才输出，主 UI 不受影响。
+ *
+ * 不允许在 line 中包含 API key / provider.env 字段；调用方负责截断/脱敏用户输入
+ * （≤40 字符）。本 helper 自身只兜底再做一次硬截断，避免单条事件过长。
+ */
+function redactPipelineTraceLine(line: string): string {
+  const truncated = line.length > 240 ? `${line.slice(0, 237)}...` : line;
+  return truncated.replace(/sk-[A-Za-z0-9._-]{4,}/gu, "sk-[redacted]");
+}
+
+function isPipelineTraceEnabled(): boolean {
+  return process.env.LINGHUN_TUI_PIPELINE_TRACE === "1";
+}
+
+function redactPipelineUserInput(text: string): string {
+  const collapsed = text.replace(/\s+/gu, " ").trim();
+  const limited = collapsed.length > 40 ? `${collapsed.slice(0, 40)}...` : collapsed;
+  return limited.replace(/sk-[A-Za-z0-9._-]{4,}/gu, "sk-[redacted]");
+}
+
+async function tracePipelineEvent(
+  context: TuiContext,
+  sessionId: string | undefined,
+  line: string,
+): Promise<void> {
+  if (!isPipelineTraceEnabled()) return;
+  const safeLine = redactPipelineTraceLine(line);
+  const stderr = process.stderr;
+  if (stderr && typeof stderr.write === "function") {
+    try {
+      stderr.write(`[linghun-tui-pipeline] ${safeLine}\n`);
+    } catch {
+      // stderr write 失败不应该影响主流程
+    }
+  }
+  if (sessionId) {
+    try {
+      await appendSystemEvent(context, sessionId, `pipeline_trace ${safeLine}`, "info");
+    } catch {
+      // 写 session event 失败也仅是诊断 miss，不影响实际 pipeline
+    }
+  }
+}
+
 async function appendRouteDecisionEvent(
   context: TuiContext,
   sessionId: string,
@@ -16555,4 +16803,22 @@ function createSessionEndEvent(sessionId: string): TranscriptEvent {
     sessionId,
     createdAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Test-only factory. ShellBlockOutput 是 module-internal class（Ink shell 注入），
+ * 这里仅为单测暴露一个等价构造器，让测试可以验证 assistant_text_delta 多片
+ * 累积到同一条 keep:true block 而不是被 _write 的 ephemeral splice 淘汰。
+ * 不要在生产代码里使用这个工厂。
+ */
+export function __testCreateShellBlockOutput(
+  context: TuiContext,
+  blocks: ProductBlockViewModel[],
+  onWrite: () => void = () => {},
+): Writable & {
+  beginAssistantStream(id: string): void;
+  appendAssistantDelta(text: string): void;
+  endAssistantStream(): void;
+} {
+  return new ShellBlockOutput(context, blocks, onWrite);
 }

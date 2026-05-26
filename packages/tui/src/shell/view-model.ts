@@ -443,6 +443,11 @@ export function createOutputBlock(
     title: copy.latestOutputTitle,
     summary: firstLine || copy.noVisibleOutput,
     nextAction: isFail ? copy.errorDetailsHint : copy.latestOutputNext,
+    // Preserve the full body so /details can reveal it. The summary keeps the
+    // first non-empty line for the inline block; multi-line outputs (e.g. the
+    // /model doctor body with provider.env merge / endpointPath / providers)
+    // are no longer truncated to the first line at this boundary.
+    fullText: normalized,
   };
 }
 

@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { TuiContext } from "../index.js";
+import { __testCreateShellBlockOutput, type TuiContext } from "../index.js";
 import {
   bufferInsert,
   bufferMoveDown,
@@ -3168,5 +3168,94 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
+  });
+});
+
+// ShellBlockOutput streaming assistant block —— assistant_text_delta 多片必须
+// 累积到同一条 keep:true block，而不是被 _write 的 ephemeral splice 淘汰。
+// 触发场景：sendMessage / streamFinalModelAnswerWithoutTools /
+// continueModelAfterToolResults 三处 gateway.stream 循环。
+describe("ShellBlockOutput — assistant streaming block", () => {
+  function makeFakeContext(): TuiContext {
+    // 测试只用到 language / lastFullOutput / suppressLastFullOutputCapture 三个字段。
+    return {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+  }
+
+  it("两段 assistant_text_delta 必须拼成完整正文（'连' + '接成功' === '连接成功'）", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    let renderCount = 0;
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
+      renderCount += 1;
+    });
+
+    output.beginAssistantStream("assistant-stream-test-1");
+    output.appendAssistantDelta("连");
+    output.appendAssistantDelta("接成功");
+    output.endAssistantStream();
+
+    const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-1");
+    expect(streamingBlock).toBeDefined();
+    expect(streamingBlock?.keep).toBe(true);
+    expect(streamingBlock?.fullText).toBe("连接成功");
+    expect(streamingBlock?.summary).toBe("连接成功");
+    // begin / 2 deltas / end —— 每次都触发 onWrite 重渲染。
+    expect(renderCount).toBeGreaterThanOrEqual(3);
+  });
+
+  it("普通 writeLine 后再开 streaming block，writeLine 的 ephemeral splice 不会淘汰 keep streaming block", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+
+    // 1) 先开 streaming block —— keep:true
+    output.beginAssistantStream("assistant-stream-test-2");
+    output.appendAssistantDelta("hello ");
+    output.appendAssistantDelta("world");
+    output.endAssistantStream();
+
+    // 2) 再写两条普通 writeLine（_write 路径），ephemeral splice 只保留最后一条
+    output.write("first ephemeral line\n");
+    output.write("second ephemeral line\n");
+
+    // streaming block 必须留下，且 fullText 不丢
+    const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-2");
+    expect(streamingBlock).toBeDefined();
+    expect(streamingBlock?.fullText).toBe("hello world");
+    // 普通 ephemeral 只剩最后一条
+    const ephemeralBlocks = blocks.filter((b) => !b.keep);
+    expect(ephemeralBlocks).toHaveLength(1);
+    expect(ephemeralBlocks[0]?.summary).toContain("second ephemeral line");
+  });
+
+  it("appendAssistantDelta 在没有 active streaming block 时回退到 _write（不丢内容）", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+
+    // 没 begin 直接 append —— 走 _write fallback，作为普通 ephemeral 块。
+    output.appendAssistantDelta("fallback text");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.keep).toBeFalsy();
+    expect(blocks[0]?.summary).toContain("fallback text");
+  });
+
+  it("lastFullOutput 在 append 时累计；suppressLastFullOutputCapture=true 时不写入", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-test-3");
+    output.appendAssistantDelta("连");
+    expect(ctx.lastFullOutput).toBe("连");
+    output.appendAssistantDelta("接成功");
+    expect(ctx.lastFullOutput).toBe("连接成功");
+
+    // 切换到 suppress 模式后，新的 delta 不能再覆盖 lastFullOutput。
+    ctx.suppressLastFullOutputCapture = true;
+    output.appendAssistantDelta("后续");
+    expect(ctx.lastFullOutput).toBe("连接成功");
+    output.endAssistantStream();
   });
 });
