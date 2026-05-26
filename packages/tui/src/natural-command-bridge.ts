@@ -173,6 +173,7 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/bash", capabilityId: "bash", userVisible: true },
   { slash: "/todo", capabilityId: "todo", userVisible: true },
   { slash: "/diff", capabilityId: "diff", userVisible: true },
+  { slash: "/config", capabilityId: "config", userVisible: true },
   { slash: "/exit", capabilityId: "exit", userVisible: true },
   {
     slash: "/status",
@@ -911,6 +912,18 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "需要结束当前 REPL。",
     "Use to end the REPL.",
     "start_gate",
+  ),
+  cap(
+    "config",
+    "/config",
+    ["config", "配置", "settings", "设置", "configuration"],
+    "配置概览",
+    "Config overview",
+    "概览当前 model/permission/language/index/MCP/memory/cache/background/remote/hooks/plugins/skills/workflows 的现状与下一步。",
+    "Shows the current state and next actions for model/permission/language/index/MCP/memory/cache/background/remote/hooks/plugins/skills/workflows.",
+    "想一次看清楚 LingHun 的当前配置态势。",
+    "Use when surveying current LingHun configuration posture.",
+    "readonly",
   ),
   cap(
     "status",

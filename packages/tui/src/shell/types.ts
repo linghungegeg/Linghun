@@ -13,7 +13,8 @@ export type ProductBlockKind =
   | "run"
   | "tool"
   | "error"
-  | "details";
+  | "details"
+  | "command";
 
 export type ProductBlockStatus = "info" | "running" | "pass" | "partial" | "fail" | "blocked";
 
@@ -80,12 +81,6 @@ export type TaskPermissionView = {
   actions?: PermissionAction[];
 };
 
-/** Lightweight echo of the most recent slash command, surfaced above the task output. */
-export type SlashEchoView = {
-  id: string;
-  text: string;
-};
-
 /**
  * TaskFooter — minimal status footer rendered under the composer in task mode.
  * Only carries the small set of always-on signals: permission mode, index
@@ -116,8 +111,6 @@ export type ShellViewModel = {
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
   limitations: string[];
-  /** Most recent slash command echo, surfaced above task output (not in blocks). */
-  slashEcho?: SlashEchoView;
   /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */
   taskFooter?: TaskFooterView;
 };

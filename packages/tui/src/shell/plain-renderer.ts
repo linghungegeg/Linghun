@@ -1,6 +1,6 @@
 import type { Writable } from "node:stream";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
-import { charWidth, composerMaxWidth } from "./text-utils.js";
+import { charWidth, composerMaxWidth, taskComposerMaxWidth } from "./text-utils.js";
 import { getStatusMarker } from "./theme.js";
 import type { ProductBlockStatus, ShellViewModel } from "./types.js";
 
@@ -161,7 +161,7 @@ function renderPlainHome(view: ShellViewModel, capability: TerminalCapability): 
 
 function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): string {
   const noColor = view.themeMode === "no-color";
-  const composerWidth = composerMaxWidth(view.width);
+  const composerWidth = taskComposerMaxWidth(view.width);
   const separator = separatorLine(capability, composerWidth, noColor);
 
   const lines: string[] = [];
@@ -234,6 +234,11 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
 
 function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
   return view.blocks.flatMap((block) => {
+    // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
+    // task transcript（plain 渲染同步 Ink ProductBlock 的 command 分支）。
+    if (block.kind === "command") {
+      return [`${dim("\u276F", noColor)} ${colorCyan(block.title, noColor)}`];
+    }
     const marker = getStatusMarker(block.status, noColor);
     const coloredMarker = colorStatus(marker, block.status, noColor);
     return [

@@ -30,6 +30,19 @@ export function composerMaxWidth(viewWidth: number): number {
 }
 
 /**
+ * Task-mode composer width.
+ *
+ * Home keeps the centered 80-col composer that doubles as a brand frame.
+ * Task mode is a working surface — the composer band should fill the terminal
+ * width minus a small symmetric padding so long output (URLs, code, paste
+ * payloads) is not artificially clipped at 80 columns. The minimum 40 keeps
+ * narrow terminals readable; on wider terminals the band stretches.
+ */
+export function taskComposerMaxWidth(viewWidth: number): number {
+  return Math.max(40, viewWidth - 4);
+}
+
+/**
  * Terminal-safe horizontal line character.
  * Legacy terminals get ASCII dash; modern/basic get box-drawing.
  */

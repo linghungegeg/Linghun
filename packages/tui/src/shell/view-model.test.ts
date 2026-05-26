@@ -3048,14 +3048,17 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("会话");
   });
 
-  it("setupHint surfaces as taskFooter.hint in task mode", () => {
+  it("setupHint NO LONGER routes through taskFooter.hint (footer stays 1-line minimal)", () => {
+    // D.13D 收尾：长 setup 句子不再灌入 footer.hint，避免任务页底部出现冗长说明。
+    // setupHint 仍然存在于 ShellViewModel.setupHint，由 HomeLayout 在主屏单独显示。
     const view = createShellViewModel(createContext(), {
       setupNeeded: true,
       width: 120,
       viewMode: "task",
     });
-    expect(view.taskFooter?.hint).toBe(view.setupHint);
-    expect(view.taskFooter?.hint).toContain("按 Enter");
+    expect(view.setupHint).toBeDefined();
+    expect(view.setupHint).toContain("按 Enter");
+    expect(view.taskFooter?.hint).toBeUndefined();
   });
 
   it("setup hint suppressed at every pendingModelSetup.step (apiKey/baseUrl/model/reasoning/auxModel/confirm)", () => {
@@ -3083,14 +3086,16 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.hint).toBeUndefined();
   });
 
-  it("setup hint re-surfaces after pendingModelSetup is cleared (still setupNeeded)", () => {
+  it("setup hint re-surfaces in setupHint after pendingModelSetup is cleared (taskFooter.hint stays empty)", () => {
     const view = createShellViewModel(createContext({} as Partial<TuiContext>), {
       setupNeeded: true,
       width: 120,
       viewMode: "task",
     });
     expect(view.setupHint).toBeDefined();
-    expect(view.taskFooter?.hint).toBe(view.setupHint);
+    // C 改动后 footer 不再承载 setupHint。setupHint 仍然在 ShellViewModel.setupHint
+    // 由主屏渲染（HomeLayout），任务页 footer 永远保持 1 行 permission · index。
+    expect(view.taskFooter?.hint).toBeUndefined();
   });
 
   it("bare slash '/' surfaces 5 core candidates from getCoreSlashCandidates()", async () => {
@@ -3118,7 +3123,11 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // The render path passes null to useAnchoredCursor when permissionActive,
     // so the cursor is hidden while the permission selector owns focus.
-    expect(source).toMatch(/permissionActive\s*\?\s*null\s*:\s*\{\s*row/);
+    // A 改动后还多了 useInlineCursor 分支（Task 模式 inline 反白光标 fallback），
+    // 任意一个为真时都必须把 anchored cursor 切到 null。
+    expect(source).toMatch(
+      /permissionActive\s*(?:\|\|\s*useInlineCursor\s*)?\?\s*null\s*:\s*\{\s*row/,
+    );
   });
 
   it("Composer Shift+Tab emits cycle-permission-mode (not raw escape sequences)", async () => {

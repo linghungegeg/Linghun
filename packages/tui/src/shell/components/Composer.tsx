@@ -760,14 +760,25 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // Position native cursor — anchored to Composer's outer Box via parent-chain
   // accumulation. Composer only declares row/col; absolute coordinates are
   // resolved by useAnchoredCursor against ink-root in the render phase.
-  // Above-truncation marker shifts the visible row by 1.
   // Permission-exclusive focus: while a permission card is on screen, the
   // selector row owns the visible focus. The native cursor MUST NOT also be
   // positioned over the buffer line; otherwise the user sees two competing
   // focus owners. We pass null so useAnchoredCursor hides the cursor instead.
-  const declaredRow = cursorRow + (truncatedAbove > 0 ? 1 : 0);
+  // Task-mode fallback: real-machine smoke showed yoga parent-chain cursor
+  // accumulation drifting on Win10 conhost when the Composer band sits below
+  // a flexGrow output region. Task mode therefore yields the native cursor
+  // (declared=null) and renders an inline reverse-video cursor character at
+  // (cursorRow, cursorCol). Home keeps native cursor for parity with the
+  // 80-col centered composer.
+  // Truncation indicator rows have been removed (cursor-centered viewport
+  // already conveys overflow), so cursorRow is used as-is without an offset.
+  void truncatedAbove;
+  void truncatedBelow;
+  const isTaskMode = view.viewMode === "task" || view.viewMode === "pending";
+  const useInlineCursor = isTaskMode && !permissionActive;
+  const declaredRow = cursorRow;
   useAnchoredCursor(
-    permissionActive ? null : { row: declaredRow, col: cursorCol },
+    permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },
     anchorRef,
     capability,
   );
@@ -807,31 +818,23 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         />
       ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
-        {truncatedAbove > 0 ? (
-          <Text color="gray">
-            {fitText(
-              view.language === "en-US"
-                ? `… ${truncatedAbove} line(s) above`
-                : `… 上面还有 ${truncatedAbove} 行`,
-              maxWidth,
-            )}
-          </Text>
-        ) : null}
-        {lines.map((line, index) => (
-          <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-            {fitText(line, maxWidth)}
-          </Text>
-        ))}
-        {truncatedBelow > 0 ? (
-          <Text color="gray">
-            {fitText(
-              view.language === "en-US"
-                ? `… ${truncatedBelow} line(s) below`
-                : `… 下面还有 ${truncatedBelow} 行`,
-              maxWidth,
-            )}
-          </Text>
-        ) : null}
+        {lines.map((line, index) => {
+          if (useInlineCursor && index === cursorRow) {
+            const segs = splitLineAtDisplayCol(line, cursorCol);
+            return (
+              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+                {segs.before}
+                <Text inverse>{segs.cursorChar}</Text>
+                {segs.after}
+              </Text>
+            );
+          }
+          return (
+            <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+              {fitText(line, maxWidth)}
+            </Text>
+          );
+        })}
       </Box>
       {showUnknownHint ? (
         <Text color={theme.muted}>
@@ -1135,6 +1138,42 @@ function displayWidthOf(value: string): number {
     width += charWidth(char);
   }
   return width;
+}
+
+/**
+ * Split a rendered composer line at a target display column for inline cursor
+ * rendering (Task mode fallback when native cursor positioning is unreliable).
+ *
+ * Returns three segments:
+ *   - before: characters before the cursor column (display-width aligned)
+ *   - cursorChar: the single character under the cursor (or " " if at line end)
+ *   - after: characters after the cursor column
+ *
+ * The caller renders cursorChar with `inverse` to produce a reverse-video
+ * cursor block. CJK wide characters are kept atomic — when the cursor lands
+ * on the second visual cell of a wide char, the whole wide char is the
+ * cursor cell.
+ */
+export function splitLineAtDisplayCol(
+  line: string,
+  col: number,
+): { before: string; cursorChar: string; after: string } {
+  const chars = Array.from(line);
+  let acc = 0;
+  let i = 0;
+  for (; i < chars.length; i++) {
+    const ch = chars[i] ?? "";
+    const w = charWidth(ch);
+    if (acc + w > col) break;
+    acc += w;
+  }
+  if (i >= chars.length) {
+    return { before: chars.join(""), cursorChar: " ", after: "" };
+  }
+  const before = chars.slice(0, i).join("");
+  const cursorChar = chars[i] ?? " ";
+  const after = chars.slice(i + 1).join("");
+  return { before, cursorChar, after };
 }
 
 // ---------------------------------------------------------------------------

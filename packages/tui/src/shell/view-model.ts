@@ -8,7 +8,6 @@ import type {
   ProductBlockViewModel,
   ShellViewMode,
   ShellViewModel,
-  SlashEchoView,
   TaskActivityView,
   TaskFooterView,
   TaskPermissionView,
@@ -135,8 +134,6 @@ export type ShellViewModelOptions = {
   submitted?: boolean;
   /** Denial/cancel feedback for the most recent permission action. */
   denialFeedback?: { toolName: string; kind: "denied" | "cancelled" };
-  /** Most recent slash command echo, surfaced above task output. */
-  slashEcho?: SlashEchoView;
 };
 
 export function createShellViewModel(
@@ -199,9 +196,14 @@ export function createShellViewModel(
     const normalBlocks = allOutputBlocks.filter(
       (b) => b.status !== "fail" && b.status !== "blocked",
     );
-    // Show all fail/blocking + up to 3 most recent normal (total capped at 3)
-    const maxNormal = Math.max(0, 3 - failBlocks.length);
-    const selectedBlocks = [...failBlocks, ...normalBlocks.slice(-maxNormal)];
+    // keep:true 的 block（例如 slash command 的 transcript row）必须穿透 slice 限流，
+    // 否则连续 tool 输出会把用户提交记录推出可视区，破坏 transcript 分层。
+    const keepBlocks = normalBlocks.filter((b) => b.keep);
+    const ephemeralBlocks = normalBlocks.filter((b) => !b.keep);
+    // Show all fail/blocking + all keep + up to 3 most recent ephemeral
+    // (cap on ephemerals only; fail/keep 不计入 cap，仍作为优先信号保留)。
+    const maxEphemeral = Math.max(0, 3 - failBlocks.length);
+    const selectedBlocks = [...failBlocks, ...keepBlocks, ...ephemeralBlocks.slice(-maxEphemeral)];
     // Add /details hint only to error/blocked blocks (avoid noise on info rows).
     const outputWithHints = selectedBlocks.map((b) => addDetailsHint(b, language));
     blocks.push(...outputWithHints);
@@ -259,15 +261,16 @@ export function createShellViewModel(
 
   // TaskFooter — minimal status footer for task/pending viewMode. The full
   // StatusTray noise stays out of the task region; this only carries the
-  // signals a user wants while a flow is active: permission mode, index,
-  // optional one-line hint (currently the setupHint when surfaced).
+  // signals a user wants while a flow is active: permission mode and index.
+  // setupHint is intentionally NOT routed through the footer hint slot — long
+  // setup sentences belong above the composer (or in /config), not in the
+  // 1-line breathing footer.
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
       : {
           permissionMode: formatPermissionModeLabel(context.permissionMode, language),
           index: formatIndex(context.index.status, language),
-          hint: setupHint,
         };
 
   return {
@@ -308,7 +311,6 @@ export function createShellViewModel(
     },
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
-    slashEcho: options.slashEcho,
     taskFooter,
   };
 }

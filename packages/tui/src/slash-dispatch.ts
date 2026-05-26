@@ -483,6 +483,7 @@ function formatHelp(language: Language): string {
   /bash <command>       Run command with collapsed task status and full log
   /todo                 Show tasks
   /diff                 Show changed file summary
+  /config               Show consolidated configuration overview with next actions
   /exit                 Exit
 
 Slash commands, config keys, and transcript event fields stay in English.`;
@@ -590,6 +591,7 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /todo add <text>      添加任务
   /todo start|done|block <id> 更新任务状态
   /diff                 显示本轮工具改动摘要
+  /config               一站式查看当前模型/权限/语言/索引/MCP/记忆/缓存/后台/远程/钩子/插件/技能/工作流
   /exit                 退出
 
 普通输入会发送给当前 provider/model，并写入 JSONL transcript。工具命令也会写入 transcript。`;

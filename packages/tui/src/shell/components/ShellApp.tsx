@@ -1,7 +1,13 @@
 import { Box, Text } from "ink";
 import type React from "react";
 import type { TerminalCapability } from "../terminal-capability.js";
-import { brandWordmark, composerMaxWidth, fitText, lineChar } from "../text-utils.js";
+import {
+  brandWordmark,
+  composerMaxWidth,
+  fitText,
+  lineChar,
+  taskComposerMaxWidth,
+} from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type {
   ShellController,
@@ -116,8 +122,8 @@ function HomeLayout({
  * TaskLayout — production-grade task interaction shell.
  *
  * Layout (top → bottom, full-page top-left):
- *   1. output region (flexGrow=1, overflow=hidden) — slashEcho, activity,
- *      permission card, blocks, limitations.
+ *   1. output region (flexGrow=1, overflow=hidden) — activity, permission
+ *      card, blocks (including slash command transcript rows), limitations.
  *   2. composer band (flexShrink=0) — accent rule, Composer (which renders
  *      the permission action row above the buffer when permission is active),
  *      accent rule.
@@ -145,7 +151,7 @@ function TaskLayout({
   capability: TerminalCapability;
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
-  const cw = composerMaxWidth(view.width);
+  const cw = taskComposerMaxWidth(view.width);
   const composerLine = lineChar(noColor, capability).repeat(cw);
 
   return (
@@ -162,12 +168,6 @@ function TaskLayout({
         paddingX={2}
         paddingTop={1}
       >
-        {view.slashEcho ? (
-          <Box marginBottom={1}>
-            <Text color={theme.muted}>{fitText(`› ${view.slashEcho.text}`, view.width - 4)}</Text>
-          </Box>
-        ) : null}
-
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
         {view.permission ? (
@@ -200,20 +200,27 @@ function TaskLayout({
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
           Yoga from collapsing the band when output is tall. Left alignment
-          matches the Task page's full-width top-left output rhythm. */}
+          matches the Task page's full-width top-left output rhythm.
+          Border-color rules use theme.border (muted) instead of theme.accent
+          so the lines don't compete with content. */}
       <Box flexShrink={0} flexDirection="column">
         <Box flexDirection="column" width={cw}>
-          <Text color={theme.accent}>{composerLine}</Text>
+          <Text color={theme.border}>{composerLine}</Text>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
-          <Text color={theme.accent}>{composerLine}</Text>
+          <Text color={theme.border}>{composerLine}</Text>
         </Box>
 
-        {/* Task footer — minimal status line: permission mode · index · hint.
-            NOT the full StatusTray; the noisy line was identified as the
+        {/* Task footer — minimal status line: permission mode · index. NOT the
+            full StatusTray; the noisy line was identified as the
             "[Linghun] 会话…" leak source and stays out of Task mode. */}
         {view.taskFooter ? (
           <TaskFooter footer={view.taskFooter} theme={theme} width={view.width} />
         ) : null}
+
+        {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
+            贴在终端最后一行（光标 / 滚动条 / OS 任务栏会与之相邻不舒服）。
+            flexShrink=0 确保 Yoga 不会在内容超长时把这一行吞掉。 */}
+        <Box flexShrink={0} height={1} />
       </Box>
     </Box>
   );
@@ -228,11 +235,15 @@ function TaskFooter({
   theme: ReturnType<typeof createShellTheme>;
   width: number;
 }): React.ReactNode {
+  // Production footer: 1 line of muted status with bottom breathing space.
+  // Long sentences (e.g. setup hint) are intentionally NOT routed here —
+  // permissionMode · index is the entire signal budget. An optional short
+  // hint is supported for future per-flow needs but trimmed defensively.
   const segments: string[] = [footer.permissionMode, footer.index];
   if (footer.hint) segments.push(footer.hint);
   const line = segments.join(" · ");
   return (
-    <Box width={width} paddingX={2}>
+    <Box width={width} paddingX={2} paddingTop={1}>
       <Text color={theme.muted}>{fitText(line, Math.max(20, width - 4))}</Text>
     </Box>
   );

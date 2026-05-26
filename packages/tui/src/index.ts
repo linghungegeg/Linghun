@@ -2563,7 +2563,6 @@ async function runInkShell(
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
   let submittedPending = false;
-  let slashEcho: { id: string; text: string } | undefined;
   let resolveExit: (code: number) => void = () => undefined;
   const exitPromise = new Promise<number>((resolve) => {
     resolveExit = resolve;
@@ -2581,7 +2580,6 @@ async function runInkShell(
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
-        slashEcho,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (t) =>
@@ -2634,16 +2632,20 @@ async function runInkShell(
       }
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
-      // Echo: slash commands are user-visible commands, not chat input. Show
-      // the most recent slash submission as a slim echo line above the task
-      // output (rendered through view.slashEcho, NOT pushed into blocks — the
-      // ShellBlockOutput stream may splice the blocks array down to its last
-      // model output and would otherwise drop the echo).
+      // Slash commands are user-visible commands, not chat input. Push a
+      // dedicated command block (kind="command", keep=true) into the
+      // transcript so it survives ShellBlockOutput splice and renders as an
+      // independent `❯ /command` row above the tool/output blocks.
       if (event.type === "submit" && event.text.startsWith("/")) {
-        slashEcho = {
-          id: `slash-echo-${Date.now()}`,
-          text: event.text.length > 80 ? `${event.text.slice(0, 79)}…` : event.text,
-        };
+        const trimmed = event.text.length > 120 ? `${event.text.slice(0, 119)}…` : event.text;
+        blocks.push({
+          id: `command-${Date.now()}`,
+          kind: "command",
+          status: "info",
+          title: trimmed,
+          summary: "",
+          keep: true,
+        });
       }
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
@@ -2752,8 +2754,16 @@ class ShellBlockOutput extends Writable {
     const normalized = text.trim();
     if (normalized) {
       this.blocks.push(createOutputBlock(normalized, this.context.language));
-      if (this.blocks.length > 1) {
-        this.blocks.splice(0, this.blocks.length - 1);
+      // 只回收非 keep 的 ephemeral 输出，让 keep:true 的 transcript row（slash
+      // command 行等）穿透 splice，保住分层。回收策略：保留所有 keep 块 + 最后
+      // 一条 ephemeral 块。
+      const keepBlocks = this.blocks.filter((b) => b.keep);
+      const ephemeralBlocks = this.blocks.filter((b) => !b.keep);
+      if (ephemeralBlocks.length > 1) {
+        const lastEphemeral = ephemeralBlocks[ephemeralBlocks.length - 1];
+        this.blocks.length = 0;
+        this.blocks.push(...keepBlocks);
+        if (lastEphemeral) this.blocks.push(lastEphemeral);
       }
       this.onWrite();
     }
@@ -3001,6 +3011,10 @@ export async function handleSlashCommand(
     await handleToolCommand(toolName, rest, context, output);
     return "handled";
   }
+  if (command === "/config") {
+    writeLine(output, formatConfigOverview(context));
+    return "handled";
+  }
   if (command === "/exit") {
     return "exit";
   }
@@ -3013,6 +3027,74 @@ export async function handleSlashCommand(
 
   writeLine(output, formatUnknownSlashCommand(command, context.language));
   return "handled";
+}
+
+function formatConfigOverview(context: TuiContext): string {
+  const zh = context.language === "zh-CN";
+  const yes = zh ? "是" : "yes";
+  const no = zh ? "否" : "no";
+  const onOff = (b: boolean) => (b ? yes : no);
+  const executor = context.config.modelRoutes.routes.find((r) => r.role === "executor");
+  const trust = context.config.workspaceTrust;
+  const trustLabel = trust.recorded
+    ? trust.level === "trusted"
+      ? zh
+        ? "已信任"
+        : "trusted"
+      : zh
+        ? "受限"
+        : "restricted"
+    : zh
+      ? "未记录"
+      : "unrecorded";
+  const mcpServers = context.config.mcp.enabledServers.join(", ") || (zh ? "无" : "none");
+  const indexStatus = context.index.status || (zh ? "未知" : "unknown");
+  const cacheCount = context.cache.history.length;
+  const bgRunning = context.backgroundTasks.filter((t) => t.status === "running").length;
+  const skillsTrusted = context.skills.trustedIds.length;
+  const pluginsTrusted = context.plugins.trustedIds.length;
+  const remoteEnabled = Boolean(
+    (context.config as { remote?: { enabled?: boolean } }).remote?.enabled,
+  );
+
+  if (zh) {
+    return [
+      "配置概览（一站式只读）",
+      `- 语言：${context.config.language}（用 /language en-US 切换）`,
+      `- 模型：${context.model}（执行器 allowTools=${onOff(Boolean(executor?.allowTools))}；用 /model、/model doctor、/model route 查看与诊断）`,
+      `- 权限模式：${context.permissionMode}（用 /mode 切换；规则用 /permissions）`,
+      `- 工作区信任：${trustLabel}（用 /trust 调整）`,
+      `- 索引：${indexStatus}（用 /index status、/index doctor、/index check）`,
+      `- MCP：启用=${mcpServers}（用 /mcp、/mcp doctor、/mcp tools）`,
+      "- 记忆：用 /memory、/memory storage、/memory review、/memory learn",
+      `- 缓存：history=${cacheCount}（用 /cache status、/cache-log、/usage、/stats）`,
+      `- 后台：running=${bgRunning}（用 /background、/job、/details）`,
+      `- 远程：enabled=${onOff(remoteEnabled)}（用 /remote）`,
+      `- 钩子：enabled=${onOff(context.hooks.enabled)}；项目信任=${onOff(context.hooks.projectTrusted)}（用 /doctor hooks）`,
+      `- 插件：discover=${onOff(context.plugins.enabled)}；信任 id 数=${pluginsTrusted}（用 /plugins、/plugins doctor）`,
+      `- 技能：discover=${onOff(context.skills.enabled)}；信任 id 数=${skillsTrusted}（用 /skills、/skills status）`,
+      `- 工作流：discover=${onOff(context.workflows.enabled)}（用 /workflows）`,
+      "下一步：直接输入对应 slash 进入；用 /features 查看默认功能策略，用 /help all 查看完整命令表。",
+    ].join("\n");
+  }
+  return [
+    "Configuration overview (one-stop read-only)",
+    `- language: ${context.config.language} (switch via /language en-US)`,
+    `- model: ${context.model} (executor allowTools=${onOff(Boolean(executor?.allowTools))}; use /model, /model doctor, /model route)`,
+    `- permission mode: ${context.permissionMode} (switch via /mode; rules via /permissions)`,
+    `- workspace trust: ${trustLabel} (adjust via /trust)`,
+    `- index: ${indexStatus} (use /index status, /index doctor, /index check)`,
+    `- MCP: enabled=${mcpServers} (use /mcp, /mcp doctor, /mcp tools)`,
+    "- memory: use /memory, /memory storage, /memory review, /memory learn",
+    `- cache: history=${cacheCount} (use /cache status, /cache-log, /usage, /stats)`,
+    `- background: running=${bgRunning} (use /background, /job, /details)`,
+    `- remote: enabled=${onOff(remoteEnabled)} (use /remote)`,
+    `- hooks: enabled=${onOff(context.hooks.enabled)}; projectTrusted=${onOff(context.hooks.projectTrusted)} (use /doctor hooks)`,
+    `- plugins: discover=${onOff(context.plugins.enabled)}; trustedIds=${pluginsTrusted} (use /plugins, /plugins doctor)`,
+    `- skills: discover=${onOff(context.skills.enabled)}; trustedIds=${skillsTrusted} (use /skills, /skills status)`,
+    `- workflows: discover=${onOff(context.workflows.enabled)} (use /workflows)`,
+    "Next: type the slash to enter the panel. /features for default policy. /help all for the full command list.",
+  ].join("\n");
 }
 
 function formatFeaturePolicy(context: TuiContext): string {
