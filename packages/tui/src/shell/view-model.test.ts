@@ -3058,6 +3058,41 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.hint).toContain("按 Enter");
   });
 
+  it("setup hint suppressed at every pendingModelSetup.step (apiKey/baseUrl/model/reasoning/auxModel/confirm)", () => {
+    const steps = ["apiKey", "baseUrl", "model", "reasoning", "auxModel", "confirm"] as const;
+    for (const step of steps) {
+      const view = createShellViewModel(
+        createContext({ pendingModelSetup: { step } } as Partial<TuiContext>),
+        { setupNeeded: true, width: 120, viewMode: "task" },
+      );
+      // 配置流程进行中：setupHint 与 taskFooter.hint 都必须为空，
+      // 让 composer 的 step 标签 + step placeholder 成为唯一信源。
+      expect(view.setupHint).toBeUndefined();
+      expect(view.taskFooter?.hint).toBeUndefined();
+    }
+  });
+
+  it("setup hint also suppressed in pending viewMode while a setup step is active", () => {
+    // Ink 提交后第一帧 viewMode='pending'：只要 pendingModelSetup.step 已经存在，
+    // hint 就必须为空，避免旧 hint 与 step 标签同屏闪现。
+    const view = createShellViewModel(
+      createContext({ pendingModelSetup: { step: "baseUrl" } } as Partial<TuiContext>),
+      { setupNeeded: true, width: 120, viewMode: "pending" },
+    );
+    expect(view.setupHint).toBeUndefined();
+    expect(view.taskFooter?.hint).toBeUndefined();
+  });
+
+  it("setup hint re-surfaces after pendingModelSetup is cleared (still setupNeeded)", () => {
+    const view = createShellViewModel(createContext({} as Partial<TuiContext>), {
+      setupNeeded: true,
+      width: 120,
+      viewMode: "task",
+    });
+    expect(view.setupHint).toBeDefined();
+    expect(view.taskFooter?.hint).toBe(view.setupHint);
+  });
+
   it("bare slash '/' surfaces 5 core candidates from getCoreSlashCandidates()", async () => {
     const { getCoreSlashCandidates } = await import("../slash-dispatch.js");
     const candidates = getCoreSlashCandidates();

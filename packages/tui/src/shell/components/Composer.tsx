@@ -1,6 +1,6 @@
 import { Box, type DOMElement, Text, useInput } from "ink";
 import type React from "react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   formatUnknownSlashCommand,
   getCoreSlashCandidates,
@@ -162,6 +162,14 @@ function isWordBoundary(ch: string): boolean {
   return /[\s\p{P}]/u.test(ch);
 }
 
+// 极简 ANSI 去除：识别 CSI / OSC / 单字节 ESC 序列。
+// 不引入新依赖（CCB 用 strip-ansi 包，这里就地实现以保持 LingHun 已有依赖收敛）。
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequences inherently contain control characters.
+const ANSI_STRIP_PATTERN = /\u001B\[[\d;?]*[a-zA-Z]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B./g;
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_STRIP_PATTERN, "");
+}
+
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
@@ -206,8 +214,66 @@ export function historyCurrentText(history: InputHistory): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Composer component
+// Owner-priority dispatcher pure helpers (exported for tests)
 // ---------------------------------------------------------------------------
+
+/**
+ * 判断当前 useInput 事件是否应当走 paste 聚合路径。
+ * - 若 paste 已在 pending 中，且当前事件不是 ctrl/meta/escape/tab，且 input 非空，则继续聚合。
+ * - 若单次 chunk 长度超过阈值（标准 ink@7 fallback），视作粘贴。
+ *
+ * 决策不依赖 React state，单纯由 (input, key, pasteState) 决定，便于单测。
+ */
+export function shouldEnterPastePath(
+  input: string,
+  key: {
+    ctrl?: boolean;
+    meta?: boolean;
+    escape?: boolean;
+    tab?: boolean;
+    return?: boolean;
+  },
+  pastePending: boolean,
+): boolean {
+  if (input.length > PASTE_THRESHOLD) return true;
+  if (
+    pastePending &&
+    input.length > 0 &&
+    !key.ctrl &&
+    !key.meta &&
+    !key.escape &&
+    !key.tab &&
+    !key.return
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 判断双击窗口（Esc / Ctrl+C 二次清空）是否命中。
+ * 命中时视作"清空"动作；未命中视作"提示"动作。
+ */
+export function isDoublePressWithin(
+  lastPressAt: number,
+  now: number,
+  windowMs = DOUBLE_PRESS_WINDOW_MS,
+): boolean {
+  if (lastPressAt <= 0) return false;
+  return now - lastPressAt < windowMs;
+}
+
+/**
+ * Slash hidden 粘性：若文本不再以 "/" 开头，或 head 改变，则取消粘性。
+ */
+export function shouldUnstickSlashHidden(
+  prevHead: string,
+  nextText: string,
+  nextHead: string,
+): boolean {
+  if (!nextText.startsWith("/")) return true;
+  return prevHead !== nextHead;
+}
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "> ";
@@ -222,11 +288,31 @@ const PERMISSION_TEXT_MAP: Record<PermissionActionId, string> = {
   cancel: "cancel",
 };
 
+// ---------------------------------------------------------------------------
+// Owner-priority dispatcher constants
+// ---------------------------------------------------------------------------
+// PASTE_THRESHOLD: 单次 useInput 的 input.length 超过该阈值 → 视作粘贴片段。
+// 标准 ink@7 不暴露 event.keypress.isPasted（CCB 用的是 @anthropic 私有 fork），
+// 所以只能通过 chunk 大小 + 100ms 聚合窗口降级识别 bracketed paste。
+const PASTE_THRESHOLD = 16;
+const PASTE_COMPLETION_TIMEOUT_MS = 100;
+// DOUBLE_PRESS_WINDOW_MS: 双击 Esc / Ctrl+C 的有效窗口（CCB ~1s）。
+const DOUBLE_PRESS_WINDOW_MS = 1000;
+const HINT_NOTICE_DECAY_MS = 1500;
+
 export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
   const [slashSelection, setSlashSelection] = useState(0);
+  const [slashHidden, setSlashHidden] = useState(false);
   const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("yes");
+  const [hintNotice, setHintNotice] = useState<string | undefined>(undefined);
   const historyRef = useRef<InputHistory>(createInputHistory());
+  const pasteChunksRef = useRef<string[]>([]);
+  const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pastePendingRef = useRef(false);
+  const lastEscAtRef = useRef(0);
+  const lastCtrlCAtRef = useRef(0);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxWidth = composerMaxWidth(view.width);
   const noColor = view.themeMode === "no-color";
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
@@ -241,6 +327,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 
   const text = bufferToString(buffer);
+  const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
   // Slash candidates surface in two cases:
   //   1. Bare "/" — show the core 5 entries as a soft onboarding affordance.
   //   2. "/<prefix>" with at least one non-slash char — prefix-match candidates.
@@ -254,9 +341,22 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     text !== "/?";
   const slashCandidates = useMemo(() => {
     if (isBareSlash) return getCoreSlashCandidates();
-    if (isSingleLineSlash) return getSlashPrefixCandidates(slashHead(text));
+    if (isSingleLineSlash) return getSlashPrefixCandidates(slashHeadCurrent);
     return [];
-  }, [isBareSlash, isSingleLineSlash, text]);
+  }, [isBareSlash, isSingleLineSlash, slashHeadCurrent]);
+  // slashHidden 在 head 不再以 "/" 开头时强制还原。head 改变（"/m" → "/me"）也还原。
+  const lastSlashHeadRef = useRef(slashHeadCurrent);
+  useEffect(() => {
+    if (!text.startsWith("/")) {
+      if (slashHidden) setSlashHidden(false);
+      lastSlashHeadRef.current = slashHeadCurrent;
+      return;
+    }
+    if (lastSlashHeadRef.current !== slashHeadCurrent) {
+      if (slashHidden) setSlashHidden(false);
+      lastSlashHeadRef.current = slashHeadCurrent;
+    }
+  }, [text, slashHeadCurrent, slashHidden]);
   const slashSelectionClamped =
     slashCandidates.length === 0
       ? 0
@@ -283,20 +383,79 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     [onInput],
   );
 
+  // 提示通知（Esc again to clear / Ctrl+C again to clear）
+  const showHintNotice = useCallback((notice: string) => {
+    setHintNotice(notice);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => {
+      setHintNotice(undefined);
+      hintTimerRef.current = null;
+    }, HINT_NOTICE_DECAY_MS);
+  }, []);
+
+  const clearHintNotice = useCallback(() => {
+    if (hintTimerRef.current) {
+      clearTimeout(hintTimerRef.current);
+      hintTimerRef.current = null;
+    }
+    setHintNotice(undefined);
+  }, []);
+
+  // Paste 聚合：100ms 内连续到达的大 chunk 合并为一次 buffer 插入。
+  // 提交 Enter 在 pending 期间被吞，避免多行粘贴尾部 \r 触发误提交。
+  const flushPaste = useCallback(() => {
+    const chunks = pasteChunksRef.current;
+    pasteChunksRef.current = [];
+    if (pasteTimerRef.current) {
+      clearTimeout(pasteTimerRef.current);
+      pasteTimerRef.current = null;
+    }
+    pastePendingRef.current = false;
+    if (chunks.length === 0) return;
+    const joined = stripAnsi(chunks.join("")).replace(/\r\n?/g, "\n");
+    if (!joined) return;
+    setBuffer((prev) => bufferInsert(prev, joined));
+    setSlashSelection(0);
+  }, []);
+
+  const cancelPaste = useCallback(() => {
+    pasteChunksRef.current = [];
+    if (pasteTimerRef.current) {
+      clearTimeout(pasteTimerRef.current);
+      pasteTimerRef.current = null;
+    }
+    pastePendingRef.current = false;
+  }, []);
+
+  const enqueuePasteChunk = useCallback(
+    (chunk: string) => {
+      pasteChunksRef.current.push(chunk);
+      pastePendingRef.current = true;
+      if (pasteTimerRef.current) clearTimeout(pasteTimerRef.current);
+      pasteTimerRef.current = setTimeout(flushPaste, PASTE_COMPLETION_TIMEOUT_MS);
+    },
+    [flushPaste],
+  );
+
+  // 卸载时清理所有 timer，避免内存泄漏。
+  useEffect(() => {
+    return () => {
+      if (pasteTimerRef.current) clearTimeout(pasteTimerRef.current);
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
+  }, []);
+
   useInput((input, key) => {
-    // ─── Permission selector mode ─────────────────────────────────────────
+    // ─── 1. Permission selector mode（最高优先级）────────────────────────
     if (permissionActive) {
-      // Esc cancels the prompt regardless of focus.
       if (key.escape) {
         submitPermissionAction("cancel");
         return;
       }
-      // Enter confirms the currently focused action.
       if (key.return) {
         submitPermissionAction(permissionFocus);
         return;
       }
-      // Tab / arrows cycle the focus.
       if (key.tab && !key.shift) {
         setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
         return;
@@ -313,9 +472,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         setPermissionFocus(cyclePermissionFocus(permissionActions, permissionFocus, 1));
         return;
       }
-      // Single-letter shortcuts. We accept ONLY when the keystroke is a single
-      // character matching y/n/d (case-insensitive) and no modifiers are held.
-      // This avoids the "the user typed a sentence starting with y" trap.
       if (!key.ctrl && !key.meta && input && input.length === 1) {
         const lower = input.toLowerCase();
         if (lower === "y") {
@@ -331,23 +487,50 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
       }
-      // All other keys are intentionally swallowed: we do NOT mutate the edit
-      // buffer while a permission card is on screen, to avoid "ordinary text
-      // submitted as approval" mistakes.
+      // 其他按键吞掉，避免 buffer 被污染。
       return;
     }
 
-    // ─── Normal composer mode ─────────────────────────────────────────────
-    // Submit: Enter (without shift)
+    // ─── 2. Paste 聚合（次高优先级）────────────────────────────────────
+    // pending 期间 Enter 被吞掉（CCB BaseTextInput 的 paste-blocks-Enter 模式）。
+    // pending 期间 Esc 主动取消粘贴。
+    if (pastePendingRef.current && key.return) {
+      // 把剩余 chunk 一并 flush 但不提交。
+      enqueuePasteChunk("");
+      return;
+    }
+    if (pastePendingRef.current && key.escape) {
+      cancelPaste();
+      return;
+    }
+    // 大 chunk 或已在 pending 期内的任意输入 → 进 paste 路径（不识别为按键）。
+    const looksLikePasteChunk =
+      input.length > PASTE_THRESHOLD ||
+      (pastePendingRef.current &&
+        input.length > 0 &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.escape &&
+        !key.tab);
+    if (looksLikePasteChunk) {
+      enqueuePasteChunk(input);
+      return;
+    }
+
+    // ─── 3. Slash candidates（仅在可见时拦截 ↑↓ Tab Esc Enter）─────────
+    const slashVisible = slashCandidates.length > 0 && !slashHidden;
+
+    // ─── Submit: Enter（无 shift）─────────────────────────────────────
     if (key.return && !key.shift) {
-      // If a slash candidate is highlighted and the user has only typed the
-      // slash prefix (no args yet), accept the candidate first then submit.
-      if (slashCandidates.length > 0 && slashSelection >= 0 && !text.includes(" ")) {
+      // slash 可见且光标只在 head 上 → 接受候选再提交。
+      if (slashVisible && slashSelection >= 0 && !text.includes(" ")) {
         const picked = slashCandidates[slashSelectionClamped];
         if (picked && picked.slash !== text) {
           const submitText = picked.slash;
           historyRef.current = historyAdd(historyRef.current, submitText);
           resetBuffer();
+          setSlashHidden(false);
+          clearHintNotice();
           void onInput({ type: "submit", text: submitText });
           return;
         }
@@ -355,6 +538,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       const submitText = text.trim();
       historyRef.current = historyAdd(historyRef.current, text);
       resetBuffer();
+      setSlashHidden(false);
+      clearHintNotice();
       void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
       return;
     }
@@ -365,54 +550,64 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // Tab — accept the highlighted slash candidate. If the user has already
-    // typed args (a space after the slash), Tab only completes the slash head
-    // and preserves the args, keeping intent intact.
+    // Tab — 接受 slash 候选 head（保留 args）。
     if (key.tab && !key.shift) {
-      if (slashCandidates.length > 0 && slashSelection >= 0) {
+      if (slashVisible && slashSelection >= 0) {
         const picked = slashCandidates[slashSelectionClamped];
         if (picked) {
           const spaceIndex = text.indexOf(" ");
           const args = spaceIndex >= 0 ? text.slice(spaceIndex) : "";
           const next = args ? `${picked.slash}${args}` : `${picked.slash} `;
           resetBuffer(next);
+          setSlashHidden(false);
           return;
         }
       }
       return;
     }
 
-    // Shift+Tab — cycle the permission mode in both Home and Task. Reuses the
-    // existing handleTuiKeypress("shift-tab", ...) chain via a new shell event,
-    // so the dispatch path is identical to the plain TUI's onShiftTab handler.
+    // Shift+Tab — 切换 permission mode。
     if (key.tab && key.shift) {
       void onInput({ type: "cycle-permission-mode" });
       return;
     }
 
-    // Escape — when slash candidates are visible, hide them by clearing
-    // selection (buffer keeps its text). Otherwise propagate as a shell escape.
+    // Escape — 分层归属：slash 可见 → 仅隐藏；buffer 非空 → 双击清空；空 → 上抛 escape。
     if (key.escape) {
-      if (slashCandidates.length > 0 && slashSelection >= 0) {
+      if (slashVisible && slashSelection >= 0) {
+        setSlashHidden(true);
         setSlashSelection(-1);
         return;
       }
-      resetBuffer();
+      if (text.length > 0) {
+        const now = Date.now();
+        if (now - lastEscAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
+          lastEscAtRef.current = 0;
+          resetBuffer();
+          clearHintNotice();
+          return;
+        }
+        lastEscAtRef.current = now;
+        showHintNotice(view.language === "en-US" ? "Esc again to clear" : "再按 Esc 清空输入");
+        return;
+      }
+      // 空 buffer → 走上层 escape 链路（既有交互行为）。
+      clearHintNotice();
       void onInput({ type: "escape" });
       return;
     }
 
-    // Navigation: arrow keys
-    if (key.leftArrow) {
-      if (key.ctrl || key.meta) {
+    // Navigation: arrow keys / Ctrl+B/F
+    if (key.leftArrow || (key.ctrl && input === "b")) {
+      if ((key.ctrl && key.leftArrow) || key.meta) {
         setBufferAndResetSelection(bufferWordLeft(buffer));
       } else {
         setBufferAndResetSelection(bufferMoveLeft(buffer));
       }
       return;
     }
-    if (key.rightArrow) {
-      if (key.ctrl || key.meta) {
+    if (key.rightArrow || (key.ctrl && input === "f")) {
+      if ((key.ctrl && key.rightArrow) || key.meta) {
         setBufferAndResetSelection(bufferWordRight(buffer));
       } else {
         setBufferAndResetSelection(bufferMoveRight(buffer));
@@ -420,9 +615,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // Up / Down — slash list takes priority only when visible.
+    // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
     if (key.upArrow) {
-      if (slashCandidates.length > 0 && slashSelection >= 0) {
+      if (slashVisible && slashSelection >= 0) {
         setSlashSelection((current) => {
           const safe = current < 0 ? 0 : current;
           return safe === 0 ? slashCandidates.length - 1 : safe - 1;
@@ -443,7 +638,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
     if (key.downArrow) {
-      if (slashCandidates.length > 0 && slashSelection >= 0) {
+      if (slashVisible && slashSelection >= 0) {
         setSlashSelection((current) => {
           const safe = current < 0 ? 0 : current;
           return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
@@ -487,30 +682,59 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       return;
     }
 
-    // Ctrl+U: clear line
+    // Ctrl+U / Ctrl+K / Ctrl+W
     if (key.ctrl && input === "u") {
       setBufferAndResetSelection(bufferClearLine(buffer));
       return;
     }
-
-    // Ctrl+K: kill to end
     if (key.ctrl && input === "k") {
       setBufferAndResetSelection(bufferKillToEnd(buffer));
       return;
     }
-
-    // Ctrl+W: delete word left
     if (key.ctrl && input === "w") {
       setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
       return;
     }
 
-    // Ignore other ctrl/meta sequences
+    // Ctrl+C — 不是复制（复制走终端选区 / Ctrl+Shift+C）。
+    //  - buffer 非空：第一次显示提示；窗口内第二次清空 buffer。不走上层 escape。
+    //  - buffer 空 + 请求运行中：走既有 escape/interrupt 链路。
+    //  - buffer 空 + 空闲：交既有上层链路（exit 由控制器决定）。
+    if (key.ctrl && input === "c") {
+      if (text.length > 0) {
+        const now = Date.now();
+        if (now - lastCtrlCAtRef.current < DOUBLE_PRESS_WINDOW_MS) {
+          lastCtrlCAtRef.current = 0;
+          resetBuffer();
+          clearHintNotice();
+          return;
+        }
+        lastCtrlCAtRef.current = now;
+        showHintNotice(
+          view.language === "en-US" ? "Ctrl+C again to clear" : "再按 Ctrl+C 清空输入",
+        );
+        return;
+      }
+      clearHintNotice();
+      void onInput({ type: "escape" });
+      return;
+    }
+
+    // Ctrl+V — 终端 host 通常拦截系统粘贴；这里不写入 "v"。
+    // 真实粘贴会进 paste 路径（looksLikePasteChunk 已处理）。
+    if (key.ctrl && input === "v") {
+      return;
+    }
+
+    // 其他 ctrl/meta 不处理
     if (key.ctrl || key.meta) return;
 
-    // Regular character input — ignore raw CR/LF (handled by return above)
+    // 普通字符输入：去掉 ANSI、\r → \n（处理终端粘贴 SSH coalesce）。
     if (input && input !== "\r" && input !== "\n") {
-      setBufferAndResetSelection(bufferInsert(buffer, input));
+      const sanitized = stripAnsi(input).replace(/\r\n?/g, "\n");
+      if (sanitized) {
+        setBufferAndResetSelection(bufferInsert(buffer, sanitized));
+      }
     }
   });
 
@@ -551,7 +775,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const placeholderColor = noColor ? undefined : "gray";
   const color = text ? undefined : placeholderColor;
 
-  const showSuggestions = !permissionActive && slashCandidates.length > 0 && slashSelection >= 0;
+  const showSuggestions =
+    !permissionActive && slashCandidates.length > 0 && slashSelection >= 0 && !slashHidden;
 
   // Unknown slash hint: only after the user pressed Enter with an unknown
   // command. The composer no longer pesters the user mid-typing.
@@ -613,6 +838,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           {fitText(formatUnknownSlashCommand(text, view.language), maxWidth)}
         </Text>
       ) : null}
+      {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, maxWidth)}</Text> : null}
     </Box>
   );
 }
