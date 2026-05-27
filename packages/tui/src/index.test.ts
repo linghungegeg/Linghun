@@ -598,7 +598,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Linghun TUI / REPL");
     expect(output.text).toContain("项目 linghun-tui-project-");
     expect(output.text).toContain("模型 deepseek-v4-flash");
-    expect(output.text).toContain("模式 风险确认");
+    expect(output.text).toContain("模式 默认模式");
     expect(output.text).toContain("可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。");
     expect(output.text).toContain("需要精确命令时，用 /help 查看。");
     expect(output.text).not.toContain("Phase 14 TUI / REPL");
@@ -670,7 +670,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
     );
-    expect(output.text).toContain("模式 风险确认");
+    expect(output.text).toContain("模式 默认模式");
     expect(output.text).not.toContain("¥--");
     expect(output.text).toContain(session.id);
   });
@@ -6944,15 +6944,25 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand("/tab", context, output);
-    expect(context.permissionMode).toBe("auto-review");
-    await handleSlashCommand("/tab", context, output);
-    expect(context.permissionMode).toBe("plan");
-    await handleSlashCommand("/tab", context, output);
-    expect(context.permissionMode).toBe("default");
+    // D13E-P3: Shift+Tab cycles 4 canonical modes; full-access still requires
+    // local opt-in (LINGHUN_ENABLE_FULL_ACCESS=1) AND planAccepted when leaving
+    // plan mode. Without those guards full-access is silently denied.
+    process.env.LINGHUN_ENABLE_FULL_ACCESS = "1";
+    try {
+      await handleSlashCommand("/tab", context, output);
+      expect(context.permissionMode).toBe("auto-review");
+      await handleSlashCommand("/tab", context, output);
+      expect(context.permissionMode).toBe("plan");
+      context.planAccepted = true;
+      await handleSlashCommand("/tab", context, output);
+      expect(context.permissionMode).toBe("full-access");
+      await handleSlashCommand("/tab", context, output);
+      expect(context.permissionMode).toBe("default");
+    } finally {
+      delete process.env.LINGHUN_ENABLE_FULL_ACCESS;
+    }
     expect(output.text).not.toContain("acceptEdits");
     expect(output.text).not.toContain("dontAsk");
-    expect(output.text).not.toContain("bypass");
   });
 
   it("gates full-access aliases before local opt-in", async () => {
@@ -11273,183 +11283,5 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     await handleSlashCommand("/details", context, out2);
     expect(out2.text).toContain("endpointPath=/v1/messages");
     expect(context.lastFullOutput).toBe(original);
-  });
-});
-
-// LINGHUN_TUI_PIPELINE_TRACE — 用于诊断"普通自然语言为什么没走到 gateway.stream"
-// 这条 P0。普通对话经 processTuiLine → handleNaturalInput("message") 后必须走到
-// sendMessage；sendMessage 入口本身的 4 个 provider-front guard
-// （resource / cooldown / evidence / budget）若被触发，应在 trace 中有清晰原因。
-//
-// 这两个测试用 LINGHUN_TUI_PIPELINE_TRACE=1 让 trace 同时写入 stderr 和 session
-// system_event。早期节点（processTuiLine / handleNaturalInput / sendMessage 入口）
-// 在 sessionId 落盘前只能落到 stderr；后期节点（guard=none / gateway.stream）
-// 才能写到 transcript。两路合并起来正好覆盖完整链路。
-describe("LINGHUN_TUI_PIPELINE_TRACE — pipeline diagnostics", () => {
-  it("普通对话从 handleNaturalInput 放行后，sendMessage 至少跑到 'guard=none' / 'gateway.stream before' 节点", async () => {
-    vi.stubEnv("LINGHUN_TUI_PIPELINE_TRACE", "1");
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "trace-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test-trace",
-            model: "trace-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const output = new MemoryOutput();
-    // tracePipelineEvent 写入 Node 全局 process.stderr（不是 runTui 的 stderr 选项），
-    // 因为早期节点 sessionId 还没落盘时，唯一可观测通道就是 stderr。这里劫持
-    // process.stderr.write 收集 [linghun-tui-pipeline] 行，配合 transcript 拼出全链路。
-    const stderrCaptured: string[] = [];
-    const originalStderrWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: Buffer | string) => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (text.includes("[linghun-tui-pipeline] ")) {
-        stderrCaptured.push(text);
-      }
-      return true;
-    }) as typeof process.stderr.write;
-    // mockOpenAiTextFetch 会返回一条 done 文本响应；此处只验证 trace 走到了
-    // gateway.stream before / done 节点，不验证模型回答内容。
-    mockOpenAiTextFetch("连接成功");
-
-    try {
-      await runTui({
-        projectPath: project,
-        stdin: Readable.from(["你好，只回复：连接成功\n", "/exit\n"]),
-        stdout: output,
-        stderr: new MemoryOutput(),
-      });
-    } finally {
-      process.stderr.write = originalStderrWrite;
-    }
-
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    // 后期节点（sessionId 已落盘后）会出现在 transcript 的 system_event 里。
-    const transcriptLines = transcript
-      .filter(
-        (event): event is Extract<typeof event, { type: "system_event" }> =>
-          event.type === "system_event" && event.message.startsWith("pipeline_trace "),
-      )
-      .map((event) => event.message);
-    // 早期节点（processTuiLine / handleNaturalInput / sendMessage 入口）的 sessionId
-    // 还是 undefined，只会写到 stderr `[linghun-tui-pipeline] ` 前缀行；这里把两路
-    // 合并成一个完整链路再做断言。
-    const stderrLines = stderrCaptured
-      .join("")
-      .split(/\r?\n/u)
-      .filter((line) => line.startsWith("[linghun-tui-pipeline] "))
-      .map((line) => line.replace(/^\[linghun-tui-pipeline\] /u, "pipeline_trace "));
-    const allTrace = [...stderrLines, ...transcriptLines];
-
-    // 必经节点：handleNaturalInput → message（passThrough），然后 sendMessage entered，
-    // 再到 guard=none、gateway.stream before。中间任何一处缺失就说明被某个 guard
-    // 静默截走，trace 会在断言失败时直接告诉我们到哪一步停了。
-    expect(allTrace.some((m) => m.includes("handleNaturalInput result=message"))).toBe(true);
-    expect(allTrace.some((m) => m.includes("sendMessage entered=yes"))).toBe(true);
-    expect(allTrace.some((m) => m.includes("sendMessage guard=none"))).toBe(true);
-    expect(
-      allTrace.some(
-        (m) => m.includes("gateway.stream before") && m.includes("provider=openai-compatible"),
-      ),
-    ).toBe(true);
-    // trace 入口字段必须脱敏，不能把原始 sk- key 写进 trace（无论 stderr 还是 session）。
-    expect(allTrace.every((m) => !m.includes("sk-test-trace"))).toBe(true);
-  });
-
-  it("sendMessage 各 provider-front guard 触发时，trace 写出明确 reason", async () => {
-    vi.stubEnv("LINGHUN_TUI_PIPELINE_TRACE", "1");
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "trace-error-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test-trace-err",
-            model: "trace-error-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    // 让 fetch 直接返回 429（rate-limit），第一条普通对话会以
-    // gateway.stream error 收尾，trace 必须写出 "gateway.stream error code=..."；
-    // 这条 trace 对应"被 provider-front 接住但出现错误"的诊断分支，与 cooldown /
-    // resource / evidence / budget 共用同一个 redact + appendSystemEvent 通路。
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("rate limit", { status: 429 })),
-    );
-
-    const output = new MemoryOutput();
-    // tracePipelineEvent 写入 Node 全局 process.stderr，不是 runTui 的 stderr 选项。
-    // 这里劫持 process.stderr.write 收集 [linghun-tui-pipeline] 行。
-    const stderrCaptured: string[] = [];
-    const originalStderrWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: Buffer | string) => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (text.includes("[linghun-tui-pipeline] ")) {
-        stderrCaptured.push(text);
-      }
-      return true;
-    }) as typeof process.stderr.write;
-
-    try {
-      await runTui({
-        projectPath: project,
-        stdin: Readable.from(["你好，只回复:连接成功\n", "/exit\n"]),
-        stdout: output,
-        stderr: new MemoryOutput(),
-      });
-    } finally {
-      process.stderr.write = originalStderrWrite;
-    }
-
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    const transcriptLines = transcript
-      .filter(
-        (event): event is Extract<typeof event, { type: "system_event" }> =>
-          event.type === "system_event" && event.message.startsWith("pipeline_trace "),
-      )
-      .map((event) => event.message);
-    const stderrLines = stderrCaptured
-      .join("")
-      .split(/\r?\n/u)
-      .filter((line) => line.startsWith("[linghun-tui-pipeline] "))
-      .map((line) => line.replace(/^\[linghun-tui-pipeline\] /u, "pipeline_trace "));
-    const allTrace = [...stderrLines, ...transcriptLines];
-
-    // 必经节点：sendMessage entered=yes、guard=none、gateway.stream before；
-    // 然后 stream error 节点必须写出错误 code，方便用户从 trace 直接看出
-    // "走到了 provider，但 provider 拒绝了"。
-    expect(allTrace.some((m) => m.includes("sendMessage entered=yes"))).toBe(true);
-    expect(allTrace.some((m) => m.includes("sendMessage guard=none"))).toBe(true);
-    expect(
-      allTrace.some((m) => m.includes("gateway.stream before") && m.includes("provider=")),
-    ).toBe(true);
-    expect(
-      allTrace.some((m) => m.startsWith("pipeline_trace gateway.stream error code=")),
-    ).toBe(true);
-    // 仍然不能泄漏 sk- key（无论 stderr 还是 session）。
-    expect(allTrace.every((m) => !m.includes("sk-test-trace-err"))).toBe(true);
   });
 });

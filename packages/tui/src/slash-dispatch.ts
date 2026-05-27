@@ -34,6 +34,8 @@ export const DEFAULT_HELP_SLASHES = [
   "/doctor",
   "/problems",
   "/help",
+  "/memory",
+  "/index",
   "/exit",
 ] as const;
 
@@ -102,9 +104,20 @@ export function formatCatalogHelp(
   language: Language,
   mode: PermissionMode = "default",
   showAll = false,
+  variant: "short" | "all" | "advanced" | "details" = "short",
 ): string {
-  if (showAll) {
+  // D13E-P3: differentiate /help all vs /help advanced vs /help details so the
+  // short core list isn't the only branch. `showAll` is preserved for the old
+  // boolean call-site (treated as "all"). `variant` is the canonical knob.
+  const effective: "short" | "all" | "advanced" | "details" = showAll ? "all" : variant;
+  if (effective === "all") {
     return formatHelp(language);
+  }
+  if (effective === "advanced") {
+    return formatHelpAdvanced(language);
+  }
+  if (effective === "details") {
+    return formatHelpDetails(language);
   }
   const lines =
     language === "en-US"
@@ -386,6 +399,145 @@ function boundedEditDistance(a: string, b: string, maxDistance: number): number 
     previous = current;
   }
   return previous[b.length] ?? maxDistance + 1;
+}
+
+function formatHelpAdvanced(language: Language): string {
+  // D13E-P3 /help advanced: surface advanced / recovery / diagnostic / agent /
+  // job / provider / index / mcp / plugin / skill / workflow entries without
+  // the noise of basic CRUD slashes that already live in /help short.
+  if (language === "en-US") {
+    return [
+      "Advanced commands:",
+      "  /model setup          Configure provider, key, model, reasoning",
+      "  /model route          Show role-based model routes",
+      "  /model route doctor   Diagnose role provider/model/capability/budget",
+      "  /model route set <role> <model>  Set one role route",
+      "  /permissions          Show permission rules",
+      "  /memory               Show memory and handoff status",
+      "  /memory review        Review candidate memories before accepting",
+      "  /memory learn [on|off|status]  Toggle auto-learning",
+      "  /mcp                  Show MCP server status",
+      "  /mcp doctor           Diagnose MCP server availability",
+      "  /skills               List local skills metadata",
+      "  /plugins              List local plugin manifests",
+      "  /workflows            List workflow templates",
+      "  /index status         Show fast codebase-memory status",
+      "  /index doctor         Diagnose bundled/managed codebase-memory",
+      "  /index check          Run explicit freshness check",
+      "  /background           Show background task summaries",
+      "  /job                  Manage local durable jobs",
+      "  /agents               List agent status, transcripts, usage",
+      "  /agents show <id>     Show one agent detail",
+      "  /agents cancel <id>   Interrupt one agent",
+      "  /fork <type> <task>   Start explorer/planner/verifier/worker",
+      "  /rewind               List checkpoints",
+      "  /verify [plan|last|smoke]  Generate or run verification",
+      "  /compact              Compact long conversation context",
+      "  /trust                Show or change workspace trust",
+      "  /remote               Manage remote sessions",
+      "  /config               Consolidated configuration overview",
+      "Use /help all for the full command list, /help details for debug entries.",
+    ].join("\n");
+  }
+  return [
+    "高级命令：",
+    "  /model setup          配置 provider、key、模型与推理等级",
+    "  /model route          查看角色模型路由",
+    "  /model route doctor   诊断角色 provider/model/capability/budget",
+    "  /model route set <role> <model>  设置单角色路由",
+    "  /permissions          查看权限规则",
+    "  /memory               查看记忆与 handoff 状态",
+    "  /memory review        审查候选记忆",
+    "  /memory learn [on|off|status]  开关自动学习",
+    "  /mcp                  查看 MCP 状态",
+    "  /mcp doctor           诊断 MCP server 可用性",
+    "  /skills               列出本地 skill metadata",
+    "  /plugins              列出本地 plugin manifest",
+    "  /workflows            列出 workflow 模板",
+    "  /index status         查看 fast 索引状态",
+    "  /index doctor         诊断 bundled/managed 索引 runtime",
+    "  /index check          显式运行 detect_changes",
+    "  /background           查看后台任务摘要",
+    "  /job                  管理本地 durable job",
+    "  /agents               查看 agent 状态、transcript、usage",
+    "  /agents show <id>     查看单个 agent 详情",
+    "  /agents cancel <id>   中断单个 agent",
+    "  /fork <类型> <任务>    派生 explorer/planner/verifier/worker",
+    "  /rewind               列出 checkpoint",
+    "  /verify [plan|last|smoke]  生成或运行验证",
+    "  /compact              压缩长对话上下文",
+    "  /trust                查看或更改工作区信任",
+    "  /remote               管理远程会话",
+    "  /config               统一配置面板",
+    "使用 /help all 查看完整命令表；/help details 查看调试入口。",
+  ].join("\n");
+}
+
+function formatHelpDetails(language: Language): string {
+  // D13E-P3 /help details: details / debug entries that aren't surfaced in the
+  // short core list or the advanced view. Kept small so the output is scannable.
+  if (language === "en-US") {
+    return [
+      "Details and debug commands:",
+      "  /details              Show evidence/background/details summary (Ctrl+O equivalent)",
+      "  /diff                 Show changed file summary",
+      "  /todo                 Show tasks",
+      "  /todo add <text>      Add a task",
+      "  /todo start|done|block <id>  Update task state",
+      "  /usage                Show token/cache usage summary",
+      "  /stats                Show local cache/cost statistics",
+      "  /stats endpoints      Group usage by endpoint",
+      "  /cache status         Show cache status and freshness",
+      "  /cache-log            Show recent cache usage records",
+      "  /break-cache status   Show cache freshness changes",
+      "  /sessions             List sessions",
+      "  /sessions resume <id> Resume a session via structured handoff",
+      "  /resume [id]          Resume latest session without full transcript",
+      "  /branch [purpose]     Create a branch session from handoff",
+      "  /problems             Show local Problems Lite summary",
+      "  /doctor               Show terminal readiness checklist",
+      "  /doctor project       Project Doctor sections",
+      "  /doctor hooks         Diagnose hook sources/events/timeouts",
+      "  /doctor runner        Diagnose native runner resolver",
+      "  /interrupt            Mark current background task cancelled",
+      "  /claim-check <claim>  Downgrade unsupported final claims",
+      "  /btw <question>       Insert a temporary question",
+      "  /review               Review diff, risks, evidence",
+      "  /vision <path>        Record VisionObservation evidence",
+      "  /image generate <prompt>  Generate image asset metadata",
+      "Use /help all for the full command list, /help advanced for advanced.",
+    ].join("\n");
+  }
+  return [
+    "详情与调试命令：",
+    "  /details              查看 evidence/background/details 摘要（等价 Ctrl+O）",
+    "  /diff                 查看本轮工具改动摘要",
+    "  /todo                 查看任务",
+    "  /todo add <text>      添加任务",
+    "  /todo start|done|block <id>  更新任务状态",
+    "  /usage                查看 token/cache usage 汇总",
+    "  /stats                查看本地 cache/cost 统计",
+    "  /stats endpoints      按 endpoint 聚合 usage",
+    "  /cache status         查看 cache 状态与 freshness",
+    "  /cache-log            查看最近 cache usage 记录",
+    "  /break-cache status   查看 cache freshness 变化",
+    "  /sessions             列出会话",
+    "  /sessions resume <id> 基于结构化 handoff 恢复会话",
+    "  /resume [id]          恢复最近会话，不注入完整历史",
+    "  /branch [目的]        基于 handoff 创建分支会话",
+    "  /problems             查看 Problems Lite 摘要",
+    "  /doctor               查看就绪 checklist",
+    "  /doctor project       Project Doctor 小节",
+    "  /doctor hooks         诊断 hook 来源/事件/超时",
+    "  /doctor runner        诊断 native runner 解析器",
+    "  /interrupt            标记当前后台任务取消",
+    "  /claim-check <claim>  降级缺少证据的结论",
+    "  /btw <question>       插入临时问题",
+    "  /review               审查 diff/风险/证据",
+    "  /vision <path>        记录 VisionObservation evidence",
+    "  /image generate <prompt>  生成图片资产 metadata",
+    "使用 /help all 查看完整命令表；/help advanced 查看高级入口。",
+  ].join("\n");
 }
 
 function formatHelp(language: Language): string {

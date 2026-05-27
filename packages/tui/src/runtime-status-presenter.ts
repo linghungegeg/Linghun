@@ -41,18 +41,18 @@ export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Langu
 export function formatPermissionModeLabel(mode: PermissionMode, language: Language): string {
   if (language === "en-US") {
     const labels: Record<PermissionMode, string> = {
-      default: "confirm risky",
-      "auto-review": "review edits",
-      plan: "plan only",
-      "full-access": "local opt-in",
+      default: "default mode",
+      "auto-review": "auto mode",
+      plan: "plan mode",
+      "full-access": "bypass approvals",
     };
     return labels[mode] ?? mode;
   }
   const labels: Record<PermissionMode, string> = {
-    default: "风险确认",
-    "auto-review": "低风险顺滑",
-    plan: "只规划",
-    "full-access": "本地放宽",
+    default: "默认模式",
+    "auto-review": "自动模式",
+    plan: "计划模式",
+    "full-access": "跳过审批",
   };
   return labels[mode] ?? mode;
 }

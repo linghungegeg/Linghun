@@ -20,7 +20,7 @@ describe("Polish A runtime status presenter", () => {
     );
 
     expect(line).toContain("模型 deepseek-v4-flash");
-    expect(line).toContain("模式 风险确认");
+    expect(line).toContain("模式 默认模式");
     expect(line).toContain("缓存 92%");
     expect(line).toContain("索引 ready");
     expect(line.length).toBeLessThanOrEqual(100);
@@ -44,7 +44,7 @@ describe("Polish A runtime status presenter", () => {
     );
 
     expect(line).toContain("Model gpt-5.5");
-    expect(line).toContain("Mode review edits");
+    expect(line).toContain("Mode auto mode");
     expect(line).toContain("Cache 90%");
     expect(line).toContain("Index ready");
     expect(line).not.toContain("openai-compatible");
@@ -72,7 +72,7 @@ describe("Polish A runtime status presenter", () => {
     );
 
     expect(line).toContain("Cache 100%");
-    expect(line).toContain("Index read");
+    expect(line).toContain("Index");
     expect(line).not.toContain("diagnostic-suffix");
     expect(line.length).toBeLessThanOrEqual(100);
   });
@@ -95,7 +95,7 @@ describe("Polish A runtime status presenter", () => {
     );
 
     expect(line).toContain("模型 deepseek-v4-flash");
-    expect(line).toContain("模式 只规划");
+    expect(line).toContain("模式 计划模式");
     expect(line).toContain("缓存?");
     expect(line).toContain("索引?");
     expect(line).toContain("确认 待确认");

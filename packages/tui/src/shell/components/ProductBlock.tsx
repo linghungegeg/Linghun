@@ -61,9 +61,11 @@ export function ProductBlock({
       paddingX={emphasized ? 1 : 0}
       marginBottom={1}
     >
-      <Text color={theme.status[block.status]}>
-        {getStatusMarker(block.status, theme.mode === "no-color")} {block.title}
-      </Text>
+      {block.title ? (
+        <Text color={theme.status[block.status]}>
+          {getStatusMarker(block.status, theme.mode === "no-color")} {block.title}
+        </Text>
+      ) : null}
       <Text>{block.summary}</Text>
       {block.detail ? (
         <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text>

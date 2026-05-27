@@ -820,6 +820,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
+      // D13E-P3 Ctrl+O — 查看完整内容：直接派 /details，让 transcript 上的
+      // hint「Ctrl+O 查看完整内容 / Ctrl+O for details」与按键真正联动。
+      // 不写 buffer，不影响当前编辑状态；slash 路径与用户手敲 /details 一致。
+      if (key.ctrl && input === "o") {
+        clearHintNotice();
+        void onInput({ type: "submit", text: "/details" });
+        return;
+      }
+
       // 其他 ctrl/meta 不处理
       if (key.ctrl || key.meta) return;
 
@@ -870,13 +879,17 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // 80-col centered composer.
   // Truncation indicator rows have been removed (cursor-centered viewport
   // already conveys overflow), so cursorRow is used as-is without an offset.
+  // D13E-P3: drop the Task-mode inline reverse-video cursor. Both Home and
+  // Task modes route the native cursor through useAnchoredCursor — yoga
+  // parent-chain accumulation has stabilized on Win10 conhost since the
+  // shell band layout settled, and the inline cursor produced flicker on
+  // multi-line buffers. Permission flow still hides the native cursor (null
+  // branch) so the permission action row owns visible focus.
   void truncatedAbove;
   void truncatedBelow;
-  const isTaskMode = view.viewMode === "task" || view.viewMode === "pending";
-  const useInlineCursor = isTaskMode && !permissionActive;
   const declaredRow = cursorRow;
   useAnchoredCursor(
-    permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },
+    permissionActive ? null : { row: declaredRow, col: cursorCol },
     anchorRef,
     capability,
   );
@@ -919,16 +932,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
         {lines.map((line, index) => {
-          if (useInlineCursor && index === cursorRow) {
-            const segs = splitLineAtDisplayCol(line, cursorCol);
-            return (
-              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-                {segs.before}
-                <Text inverse>{segs.cursorChar}</Text>
-                {segs.after}
-              </Text>
-            );
-          }
+          // D13E-P3: single-branch render — no inline reverse-video cursor.
+          // useAnchoredCursor positions the native terminal cursor at
+          // (cursorRow, cursorCol) for both Home and Task modes.
+          void index;
           return (
             <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
               {fitText(line, maxWidth)}

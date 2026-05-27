@@ -67,9 +67,9 @@ const shellText = {
     latestOutputTitle: "最近输出",
     noVisibleOutput: "没有可见输出。",
     latestOutputNext: "如需完整运行时输出，可用 /details。",
-    detailsHint: "用 /details 查看完整内容",
+    detailsHint: "Ctrl+O 查看完整内容",
     errorTitle: (tool: string) => `${tool} 失败`,
-    errorDetailsHint: "用 /details 查看完整错误",
+    errorDetailsHint: "Ctrl+O 查看完整错误",
     activityError: "请求失败，可重试或用 /model doctor 排查。",
     activityCompleted: "已完成。",
     denied: (tool: string) => `已拒绝 ${tool}，工具未执行。`,
@@ -118,9 +118,9 @@ const shellText = {
     latestOutputTitle: "Latest output",
     noVisibleOutput: "No visible output.",
     latestOutputNext: "Use /details for full runtime output.",
-    detailsHint: "Use /details for full content",
+    detailsHint: "Ctrl+O for details",
     errorTitle: (tool: string) => `${tool} failed`,
-    errorDetailsHint: "Use /details for full error",
+    errorDetailsHint: "Ctrl+O for full error",
     activityError: "Request failed. Retry or use /model doctor.",
     activityCompleted: "Completed.",
     denied: (tool: string) => `Denied ${tool}; tool was not executed.`,
@@ -284,16 +284,21 @@ export function createShellViewModel(
 
   // TaskFooter — minimal status footer for task/pending viewMode. The full
   // StatusTray noise stays out of the task region; this only carries the
-  // signals a user wants while a flow is active: permission mode and index.
+  // signals a user wants while a flow is active: permission mode, model,
+  // cache hit rate, index status, and a red-colored Shift+Tab cycle hint.
   // setupHint is intentionally NOT routed through the footer hint slot — long
   // setup sentences belong above the composer (or in /config), not in the
-  // 1-line breathing footer.
+  // 1-line breathing footer. D13E-P3: dropped session id / gate / background.
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
       : {
           permissionMode: formatPermissionModeLabel(context.permissionMode, language),
+          model: formatFooterModel(context.model, language, width),
+          cache: formatFooterCache(context.cache?.history?.at(-1)?.hitRate ?? null, language),
           index: formatIndex(context.index.status, language),
+          cyclePermHint:
+            language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）",
         };
 
   // D.13E Step 2 — TaskSuggestionBar 数据（只读，UI 不接键盘）。
@@ -436,13 +441,28 @@ export function createOutputBlock(
   const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
   const copy = shellText[language];
   const isFail = /错误|失败|error|failed/iu.test(normalized);
+  const summary = firstLine || copy.noVisibleOutput;
+  // D13E-P3 hasMore policy: only show the details hint when the full body is
+  // meaningfully longer than the inline summary. "Meaningfully" means either a
+  // multi-line body, or a single line that was truncated past the summary.
+  // This stops short normal outputs (e.g. "已完成") from carrying a useless
+  // "Ctrl+O 查看完整内容" row, while error stacks / doctor bodies / long tool
+  // logs still reveal the hint. Errors keep the explicit error-details copy;
+  // normal blocks get the Ctrl+O-first hint per D13E-P3.
+  const hasMore =
+    normalized.length > 0 &&
+    (normalized.includes("\n") || normalized.length > summary.length + 8);
   return {
     id,
     kind: isFail ? "error" : "details",
     status: isFail ? "fail" : "info",
-    title: copy.latestOutputTitle,
-    summary: firstLine || copy.noVisibleOutput,
-    nextAction: isFail ? copy.errorDetailsHint : copy.latestOutputNext,
+    // D13E-P3 empty title: drop the fixed "最近输出" / "Latest output" title
+    // for normal outputs so ProductBlock renders only the summary line and
+    // adjacent normal outputs breathe instead of stacking duplicate banners.
+    // Errors keep an explicit title because the alert framing is the signal.
+    title: isFail ? copy.errorTitle("output") : "",
+    summary,
+    nextAction: isFail ? copy.errorDetailsHint : hasMore ? copy.detailsHint : undefined,
     // Preserve the full body so /details can reveal it. The summary keeps the
     // first non-empty line for the inline block; multi-line outputs (e.g. the
     // /model doctor body with provider.env merge / endpointPath / providers)
@@ -452,23 +472,29 @@ export function createOutputBlock(
 }
 
 /**
- * Adds /details hint to output blocks that have long content or are errors.
- * Ensures users know how to access full output without screen flooding.
+ * Adds /details hint to output blocks only when the block actually has more
+ * content than its summary. D13E-P3: the prompt says "Ctrl+O 查看完整内容" /
+ * "Ctrl+O for details" so users discover the keyboard shortcut; falling back
+ * to /details only happens for plain-mode error blocks.
  */
 function addDetailsHint(block: ProductBlockViewModel, language: Language): ProductBlockViewModel {
   const copy = shellText[language];
-  // Error blocks always get the error details hint
+  // Error / blocked blocks always get an explicit error-details hint.
   if (block.status === "fail" || block.status === "blocked") {
     return {
       ...block,
       nextAction: block.nextAction || copy.errorDetailsHint,
     };
   }
-  // Normal blocks get the generic details hint if they don't already have one
-  if (!block.nextAction) {
-    return { ...block, nextAction: copy.detailsHint };
-  }
-  return block;
+  // Normal blocks only get the hint when fullText is meaningfully longer than
+  // the displayed summary. Final reports / short normal outputs stay clean.
+  if (block.nextAction) return block;
+  const fullText = block.fullText ?? "";
+  const summary = block.summary ?? "";
+  const hasMore =
+    fullText.length > 0 && (fullText.includes("\n") || fullText.length > summary.length + 8);
+  if (!hasMore) return block;
+  return { ...block, nextAction: copy.detailsHint };
 }
 
 /**
@@ -643,6 +669,27 @@ function formatBackground(count: number, language: Language, width: number): str
     return shellText[language].backgroundShort(count);
   }
   return shellText[language].background(count);
+}
+
+/**
+ * Format model label for the task footer.
+ * D13E-P3: "模型 X" / "model X" — short and width-aware.
+ */
+function formatFooterModel(model: string | undefined, language: Language, width: number): string {
+  const label = language === "en-US" ? "model" : "模型";
+  const value = truncateMiddle(model || "unknown", width <= 60 ? 12 : 22);
+  return `${label} ${value}`;
+}
+
+/**
+ * Format cache hit rate for the task footer.
+ * D13E-P3: "缓存 92%" / "cache 92%" / "缓存?" / "cache?" when null.
+ */
+function formatFooterCache(hitRate: number | null | undefined, language: Language): string {
+  const label = language === "en-US" ? "cache" : "缓存";
+  if (hitRate === null || hitRate === undefined) return `${label}?`;
+  const percent = Math.max(0, Math.min(100, Math.round(hitRate * 100)));
+  return `${label} ${percent}%`;
 }
 
 function normalizeWidth(width: number | undefined): number {

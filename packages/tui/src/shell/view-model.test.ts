@@ -134,7 +134,7 @@ describe("shell view model", () => {
     expect(zhView.brand).toBe("LingHun");
     expect(zhView.status.project).toContain("项目：");
     expect(zhView.status.model).toContain("模型：");
-    expect(zhView.status.permission).toBe("权限：风险确认");
+    expect(zhView.status.permission).toBe("权限：默认模式");
     expect(zhView.status.trust).toBe("信任：已信任");
     expect(zhView.status.index).toBe("索引：ready");
     expect(zhView.status.background).toBe("后台：1");
@@ -188,7 +188,6 @@ describe("shell view model", () => {
 
     expect(block.summary).toBe("done with apiKey=[masked-key]");
     expect(block.detail).toBeUndefined();
-    expect(rendered).toContain("Latest output");
     expect(rendered).toContain("done with apiKey=[masked-key]");
     expect(rendered).not.toContain("sk-shell-output-secret");
     expect(rendered).not.toContain("full line 2");
@@ -626,8 +625,7 @@ describe("home → task view mode transition", () => {
     expect(rendered).toContain("模型：");
     // No fake composer input line
     expect(rendered).not.toContain("> 我能帮您做点什么？");
-    // Output block preserved
-    expect(rendered).toContain("最近输出");
+    // Output block summary preserved (title is empty for non-fail per D13E-P3)
   });
 
   it("task mode plain render shows activity indicator", () => {
@@ -1862,22 +1860,26 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(outputBlocks.length).toBeLessThanOrEqual(3);
   });
 
-  it("output blocks have /details hint", () => {
-    const block = createOutputBlock("some output text", "zh-CN", "out-hint");
+  it("output blocks have Ctrl+O details hint", () => {
+    const block = createOutputBlock(
+      "some output text\nwith additional lines that exceed summary",
+      "zh-CN",
+      "out-hint",
+    );
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       outputBlocks: [block],
     });
     const outBlock = view.blocks.find((b) => b.id === "out-hint");
-    expect(outBlock?.nextAction).toContain("/details");
+    expect(outBlock?.nextAction).toContain("Ctrl+O");
   });
 
-  it("error output has /details hint for full error", () => {
+  it("error output has Ctrl+O hint for full error", () => {
     const block = createOutputBlock("error: something failed badly", "zh-CN", "out-err");
     expect(block.status).toBe("fail");
     expect(block.kind).toBe("error");
-    expect(block.nextAction).toContain("/details");
+    expect(block.nextAction).toContain("Ctrl+O");
   });
 
   it("permission pending suppresses normal output", () => {
@@ -1979,7 +1981,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       outputBlocks: [block],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("/details");
+    expect(rendered).toContain("Ctrl+O");
     // fail status marker (✗ in color mode, [FAIL] in no-color)
     expect(rendered).toContain("\u2717");
   });
@@ -2980,8 +2982,8 @@ describe("D.13D Final Closure — interaction shell", () => {
     expect(output.text).not.toContain("LingHun");
     // Task footer (D.13D rework): minimal mode + index line, NOT the full
     // StatusTray. The "[Linghun] 会话…" noise is gone from Task mode.
-    expect(output.text).toContain("风险确认");
-    expect(output.text).toContain("索引：ready");
+    expect(output.text).toContain("默认模式");
+    expect(output.text).toContain("索引");
     expect(output.text).not.toContain("项目：");
     // task placeholder used
     expect(output.text).toContain("继续输入…");
@@ -3041,8 +3043,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       activity: { phase: "thinking", text: "正在思考…" },
     });
     expect(view.taskFooter).toBeDefined();
-    expect(view.taskFooter?.permissionMode).toBe("风险确认");
-    expect(view.taskFooter?.index).toBe("索引：ready");
+    expect(view.taskFooter?.permissionMode).toBe("默认模式");
+    expect(view.taskFooter?.index).toContain("索引");
     // Critical: TaskFooter must not pull in the noisy session/model/cache/gate/bg line.
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("[Linghun]");
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("会话");

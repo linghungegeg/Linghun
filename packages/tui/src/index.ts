@@ -2653,7 +2653,7 @@ async function runInkShell(
         // 链路；那条链路会 writeLine(modeSwitched) + writeStatus(...)，把
         // "[Linghun] 会话…" StatusTray 文本写进 shellOutput，污染 Task 区 transcript。
         // TaskFooter 的 permissionMode 段已经覆盖可见状态，rerender 后用户能看到切换结果。
-        const modes: PermissionMode[] = ["default", "auto-review", "plan"];
+        const modes: PermissionMode[] = ["default", "auto-review", "plan", "full-access"];
         const idx = modes.indexOf(context.permissionMode);
         const nextMode = modes[(idx + 1) % modes.length] ?? "default";
         const guard = getModeChangeGuard(nextMode, context);
@@ -2900,13 +2900,6 @@ async function processTuiLine(
   }
 
   const commandResult = await handleSlashCommand(text, context, output);
-  if (isPipelineTraceEnabled()) {
-    await tracePipelineEvent(
-      context,
-      context.sessionId,
-      `processTuiLine input=${redactPipelineUserInput(text)} commandResult=${commandResult}`,
-    );
-  }
   if (commandResult === "exit") {
     if (context.sessionId && !context.sessionEnded) {
       await store.appendEvent(context.sessionId, createSessionEndEvent(context.sessionId));
@@ -2917,13 +2910,6 @@ async function processTuiLine(
   }
   if (commandResult === "message") {
     const naturalResult = await handleNaturalInput(text, context, gateway, output);
-    if (isPipelineTraceEnabled()) {
-      await tracePipelineEvent(
-        context,
-        context.sessionId,
-        `processTuiLine handleNaturalInput=${naturalResult}`,
-      );
-    }
     if (naturalResult === "message") {
       await sendMessage(text, context, gateway, output);
     }
@@ -3107,13 +3093,18 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/help") {
+    const variantArg = (rest[0] ?? "").toLowerCase();
+    const variant: "short" | "all" | "advanced" | "details" =
+      variantArg === "all"
+        ? "all"
+        : variantArg === "advanced"
+          ? "advanced"
+          : variantArg === "details"
+            ? "details"
+            : "short";
     writeLine(
       output,
-      formatCatalogHelp(
-        context.language,
-        context.permissionMode,
-        ["all", "advanced", "details"].includes(rest[0] ?? ""),
-      ),
+      formatCatalogHelp(context.language, context.permissionMode, false, variant),
     );
     return "handled";
   }
@@ -4887,15 +4878,22 @@ async function promptInitialLanguage(
   output: Writable,
   context: TuiContext,
 ): Promise<void> {
-  writeLine(
-    output,
-    [
-      "选择输出语言 / Choose output language",
-      "- 1 / 中文：中文主屏、状态、帮助、权限、doctor 和错误提示。",
-      "- 2 / English: English main screen, status, help, permissions, doctor, and errors.",
-      "- Press Enter for 中文. You can change it later with /language zh-CN or /language en-US.",
-    ].join("\n"),
-  );
+  // D13E-P3 first-run language UI: bordered arrow-select panel that mirrors
+  // the workspace-trust prompt rhythm. ↑↓ / jk navigate, Enter confirms,
+  // Esc accepts the default (中文). The text-input fallback (1/2/zh/en/中文/
+  // English) is preserved by readInitialLanguageDecision so non-keypress
+  // terminals still work.
+  const lines = [
+    "",
+    "┌─ 选择输出语言 / Choose output language ─────────────────────",
+    "│",
+    "│  ↑/↓ 或 j/k 切换 · Enter 确认 · Esc 默认中文",
+    "│  Type 1/2/zh/en/中文/English to choose by keyboard.",
+    "│",
+    "└─────────────────────────────────────────────────────────────",
+    "",
+  ];
+  writeLine(output, lines.join("\n"));
   const language = await readInitialLanguageDecision(input, output);
   await saveUserLanguage(language);
   context.config = { ...context.config, language };
@@ -4911,10 +4909,20 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
   const rawInput = input as Readable & { setRawMode?: (enabled: boolean) => void; isRaw?: boolean };
   const wasRaw = rawInput.isRaw === true;
   let settled = false;
+  let selectedIndex = 0; // 0 = zh-CN (default), 1 = en-US
+  const renderChoices = (): void => {
+    const cursor = (active: boolean) => (active ? "❯" : " ");
+    const choiceLines = [
+      `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] 中文 (zh-CN)`,
+      `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] English (en-US)`,
+    ];
+    output.write(choiceLines.join("\n") + "\n");
+  };
   return await new Promise<Language>((resolveDecision) => {
     const finish = (language: Language) => {
       if (settled) return;
       settled = true;
+      input.off("keypress", onKeypress);
       rl.off("line", onLine);
       if (typeof rawInput.setRawMode === "function" && !wasRaw) {
         rawInput.setRawMode(false);
@@ -4922,9 +4930,36 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
       rl.close();
       resolveDecision(language);
     };
+    const onKeypress = (str: string, key: { name?: string } = {}) => {
+      const name = key.name;
+      if (name === "escape") {
+        finish("zh-CN");
+        return;
+      }
+      if (name === "up" || name === "k") {
+        if (selectedIndex !== 0) {
+          selectedIndex = 0;
+          renderChoices();
+        }
+        return;
+      }
+      if (name === "down" || name === "j") {
+        if (selectedIndex !== 1) {
+          selectedIndex = 1;
+          renderChoices();
+        }
+        return;
+      }
+      // Enter handled by readline 'line' event; ignore other raw input here.
+      void str;
+    };
     const onLine = (line: string) => {
       const normalized = line.trim().toLowerCase();
-      if (normalized === "" || /^(1|zh|zh-cn|中文|chinese|cn)$/iu.test(normalized)) {
+      if (normalized === "") {
+        finish(selectedIndex === 0 ? "zh-CN" : "en-US");
+        return;
+      }
+      if (/^(1|zh|zh-cn|中文|chinese|cn)$/iu.test(normalized)) {
         finish("zh-CN");
         return;
       }
@@ -4933,11 +4968,15 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
         return;
       }
       writeLine(output, "请输入 1/中文 或 2/English。Type 1/中文 or 2/English.");
+      renderChoices();
     };
+    emitKeypressEvents(input);
+    input.on("keypress", onKeypress);
     rl.on("line", onLine);
     if (typeof rawInput.setRawMode === "function") {
-      rawInput.setRawMode(false);
+      rawInput.setRawMode(true);
     }
+    renderChoices();
     output.write("> ");
   });
 }
@@ -4957,30 +4996,24 @@ async function promptInitialWorkspaceTrust(
     ? [
         "",
         "┌─ Workspace trust ───────────────────────────────────────────",
-        `│  Current directory: ${project}`,
+        `│  ${project}`,
         "│",
         "│  Do you trust this project?",
-        "│  - Trusted: Linghun can read, edit, and run commands here.",
-        "│  - Restricted: file writes and shell commands stay blocked.",
-        "│  Start Gate, Plan approval, and the permission pipeline still apply.",
+        "│  Trusted allows reads/writes/commands; approvals still apply.",
         "│",
-        "│  ↑/↓ or j/k to switch · Enter to confirm",
-        "│  Enter/yes: trust this project. Esc/no: keep restricted.",
+        "│  ↑/↓ or j/k to switch · Enter to confirm · Esc keep restricted",
         "└─────────────────────────────────────────────────────────────",
         "",
       ]
     : [
         "",
         "┌─ 工作区信任 ────────────────────────────────────────────────",
-        `│  当前目录：${project}`,
+        `│  ${project}`,
         "│",
         "│  是否信任这个项目？",
-        "│  - 信任此项目：Linghun 可以在这里读、改、运行命令。",
-        "│  - 保持 restricted：文件写入和 shell 命令仍被拦截。",
-        "│  即使信任，仍受 Start Gate、Plan approval 和权限管道约束。",
+        "│  信任后可读写和运行命令；安全审批仍生效。",
         "│",
-        "│  ↑/↓ 或 j/k 切换选项 · Enter 确认",
-        "│  Enter/yes：信任此项目。Esc/no：对此项目保持 restricted。",
+        "│  ↑/↓ 或 j/k 切换 · Enter 确认 · Esc 保持受限",
         "└─────────────────────────────────────────────────────────────",
         "",
       ];
@@ -5496,20 +5529,18 @@ async function handleModeCommand(
   const guard = getModeChangeGuard(nextMode, context);
   if (guard) {
     writeLine(output, guard);
-    writeStatus(output, context);
     return;
   }
   await setPermissionMode(context, output, nextMode, `mode command -> ${nextMode}`);
 }
 
 async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
-  const modes: PermissionMode[] = ["default", "auto-review", "plan"];
+  const modes: PermissionMode[] = ["default", "auto-review", "plan", "full-access"];
   const index = modes.indexOf(context.permissionMode);
   const nextMode = modes[(index + 1) % modes.length] ?? "default";
   const guard = getModeChangeGuard(nextMode, context);
   if (guard) {
     writeLine(output, guard);
-    writeStatus(output, context);
     return;
   }
   await setPermissionMode(context, output, nextMode, "tab mode cycle");
@@ -13530,22 +13561,12 @@ export async function handleNaturalInput(
 ): Promise<"handled" | "message"> {
   const gateway = maybeOutput ? (gatewayOrOutput as ModelGateway) : undefined;
   const output = maybeOutput ?? (gatewayOrOutput as Writable);
-  const traceEnabled = isPipelineTraceEnabled();
-  const traceBranch = async (branch: string, result: "handled" | "message"): Promise<void> => {
-    if (!traceEnabled) return;
-    await tracePipelineEvent(
-      context,
-      context.sessionId,
-      `handleNaturalInput result=${result} reason=${branch}`,
-    );
-  };
   const pendingLocalApproval = context.pendingLocalApproval;
   if (pendingLocalApproval) {
     const normalized = text.trim().toLowerCase();
     if (/^(details|detail|详情|细节)$/iu.test(normalized)) {
       writeLine(output, formatPendingApprovalDetails(pendingLocalApproval, context));
       writeStatus(output, context);
-      await traceBranch("pendingLocalApproval_details", "handled");
       return "handled";
     }
     if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(normalized)) {
@@ -13553,7 +13574,6 @@ export async function handleNaturalInput(
       context.pendingLocalApproval = undefined;
       // D.13E Step 2 修正 #4：复用 executePermissionApprove，避免双实现漂移
       await executePermissionApprove(approval, context, gateway, output);
-      await traceBranch("pendingLocalApproval_approve", "handled");
       return "handled";
     }
     if (/^(no|n|deny|取消|拒绝|不|否|cancel)$/iu.test(normalized)) {
@@ -13561,7 +13581,6 @@ export async function handleNaturalInput(
       context.pendingLocalApproval = undefined;
       const cancelled = /^(cancel|取消)$/iu.test(normalized);
       await executePermissionDeny(approval, context, gateway, output, cancelled);
-      await traceBranch("pendingLocalApproval_deny", "handled");
       return "handled";
     }
     writeLine(
@@ -13571,7 +13590,6 @@ export async function handleNaturalInput(
         : "当前有本地权限审批待处理。输入 yes/确认/继续 可本次允许，输入 no/取消 可拒绝；这条输入不会发送给模型。",
     );
     writeStatus(output, context);
-    await traceBranch("pendingLocalApproval_other", "handled");
     return "handled";
   }
 
@@ -13580,7 +13598,6 @@ export async function handleNaturalInput(
     if (/^(details|detail|详情|细节)$/iu.test(text.trim())) {
       writeLine(output, formatPendingNaturalCommandDetails(gate, context));
       writeStatus(output, context);
-      await traceBranch("pendingNaturalCommand_details", "handled");
       return "handled";
     }
     const decision = matchesNaturalGateConfirmation(gate, text);
@@ -13588,19 +13605,16 @@ export async function handleNaturalInput(
       context.pendingNaturalCommand = undefined;
       writeLine(output, t(context, "startGateExpired"));
       writeStatus(output, context);
-      await traceBranch("pendingNaturalCommand_expired", "handled");
       return "handled";
     }
     if (decision === "exact_required") {
       if (/^(yes|y|confirm|确认|是|执行|继续)$/iu.test(text.trim())) {
         writeLine(output, t(context, "startGatePlainConfirmationRejected"));
         writeStatus(output, context);
-        await traceBranch("pendingNaturalCommand_exactRequired_yes", "handled");
         return "handled";
       }
       writeLine(output, t(context, "startGateExactRequired"));
       writeStatus(output, context);
-      await traceBranch("pendingNaturalCommand_exactRequired", "handled");
       return "handled";
     }
     if (decision === "confirmed") {
@@ -13608,9 +13622,7 @@ export async function handleNaturalInput(
       writeLine(output, t(context, "startGateConfirmed"));
       await appendNaturalGateDebugEvent(context, gate, "confirmed");
       const result = await handleSlashCommand(gate.exactCommand, context, output);
-      const mapped = result === "message" ? "message" : "handled";
-      await traceBranch(`pendingNaturalCommand_confirmed_${result}`, mapped);
-      return mapped;
+      return result === "message" ? "message" : "handled";
     }
     context.pendingNaturalCommand = undefined;
   }
@@ -13623,19 +13635,33 @@ export async function handleNaturalInput(
         : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
     );
     writeStatus(output, context);
-    await traceBranch("bareYesWithoutGate", "handled");
     return "handled";
+  }
+
+  // Narrow workspace-trust intent (P3 收口): only the explicit "trust this folder /
+  // 信任这个项目" wording opens a Start Gate. Everything else falls through to the
+  // model — we do NOT restore the broad routeNaturalIntent / handleLocalControlPlaneInput
+  // pre-route path that historically swallowed ordinary natural language.
+  if (looksLikeWorkspaceTrustNaturalRequest(text)) {
+    const intent = routeNaturalIntent(text, context.language);
+    if (isWorkspaceTrustNaturalStartGate(intent)) {
+      const gate = createPendingNaturalCommand(intent, context);
+      if (gate) {
+        context.pendingNaturalCommand = gate;
+        writeLine(output, formatNaturalStartGate(intent, context, gate));
+        writeStatus(output, context);
+        return "handled";
+      }
+    }
   }
 
   if (shouldOfferUserScopedModelSetup(context) && looksLikeModelSetupInput(text)) {
     await startModelSetup(context, output, parseModelSetupPrefill(text));
-    await traceBranch("modelSetupWizard", "handled");
     return "handled";
   }
 
   const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
   if (indexRepair === "handled") {
-    await traceBranch("indexSafetyRepair", "handled");
     return "handled";
   }
 
@@ -13650,13 +13676,11 @@ export async function handleNaturalInput(
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
-    await traceBranch("resourceGuard_model", "handled");
     return "handled";
   }
   if (context.memory.learningMode === "active") {
     await runAutoLearningOnTurnEnd(context, text);
   }
-  await traceBranch("passThrough", "message");
   return "message";
 }
 
@@ -13905,7 +13929,19 @@ function startRequestActivity(
   clearRequestActivity(context);
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
-  writeLine(output, formatRequestActivity(phase, context.language, values));
+  // D13E-P3 single-thinking display: in Ink/Task mode the ActivityIndicator
+  // (driven by context.requestActivityPhase via mapRequestActivityToView) is
+  // the sole visible "thinking…" surface. Writing the same line into the
+  // transcript via writeLine would produce a duplicated "正在思考…" / "Thinking…"
+  // row that survives across rerenders. We detect Ink mode by checking whether
+  // `output` is the ShellBlockOutput instance and skip the writeLine in that
+  // case; plain TUI keeps the writeLine for transcript-style scrollback. The
+  // slow-hint timer follows the same gate so plain TUI still gets its
+  // waiting_first_delta line on slow requests.
+  const isInkOutput = output instanceof ShellBlockOutput;
+  if (!isInkOutput) {
+    writeLine(output, formatRequestActivity(phase, context.language, values));
+  }
   if (
     phase !== "request_started" &&
     phase !== "request_started_report" &&
@@ -13920,7 +13956,9 @@ function startRequestActivity(
       return;
     }
     context.requestActivity = { slowHintShown: true };
-    writeLine(output, formatRequestActivity("waiting_first_delta", context.language, values));
+    if (!isInkOutput) {
+      writeLine(output, formatRequestActivity("waiting_first_delta", context.language, values));
+    }
   }, REQUEST_SLOW_HINT_MS);
   context.requestActivity = { slowHintShown: false, slowTimer };
 }
@@ -13945,19 +13983,8 @@ async function sendMessage(
   gateway: ModelGateway,
   output: Writable,
 ): Promise<void> {
-  const traceEnabled = isPipelineTraceEnabled();
-  if (traceEnabled) {
-    await tracePipelineEvent(
-      context,
-      context.sessionId,
-      `sendMessage entered=yes input=${redactPipelineUserInput(text)}`,
-    );
-  }
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
-    if (traceEnabled) {
-      await tracePipelineEvent(context, context.sessionId, "sendMessage guard=resource");
-    }
     writeLine(output, modelGuard);
     return;
   }
@@ -13974,13 +14001,6 @@ async function sendMessage(
       cooldownCheck.remainingMs,
       context.language,
     );
-    if (traceEnabled) {
-      await tracePipelineEvent(
-        context,
-        context.sessionId,
-        `sendMessage guard=cooldown remainingMs=${cooldownCheck.remainingMs}`,
-      );
-    }
     writeLine(output, cooldownMsg);
     return;
   }
@@ -13989,9 +14009,6 @@ async function sendMessage(
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
   const gate = checkEvidenceGate(text, context);
   if (gate) {
-    if (traceEnabled) {
-      await tracePipelineEvent(context, sessionId, "sendMessage guard=evidence");
-    }
     await appendSystemEvent(context, sessionId, gate, "warning");
     writeLine(output, gate);
     writeStatus(output, context);
@@ -14061,13 +14078,6 @@ async function sendMessage(
   );
   const budget = estimateModelMessageChars(messages);
   if (budget > MAX_CONTEXT_CHARS) {
-    if (traceEnabled) {
-      await tracePipelineEvent(
-        context,
-        sessionId,
-        `sendMessage guard=budget budget=${budget} max=${MAX_CONTEXT_CHARS}`,
-      );
-    }
     const warning =
       context.language === "en-US"
         ? `Context budget exceeded before provider call: ${budget}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
@@ -14081,10 +14091,6 @@ async function sendMessage(
     writeStatus(output, context);
     return;
   }
-  if (traceEnabled) {
-    await tracePipelineEvent(context, sessionId, "sendMessage guard=none");
-  }
-
   if (reportWriteGuard) {
     messages.push({
       role: "user",
@@ -14109,13 +14115,6 @@ async function sendMessage(
         );
       }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
-      if (traceEnabled) {
-        await tracePipelineEvent(
-          context,
-          sessionId,
-          `gateway.stream before provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile}`,
-        );
-      }
       for await (const event of gateway.stream(
         selectedRuntime.provider,
         {
@@ -14166,24 +14165,10 @@ async function sendMessage(
           roundChunkCount = event.chunkCount;
           roundHadUsage = roundHadUsage || event.hadUsage;
           roundFinishReason = event.finishReason;
-          if (traceEnabled) {
-            await tracePipelineEvent(
-              context,
-              sessionId,
-              `gateway.stream done chunkCount=${event.chunkCount} finishReason=${event.finishReason ?? "none"}`,
-            );
-          }
           continue;
         }
         if (event.type === "error") {
           clearRequestActivity(context);
-          if (traceEnabled) {
-            await tracePipelineEvent(
-              context,
-              sessionId,
-              `gateway.stream error code=${event.error.code ?? "UNKNOWN"} message=${redactPipelineUserInput(event.error.message ?? "")}`,
-            );
-          }
           await recordProviderFailureEvidence(context, sessionId, event.error, selectedRuntime);
           recordProviderFailure(
             context.providerBreaker,
@@ -16275,56 +16260,6 @@ async function appendSystemEvent(
     message,
     createdAt: new Date().toISOString(),
   });
-}
-
-/**
- * Env-gated pipeline trace (LINGHUN_TUI_PIPELINE_TRACE=1).
- *
- * 用于诊断"普通自然语言为什么没有走到 gateway.stream"这条 P0：
- * processTuiLine → handleSlashCommand → handleNaturalInput → sendMessage 的每个
- * 节点都会调用 tracePipelineEvent，写入 session system_event + stderr。仅当 env
- * 开启时才输出，主 UI 不受影响。
- *
- * 不允许在 line 中包含 API key / provider.env 字段；调用方负责截断/脱敏用户输入
- * （≤40 字符）。本 helper 自身只兜底再做一次硬截断，避免单条事件过长。
- */
-function redactPipelineTraceLine(line: string): string {
-  const truncated = line.length > 240 ? `${line.slice(0, 237)}...` : line;
-  return truncated.replace(/sk-[A-Za-z0-9._-]{4,}/gu, "sk-[redacted]");
-}
-
-function isPipelineTraceEnabled(): boolean {
-  return process.env.LINGHUN_TUI_PIPELINE_TRACE === "1";
-}
-
-function redactPipelineUserInput(text: string): string {
-  const collapsed = text.replace(/\s+/gu, " ").trim();
-  const limited = collapsed.length > 40 ? `${collapsed.slice(0, 40)}...` : collapsed;
-  return limited.replace(/sk-[A-Za-z0-9._-]{4,}/gu, "sk-[redacted]");
-}
-
-async function tracePipelineEvent(
-  context: TuiContext,
-  sessionId: string | undefined,
-  line: string,
-): Promise<void> {
-  if (!isPipelineTraceEnabled()) return;
-  const safeLine = redactPipelineTraceLine(line);
-  const stderr = process.stderr;
-  if (stderr && typeof stderr.write === "function") {
-    try {
-      stderr.write(`[linghun-tui-pipeline] ${safeLine}\n`);
-    } catch {
-      // stderr write 失败不应该影响主流程
-    }
-  }
-  if (sessionId) {
-    try {
-      await appendSystemEvent(context, sessionId, `pipeline_trace ${safeLine}`, "info");
-    } catch {
-      // 写 session event 失败也仅是诊断 miss，不影响实际 pipeline
-    }
-  }
 }
 
 async function appendRouteDecisionEvent(

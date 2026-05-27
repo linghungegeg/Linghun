@@ -260,22 +260,27 @@ function TaskFooter({
   width: number;
   language: ShellViewModel["language"];
 }): React.ReactNode {
-  // Production footer: 1 line of muted status with bottom breathing space.
+  // D13E-P3 production footer: 1 line of muted status with bottom breathing
+  // space, plus a red-colored Shift+Tab hint at the end.
+  //
+  // Shape: "默认模式 · 模型 X · 缓存 X% · 索引?  （Shift+Tab 切换模式）"
+  //        "default mode · model X · cache X% · index?  (Shift+Tab switch mode)"
+  //
   // Long sentences (e.g. setup hint) are intentionally NOT routed here —
-  // permissionMode · index is the entire signal budget. An optional short
-  // hint is supported for future per-flow needs but trimmed defensively.
-  // P2-4：在 footer 末尾追加 Shift+Tab 切权限模式的极短 hint（zh: "Shift+Tab 切权限"
-  // / en: "Shift+Tab perm"）。整体仍走 fitText，宽度不足时优先丢弃 hint，不会
-  // 退化成完整 StatusTray 噪声。
-  const segments: string[] = [footer.permissionMode, footer.index];
+  // permissionMode + model + cache + index is the entire signal budget.
+  // An optional short hint is supported and dropped first when width is tight.
+  // The cyclePermHint is always rendered with theme.status.fail (red) so it
+  // stays scannable even on narrow terminals; if the muted segments overflow,
+  // they truncate but the hint stays visible at the right.
+  void language; // hint copy already localized in view-model
+  const segments: string[] = [footer.permissionMode, footer.model, footer.cache, footer.index];
   if (footer.hint) segments.push(footer.hint);
-  const cyclePermHint =
-    language === "en-US" ? "Shift+Tab perm" : "Shift+Tab 切权限";
-  segments.push(cyclePermHint);
-  const line = segments.join(" · ");
+  const main = segments.join(" · ");
+  const fittedMain = fitText(main, Math.max(20, width - 4));
   return (
     <Box width={width} paddingX={2} paddingTop={1}>
-      <Text color={theme.muted}>{fitText(line, Math.max(20, width - 4))}</Text>
+      <Text color={theme.muted}>{fittedMain} </Text>
+      <Text color={theme.status.fail}>{footer.cyclePermHint}</Text>
     </Box>
   );
 }

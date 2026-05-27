@@ -104,13 +104,21 @@ export type TaskPermissionView = {
 
 /**
  * TaskFooter — minimal status footer rendered under the composer in task mode.
- * Only carries the small set of always-on signals: permission mode, index
- * status, optional one-line hint. The full StatusTray noise stays out of the
- * task region so the composer + permission flow keep focus.
+ * Only carries the small set of always-on signals: permission mode, model,
+ * cache hit rate, index status, and a colored cycle-mode hint. The full
+ * StatusTray noise stays out of the task region so the composer + permission
+ * flow keep focus.
+ *
+ * D13E-P3: dropped session id / gate / background fields; added model + cache
+ * + cyclePermHint (rendered with status-fail color in ShellApp.TaskFooter).
  */
 export type TaskFooterView = {
   permissionMode: string;
+  model: string;
+  cache: string;
   index: string;
+  /** Red-colored Shift+Tab hint, e.g. "（Shift+Tab 切换模式）" / "(Shift+Tab switch mode)". */
+  cyclePermHint: string;
   hint?: string;
 };
 
