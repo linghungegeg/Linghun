@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { type JsonlDiagnostic, appendJsonl, readJsonl } from "./jsonl.js";
 import { identifyProject } from "./project.js";
 import {
@@ -10,6 +10,40 @@ import {
   createEmptyCacheSummary,
   createEmptyCostSummary,
 } from "./session.js";
+
+// D.13O — sessionId 在写入 / 读取路径前必须做静态校验。
+// 拒绝：空字符串、超长、`.` / `..`、绝对路径、盘符、slash/backslash 或其他
+//       path-sensitive 字符 (`:` `*` `?` `"` `<` `>` `|`、空格、`%`、TAB/CR/LF)。
+// 允许：randomUUID() 产物（hex + `-`）以及不含上述危险字符的紧凑标识符。
+//       UUID 含 `-`，所以不能用范围 `[ -/]`（那是 0x20..0x2F 会误伤 0x2D）。
+// 错误信息保守、可操作；不写到 fs。
+const MAX_SESSION_ID_LENGTH = 128;
+const SESSION_ID_INVALID_CHAR = /[\\/\t\r\n :*?"<>|%]/u;
+
+export function assertValidSessionId(sessionId: unknown): asserts sessionId is string {
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    throw new Error("sessionId 不能为空。建议：传入由 SessionStore.create 返回的会话 id。");
+  }
+  if (sessionId.length > MAX_SESSION_ID_LENGTH) {
+    throw new Error(
+      `sessionId 长度超限（>${MAX_SESSION_ID_LENGTH}）。建议：使用 randomUUID 或最近一次 /sessions list 的 id。`,
+    );
+  }
+  if (sessionId === "." || sessionId === "..") {
+    throw new Error("sessionId 不能是 . 或 ..；这是路径越界尝试。");
+  }
+  if (sessionId.includes("..")) {
+    throw new Error("sessionId 不允许包含 ..；这是路径越界尝试。");
+  }
+  if (SESSION_ID_INVALID_CHAR.test(sessionId)) {
+    throw new Error(
+      'sessionId 含非法字符（slash / backslash / 控制字符 / 空格 / : * ? " < > | %）；不允许进入 sessions 目录。',
+    );
+  }
+  if (isAbsolute(sessionId) || /^[A-Za-z]:/u.test(sessionId)) {
+    throw new Error("sessionId 不能是绝对路径或盘符；只允许 sessions 子目录名。");
+  }
+}
 
 export type SessionStoreOptions = {
   sessionRootDir: string;
@@ -95,6 +129,7 @@ export class SessionStore {
   }
 
   async resume(sessionId: string): Promise<ResumeSessionResult> {
+    assertValidSessionId(sessionId);
     const project = identifyProject(this.projectPath);
     const session = await this.readMetadata(project.projectId, sessionId);
     if (!session) {
@@ -110,6 +145,7 @@ export class SessionStore {
   }
 
   async appendEvent(sessionId: string, event: TranscriptEvent): Promise<void> {
+    assertValidSessionId(sessionId);
     const project = identifyProject(this.projectPath);
     let session = await this.readMetadata(project.projectId, sessionId);
     if (!session) {
@@ -128,6 +164,7 @@ export class SessionStore {
   }
 
   async updateSummary(sessionId: string, summary: string): Promise<Session> {
+    assertValidSessionId(sessionId);
     const project = identifyProject(this.projectPath);
     const session = await this.readMetadata(project.projectId, sessionId);
     if (!session) {

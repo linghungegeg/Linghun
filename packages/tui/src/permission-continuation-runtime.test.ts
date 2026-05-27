@@ -150,6 +150,37 @@ describe("permission-continuation-runtime", () => {
       const result = getHardDenyReason("Write", { path: "src/a.ts" }, ["src/a.ts"], "/workspace");
       expect(result).toBeNull();
     });
+
+    // D.13O — UNC / WebDAV / 远程路径 hard-deny。
+    it("denies UNC path with backslashes", () => {
+      const result = getHardDenyReason(
+        "Read",
+        { path: "\\\\server\\share\\foo.txt" },
+        ["\\\\server\\share\\foo.txt"],
+        "/workspace",
+      );
+      expect(result).toMatch(/UNC|WebDAV|远程路径/iu);
+    });
+
+    it("denies UNC path with forward slashes", () => {
+      const result = getHardDenyReason(
+        "Read",
+        { path: "//server/share/foo.txt" },
+        ["//server/share/foo.txt"],
+        "/workspace",
+      );
+      expect(result).toMatch(/UNC|WebDAV|远程路径/iu);
+    });
+
+    it("denies WebDAV @SSL@ style path", () => {
+      const result = getHardDenyReason(
+        "Read",
+        { path: "//webdav.example.com@SSL@443/folder" },
+        ["//webdav.example.com@SSL@443/folder"],
+        "/workspace",
+      );
+      expect(result).toMatch(/UNC|WebDAV|远程路径/iu);
+    });
   });
 
   describe("findPermissionRule", () => {

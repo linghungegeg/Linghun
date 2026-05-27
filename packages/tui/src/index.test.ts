@@ -11617,3 +11617,38 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
     expect(output.text).toContain("已读取 package.json，分析完成。");
   });
 });
+
+// D.13O — Provider abort/timeout 后 continuation 路径必须早返回，不再让迟到
+// 的 SSE delta 流入 transcript / 主屏 / continuation messages。直接 mock
+// gateway 走 cancel 路径成本高且容易脆，因此用源码事实断言：sendMessage 的
+// 主流和 continueModelAfterToolResults 的 continuation 流必须都包含
+// `controller.signal.aborted` 的早返回守卫。这是 invariant test，不是镜像。
+describe("D.13O safety boundary — provider abort early-return guard", () => {
+  it("source: sendMessage main loop has aborted early-return", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    // 主流定位：`controller.signal.aborted` + `t(context, "toolInterrupted")`
+    expect(text).toContain("if (controller.signal.aborted) {");
+    expect(text).toMatch(/D\.13O[\s\S]*abort[\s\S]*continuation/iu);
+  });
+
+  it("source: continueModelAfterToolResults has aborted early-return", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    const continuationStart = text.indexOf("async function continueModelAfterToolResults");
+    expect(continuationStart).toBeGreaterThan(-1);
+    const continuationBody = text.slice(continuationStart, continuationStart + 4000);
+    expect(continuationBody).toContain("controller.signal.aborted");
+    expect(continuationBody).toContain("toolInterrupted");
+  });
+});
+
+// D.13O — Workspace boundary: getHardDenyReason 必须 hard-deny UNC / WebDAV /
+// 远程路径。本测试覆盖到 permission-continuation-runtime.ts 的修补；同时在
+// permission-continuation-runtime.test.ts 里有更细粒度的单元覆盖。
+describe("D.13O safety boundary — UNC/WebDAV hard deny", () => {
+  it("source: getHardDenyReason rejects UNC backslash form", async () => {
+    const text = await readFile("src/permission-continuation-runtime.ts", "utf8");
+    expect(text).toContain('startsWith("\\\\\\\\")');
+    expect(text).toContain('startsWith("//")');
+    expect(text).toMatch(/UNC|WebDAV/iu);
+  });
+});

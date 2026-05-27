@@ -12495,6 +12495,14 @@ async function continueModelAfterToolResults(
         },
         controller.signal,
       )) {
+        // D.13O — abort 后必须早返回，迟到的 SSE delta 不再写主屏 / transcript /
+        // continuation messages。与 sendMessage 顶层的 controller.signal.aborted
+        // 早返回保持一致。
+        if (controller.signal.aborted) {
+          clearRequestActivity(context);
+          writeLine(output, t(context, "toolInterrupted"));
+          return;
+        }
         if (event.type === "assistant_text_delta") {
           clearRequestActivity(context);
           assistantText += event.text;

@@ -129,6 +129,16 @@ export function getHardDenyReason(
   workspaceRoot: string,
 ): string | null {
   for (const file of files) {
+    // D.13O — UNC / WebDAV / `@SSL@` 风格远程路径必须直接拒绝；resolve()
+    // 在某些 Node 版本会把它们规范化成本地路径，会绕过下面的 startsWith("..")
+    // 检查。为保守起见，单独 hard-deny。
+    if (
+      file.startsWith("\\\\") ||
+      file.startsWith("//") ||
+      /@SSL@\d+|@\d+@SSL/iu.test(file)
+    ) {
+      return `安全保护：UNC / WebDAV / 远程路径不允许走工作区工具：${file}。`;
+    }
     const target = resolve(workspaceRoot, file);
     const rel = relative(resolve(workspaceRoot), target);
     if (rel.startsWith("..") || (rel === "" && !builtInTools[name].isReadOnly)) {
