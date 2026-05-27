@@ -119,6 +119,12 @@ export type TaskFooterView = {
   index: string;
   /** Red-colored Shift+Tab hint, e.g. "（Shift+Tab 切换模式）" / "(Shift+Tab switch mode)". */
   cyclePermHint: string;
+  /**
+   * D13E-P3 cleanup: optional reasoning level segment, e.g. "推理 High" /
+   * "Reasoning High". Absent when the active provider/model does not surface
+   * a reasoning level or when the value is empty/未生效.
+   */
+  reasoning?: string;
   hint?: string;
 };
 

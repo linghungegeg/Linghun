@@ -1875,6 +1875,198 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(outBlock?.nextAction).toContain("Ctrl+O");
   });
 
+  it("D13E-P3 #2: short single-line normal output has NO Ctrl+O hint (no fake fold)", () => {
+    // Final-answer / completion / "我能帮您做点什么？" 短回声 → 不展示 Ctrl+O 行。
+    const shortAnswer = createOutputBlock("已完成。", "zh-CN", "out-short");
+    expect(shortAnswer.nextAction).toBeUndefined();
+
+    const placeholderEcho = createOutputBlock("我能帮您做点什么？", "zh-CN", "out-echo");
+    expect(placeholderEcho.nextAction).toBeUndefined();
+
+    const enShort = createOutputBlock("Done.", "en-US", "out-done");
+    expect(enShort.nextAction).toBeUndefined();
+  });
+
+  it("D13E-P3 #2: multi-line tool output / doctor body / error stack DOES carry Ctrl+O hint", () => {
+    const multiLine = createOutputBlock(
+      "checking provider...\nendpoint: https://example.com\nreasoning: high\nstatus: ok",
+      "zh-CN",
+      "out-multi",
+    );
+    expect(multiLine.nextAction).toContain("Ctrl+O");
+
+    const errorStack = createOutputBlock(
+      "Error: request failed\n  at provider.send\n  at gateway.invoke",
+      "zh-CN",
+      "out-stack",
+    );
+    expect(errorStack.status).toBe("fail");
+    expect(errorStack.nextAction).toContain("Ctrl+O");
+  });
+
+  it("D13E-P3 #2: long single-line output is treated as folded only past the 16-char threshold", () => {
+    // Short single-line: no hint. The cap is summary.length + 16, so a 5-char
+    // body (no newline) must NOT trigger.
+    const tiny = createOutputBlock("hello", "en-US", "out-tiny");
+    expect(tiny.nextAction).toBeUndefined();
+
+    // A genuinely-long single-line body: hint visible.
+    const long = createOutputBlock("x".repeat(200), "en-US", "out-long");
+    // Single-line normalize means summary == body, so summary+16 cap won't
+    // actually trigger — but createOutputBlock's hasMore looks at total len vs
+    // summary len; since they're equal, this should NOT carry the hint either,
+    // because there's nothing folded to reveal.
+    expect(long.nextAction).toBeUndefined();
+  });
+
+  it("D13E-P3 #2: addDetailsHint via outputBlocks pipeline respects the same discipline", () => {
+    const shortBlock: ProductBlockViewModel = {
+      id: "short",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "已完成。",
+      fullText: "已完成。",
+    };
+    const longBlock: ProductBlockViewModel = {
+      id: "long",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "checking provider...",
+      fullText:
+        "checking provider...\nendpoint: https://example.com\nreasoning: high\nstatus: ok",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [shortBlock, longBlock],
+    });
+    const out1 = view.blocks.find((b) => b.id === "short");
+    const out2 = view.blocks.find((b) => b.id === "long");
+    expect(out1?.nextAction).toBeUndefined();
+    expect(out2?.nextAction).toContain("Ctrl+O");
+  });
+
+  it("D13E-P3 #3: ProductBlock filters out title='unknown' / empty as no-title (source check)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
+    // The render path must drop "unknown" titles via a dedicated guard, not just
+    // a truthy check on block.title — that's the reason "● unknown" was leaking.
+    expect(source).toContain("isMeaningfulTitle");
+    expect(source).toMatch(/trimmed\.toLowerCase\(\)\s*===\s*"unknown"/);
+  });
+
+  it("D13E-P3 #3: ProductBlock promotes summary to marker line when title is dropped", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
+    // Two render branches: titleVisible → title row; summaryAsMarker → summary
+    // gets the "● {summary}" treatment so "我不能讨论这个。" still has presence.
+    expect(source).toContain("summaryAsMarker");
+    expect(source).toMatch(/getStatusMarker\([^)]+\)\}\s*\{block\.summary\}/);
+  });
+
+  it("D13E-P3 #3: ProductBlock returns null when title=unknown AND no visible body", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
+    // Empty title + empty summary + no detail/nextAction → render nothing.
+    // Avoid the orphan "● " line that the old fallback path could produce.
+    expect(source).toMatch(
+      /!titleVisible\s*&&\s*!summaryTrimmed\s*&&\s*!block\.detail\s*&&\s*!block\.nextAction/,
+    );
+  });
+
+  it("D13E-P3 #4: ShellBlockOutput silently drops '[Linghun] 会话 …' StatusTray dump", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    let onWriteCount = 0;
+    const ctx = createContext();
+    const sink = __testCreateShellBlockOutput(ctx, blocks, () => {
+      onWriteCount += 1;
+    });
+    sink.write(
+      "[Linghun] 会话 abc123 · 模型 gpt · 模式 默认模式 · 缓存? · 索引? · 确认 无 · 后台 0\n",
+    );
+    expect(blocks.length).toBe(0);
+    expect(onWriteCount).toBe(0);
+    // 普通输出依然落 block，证明只是丢 dump，不是整体阻断。
+    sink.write("正常输出\n");
+    expect(blocks.length).toBe(1);
+    expect(blocks[0]?.summary).toBe("正常输出");
+  });
+
+  it("D13E-P3 #4: ShellBlockOutput silently drops 'Status: Session …' English variant", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const ctx = createContext({ language: "en-US" });
+    const sink = __testCreateShellBlockOutput(ctx, blocks, () => undefined);
+    sink.write(
+      "Status: Session abc123 · Model gpt · Mode default mode · Cache? · Index? · Gate none · BG 0\n",
+    );
+    expect(blocks.length).toBe(0);
+    sink.write(
+      "  · Gate none · BG 0  ", // bare fragment without prefix — must still drop via Gate/BG token combo
+    );
+    expect(blocks.length).toBe(0);
+  });
+
+  it("D13E-P3 #4: error stacks containing 'Gate' word do NOT match the dump filter", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const ctx = createContext();
+    const sink = __testCreateShellBlockOutput(ctx, blocks, () => undefined);
+    // 真实错误堆栈或文档输出可能提到 "Gate" 但缺少 "· BG" 这种 StatusTray token。
+    sink.write("error: Gate authorization failed at handler\n");
+    expect(blocks.length).toBe(1);
+    expect(blocks[0]?.summary).toContain("error: Gate authorization failed");
+  });
+
+  it("D13E-P3 #5: /model doctor surfaces reasoning effective/ignored disambiguation per provider", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "model-doctor-runtime.ts"), "utf8");
+    // doctor body must distinguish three states so users can tell whether
+    // LINGHUN_INFERENCE_LEVEL=High actually flows to the request:
+    //   - configured + responses/permissive  → effective/sent level=X
+    //   - configured + strict_openai_compatible → ignored/unsupported/未生效
+    //   - not configured → not configured/未生效
+    expect(source).toContain("effective/sent level=");
+    expect(source).toContain("ignored/unsupported/未生效");
+    expect(source).toContain("not configured/未生效");
+  });
+
+  it("D13E-P3 #5: /model echo prints 'reasoning=<status>' so users see runtime decision", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    // /model body must include reasoning status so the user has a fast surface
+    // outside the (size-limited) footer.
+    expect(source).toMatch(/reasoning=\$\{runtime\.reasoningStatus\}/);
+  });
+
+  it("D13E-P3 #6: useAnchoredCursor no longer gates render on hasMeasured (first-frame focus)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/useAnchoredCursor.ts"), "utf8");
+    // The first-frame cursor was hidden because hasMeasured flips inside a
+    // useEffect (one frame after yoga commits). The desired-position guard
+    // now relies on getAbsoluteOrigin's intrinsic null-check, so the cursor
+    // appears immediately on the first frame whenever yoga layout is ready.
+    expect(source).not.toMatch(/declared\s*&&\s*capability\.cursorPositioning\s*&&\s*hasMeasured/);
+    // Still subscribes to useBoxMetrics for the resize re-run.
+    expect(source).toContain("useBoxMetrics(anchorRef)");
+    expect(source).toMatch(/declared\s*&&\s*capability\.cursorPositioning/);
+  });
+
+  it("D13E-P3 #6: Composer renders anchored cursor on first frame (declared row/col passed)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    // The Composer must call useAnchoredCursor unconditionally on every render
+    // (no isFirstFrame / mount-effect short-circuit). Permission is the only
+    // null branch.
+    expect(source).toMatch(
+      /useAnchoredCursor\(\s*permissionActive\s*(?:\|\|\s*useInlineCursor\s*)?\?\s*null\s*:\s*\{\s*row/,
+    );
+    // anchorRef attaches to the outer Box synchronously in the same render —
+    // not via a deferred effect — so the parent-chain origin resolves on the
+    // very first commit.
+    expect(source).toMatch(/<Box ref=\{anchorRef\}/);
+  });
+
   it("error output has Ctrl+O hint for full error", () => {
     const block = createOutputBlock("error: something failed badly", "zh-CN", "out-err");
     expect(block.status).toBe("fail");
@@ -3048,6 +3240,75 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     // Critical: TaskFooter must not pull in the noisy session/model/cache/gate/bg line.
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("[Linghun]");
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("会话");
+  });
+
+  it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
+    // 显式注入 index.status="unknown"，确保 footer 走 unknown 分支。
+    const zhView = createShellViewModel(
+      createContext({ index: { status: "unknown" } } as Partial<TuiContext>),
+      { width: 80, viewMode: "task" },
+    );
+    expect(zhView.taskFooter?.index).toBe("索引?");
+    expect(zhView.taskFooter?.index ?? "").not.toContain("unknown");
+
+    const enView = createShellViewModel(
+      createContext({ language: "en-US", index: { status: "unknown" } } as Partial<TuiContext>),
+      { width: 80, viewMode: "task" },
+    );
+    expect(enView.taskFooter?.index).toBe("Index?");
+    expect(enView.taskFooter?.index ?? "").not.toContain("unknown");
+  });
+
+  it("D13E-P3: ShellApp.TaskFooter places cyclePermHint between permissionMode and tail", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    // Three text spans: muted permissionMode, red cyclePermHint, muted " · tail".
+    // The ordering is what guarantees the hint sits *after* "默认模式", not at the
+    // end of the line (which was the pre-D13E-P3 layout that buried discoverability).
+    const fnStart = source.indexOf("function TaskFooter(");
+    const fnEnd = source.indexOf("function ActivityIndicator(");
+    expect(fnStart).toBeGreaterThan(0);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    const body = source.slice(fnStart, fnEnd);
+    const permIdx = body.indexOf("footer.permissionMode");
+    const hintIdx = body.indexOf("footer.cyclePermHint");
+    const tailIdx = body.indexOf("fittedTail");
+    expect(permIdx).toBeGreaterThan(0);
+    expect(hintIdx).toBeGreaterThan(permIdx);
+    expect(tailIdx).toBeGreaterThan(hintIdx);
+    // Hint stays red.
+    expect(body).toMatch(/theme\.status\.fail.*footer\.cyclePermHint/s);
+  });
+
+  it("D13E-P3: reasoningLevel + reasoningSent surface as 'Reasoning X' / '推理 X' in footer", () => {
+    const zhView = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      reasoningLevel: "High",
+      reasoningSent: true,
+    });
+    expect(zhView.taskFooter?.reasoning).toBe("推理 High");
+
+    const enView = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 120,
+      viewMode: "task",
+      reasoningLevel: "High",
+      reasoningSent: true,
+    });
+    expect(enView.taskFooter?.reasoning).toBe("Reasoning High");
+
+    // reasoningSent=false 时不露出，避免 "推理 ignored" 这种假信号污染 1 行 footer。
+    const dropped = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      reasoningLevel: "High",
+      reasoningSent: false,
+    });
+    expect(dropped.taskFooter?.reasoning).toBeUndefined();
+
+    // 没有 level 时也不露出。
+    const noLevel = createShellViewModel(createContext(), { width: 120, viewMode: "task" });
+    expect(noLevel.taskFooter?.reasoning).toBeUndefined();
   });
 
   it("setupHint NO LONGER routes through taskFooter.hint (footer stays 1-line minimal)", () => {

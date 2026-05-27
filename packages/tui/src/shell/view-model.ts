@@ -157,6 +157,16 @@ export type ShellViewModelOptions = {
   configPanelState?:
     | { phase: "panel_list"; cursor: number }
     | { phase: "panel_detail"; panelId: string; actionCursor: number };
+  /**
+   * D13E-P3 cleanup #5 — 当前 executor provider 的 reasoning level（如 "High"）。
+   * view-model 只负责把它格式化成 "推理 High" / "Reasoning High" 后挂到
+   * taskFooter.reasoning。view-model 不解析 provider 路由，由 runInkShell /
+   * runPlainTui 在调用前从 getSelectedModelRuntime 取值。空字符串或 undefined
+   * 表示不显示这一段（避免 "推理 unknown" 这种假信号）。
+   */
+  reasoningLevel?: string;
+  /** 是否真的发送给 provider；false 时不在 footer 露出，避免误导用户。 */
+  reasoningSent?: boolean;
 };
 
 export function createShellViewModel(
@@ -299,6 +309,11 @@ export function createShellViewModel(
           index: formatIndex(context.index.status, language),
           cyclePermHint:
             language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）",
+          reasoning: formatFooterReasoning(
+            options.reasoningLevel,
+            options.reasoningSent,
+            language,
+          ),
         };
 
   // D.13E Step 2 — TaskSuggestionBar 数据（只读，UI 不接键盘）。
@@ -442,16 +457,19 @@ export function createOutputBlock(
   const copy = shellText[language];
   const isFail = /错误|失败|error|failed/iu.test(normalized);
   const summary = firstLine || copy.noVisibleOutput;
-  // D13E-P3 hasMore policy: only show the details hint when the full body is
-  // meaningfully longer than the inline summary. "Meaningfully" means either a
-  // multi-line body, or a single line that was truncated past the summary.
-  // This stops short normal outputs (e.g. "已完成") from carrying a useless
-  // "Ctrl+O 查看完整内容" row, while error stacks / doctor bodies / long tool
-  // logs still reveal the hint. Errors keep the explicit error-details copy;
-  // normal blocks get the Ctrl+O-first hint per D13E-P3.
+  // D13E-P3 cleanup #2 — Ctrl+O hint discipline:
+  // hasMore must mean "the inline summary actually hides content the user
+  // could reveal". Two and only two triggers:
+  //   1. body contains 2+ non-empty lines (multi-line tool output / doctor /
+  //      error stack — summary inevitably truncates these).
+  //   2. body is single-line but at least 16 chars longer than the rendered
+  //      summary (a genuinely-truncated long line, not a 1-2-char fluctuation).
+  // Short normal final answers / completion confirms / "我能帮您做点什么？"
+  // echoes never satisfy either condition and stay clean (no hint row).
+  const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
     normalized.length > 0 &&
-    (normalized.includes("\n") || normalized.length > summary.length + 8);
+    (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16);
   return {
     id,
     kind: isFail ? "error" : "details",
@@ -473,9 +491,10 @@ export function createOutputBlock(
 
 /**
  * Adds /details hint to output blocks only when the block actually has more
- * content than its summary. D13E-P3: the prompt says "Ctrl+O 查看完整内容" /
- * "Ctrl+O for details" so users discover the keyboard shortcut; falling back
- * to /details only happens for plain-mode error blocks.
+ * content than its summary. D13E-P3 cleanup #2: discipline tightened — the
+ * hint must reflect a *real* fold (multi-line body or a single line that's
+ * meaningfully longer than the summary). Final answers / "完成" 类型短行 /
+ * "我能帮您做点什么？" 回声不再带 Ctrl+O 行。
  */
 function addDetailsHint(block: ProductBlockViewModel, language: Language): ProductBlockViewModel {
   const copy = shellText[language];
@@ -491,8 +510,9 @@ function addDetailsHint(block: ProductBlockViewModel, language: Language): Produ
   if (block.nextAction) return block;
   const fullText = block.fullText ?? "";
   const summary = block.summary ?? "";
+  const nonEmptyLines = fullText.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
-    fullText.length > 0 && (fullText.includes("\n") || fullText.length > summary.length + 8);
+    fullText.length > 0 && (nonEmptyLines >= 2 || fullText.length > summary.length + 16);
   if (!hasMore) return block;
   return { ...block, nextAction: copy.detailsHint };
 }
@@ -659,8 +679,13 @@ function formatTrust(context: TuiContext, language: Language): string {
 }
 
 function formatIndex(status: string, language: Language): string {
-  const value = truncateMiddle(status || "unknown", 10);
-  return shellText[language].index(value);
+  // D13E-P3: 当 indexer 状态为空 / "unknown" 时不显示噪音文案，
+  // 用 "索引?" / "Index?" 替代 "索引：unknown"，避免主屏出现假信号。
+  const trimmed = (status ?? "").trim();
+  if (!trimmed || trimmed.toLowerCase() === "unknown") {
+    return language === "en-US" ? "Index?" : "索引?";
+  }
+  return shellText[language].index(truncateMiddle(trimmed, 10));
 }
 
 function formatBackground(count: number, language: Language, width: number): string {
@@ -690,6 +715,25 @@ function formatFooterCache(hitRate: number | null | undefined, language: Languag
   if (hitRate === null || hitRate === undefined) return `${label}?`;
   const percent = Math.max(0, Math.min(100, Math.round(hitRate * 100)));
   return `${label} ${percent}%`;
+}
+
+/**
+ * Format reasoning level for the task footer.
+ * D13E-P3 cleanup #5: only render when level is non-empty AND reasoningSent is
+ * true; otherwise return undefined so the segment is dropped (避免 "推理 unknown"
+ * 或 "Reasoning ignored" 这种假信号污染 1 行 footer)。
+ */
+function formatFooterReasoning(
+  level: string | undefined,
+  sent: boolean | undefined,
+  language: Language,
+): string | undefined {
+  if (!level) return undefined;
+  if (sent === false) return undefined;
+  const trimmed = level.trim();
+  if (!trimmed) return undefined;
+  const label = language === "en-US" ? "Reasoning" : "推理";
+  return `${label} ${truncateMiddle(trimmed, 12)}`;
 }
 
 function normalizeWidth(width: number | undefined): number {

@@ -2524,6 +2524,8 @@ async function runPlainTui(
       setupNeeded: startup.setupNeeded,
       projectRouteProblem: startup.projectRouteProblem,
       outputBlocks: blocks,
+      reasoningLevel: getSelectedModelRuntime(context).reasoningLevel,
+      reasoningSent: getSelectedModelRuntime(context).reasoningSent,
       limitations: createShellLimitations({
         language: context.language,
         providerEnvWarning: startup.providerEnvWarning,
@@ -2548,6 +2550,7 @@ async function runPlainTui(
 
     // After each interaction, refresh the product shell view for TTY legacy terminals
     if (isTty) {
+      const runtime = getSelectedModelRuntime(context);
       const refreshView = createShellViewModel(context, {
         width: readOutputColumns(output),
         height: readOutputRows(output),
@@ -2557,6 +2560,8 @@ async function runPlainTui(
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
         outputBlocks: blocks,
+        reasoningLevel: runtime.reasoningLevel,
+        reasoningSent: runtime.reasoningSent,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (task) =>
@@ -2611,8 +2616,9 @@ async function runInkShell(
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
   const controller: ShellController = {
-    getViewModel: () =>
-      createShellViewModel(context, {
+    getViewModel: () => {
+      const runtime = getSelectedModelRuntime(context);
+      return createShellViewModel(context, {
         width: readOutputColumns(output),
         height: readOutputRows(output),
         noColor: isNoColorTerminal(),
@@ -2622,6 +2628,8 @@ async function runInkShell(
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
+        reasoningLevel: runtime.reasoningLevel,
+        reasoningSent: runtime.reasoningSent,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (t) =>
@@ -2636,7 +2644,8 @@ async function runInkShell(
           language: context.language,
           providerEnvWarning: startup.providerEnvWarning,
         }),
-      }),
+      });
+    },
     onInput: async (event: ShellInputEvent) => {
       process.removeListener("SIGINT", sigintHandler);
       process.once("SIGINT", sigintHandler);
@@ -2923,6 +2932,28 @@ async function shouldEnterInkShell(input: Readable, output: Writable): Promise<b
   return shouldUseInkShell(input, output);
 }
 
+/**
+ * D13E-P3 cleanup #4 — 识别 plain TUI 的 StatusTray raw 行
+ * （`formatRuntimeStatusLine` 的产出）。Ink 模式下任何残留 writeLine 该格式
+ * 的字符串都视为噪音，必须从 ShellBlockOutput._write 静默丢弃。
+ *
+ * 命中条件（任意一条即可，line 已经 trim）：
+ *   - "[Linghun] 会话 …" / "[Linghun] 会话 ..." 中文格式
+ *   - "Status: Session …" 英文格式
+ *   - 同时包含 "确认 " 与 "后台 "（中文 fallback）
+ *   - 同时包含 "Gate " 与 "BG "（英文 fallback；前导可有可无的 "· "
+ *     分隔符，所以这里只查 token 关键字）
+ *
+ * 故意保守：长 doctor 报告 / 错误堆栈 / 用户回声不会同时命中两个 token。
+ */
+function isRuntimeStatusDump(line: string): boolean {
+  if (line.startsWith("[Linghun] 会话 ")) return true;
+  if (line.startsWith("Status: Session ")) return true;
+  if (line.includes("确认 ") && line.includes("后台 ")) return true;
+  if (line.includes("Gate ") && line.includes("BG ")) return true;
+  return false;
+}
+
 class ShellBlockOutput extends Writable {
   /**
    * 当前 active 的 assistant streaming block id（keep:true，由
@@ -2947,6 +2978,15 @@ class ShellBlockOutput extends Writable {
     const text = chunk.toString();
     const normalized = text.trim();
     if (normalized) {
+      // D13E-P3 cleanup #4 — 拦截 plain TUI 用的 StatusTray raw 行（writeStatus
+      // 的产出）。Ink 路径下任何 writeLine/handleTuiKeypress 残留写出
+      // "[Linghun] 会话 ... · 后台 N" / "Status: Session ..." 都会被这里 drop，
+      // 让 task transcript 永远看不到那条噪音。新 TaskFooter 已经覆盖必要状态
+      // （permission · model · cache · index · reasoning），所以丢弃这条不损失信号。
+      if (isRuntimeStatusDump(normalized)) {
+        callback();
+        return;
+      }
       this.blocks.push(createOutputBlock(normalized, this.context.language));
       // 缓存"最近一次普通 writeLine 的完整正文"，让 /details 默认分支可以展开
       // 长正文（如 /model doctor 的 provider.env merge / providers / endpointPath

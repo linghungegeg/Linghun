@@ -261,26 +261,38 @@ function TaskFooter({
   language: ShellViewModel["language"];
 }): React.ReactNode {
   // D13E-P3 production footer: 1 line of muted status with bottom breathing
-  // space, plus a red-colored Shift+Tab hint at the end.
+  // space. Shift+Tab hint sits right after permissionMode (NOT at end of line)
+  // and stays red so it's the first thing the eye picks up.
   //
-  // Shape: "默认模式 · 模型 X · 缓存 X% · 索引?  （Shift+Tab 切换模式）"
-  //        "default mode · model X · cache X% · index?  (Shift+Tab switch mode)"
+  // Shape: "默认模式（Shift+Tab 切换模式） · 模型 X · 缓存 X% · 索引?"
+  //        "default mode (Shift+Tab switch mode) · model X · cache X% · index?"
   //
   // Long sentences (e.g. setup hint) are intentionally NOT routed here —
-  // permissionMode + model + cache + index is the entire signal budget.
-  // An optional short hint is supported and dropped first when width is tight.
-  // The cyclePermHint is always rendered with theme.status.fail (red) so it
-  // stays scannable even on narrow terminals; if the muted segments overflow,
-  // they truncate but the hint stays visible at the right.
+  // permissionMode + model + cache + index + optional reasoning is the entire
+  // signal budget. An optional short hint is supported and dropped first when
+  // width is tight. The muted tail is fitText-truncated; the cyclePermHint is
+  // never truncated because it's the discovery affordance for mode switching.
   void language; // hint copy already localized in view-model
-  const segments: string[] = [footer.permissionMode, footer.model, footer.cache, footer.index];
-  if (footer.hint) segments.push(footer.hint);
-  const main = segments.join(" · ");
-  const fittedMain = fitText(main, Math.max(20, width - 4));
+  const tailSegments: string[] = [footer.model, footer.cache, footer.index];
+  if (footer.reasoning) tailSegments.push(footer.reasoning);
+  if (footer.hint) tailSegments.push(footer.hint);
+  const tail = tailSegments.join(" · ");
+  // Reserve room for "permissionMode" + "cyclePermHint" + " · " separator.
+  const reserved = footer.permissionMode.length + footer.cyclePermHint.length + 3;
+  const tailBudget = Math.max(10, width - 4 - reserved);
+  const fittedTail = fitText(tail, tailBudget);
+  // Nest the three colored runs inside a single parent <Text>. Three sibling
+  // <Text> children of a <Box> would be treated as flex inline-blocks and each
+  // would wrap inside its own column budget — that's why the early version
+  // produced "默认模 （Shift+Tab\n        切换模式）". A single parent Text flows
+  // them as one logical line with inline color changes.
   return (
     <Box width={width} paddingX={2} paddingTop={1}>
-      <Text color={theme.muted}>{fittedMain} </Text>
-      <Text color={theme.status.fail}>{footer.cyclePermHint}</Text>
+      <Text>
+        <Text color={theme.muted}>{footer.permissionMode}</Text>
+        <Text color={theme.status.fail}>{footer.cyclePermHint}</Text>
+        <Text color={theme.muted}> · {fittedTail}</Text>
+      </Text>
     </Box>
   );
 }

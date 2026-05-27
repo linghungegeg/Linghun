@@ -4,6 +4,20 @@ import { fitText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
 import type { ProductBlockViewModel } from "../types.js";
 
+/**
+ * D13E-P3 cleanup #3 — title 噪音过滤：
+ * "unknown" / "Unknown" / 空白都视作没有 title，避免 ProductBlock 把
+ * fallback 占位词当作产品级标题渲染（"● unknown" 是观察到的真实泄漏）。
+ * 调用方仍可传任何字符串；这里只是渲染层的最后一道防线。
+ */
+function isMeaningfulTitle(value: string | undefined): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.toLowerCase() === "unknown") return false;
+  return true;
+}
+
 export function ProductBlock({
   block,
   theme,
@@ -53,6 +67,16 @@ export function ProductBlock({
   // P2-2：detail / nextAction 走 fitText 防御截断。
   // 边框态 paddingX=1，左右各 1 列+边框 2 列 = 4 列开销，预留出来防溢出。
   const innerWidth = Math.max(8, width - (emphasized ? 4 : 0));
+  // D13E-P3 cleanup #3：title 为空 / "unknown" 时不渲染 title 行。如果同时
+  // 也没有 detail / nextAction，summary 就上提到 marker 行，让块依然有视觉
+  // 主体（"● 我不能讨论这个。" 这种安全拒绝回复就是典型场景）。空 summary
+  // 直接不渲染整个块，避免出现一个孤零零的 marker 行。
+  const titleVisible = isMeaningfulTitle(block.title);
+  const summaryTrimmed = (block.summary ?? "").trim();
+  if (!titleVisible && !summaryTrimmed && !block.detail && !block.nextAction) {
+    return null;
+  }
+  const summaryAsMarker = !titleVisible && summaryTrimmed.length > 0;
   return (
     <Box
       flexDirection="column"
@@ -61,12 +85,16 @@ export function ProductBlock({
       paddingX={emphasized ? 1 : 0}
       marginBottom={1}
     >
-      {block.title ? (
+      {titleVisible ? (
         <Text color={theme.status[block.status]}>
           {getStatusMarker(block.status, theme.mode === "no-color")} {block.title}
         </Text>
+      ) : summaryAsMarker ? (
+        <Text color={theme.status[block.status]}>
+          {getStatusMarker(block.status, theme.mode === "no-color")} {block.summary}
+        </Text>
       ) : null}
-      <Text>{block.summary}</Text>
+      {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
       {block.detail ? (
         <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text>
       ) : null}
