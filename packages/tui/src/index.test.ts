@@ -5681,9 +5681,13 @@ describe("Phase 06 TUI slash commands", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const output = new MemoryOutput();
 
+    // D.13N — engine auto-allows readonly Bash (echo / pwd / git status / …),
+    // so to assert "no silent Bash" we use a destructive command that the
+    // policy engine never auto-allows. The contract: in default mode any
+    // command not in the readonly whitelist must still prompt.
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["/bash echo SHOULD_NOT_RUN\n/exit\n"]),
+      stdin: Readable.from(["/bash rm SHOULD_NOT_RUN.txt\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -5691,6 +5695,82 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("default 模式不会静默执行 Bash");
     expect(output.text).not.toContain("SHOULD_NOT_RUN");
     expect(output.text).not.toContain("工具 Bash 结果");
+  });
+
+  // D.13N — policy engine auto_allow_readonly: safe readonly Bash (echo,
+  // pwd, git status, …) skips the permission card in default mode and the
+  // session transcript records a `permission_auto_allow_readonly` event for
+  // auditability. Sensitive paths (`.env`, provider.env, .ssh/) and
+  // composition operators (`; && || | > $()`) keep the prompt.
+  it("D.13N policy engine auto_allow_readonly: /bash echo runs without permission card and emits audit event", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/bash echo D13N_AUTO_ALLOW_OK\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("D13N_AUTO_ALLOW_OK");
+    expect(output.text).not.toContain("default 模式不会静默执行 Bash");
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("permission_auto_allow_readonly") &&
+          event.message.includes("tool=Bash") &&
+          event.message.includes("semantic=readonly"),
+      ),
+    ).toBe(true);
+    // Audit event must not leak the actual command argument verbatim — the
+    // engine emits a summary, not raw text.
+    const autoAllowEvent = transcript.find(
+      (event) =>
+        event.type === "system_event" &&
+        event.message.includes("permission_auto_allow_readonly") &&
+        event.message.includes("tool=Bash"),
+    );
+    expect(
+      autoAllowEvent && autoAllowEvent.type === "system_event"
+        ? autoAllowEvent.message
+        : "",
+    ).toContain("summary=");
+  });
+
+  it("D.13N policy engine: /bash cat .env still prompts (sensitive_path)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, ".env"), "API_KEY=must-not-leak\n", "utf8");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/bash cat .env\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("default 模式不会静默执行 Bash");
+    expect(output.text).not.toContain("must-not-leak");
+  });
+
+  it("D.13N policy engine: /bash with composition operator still prompts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/bash echo a > out.txt\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("default 模式不会静默执行 Bash");
   });
 
   it("exposes layered tool output fields for presenter callers", () => {

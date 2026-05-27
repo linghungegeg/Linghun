@@ -36,6 +36,10 @@ import {
   isLowRiskWorkspaceEdit,
   isPlanAllowedTool,
 } from "./permission-continuation-runtime.js";
+import {
+  classifyToolRequest,
+  type PolicyVerdict,
+} from "./permission-policy-engine.js";
 
 export type PermissionCheck = {
   request: {
@@ -50,6 +54,12 @@ export type PermissionCheck = {
   decision: "allow" | "ask" | "deny";
   reason: string;
   preflight?: string;
+  /**
+   * Set when the policy engine short-circuited to auto_allow_readonly.
+   * Caller (executeModelToolUse) emits a `permission_auto_allow_readonly`
+   * event and can use the verdict to render an explainer line.
+   */
+  autoAllowReadonly?: PolicyVerdict;
 };
 
 export type AddAllowRuleResult =
@@ -139,6 +149,38 @@ export async function decidePermission(
   if (hardDeny) {
     await recordPermissionDenied(context, name, hardDeny);
     return { request, decision: "deny", reason: hardDeny };
+  }
+
+  // D.13N — policy engine auto_allow_readonly short-circuit.
+  // Runs *after* hard-deny and *before* rule / mode policy so the engine can
+  // widen the implicit allow surface for safe readonly Bash / Read calls
+  // without bypassing user-configured deny rules. Engine itself never auto-
+  // denies; conservative path is `require_permission`, which falls through
+  // here unchanged so the existing decision tree owns the `ask` / `allow` /
+  // `deny` outcome.
+  if (context.permissionMode !== "plan" && context.permissionMode !== "auto-review") {
+    const policyVerdict = classifyToolRequest({
+      toolName: name,
+      input,
+      workspaceRoot: context.projectPath,
+    });
+    if (policyVerdict.decision === "auto_allow_readonly") {
+      // Honor explicit deny rules even for readonly tools — never override
+      // a user-configured deny.
+      const denyRule = findPermissionRule(
+        context.permissions.rules,
+        name,
+        tool.permission.risk,
+      );
+      if (!denyRule || denyRule.effect !== "deny") {
+        return {
+          request,
+          decision: "allow",
+          reason: `policy auto_allow_readonly: ${policyVerdict.reason}`,
+          autoAllowReadonly: policyVerdict,
+        };
+      }
+    }
   }
 
   if (context.permissionMode === "plan") {

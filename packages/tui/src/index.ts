@@ -296,6 +296,7 @@ import {
   formatLocalToolPermissionPrompt,
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
+import { classifyToolRequest } from "./permission-policy-engine.js";
 import {
   createProcessGuard,
   installProcessGuardExitHandlers,
@@ -12799,6 +12800,19 @@ async function executeModelToolUse(
     reason: permission.reason,
     createdAt: new Date().toISOString(),
   });
+  if (permission.autoAllowReadonly) {
+    // D.13N — engine short-circuited this tool to auto_allow_readonly.
+    // Record a structured event for transparency. Payload is sanitized: the
+    // engine returns redactedSummary, never raw command text or absolute
+    // sensitive paths, so this event is safe to ship in transcripts.
+    const verdict = permission.autoAllowReadonly;
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `permission_auto_allow_readonly: tool=${toolName} semantic=${verdict.semantic} pathSafety=${verdict.pathSafety} summary=${verdict.redactedSummary} reason=${verdict.reason}`,
+      "info",
+    );
+  }
   if (permission.decision !== "allow") {
     clearRequestActivity(context);
     const text = `${permission.decision}: ${permission.reason}`;
@@ -13040,6 +13054,37 @@ async function executeDeferredDispatchToolUse(
       };
     }
     // ExecuteExtraTool
+    // D.13N — record a policy engine verdict for transparency. The actual
+    // gate (whitelist + mutating flags inside executeExtraTool) is unchanged;
+    // this event is the auditable proof that ExecuteExtraTool runs through
+    // the same classifier as built-in tools, so dispatch never silently
+    // bypasses permission policy.
+    const requestedToolName =
+      typeof input.tool_name === "string" ? input.tool_name : "(unknown)";
+    const deferredVerdict = classifyToolRequest({
+      toolName: requestedToolName,
+      input: input.params,
+      workspaceRoot: context.projectPath,
+      isDeferred: true,
+      manifestReadOnly:
+        isCodebaseMemoryToolName(requestedToolName) &&
+        getCodebaseMemoryToolRisk(requestedToolName) === "readonly",
+    });
+    if (deferredVerdict.decision === "auto_allow_readonly") {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `permission_auto_allow_readonly: tool=ExecuteExtraTool target=${deferredVerdict.redactedSummary} semantic=${deferredVerdict.semantic} reason=${deferredVerdict.reason}`,
+        "info",
+      );
+    } else {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `permission_policy_require: tool=ExecuteExtraTool target=${deferredVerdict.redactedSummary} semantic=${deferredVerdict.semantic} reason=${deferredVerdict.reason}`,
+        "info",
+      );
+    }
     const result = await executeExtraTool(
       { tool_name: input.tool_name, params: input.params },
       context,
@@ -13491,6 +13536,19 @@ async function handleToolCommand(
       reason: permission.reason,
       createdAt: new Date().toISOString(),
     });
+    if (permission.autoAllowReadonly) {
+      // D.13N — same audit event as the model-dispatched path. Mirrors the
+      // emit in executeModelToolUse so transcripts have a single, uniform
+      // signal regardless of whether the tool was triggered by the model
+      // or by a user-typed slash command.
+      const verdict = permission.autoAllowReadonly;
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `permission_auto_allow_readonly: tool=${name} semantic=${verdict.semantic} pathSafety=${verdict.pathSafety} summary=${verdict.redactedSummary} reason=${verdict.reason}`,
+        "info",
+      );
+    }
 
     if (permission.decision !== "allow") {
       await recordToolFailureEvidence(

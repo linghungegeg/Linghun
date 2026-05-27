@@ -141,6 +141,19 @@ export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
   };
 }
 
+/**
+ * **UNSAFE LOW-LEVEL PRIMITIVE.** Executes a built-in tool directly without
+ * any permission policy check.
+ *
+ * D.13N — TUI main paths (model tool dispatch, slash commands) MUST go
+ * through `decidePermission` (and by extension, the permission-policy-engine)
+ * BEFORE calling `runTool`. This entry exists only for callers that have
+ * already passed a policy decision (e.g. `executeApprovedModelToolUse` in
+ * the TUI package). New consumers should add a permission gate at the
+ * call site rather than bypassing here.
+ *
+ * Do NOT export this through wrapper modules without a permission check.
+ */
 export async function runTool(
   name: ToolName,
   input: unknown,
