@@ -322,9 +322,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     const reasoningStatus = reasoningLevel
       ? endpointProfile === "responses"
         ? `effective/sent level=${reasoningLevel}`
-        : compatibilityProfile === "permissive_openai_compatible"
+        : endpointProfile === "anthropic_messages"
           ? `effective/sent level=${reasoningLevel}`
-          : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
+          : compatibilityProfile === "permissive_openai_compatible"
+            ? `effective/sent level=${reasoningLevel}`
+            : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
       : "not configured/未生效";
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       provider.baseUrl,

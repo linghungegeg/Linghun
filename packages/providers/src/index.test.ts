@@ -2827,3 +2827,208 @@ describe("D.13H Anthropic context editing hard-disabled closure", () => {
     expect(bodyText).not.toContain("cache_reference");
   });
 });
+
+// ---------------------------------------------------------------------------
+// D.13K — Anthropic Messages extended thinking (推理强度真正生效)
+// reasoningLevel=Low/Medium/High 时，body 必须带原生 Anthropic `thinking` 字段；
+// OpenAI strict chat / responses 原有 reasoning 行为不回归；
+// strict chat 永远不出现 Anthropic `thinking` 字段。
+// ---------------------------------------------------------------------------
+describe("D.13K Anthropic Messages extended thinking", () => {
+  function buildClaudeProvider(overrides: Partial<Parameters<typeof OpenAiCompatibleProvider.prototype.createAnthropicMessagesRequest>[0]> = {}) {
+    return new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+      ...overrides,
+    });
+  }
+
+  it("contract: anthropic_messages + reasoningLevel=High → sendReasoning=true", () => {
+    const contract = resolveProviderRuntimeContract(
+      {
+        id: "claude-relay",
+        type: "openai-compatible",
+        baseUrl: "https://relay.example.com/v1",
+        apiKey: "test-key",
+        model: "claude-opus-4-7",
+        endpointProfile: "anthropic_messages",
+        reasoningLevel: "High",
+      },
+    );
+    expect(contract.endpointProfile).toBe("anthropic_messages");
+    expect(contract.sendReasoning).toBe(true);
+  });
+
+  it("contract: anthropic_messages 无 reasoningLevel → sendReasoning=false", () => {
+    const contract = resolveProviderRuntimeContract({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+    });
+    expect(contract.sendReasoning).toBe(false);
+  });
+
+  it("body: reasoningLevel=High → thinking={type:'enabled', budget_tokens:8192}", () => {
+    const provider = buildClaudeProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningLevel: "High",
+    });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+  });
+
+  it("body: reasoningLevel=Medium → budget_tokens=4096", () => {
+    const provider = buildClaudeProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningLevel: "Medium",
+    });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+  });
+
+  it("body: reasoningLevel=Low → budget_tokens=1024", () => {
+    const provider = buildClaudeProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningLevel: "Low",
+    });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+  });
+
+  it("body: 大小写无关——'high' / 'HIGH' / 'High' 都映射到 8192", () => {
+    const provider = buildClaudeProvider();
+    for (const level of ["high", "HIGH", "High"]) {
+      const body = provider.createAnthropicMessagesRequest({
+        messages: [{ role: "user", content: "hi" }],
+        reasoningLevel: level,
+      });
+      expect(body.thinking?.budget_tokens).toBe(8192);
+    }
+  });
+
+  it("body: 无 reasoningLevel → 不写 thinking 字段", () => {
+    const provider = buildClaudeProvider();
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.thinking).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("thinking");
+  });
+
+  it("body: config.reasoningLevel=High 也生效（request 不显式传时 fallback）", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "High",
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+  });
+
+  it("body: max_tokens 安全处理——thinking budget=8192 + max_tokens=1024 → 抬升到 9216", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+      maxOutputTokens: 1024,
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningLevel: "High",
+    });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+    expect(body.max_tokens).toBeGreaterThanOrEqual(8192 + 1024);
+  });
+
+  it("strict chat profile: reasoningLevel=High 永远不出现 Anthropic thinking 字段，也不出现 OpenAI reasoning", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+      reasoningLevel: "Medium",
+    });
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      reasoningLevel: "High",
+    });
+    expect(JSON.stringify(request)).not.toContain("thinking");
+    expect(request).not.toHaveProperty("reasoning");
+  });
+
+  it("OpenAI Responses profile: reasoning.effort 仍按原逻辑发送，且不发 Anthropic thinking", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "High",
+    });
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(request.reasoning).toEqual({ effort: "High" });
+    expect(JSON.stringify(request)).not.toContain("thinking");
+  });
+
+  it("wire(stream): anthropic_messages reasoningLevel=High → POST body 含 thinking 字段，URL=/v1/messages", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_k"}}\n\n',
+            ),
+          );
+          controller.enqueue(
+            encoder.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = buildClaudeProvider();
+    for await (const _ of provider.stream(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        reasoningLevel: "High",
+      },
+      new AbortController().signal,
+    )) {
+      // drain
+    }
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
+    if (!call) throw new Error("fetch was not called");
+    const [url, init] = call;
+    expect(url).toBe("https://relay.example.com/v1/messages");
+    const sent = JSON.parse(String(init.body)) as {
+      thinking?: { type: string; budget_tokens: number };
+    };
+    expect(sent.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+  });
+});

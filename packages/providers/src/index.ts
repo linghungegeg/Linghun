@@ -245,6 +245,10 @@ export type AnthropicToolChoice =
   | { type: "none" }
   | { type: "tool"; name: string };
 
+// Anthropic Messages API extended thinking 配置；budget_tokens 为 thinking 上限。
+// 仅在 Linghun reasoningLevel 非空且 endpointProfile=anthropic_messages 时由 builder 注入。
+export type AnthropicThinkingConfig = { type: "enabled"; budget_tokens: number };
+
 export type AnthropicMessagesRequest = {
   model: string;
   messages: AnthropicMessage[];
@@ -253,6 +257,7 @@ export type AnthropicMessagesRequest = {
   system?: string | AnthropicSystemBlock[];
   tools?: AnthropicToolDefinition[];
   tool_choice?: AnthropicToolChoice;
+  thinking?: AnthropicThinkingConfig;
 };
 
 type AnthropicStreamEvent =
@@ -833,13 +838,16 @@ export function resolveProviderRuntimeContract(
     // config.supportsTools=false 时才禁用；toolSchemaShape="anthropic_tools"
     // 走 Anthropic 原生 schema（{name, description, input_schema}），
     // toolResultShape="anthropic_tool_result" 走 user content block 形态。
+    // D.13K：Anthropic Messages 原生支持 extended thinking。当
+    // request.reasoningLevel 或 config.reasoningLevel 非空时，sendReasoning=true，
+    // body builder 会注入 thinking 字段（不复用 OpenAI reasoning.effort）。
     return {
       profile: "anthropic_messages",
       endpointProfile,
       endpoint: "/v1/messages",
       compatibilityProfile,
       supportsTools,
-      sendReasoning: false,
+      sendReasoning: Boolean(request.reasoningLevel ?? config.reasoningLevel),
       includeUsage: false,
       toolSchemaShape: supportsTools ? "anthropic_tools" : "tools_disabled",
       toolResultShape: supportsTools ? "anthropic_tool_result" : "tools_disabled",
@@ -1411,6 +1419,24 @@ function createAnthropicMessagesProfileRequest(
     max_tokens: resolveMaxOutputTokens(model, request, config),
     stream: true,
   };
+  // D.13K：Anthropic Messages extended thinking 注入。
+  // 仅在 contract.sendReasoning=true（即 request 或 config 含 reasoningLevel）时附加；
+  // Low/Medium/High → budget_tokens=1024/4096/8192。其它字符串视为未识别，按
+  // Medium 兜底（与 model-setup 默认一致），避免静默丢失推理意图。
+  // max_tokens 安全处理：thinking budget 必须严格小于 max_tokens；
+  // 不足时把 max_tokens 抬到 budget + 1024，保证 Anthropic 不返回 invalid_request_error。
+  if (contract.sendReasoning) {
+    const thinking = createAnthropicThinkingPayload(
+      request.reasoningLevel ?? config.reasoningLevel,
+    );
+    if (thinking) {
+      body.thinking = thinking;
+      const minMaxTokens = thinking.budget_tokens + 1024;
+      if (body.max_tokens < minMaxTokens) {
+        body.max_tokens = minMaxTokens;
+      }
+    }
+  }
   // D.13G：tools 走 Anthropic 原生 schema，按 name 字典序稳定排序（与 OpenAI 路径一致），
   // 用于保护 prompt cache 前缀 hash。tool_choice 默认 "auto"；显式 "none" 时同步透传。
   if (contract.supportsTools && request.tools && request.tools.length > 0) {
@@ -1532,6 +1558,22 @@ function createReasoningPayload(level: string | undefined): { reasoning?: { effo
     return {};
   }
   return { reasoning: { effort: level } };
+}
+
+// D.13K：Anthropic Messages extended thinking budget 映射。
+// Low → 1024 / Medium → 4096 / High → 8192；其它字符串按 Medium 兜底。
+// 仅由 createAnthropicMessagesProfileRequest 在 contract.sendReasoning=true 时调用，
+// 不复用 OpenAI reasoning.effort 字段；OpenAI 路径不会触发该 helper。
+function createAnthropicThinkingPayload(
+  level: string | undefined,
+): AnthropicThinkingConfig | undefined {
+  if (!level) return undefined;
+  const normalized = level.trim().toLowerCase();
+  let budget: number;
+  if (normalized === "low") budget = 1024;
+  else if (normalized === "high") budget = 8192;
+  else budget = 4096; // medium / 未识别 → 与 model-setup 默认 Medium 一致
+  return { type: "enabled", budget_tokens: budget };
 }
 
 function toOpenAiMessage(message: ModelMessage): OpenAiChatMessage {

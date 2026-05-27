@@ -669,6 +669,44 @@ describe("model-doctor-runtime", () => {
       expect(output).toContain("anthropic_messages profile 已原生支持 tools");
     });
 
+    it("D.13K: anthropic_messages provider + reasoningLevel=High → reasoning=effective/sent level=High", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-opus-4-7",
+            endpointProfile: "anthropic_messages",
+            reasoningLevel: "High",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("reasoning=effective/sent level=High");
+      expect(output).not.toContain("reasoning=ignored/unsupported");
+    });
+
+    it("D.13K: anthropic_messages provider 无 reasoningLevel → reasoning=not configured/未生效", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "claude-relay": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test-claude-1234567890",
+            model: "claude-opus-4-7",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("reasoning=not configured/未生效");
+    });
+
     it("never leaks raw apiKey or prompt text", async () => {
       const config: LinghunConfig = {
         ...baseConfig,

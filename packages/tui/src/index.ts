@@ -4736,9 +4736,17 @@ function getSelectedModelRuntime(
     providerConfig?.compatibilityProfile ??
     (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
   const reasoningLevel = providerConfig?.reasoningLevel;
+  // D.13K：reasoningSent 现支持三种生效路径——
+  //   1. responses profile（OpenAI Responses API 原生 reasoning.effort）；
+  //   2. permissive_openai_compatible chat（中转网关接受非标 reasoning 字段）；
+  //   3. anthropic_messages profile（Anthropic extended thinking，由 provider builder 注入 thinking 字段）。
+  // 注意：SelectedModelRuntime.endpointProfile 被收窄为 chat_completions | responses，
+  // anthropic_messages 走的是 provider 决策器自动切换路径——这里直接看 raw provider profile。
   const reasoningSent = Boolean(
     reasoningLevel &&
-      (endpointProfile === "responses" || compatibilityProfile === "permissive_openai_compatible"),
+      (endpointProfile === "responses" ||
+        compatibilityProfile === "permissive_openai_compatible" ||
+        rawEndpointProfile === "anthropic_messages"),
   );
   return {
     role,

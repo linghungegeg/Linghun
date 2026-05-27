@@ -3311,6 +3311,19 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(noLevel.taskFooter?.reasoning).toBeUndefined();
   });
 
+  it("D.13K: anthropic_messages provider + reasoningLevel=High → footer 显示 '推理 High'", () => {
+    // view-model 自身不解析 provider，由 runInkShell / runPlainTui 上游传 reasoningLevel +
+    // reasoningSent。本用例验证 anthropic_messages 路径下 reasoningSent=true 同样会触发
+    // footer 显示，与 responses / permissive_openai_compatible 行为对齐。
+    const view = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      reasoningLevel: "High",
+      reasoningSent: true,
+    });
+    expect(view.taskFooter?.reasoning).toBe("推理 High");
+  });
+
   it("setupHint NO LONGER routes through taskFooter.hint (footer stays 1-line minimal)", () => {
     // D.13D 收尾：长 setup 句子不再灌入 footer.hint，避免任务页底部出现冗长说明。
     // setupHint 仍然存在于 ShellViewModel.setupHint，由 HomeLayout 在主屏单独显示。
