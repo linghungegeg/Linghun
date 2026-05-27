@@ -3459,6 +3459,31 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(en).toContain("Hidden commands still work");
   });
 
+  it("D.13P-S latestOutputNext promotes Ctrl+O over /details in zh-CN and en-US", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
+    // 主屏 latestOutput next-action：Ctrl+O 必须出现在 /details 之前，且 /details 仍保留为备用。
+    const zhMatch = source.match(/latestOutputNext:\s*"按 Ctrl\+O 查看完整运行时输出（或 \/details）。"/);
+    expect(zhMatch).not.toBeNull();
+    const enMatch = source.match(
+      /latestOutputNext:\s*"Press Ctrl\+O for full runtime output \(or \/details\)\."/,
+    );
+    expect(enMatch).not.toBeNull();
+  });
+
+  it("D.13P-S toolErrorRetryHint promotes Ctrl+O over /details in zh-CN and en-US", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/models/task-suggestion.ts"), "utf8");
+    const zhMatch = source.match(
+      /toolErrorRetryHint:\s*"按 Ctrl\+O 查看最近一次失败输出（或 \/details）"/,
+    );
+    expect(zhMatch).not.toBeNull();
+    const enMatch = source.match(
+      /toolErrorRetryHint:\s*"Press Ctrl\+O for the latest failure output \(or \/details\)"/,
+    );
+    expect(enMatch).not.toBeNull();
+  });
+
   it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/types.ts"), "utf8");
