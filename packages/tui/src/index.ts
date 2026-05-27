@@ -319,6 +319,7 @@ import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
   formatProviderFailurePrimary,
+  formatProviderThinkingOnlyResponsePrimary,
   formatReportEvidenceRequired,
   formatReportIncompletePrimary,
   formatRequestActivity,
@@ -12635,6 +12636,10 @@ async function recordProviderEmptyResponse(
     ...evidence,
   });
   await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
+  // D.13M：本轮只有 thinking 没有 text/tool_use 时，给用户区分性提示，不再用通用 empty response 文案。
+  if (hadThinking) {
+    return formatProviderThinkingOnlyResponsePrimary(context.language);
+  }
   return formatProviderEmptyResponsePrimary(context.language);
 }
 

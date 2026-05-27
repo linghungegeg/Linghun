@@ -95,6 +95,14 @@ export function formatProviderEmptyResponsePrimary(language: Language): string {
     : "模型没有返回有效回答。可运行 /model doctor 查看详情后重试。";
 }
 
+// D.13M：thinking-only 空响应（Anthropic extended thinking 已返回，但没有最终 text/tool_use）。
+// 给用户明确人话提示，区别于"完全没产出"的通用文案。
+export function formatProviderThinkingOnlyResponsePrimary(language: Language): string {
+  return language === "en-US"
+    ? "The model returned a thinking stream but no final text. Retry, lower the reasoning level, or run /model doctor for details."
+    : "模型已返回思考流但没有最终文本。请重试或降低推理等级，可运行 /model doctor 查看详情。";
+}
+
 export function formatReportEvidenceRequired(language: Language): string {
   return language === "en-US"
     ? "Read key project evidence before writing the report. Mark missing README/package/config items as unconfirmed in the report."

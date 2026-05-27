@@ -3032,3 +3032,109 @@ describe("D.13K Anthropic Messages extended thinking", () => {
     expect(sent.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// D.13M — Anthropic Messages extended thinking SSE (thinking_delta / signature_delta / redacted_thinking)
+// ---------------------------------------------------------------------------
+describe("D.13M Anthropic Messages extended thinking SSE", () => {
+  it("content_block_delta thinking_delta → emits assistant_thinking_delta with thinking text", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-1","usage":{"input_tokens":10}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"分析"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"中"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-fragment"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const thinking = events.filter(
+      (event): event is Extract<LinghunEvent, { type: "assistant_thinking_delta" }> =>
+        event.type === "assistant_thinking_delta",
+    );
+    expect(thinking).toEqual([
+      { type: "assistant_thinking_delta", id: "msg-think-1", text: "分析" },
+      { type: "assistant_thinking_delta", id: "msg-think-1", text: "中" },
+    ]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.some((event) => event.type === "assistant_text_delta")).toBe(false);
+  });
+
+  it("thinking_delta followed by text_delta → emits thinking then text in order", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-2","usage":{"input_tokens":1}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"思考"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"答案"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const types = events.map((event) => event.type);
+    const thinkingIdx = types.indexOf("assistant_thinking_delta");
+    const textIdx = types.indexOf("assistant_text_delta");
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(textIdx).toBeGreaterThanOrEqual(0);
+    expect(thinkingIdx).toBeLessThan(textIdx);
+    const text = events.filter(
+      (event): event is Extract<LinghunEvent, { type: "assistant_text_delta" }> =>
+        event.type === "assistant_text_delta",
+    );
+    expect(text).toEqual([{ type: "assistant_text_delta", id: "msg-think-2", text: "答案" }]);
+  });
+
+  it("redacted_thinking content block + signature_delta → no leak, no error, marks thinking via empty assistant_thinking_delta", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-redact","usage":{"input_tokens":1}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"REDACTED-PAYLOAD"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"redacted_thinking","data":"MORE-REDACTED"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    const thinking = events.filter(
+      (event): event is Extract<LinghunEvent, { type: "assistant_thinking_delta" }> =>
+        event.type === "assistant_thinking_delta",
+    );
+    expect(thinking.length).toBeGreaterThanOrEqual(1);
+    for (const event of thinking) {
+      expect(event.text).toBe("");
+    }
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("REDACTED-PAYLOAD");
+    expect(serialized).not.toContain("MORE-REDACTED");
+  });
+
+  it("thinking_delta followed by tool_use → emits thinking then tool_use; tool continuation not blocked", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-tool","usage":{"input_tokens":1}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先思考"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-think-1","name":"Read"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"}}\n\n',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":4}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const types = events.map((event) => event.type);
+    const thinkingIdx = types.indexOf("assistant_thinking_delta");
+    const toolIdx = types.indexOf("tool_use");
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(toolIdx).toBeGreaterThanOrEqual(0);
+    expect(thinkingIdx).toBeLessThan(toolIdx);
+    const tool = events.filter(
+      (event): event is Extract<LinghunEvent, { type: "tool_use" }> => event.type === "tool_use",
+    );
+    expect(tool).toEqual([
+      { type: "tool_use", id: "call-think-1", name: "Read", input: { path: "README.md" } },
+    ]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
+});

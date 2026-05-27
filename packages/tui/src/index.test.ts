@@ -11279,3 +11279,196 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     expect(context.lastFullOutput).toBe(original);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D.13M — Anthropic thinking SSE: thinking-only / thinking+text / thinking+tool_use
+// ---------------------------------------------------------------------------
+describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
+  function setupClaudeAnthropicEnv(project: string) {
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "anthropic_messages");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    return writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+      }),
+      "utf8",
+    );
+  }
+
+  function mockAnthropicSseFetch(streams: string[][]): Array<{ url: string }> {
+    const requests: Array<{ url: string }> = [];
+    const realFetch = globalThis.fetch.bind(globalThis);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        // 只拦截 LLM 调用（/v1/messages）。其它 fetch（如 codebase-memory wasm 加载用的
+        // data:application/octet-stream;base64 / file:// 等）原样透传给真实 fetch，
+        // 否则它们会被错算成 LLM 请求并消耗 streams[0]，或返回空 buffer 触发 wasm 解析失败。
+        if (!u.includes("/v1/messages")) {
+          return realFetch(url, init);
+        }
+        const idx = requests.length;
+        requests.push({ url: u });
+        const chunks = streams[idx] ?? streams[streams.length - 1] ?? [];
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    return requests;
+  }
+
+  it("thinking-only stream → TUI shows thinking-only message; transcript records hadThinking=yes via provider_empty_response", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-think-only-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await setupClaudeAnthropicEnv(project);
+
+    const requests = mockAnthropicSseFetch([
+      [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-only","usage":{"input_tokens":3}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"思考"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ],
+    ]);
+
+    const output = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请简单回答\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe("https://relay.example.com/v1/messages");
+    // thinking-only 文案：必须是新提示，不是通用 empty response 文案
+    expect(output.text).toContain("模型已返回思考流但没有最终文本");
+    expect(output.text).toContain("/model doctor");
+    expect(output.text).not.toContain("模型没有返回有效回答。可运行 /model doctor 查看详情后重试。");
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("provider_empty_response"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) => event.type === "system_event" && event.message.includes("hadThinking=yes"),
+      ),
+    ).toBe(true);
+  });
+
+  it("thinking_delta then text_delta → main screen shows only the final text, not the thinking content", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-think-text-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await setupClaudeAnthropicEnv(project);
+
+    const secret = "INNER-THOUGHT-MUST-NOT-LEAK";
+    const requests = mockAnthropicSseFetch([
+      [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-text","usage":{"input_tokens":3}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+        `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"${secret}"}}\n\n`,
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"最终答复"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ],
+    ]);
+
+    const output = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["你好\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("最终答复");
+    expect(output.text).not.toContain(secret);
+    expect(output.text).not.toContain("模型已返回思考流但没有最终文本");
+    expect(output.text).not.toContain("模型没有返回有效回答");
+  });
+
+  it("thinking_delta then tool_use → tool/permission continuation is not blocked by empty-response", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-think-tool-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    await setupClaudeAnthropicEnv(project);
+
+    const requests = mockAnthropicSseFetch([
+      [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-think-tool","usage":{"input_tokens":5}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先思考"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_think_1","name":"Read"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"package.json\\"}"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ],
+      [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-final","usage":{"input_tokens":10}}}\n\n',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"已读取 package.json，分析完成。"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ],
+    ]);
+
+    const output = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["读一下 package.json\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 必须发了至少 2 轮（thinking+tool_use → 工具执行 → 继续模型）
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(requests[0].url).toBe("https://relay.example.com/v1/messages");
+    expect(requests[1].url).toBe("https://relay.example.com/v1/messages");
+    // 不应该被空响应截断：thinking-only 提示和通用 empty response 提示都不应出现
+    expect(output.text).not.toContain("模型已返回思考流但没有最终文本");
+    expect(output.text).not.toContain("模型没有返回有效回答");
+    // 第二轮 text_delta 必须落到主屏
+    expect(output.text).toContain("已读取 package.json，分析完成。");
+  });
+});

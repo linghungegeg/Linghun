@@ -276,7 +276,14 @@ type AnthropicStreamEvent =
   | {
       type: "content_block_delta";
       index?: number;
-      delta?: { type?: string; text?: string; partial_json?: string };
+      delta?: {
+        type?: string;
+        text?: string;
+        partial_json?: string;
+        // D.13M：extended thinking 流。thinking_delta 携带 thinking 文本；
+        // signature_delta / redacted_thinking 不暴露 signature/data 给 Linghun 主屏。
+        thinking?: string;
+      };
     }
   | { type: "content_block_stop"; index?: number }
   | { type: "message_delta"; delta?: { stop_reason?: string }; usage?: AnthropicUsage }
@@ -1867,6 +1874,11 @@ function parseAnthropicMessagesEventBlock(
       }
       state.pendingToolUses.set(blockIndex, { id, name, argsBuffer: "" });
     }
+    // D.13M：redacted_thinking 整块（block.type === "redacted_thinking"）在 content_block_start 直接出现。
+    // 不暴露 block.data；只用空字符串 thinking_delta 标记本轮"曾发生 thinking"，让 TUI 走 thinking-only 文案。
+    if (block?.type === "redacted_thinking") {
+      return [{ type: "assistant_thinking_delta", id: state.lastId, text: "" }];
+    }
     return [];
   }
 
@@ -1875,6 +1887,22 @@ function parseAnthropicMessagesEventBlock(
     if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
       state.hadText = true;
       return [{ type: "assistant_text_delta", id: state.lastId, text: delta.text }];
+    }
+    // D.13M：Anthropic extended thinking 流。
+    // - thinking_delta：携带 thinking 文本，作为 assistant_thinking_delta emit；不写主屏，不进 transcript。
+    // - signature_delta：thinking 块的签名片段，Linghun 不展示，静默忽略，不计错误，不算空响应。
+    // - redacted_thinking：作为 delta 出现时（部分 relay 实现），不暴露 redacted 数据，仅以空字符串 thinking_delta
+    //   标记本轮"曾发生 thinking"，让 TUI 走 thinking-only 文案。
+    if (delta?.type === "thinking_delta") {
+      const text = typeof delta.thinking === "string" ? delta.thinking : "";
+      if (text.length === 0) return [];
+      return [{ type: "assistant_thinking_delta", id: state.lastId, text }];
+    }
+    if (delta?.type === "signature_delta") {
+      return [];
+    }
+    if (delta?.type === "redacted_thinking") {
+      return [{ type: "assistant_thinking_delta", id: state.lastId, text: "" }];
     }
     if (delta?.type === "input_json_delta") {
       // D.13G：input_json_delta 累积 partial_json 到对应 index 上的 pendingToolUses。
