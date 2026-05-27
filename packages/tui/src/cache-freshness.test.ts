@@ -375,4 +375,31 @@ describe("cache-freshness", () => {
       expect(summary.providers.test.apiKey).toBe("missing");
     });
   });
+
+  describe("D.13P createCacheState provider boundary", () => {
+    it("does not hardcode deepseek/deepseek-v4-flash when model is unspecified", async () => {
+      const { createCacheState } = await import("./tui-state-runtime.js");
+      const stateDefault = createCacheState("/tmp/no-real-project");
+      // 默认 model 应为 unknown 占位，provider 也不再硬编码 deepseek。
+      // 通过 modelProviderHash 比对 unknown:unknown 与硬编码 deepseek:deepseek-v4-flash
+      // 应不一致，保证 Claude / OpenAI-compatible 场景下 cache freshness 不会被误染成 DeepSeek。
+      const expectedUnknownHash = stableHash("unknown:unknown");
+      expect(stateDefault.lastFreshness?.modelProviderHash).toBe(expectedUnknownHash);
+      const legacyHardcodedHash = stableHash("deepseek:deepseek-v4-flash");
+      expect(stateDefault.lastFreshness?.modelProviderHash).not.toBe(legacyHardcodedHash);
+    });
+
+    it("derives provider from model prefix (deepseek-* → deepseek)", async () => {
+      const { createCacheState } = await import("./tui-state-runtime.js");
+      const dsState = createCacheState("/tmp/p", "deepseek-chat");
+      expect(dsState.lastFreshness?.modelProviderHash).toBe(
+        stableHash("deepseek:deepseek-chat"),
+      );
+      const claudeState = createCacheState("/tmp/p", "claude-opus-4-7");
+      // 非 deepseek-* 前缀不再被误染成 DeepSeek。
+      expect(claudeState.lastFreshness?.modelProviderHash).toBe(
+        stableHash("unknown:claude-opus-4-7"),
+      );
+    });
+  });
 });

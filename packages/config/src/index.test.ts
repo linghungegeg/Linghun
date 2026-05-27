@@ -766,6 +766,65 @@ describe("config directories", () => {
     expect(indexModule.defaultPlaceholderModelNames.has("openai-compatible-model")).toBe(true);
   });
 
+  it("D.13P default routes do not pre-populate placeholder fallbacks like deepseek-v4-pro", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    // 默认 modelRoutes.routes 的 fallbackModels 不再硬塞占位 deepseek-v4-pro。
+    // 占位模型仍可在 defaultPlaceholderModelNames / doctor warning 中存在，
+    // 但默认配置不应假装它是可运行 fallback。
+    for (const route of indexModule.defaultModelRoutes.routes) {
+      expect(route.fallbackModels).not.toContain("deepseek-v4-pro");
+    }
+    // summarizer fallbackModels 之前是 [] + primaryModel 硬编码 deepseek-v4-flash；
+    // D.13P 仍允许 primaryModel 跟随 LINGHUN_DEEPSEEK_MODEL/defaultDeepSeekModel，
+    // 但不应该把另一个 placeholder 名（v4-pro）当成 fallback。
+    const summarizer = indexModule.defaultModelRoutes.routes.find(
+      (route) => route.role === "summarizer",
+    );
+    expect(summarizer?.fallbackModels).toEqual([]);
+  });
+
+  it("D.13P-hotfix default DeepSeek routes use deepseek-chat, not placeholder deepseek-v4-flash/pro", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    // 运行时默认不再用 placeholder。
+    expect(indexModule.defaultConfig.providers.deepseek.model).toBe("deepseek-chat");
+    expect(indexModule.defaultConfig.defaultModel).toBe("deepseek-chat");
+    // 所有 deepseek 角色 route 的 primaryModel 都不能是 placeholder。
+    const deepseekRoutes = indexModule.defaultModelRoutes.routes.filter(
+      (route) => route.provider === "deepseek",
+    );
+    expect(deepseekRoutes.length).toBeGreaterThan(0);
+    for (const route of deepseekRoutes) {
+      expect(route.primaryModel).not.toBe("deepseek-v4-flash");
+      expect(route.primaryModel).not.toBe("deepseek-v4-pro");
+      expect(route.primaryModel).toBe("deepseek-chat");
+    }
+    // placeholder 识别能力保留——doctor / warning 不被削弱。
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-v4-flash")).toBe(true);
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-v4-pro")).toBe(true);
+    expect(indexModule.isDefaultPlaceholderModel("deepseek-chat")).toBe(false);
+  });
+
+  it("D.13P-hotfix LINGHUN_DEEPSEEK_MODEL env override propagates into default routes", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "custom-deepseek-model");
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    expect(indexModule.defaultConfig.providers.deepseek.model).toBe("custom-deepseek-model");
+    const executor = indexModule.defaultModelRoutes.routes.find(
+      (route) => route.role === "executor",
+    );
+    expect(executor?.primaryModel).toBe("custom-deepseek-model");
+    const summarizer = indexModule.defaultModelRoutes.routes.find(
+      (route) => route.role === "summarizer",
+    );
+    expect(summarizer?.primaryModel).toBe("custom-deepseek-model");
+    vi.unstubAllEnvs();
+  });
+
   it("D.13J Block 1 records lastProviderEnvMerge applied=no when no provider.env values are set", async () => {
     vi.unstubAllEnvs();
     vi.resetModules();

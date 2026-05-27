@@ -282,7 +282,11 @@ export type LinghunConfig = {
   workspaceTrust: WorkspaceTrustConfig;
 };
 
-const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-v4-flash";
+// D.13P-hotfix：默认 DeepSeek 运行时模型不再使用 placeholder `deepseek-v4-flash`。
+// 现役默认改为 `deepseek-chat`；当用户设置 LINGHUN_DEEPSEEK_MODEL 时跟随该值。
+// `defaultPlaceholderModelNames` 仍保留 deepseek-v4-flash / deepseek-v4-pro / openai-compatible-model
+// 用于 doctor warning 与测试 fixture，识别能力不变。
+const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-chat";
 const defaultLinghunModel = process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel;
 const openAiCompatibleModelPlaceholder = "openai-compatible-model";
 const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
@@ -320,7 +324,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
       role: "planner",
       provider: "deepseek",
       primaryModel: defaultDeepSeekModel,
-      fallbackModels: ["deepseek-v4-pro"],
+      fallbackModels: [],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
       maxCostCny: 0,
@@ -333,7 +337,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
       role: "executor",
       provider: "deepseek",
       primaryModel: defaultDeepSeekModel,
-      fallbackModels: ["deepseek-v4-pro"],
+      fallbackModels: [],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
       allowTools: true,
@@ -345,7 +349,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
       role: "reviewer",
       provider: "deepseek",
       primaryModel: defaultDeepSeekModel,
-      fallbackModels: ["deepseek-v4-pro"],
+      fallbackModels: [],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
       allowTools: true,
@@ -357,7 +361,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
       role: "verifier",
       provider: "deepseek",
       primaryModel: defaultDeepSeekModel,
-      fallbackModels: ["deepseek-v4-pro"],
+      fallbackModels: [],
       requiredCapabilities: ["text"],
       maxOutputTokens: 8_192,
       allowTools: true,
@@ -368,7 +372,7 @@ export const defaultModelRoutes: ModelRouteConfig = {
     {
       role: "summarizer",
       provider: "deepseek",
-      primaryModel: "deepseek-v4-flash",
+      primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
       maxOutputTokens: 2_048,

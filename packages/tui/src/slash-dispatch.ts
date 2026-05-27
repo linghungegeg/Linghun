@@ -125,11 +125,13 @@ export function formatCatalogHelp(
           "Help: describe your goal directly first.",
           `Current mode: ${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
           "Core entries:",
+          "(Hidden commands still work — /help all shows the full list.)",
         ]
       : [
           "帮助：优先直接描述你的目标。",
           `当前模式：${formatPermissionModeLabel(mode, language)} — ${formatModeBehavior(mode, language)}`,
           "核心入口：",
+          "（未显示不等于不能用，/help all 查看完整命令表）",
         ];
   lines.push(...formatDefaultCommandLines(language));
   lines.push(
@@ -151,10 +153,7 @@ export function formatSlashDiscovery(language: Language, prefix = "/"): string {
   if (candidates.length > 0) {
     const lines =
       language === "en-US" ? [`Slash candidates for ${trimmed}:`] : [`${trimmed} 的候选命令：`];
-    for (const item of candidates) {
-      const title = language === "en-US" ? item.titleEn : item.titleZh;
-      lines.push(`- ${item.slash} — ${title}`);
-    }
+    lines.push(...formatColumnAlignedCandidates(candidates, language));
     lines.push(language === "en-US" ? "Full command list: /help all." : "完整命令表：/help all。");
     return lines.join("\n");
   }
@@ -165,28 +164,34 @@ export function formatSlashDiscovery(language: Language, prefix = "/"): string {
   lines.push(...formatDefaultCommandLines(language));
   lines.push(
     language === "en-US"
-      ? "Advanced/recovery/debug commands: /help all."
-      : "高级、恢复、调试命令：/help all。",
+      ? "Type a slash prefix (e.g. /p, /ca) to filter; /help all shows the full list."
+      : "继续输入前缀（例如 /p、/ca）可筛选；/help all 查看完整命令表。",
   );
   return lines.join("\n");
 }
 
+// D.13P Slash discovery polish:
+// - 前缀候选必须命中完整 user-visible registry（/skills /plugins /workflows 等高级命令），
+//   不再只限于 DEFAULT_HELP_SLASHES。
+// - /status 仍隐藏：getUserVisibleCommandCapabilities 已经过滤掉 hiddenReason 项。
+// - /config 等用户可见命令进入候选，与 /help all 保持一致。
+// - 上限固定 8 条，避免炸屏。
 export function getSlashPrefixCandidates(prefix: string): CommandCapability[] {
   if (!prefix.startsWith("/") || prefix.length <= 1) return [];
   const normalized = prefix.toLowerCase();
-  return getDefaultVisibleCommandCapabilities()
+  return getUserVisibleCommandCapabilities()
     .filter((item) => item.slash.toLowerCase().startsWith(normalized))
     .slice(0, 8);
 }
 
 /**
  * Core slash candidates surfaced when the user types just `/` and nothing else.
- * Returns the same DEFAULT_HELP_SLASHES set used by /help discovery, capped at
- * 5 entries to keep the inline overlay narrow. Used by the Composer as a soft
- * onboarding affordance — not an alternate dispatch path.
+ * Returns the same DEFAULT_HELP_SLASHES set used by /help discovery (max 8),
+ * keeping the inline overlay narrow without炸屏. Used by the Composer as a
+ * soft onboarding affordance — not an alternate dispatch path.
  */
 export function getCoreSlashCandidates(): CommandCapability[] {
-  return getDefaultVisibleCommandCapabilities().slice(0, 5);
+  return getDefaultVisibleCommandCapabilities().slice(0, 8);
 }
 
 export function formatUnknownSlashCommand(command: string, language: Language): string {
@@ -294,34 +299,25 @@ export function formatModeBehaviorLines(language: Language): string[] {
 
 function formatDefaultCommandLines(language: Language): string[] {
   const catalog = getDefaultVisibleCommandCapabilities();
-  return catalog.map((item) => {
-    const title = language === "en-US" ? item.titleEn : item.titleZh;
-    const description = getDefaultCommandDescription(item.slash, language);
-    return `- ${item.slash} — ${title}：${description}`;
-  });
+  return formatColumnAlignedCandidates(catalog, language);
 }
 
-function getDefaultCommandDescription(slash: string, language: Language): string {
-  const zh: Record<string, string> = {
-    "/model": "查看当前模型与路由。",
-    "/mode": "查看或切换权限模式。",
-    "/doctor": "查看本地诊断摘要。",
-    "/problems": "查看当前问题摘要。",
-    "/help": "查看帮助。",
-    "/exit": "退出。",
-  };
-  const en: Record<string, string> = {
-    "/model": "Show current model and routes.",
-    "/mode": "Show or switch permission mode.",
-    "/doctor": "Show local diagnostic summary.",
-    "/problems": "Show current problem summary.",
-    "/help": "Show help.",
-    "/exit": "Exit.",
-  };
-  return (
-    (language === "en-US" ? en : zh)[slash] ??
-    (language === "en-US" ? "Open this command." : "打开此命令。")
-  );
+// D.13P Slash discovery polish — column-aligned candidate rendering.
+// 旧版本是 "- /xxx — 标题：说明"，长度参差且 emdash 在窄终端不齐；
+// 改成 "/xxx        标题" 两列对齐，左列固定宽度（按最长 slash 取整 + 2 空格），
+// 上限 8 条，左列 cap=14（覆盖现有最长命令 /claim-check / /permissions 12 字符）。
+export function formatColumnAlignedCandidates(
+  candidates: CommandCapability[],
+  language: Language,
+): string[] {
+  const items = candidates.slice(0, 8);
+  if (items.length === 0) return [];
+  const widest = items.reduce((acc, item) => Math.max(acc, item.slash.length), 0);
+  const colWidth = Math.min(Math.max(widest + 2, 12), 14);
+  return items.map((item) => {
+    const title = language === "en-US" ? item.titleEn : item.titleZh;
+    return `${item.slash.padEnd(colWidth, " ")}${title}`;
+  });
 }
 
 function formatGroupedCommandLines(language: Language): string[] {

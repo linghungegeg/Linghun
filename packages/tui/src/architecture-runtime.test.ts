@@ -163,6 +163,33 @@ describe("architecture card facts and formatting", () => {
     expect(directive).toContain("不是授权大重构");
     expect(directive).toContain("最小改动");
   });
+
+  it("D.13P legacy-large-file debt directive treats index.ts as risk signal, not a violation, and asks the user", () => {
+    const directive = createArchitectureRuntimeDirective(baseCard);
+
+    // 目录 / 标识
+    expect(directive).toContain("LegacyLargeFileDebt=");
+    expect(directive).toContain("packages/tui/src/index.ts");
+    expect(directive).toContain("legacy-large-file");
+    expect(directive).toContain("D.14");
+
+    // 风险口径：是维护风险信号，不是违规；不取代 permission pipeline。
+    expect(directive).toContain("maintenance-risk signal");
+    expect(directive).toContain("维护风险信号");
+    expect(directive).toContain("not a violation");
+    expect(directive).toContain("不是违规");
+    expect(directive).toContain("does not grant write permission");
+    expect(directive).toContain("不授权写入");
+    expect(directive).toContain("permission pipeline");
+
+    // 行为：先询问用户、给两条路径。
+    expect(directive).toMatch(/prompt|ask user/);
+    expect(directive).toContain("询问用户");
+    expect(directive).toContain("continue minimal local change");
+    expect(directive).toContain("最小局部改动");
+    expect(directive).toContain("split plan");
+    expect(directive).toContain("拆分计划");
+  });
 });
 
 describe("architecture drift detection", () => {

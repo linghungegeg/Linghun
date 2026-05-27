@@ -57,9 +57,19 @@ const DEFAULT_CACHE_HISTORY_SIZE = 20;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
 
+// D.13P boundary cleanup: cache freshness 默认维度不再硬编码 deepseek/deepseek-v4-flash。
+// 调用方（context bootstrap）会传入 resolved initialModel；无 model 时以 unknown 占位，
+// 由 model 名前缀推导 provider（保留 deepseek-* 推断），其他情况标 unknown，避免把
+// Claude / OpenAI-compatible 的 cache 状态误显示为 DeepSeek。
+function inferProviderForCacheModel(model: string): string {
+  if (!model || model === "unknown") return "unknown";
+  if (model.startsWith("deepseek-")) return "deepseek";
+  return "unknown";
+}
+
 export function createCacheState(
   projectPath: string,
-  model = "deepseek-v4-flash",
+  model = "unknown",
   mcpToolList: McpToolState[] = [],
 ): CacheState {
   const freshness = createCacheFreshness({
@@ -67,7 +77,7 @@ export function createCacheState(
     toolSchema: builtInTools,
     mcpToolList: stabilizeMcpToolList(mcpToolList),
     model,
-    provider: "deepseek",
+    provider: inferProviderForCacheModel(model),
     projectRules: "local CLAUDE.md rules loaded by harness",
     memory: "memory/handoff context not loaded yet",
     compact: "not compacted",

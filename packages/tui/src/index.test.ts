@@ -327,7 +327,7 @@ async function createTestContext(
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
-    cache: createCacheState(project),
+    cache: createCacheState(project, session.model),
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: {

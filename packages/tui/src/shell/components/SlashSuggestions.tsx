@@ -10,11 +10,11 @@ import type { ShellTheme } from "../theme.js";
  * is typing a slash prefix (e.g. "/m"). Pure render — selection state and
  * keyboard handling live in the Composer.
  *
- * Rendering rules:
- *   - One row per candidate, prefixed with the slash and i18n title.
- *   - Selected row is rendered with an accent marker; others use muted color.
- *   - Truncation hint when more than 8 candidates exist (matches the dispatch
- *     helper's slice).
+ * Rendering rules (D.13P):
+ *   - Two-column layout: left = slash, right = title. Left column is padded
+ *     to the widest visible slash (capped at 14) so titles share a start col.
+ *   - Selected row uses an accent marker; others use muted color.
+ *   - Up to 8 candidates (matches the dispatch helper's slice).
  */
 export function SlashSuggestions({
   candidates,
@@ -33,13 +33,15 @@ export function SlashSuggestions({
 }): React.ReactNode {
   if (candidates.length === 0) return null;
   const safeIndex = Math.max(0, Math.min(selectedIndex, candidates.length - 1));
+  const widest = candidates.reduce((acc, item) => Math.max(acc, item.slash.length), 0);
+  const colWidth = Math.min(Math.max(widest + 2, 12), 14);
   return (
     <Box flexDirection="column" width={width}>
       {candidates.map((item, index) => {
         const title = language === "en-US" ? item.titleEn : item.titleZh;
         const isSelected = index === safeIndex;
         const marker = isSelected ? "›" : " ";
-        const line = `${marker} ${item.slash} — ${title}`;
+        const line = `${marker} ${item.slash.padEnd(colWidth, " ")}${title}`;
         return (
           <Text key={item.slash} color={isSelected ? theme.accent : theme.muted} bold={isSelected}>
             {fitText(line, Math.max(20, width - 2))}

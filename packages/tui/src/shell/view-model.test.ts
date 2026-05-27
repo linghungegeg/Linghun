@@ -3385,18 +3385,78 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.hint).toBeUndefined();
   });
 
-  it("bare slash '/' surfaces 5 core candidates from getCoreSlashCandidates()", async () => {
+  it("bare slash '/' surfaces core candidates from getCoreSlashCandidates()", async () => {
     const { getCoreSlashCandidates } = await import("../slash-dispatch.js");
     const candidates = getCoreSlashCandidates();
     expect(candidates.length).toBeGreaterThan(0);
-    expect(candidates.length).toBeLessThanOrEqual(5);
+    // D.13P: bare-slash cap raised from 5 to 8 to surface the full
+    // DEFAULT_HELP_SLASHES core set without relying on /help all for the
+    // most common entries. Hard cap stays 8 so the inline overlay stays narrow.
+    expect(candidates.length).toBeLessThanOrEqual(8);
     const slashes = candidates.map((c) => c.slash);
-    // Bare-slash surface is the first 5 entries of DEFAULT_HELP_SLASHES.
-    // /model, /mode, /doctor, /problems, /help — /exit drops off at the cap.
     expect(slashes).toContain("/model");
     expect(slashes).toContain("/mode");
     expect(slashes).toContain("/help");
     expect(slashes).toContain("/problems");
+  });
+
+  it("D.13P slash prefix candidates pull from full user-visible registry, not just default-help", async () => {
+    const { getSlashPrefixCandidates } = await import("../slash-dispatch.js");
+
+    const pCandidates = getSlashPrefixCandidates("/p").map((c) => c.slash);
+    expect(pCandidates).toContain("/permissions");
+    expect(pCandidates).toContain("/plugins");
+    expect(pCandidates).toContain("/plan");
+    expect(pCandidates).toContain("/problems");
+
+    const caCandidates = getSlashPrefixCandidates("/ca").map((c) => c.slash);
+    expect(caCandidates).toContain("/cache");
+    expect(caCandidates).toContain("/cache-log");
+
+    const skCandidates = getSlashPrefixCandidates("/sk").map((c) => c.slash);
+    expect(skCandidates).toContain("/skills");
+
+    const wCandidates = getSlashPrefixCandidates("/w").map((c) => c.slash);
+    expect(wCandidates).toContain("/workflows");
+    expect(wCandidates).toContain("/write");
+  });
+
+  it("D.13P slash prefix candidates cap at 8 and exclude hidden /status", async () => {
+    const { getSlashPrefixCandidates } = await import("../slash-dispatch.js");
+    // /s would match many — verify cap=8 is honored.
+    const sCandidates = getSlashPrefixCandidates("/s");
+    expect(sCandidates.length).toBeLessThanOrEqual(8);
+    // /status is registered with userVisible=false; it must not surface even
+    // when the prefix exactly matches.
+    const statusCandidates = getSlashPrefixCandidates("/status").map((c) => c.slash);
+    expect(statusCandidates).not.toContain("/status");
+  });
+
+  it("D.13P slash candidates render in column-aligned format (no em dash)", async () => {
+    const { formatColumnAlignedCandidates, getSlashPrefixCandidates } = await import(
+      "../slash-dispatch.js"
+    );
+    const candidates = getSlashPrefixCandidates("/p");
+    expect(candidates.length).toBeGreaterThan(0);
+    const lines = formatColumnAlignedCandidates(candidates, "zh-CN");
+    expect(lines.length).toBe(candidates.length);
+    for (const line of lines) {
+      // No em-dash separator and no leading "- " bullet.
+      expect(line).not.toContain(" — ");
+      expect(line.startsWith("- ")).toBe(false);
+      // Two-column layout: slash followed by run of spaces, then title.
+      expect(line).toMatch(/^\/[a-z][a-z-]*\s{2,}/);
+    }
+  });
+
+  it("D.13P /help short hint mentions /help all so users know hidden commands still work", async () => {
+    const { formatCatalogHelp } = await import("../slash-dispatch.js");
+    const zh = formatCatalogHelp("zh-CN", "default", false, "short");
+    expect(zh).toContain("/help all");
+    expect(zh).toContain("未显示不等于不能用");
+    const en = formatCatalogHelp("en-US", "default", false, "short");
+    expect(en).toContain("/help all");
+    expect(en).toContain("Hidden commands still work");
   });
 
   it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {
