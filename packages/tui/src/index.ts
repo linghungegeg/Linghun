@@ -1685,31 +1685,41 @@ class ShellBlockOutput extends Writable {
   }
 
   /**
-   * 注册一个 keep:true 的 assistant streaming block。后续每个
-   * appendAssistantDelta 都会 mutate 同一条 block.fullText / summary，
-   * 不再走 _write → createOutputBlock + splice 这条 ephemeral 路径，
-   * 因此 splice 不会把流式正文淘汰为最后一片 chunk。
+   * 注册一条 assistant streaming block id，但 **不立即** 推入 blocks 数组。
+   * 真正的 keep:true block 在第一次 appendAssistantDelta 收到非空文本时才创建
+   * （ensureAssistantBlock）。这样在 thinking-only / 空响应 / 慢请求等场景下，
+   * 主屏不会出现一条空 block 渲染成"没有可见输出。"占位行 —— 等待态由
+   * requestActivityPhase / mapRequestActivityToView 驱动的 ActivityIndicator
+   * 单独负责（"正在思考…" / "Thinking…"）。
    *
    * id 由调用方传入（每个 request 用一个稳定 id），便于多轮请求各自占用
    * 独立 block，互不覆盖。
    */
   beginAssistantStream(id: string): void {
     this.assistantBlockId = id;
-    // 复用 createOutputBlock 拿到 i18n 后的 title / 占位 summary，再补 keep:true。
-    // 初始 fullText 用空串，后续 appendAssistantDelta 会累计实际正文。
-    const initial = createOutputBlock("", this.context.language, id);
-    initial.keep = true;
-    initial.fullText = "";
-    initial.nextAction = undefined;
-    this.blocks.push(initial);
+    // 不再 push 初始空 block；只通知一次 rerender（让 ActivityIndicator 起来）。
     this.onWrite();
+  }
+
+  private ensureAssistantBlock(id: string): ProductBlockViewModel | undefined {
+    const existing = this.blocks.find((b) => b.id === id);
+    if (existing) return existing;
+    // 复用 createOutputBlock 拿到 i18n 后的 title / 占位 summary，再补 keep:true。
+    // 初始 fullText 用空串，由调用者紧接着覆盖为首个 delta 文本。
+    const block = createOutputBlock("", this.context.language, id);
+    block.keep = true;
+    block.fullText = "";
+    block.nextAction = undefined;
+    this.blocks.push(block);
+    return block;
   }
 
   /**
    * 将一段 assistant_text_delta 追加到当前 streaming block。
+   * - 第一次收到非空 delta 时才创建 keep:true block（避免空占位行）
    * - fullText 累计完整正文
    * - summary 取累计正文的首个非空行
-   * - 找不到 active block 时静默 fallback 到 _write，保持非交互回退
+   * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
    */
   appendAssistantDelta(text: string): void {
     if (!text) return;
@@ -1718,7 +1728,7 @@ class ShellBlockOutput extends Writable {
       this._write(text, "utf8", () => {});
       return;
     }
-    const block = this.blocks.find((b) => b.id === id);
+    const block = this.ensureAssistantBlock(id);
     if (!block) {
       this.assistantBlockId = undefined;
       this._write(text, "utf8", () => {});
@@ -10643,9 +10653,19 @@ function writeLightHints(output: Writable, context: TuiContext): void {
   //   - freshness-changed → "项目上下文有变化；结果像旧信息时再刷新。"
   // suggestedCommand 仍保留在 LightHint 上，给 /usage / /stats / /details 路径
   // 当数据点用，不再贴到主屏行。
-  for (const hint of visibleHints) {
-    context.cache.hintLastShownAt[hint.dedupeKey] = now;
-    writeLine(output, formatPlainLightHint(hint, context.language));
+  //
+  // D.13M-B：写轻提示时设置 suppressLastFullOutputCapture，避免一句"最近缓存
+  // 复用变低..."把刚刚 assistant 答复的 lastFullOutput 替换成单行轻提示，
+  // 让 /details 默认分支仍能展开真正的最近一次正文。
+  const previousSuppress = context.suppressLastFullOutputCapture;
+  context.suppressLastFullOutputCapture = true;
+  try {
+    for (const hint of visibleHints) {
+      context.cache.hintLastShownAt[hint.dedupeKey] = now;
+      writeLine(output, formatPlainLightHint(hint, context.language));
+    }
+  } finally {
+    context.suppressLastFullOutputCapture = previousSuppress;
   }
 }
 

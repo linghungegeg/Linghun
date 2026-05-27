@@ -11281,6 +11281,71 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 });
 
 // ---------------------------------------------------------------------------
+// D.13M-B — light hint must not pollute lastFullOutput; /details still
+// expands the most recent real assistant body even after a light hint fired.
+// ---------------------------------------------------------------------------
+describe("D.13M-B light hint × /details lastFullOutput", () => {
+  it("writeLightHints 写入主屏后 lastFullOutput 不被替换为单行轻提示", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 模拟一段 assistant 正文已经流到主屏，把它当作 "lastFullOutput"
+    const assistantBody = "完整答复\n- 第二行\n- 第三行";
+    context.lastFullOutput = assistantBody;
+
+    // 触发缓存复用低 → 进 cache-hit-low light hint 路径
+    recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 0,
+      cacheWriteTokensRaw: 0,
+    });
+
+    const output = new MemoryOutput();
+    writeLightHintsForTest(output, context);
+
+    expect(output.text).toContain("最近缓存复用变低");
+    // 关键不变量：light hint 不能把 lastFullOutput 替换成 "最近缓存复用变低..." 这条单行字符串
+    expect(context.lastFullOutput).toBe(assistantBody);
+  });
+
+  it("/details 在 light hint 之后仍展开 assistant 完整正文", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const assistantBody = "完整答复\n- 关键证据 X\n- 关键证据 Y";
+    context.lastFullOutput = assistantBody;
+
+    recordModelUsage(context, {
+      inputTokens: 100,
+      outputTokens: 10,
+      totalTokens: 110,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 0,
+      cacheWriteTokensRaw: 0,
+    });
+
+    const hintOut = new MemoryOutput();
+    writeLightHintsForTest(hintOut, context);
+
+    const detailsOut = new MemoryOutput();
+    await handleSlashCommand("/details", context, detailsOut);
+
+    expect(detailsOut.text).toContain("最近一次输出（完整正文）：");
+    expect(detailsOut.text).toContain("关键证据 X");
+    expect(detailsOut.text).toContain("关键证据 Y");
+    // /details 默认分支当然也不能把 lastFullOutput 改写
+    expect(context.lastFullOutput).toBe(assistantBody);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // D.13M — Anthropic thinking SSE: thinking-only / thinking+text / thinking+tool_use
 // ---------------------------------------------------------------------------
 describe("D.13M Anthropic thinking SSE → TUI behavior", () => {

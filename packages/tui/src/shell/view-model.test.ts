@@ -3545,4 +3545,45 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(ctx.lastFullOutput).toBe("连接成功");
     output.endAssistantStream();
   });
+
+  // D.13M-B：beginAssistantStream 不得制造用户可见的空 block。
+  // 等待态由 ActivityIndicator（mapRequestActivityToView）单独显示。
+  it("beginAssistantStream 不创建空 block；endAssistantStream 之前没有 delta 时主屏不显示'没有可见输出。'", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+
+    output.beginAssistantStream("assistant-stream-empty-1");
+    // 没有任何 delta 直接 end —— 模拟 thinking-only / 空响应 / 早期 abort
+    output.endAssistantStream();
+
+    // 不应有 keep:true 的空 streaming 占位 block 进入主屏
+    expect(blocks.find((b) => b.keep === true)).toBeUndefined();
+
+    // 即便 blocks 数组里挂了一条空 streaming block（防御性场景），view-model
+    // 也必须把它从主屏滤掉，不渲染 "没有可见输出。" 占位行。
+    const stuckEmpty = createOutputBlock("", "zh-CN", "stuck-empty-stream");
+    stuckEmpty.keep = true;
+    stuckEmpty.fullText = "";
+    const view = createShellViewModel(createContext(), { outputBlocks: [stuckEmpty] });
+    expect(view.blocks.find((b) => b.id === "stuck-empty-stream")).toBeUndefined();
+    expect(view.blocks.some((b) => b.summary === "没有可见输出。")).toBe(false);
+  });
+
+  it("Ctrl+O 只在有真实 fullText 的 streaming block 上出现；空 streaming block 不带 nextAction", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+
+    output.beginAssistantStream("assistant-stream-ctrl-o");
+    // 单段长正文足以触发 Ctrl+O 提示（多行）
+    output.appendAssistantDelta("第一行\n第二行\n第三行");
+    output.endAssistantStream();
+
+    const streaming = blocks.find((b) => b.id === "assistant-stream-ctrl-o");
+    expect(streaming).toBeDefined();
+
+    const view = createShellViewModel(createContext(), { outputBlocks: blocks });
+    const visible = view.blocks.find((b) => b.id === "assistant-stream-ctrl-o");
+    expect(visible).toBeDefined();
+    expect(visible?.nextAction ?? "").toContain("Ctrl+O");
+  });
 });

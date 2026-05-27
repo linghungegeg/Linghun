@@ -231,7 +231,17 @@ export function createShellViewModel(
     );
     // keep:true 的 block（例如 slash command 的 transcript row）必须穿透 slice 限流，
     // 否则连续 tool 输出会把用户提交记录推出可视区，破坏 transcript 分层。
-    const keepBlocks = normalBlocks.filter((b) => b.keep);
+    // D.13M-B：assistant streaming block（kind="details" + keep:true）在收到首个
+    // delta 之前 fullText 为空，summary 落在 noVisibleOutput 占位字符串上。这种空
+    // streaming 占位不应当作可见输出：等待态由 ActivityIndicator 接管，正文为空
+    // 时直接从主屏过滤掉，避免 "没有可见输出。" 在 thinking-only / 慢请求等场景
+    // 下闪现。
+    const isEmptyAssistantStreamBlock = (b: ProductBlockViewModel): boolean =>
+      b.keep === true &&
+      b.kind === "details" &&
+      (b.fullText ?? "").trim().length === 0 &&
+      !b.title;
+    const keepBlocks = normalBlocks.filter((b) => b.keep && !isEmptyAssistantStreamBlock(b));
     const ephemeralBlocks = normalBlocks.filter((b) => !b.keep);
     // Show all fail/blocking + all keep + up to 3 most recent ephemeral
     // (cap on ephemerals only; fail/keep 不计入 cap，仍作为优先信号保留)。
