@@ -51,16 +51,18 @@ export type TaskSuggestionLimits = {
 
 const TEXT = {
   "zh-CN": {
-    permissionDetailsLabel: "查看权限详情",
-    permissionDetailsHint: "展开 reason / scope / risk",
+    // D.13L Block E：permissionDetailsLabel/Hint 已停用（权限卡只剩 3 项动作），
+    // 字段保留为空字符串避免未引用警告，未来真要恢复 details 入口时再回填文案。
+    permissionDetailsLabel: "",
+    permissionDetailsHint: "",
     toolErrorRetryLabel: "查看完整错误",
     toolErrorRetryHint: "/details 显示最近一次失败输出",
     setupLabel: "继续模型配置",
     setupHint: "回到 setup 流，按 Enter 进入下一步",
   },
   "en-US": {
-    permissionDetailsLabel: "Show permission details",
-    permissionDetailsHint: "Expand reason / scope / risk",
+    permissionDetailsLabel: "",
+    permissionDetailsHint: "",
     toolErrorRetryLabel: "Show full error output",
     toolErrorRetryHint: "/details surfaces the latest failure",
     setupLabel: "Continue model setup",
@@ -96,26 +98,10 @@ function buildPermissionSuggestions(
   text: (typeof TEXT)[keyof typeof TEXT],
   permission: TaskPermissionView,
 ): TaskSuggestion[] {
-  const out: TaskSuggestion[] = [];
-  // 权限卡 details 走 inline 展开（不是 slash）
-  pushIfValid(out, {
-    id: "permission:details",
-    source: "permission",
-    label: text.permissionDetailsLabel,
-    hint: text.permissionDetailsHint,
-    action: { kind: "inline", id: "permission_details" },
-  });
-  // 高/中风险时，加一条 /permissions 入口（落盘规则视图）
-  if (permission.risk === "high" || permission.risk === "medium") {
-    pushIfValid(out, {
-      id: "permission:rules",
-      source: "permission",
-      label: "/permissions",
-      hint: permission.toolName,
-      action: { kind: "slash", command: "/permissions" },
-    });
-  }
-  return out;
+  // D.13L Block E — 权限卡现在主屏只渲染 [是 / 始终允许 / 否] 三个动作，
+  // 不再额外曝出 details 入口或 /permissions 入口。details 由 /details 命令承担，
+  // 持久化规则视图由用户主动调用 /permissions 看，不再在权限卡下方推。
+  return [];
 }
 
 function buildToolErrorSuggestions(

@@ -54,6 +54,9 @@ export function formatRequestActivity(
 export function formatProviderFailurePrimary(error: unknown, language: Language): string {
   const kind = classifyProviderFailure(error);
   if (language === "en-US") {
+    if (kind === "reasoning_unsupported") {
+      return "This gateway or model does not accept reasoning params. Lower the reasoning level or switch the gateway/model. Run /model doctor for details.";
+    }
     if (kind === "gateway") {
       return "The upstream gateway is temporarily unavailable, so this request did not complete. Retry later or run /model doctor for details.";
     }
@@ -67,6 +70,9 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
       return "The provider rejected the request schema. Run /model doctor to check endpointProfile, tools/tool_choice, tool_result, and reasoning compatibility.";
     }
     return "The model request did not complete. Run /model doctor for details, then retry.";
+  }
+  if (kind === "reasoning_unsupported") {
+    return "当前网关或模型不接受推理参数。请降低推理等级或更换网关/模型。可运行 /model doctor 查看详情。";
   }
   if (kind === "gateway") {
     return "上游网关暂时异常，本次请求未完成。稍后重试，或运行 /model doctor 查看详情。";
@@ -103,11 +109,19 @@ export function formatReportIncompletePrimary(path: string, language: Language):
 
 function classifyProviderFailure(
   error: unknown,
-): "gateway" | "timeout" | "abort" | "schema" | "generic" {
+): "gateway" | "timeout" | "abort" | "schema" | "reasoning_unsupported" | "generic" {
   const code = readStringField(error, "code");
   const name = readStringField(error, "name");
   const message = error instanceof Error ? error.message : String(error ?? "");
   const text = `${code ?? ""} ${name ?? ""} ${message}`;
+  // 推理参数不被网关/模型接受 —— 必须在 schema 之前分流，否则会被 schema 吞掉。
+  if (
+    /thinking|extended_thinking|reasoning|unsupported_param|不支持.*推理|推理.*不支持/iu.test(
+      text,
+    )
+  ) {
+    return "reasoning_unsupported";
+  }
   if (/\b(?:502|503|504)\b/u.test(text) || code === "PROVIDER_SERVER_ERROR") {
     return "gateway";
   }

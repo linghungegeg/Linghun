@@ -285,16 +285,25 @@ const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "> ";
 const PROMPT_MARKER_CONTINUATION = "  ";
 
-const PERMISSION_ACTION_ORDER: PermissionActionId[] = ["yes", "no", "details", "cancel"];
+// D.13L Block E — 权限卡对齐 CCB：主屏只暴露 3 个动作 [是 / 始终允许 / 否]，
+// 顺序 allow_once → allow_always_tool → deny。details / cancel 不再出现在
+// PermissionActionRow / 单字母快捷键表，但 PermissionActionId 类型仍保留这两个值，
+// 兼容已有 controller 路径（Esc 仍由 useInput 直接派发 cancel）。
+const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
+  "allow_once",
+  "allow_always_tool",
+  "deny",
+];
 
 const PERMISSION_TEXT_MAP: Record<PermissionActionId, string> = {
   // legacy 别名
   yes: "yes",
   no: "no",
-  // 4 档 elevation
+  // 3 档 elevation（主屏可见）
   allow_once: "allow_once",
   allow_always_tool: "allow_always_tool",
   deny: "deny",
+  // details / cancel 走内部路径（Esc / 详情命令），主屏不再渲染
   details: "details",
   cancel: "cancel",
 };
@@ -315,7 +324,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
   const [slashSelection, setSlashSelection] = useState(0);
   const [slashHidden, setSlashHidden] = useState(false);
-  const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("yes");
+  const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("allow_once");
   const [hintNotice, setHintNotice] = useState<string | undefined>(undefined);
   const historyRef = useRef<InputHistory>(createInputHistory());
   const pasteChunksRef = useRef<string[]>([]);
@@ -333,8 +342,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // selector mode (key bindings change; ordinary chars do NOT enter the buffer).
   const permissionActive = Boolean(view.permission);
   const permissionActions = useMemo(
-    () => buildPermissionActions(view.permission?.actions),
-    [view.permission],
+    () => buildPermissionActions(view.language, view.permission?.actions),
+    [view.language, view.permission],
   );
 
   // D.13E Step 2 修正 #1：ConfigPanel 渲染时 Composer.useInput 必须 isActive=false，
@@ -499,11 +508,11 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
         if (!key.ctrl && !key.meta && input && input.length === 1) {
           const lower = input.toLowerCase();
-          // D.13E Step 2 — 4 档 elevation 单字母快捷键（向后兼容旧 yes/no）：
-          //   y → allow_once（旧 yes 别名同义）
+          // D.13L Block E — 权限卡 3 档（与 CCB 对齐）单字母快捷键：
+          //   y → allow_once（本次允许；旧 yes 别名同义）
           //   a → allow_always_tool（持久化 allow rule + 当次 approve）
-          //   n → deny（旧 no 别名同义）
-          //   d → details
+          //   n → deny（拒绝；旧 no 别名同义）
+          // details / cancel 不再走单字母路径；Esc 仍触发 cancel 关闭权限卡。
           if (lower === "y") {
             submitPermissionAction(resolveActionId(permissionActions, "allow_once", "yes"));
             return;
@@ -516,10 +525,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
           if (lower === "n") {
             submitPermissionAction(resolveActionId(permissionActions, "deny", "no"));
-            return;
-          }
-          if (lower === "d") {
-            submitPermissionAction("details");
             return;
           }
         }
@@ -968,33 +973,20 @@ function PermissionControl({
   width: number;
   language: ShellViewModel["language"];
 }): React.ReactNode {
-  // P0-1：把 permission body（toolName/risk/reason/scope）和 PermissionActionRow
-  // 合并到 Composer 内同一卡。Composer 仍持有 useInput owner，按键派发不变；
-  // ShellApp 在 view.permission 存在时不再单独渲染 PermissionPrompt。
+  // D.13L Block 0-B — 权限卡对齐 CCB：主屏标题改成"需要您授权" / "Permission requested"，
+  // 第二行用 actionSummary 显示"做什么"（来自 toolCall.input 派生），第三行 3 项动作。
+  // reason / risk / scope / proceedQuestion / hint 仍隐藏（保留在 TaskPermissionView 上，
+  // 由 /details 路径展开）。
   const isEn = language === "en-US";
   const cardWidth = Math.min(width, 76);
   const innerWidth = Math.max(20, cardWidth - 4);
-
-  const riskColor =
-    permission.risk === "high"
-      ? theme.status.fail
-      : permission.risk === "medium"
-        ? theme.status.blocked
-        : theme.status.info;
-  const riskLabel =
-    permission.risk === "high"
-      ? isEn
-        ? "HIGH"
-        : "高"
-      : permission.risk === "medium"
-        ? isEn
-          ? "MEDIUM"
-          : "中"
-        : isEn
-          ? "LOW"
-          : "低";
-
-  const proceedQuestion = isEn ? "Do you want to proceed?" : "是否继续？";
+  const headline = isEn ? "Permission requested" : "需要您授权";
+  const summaryLine =
+    permission.actionSummary && permission.actionSummary.length > 0
+      ? permission.actionSummary
+      : isEn
+        ? `Use tool: ${permission.toolName}`
+        : `使用工具：${permission.toolName}`;
 
   return (
     <Box
@@ -1004,24 +996,14 @@ function PermissionControl({
       paddingX={1}
       width={cardWidth}
     >
-      <Text color={riskColor} bold>
-        {permission.toolName} · {riskLabel}
-      </Text>
-      <Text>{fitText(permission.reason, innerWidth)}</Text>
-      {permission.scope.length > 0 ? (
-        <Text color={theme.muted}>{fitText(permission.scope.join(", "), innerWidth)}</Text>
-      ) : null}
-      <Text color={theme.accent}>{fitText(proceedQuestion, innerWidth)}</Text>
+      <Text>{fitText(headline, innerWidth)}</Text>
+      <Text color={theme.muted}>{fitText(summaryLine, innerWidth)}</Text>
       <PermissionActionRow
         actions={actions}
         focused={focused}
         theme={theme}
         width={innerWidth}
       />
-      {/* P0-1：hint 行直接复用 view-model 的 permission.hint，与 ShellApp 旧
-          PermissionPrompt 保持等价（view-model 契约不变），同时把 body /
-          actions / hint 全部并到同一卡内。 */}
-      <Text color={theme.muted}>{fitText(permission.hint, innerWidth)}</Text>
     </Box>
   );
 }
@@ -1073,14 +1055,19 @@ function PermissionActionRow({
 }
 
 function buildPermissionActions(
-  actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
+  language: ShellViewModel["language"],
+  _actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
 ): { id: PermissionActionId; label: string; shortcut?: string }[] {
-  if (actions && actions.length > 0) return actions;
+  // D.13L Section 2 — 主屏权限卡固定 3 动作 [是 / 始终允许 / 否]，
+  // 不再读 view.permission.actions：避免 buildElevationOptions 因
+  // 已存在的 allow rule 把 allow_always_tool 过滤掉，导致主屏丢按钮。
+  // 用户始终能在主屏看到"是 / 始终允许 / 否"完整选择；底层 controller
+  // 仍以 allowList 作为持久化判定来源，行为不变。
+  const isEn = language === "en-US";
   return [
-    { id: "yes", label: "Allow", shortcut: "y" },
-    { id: "no", label: "Deny", shortcut: "n" },
-    { id: "details", label: "Details", shortcut: "d" },
-    { id: "cancel", label: "Cancel" },
+    { id: "allow_once", label: isEn ? "Yes" : "是", shortcut: "y" },
+    { id: "allow_always_tool", label: isEn ? "Always allow" : "始终允许", shortcut: "a" },
+    { id: "deny", label: isEn ? "No" : "否", shortcut: "n" },
   ];
 }
 
@@ -1094,7 +1081,7 @@ function cyclePermissionFocus(
   const idx = ids.indexOf(current);
   const safeIdx = idx < 0 ? 0 : idx;
   const next = (safeIdx + delta + ids.length) % ids.length;
-  return ids[next] ?? ids[0] ?? "yes";
+  return ids[next] ?? ids[0] ?? "allow_once";
 }
 
 // D.13E Step 2 — y/n 单字母在新 4 档 elevation（allow_once / allow_always_tool /

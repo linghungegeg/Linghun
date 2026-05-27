@@ -53,13 +53,71 @@ export function formatToolOutput(
   if (layered.details || layered.truncated) {
     lines.push(formatDetailsHint(language));
   }
+  // D.13L Section 4 — Bash 单独再补一行人类可读终态：
+  //   "Command exited 0" / "命令已退出 0"
+  // 与 CCB AssistantToolUseMessage 的 end-summary 模式对齐；只在能从
+  // output.data.exitCode 读出退出码时打印。其他工具不需要这条行——
+  // Read/Edit/Write/Glob/Grep 的 stats 行（N 行 / +N -N / N 条结果）
+  // 已经能一眼看出工作量。
+  const bashEnd = formatBashEndSummary(name, output, language);
+  if (bashEnd) {
+    lines.push(bashEnd);
+  }
   return lines.join("\n");
 }
 
+function formatBashEndSummary(
+  name: ToolName,
+  output: ToolOutput,
+  language: Language,
+): string | undefined {
+  if (name !== "Bash") return undefined;
+  const data = output.data && typeof output.data === "object" ? (output.data as Record<string, unknown>) : undefined;
+  const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
+  if (exitCode === undefined) return undefined;
+  return language === "en-US" ? `Command exited ${exitCode}` : `命令已退出 ${exitCode}`;
+}
+
+/**
+ * D.13L Section 4 — Tool start banner shown immediately before runTool.
+ * Mirrors CCB AssistantToolUseMessage rendering: `<UserFacingName>(<arg>)`.
+ *   Bash(<command>) / Read(<path>) / Edit(<file>) / Write(<file>) /
+ *   Grep(<pattern>) / Glob(<pattern>) / MultiEdit(<file>).
+ *
+ * Only emits when we can produce a single readable arg from input; otherwise
+ * returns undefined so the caller can skip the writeLine. Long commands /
+ * paths are clamped to 120 chars to keep one transcript line.
+ */
+export function formatToolStart(name: ToolName, input: unknown): string | undefined {
+  const obj = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  const str = (key: string): string | undefined => {
+    const v = obj[key];
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  };
+  const clamp = (value: string): string => (value.length > 120 ? `${value.slice(0, 117)}...` : value);
+  let arg: string | undefined;
+  if (name === "Bash") {
+    arg = str("command");
+  } else if (name === "Read") {
+    arg = str("path") ?? str("file_path");
+  } else if (name === "Write" || name === "Edit" || name === "MultiEdit") {
+    arg = str("file_path") ?? str("path");
+  } else if (name === "Grep") {
+    arg = str("pattern") ?? str("path");
+  } else if (name === "Glob") {
+    arg = str("pattern") ?? str("path");
+  }
+  if (!arg) return undefined;
+  return `${name}(${clamp(arg)})`;
+}
+
 function formatDetailsHint(language: Language): string {
+  // D.13L Section 1 — 主屏只暴露 Ctrl+O 折叠提示，不再泄漏
+  // `/details output <id>`。完整结果仍保存在 fullText / fullOutputPath 中，
+  // 由 /details 命令或 Ctrl+O 展开访问。
   return language === "en-US"
-    ? "Details: use /details output <id> for the full result, or /details for recent items."
-    : "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。";
+    ? "Output folded. Press Ctrl+O to expand."
+    : "输出已折叠，按 Ctrl+O 展开。";
 }
 
 function createToolSummary(name: ToolName, output: ToolOutput, language: Language): string {
@@ -133,6 +191,9 @@ function createSummaryFirstPreview(
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
   if (name === "Bash" && exitCode !== undefined) {
+    // D.13L Section 4 — Bash 终态行：把退出码升级成一句人类可读的
+    // "Command exited 0" / "命令已退出 0"，与 CCB AssistantToolUseMessage
+    // 的"end summary"对齐。原 "exit code N" 标签保留在 stats 行作为内部标记。
     stats.push(language === "en-US" ? `exit code ${exitCode}` : `退出码 ${exitCode}`);
     if (looksLikeMojibake(text)) {
       stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
@@ -161,8 +222,8 @@ function createSummaryFirstPreview(
   }
   const hint =
     language === "en-US"
-      ? "Output summarized; use /details output <id> for the full result."
-      : "输出已摘要；完整结果可通过 /details output <id> 查看。";
+      ? "Output folded. Press Ctrl+O to expand."
+      : "输出已折叠，按 Ctrl+O 展开。";
   return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
 }
 

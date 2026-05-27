@@ -423,10 +423,10 @@ function withPermissionActions(
   context: TuiContext,
 ): TaskPermissionView {
   if (permission.actions && permission.actions.length > 0) return permission;
-  // D.13E Step 2 — 用 PermissionElevationModel 替代旧 y/n/d/cancel 默认集合。
-  // 现有 rules 注入后，allow_always_tool 在已存在等价 allow 规则时自动隐藏。
-  // 测试 stub context 可能没有 permissions 字段，这里防御性回退到空数组，
-  // 保持 view-model.test.ts 既有 22 条 stub 用例不破。
+  // D.13L Block E — 主屏只暴露 3 个动作：allow_once / allow_always_tool / deny。
+  // 仍走 buildElevationOptions（以保留 allow_always_tool 在已有 allow 规则时
+  // 自动隐藏的逻辑），但 details 在主屏权限卡里被过滤掉，避免与"减少术语泄漏"
+  // 的目标冲突。details 入口由 /details 命令承担。
   const existingRules = context.permissions?.rules ?? [];
   const elevation = buildElevationOptions({
     toolName: permission.toolName as ToolName,
@@ -435,11 +435,18 @@ function withPermissionActions(
     existingRules,
     language,
   });
-  const actions: PermissionAction[] = elevation.map((o) => ({
-    id: o.id,
-    label: o.label,
-    shortcut: o.shortcut,
-  }));
+  const visibleIds = new Set(["allow_once", "allow_always_tool", "deny"] as const);
+  const actions: PermissionAction[] = elevation
+    .filter((o) => visibleIds.has(o.id as "allow_once" | "allow_always_tool" | "deny"))
+    .map((o) => ({
+      id: o.id,
+      label: o.id === "allow_once"
+        ? language === "zh-CN" ? "是" : "Yes"
+        : o.id === "allow_always_tool"
+          ? language === "zh-CN" ? "始终允许" : "Always allow"
+          : language === "zh-CN" ? "否" : "No",
+      shortcut: o.shortcut,
+    }));
   return { ...permission, actions };
 }
 
@@ -589,37 +596,70 @@ export function mapPendingApprovalToPermission(
 
   if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
     const toolName = approval.toolName ?? "unknown";
-    const input = approval.toolCall?.input as
-      | { file_path?: string; path?: string; command?: string }
-      | undefined;
-    const scope: string[] = [];
-    if (input?.file_path) scope.push(input.file_path);
-    if (input?.path && input.path !== input.file_path) scope.push(input.path);
-    if (input?.command) scope.push(input.command.slice(0, 60));
-
-    const reason =
-      approval.kind === "architecture_drift"
-        ? (approval.warnings ?? []).join("; ") ||
-          (context.language === "zh-CN" ? "工具调用改变约定范围" : "Tool use changes agreed scope")
-        : context.language === "zh-CN"
-          ? `${toolName} 需要用户确认`
-          : `${toolName} requires confirmation`;
-
-    const hint =
-      context.language === "zh-CN"
-        ? "输入 y 允许 / n 拒绝 / details 查看详情"
-        : "Enter y to allow / n to deny / details for more";
-
+    // D.13L Block E — 主屏权限卡只暴露 toolName + 3 项动作。
+    // reason / scope / risk / hint 仍在 TaskPermissionView 上保留为内部字段，
+    // 供 /details 路径或 controller 层使用，但主屏渲染不再读它们。
+    // risk 仍由 toolName 推断（buildElevationOptions 用它判断 allow_always_tool 风险等级）。
     return {
       toolName,
-      reason,
+      reason: "",
       risk: toolName === "Bash" ? "high" : "medium",
-      scope,
-      hint,
+      scope: [],
+      hint: "",
+      actionSummary: buildPermissionActionSummary(
+        context.language,
+        toolName,
+        approval.toolCall?.input,
+      ),
       actions: [],
     };
   }
   return undefined;
+}
+
+/**
+ * D.13L Block 0-B — 把 toolCall.input 转成主屏权限卡可读的"做什么"摘要行。
+ *
+ *   Bash               → "运行终端命令：<command>"   / "Run terminal command: <command>"
+ *   Write/Edit/MultiEdit → "修改文件：<file_path>"   / "Edit file: <file_path>"
+ *   Read               → "读取文件：<file_path>"     / "Read file: <file_path>"
+ *   Glob/Grep          → "搜索：<pattern 或 path>"   / "Search: <pattern 或 path>"
+ *   fallback           → "使用工具：<toolName>"      / "Use tool: <toolName>"
+ *
+ * D.13L Section 3 — Write 不再单独显示"写入文件"，与 Edit/MultiEdit 统一为
+ * "修改文件"，避免主屏出现两套近义词；底层 Write 工具行为不变。
+ *
+ * 取值不解析、不预览内容；只读 input 上已经有的字符串字段。任何取不到字段
+ * 的分支都退回到 fallback，避免主屏出现空摘要。
+ */
+function buildPermissionActionSummary(
+  language: Language,
+  toolName: string,
+  input: unknown,
+): string {
+  const zh = language === "zh-CN";
+  const obj = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  const str = (key: string): string | undefined => {
+    const v = obj[key];
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  };
+  if (toolName === "Bash") {
+    const command = str("command");
+    if (command) return zh ? `运行终端命令：${command}` : `Run terminal command: ${command}`;
+  }
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") {
+    const path = str("file_path") ?? str("path");
+    if (path) return zh ? `修改文件：${path}` : `Edit file: ${path}`;
+  }
+  if (toolName === "Read") {
+    const path = str("path") ?? str("file_path");
+    if (path) return zh ? `读取文件：${path}` : `Read file: ${path}`;
+  }
+  if (toolName === "Glob" || toolName === "Grep") {
+    const target = str("pattern") ?? str("path");
+    if (target) return zh ? `搜索：${target}` : `Search: ${target}`;
+  }
+  return zh ? `使用工具：${toolName}` : `Use tool: ${toolName}`;
 }
 
 function createProjectRouteBlock(language: Language, problem: string): ProductBlockViewModel {
@@ -638,34 +678,88 @@ function mapBackgroundSummariesToBlocks(
   summaries: BackgroundTaskSummary[],
   language: Language,
 ): ProductBlockViewModel[] {
-  return summaries.map((s) => {
-    const statusMap: Record<string, ProductBlockViewModel["status"]> = {
-      running: "running",
-      completed: "partial",
-      failed: "fail",
-      cancelled: "partial",
-      timeout: "blocked",
-      stale: "blocked",
-      paused: "info",
-    };
-    const blockStatus = statusMap[s.status] ?? "info";
-    const resultSuffix = s.result && s.result !== s.status ? ` (${s.result})` : "";
-    const title = language === "zh-CN" ? `后台：${s.title}` : `Background: ${s.title}`;
-    const completedNote =
-      s.status === "completed"
-        ? language === "zh-CN"
-          ? "[非PASS] 已结束，非验证通过"
-          : "[not PASS] finished, not a verification pass"
-        : undefined;
-    return {
-      id: `bg-${s.id}`,
-      kind: "run" as const,
-      status: blockStatus,
+  // D.13L Block D — 主屏后台任务说人话：
+  // - 不再泄漏 raw status (running/stale/cancelled/timeout) / raw result / job id；
+  // - 不再用 "后台：${unknown}" 当 title，回落到中性 "后台任务"；
+  // - 多个后台任务聚合为单条 "后台还有 N 个任务在运行 / 已结束 / 失败"，
+  //   细节（job id、raw status、log path、raw result）仍保留在 BackgroundTaskSummary
+  //   里，由 /details background 路径渲染。
+  if (summaries.length === 0) return [];
+  const statusMap: Record<string, ProductBlockViewModel["status"]> = {
+    running: "running",
+    completed: "partial",
+    failed: "fail",
+    cancelled: "partial",
+    timeout: "blocked",
+    stale: "blocked",
+    paused: "info",
+  };
+  const isFail = (s: BackgroundTaskSummary): boolean =>
+    s.status === "failed" || s.status === "timeout";
+  const isRunning = (s: BackgroundTaskSummary): boolean =>
+    s.status === "running" || s.status === "paused" || s.status === "stale";
+  const failed = summaries.filter(isFail);
+  const running = summaries.filter(isRunning);
+  const finished = summaries.filter((s) => !isFail(s) && !isRunning(s));
+  const zh = language === "zh-CN";
+  const blocks: ProductBlockViewModel[] = [];
+  const meaningfulTitle = (s: BackgroundTaskSummary): string => {
+    const t = (s.title ?? "").trim();
+    const base = !t || t.toLowerCase() === "unknown" ? (zh ? "后台任务" : "Background task") : t;
+    return zh ? `后台：${base}` : `Background: ${base}`;
+  };
+  if (running.length > 0) {
+    const head = running[0];
+    if (!head) return blocks;
+    const title = running.length === 1
+      ? meaningfulTitle(head)
+      : zh
+        ? `后台还有 ${running.length} 个任务在运行`
+        : `${running.length} background tasks running`;
+    const summary = zh ? "后台任务正在运行。" : "Background task is still running.";
+    blocks.push({
+      id: `bg-running-${running.length}`,
+      kind: "run",
+      status: statusMap[head.status] ?? "running",
       title,
-      summary: `${s.status}${resultSuffix}`,
-      nextAction: completedNote,
-    };
-  });
+      summary,
+    });
+  }
+  if (failed.length > 0) {
+    const head = failed[0];
+    if (!head) return blocks;
+    const title = failed.length === 1
+      ? meaningfulTitle(head)
+      : zh
+        ? `后台还有 ${failed.length} 个任务失败`
+        : `${failed.length} background tasks failed`;
+    const summary = zh ? "后台任务失败，可稍后查看详情或重试。" : "Background task failed.";
+    blocks.push({
+      id: `bg-failed-${failed.length}`,
+      kind: "run",
+      status: statusMap[head.status] ?? "fail",
+      title,
+      summary,
+    });
+  }
+  if (finished.length > 0) {
+    const head = finished[0];
+    if (!head) return blocks;
+    const title = finished.length === 1
+      ? meaningfulTitle(head)
+      : zh
+        ? `后台还有 ${finished.length} 个任务已结束`
+        : `${finished.length} background tasks finished`;
+    const summary = zh ? "后台任务已结束。" : "Background task finished.";
+    blocks.push({
+      id: `bg-finished-${finished.length}`,
+      kind: "run",
+      status: statusMap[head.status] ?? "partial",
+      title,
+      summary,
+    });
+  }
+  return blocks;
 }
 
 function formatTrust(context: TuiContext, language: Language): string {

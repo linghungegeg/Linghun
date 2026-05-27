@@ -706,10 +706,11 @@ describe("home → task view mode transition", () => {
           height: output.rows,
           permission: {
             toolName: "Bash",
-            reason: "执行命令",
+            reason: "",
             risk: "high",
-            scope: ["npm install"],
-            hint: "yes / no",
+            scope: [],
+            hint: "",
+            actionSummary: "运行终端命令：npm install",
           },
         }),
       onInput: () => undefined,
@@ -724,11 +725,13 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("Bash");
-    expect(output.text).toContain("执行命令");
+    expect(output.text).toContain("需要您授权");
+    expect(output.text).toContain("运行终端命令：npm install");
     // Permission uses single border
     expect(output.text).toContain("│");
-    expect(output.text).toContain("yes / no");
+    expect(output.text).toContain("是");
+    expect(output.text).toContain("始终允许");
+    expect(output.text).toContain("否");
   });
 
   it("home mode Ink render does NOT show task activity or permission", async () => {
@@ -973,9 +976,9 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result).toBeDefined();
     expect(result?.toolName).toBe("Bash");
     expect(result?.risk).toBe("high");
-    expect(result?.scope).toContain("rm -rf /tmp/test");
-    expect(result?.reason).toContain("Bash");
-    expect(result?.hint).toContain("y");
+    // D.13L Block 0-B — 主屏只保留 actionSummary，scope/reason/hint 内部留空。
+    expect(result?.actionSummary).toContain("rm -rf /tmp/test");
+    expect(result?.actionSummary).toContain("运行终端命令");
   });
 
   it("maps model_tool_use approval for Write with medium risk", () => {
@@ -990,7 +993,8 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result).toBeDefined();
     expect(result?.toolName).toBe("Write");
     expect(result?.risk).toBe("medium");
-    expect(result?.scope).toContain("src/main.ts");
+    expect(result?.actionSummary).toContain("src/main.ts");
+    expect(result?.actionSummary).toContain("修改文件");
   });
 
   it("maps architecture_drift approval with warnings", () => {
@@ -1005,7 +1009,10 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     const result = mapPendingApprovalToPermission(ctx);
     expect(result).toBeDefined();
     expect(result?.toolName).toBe("Edit");
-    expect(result?.reason).toContain("修改了公共接口");
+    // D.13L Block 0-B — architecture_drift 也只用 actionSummary 展示"做什么"，
+    // warnings 仍走 /details 路径，不在主屏暴露。
+    expect(result?.actionSummary).toContain("core/api.ts");
+    expect(result?.actionSummary).toContain("修改文件");
   });
 
   it("returns undefined for unrecognized approval kinds", () => {
@@ -1028,7 +1035,8 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     } as Partial<TuiContext>);
     const result = mapPendingApprovalToPermission(ctx);
     expect(result).toBeDefined();
-    expect(result?.hint).toContain("Enter y to allow");
+    expect(result?.actionSummary).toContain("Run terminal command");
+    expect(result?.actionSummary).toContain("npm install");
   });
 });
 
@@ -1045,7 +1053,9 @@ describe("backgroundSummaries → blocks mapping", () => {
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
     // completed is filtered out — only running shows
     expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.id).toBe("bg-t1");
+    // D.13L Block 0-D — 单条 running 聚合 ID = "bg-running-1"，
+    // 标题统一加 "后台：" 前缀，不再泄漏 job-id。
+    expect(bgBlocks[0]?.id).toBe("bg-running-1");
     expect(bgBlocks[0]?.kind).toBe("run");
     expect(bgBlocks[0]?.status).toBe("running");
     expect(bgBlocks[0]?.title).toContain("后台：lint check");
@@ -1074,7 +1084,8 @@ describe("backgroundSummaries → blocks mapping", () => {
       viewMode: "task",
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
-    const bgBlock = view.blocks.find((b) => b.id === "bg-t5");
+    // D.13L Block 0-D — 单条 running 聚合 ID = "bg-running-1"，job-id 不再泄漏。
+    const bgBlock = view.blocks.find((b) => b.id === "bg-running-1");
     expect(bgBlock?.title).toContain("Background: build");
   });
 
@@ -2745,7 +2756,7 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     expect(completedActivity?.phase).toBe("completed");
   });
 
-  it("Task permission card includes risk level, reason, scope, and hint", () => {
+  it("Task permission card includes risk level and tool-action summary", () => {
     const ctx = createContext();
     const permission = mapPendingApprovalToPermission({
       ...ctx,
@@ -2758,9 +2769,9 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     expect(permission).toBeDefined();
     expect(permission?.toolName).toBe("Bash");
     expect(permission?.risk).toBe("high");
-    expect(permission?.reason).toContain("Bash");
-    expect(permission?.scope).toContain("rm -rf /tmp/test");
-    expect(permission?.hint).toBeTruthy();
+    // D.13L Block 0-B — actionSummary 是主屏唯一展示的"做什么"行。
+    expect(permission?.actionSummary).toContain("运行终端命令");
+    expect(permission?.actionSummary).toContain("rm -rf /tmp/test");
   });
 
   it("Task permission card renders with all fields in plain view", () => {

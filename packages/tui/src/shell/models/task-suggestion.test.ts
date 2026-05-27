@@ -46,7 +46,7 @@ describe("buildTaskSuggestions", () => {
     expect(buildTaskSuggestions(baseInputs)).toEqual([]);
   });
 
-  it("places permission suggestions before tool_error / setup / config / slash", () => {
+  it("does not surface permission entries when permission is active (D.13L Block E)", () => {
     const result = buildTaskSuggestions({
       ...baseInputs,
       permission,
@@ -55,13 +55,15 @@ describe("buildTaskSuggestions", () => {
       configHints: [{ id: "model", label: "模型设置", slash: "/model" }],
       slashCandidates: [{ slash: "/help", label: "帮助" }],
     });
-    expect(result[0].source).toBe("permission");
+    // 权限卡现在在 PermissionControl 主屏自带 [是 / 始终允许 / 否]，
+    // suggestion bar 不再代为出 permission:details / permission:rules。
+    expect(result.some((s) => s.source === "permission")).toBe(false);
+    // 非 permission 来源仍按 tool_error > setup > config > slash 排序。
     const sources = result.map((s) => s.source);
-    const permIdx = sources.indexOf("permission");
     const errIdx = sources.indexOf("tool_error");
     const setIdx = sources.indexOf("setup");
-    expect(permIdx).toBeLessThan(errIdx);
-    expect(errIdx).toBeLessThan(setIdx);
+    expect(errIdx).toBeGreaterThanOrEqual(0);
+    expect(setIdx).toBeGreaterThan(errIdx);
   });
 
   it("limits results to max (default 4)", () => {
@@ -108,19 +110,19 @@ describe("buildTaskSuggestions", () => {
     expect(result.map((s) => s.id)).toEqual(["config:real"]);
   });
 
-  it("includes /permissions only on medium/high risk permission", () => {
+  it("never emits permission:rules even on high risk permission (D.13L Block E)", () => {
     const lowRisk: TaskPermissionView = { ...permission, risk: "low" };
     const lowResult = buildTaskSuggestions({ ...baseInputs, permission: lowRisk });
     expect(lowResult.some((s) => s.id === "permission:rules")).toBe(false);
 
     const highResult = buildTaskSuggestions({ ...baseInputs, permission });
-    expect(highResult.some((s) => s.id === "permission:rules")).toBe(true);
+    expect(highResult.some((s) => s.id === "permission:rules")).toBe(false);
   });
 
-  it("permission details suggestion uses inline action (not slash)", () => {
+  it("never emits permission:details (D.13L Block E)", () => {
     const result = buildTaskSuggestions({ ...baseInputs, permission });
-    const detailsItem = result.find((s) => s.id === "permission:details");
-    expect(detailsItem?.action).toEqual({ kind: "inline", id: "permission_details" });
+    expect(result.find((s) => s.id === "permission:details")).toBeUndefined();
+    expect(result.some((s) => s.source === "permission")).toBe(false);
   });
 
   it("tool_error suggestion routes to /details", () => {
@@ -150,11 +152,12 @@ describe("buildTaskSuggestions", () => {
   });
 
   it("english labels when language=en-US", () => {
+    // 权限来源已停用，改由 setup 来源校验英文文案。
     const result = buildTaskSuggestions({
       ...baseInputs,
       language: "en-US",
-      permission,
+      setupHint: "model not configured",
     });
-    expect(result[0].label).toBe("Show permission details");
+    expect(result[0].label).toBe("Continue model setup");
   });
 });

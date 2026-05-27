@@ -319,7 +319,31 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       provider.compatibilityProfile ??
       (provider.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
     const reasoningLevel = provider.reasoningLevel;
-    const reasoningStatus = reasoningLevel
+    // D.13L Block A — doctor 主行说人话：
+    //   "推理 High 已发送" / "Reasoning High sent"（生效路径）
+    //   "未配置推理等级" / "Reasoning not configured"（缺省）
+    //   "推理 High 不会发送（当前网关或模型不接受）" / "Reasoning High not sent ..."（不生效）
+    // 技术字段（effective/sent level=High，路径详情）仍写在同一行的括号里，
+    // 避免再开一段；既不破坏现有 doctor grep 用例（仍含 effective/sent 关键字），
+    // 也让普通用户能直接看懂主行。
+    const reasoningSentLocal = Boolean(
+      reasoningLevel &&
+        (endpointProfile === "responses" ||
+          endpointProfile === "anthropic_messages" ||
+          compatibilityProfile === "permissive_openai_compatible"),
+    );
+    const reasoningPlain = !reasoningLevel
+      ? context.language === "en-US"
+        ? "Reasoning not configured"
+        : "未配置推理等级"
+      : reasoningSentLocal
+        ? context.language === "en-US"
+          ? `Reasoning ${reasoningLevel} sent`
+          : `推理 ${reasoningLevel} 已发送`
+        : context.language === "en-US"
+          ? `Reasoning ${reasoningLevel} not sent (gateway or model rejects it)`
+          : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
+    const reasoningTechnical = reasoningLevel
       ? endpointProfile === "responses"
         ? `effective/sent level=${reasoningLevel}`
         : endpointProfile === "anthropic_messages"
@@ -328,6 +352,10 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
             ? `effective/sent level=${reasoningLevel}`
             : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
       : "not configured/未生效";
+    // 顺序保持 technical 在前：现有 grep 用例期望 `reasoning=ignored/unsupported`
+    // / `reasoning=effective/sent` / `reasoning=not configured` 直接跟在 `reasoning=`
+    // 后面；human-readable 段放在括号里，给普通用户当主语义看，但不破坏 grep。
+    const reasoningStatus = `${reasoningTechnical} (${reasoningPlain})`;
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       provider.baseUrl,
       endpointProfile as EndpointProfile,

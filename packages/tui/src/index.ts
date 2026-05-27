@@ -386,7 +386,7 @@ import {
   formatTerminalReadinessDoctor,
   formatTerminalReadinessStatus,
 } from "./terminal-readiness-presenter.js";
-import { formatToolOutput } from "./tool-output-presenter.js";
+import { formatToolOutput, formatToolStart } from "./tool-output-presenter.js";
 import {
   type WorkspaceReferenceCache,
   createWorkspaceReferenceCache,
@@ -2802,11 +2802,29 @@ async function runInkShell(
             const tool = approval.toolName;
             const risk: PermissionRule["risk"] = tool === "Bash" ? "high" : "medium";
             const result = await addAllowRule(context, tool, risk);
-            writeLine(shellOutput, result.message);
+            // D.13L Block 0-C — 权限卡里的"始终允许"反馈降噪：
+            // 不再把 "已添加权限规则：<uuid> allow Bash high" 这类含 rule.id 的审计文案
+            // 直接写到主屏。added / duplicate 都视为持久化成功，给同一句"已记住"。
+            // save_failed / invalid 走人性化分支，仍保留可操作信息但不含 rule.id。
+            const isEn = context.language === "en-US";
+            if (result.kind === "added" || result.kind === "duplicate") {
+              writeLine(
+                shellOutput,
+                isEn
+                  ? `Remembered: future ${tool} actions like this will be allowed.`
+                  : `已记住：以后这类 ${tool} 操作将自动允许。`,
+              );
+            }
             if (result.kind === "save_failed") {
               writeLine(
                 shellOutput,
-                context.language === "en-US"
+                isEn
+                  ? `Could not save the permission rule: ${result.error.message}`
+                  : `保存权限规则失败：${result.error.message}`,
+              );
+              writeLine(
+                shellOutput,
+                isEn
                   ? "Permission rule was not persisted; pending approval kept."
                   : "权限规则未保存；当前 pending 仍保留，可重试或选择其它动作。",
               );
@@ -2815,6 +2833,10 @@ async function runInkShell(
               return;
             }
             if (result.kind === "invalid") {
+              writeLine(
+                shellOutput,
+                isEn ? `Unknown tool: ${tool}` : `未知工具：${tool}`,
+              );
               shell?.rerender();
               await shell?.waitUntilRenderFlush();
               return;
@@ -7159,6 +7181,9 @@ async function runDetailsCommandBody(
   // 默认分支：先展开最近一次完整正文（lastFullOutput），让 /model doctor →
   // /details 这种链路可以看到 provider.env merge / providers / endpointPath
   // 等被 summary 行截断的内容。再附上 evidence/background 的简短摘要。
+  // D.13L Block C — 没有可展开内容时（lastFullOutput 空 + 没有 evidence /
+  // background），主屏说人话："当前没有可展开的完整内容。" 不再 dump
+  // "Linghun details / evidence: 0/16 / background: 0/16" 这种内部计数。
   const sections: string[] = [];
   if (context.lastFullOutput) {
     sections.push(
@@ -7168,6 +7193,19 @@ async function runDetailsCommandBody(
     );
     sections.push(context.lastFullOutput);
     sections.push("");
+  }
+  const hasAnyDetail =
+    Boolean(context.lastFullOutput) ||
+    context.evidence.length > 0 ||
+    context.backgroundTasks.length > 0;
+  if (!hasAnyDetail) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Nothing to expand right now."
+        : "当前没有可展开的完整内容。",
+    );
+    return;
   }
   const summary = [
     "Linghun details",
@@ -12797,14 +12835,41 @@ function writeLightHints(output: Writable, context: TuiContext): void {
     .filter((hint) => now - (context.cache.hintLastShownAt[hint.dedupeKey] ?? 0) >= hint.cooldownMs)
     .sort((a, b) => b.priority - a.priority)
     .slice(0, MAX_LIGHT_HINTS_PER_TURN);
+  // D.13L Block F — 主屏轻提示说人话：不再用 "[提示:warning] ... ；下一步：/break-cache status"
+  // 这种内部术语 + 强 slash 推送的格式。改成单行平铺：dedupeKey 决定语气，
+  //   - cache-hit-low → "最近缓存复用变低，后续响应可能会慢一点。"
+  //   - context-long → "这轮对话较长；如果开始变慢，再按需压缩。"
+  //   - cache-zero-create-with-read → "用量数据可能需要复核后再下结论。"
+  //   - freshness-changed → "项目上下文有变化；结果像旧信息时再刷新。"
+  // suggestedCommand 仍保留在 LightHint 上，给 /usage / /stats / /details 路径
+  // 当数据点用，不再贴到主屏行。
   for (const hint of visibleHints) {
     context.cache.hintLastShownAt[hint.dedupeKey] = now;
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? `[hint:${hint.severity}] ${hint.message}; next: ${hint.suggestedCommand}`
-        : `[提示:${hint.severity}] ${hint.message}；下一步：${hint.suggestedCommand}`,
-    );
+    writeLine(output, formatPlainLightHint(hint, context.language));
+  }
+}
+
+function formatPlainLightHint(hint: LightHint, language: TuiContext["language"]): string {
+  const isEn = language === "en-US";
+  switch (hint.dedupeKey) {
+    case "cache-hit-low":
+      return isEn
+        ? "Cache reuse dipped a bit; the next response may be slower."
+        : "最近缓存复用变低，后续响应可能会慢一点。";
+    case "context-long":
+      return isEn
+        ? "This conversation is getting long; compact only if it starts feeling slow."
+        : "这轮对话较长；如果开始变慢，再按需压缩。";
+    case "cache-zero-create-with-read":
+      return isEn
+        ? "Usage numbers may need a quick check before drawing cost conclusions."
+        : "用量数据可能需要复核后再下结论。";
+    case "freshness-changed":
+      return isEn
+        ? "Project context changed; refresh reuse data when results look stale."
+        : "项目上下文有变化；结果像旧信息时再刷新。";
+    default:
+      return hint.message;
   }
 }
 
@@ -15005,6 +15070,13 @@ async function executeApprovedModelToolUse(
     context.tools.abortSignal = backgroundController.signal;
   }
   const progress = installToolProgressHandler(context, sessionId, toolCall.id, output, task);
+  // D.13L Section 4 — model tool use 也在 runTool 前 emit 启动行，确保
+  // `Bash(git status)` / `Read(src/foo.ts)` 这种人类可读句首与 CCB 一致；
+  // permission 已批准、preflight 已写入后再打印，避免被拒绝时多一行噪音。
+  const startBanner = formatToolStart(toolName, toolCall.input);
+  if (startBanner) {
+    writeLine(output, startBanner);
+  }
   try {
     const result = await runTool(toolName, toolCall.input, context.tools);
     progress.restore();
@@ -15657,6 +15729,13 @@ async function handleToolCommand(
       context.tools.abortSignal = backgroundController.signal;
     }
     const progress = installToolProgressHandler(context, sessionId, callId, output, task);
+    // D.13L Section 4 — 在 runTool 前 emit `<Tool>(<arg>)` 启动行，与 CCB
+    // AssistantToolUseMessage 渲染对齐；只有可派生单参数（command / path /
+    // pattern）时才打印，避免 fallback 到无意义的 "Tool() ".
+    const startBanner = formatToolStart(name, input);
+    if (startBanner) {
+      writeLine(output, startBanner);
+    }
     let result: Awaited<ReturnType<typeof runTool>>;
     try {
       result = await runTool(name, input, context.tools);

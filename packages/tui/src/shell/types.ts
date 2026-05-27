@@ -95,6 +95,14 @@ export type TaskPermissionView = {
   scope: string[];
   hint: string;
   /**
+   * D.13L Block 0-B — 主屏权限卡的"做什么"摘要行，例如：
+   *   "运行终端命令：git status"
+   *   "写入文件：packages/tui/src/foo.ts"
+   *   "使用工具：Glob"
+   * 由 mapPendingApprovalToPermission 从 toolCall.input 派生；UI 只读不解析。
+   */
+  actionSummary?: string;
+  /**
    * Selectable actions surfaced as a button row under the card.
    * If absent/empty, the view-model auto-fills the default y/n/d/cancel set
    * via `withPermissionActions(...)`.

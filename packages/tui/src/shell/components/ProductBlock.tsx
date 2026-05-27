@@ -86,8 +86,12 @@ export function ProductBlock({
       marginBottom={1}
     >
       {titleVisible ? (
-        <Text color={theme.status[block.status]}>
-          {getStatusMarker(block.status, theme.mode === "no-color")} {block.title}
+        <Text>
+          <Text color={theme.status[block.status]}>
+            {getStatusMarker(block.status, theme.mode === "no-color")}
+          </Text>
+          {" "}
+          {block.title}
         </Text>
       ) : summaryAsMarker ? (
         <Text color={theme.status[block.status]}>

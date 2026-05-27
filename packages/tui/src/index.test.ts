@@ -5777,9 +5777,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).toContain("工具 Edit 已完成");
     expect(formatted).toContain("补丁 +1 -1");
     expect(formatted).toContain("读取保护 expectedHash");
-    expect(formatted).toContain(
-      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。",
-    );
+    expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(formatted).not.toContain("raw edit preview");
     expect(formatted).not.toContain("operation: Edit");
     expect(formatted).not.toContain("ev-edit-1");
@@ -5802,10 +5800,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(formatted).toContain("Tool Bash completed");
     expect(formatted).toContain("50 line(s)");
     expect(formatted).toContain("exit code 0");
-    expect(formatted).toContain("Output summarized; use /details output <id> for the full result.");
-    expect(formatted).toContain(
-      "Details: use /details output <id> for the full result, or /details for recent items.",
-    );
+    expect(formatted).toContain("Output folded. Press Ctrl+O to expand.");
+    expect(formatted).toContain("Command exited 0");
     expect(formatted).not.toContain("Primary output is summary-first");
     expect(formatted).not.toContain("Full log: .linghun/logs/tools/bash-test.log");
     expect(formatted).not.toContain("Evidence: ev-bash-1");
@@ -5825,9 +5821,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     expect(formatted).toContain("疑似编码问题");
-    expect(formatted).toContain(
-      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目。",
-    );
+    expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(formatted).not.toContain("完整日志：.linghun/logs/tools/bash-mojibake.log");
     expect(formatted).not.toContain("Ã¤Â¸Â­Ã¦Â–Â‡");
   });
