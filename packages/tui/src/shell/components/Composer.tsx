@@ -10,7 +10,12 @@ import { selectInputOwner } from "../models/input-owner-controller.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
-import type { PermissionActionId, ShellInputEvent, ShellViewModel } from "../types.js";
+import type {
+  PermissionActionId,
+  ShellInputEvent,
+  ShellViewModel,
+  TaskPermissionView,
+} from "../types.js";
 import { SlashSuggestions } from "./SlashSuggestions.js";
 import { useAnchoredCursor } from "./useAnchoredCursor.js";
 
@@ -888,12 +893,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   return (
     <Box flexDirection="column" width={maxWidth}>
-      {permissionActive ? (
-        <PermissionActionRow
+      {permissionActive && view.permission ? (
+        <PermissionControl
+          permission={view.permission}
           actions={permissionActions}
           focused={permissionFocus}
           theme={theme}
           width={maxWidth}
+          language={view.language}
         />
       ) : null}
       {showSuggestions ? (
@@ -935,6 +942,79 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         </Text>
       ) : null}
       {hintNotice ? <Text color={theme.muted}>{fitText(hintNotice, maxWidth)}</Text> : null}
+    </Box>
+  );
+}
+
+function PermissionControl({
+  permission,
+  actions,
+  focused,
+  theme,
+  width,
+  language,
+}: {
+  permission: TaskPermissionView;
+  actions: { id: PermissionActionId; label: string; shortcut?: string }[];
+  focused: PermissionActionId;
+  theme: ReturnType<typeof createShellTheme>;
+  width: number;
+  language: ShellViewModel["language"];
+}): React.ReactNode {
+  // P0-1：把 permission body（toolName/risk/reason/scope）和 PermissionActionRow
+  // 合并到 Composer 内同一卡。Composer 仍持有 useInput owner，按键派发不变；
+  // ShellApp 在 view.permission 存在时不再单独渲染 PermissionPrompt。
+  const isEn = language === "en-US";
+  const cardWidth = Math.min(width, 76);
+  const innerWidth = Math.max(20, cardWidth - 4);
+
+  const riskColor =
+    permission.risk === "high"
+      ? theme.status.fail
+      : permission.risk === "medium"
+        ? theme.status.blocked
+        : theme.status.info;
+  const riskLabel =
+    permission.risk === "high"
+      ? isEn
+        ? "HIGH"
+        : "高"
+      : permission.risk === "medium"
+        ? isEn
+          ? "MEDIUM"
+          : "中"
+        : isEn
+          ? "LOW"
+          : "低";
+
+  const proceedQuestion = isEn ? "Do you want to proceed?" : "是否继续？";
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="single"
+      borderColor={theme.border}
+      paddingX={1}
+      width={cardWidth}
+    >
+      <Text color={riskColor} bold>
+        {permission.toolName} · {riskLabel}
+      </Text>
+      <Text>{fitText(permission.reason, innerWidth)}</Text>
+      {permission.scope.length > 0 ? (
+        <Text color={theme.muted}>{fitText(permission.scope.join(", "), innerWidth)}</Text>
+      ) : null}
+      <Text color={theme.accent}>{fitText(proceedQuestion, innerWidth)}</Text>
+      <PermissionActionRow
+        actions={actions}
+        focused={focused}
+        theme={theme}
+        width={innerWidth}
+      />
+      {/* P0-1：hint 行直接复用 view-model 的 permission.hint，与 ShellApp 旧
+          PermissionPrompt 保持等价（view-model 契约不变），同时把 body /
+          actions / hint 全部并到同一卡内。 */}
+      <Text color={theme.muted}>{fitText(permission.hint, innerWidth)}</Text>
     </Box>
   );
 }

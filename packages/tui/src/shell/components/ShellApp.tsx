@@ -14,7 +14,6 @@ import type {
   ShellViewModel,
   TaskActivityView,
   TaskFooterView,
-  TaskPermissionView,
 } from "../types.js";
 import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
@@ -172,17 +171,13 @@ function TaskLayout({
       >
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
-        {/* Permission > ConfigPanel 互斥渲染（D.13E Step 2 修正 #1）：
-            permission 优先级最高；ConfigPanel 只在没有 permission 时渲染。
+        {/* Permission > ConfigPanel 互斥渲染（P0-1）：
+            permission 优先级最高，但 body+actions+hint 已合并到 Composer 内的
+            PermissionControl card；output 区不再渲染独立的 PermissionPrompt，
+            避免 body 与 action row 跨区域分裂、避免重复 toolName/risk 信息。
+            ConfigPanel 只在没有 permission 时渲染。
             Composer 在 ConfigPanel 渲染时 useInput { isActive: false }，避免双消费。 */}
-        {view.permission ? (
-          <PermissionPrompt
-            permission={view.permission}
-            theme={theme}
-            width={view.width - 4}
-            language={view.language}
-          />
-        ) : view.configPanel ? (
+        {!view.permission && view.configPanel ? (
           <ConfigPanel
             panel={view.configPanel}
             controller={controller}
@@ -237,7 +232,12 @@ function TaskLayout({
             full StatusTray; the noisy line was identified as the
             "[Linghun] 会话…" leak source and stays out of Task mode. */}
         {view.taskFooter ? (
-          <TaskFooter footer={view.taskFooter} theme={theme} width={view.width} />
+          <TaskFooter
+            footer={view.taskFooter}
+            theme={theme}
+            width={view.width}
+            language={view.language}
+          />
         ) : null}
 
         {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
@@ -253,17 +253,25 @@ function TaskFooter({
   footer,
   theme,
   width,
+  language,
 }: {
   footer: TaskFooterView;
   theme: ReturnType<typeof createShellTheme>;
   width: number;
+  language: ShellViewModel["language"];
 }): React.ReactNode {
   // Production footer: 1 line of muted status with bottom breathing space.
   // Long sentences (e.g. setup hint) are intentionally NOT routed here —
   // permissionMode · index is the entire signal budget. An optional short
   // hint is supported for future per-flow needs but trimmed defensively.
+  // P2-4：在 footer 末尾追加 Shift+Tab 切权限模式的极短 hint（zh: "Shift+Tab 切权限"
+  // / en: "Shift+Tab perm"）。整体仍走 fitText，宽度不足时优先丢弃 hint，不会
+  // 退化成完整 StatusTray 噪声。
   const segments: string[] = [footer.permissionMode, footer.index];
   if (footer.hint) segments.push(footer.hint);
+  const cyclePermHint =
+    language === "en-US" ? "Shift+Tab perm" : "Shift+Tab 切权限";
+  segments.push(cyclePermHint);
   const line = segments.join(" · ");
   return (
     <Box width={width} paddingX={2} paddingTop={1}>
@@ -302,58 +310,6 @@ function ActivityIndicator({
       <Text color={color}>
         {marker} {activity.text}
       </Text>
-    </Box>
-  );
-}
-
-function PermissionPrompt({
-  permission,
-  theme,
-  width,
-  language,
-}: {
-  permission: TaskPermissionView;
-  theme: ReturnType<typeof createShellTheme>;
-  width: number;
-  language: ShellViewModel["language"];
-}): React.ReactNode {
-  const riskColor =
-    permission.risk === "high"
-      ? theme.status.fail
-      : permission.risk === "medium"
-        ? theme.status.blocked
-        : theme.status.info;
-
-  const riskLabel =
-    permission.risk === "high"
-      ? language === "en-US"
-        ? "HIGH"
-        : "高"
-      : permission.risk === "medium"
-        ? language === "en-US"
-          ? "MEDIUM"
-          : "中"
-        : language === "en-US"
-          ? "LOW"
-          : "低";
-
-  return (
-    <Box
-      flexDirection="column"
-      borderStyle="single"
-      borderColor={theme.border}
-      paddingX={1}
-      marginTop={1}
-      width={Math.min(width, 76)}
-    >
-      <Text color={riskColor} bold>
-        {permission.toolName} · {riskLabel}
-      </Text>
-      <Text>{fitText(permission.reason, width - 4)}</Text>
-      {permission.scope.length > 0 ? (
-        <Text color={theme.muted}>{fitText(permission.scope.join(", "), width - 4)}</Text>
-      ) : null}
-      <Text color={theme.accent}>{permission.hint}</Text>
     </Box>
   );
 }
