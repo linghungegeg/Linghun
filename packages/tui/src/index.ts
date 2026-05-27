@@ -489,11 +489,140 @@ export {
   validateChangeDeclarationHuman,
 } from "./guard-wiring.js";
 
-export type PlanProposal = {
-  id: string;
-  title: string;
-  options: { id: string; title: string; steps: string[]; risks: string[] }[];
-};
+// Module 1 (D.13L mechanical split) — pure type declarations live in
+// ./tui-data-types.js. Imported for in-file usage (TuiContext + state factories
+// + helpers all reference them) and re-exported so downstream consumers that
+// rely on `import type { ... } from "../index.js"` keep compiling unchanged.
+import type {
+  AgentRun,
+  AgentType,
+  ApprovedRunnerJobSpec,
+  BackgroundTaskState,
+  BackgroundTaskStatus,
+  CacheHistoryConfig,
+  CacheState,
+  CheckpointState,
+  DurableJobAgent,
+  DurableJobAgentStatus,
+  DurableJobState,
+  DurableJobStatus,
+  EvidenceRecord,
+  ExtensionLifecycleRecord,
+  ExtensionScope,
+  ExtensionSource,
+  ExtensionTrustLevel,
+  HandoffPacket,
+  HookState,
+  HookSummary,
+  ImageGenerationResult,
+  LightHint,
+  McpServerState,
+  McpState,
+  McpToolState,
+  MemoryCandidate,
+  MemoryLearningCategory,
+  MemoryLearningMode,
+  MemoryLearningRun,
+  MemoryScope,
+  MemoryState,
+  MemoryStatus,
+  NativeRunnerLifecycleStatus,
+  NativeRunnerResolutionStatus,
+  PlanProposal,
+  PluginState,
+  PluginSummary,
+  ProviderFailureSummary,
+  RemoteApprovalDecision,
+  RemoteApprovalMessage,
+  RemoteChannelRuntimeStatus,
+  RemoteChannelState,
+  RemoteEvent,
+  RemoteEventStatus,
+  RemoteState,
+  ResolvedRoleRoute,
+  RoleHandoff,
+  RoleRouteDecision,
+  RoleUsage,
+  SkillEvolutionCandidate,
+  SkillState,
+  SkillSummary,
+  VerdictEvidenceScope,
+  VerdictScope,
+  VerdictStatus,
+  VerificationCommandResult,
+  VerificationReport,
+  VerificationRuntimeStatus,
+  VerificationStep,
+  VerificationStepKind,
+  VisionObservation,
+  WorkflowState,
+  WorkflowTemplate,
+} from "./tui-data-types.js";
+export type {
+  AgentRun,
+  AgentType,
+  ApprovedRunnerJobSpec,
+  BackgroundTaskState,
+  BackgroundTaskStatus,
+  CacheHistoryConfig,
+  CacheState,
+  CheckpointState,
+  DurableJobAgent,
+  DurableJobAgentStatus,
+  DurableJobState,
+  DurableJobStatus,
+  EvidenceRecord,
+  ExtensionLifecycleRecord,
+  ExtensionScope,
+  ExtensionSource,
+  ExtensionTrustLevel,
+  HandoffPacket,
+  HookState,
+  HookSummary,
+  ImageGenerationResult,
+  LightHint,
+  McpServerState,
+  McpState,
+  McpToolState,
+  MemoryCandidate,
+  MemoryLearningCategory,
+  MemoryLearningMode,
+  MemoryLearningRun,
+  MemoryScope,
+  MemoryState,
+  MemoryStatus,
+  NativeRunnerLifecycleStatus,
+  NativeRunnerResolutionStatus,
+  PlanProposal,
+  PluginState,
+  PluginSummary,
+  ProviderFailureSummary,
+  RemoteApprovalDecision,
+  RemoteApprovalMessage,
+  RemoteChannelRuntimeStatus,
+  RemoteChannelState,
+  RemoteEvent,
+  RemoteEventStatus,
+  RemoteState,
+  ResolvedRoleRoute,
+  RoleHandoff,
+  RoleRouteDecision,
+  RoleUsage,
+  SkillEvolutionCandidate,
+  SkillState,
+  SkillSummary,
+  VerdictEvidenceScope,
+  VerdictScope,
+  VerdictStatus,
+  VerificationCommandResult,
+  VerificationReport,
+  VerificationRuntimeStatus,
+  VerificationStep,
+  VerificationStepKind,
+  VisionObservation,
+  WorkflowState,
+  WorkflowTemplate,
+} from "./tui-data-types.js";
 
 export type {
   ModelSetupStep,
@@ -501,727 +630,6 @@ export type {
   ModelSetupPrefill,
   ModelSetupMessageKey,
 } from "./model-setup-runtime.js";
-
-export type BackgroundTaskStatus =
-  | "running"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "timeout"
-  | "stale";
-
-export type BackgroundTaskState = {
-  id: string;
-  kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
-  title: string;
-  status: BackgroundTaskStatus;
-  currentStep?: string;
-  progress?: { completed: number; total?: number; label?: string };
-  startedAt: string;
-  updatedAt: string;
-  lastOutputAt?: string;
-  estimatedRemainingMs?: number;
-  heartbeatIntervalMs: number;
-  staleAfterMs: number;
-  logPath?: string;
-  outputPath?: string;
-  hasOutput: boolean;
-  result?: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
-  userVisibleSummary: string;
-  nextAction?: string;
-};
-
-export type CheckpointState = {
-  id: string;
-  sessionId: string;
-  createdAt: string;
-  reason: string;
-  changedFiles: string[];
-  restoreKind: "git" | "snapshot";
-  files: { path: string; existed: boolean; content?: string }[];
-};
-
-export type EvidenceRecord = {
-  id: string;
-  kind:
-    | "file_read"
-    | "grep_result"
-    | "index_query"
-    | "command_output"
-    | "test_result"
-    | "web_source"
-    | "vision_observation"
-    | "image_result"
-    | "user_provided";
-  summary: string;
-  source: string;
-  fullOutputPath?: string;
-  outputPath?: string;
-  logPath?: string;
-  supportsClaims: string[];
-  createdAt: string;
-};
-
-export type VerificationStepKind = "test" | "typecheck" | "build" | "lint" | "smoke";
-
-export type VerificationStep = {
-  kind: VerificationStepKind;
-  command: string;
-  reason: string;
-};
-
-const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
-
-export type VerificationRuntimeStatus =
-  | "pass"
-  | "fail"
-  | "partial"
-  | "skipped"
-  | "cancelled"
-  | "timeout"
-  | "stale";
-
-export type VerificationCommandResult = VerificationStep & {
-  status: VerificationRuntimeStatus;
-  exitCode?: number;
-  durationMs: number;
-  logPath?: string;
-  summary: string;
-  runnerError?: string;
-};
-
-export type VerificationReport = {
-  id: string;
-  status: Exclude<VerificationRuntimeStatus, "skipped">;
-  summary: string;
-  commands: VerificationCommandResult[];
-  unverified: string[];
-  risk: string[];
-  logPath?: string;
-  startedAt: string;
-  endedAt: string;
-  durationMs: number;
-  nextAction: string;
-};
-
-export type CacheHistoryConfig = {
-  maxTurns: number;
-  warnBelowHitRate: number;
-  persistPath: string;
-  hintsMuted: boolean;
-};
-
-export type LightHint = {
-  id: string;
-  severity: "info" | "warning";
-  priority: number;
-  message: string;
-  suggestedCommand: string;
-  dedupeKey: string;
-  cooldownMs: number;
-};
-
-export type CacheState = {
-  config: CacheHistoryConfig;
-  history: CacheTurnStats[];
-  nextTurn: number;
-  lastFreshness?: CacheFreshness;
-  hintLastShownAt: Record<string, number>;
-  compacted: boolean;
-  compactBoundaries: CompactBoundary[];
-  workspaceReference: WorkspaceReferenceCache;
-  startedAt: number;
-};
-
-export type McpServerState = {
-  name: string;
-  command: string;
-  status: "configured" | "disabled" | "missing" | "error";
-  error?: string;
-};
-
-export type McpToolState = {
-  server: string;
-  name: string;
-  description: string;
-  discovery?: "discovered" | "placeholder";
-  trusted?: boolean;
-  schemaLoaded?: boolean;
-  runtimeVersion?: "compatible" | "unknown";
-};
-
-export type McpState = {
-  enabled: boolean;
-  servers: McpServerState[];
-  tools: McpToolState[];
-  lastDoctor?: string;
-};
-
-export type VerdictScope =
-  | "focused"
-  | "full-test"
-  | "mock"
-  | "journey"
-  | "live-provider"
-  | "real-tui"
-  | "beta"
-  | "release";
-
-export type VerdictStatus = "PASS" | "PARTIAL" | "FAIL" | "SKIPPED";
-
-export type VerdictEvidenceScope = {
-  scope: VerdictScope;
-  status: VerdictStatus;
-  evidenceRefs: string[];
-  validationCommands: string[];
-  uncoveredItems: string[];
-  residualRisks: string[];
-  nextAction: string;
-};
-
-export type HandoffPacket = {
-  id: string;
-  sessionId: string;
-  projectPath: string;
-  parentSessionId?: string;
-  currentPhase: string;
-  nextPhase: string;
-  phaseStatus: "pending" | "in_progress" | "completed" | "blocked";
-  goal: string;
-  completed: string[];
-  pending: string[];
-  mustNotDo: string[];
-  todos: TodoItem[];
-  keyFiles: string[];
-  changedFiles: string[];
-  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
-  verdictEvidence: VerdictEvidenceScope;
-  verification: VerificationReport | null;
-  risks: string[];
-  indexStatus: Pick<
-    IndexState,
-    "projectName" | "status" | "nodes" | "edges" | "changedFiles" | "staleHint"
-  >;
-  permissionMode: PermissionMode;
-  modelProvider: { provider: string; model: string };
-  recentCommit: string;
-  budgetUsage: string;
-  createdAt: string;
-  generatedBy: string;
-  solutionCompleteness?: SolutionCompletenessStatus;
-  currentArchitectureCard?: ArchitectureCardSummary;
-};
-
-export type AgentType = "explorer" | "worker" | "verifier" | "planner";
-
-export type RoleUsage = {
-  role: ModelRole;
-  provider: string;
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  estimatedCny: number;
-  createdAt: string;
-  durationMs?: number;
-  fallbackUsed: boolean;
-  budgetStop: boolean;
-  contributionSummary: string;
-};
-
-export type RoleRouteDecision = {
-  id: string;
-  triggerReason: string;
-  role: ModelRole;
-  selectedProvider: string;
-  selectedModel: string;
-  fallbackCandidates: string[];
-  requiredCapabilities: ModelCapability[];
-  maxCostCny?: number;
-  stopConditions: string[];
-  repairSuggestions: string[];
-  fallbackUsed: boolean;
-  budgetStop: boolean;
-  createdAt: string;
-};
-
-type ResolvedRoleRoute = {
-  route: RoleModelRoute;
-  decision: RoleRouteDecision;
-  usable: boolean;
-};
-
-export type RoleHandoff = {
-  from: ModelRole;
-  to: ModelRole;
-  taskId: string;
-  summary: string;
-  evidence: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
-  changedFiles: string[];
-  keyFiles: string[];
-  diffSummary?: DiffSummary;
-  verificationReport?: VerificationReport;
-  notIncluded: string[];
-};
-
-export type VisionObservation = {
-  id: string;
-  source: "image" | "screenshot" | "design" | "browser-capture";
-  model: string;
-  provider: string;
-  summary: string;
-  extractedText: string[];
-  uiRegions: string[];
-  suspectedFiles: string[];
-  confidence: number;
-  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
-  createdAt: string;
-};
-
-export type ImageGenerationResult = {
-  id: string;
-  provider: string;
-  model: string;
-  images: Array<{ path: string; mimeType: string; revisedPrompt?: string }>;
-  usage?: RoleUsage;
-  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
-  createdAt: string;
-};
-
-export type AgentRun = {
-  id: string;
-  type: AgentType;
-  displayName?: string;
-  role: ModelRole;
-  provider: string;
-  parentSessionId?: string;
-  forkedFrom?: string;
-  task: string;
-  model: string;
-  permissionMode: PermissionMode;
-  status: "running" | "completed" | "failed" | "cancelled";
-  transcriptPath: string;
-  transcriptSessionId: string;
-  summary: string;
-  contextSummary: string;
-  cost: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-    estimatedCny: number;
-  };
-  startedAt: string;
-  updatedAt: string;
-};
-
-export type DurableJobStatus =
-  | "created"
-  | "running"
-  | "sleeping"
-  | "blocked"
-  | "stale"
-  | "cancelled"
-  | "timeout"
-  | "completed"
-  | "failed";
-
-export type DurableJobAgentStatus =
-  | "created"
-  | "running"
-  | "queued"
-  | "sleeping"
-  | "blocked"
-  | "stale"
-  | "cancelled"
-  | "timeout"
-  | "completed"
-  | "failed";
-
-export type DurableJobAgent = {
-  id: string;
-  type: AgentType;
-  displayName?: string;
-  goal: string;
-  status: DurableJobAgentStatus;
-  budgetTokens: number;
-  owner?: string;
-  heartbeatAt?: string;
-  summary?: string;
-};
-
-export type NativeRunnerResolutionStatus =
-  | "disabled"
-  | "unavailable"
-  | "available"
-  | "protocol_mismatch";
-
-export type NativeRunnerLifecycleStatus =
-  | "node_fallback"
-  | "starting"
-  | "running"
-  | "completed"
-  | "failed"
-  | "timeout"
-  | "cancelled"
-  | "stale"
-  | "protocol_mismatch"
-  | "unavailable";
-
-export type ApprovedRunnerJobSpec = {
-  id: string;
-  approvedTaskKind: "durable_job_supervisor";
-  cwd: string;
-  envAllowlist: string[];
-  redactedEnvRefs: string[];
-  timeoutMs: number;
-  logPaths: {
-    state: string;
-    stdout: string;
-    stderr: string;
-    jobLog: string;
-    fullOutput: string;
-    report: string;
-  };
-  expectedProtocol: string;
-  permissionRef: PermissionMode;
-  evidenceRefs: string[];
-  runnerRoot: string;
-};
-
-export type DurableJobState = {
-  id: string;
-  goal: string;
-  projectPath: string;
-  phase: string;
-  target: string;
-  plan: string[];
-  budget: {
-    maxTokens: number;
-    maxRunningAgents: number;
-    maxSteps: number;
-    note: string;
-    usedTokens?: number;
-    remainingTokens?: number;
-    usedSteps?: number;
-    maxRuntimeMs?: number;
-  };
-  timeoutMs: number;
-  permissionPolicy: PermissionMode;
-  allowEdit: boolean;
-  allowBash: boolean;
-  allowMultiAgent: boolean;
-  status: DurableJobStatus;
-  pauseReason?: string;
-  agents: DurableJobAgent[];
-  handoffPacket?: HandoffPacket;
-  createdAt: string;
-  updatedAt: string;
-  startedAt?: string;
-  endedAt?: string;
-  logPath: string;
-  reportPath: string;
-  fullOutputPath: string;
-  evidenceRefs: Array<Pick<EvidenceRecord, "id" | "kind" | "source" | "summary">>;
-  verification?: { status: "not_run" | "pass" | "fail" | "partial"; summary: string };
-  runner?: {
-    enabled: boolean;
-    status: NativeRunnerLifecycleStatus;
-    resolution: NativeRunnerResolutionStatus;
-    adapter: "native" | "node";
-    protocol?: string;
-    version?: string;
-    pathRef?: string;
-    spec?: ApprovedRunnerJobSpec;
-    startedAt?: string;
-    updatedAt: string;
-    completedAt?: string;
-    heartbeatAt?: string;
-    logRefs?: {
-      state: string;
-      stdout: string;
-      stderr: string;
-    };
-    lastError?: string;
-    fallbackReason?: string;
-    nextAction: string;
-  };
-  ownerSessionId?: string;
-  ownerPid?: number;
-  heartbeatAt?: string;
-  worker?: {
-    sessionId?: string;
-    status: "not_started" | "running" | "completed" | "blocked" | "timeout" | "failed" | "stale";
-    startedAt?: string;
-    endedAt?: string;
-    currentStep?: number;
-    completedSteps?: number;
-    summary: string;
-  };
-  result?: {
-    status: "partial" | "blocked" | "stale" | "timeout" | "overbudget" | "failed" | "cancelled";
-    summary: string;
-    facts: string[];
-    evidenceRefs: string[];
-    generatedAt: string;
-  };
-  adoptedConclusions: string[];
-  rejectedConclusions: string[];
-};
-
-export type RemoteEventStatus = "pending" | "sent" | "failed" | "expired" | "rejected" | "approved";
-export type RemoteChannelRuntimeStatus = "disabled" | "blocked" | "ready";
-
-export type RemoteChannelState = {
-  id: string;
-  config: RemoteChannelConfig;
-  runtimeStatus: RemoteChannelRuntimeStatus;
-  bindingStatus: "bound" | "unbound";
-  transportStatus: "ready" | "missing" | "not_configured" | "mock" | "unknown";
-  lastError?: string;
-  nextAction: string;
-};
-
-export type RemoteEvent = {
-  id: string;
-  channel: string;
-  eventType: RemoteEventType;
-  createdAt: string;
-  expiresAt: string;
-  nonce: string;
-  messageId: string;
-  source: string;
-  redactedSummary: string;
-  refs: string[];
-  status: RemoteEventStatus;
-};
-
-export type RemoteApprovalMessage = {
-  eventId: string;
-  channel: string;
-  messageId: string;
-  nonce: string;
-  source: string;
-  bindingUserId: string;
-  bindingDeviceId?: string;
-  signature?: string;
-  receivedAt?: string;
-  approve: boolean;
-};
-
-export type RemoteApprovalDecision = {
-  status:
-    | "approved"
-    | "rejected"
-    | "expired"
-    | "unknown_source"
-    | "wrong_binding"
-    | "bad_signature"
-    | "replayed"
-    | "blocked";
-  summary: string;
-  evidenceCreated: false;
-};
-
-export type RemoteState = {
-  enabled: boolean;
-  channels: RemoteChannelState[];
-  events: RemoteEvent[];
-  processedMessageIds: string[];
-  sessionDisabledChannelIds: string[];
-  lastDoctor?: string;
-  lastApproval?: RemoteApprovalDecision;
-};
-
-export type MemoryScope = "project" | "user" | "session";
-export type MemoryStatus = "candidate" | "accepted" | "rejected" | "disabled" | "retired";
-
-export type MemoryCandidate = {
-  id: string;
-  scope: MemoryScope;
-  status: MemoryStatus;
-  summary: string;
-  source: string;
-  sourceRefs: string[];
-  risk: "low" | "medium" | "high";
-  inferred: boolean;
-  createdAt: string;
-};
-
-export type MemoryLearningRun = {
-  trigger: "manual" | "verification" | "handoff" | "evidence";
-  candidatesCreated: number;
-  modelCalled: boolean;
-  skippedReason?: string;
-  createdAt: string;
-};
-
-export type MemoryLearningMode = "off" | "active";
-
-export type MemoryLearningCategory =
-  | "preference"
-  | "frequent_behavior"
-  | "project_habit"
-  | "collaboration_rule";
-
-export type MemoryState = {
-  projectRulesPath: string;
-  projectRulesExists: boolean;
-  projectRulesSummary: string;
-  projectRulesError?: string;
-  projectDir: string;
-  userDir: string;
-  sessionDir: string;
-  candidates: MemoryCandidate[];
-  accepted: MemoryCandidate[];
-  rejected: MemoryCandidate[];
-  disabled: MemoryCandidate[];
-  retired: MemoryCandidate[];
-  learningMode: MemoryLearningMode;
-  lastLearningRun?: MemoryLearningRun;
-  lastHandoff?: HandoffPacket;
-  lastResumeReadonly?: boolean;
-};
-
-export type ExtensionSource = "local" | "official" | "third-party";
-export type ExtensionScope = "project" | "user";
-
-export type ExtensionTrustLevel = "trusted" | "untrusted" | "disabled";
-
-export type ExtensionLifecycleRecord = {
-  sourceUrl?: string;
-  localPath?: string;
-  ref?: string;
-  commit?: string;
-  installedAt?: string;
-  trustLevel: ExtensionTrustLevel;
-  permissionSummary: string;
-  discovered: boolean;
-  registered: boolean;
-  schemaLoaded: boolean;
-  runtimeVersion: "compatible" | "incompatible" | "unknown";
-};
-
-export type SkillSummary = {
-  id: string;
-  name: string;
-  description: string;
-  triggers: string[];
-  summary: string;
-  source: ExtensionSource;
-  scope: ExtensionScope;
-  path: string;
-  version: string;
-  enabled: boolean;
-  trusted: boolean;
-  permissions: string[];
-  mayWrite: boolean;
-  mayExecute: boolean;
-  mayNetwork: boolean;
-  lifecycle: ExtensionLifecycleRecord;
-  lastError?: string;
-};
-
-export type SkillEvolutionCandidate = {
-  id: string;
-  status: "candidate" | "rejected";
-  summary: string;
-  triggerCondition: string;
-  source: string;
-  risk: "low" | "medium" | "high";
-  suggestedPath: string;
-  createdAt: string;
-};
-
-export type SkillState = {
-  enabled: boolean;
-  projectDir: string;
-  userDir: string;
-  skills: SkillSummary[];
-  disabledIds: string[];
-  trustedIds: string[];
-  evolutionCandidates: SkillEvolutionCandidate[];
-  rejectedEvolutionCandidates: SkillEvolutionCandidate[];
-  lastError?: string;
-};
-
-export type WorkflowTemplate = {
-  id: string;
-  purpose: string;
-  risk: "low" | "medium" | "high";
-  writesFiles: boolean;
-  recommendedValidation: string[];
-  steps: string[];
-};
-
-export type WorkflowState = {
-  enabled: boolean;
-  templates: WorkflowTemplate[];
-  disabledIds: string[];
-  lastStarted?: string;
-};
-
-export type HookSummary = {
-  id: string;
-  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "Workflow" | "Plugin";
-  source: ExtensionSource;
-  scope: ExtensionScope;
-  path: string;
-  enabled: boolean;
-  trusted: boolean;
-  timeoutMs: number;
-  outputLimitBytes: number;
-  lastError?: string;
-  logPath?: string;
-  permissions: string[];
-};
-
-export type HookState = {
-  enabled: boolean;
-  projectTrusted: boolean;
-  timeoutMs: number;
-  outputLimitBytes: number;
-  hooks: HookSummary[];
-  recentErrors: string[];
-};
-
-export type PluginSummary = {
-  id: string;
-  name: string;
-  version: string;
-  description: string;
-  source: ExtensionSource;
-  scope: ExtensionScope;
-  path: string;
-  enabled: boolean;
-  trusted: boolean;
-  permissions: string[];
-  mayWrite: boolean;
-  mayExecute: boolean;
-  mayNetwork: boolean;
-  lifecycle: ExtensionLifecycleRecord;
-  contributions: {
-    commands: string[];
-    mcpServers: string[];
-    providers: string[];
-    hooks: string[];
-    workflows: string[];
-    skills: string[];
-  };
-  lastError?: string;
-};
-
-export type PluginState = {
-  enabled: boolean;
-  projectDir: string;
-  userDir: string;
-  plugins: PluginSummary[];
-  disabledIds: string[];
-  trustedIds: string[];
-  lastError?: string;
-};
 
 type MessageKey =
   | "appTitle"
@@ -1492,20 +900,10 @@ export type TuiContext = {
   suppressLastFullOutputCapture?: boolean;
 };
 
-type ProviderFailureSummary = {
-  code: string;
-  provider: string;
-  model: string;
-  endpointProfile: string;
-  summary: string;
-  evidenceId: string;
-  createdAt: string;
-};
+const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 
-const DEFAULT_CACHE_HISTORY_SIZE = 20;
 const MIN_CACHE_HISTORY_SIZE = 1;
 const MAX_CACHE_HISTORY_SIZE = 200;
-const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
@@ -1531,7 +929,6 @@ const LARGE_INDEX_RISK_DIRS = new Set([
 const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
-const PROJECT_RULES_SUMMARY_WIDTH = 600;
 const PROJECT_RULES_STATUS_WIDTH = 160;
 const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
@@ -1552,77 +949,46 @@ const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>>
 const MAX_CHECKPOINTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
 
-export function createCacheState(
-  projectPath: string,
-  model = "deepseek-v4-flash",
-  mcpToolList: McpToolState[] = [],
-): CacheState {
-  const freshness = createCacheFreshness({
-    systemPrompt: "Linghun interactive terminal with local extensions and workflows",
-    toolSchema: builtInTools,
-    mcpToolList: stabilizeMcpToolList(mcpToolList),
-    model,
-    provider: "deepseek",
-    projectRules: "local CLAUDE.md rules loaded by harness",
-    memory: "memory/handoff context not loaded yet",
-    compact: "not compacted",
-    plugins: [],
-  });
-  return {
-    config: {
-      maxTurns: DEFAULT_CACHE_HISTORY_SIZE,
-      warnBelowHitRate: DEFAULT_CACHE_WARN_BELOW_HIT_RATE,
-      persistPath: join(projectPath, ".linghun", "cache-log.json"),
-      hintsMuted: false,
-    },
-    history: [],
-    nextTurn: 1,
-    lastFreshness: freshness,
-    hintLastShownAt: {},
-    compacted: false,
-    compactBoundaries: [],
-    workspaceReference: createWorkspaceReferenceCache(),
-    startedAt: Date.now(),
-  };
-}
+// Module 2 (state-runtime) — pure state factories and their leaf helpers
+// moved to ./tui-state-runtime.ts. Only `refreshRemoteState` stays here
+// because it mutates TuiContext.
+export {
+  applyRemoteSessionDisables,
+  codebaseMemoryRequiredArgs,
+  createCacheState,
+  createHookState,
+  createMcpState,
+  createMcpToolPlaceholders,
+  createMemoryState,
+  createPluginState,
+  createRemoteState,
+  createSkillState,
+  createWorkflowState,
+  getRemoteInstallHint,
+  isRecord,
+  normalizeMemoryStatus,
+  pathExists,
+  stabilizeMcpToolList,
+  stableId,
+  summarizeProjectRules,
+} from "./tui-state-runtime.js";
 
-export function createRemoteState(config: LinghunConfig): RemoteState {
-  return {
-    enabled: config.remote.enabled,
-    channels: Object.entries(config.remote.channels)
-      .map(([id, channel]) => createRemoteChannelState(id, channel, config.remote.enabled))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-    events: [],
-    processedMessageIds: [],
-    sessionDisabledChannelIds: [],
-  };
-}
-
-function createRemoteChannelState(
-  id: string,
-  config: RemoteChannelConfig,
-  remoteEnabled: boolean,
-): RemoteChannelState {
-  const active = remoteEnabled && config.enabled;
-  const bindingStatus = config.bindingUserId ? "bound" : "unbound";
-  const transportStatus = active ? getRemoteTransportStatus(config) : "unknown";
-  const disabledReason = active ? undefined : "remote_disabled";
-  const blockedReason =
-    disabledReason ?? getRemoteBlockedReason(config, transportStatus, bindingStatus);
-  return {
-    id,
-    config,
-    runtimeStatus: blockedReason
-      ? blockedReason === "remote_disabled"
-        ? "disabled"
-        : "blocked"
-      : "ready",
-    bindingStatus,
-    transportStatus,
-    lastError: blockedReason,
-    nextAction: getRemoteNextAction(id, config, blockedReason),
-  };
-}
+import {
+  applyRemoteSessionDisables,
+  createCacheState,
+  createHookState,
+  createMcpState,
+  createMcpToolPlaceholders,
+  createMemoryState,
+  createPluginState,
+  createRemoteState,
+  createSkillState,
+  createWorkflowState,
+  normalizeMemoryStatus,
+  pathExists,
+  stableId,
+  summarizeProjectRules,
+} from "./tui-state-runtime.js";
 
 function refreshRemoteState(context: TuiContext): void {
   const previous = context.remote;
@@ -1633,723 +999,6 @@ function refreshRemoteState(context: TuiContext): void {
   context.remote.lastDoctor = previous.lastDoctor;
   context.remote.lastApproval = previous.lastApproval;
   applyRemoteSessionDisables(context.remote);
-}
-
-function applyRemoteSessionDisables(remote: RemoteState): void {
-  for (const channel of remote.channels) {
-    if (!remote.sessionDisabledChannelIds.includes(channel.id)) {
-      continue;
-    }
-    channel.runtimeStatus = "disabled";
-    channel.lastError = "disabled_by_user";
-    channel.nextAction = `/remote setup ${channel.id}`;
-  }
-}
-
-function getRemoteTransportStatus(
-  config: RemoteChannelConfig,
-): RemoteChannelState["transportStatus"] {
-  if (config.transport === "webhook_mock") {
-    return "mock";
-  }
-  if (config.transport === "webhook") {
-    return config.endpoint ? "ready" : "not_configured";
-  }
-  if (!config.cliPath) {
-    return "not_configured";
-  }
-  const result = spawnSync(config.cliPath, ["--version"], { encoding: "utf8", timeout: 2_000 });
-  return result.error ? "missing" : "ready";
-}
-
-function getRemoteBlockedReason(
-  config: RemoteChannelConfig,
-  transportStatus: RemoteChannelState["transportStatus"],
-  bindingStatus: RemoteChannelState["bindingStatus"],
-): string | undefined {
-  if (bindingStatus !== "bound") {
-    return "not_bound";
-  }
-  if (config.transport === "official_cli" && transportStatus !== "ready") {
-    return transportStatus === "missing" ? "cli_missing" : "cli_not_configured";
-  }
-  if (config.transport === "webhook" && transportStatus !== "ready") {
-    return "webhook_missing";
-  }
-  if (!config.trustedSources.length) {
-    return "source_not_trusted";
-  }
-  return undefined;
-}
-
-function getRemoteNextAction(
-  channelId: string,
-  config: RemoteChannelConfig,
-  reason: string | undefined,
-): string {
-  if (!reason || reason === "remote_disabled") {
-    return reason ? `/remote setup ${channelId}` : `/remote test ${channelId}`;
-  }
-  if (reason === "not_bound") {
-    return `/remote setup ${channelId}`;
-  }
-  if (reason === "cli_missing") {
-    return getRemoteInstallHint(config.type);
-  }
-  if (reason === "webhook_missing") {
-    return `configure a redacted webhook endpoint or use /remote setup ${channelId}`;
-  }
-  if (reason === "source_not_trusted") {
-    return `bind a trusted source with /remote setup ${channelId}`;
-  }
-  return "/remote doctor";
-}
-
-export function createMcpState(config: LinghunConfig): McpState {
-  const servers = Object.entries(config.mcp.servers)
-    .map(
-      ([name, server]) =>
-        ({
-          name,
-          command: server.command,
-          status:
-            server.disabled || !config.mcp.enabledServers.includes(name)
-              ? "disabled"
-              : "configured",
-        }) satisfies McpServerState,
-    )
-    .sort((a, b) => a.name.localeCompare(b.name));
-  return {
-    enabled: config.mcp.enabledServers.length > 0,
-    servers,
-    tools: stabilizeMcpToolList(
-      servers
-        .filter((server) => server.status === "configured")
-        .flatMap((server) => createMcpToolPlaceholders(server.name, "placeholder")),
-    ),
-  };
-}
-
-function createMcpToolPlaceholders(
-  serverName: string,
-  discovery: "discovered" | "placeholder",
-): McpToolState[] {
-  if (serverName !== "codebase-memory") {
-    return [
-      {
-        server: serverName,
-        name: `${serverName}.status`,
-        description:
-          "MCP server health and tool discovery placeholder; real tool schemas are not dumped.",
-        discovery,
-        trusted: discovery === "discovered",
-        schemaLoaded: discovery === "discovered",
-        runtimeVersion: discovery === "discovered" ? "compatible" : "unknown",
-      },
-    ];
-  }
-  return Object.keys(codebaseMemoryRequiredArgs()).map((tool) => ({
-    server: serverName,
-    name: `${serverName}.${tool}`,
-    description: `codebase-memory ${tool}; schema summary only, full schema omitted.`,
-    discovery,
-    trusted: discovery === "discovered",
-    schemaLoaded: discovery === "discovered",
-    runtimeVersion: discovery === "discovered" ? "compatible" : "unknown",
-  }));
-}
-
-export async function createMemoryState(
-  config: LinghunConfig,
-  projectPath: string,
-): Promise<MemoryState> {
-  const paths = resolveStoragePaths(config, projectPath);
-  const projectRulesPath = join(projectPath, "LINGHUN.md");
-  const projectRules = await loadProjectRulesSummary(projectRulesPath);
-  return {
-    projectRulesPath,
-    projectRulesExists: projectRules.exists,
-    projectRulesSummary: projectRules.summary,
-    ...(projectRules.error ? { projectRulesError: projectRules.error } : {}),
-    projectDir: paths.memoryProject,
-    userDir: paths.memoryUser,
-    sessionDir: paths.memorySession,
-    candidates: [],
-    accepted: await loadMemoryByStatus(paths, "accepted"),
-    rejected: await loadMemoryByStatus(paths, "rejected"),
-    disabled: await loadMemoryByStatus(paths, "disabled"),
-    retired: await loadMemoryByStatus(paths, "retired"),
-    learningMode: "off",
-  };
-}
-
-async function loadProjectRulesSummary(
-  path: string,
-): Promise<{ exists: boolean; summary: string; error?: string }> {
-  try {
-    const content = await readFile(path, "utf8");
-    return { exists: true, summary: summarizeProjectRules(content) };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return { exists: false, summary: "missing" };
-    }
-    return { exists: false, summary: "unreadable", error: formatError(error) };
-  }
-}
-
-function summarizeProjectRules(content: string): string {
-  const normalized = content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .join(" ")
-    .replace(/\s+/g, " ");
-  return truncateDisplay(normalized || "empty", PROJECT_RULES_SUMMARY_WIDTH);
-}
-
-async function loadMemoryByStatus(
-  paths: ReturnType<typeof resolveStoragePaths>,
-  status: MemoryStatus,
-): Promise<MemoryCandidate[]> {
-  const [projectMemory, userMemory] = await Promise.all([
-    loadMemoryDirByStatus(paths.memoryProject, status),
-    loadMemoryDirByStatus(paths.memoryUser, status),
-  ]);
-  return [...projectMemory, ...userMemory].sort((a, b) => a.id.localeCompare(b.id));
-}
-
-async function loadMemoryDirByStatus(
-  directory: string,
-  status: MemoryStatus,
-): Promise<MemoryCandidate[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(directory);
-  } catch {
-    return [];
-  }
-
-  const memory = await Promise.all(
-    entries
-      .filter((entry) => entry.endsWith(".json"))
-      .map(async (entry) => readMemoryCandidate(join(directory, entry))),
-  );
-  return memory.filter(
-    (item): item is MemoryCandidate => item !== null && normalizeMemoryStatus(item) === status,
-  );
-}
-
-async function readMemoryCandidate(path: string): Promise<MemoryCandidate | null> {
-  try {
-    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
-    return parseMemoryCandidate(value);
-  } catch {
-    return null;
-  }
-}
-
-function parseMemoryCandidate(value: unknown): MemoryCandidate | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  if (
-    typeof value.id !== "string" ||
-    typeof value.summary !== "string" ||
-    typeof value.source !== "string" ||
-    typeof value.createdAt !== "string"
-  ) {
-    return null;
-  }
-  if (value.scope !== "project" && value.scope !== "user" && value.scope !== "session") {
-    return null;
-  }
-  const status =
-    value.status === "candidate" ||
-    value.status === "accepted" ||
-    value.status === "rejected" ||
-    value.status === "disabled" ||
-    value.status === "retired"
-      ? value.status
-      : "accepted";
-  const risk = value.risk === "medium" || value.risk === "high" ? value.risk : "low";
-  const sourceRefs = Array.isArray(value.sourceRefs)
-    ? value.sourceRefs.filter((item): item is string => typeof item === "string")
-    : [value.source];
-  return {
-    id: value.id,
-    scope: value.scope,
-    status,
-    summary: truncateDisplay(value.summary.replace(/\s+/g, " "), 240),
-    source: value.source,
-    sourceRefs: sourceRefs.slice(0, 6),
-    risk,
-    inferred: value.inferred === true,
-    createdAt: value.createdAt,
-  };
-}
-
-function normalizeMemoryStatus(item: MemoryCandidate): MemoryStatus {
-  return item.status ?? "accepted";
-}
-
-function resolveConfiguredDir(projectPath: string, configured: string): string {
-  if (configured.startsWith("~/")) {
-    return join(homedir(), configured.slice(2));
-  }
-  return resolve(projectPath, configured);
-}
-
-export async function createSkillState(
-  config: LinghunConfig,
-  projectPath: string,
-): Promise<SkillState> {
-  const projectDir = resolveConfiguredDir(projectPath, config.skills.projectDir);
-  const userDir = resolveConfiguredDir(projectPath, config.skills.userDir);
-  try {
-    const skills = await loadSkillSummaries(config, projectDir, userDir);
-    return {
-      enabled: config.skills.enabled,
-      projectDir,
-      userDir,
-      skills,
-      disabledIds: [...config.skills.disabledIds].sort((a, b) => a.localeCompare(b)),
-      trustedIds: [...config.skills.trustedIds].sort((a, b) => a.localeCompare(b)),
-      evolutionCandidates: [],
-      rejectedEvolutionCandidates: [],
-    };
-  } catch (error) {
-    return {
-      enabled: config.skills.enabled,
-      projectDir,
-      userDir,
-      skills: [],
-      disabledIds: config.skills.disabledIds,
-      trustedIds: config.skills.trustedIds,
-      evolutionCandidates: [],
-      rejectedEvolutionCandidates: [],
-      lastError: formatError(error),
-    };
-  }
-}
-
-export function createWorkflowState(config: LinghunConfig): WorkflowState {
-  return {
-    enabled: config.workflows.enabled,
-    disabledIds: [...config.workflows.disabledIds].sort((a, b) => a.localeCompare(b)),
-    templates: [
-      workflow("bug-fix", "定位 bug、做最小修复、运行相关验证", "medium", true, [
-        "corepack pnpm test",
-        "corepack pnpm typecheck",
-      ]),
-      workflow("design-to-code", "把已确认设计转成最小代码改动", "high", true, [
-        "corepack pnpm test",
-        "corepack pnpm build",
-      ]),
-      workflow("doc-to-code", "按文档差异补齐代码入口和验证", "medium", true, [
-        "corepack pnpm test",
-        "corepack pnpm check",
-      ]),
-      workflow("refactor-plan", "只输出重构计划与风险，不直接改代码", "medium", false, [
-        "corepack pnpm typecheck",
-      ]),
-      workflow("release-note", "基于已验证变更生成发布说明", "low", false, ["corepack pnpm check"]),
-      workflow("review", "只读审查 diff、风险和验证证据", "low", false, ["corepack pnpm test"]),
-      workflow(
-        "solution-completeness-check",
-        "先判断 single_issue/systemic_gap、影响面、P0/P1/P2、阶段边界和验证方式",
-        "low",
-        false,
-        ["focused Solution Completeness Gate test"],
-      ),
-    ].sort((a, b) => a.id.localeCompare(b.id)),
-  };
-}
-
-function workflow(
-  id: string,
-  purpose: string,
-  risk: WorkflowTemplate["risk"],
-  writesFiles: boolean,
-  recommendedValidation: string[],
-): WorkflowTemplate {
-  return {
-    id,
-    purpose,
-    risk,
-    writesFiles,
-    recommendedValidation,
-    steps: [
-      "Start Gate：启动前先让用户确认范围。",
-      "执行中任何写文件、Bash、联网或依赖安装仍走现有权限管道。",
-      "结束前提示运行推荐验证，并输出修改文件、验证结果、已知限制和范围边界。",
-    ],
-  };
-}
-
-export async function createHookState(
-  config: LinghunConfig,
-  projectPath: string,
-): Promise<HookState> {
-  const hooks = await loadHookSummaries(config, projectPath);
-  return {
-    enabled: config.hooks.enabled,
-    projectTrusted: config.hooks.projectTrusted,
-    timeoutMs: config.hooks.timeoutMs,
-    outputLimitBytes: config.hooks.outputLimitBytes,
-    hooks,
-    recentErrors: hooks.flatMap((hook) =>
-      hook.lastError ? [`${hook.id}: ${hook.lastError}`] : [],
-    ),
-  };
-}
-
-export async function createPluginState(
-  config: LinghunConfig,
-  projectPath: string,
-): Promise<PluginState> {
-  const projectDir = resolveConfiguredDir(projectPath, config.plugins.projectDir);
-  const userDir = resolveConfiguredDir(projectPath, config.plugins.userDir);
-  try {
-    const plugins = await loadPluginSummaries(config, projectDir, userDir);
-    return {
-      enabled: config.plugins.enabled,
-      projectDir,
-      userDir,
-      plugins,
-      disabledIds: [...config.plugins.disabledIds].sort((a, b) => a.localeCompare(b)),
-      trustedIds: [...config.plugins.trustedIds].sort((a, b) => a.localeCompare(b)),
-    };
-  } catch (error) {
-    return {
-      enabled: config.plugins.enabled,
-      projectDir,
-      userDir,
-      plugins: [],
-      disabledIds: config.plugins.disabledIds,
-      trustedIds: config.plugins.trustedIds,
-      lastError: formatError(error),
-    };
-  }
-}
-
-async function loadSkillSummaries(
-  config: LinghunConfig,
-  projectDir: string,
-  userDir: string,
-): Promise<SkillSummary[]> {
-  const loaded = await Promise.all([
-    loadSkillDir(config, projectDir, "project"),
-    loadSkillDir(config, userDir, "user"),
-  ]);
-  return loaded.flat().sort((a, b) => a.id.localeCompare(b.id));
-}
-
-async function loadSkillDir(
-  config: LinghunConfig,
-  directory: string,
-  scope: ExtensionScope,
-): Promise<SkillSummary[]> {
-  const entries = await readJsonManifestFiles(directory);
-  const items = await Promise.all(entries.map((path) => readSkillManifest(config, path, scope)));
-  return items.filter((item): item is SkillSummary => item !== null);
-}
-
-async function readSkillManifest(
-  config: LinghunConfig,
-  path: string,
-  scope: ExtensionScope,
-): Promise<SkillSummary | null> {
-  try {
-    const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-    const id = stableId(value.id, basename(path, extname(path)));
-    const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
-    const source = parseSource(value.source, scope);
-    const trusted = source === "official" || config.skills.trustedIds.includes(id);
-    const enabled = config.skills.enabled && !config.skills.disabledIds.includes(id) && trusted;
-    return {
-      id,
-      name: stringValue(value.name, id),
-      description: truncateDisplay(stringValue(value.description, "no description"), 240),
-      triggers: stringArray(value.triggers).sort((a, b) => a.localeCompare(b)),
-      summary: truncateDisplay(stringValue(value.summary, stringValue(value.description, "")), 600),
-      source,
-      scope,
-      path,
-      version: stringValue(value.version, "0.0.0"),
-      enabled,
-      trusted,
-      permissions,
-      mayWrite: permissions.includes("write"),
-      mayExecute: permissions.includes("bash") || permissions.includes("execute"),
-      mayNetwork: permissions.includes("network"),
-      lifecycle: readLifecycleRecord(value, {
-        path,
-        source,
-        trusted,
-        enabled,
-        permissions,
-        hasSchema: true,
-      }),
-    };
-  } catch (error) {
-    return {
-      id: basename(path, extname(path)),
-      name: basename(path),
-      description: "manifest load failed; skill isolated from main session",
-      triggers: [],
-      summary: "manifest load failed; skill isolated from prompt and tools",
-      source: scope === "project" ? "third-party" : "local",
-      scope,
-      path,
-      version: "unknown",
-      enabled: false,
-      trusted: false,
-      permissions: [],
-      mayWrite: false,
-      mayExecute: false,
-      mayNetwork: false,
-      lifecycle: {
-        localPath: path,
-        trustLevel: "disabled",
-        permissionSummary: "none",
-        discovered: false,
-        registered: false,
-        schemaLoaded: false,
-        runtimeVersion: "unknown",
-      },
-      lastError: formatError(error),
-    };
-  }
-}
-
-async function loadPluginSummaries(
-  config: LinghunConfig,
-  projectDir: string,
-  userDir: string,
-): Promise<PluginSummary[]> {
-  const loaded = await Promise.all([
-    loadPluginDir(config, projectDir, "project"),
-    loadPluginDir(config, userDir, "user"),
-  ]);
-  return loaded.flat().sort((a, b) => a.id.localeCompare(b.id));
-}
-
-async function loadPluginDir(
-  config: LinghunConfig,
-  directory: string,
-  scope: ExtensionScope,
-): Promise<PluginSummary[]> {
-  const entries = await readJsonManifestFiles(directory);
-  const items = await Promise.all(entries.map((path) => readPluginManifest(config, path, scope)));
-  return items.filter((item): item is PluginSummary => item !== null);
-}
-
-async function readPluginManifest(
-  config: LinghunConfig,
-  path: string,
-  scope: ExtensionScope,
-): Promise<PluginSummary | null> {
-  try {
-    const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-    const id = stableId(value.id, basename(path, extname(path)));
-    const permissions = stringArray(value.permissions).sort((a, b) => a.localeCompare(b));
-    const source = parseSource(value.source, scope);
-    const trusted = source === "official" || config.plugins.trustedIds.includes(id);
-    const enabled = config.plugins.enabled && !config.plugins.disabledIds.includes(id) && trusted;
-    const contributions = normalizeContributions(value.contributions);
-    return {
-      id,
-      name: stringValue(value.name, id),
-      version: stringValue(value.version, "0.0.0"),
-      description: truncateDisplay(stringValue(value.description, "no description"), 240),
-      source,
-      scope,
-      path,
-      enabled,
-      trusted,
-      permissions,
-      mayWrite: permissions.includes("write"),
-      mayExecute: permissions.includes("bash") || permissions.includes("execute"),
-      mayNetwork: permissions.includes("network"),
-      lifecycle: readLifecycleRecord(value, {
-        path,
-        source,
-        trusted,
-        enabled,
-        permissions,
-        hasSchema: Object.values(contributions).some((items) => items.length > 0),
-      }),
-      contributions,
-    };
-  } catch (error) {
-    return {
-      id: basename(path, extname(path)),
-      name: basename(path),
-      version: "unknown",
-      description: "manifest load failed; plugin isolated from main session",
-      source: scope === "project" ? "third-party" : "local",
-      scope,
-      path,
-      enabled: false,
-      trusted: false,
-      permissions: [],
-      mayWrite: false,
-      mayExecute: false,
-      mayNetwork: false,
-      lifecycle: {
-        localPath: path,
-        trustLevel: "disabled",
-        permissionSummary: "none",
-        discovered: false,
-        registered: false,
-        schemaLoaded: false,
-        runtimeVersion: "unknown",
-      },
-      contributions: normalizeContributions(undefined),
-      lastError: formatError(error),
-    };
-  }
-}
-
-async function loadHookSummaries(
-  config: LinghunConfig,
-  projectPath: string,
-): Promise<HookSummary[]> {
-  const pluginHooks = (await createPluginState(config, projectPath)).plugins.flatMap((plugin) =>
-    plugin.contributions.hooks.map((event) => ({ plugin, event })),
-  );
-  return pluginHooks
-    .map(({ plugin, event }) => ({
-      id: `${plugin.id}:${event}`,
-      event: parseHookEvent(event),
-      source: plugin.source,
-      scope: plugin.scope,
-      path: plugin.path,
-      enabled:
-        config.hooks.enabled &&
-        plugin.enabled &&
-        plugin.trusted &&
-        (plugin.scope !== "project" || config.hooks.projectTrusted),
-      trusted: plugin.trusted && (plugin.scope !== "project" || config.hooks.projectTrusted),
-      timeoutMs: config.hooks.timeoutMs,
-      outputLimitBytes: config.hooks.outputLimitBytes,
-      permissions: plugin.permissions,
-      logPath: join(projectPath, ".linghun", "logs", "hooks", `${plugin.id}.log`),
-      lastError: plugin.lastError,
-    }))
-    .sort((a, b) => `${a.event}:${a.id}`.localeCompare(`${b.event}:${b.id}`));
-}
-
-function parseHookEvent(value: string): HookSummary["event"] {
-  const allowed: HookSummary["event"][] = [
-    "Notification",
-    "Plugin",
-    "PostToolUse",
-    "PreToolUse",
-    "Stop",
-    "Workflow",
-  ];
-  return allowed.includes(value as HookSummary["event"])
-    ? (value as HookSummary["event"])
-    : "Plugin";
-}
-
-async function readJsonManifestFiles(directory: string): Promise<string[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(directory);
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((entry) => entry.endsWith(".json"))
-    .map((entry) => join(directory, entry))
-    .sort((a, b) => a.localeCompare(b));
-}
-
-function normalizeContributions(value: unknown): PluginSummary["contributions"] {
-  const input = isRecord(value) ? value : {};
-  return {
-    commands: stringArray(input.commands).sort((a, b) => a.localeCompare(b)),
-    hooks: stringArray(input.hooks).sort((a, b) => a.localeCompare(b)),
-    mcpServers: stringArray(input.mcpServers).sort((a, b) => a.localeCompare(b)),
-    providers: stringArray(input.providers).sort((a, b) => a.localeCompare(b)),
-    skills: stringArray(input.skills).sort((a, b) => a.localeCompare(b)),
-    workflows: stringArray(input.workflows).sort((a, b) => a.localeCompare(b)),
-  };
-}
-
-function parseSource(value: unknown, scope: ExtensionScope): ExtensionSource {
-  if (value === "official" || value === "third-party" || value === "local") {
-    return value;
-  }
-  return scope === "project" ? "third-party" : "local";
-}
-
-function stableId(value: unknown, fallback: string): string {
-  return stringValue(value, fallback)
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_.-]+/g, "-");
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function stringValue(value: unknown, fallback: string): string {
-  return typeof value === "string" && value.length > 0 ? value : fallback;
-}
-
-function permissionSummary(permissions: string[]): string {
-  if (permissions.length === 0) {
-    return "none";
-  }
-  const risks = [
-    permissions.includes("write") ? "write" : undefined,
-    permissions.includes("bash") || permissions.includes("execute") ? "execute" : undefined,
-    permissions.includes("network") ? "network" : undefined,
-  ].filter((item): item is string => Boolean(item));
-  return risks.length > 0 ? risks.join("+") : permissions.join("+");
-}
-
-function readLifecycleRecord(
-  value: Record<string, unknown>,
-  options: {
-    path: string;
-    source: ExtensionSource;
-    trusted: boolean;
-    enabled: boolean;
-    permissions: string[];
-    hasSchema: boolean;
-  },
-): ExtensionLifecycleRecord {
-  const raw = isRecord(value.lifecycle) ? value.lifecycle : value;
-  return {
-    sourceUrl: typeof raw.sourceUrl === "string" ? raw.sourceUrl : undefined,
-    localPath: typeof raw.localPath === "string" ? raw.localPath : options.path,
-    ref: typeof raw.ref === "string" ? raw.ref : undefined,
-    commit: typeof raw.commit === "string" ? raw.commit : undefined,
-    installedAt: typeof raw.installedAt === "string" ? raw.installedAt : undefined,
-    trustLevel: options.enabled ? "trusted" : options.trusted ? "disabled" : "untrusted",
-    permissionSummary: permissionSummary(options.permissions),
-    discovered: true,
-    registered: true,
-    schemaLoaded: options.hasSchema,
-    runtimeVersion: "compatible",
-  };
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
@@ -4636,278 +3285,47 @@ async function handleModelRouteCommand(
   writeLine(output, "用法：/model route | /model route doctor | /model route set <role> <model>");
 }
 
-function shouldOfferUserScopedModelSetup(context: TuiContext): boolean {
-  return !getProjectModelRouteProblem(context) && hasSelectedProviderConfigProblem(context);
-}
+// Module 6 — shouldOfferUserScopedModelSetup / getStartupProjectRouteProblem /
+// readProjectExecutorRouteOverride / getProjectModelRouteProblem /
+// getProjectModelRouteProblemForRoute / hasSelectedProviderConfigProblem /
+// getRuntimeStatusProvider / getActiveEndpointProfileLabel / resolveInitialModel /
+// getSelectedModelRuntime / formatReasoningEffectiveState / resolveProviderForModel /
+// createModelGateway / resolveRoleRoute / createRouteRepairSuggestions /
+// formatRoutePauseMessage 已移至 ./tui-model-runtime.ts。
+export type { SelectedModelRuntime } from "./tui-model-runtime.js";
+export {
+  createModelGateway,
+  createRouteRepairSuggestions,
+  formatReasoningEffectiveState,
+  formatRoutePauseMessage,
+  getActiveEndpointProfileLabel,
+  getProjectModelRouteProblem,
+  getProjectModelRouteProblemForRoute,
+  getRuntimeStatusProvider,
+  getSelectedModelRuntime,
+  getStartupProjectRouteProblem,
+  hasSelectedProviderConfigProblem,
+  readProjectExecutorRouteOverride,
+  resolveInitialModel,
+  resolveProviderForModel,
+  resolveRoleRoute,
+  shouldOfferUserScopedModelSetup,
+} from "./tui-model-runtime.js";
 
-async function getStartupProjectRouteProblem(context: TuiContext): Promise<string | undefined> {
-  const projectRoute = await readProjectExecutorRouteOverride(context.projectPath);
-  if (projectRoute) {
-    return getProjectModelRouteProblemForRoute(projectRoute, context);
-  }
-  return getProjectModelRouteProblem(context);
-}
-
-async function readProjectExecutorRouteOverride(
-  projectPath: string,
-): Promise<RoleModelRoute | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(getProjectSettingsPath(projectPath), "utf8")) as {
-      modelRoutes?: { routes?: RoleModelRoute[] };
-    };
-    return parsed.modelRoutes?.routes?.find((route) => route.role === "executor");
-  } catch {
-    return undefined;
-  }
-}
-
-function getProjectModelRouteProblem(context: TuiContext): string | undefined {
-  const route = getRoleRoute(context.config, "executor");
-  if (isDefaultExecutorRoute(route, context.config)) return undefined;
-  return getProjectModelRouteProblemForRoute(route, context);
-}
-
-function getProjectModelRouteProblemForRoute(
-  route: RoleModelRoute,
-  context: TuiContext,
-): string | undefined {
-  const providerId = route.provider || resolveProviderForModel(context.config, route.primaryModel);
-  const provider = context.config.providers[providerId];
-  if (!provider) {
-    return `executor route points to provider=${providerId || "unknown"}, but that provider is not configured`;
-  }
-  if (provider.type === "openai-compatible" && hasOpenAiCompatibleProviderSetupProblem(provider)) {
-    return undefined;
-  }
-  if (!route.primaryModel || route.primaryModel === "openai-compatible-model") {
-    return `executor route primaryModel=${route.primaryModel || "missing"} is not a concrete model`;
-  }
-  return undefined;
-}
-
-function hasSelectedProviderConfigProblem(context: TuiContext): boolean {
-  const runtime = getSelectedModelRuntime(context);
-  const provider = context.config.providers[runtime.provider];
-  if (!provider) return true;
-  if (provider.type !== "openai-compatible") return !provider.apiKey || !provider.model;
-  return hasOpenAiCompatibleProviderSetupProblem(provider);
-}
-
-function getRuntimeStatusProvider(context: TuiContext): string {
-  const runtime = getSelectedModelRuntime(context);
-  return runtime.provider;
-}
-
-// D.13F：返回当前 executor runtime 的 effective endpoint profile，用于 cache-freshness 维度。
-// 必须用 resolveEffectiveEndpointProfile 得到的 effective profile（而非 provider 配置原值），
-// 否则 Claude + chat_completions placeholder 时 hash 会被误算成 chat_completions，
-// 与真实请求的 anthropic_messages 不一致，破坏 /break-cache status 的诊断价值。
-function getActiveEndpointProfileLabel(context: TuiContext): string {
-  const runtime = getSelectedModelRuntime(context);
-  const provider = context.config.providers[runtime.provider];
-  const decision = resolveEffectiveEndpointProfile({
-    requestEndpointProfile: undefined,
-    configEndpointProfile: provider?.endpointProfile,
-    configBaseUrl: provider?.baseUrl,
-    configModel: provider?.model,
-    requestModel: runtime.model,
-  });
-  return decision.endpointProfile;
-}
-
-function resolveInitialModel(config: LinghunConfig): string {
-  const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
-  if (executor && !isDefaultExecutorRoute(executor, config) && executor.primaryModel) {
-    return executor.primaryModel;
-  }
-  return config.defaultModel || executor?.primaryModel || config.providers.deepseek.model;
-}
-
-type SelectedModelRuntime = {
-  role: ModelRole;
-  provider: string;
-  model: string;
-  endpointProfile: "chat_completions" | "responses";
-  reasoningLevel?: string;
-  reasoningStatus: string;
-  reasoningSent: boolean;
-};
-
-function getSelectedModelRuntime(
-  context: TuiContext,
-  role: ModelRole = "executor",
-): SelectedModelRuntime {
-  const route = getRoleRoute(context.config, role);
-  const useContextModel =
-    role === "executor" &&
-    isDefaultExecutorRoute(route, context.config) &&
-    context.model &&
-    context.model !== route.primaryModel;
-  const model = useContextModel ? context.model : route.primaryModel || context.model;
-  const provider = useContextModel
-    ? resolveProviderForModel(context.config, model)
-    : route.provider || resolveProviderForModel(context.config, model);
-  const providerConfig = context.config.providers[provider];
-  // SelectedModelRuntime 仅描述 OpenAI-style runtime（chat_completions / responses）；
-  // 若 provider 已切到 anthropic_messages，仍以 chat_completions 暴露给上层（reasoning/decision
-  // 路径不依赖该字段做协议分流），避免 SelectedModelRuntime 类型扩散到 Anthropic profile。
-  const rawEndpointProfile = providerConfig?.endpointProfile ?? "chat_completions";
-  const endpointProfile: "chat_completions" | "responses" =
-    rawEndpointProfile === "responses" ? "responses" : "chat_completions";
-  const compatibilityProfile =
-    providerConfig?.compatibilityProfile ??
-    (providerConfig?.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
-  const reasoningLevel = providerConfig?.reasoningLevel;
-  // D.13K：reasoningSent 现支持三种生效路径——
-  //   1. responses profile（OpenAI Responses API 原生 reasoning.effort）；
-  //   2. permissive_openai_compatible chat（中转网关接受非标 reasoning 字段）；
-  //   3. anthropic_messages profile（Anthropic extended thinking，由 provider builder 注入 thinking 字段）。
-  // 注意：SelectedModelRuntime.endpointProfile 被收窄为 chat_completions | responses，
-  // anthropic_messages 走的是 provider 决策器自动切换路径——这里直接看 raw provider profile。
-  const reasoningSent = Boolean(
-    reasoningLevel &&
-      (endpointProfile === "responses" ||
-        compatibilityProfile === "permissive_openai_compatible" ||
-        rawEndpointProfile === "anthropic_messages"),
-  );
-  return {
-    role,
-    provider,
-    model,
-    endpointProfile,
-    reasoningLevel,
-    reasoningStatus: formatReasoningEffectiveState(reasoningLevel, reasoningSent),
-    reasoningSent,
-  };
-}
-
-function formatReasoningEffectiveState(
-  reasoningLevel: string | undefined,
-  reasoningSent: boolean,
-): string {
-  if (!reasoningLevel) {
-    return "未生效";
-  }
-  return reasoningSent ? `effective/sent ${reasoningLevel}` : "ignored/unsupported/未生效";
-}
-
-function resolveProviderForModel(config: LinghunConfig, model: string): string {
-  const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
-  if (executor?.primaryModel === model && executor.provider) {
-    return executor.provider;
-  }
-  if (config.defaultModel === model) {
-    for (const [providerId, provider] of Object.entries(config.providers)) {
-      if (provider.model === model) return providerId;
-    }
-  }
-  for (const [providerId, provider] of Object.entries(config.providers)) {
-    if (provider.model === model) {
-      return providerId;
-    }
-  }
-  return model.startsWith("deepseek-") ? "deepseek" : "unknown";
-}
-
-function createModelGateway(config: LinghunConfig): ModelGateway {
-  return new ModelGateway(
-    Object.entries(config.providers).map(([id, provider]) => {
-      if (provider.type === "deepseek") {
-        return new DeepSeekProvider({ ...provider, id, displayName: "DeepSeek" });
-      }
-      return new OpenAiCompatibleProvider({ ...provider, id, displayName: "OpenAI compatible" });
-    }),
-  );
-}
-
-function resolveRoleRoute(
-  context: TuiContext,
-  role: ModelRole,
-  triggerReason: string,
-): ResolvedRoleRoute {
-  const baseRoute = getRoleRoute(context.config, role);
-  const primaryProblems = diagnoseConcreteRoute(
-    baseRoute,
-    baseRoute.primaryModel,
-    baseRoute.provider,
-    context.config,
-  );
-  const primaryBlocking = getRouteBlockingProblems(primaryProblems);
-  let selectedProvider = baseRoute.provider;
-  let selectedModel = baseRoute.primaryModel;
-  let stopConditions = primaryBlocking;
-  let fallbackUsed = false;
-
-  if (primaryBlocking.length > 0) {
-    for (const fallbackModel of baseRoute.fallbackModels) {
-      const fallbackProvider = inferProviderForRouteModel(fallbackModel, context.config);
-      const fallbackProblems = diagnoseConcreteRoute(
-        baseRoute,
-        fallbackModel,
-        fallbackProvider,
-        context.config,
-      );
-      const fallbackBlocking = getRouteBlockingProblems(fallbackProblems);
-      if (fallbackBlocking.length === 0) {
-        selectedProvider = fallbackProvider;
-        selectedModel = fallbackModel;
-        stopConditions = [];
-        fallbackUsed = true;
-        break;
-      }
-    }
-  } else {
-    stopConditions = [];
-  }
-
-  const resolvedRoute = { ...baseRoute, provider: selectedProvider, primaryModel: selectedModel };
-  const repairSuggestions = createRouteRepairSuggestions(role, stopConditions, baseRoute);
-  const decision: RoleRouteDecision = {
-    id: `route-${randomUUID().slice(0, 8)}`,
-    triggerReason,
-    role,
-    selectedProvider: stopConditions.length > 0 ? "" : selectedProvider,
-    selectedModel: stopConditions.length > 0 ? "" : selectedModel,
-    fallbackCandidates: baseRoute.fallbackModels,
-    requiredCapabilities: baseRoute.requiredCapabilities,
-    maxCostCny: baseRoute.maxCostCny,
-    stopConditions,
-    repairSuggestions,
-    fallbackUsed,
-    budgetStop: false,
-    createdAt: new Date().toISOString(),
-  };
-  context.routeDecisions.unshift(decision);
-  context.routeDecisions = context.routeDecisions.slice(0, MAX_ROUTE_DECISIONS);
-  return { route: resolvedRoute, decision, usable: stopConditions.length === 0 };
-}
-
-function createRouteRepairSuggestions(
-  role: ModelRole,
-  stopConditions: string[],
-  route: RoleModelRoute,
-): string[] {
-  if (stopConditions.length === 0) {
-    return [];
-  }
-  const suggestions = [`运行 /model route set ${role} <model> 设置可用模型`];
-  if (stopConditions.some((item) => item.includes("openai-compatible"))) {
-    suggestions.push(
-      "在 .linghun/settings.json 配置 openai-compatible 的 baseUrl、apiKey 和 model",
-    );
-  }
-  if (stopConditions.some((item) => item.startsWith("能力不足"))) {
-    suggestions.push(`选择满足 ${route.requiredCapabilities.join("+")} capability 的模型`);
-  }
-  if (route.fallbackModels.length === 0) {
-    suggestions.push("为该 role 配置 fallbackModels，避免 primary 不可用时直接暂停");
-  }
-  return suggestions;
-}
-
-function formatRoutePauseMessage(role: ModelRole, decision: RoleRouteDecision): string {
-  return `${role} role 路由暂停：${decision.stopConditions.join("；")}。修复建议：${decision.repairSuggestions.join("；")}。不会假装可用。`;
-}
+import {
+  createModelGateway,
+  formatReasoningEffectiveState,
+  formatRoutePauseMessage,
+  getActiveEndpointProfileLabel,
+  getRuntimeStatusProvider,
+  getSelectedModelRuntime,
+  getStartupProjectRouteProblem,
+  hasSelectedProviderConfigProblem,
+  resolveInitialModel,
+  resolveRoleRoute,
+  shouldOfferUserScopedModelSetup,
+} from "./tui-model-runtime.js";
+import type { SelectedModelRuntime } from "./tui-model-runtime.js";
 
 function writeWorkspaceTrustStartupNotice(output: Writable, context: TuiContext): void {
   const level = context.config.workspaceTrust.level;
@@ -5821,78 +4239,45 @@ async function handleLanguageCommand(
 // ---------------------------------------------------------------------------
 // D.13E Step 2 — permission helpers（修正 #3 + #4）
 // ---------------------------------------------------------------------------
-// addAllowRule:
-//   - 校验工具名（"*" 或在 builtInTools 内）
-//   - 等价规则去重（同 effect+toolName+risk）
-//   - 落盘（savePermissionState）失败则回滚内存中的 push，避免与磁盘不一致
-//   - 返回判别 union，messages 由调用方决定向用户怎么回报
-// executePermissionApprove / executePermissionDeny:
-//   - 把 handleNaturalInput 的 yes/no 分支主体抽出，让 controller 端
-//     permission-action 路由可以直接复用，不重复实现 approve/deny 行为
+// Module 3 (permission-runtime) — addAllowRule、decidePermission、
+// recordPermissionDenied、loadPermissionState、savePermissionState、
+// permissionStatePath、toPermissionPromptView、PermissionCheck、
+// AddAllowRuleResult 都迁移到 ./tui-permission-runtime.ts。
+// 保留在 index.ts 的协调器：executePermissionApprove / executePermissionDeny /
+// handlePermissionsCommand / setPermissionMode / getModeChangeGuard，因为它们
+// 依赖 i18n（t）/ ensureSession / executeIndexIgnoreWritePlan /
+// runIndexRepository / executeApprovedModelToolUse /
+// continueModelAfterToolResults / writeLightHints / writeStatus 等
+// index.ts 内部协调函数，跨模块迁移会引入循环依赖。
 // ---------------------------------------------------------------------------
+export {
+  type AddAllowRuleResult,
+  type PermissionCheck,
+  addAllowRule,
+  decidePermission,
+  loadPermissionState,
+  permissionStatePath,
+  recordPermissionDenied,
+  savePermissionState,
+  toPermissionPromptView,
+} from "./tui-permission-runtime.js";
 
-type AddAllowRuleResult =
-  | { kind: "added"; rule: PermissionRule; message: string }
-  | { kind: "duplicate"; rule: PermissionRule; message: string }
-  | { kind: "invalid"; message: string }
-  | { kind: "save_failed"; error: Error; message: string };
+import {
+  addAllowRule,
+  decidePermission,
+  loadPermissionState,
+  recordPermissionDenied,
+  savePermissionState,
+  toPermissionPromptView,
+} from "./tui-permission-runtime.js";
 
 // 测试导出：让 index.test.ts 直接覆盖去重 / 失败回滚 / 成功落盘三条核心路径。
 export async function addAllowRuleForTest(
   context: TuiContext,
   toolName: ToolName | "*",
   risk: PermissionRule["risk"] | undefined,
-): Promise<AddAllowRuleResult> {
+): Promise<import("./tui-permission-runtime.js").AddAllowRuleResult> {
   return addAllowRule(context, toolName, risk);
-}
-
-async function addAllowRule(
-  context: TuiContext,
-  toolName: ToolName | "*",
-  risk: PermissionRule["risk"] | undefined,
-): Promise<AddAllowRuleResult> {
-  // 1. 校验工具名
-  if (toolName !== "*" && !(toolName in builtInTools)) {
-    return { kind: "invalid", message: `未知工具：${toolName}` };
-  }
-  // 2. 去重（与 PermissionElevationModel.hasExistingAllowRule 同语义）：
-  //    - effect 必须是 allow
-  //    - toolName 精确匹配，或既有规则是 "*" 通配（umbrella tool）
-  //    - 既有规则 risk 为空（umbrella risk）视为覆盖任意 risk；否则要求精确匹配
-  //    这样 add allow Bash 之后再 add allow Bash high 应被识别为 duplicate，
-  //    避免与 buildElevationOptions 看到 alreadyAllowed=true 时隐藏 allow_always_tool
-  //    的判断不一致。
-  const existing = context.permissions.rules.find((r) => {
-    if (r.effect !== "allow") return false;
-    if (r.toolName !== toolName && r.toolName !== "*") return false;
-    if (r.risk && r.risk !== risk) return false;
-    return true;
-  });
-  if (existing) {
-    return {
-      kind: "duplicate",
-      rule: existing,
-      message: `已存在等价 allow 规则：${existing.id} allow ${existing.toolName}${existing.risk ? ` ${existing.risk}` : ""}`,
-    };
-  }
-  // 3. push + persist；失败则回滚
-  const rule: PermissionRule = { id: randomUUID(), effect: "allow", toolName, risk };
-  context.permissions.rules.push(rule);
-  try {
-    await savePermissionState(context.projectPath, context.permissions);
-  } catch (error) {
-    context.permissions.rules = context.permissions.rules.filter((r) => r.id !== rule.id);
-    return {
-      kind: "save_failed",
-      error: error as Error,
-      message: `保存权限规则失败：${(error as Error).message}`,
-    };
-  }
-  return {
-    kind: "added",
-    rule,
-    message: `已添加权限规则：${rule.id} allow ${toolName}${risk ? ` ${risk}` : ""}`,
-  };
 }
 
 /**
@@ -7005,94 +5390,37 @@ async function applyDurableJobBudgetStop(
   return false;
 }
 
-function upsertJobBackgroundTask(context: TuiContext, job: DurableJobState): BackgroundTaskState {
-  const existing = context.backgroundTasks.find((task) => task.id === job.id);
-  const task = createJobBackgroundTask(job, context);
-  if (existing) {
-    Object.assign(existing, task);
-    return existing;
-  }
-  rememberBackgroundTask(context, task);
-  return task;
-}
+// Module 4 — upsertJobBackgroundTask / createJobBackgroundTask /
+// toJobContext / listDurableJobs / findDurableJob / getDurableJobsRoot /
+// getDurableJobPaths / formatJobList / formatJobPrimary / formatJobReport /
+// formatJobLogs 已移至 ./tui-agent-job-runtime.ts。
+export {
+  createJobBackgroundTask,
+  findDurableJob,
+  formatJobList,
+  formatJobLogs,
+  formatJobPrimary,
+  formatJobReport,
+  getDurableJobPaths,
+  getDurableJobsRoot,
+  listDurableJobs,
+  toJobContext,
+  upsertJobBackgroundTask,
+} from "./tui-agent-job-runtime.js";
 
-function createJobBackgroundTask(job: DurableJobState, context: TuiContext): BackgroundTaskState {
-  const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
-  const runnerInline = formatJobRunnerInline(job);
-  return {
-    id: job.id,
-    kind: "job",
-    title: `Job: ${truncateDisplay(job.goal, 40)}`,
-    status: mapDurableJobToBackgroundStatus(job.status),
-    currentStep:
-      job.pauseReason ??
-      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}; ${runnerInline}`,
-    progress: {
-      completed: job.budget.usedSteps ?? 0,
-      total: getDurableJobMaxSteps(job),
-      label: "worker steps",
-    },
-    startedAt: job.startedAt ?? job.createdAt,
-    updatedAt: job.updatedAt,
-    heartbeatIntervalMs: 30_000,
-    staleAfterMs: job.timeoutMs,
-    logPath: job.logPath,
-    outputPath: job.fullOutputPath,
-    hasOutput: true,
-    result: mapDurableJobToBackgroundResult(job.status),
-    userVisibleSummary:
-      job.status === "running"
-        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; ${runnerInline}; raw output stays in logs.`
-        : `Job ${job.status}; ${runnerInline}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
-    nextAction: formatJobNextAction(job, context.language),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Job runtime — thin wrappers delegating to job-runtime.ts
-// ---------------------------------------------------------------------------
-
-function toJobContext(context: TuiContext): JobContext {
-  return { config: context.config, projectPath: context.projectPath, language: context.language };
-}
-
-async function listDurableJobs(context: TuiContext): Promise<DurableJobState[]> {
-  return listDurableJobsFromFs(toJobContext(context));
-}
-
-async function findDurableJob(
-  context: TuiContext,
-  id: string | undefined,
-): Promise<DurableJobState | undefined> {
-  return findDurableJobFromFs(toJobContext(context), id);
-}
-
-function getDurableJobsRoot(context: TuiContext): string {
-  return getDurableJobsRootImpl(toJobContext(context));
-}
-
-function getDurableJobPaths(
-  context: TuiContext,
-  id: string,
-): Pick<DurableJobState, "logPath" | "reportPath" | "fullOutputPath"> {
-  return getDurableJobPathsImpl(toJobContext(context), id);
-}
-
-function formatJobList(jobs: DurableJobState[], context: TuiContext): string {
-  return formatJobListImpl(jobs, toJobContext(context));
-}
-
-function formatJobPrimary(job: DurableJobState, context: TuiContext): string {
-  return formatJobPrimaryImpl(job, toJobContext(context));
-}
-
-function formatJobReport(job: DurableJobState): string {
-  return formatJobReportImpl(job);
-}
-
-async function formatJobLogs(job: DurableJobState): Promise<string> {
-  return formatJobLogsImpl(job);
-}
+import {
+  createJobBackgroundTask,
+  findDurableJob,
+  formatJobList,
+  formatJobLogs,
+  formatJobPrimary,
+  formatJobReport,
+  getDurableJobPaths,
+  getDurableJobsRoot,
+  listDurableJobs,
+  toJobContext,
+  upsertJobBackgroundTask,
+} from "./tui-agent-job-runtime.js";
 
 async function handleDetailsCommand(
   args: string[],
@@ -7231,26 +5559,37 @@ async function runDetailsCommandBody(
   writeLine(output, sections.join("\n"));
 }
 
-function findEvidence(context: TuiContext, id: string | undefined): EvidenceRecord | undefined {
-  if (!id) {
-    return context.evidence[0];
-  }
-  return context.evidence.find((evidence) => evidence.id === id || evidence.id.endsWith(id));
-}
+// Module 5 — findEvidence / formatEvidenceDetails / parseLogArtifactRequest /
+// readPositiveIntegerArg / createLogArtifactRegistry / formatAgentDetails
+// 已移至 ./tui-details-runtime.ts。
+export {
+  createLogArtifactRegistry,
+  findEvidence,
+  formatAgentDetails,
+  formatEvidenceDetails,
+  parseLogArtifactRequest,
+  readPositiveIntegerArg,
+} from "./tui-details-runtime.js";
 
-function findBackgroundTask(
-  context: TuiContext,
-  id: string | undefined,
-): BackgroundTaskState | undefined {
-  if (!id) {
-    return context.backgroundTasks[0];
-  }
-  return context.backgroundTasks.find((task) => task.id === id || task.id.endsWith(id));
-}
+import {
+  createLogArtifactRegistry,
+  findEvidence,
+  formatAgentDetails,
+  formatEvidenceDetails,
+  parseLogArtifactRequest,
+} from "./tui-details-runtime.js";
 
-function isActiveBackgroundStatus(status: BackgroundTaskStatus): boolean {
-  return status === "running" || status === "stale";
-}
+// Module 4 — findBackgroundTask / isActiveBackgroundStatus 已移至
+// ./tui-agent-job-runtime.ts。
+export {
+  findBackgroundTask,
+  isActiveBackgroundStatus,
+} from "./tui-agent-job-runtime.js";
+
+import {
+  findBackgroundTask,
+  isActiveBackgroundStatus,
+} from "./tui-agent-job-runtime.js";
 
 function refreshBackgroundLifecycle(context: TuiContext): void {
   const now = Date.now();
@@ -7324,10 +5663,9 @@ function checkBackgroundStartGuard(
   );
 }
 
-function rememberBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {
-  context.backgroundTasks.unshift(task);
-  context.backgroundTasks = context.backgroundTasks.slice(0, MAX_BACKGROUND_TASKS);
-}
+// Module 4 — rememberBackgroundTask 已移至 ./tui-agent-job-runtime.ts。
+export { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
+import { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
 
 function finishBackgroundTaskFromToolOutput(
   task: BackgroundTaskState,
@@ -7379,66 +5717,9 @@ function finishBackgroundTaskFromToolOutput(
         : "先查看日志并修复问题，必要时重跑。";
 }
 
-function formatEvidenceDetails(evidence: EvidenceRecord): string {
-  return [
-    `Evidence ${evidence.id}`,
-    `- kind: ${evidence.kind}`,
-    `- source: ${evidence.source}`,
-    `- summary: ${evidence.summary}`,
-    `- supportsClaims: ${evidence.supportsClaims.join(", ") || "none"}`,
-    `- createdAt: ${evidence.createdAt}`,
-  ].join("\n");
-}
-
-function parseLogArtifactRequest(args: string[]): LogArtifactRequest | undefined {
-  const tailIndex = args.indexOf("--tail");
-  if (tailIndex >= 0) {
-    return {
-      mode: "tail",
-      lines: readPositiveIntegerArg(args[tailIndex + 1]),
-    };
-  }
-  const grepIndex = args.indexOf("--grep");
-  if (grepIndex >= 0) {
-    const contextIndex = args.indexOf("--context");
-    return {
-      mode: "grep",
-      pattern: args[grepIndex + 1],
-      contextLines: contextIndex >= 0 ? readPositiveIntegerArg(args[contextIndex + 1]) : undefined,
-    };
-  }
-  if (args.includes("--errors")) {
-    return { mode: "errors" };
-  }
-  return undefined;
-}
-
-function readPositiveIntegerArg(value: string | undefined): number | undefined {
-  if (!value || value.startsWith("--")) {
-    return undefined;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function createLogArtifactRegistry(context: TuiContext) {
-  return {
-    workspaceRoot: context.projectPath,
-    logRoots: [join(context.projectPath, ".linghun", "logs")],
-    backgrounds: context.backgroundTasks.map((task) => ({
-      id: task.id,
-      outputPath: task.outputPath,
-      logPath: task.logPath,
-    })),
-    evidence: context.evidence.map((evidence) => ({
-      id: evidence.id,
-      source: evidence.source,
-      fullOutputPath: evidence.fullOutputPath,
-      outputPath: evidence.outputPath,
-      logPath: evidence.logPath,
-    })),
-  };
-}
+// Module 5 — formatEvidenceDetails / parseLogArtifactRequest /
+// readPositiveIntegerArg / createLogArtifactRegistry 实现见
+// ./tui-details-runtime.ts；下方 export+import 块将其引回 index.ts。
 
 async function handleAgentsCommand(
   args: string[],
@@ -7551,79 +5832,26 @@ async function handleForkCommand(
   await completeAgent(agent, background, context, output);
 }
 
-function isAgentType(value: string): value is AgentType {
-  return value === "explorer" || value === "worker" || value === "verifier" || value === "planner";
-}
+// Module 4 — isAgentType / getAgentRole / getAgentPermissionMode /
+// createEmptyAgentCost / createAgentContextSummary / createAgentBackgroundTask
+// 已移至 ./tui-agent-job-runtime.ts。
+export {
+  createAgentBackgroundTask,
+  createAgentContextSummary,
+  createEmptyAgentCost,
+  getAgentPermissionMode,
+  getAgentRole,
+  isAgentType,
+} from "./tui-agent-job-runtime.js";
 
-function getAgentRole(type: AgentType): ModelRole {
-  if (type === "planner") {
-    return "planner";
-  }
-  if (type === "verifier") {
-    return "verifier";
-  }
-  return "executor";
-}
-
-function getAgentPermissionMode(type: AgentType, parentMode: PermissionMode): PermissionMode {
-  if (type === "explorer" || type === "planner") {
-    return "plan";
-  }
-  if (type === "verifier") {
-    return "default";
-  }
-  return parentMode;
-}
-
-function createEmptyAgentCost(task: string): AgentRun["cost"] {
-  const inputTokens = Math.ceil(task.length / 4);
-  return { inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 };
-}
-
-function createAgentContextSummary(
-  packet: HandoffPacket,
-  task: string,
-  context: TuiContext,
-): string {
-  const evidence = packet.evidenceRefs.map((item) => `${item.kind}:${item.source}`).slice(0, 5);
-  const files = packet.keyFiles.slice(0, 8);
-  return [
-    "Agent context package (trimmed)",
-    `handoff=${packet.id}`,
-    `task=${truncateDisplay(task, 200)}`,
-    `todos=${packet.todos.length}`,
-    `evidence=${evidence.length > 0 ? evidence.join("; ") : "none"}`,
-    `keyFiles=${files.length > 0 ? files.join(", ") : "none"}`,
-    `permission=${context.permissionMode}`,
-    "notIncluded=full transcript/full memory/full index/large logs",
-  ].join(" | ");
-}
-
-function createAgentBackgroundTask(agent: AgentRun, context: TuiContext): BackgroundTaskState {
-  const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
-  return {
-    id: agent.id,
-    kind: "agent",
-    title: `Agent ${label}`,
-    status: "running",
-    currentStep: context.language === "en-US" ? `running ${agent.type}` : `正在运行 ${agent.type}`,
-    progress: { completed: 0, total: 1, label },
-    startedAt: agent.startedAt,
-    updatedAt: agent.updatedAt,
-    heartbeatIntervalMs: 30_000,
-    staleAfterMs: 120_000,
-    outputPath: agent.transcriptPath,
-    hasOutput: true,
-    userVisibleSummary:
-      context.language === "en-US"
-        ? `Started ${label}. Use /agents show ${agent.id}.`
-        : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`,
-    nextAction:
-      context.language === "en-US"
-        ? `Use /agents cancel ${agent.id} to interrupt.`
-        : `可用 /agents cancel ${agent.id} 中断。`,
-  };
-}
+import {
+  createAgentBackgroundTask,
+  createAgentContextSummary,
+  createEmptyAgentCost,
+  getAgentPermissionMode,
+  getAgentRole,
+  isAgentType,
+} from "./tui-agent-job-runtime.js";
 
 async function completeAgent(
   agent: AgentRun,
@@ -7680,15 +5908,27 @@ async function completeAgent(
   writeStatus(output, context);
 }
 
-function mapAgentBackgroundResult(
-  agent: AgentRun,
-  verifierStatus?: string,
-): BackgroundTaskState["result"] {
-  if (agent.type !== "verifier") {
-    return "partial";
-  }
-  return verifierStatus === "pass" ? "partial" : verifierStatus === "fail" ? "fail" : "partial";
-}
+// Module 4 — mapAgentBackgroundResult / findAgent / formatAgentSummary /
+// 4 abort controller helpers 已移至 ./tui-agent-job-runtime.ts。
+export {
+  abortBackgroundTask,
+  clearBackgroundAbortController,
+  findAgent,
+  formatAgentSummary,
+  getBackgroundAbortControllers,
+  mapAgentBackgroundResult,
+  registerBackgroundAbortController,
+} from "./tui-agent-job-runtime.js";
+
+import {
+  abortBackgroundTask,
+  clearBackgroundAbortController,
+  findAgent,
+  formatAgentSummary,
+  getBackgroundAbortControllers,
+  mapAgentBackgroundResult,
+  registerBackgroundAbortController,
+} from "./tui-agent-job-runtime.js";
 
 async function runAgentWork(
   agent: AgentRun,
@@ -7783,12 +6023,7 @@ async function cancelAgent(agent: AgentRun, context: TuiContext, output: Writabl
   writeStatus(output, context);
 }
 
-function findAgent(context: TuiContext, id: string | undefined): AgentRun | undefined {
-  if (!id) {
-    return context.agents[0];
-  }
-  return context.agents.find((agent) => agent.id === id || agent.id.endsWith(id));
-}
+// Module 4 — findAgent moved to ./tui-agent-job-runtime.ts
 
 function formatAgentsList(context: TuiContext): string {
   if (context.agents.length === 0) {
@@ -7811,39 +6046,10 @@ function formatAgentsList(context: TuiContext): string {
   return lines.join("\n");
 }
 
-function formatAgentDetails(agent: AgentRun, context: TuiContext): string {
-  const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
-  const lines = [
-    `Agent ${agent.id} (${label})`,
-    `- displayName: ${label}`,
-    `- type: ${agent.type}`,
-    `- role: ${agent.role}`,
-    `- provider/model: ${agent.provider} / ${agent.model}`,
-    `- status: ${agent.status}`,
-    `- task: ${truncateDisplay(agent.task, 120)}`,
-    `- parentSessionId: ${agent.parentSessionId ?? "none"}`,
-    `- transcript: ${agent.transcriptPath}`,
-    `- permissionMode: ${agent.permissionMode}`,
-    `- cost: input=${agent.cost.inputTokens}, output=${agent.cost.outputTokens}, cacheRead=${agent.cost.cacheReadTokens}, cacheWrite=${agent.cost.cacheWriteTokens}, estimatedCny=${agent.cost.estimatedCny}`,
-    "- boundary: displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
-    `- context: ${agent.contextSummary}`,
-    `- summary: ${agent.summary}`,
-  ];
-  if (agent.status === "running") {
-    lines.push(
-      context.language === "en-US"
-        ? `- cancel: /agents cancel ${agent.id}`
-        : `- 中断：/agents cancel ${agent.id}`,
-    );
-  }
-  return lines.join("\n");
-}
+// Module 5 — formatAgentDetails 已移至 ./tui-details-runtime.ts。
 
-function formatAgentSummary(agent: AgentRun, context: TuiContext): string {
-  return context.language === "en-US"
-    ? `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`
-    : `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`;
-}
+// Module 4 — formatAgentSummary moved to ./tui-agent-job-runtime.ts
+// (en-US/zh-CN 双分支字符串完全一致，新模块去掉冗余 ternary，行为不变)
 
 async function handleRewindCommand(
   args: string[],
@@ -8013,32 +6219,7 @@ async function handleInterruptCommand(context: TuiContext, output: Writable): Pr
   );
 }
 
-function getBackgroundAbortControllers(context: TuiContext): Map<string, AbortController> {
-  if (!context.backgroundAbortControllers) {
-    context.backgroundAbortControllers = new Map();
-  }
-  return context.backgroundAbortControllers;
-}
-
-function registerBackgroundAbortController(context: TuiContext, taskId: string): AbortController {
-  const controller = new AbortController();
-  getBackgroundAbortControllers(context).set(taskId, controller);
-  return controller;
-}
-
-function clearBackgroundAbortController(context: TuiContext, taskId: string): void {
-  context.backgroundAbortControllers?.delete(taskId);
-}
-
-function abortBackgroundTask(context: TuiContext, taskId: string): boolean {
-  const controller = context.backgroundAbortControllers?.get(taskId);
-  if (!controller) {
-    return false;
-  }
-  controller.abort();
-  clearBackgroundAbortController(context, taskId);
-  return true;
-}
+// Module 4 — abort controller helpers moved to ./tui-agent-job-runtime.ts
 
 async function handleClaimCheckCommand(
   args: string[],
@@ -8735,15 +6916,8 @@ function isHandoffPacket(value: unknown): value is HandoffPacket {
   );
 }
 
-function formatProjectRulesContext(context: TuiContext): string {
-  if (context.memory.projectRulesError) {
-    return "unreadable; 可检查文件权限或运行 /memory storage 定位路径";
-  }
-  if (!context.memory.projectRulesExists) {
-    return "missing; 可运行 /memory init 生成基础模板，不会自动生成";
-  }
-  return truncateDisplay(context.memory.projectRulesSummary, PROJECT_RULES_STATUS_WIDTH);
-}
+// Module 7 (tui-memory-runtime): formatProjectRulesContext moved out — see
+// re-export+import block below.
 
 function formatResumePacket(packet: HandoffPacket, missing: string[], context: TuiContext): string {
   return [
@@ -8776,83 +6950,9 @@ async function writeHandoffPacket(context: TuiContext, packet: HandoffPacket): P
   );
 }
 
-function createMemoryCandidate(
-  scope: MemoryScope,
-  summary: string,
-  source: string,
-  sourceRefs: string[],
-): MemoryCandidate {
-  return {
-    id: randomUUID(),
-    scope,
-    status: "candidate",
-    summary: truncateDisplay(summary.replace(/\s+/g, " "), 240),
-    source,
-    sourceRefs: sourceRefs.slice(0, 6),
-    risk: "low",
-    inferred: false,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function parseMemoryCandidateArgs(args: string[]): { scope: MemoryScope; summary: string } {
-  const scopeIndex = args.findIndex((arg) => arg === "--scope");
-  const rawScope = scopeIndex >= 0 ? args[scopeIndex + 1] : undefined;
-  const scope: MemoryScope =
-    rawScope === "user" || rawScope === "session" || rawScope === "project" ? rawScope : "project";
-  const summary = args
-    .filter((_, index) => scopeIndex < 0 || (index !== scopeIndex && index !== scopeIndex + 1))
-    .join(" ")
-    .trim();
-  return { scope, summary };
-}
-
-async function writeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
-  if (candidate.scope === "session") {
-    return;
-  }
-  const directory = getMemoryDirectory(candidate.scope, context);
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, `${candidate.id}.json`);
-  await writeFile(path, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
-}
-
-async function removeMemoryRecord(candidate: MemoryCandidate, context: TuiContext): Promise<void> {
-  if (candidate.scope === "session") {
-    return;
-  }
-  await rm(join(getMemoryDirectory(candidate.scope, context), `${candidate.id}.json`), {
-    force: true,
-  });
-}
-
-function getMemoryDirectory(scope: MemoryScope, context: TuiContext): string {
-  if (scope === "project") return context.memory.projectDir;
-  if (scope === "user") return context.memory.userDir;
-  return context.memory.sessionDir;
-}
-
-function findMemoryRecord(
-  memory: MemoryState,
-  id: string | undefined,
-): MemoryCandidate | undefined {
-  if (!id) return undefined;
-  return [
-    ...memory.candidates,
-    ...memory.accepted,
-    ...memory.rejected,
-    ...memory.disabled,
-    ...memory.retired,
-  ].find((item) => item.id === id);
-}
-
-function removeMemoryFromState(memory: MemoryState, id: string): void {
-  memory.candidates = memory.candidates.filter((item) => item.id !== id);
-  memory.accepted = memory.accepted.filter((item) => item.id !== id);
-  memory.rejected = memory.rejected.filter((item) => item.id !== id);
-  memory.disabled = memory.disabled.filter((item) => item.id !== id);
-  memory.retired = memory.retired.filter((item) => item.id !== id);
-}
+// Module 7 (tui-memory-runtime): createMemoryCandidate / parseMemoryCandidateArgs /
+// writeMemoryRecord / removeMemoryRecord / getMemoryDirectory / findMemoryRecord /
+// removeMemoryFromState moved out — see re-export+import block below.
 
 async function appendMemoryLifecycleEvent(
   context: TuiContext,
@@ -8868,128 +6968,9 @@ async function appendMemoryLifecycleEvent(
   );
 }
 
-function formatMemoryScope(scope: MemoryScope): string {
-  if (scope === "project") return "项目";
-  if (scope === "user") return "用户";
-  return "会话";
-}
-
-function formatMemoryStatus(context: TuiContext): string {
-  const injected = createControlledMemoryInjection(context);
-  const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
-  return [
-    "Memory status",
-    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary=${formatProjectRulesContext(context)}`,
-    `- review queue: candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-    `- autoLearning: ${learningLabel}; autoAccept=no; long-term memory requires /memory accept <id>`,
-    `- prompt injection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injected.items.length}; estimatedTokens=${estimateMemoryTokens(injected.text)}; details=/memory stats`,
-    "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
-    `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
-    context.memory.projectRulesError
-      ? "- hint: LINGHUN.md 读取失败；可运行 /memory storage 定位路径，不会自动生成或打断输入。"
-      : context.memory.projectRulesExists
-        ? "- note: LINGHUN.md 只显示截断摘要；完整规则不刷主屏、不注入完整聊天。"
-        : "- hint: 缺少 LINGHUN.md。可运行 /memory init 生成基础模板；不会打断输入。",
-  ].join("\n");
-}
-
-function formatMemoryStorage(context: TuiContext): string {
-  const paths = resolveStoragePaths(context.config, context.projectPath);
-  return [
-    "Memory storage",
-    `- project rules: ${context.memory.projectRulesPath}`,
-    `- project memory: ${paths.memoryProject}`,
-    `- user memory: ${paths.memoryUser}`,
-    `- session memory/handoff: ${paths.memorySession}`,
-    `- sessions: ${paths.sessions}`,
-    `- logs: ${paths.logs}`,
-    `- jobs: ${paths.jobs}`,
-    `- cache: ${paths.cache}`,
-    `- index metadata: ${paths.index}`,
-    `- LINGHUN_DATA_DIR: ${process.env.LINGHUN_DATA_DIR ?? "not set; default user data is under ~/.linghun/data"}`,
-  ].join("\n");
-}
-
-function formatMemoryReview(context: TuiContext): string {
-  const accepted = context.memory.accepted
-    .slice(0, 5)
-    .map(
-      (item) =>
-        `- accepted ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; disable=/memory disable ${item.id}`,
-    );
-  const disabled = context.memory.disabled
-    .slice(0, 5)
-    .map(
-      (item) =>
-        `- disabled ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; rollback=/memory rollback ${item.id}; delete=/memory delete ${item.id}`,
-    );
-  if (context.memory.candidates.length === 0) {
-    return [
-      "Memory review：暂无候选记忆；长期记忆不会自动写入。",
-      "来源边界：/memory learn 只看 bounded evidence/Todo/verification/handoff，不读取完整聊天、完整日志或完整索引。",
-      "下一步：需要时用 /memory candidate <短小稳定摘要> [--scope project|user|session] 创建候选，再 /memory accept。",
-      ...accepted,
-      ...disabled,
-      "动作区别：accept=写入长期且可被 topK 注入；reject=丢弃候选；disable=暂停已接受注入；rollback=重新启用；delete=删除记录。",
-    ].join("\n");
-  }
-  return [
-    "Memory review（候选 ≠ 长期记忆）",
-    ...context.memory.candidates
-      .slice(0, 8)
-      .map(
-        (item) =>
-          `- candidate ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 100)}; source=${truncateDisplay(item.source, 48)}; accept=/memory accept ${item.id}; reject=/memory reject ${item.id}`,
-      ),
-    ...accepted,
-    ...disabled,
-    "动作区别：accept=写入长期且可被 topK 注入；reject=丢弃候选；disable=暂停已接受注入；rollback=重新启用；delete=删除记录。",
-  ].join("\n");
-}
-
-function formatMemoryStats(context: TuiContext): string {
-  const injection = createControlledMemoryInjection(context);
-  const acceptedScopeCounts = countMemoryScopes(context.memory.accepted);
-  const candidateScopeCounts = countMemoryScopes(context.memory.candidates);
-  const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
-  const lastRun = context.memory.lastLearningRun
-    ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
-    : "none";
-  if (context.language === "en-US") {
-    return [
-      "Memory stats (controlled learning / cost guard)",
-      `- candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-      `- session-scope: accepted=${acceptedScopeCounts.session}; current TuiContext only, not persisted across new sessions`,
-      `- project/user persistent scope: accepted=${acceptedScopeCounts.project + acceptedScopeCounts.user} (project=${acceptedScopeCounts.project}; user=${acceptedScopeCounts.user}); accepted-only topK prompt injection`,
-      `- candidate scope: project=${candidateScopeCounts.project}; user=${candidateScopeCounts.user}; session=${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
-      `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injection.items.length}; chars=${injection.text.length}; estimatedTokens=${estimateMemoryTokens(injection.text)}`,
-      `- lastLearningRun: ${lastRun}`,
-      `- autoLearning: ${learningLabel}; autoAccept=no; toggle with /memory learn on|off`,
-      "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
-      "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
-    ].join("\n");
-  }
-  return [
-    "Memory stats（受控学习 / 成本守卫）",
-    `- 候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}；已禁用=${context.memory.disabled.length}；已拒绝=${context.memory.rejected.length}`,
-    `- session-scope：已接受=${acceptedScopeCounts.session}；仅当前 TuiContext / 当前会话生效，不跨新会话持久化`,
-    `- project/user persistent scope：已接受=${acceptedScopeCounts.project + acceptedScopeCounts.user}（project=${acceptedScopeCounts.project}；user=${acceptedScopeCounts.user}）；仅 accepted-only topK 注入 prompt`,
-    `- candidate：project=${candidateScopeCounts.project}；user=${candidateScopeCounts.user}；session=${candidateScopeCounts.session}；候选不会自动接受或注入`,
-    `- prompt 注入：acceptedOnly topK=${MEMORY_PROMPT_TOP_K}；injected=${injection.items.length}；chars=${injection.text.length}；estimatedTokens=${estimateMemoryTokens(injection.text)}`,
-    `- 上次学习：${lastRun}`,
-    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；autoAccept=no；切换：/memory learn on|off`,
-    "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
-    "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
-  ].join("\n");
-}
-
-function countMemoryScopes(items: MemoryCandidate[]): Record<MemoryScope, number> {
-  return {
-    project: items.filter((item) => item.scope === "project").length,
-    user: items.filter((item) => item.scope === "user").length,
-    session: items.filter((item) => item.scope === "session").length,
-  };
-}
+// Module 7 (tui-memory-runtime): formatMemoryScope / formatMemoryStatus /
+// formatMemoryStorage / formatMemoryReview / formatMemoryStats /
+// countMemoryScopes moved out — see re-export+import block below.
 
 async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryLearningRun> {
   const candidates = createEvidenceBackedMemoryCandidates(context).slice(0, 3);
@@ -9022,107 +7003,13 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
   return run;
 }
 
-function createEvidenceBackedMemoryCandidates(context: TuiContext): MemoryCandidate[] {
-  const existing = new Set(
-    [...context.memory.candidates, ...context.memory.accepted, ...context.memory.disabled].map(
-      (item) => item.summary,
-    ),
-  );
-  const summaries: MemoryCandidate[] = [];
-  const add = (summary: string, source: string, refs: string[]): void => {
-    const normalized = truncateDisplay(summary.replace(/\s+/g, " "), 240);
-    if (!normalized || existing.has(normalized)) {
-      return;
-    }
-    existing.add(normalized);
-    summaries.push(createMemoryCandidate("project", normalized, source, refs));
-  };
-  for (const evidence of context.evidence.slice(0, 3)) {
-    add(`证据线索：${evidence.summary}`, `evidence:${evidence.kind}`, [evidence.id]);
-  }
-  for (const todo of context.tools.todos.slice(0, 3)) {
-    if (todo.status === "completed") {
-      add(`已完成任务线索：${todo.content}`, "todo:completed", [`todo:${todo.id}`]);
-    }
-  }
-  if (context.lastVerification?.status === "pass") {
-    add(`验证通过线索：${context.lastVerification.summary}`, "verification:pass", [
-      context.lastVerification.id,
-    ]);
-  }
-  if (context.memory.lastHandoff) {
-    add(`handoff 线索：${context.memory.lastHandoff.goal}`, "handoff", [
-      context.memory.lastHandoff.id,
-    ]);
-  }
-  return summaries;
-}
+// Module 7 (tui-memory-runtime): createEvidenceBackedMemoryCandidates moved
+// out — see re-export+import block below.
 
 // --- D.14B Controlled Learning: secret filter + auto-learning extraction ---
-
-const MEMORY_SECRET_PATTERNS = [
-  /\b[A-Za-z0-9_-]{20,}(?:key|token|secret|password|credential)/i,
-  /\b(?:sk|pk|api|token|secret|key|password|credential)[_-][A-Za-z0-9_-]{16,}/i,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}/,
-  /\b(?:xox[bpras])-[A-Za-z0-9-]+/,
-  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/,
-  /\b[A-Za-z0-9+/]{40,}={0,2}\b/,
-];
-
-export function containsSecret(text: string): boolean {
-  return MEMORY_SECRET_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-export type AutoLearningExtraction = {
-  category: MemoryLearningCategory;
-  summary: string;
-  source: string;
-  sourceRefs: string[];
-};
-
-const PREFERENCE_TRIGGERS = [
-  { pattern: /(?:用|使用|prefer|always use|默认用)\s*(.{3,60})/i, category: "preference" as const },
-  {
-    pattern: /(?:不要|don'?t|never|禁止|avoid)\s+(.{3,60})/i,
-    category: "collaboration_rule" as const,
-  },
-  {
-    pattern: /(?:先|before|每次|always|每轮)\s+(.{3,60})/i,
-    category: "collaboration_rule" as const,
-  },
-  {
-    pattern: /(?:习惯|偏好|喜欢|style|preference)\s*[:：]?\s*(.{3,60})/i,
-    category: "preference" as const,
-  },
-];
-
-export function extractLearningCandidatesFromInput(
-  userInput: string,
-  existingSummaries: Set<string>,
-): AutoLearningExtraction[] {
-  if (!userInput || userInput.length < 8 || userInput.length > 2000) return [];
-  if (containsSecret(userInput)) return [];
-
-  const results: AutoLearningExtraction[] = [];
-  for (const { pattern, category } of PREFERENCE_TRIGGERS) {
-    const match = userInput.match(pattern);
-    if (match?.[1]) {
-      const summary = match[1].trim().replace(/\s+/g, " ").slice(0, 120);
-      if (summary.length < 5) continue;
-      if (containsSecret(summary)) continue;
-      if (existingSummaries.has(summary)) continue;
-      results.push({
-        category,
-        summary,
-        source: "auto-learning:user-input",
-        sourceRefs: ["turn:current"],
-      });
-      existingSummaries.add(summary);
-    }
-  }
-  return results.slice(0, 2);
-}
+// Module 7 (tui-memory-runtime): MEMORY_SECRET_PATTERNS / containsSecret /
+// AutoLearningExtraction / PREFERENCE_TRIGGERS / extractLearningCandidatesFromInput
+// moved out — see re-export+import block below.
 
 export async function runAutoLearningOnTurnEnd(
   context: TuiContext,
@@ -9187,154 +7074,66 @@ export async function runAutoLearningOnTurnEnd(
   return run;
 }
 
-function formatMemoryLearningRun(run: MemoryLearningRun, language: Language): string {
-  if (language === "en-US") {
-    return [
-      "Memory learn (controlled / candidate-only)",
-      `- source: bounded evidence/Todo/verification/handoff only; trigger=${run.trigger}`,
-      `- candidatesCreated: ${run.candidatesCreated}`,
-      `- modelCalled: ${run.modelCalled ? "yes" : "no"}`,
-      `- skippedReason: ${run.skippedReason ?? "none"}`,
-      "- next: review candidates with /memory review, then accept or reject. autoAccept=no.",
-    ].join("\n");
-  }
-  return [
-    "Memory learn（受控 / 只生成候选）",
-    `- 来源：仅 bounded evidence/Todo/verification/handoff；trigger=${run.trigger}`,
-    `- 新候选：${run.candidatesCreated}`,
-    `- 调用模型：${run.modelCalled ? "yes" : "no"}`,
-    `- 跳过原因：${run.skippedReason ?? "none"}`,
-    "- 下一步：用 /memory review 查看候选，再 accept 或 reject；autoAccept=no。",
-  ].join("\n");
-}
+// Module 7 (tui-memory-runtime): formatMemoryLearningRun /
+// createControlledMemoryInjection / estimateMemoryTokens /
+// formatControlledMemoryForModel / createLinghunMdTemplate /
+// formatProjectRulesRead moved out — see re-export+import block below.
 
-function createControlledMemoryInjection(context: TuiContext): {
-  items: MemoryCandidate[];
-  text: string;
-} {
-  const items = context.memory.accepted
-    .filter((item) => normalizeMemoryStatus(item) === "accepted")
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .slice(0, MEMORY_PROMPT_TOP_K);
-  const text = truncateDisplay(
-    items
-      .map(
-        (item) =>
-          `- ${item.id} [${item.scope}] ${truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH)} (source=${truncateDisplay(item.source, 80)})`,
-      )
-      .join("\n"),
-    MEMORY_PROMPT_TOTAL_WIDTH,
-  );
-  return { items, text };
-}
-
-function estimateMemoryTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-function formatControlledMemoryForModel(context: TuiContext): string {
-  const injection = createControlledMemoryInjection(context);
-  if (injection.items.length === 0) {
-    return "[]";
-  }
-  return JSON.stringify(
-    injection.items.map((item) => ({
-      id: item.id,
-      scope: item.scope,
-      summary: truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH),
-      source: truncateDisplay(item.source, 80),
-    })),
-  );
-}
-
-function createLinghunMdTemplate(language: Language): string {
-  if (language === "en-US") {
-    return `# Project Rules
-
-## Purpose
-- LINGHUN.md records long-lived project rules, stable facts, common commands, and explicit constraints.
-- Keep this file concise so it can be loaded into context without adding unnecessary tokens.
-
-## What to write here
-- Stable engineering rules, validation commands, architecture boundaries, coding style, and project-specific do/don't items.
-- Facts that have been checked against code, index results, command output, or project documents.
-
-## What not to write here
-- Temporary plans, phase progress, full transcripts, large logs, raw index dumps, secrets, tokens, billing details, or private credentials.
-- Short-term handoff content belongs in structured handoff/todo/verification records, not in long-term rules.
-
-## Work rules
-- Prefer facts over guesses: read code, project index, documentation, or command results before making claims.
-- Natural-language commands do not bypass Start Gate or permission approval.
-- Writing files, Bash, network access, dependency installation, and permission/config changes require explicit user confirmation.
-- Long-term memory is candidate-first by default; do not auto-write it without user review and acceptance.
-- After code changes, run the smallest project-approved validation that covers the touched area.
-- Do not paste full transcripts, huge logs, large index results, or full memory stores back into model context.
-- Keep clean rewrite boundaries: reference public behavior and project docs, but do not copy suspicious or proprietary source.
-- Be friendly to Chinese and English projects; keep names, commands, and errors readable for both when practical.
-`;
-  }
-
-  return `# 项目规则
-
-## 用途
-- LINGHUN.md 记录项目长期稳定规则、稳定事实、常用命令和明确禁止事项。
-- 保持短小清晰，避免把完整文件塞进上下文造成 token 负担。
-
-## 应该写入
-- 稳定工程规则、验证命令、架构边界、代码风格、项目专属约定和禁止事项。
-- 已通过代码、项目索引、文档或命令结果确认过的事实。
-
-## 不应该写入
-- 临时计划、阶段进度、完整 transcript、大日志、原始索引结果、密钥、token、账单细节或私有凭据。
-- 短期交接内容应进入结构化 handoff、Todo 或验证记录，不要追加到长期规则。
-
-## 工作规则
-- 事实优先：先读代码、项目索引、文档或命令结果，再判断和下结论。
-- 自然语言命令不能绕过 Start Gate 或权限审批。
-- 写文件、Bash、联网、安装依赖、权限或配置变更，都必须先得到用户明确确认。
-- 长期记忆默认先生成候选，用户 review/accept 后再写入，不自动长期保存。
-- 改代码后运行项目认可的最小必要验证，覆盖本次改动范围。
-- 不要把完整 transcript、大日志、大索引结果或完整 memory 塞回模型上下文。
-- 遵守 clean rewrite：可参考公开行为和项目文档，不复制可疑或专有源码。
-- 中文友好，同时尽量保留中英文项目名、命令和错误信息的可读性。
-
-## 工程纪律
-- 默认只做完成当前任务所必需的最小改动，不顺手修无关问题。
-- 不主动新增抽象、helper、wrapper、目录层级或结构性改造。
-- 优先局部补丁和现有代码风格，避免继续放大屎山、超长文件和复杂分支。
-- 重构仅在必要、存在直接风险或用户明确要求时进行。
-- 默认不改公共接口、依赖、配置、构建脚本、文件名和目录结构。
-- 涉及超过 3 个文件、公共接口、依赖/配置、删除/重命名或明显重构时，先说明理由和范围。
-- 修 bug 要定位直接原因，不接受只掩盖症状的补丁。
-`;
-}
-
-async function formatProjectRulesRead(context: TuiContext): Promise<string> {
-  if (!(await pathExists(context.memory.projectRulesPath))) {
-    context.memory.projectRulesExists = false;
-    context.memory.projectRulesSummary = "missing";
-    return context.language === "en-US"
-      ? `Project rules file is missing: ${context.memory.projectRulesPath}\n- To create a template, run /memory init. I will not generate it automatically.`
-      : `项目规则文件不存在：${context.memory.projectRulesPath}\n- 如需生成模板，请运行 /memory init。本次不会自动生成。`;
-  }
-  try {
-    const content = await readFile(context.memory.projectRulesPath, "utf8");
-    context.memory.projectRulesExists = true;
-    context.memory.projectRulesSummary = summarizeProjectRules(content);
-    context.memory.projectRulesError = undefined;
-    return context.language === "en-US"
-      ? `Project rules: ${context.memory.projectRulesPath}\n${truncateDisplay(content, 2000)}`
-      : `项目规则：${context.memory.projectRulesPath}\n${truncateDisplay(content, 2000)}`;
-  } catch (error) {
-    context.memory.projectRulesExists = false;
-    context.memory.projectRulesSummary = "unreadable";
-    context.memory.projectRulesError = formatError(error);
-    return context.language === "en-US"
-      ? `Failed to read project rules: ${context.memory.projectRulesError}`
-      : `读取项目规则失败：${context.memory.projectRulesError}`;
-  }
-}
+// Module 7 — consolidated re-exports + value imports for /memory + LINGHUN.md helpers
+// moved to ./tui-memory-runtime.ts. Coordinators that depend on ensureSession,
+// store.appendEvent, appendSystemEvent, refreshCacheFreshness or writeLine stay
+// in index.ts (Path A safety valve #2).
+export type { AutoLearningExtraction } from "./tui-memory-runtime.js";
+export {
+  containsSecret,
+  countMemoryScopes,
+  createControlledMemoryInjection,
+  createEvidenceBackedMemoryCandidates,
+  createLinghunMdTemplate,
+  createMemoryCandidate,
+  estimateMemoryTokens,
+  extractLearningCandidatesFromInput,
+  findMemoryRecord,
+  formatControlledMemoryForModel,
+  formatMemoryLearningRun,
+  formatMemoryReview,
+  formatMemoryScope,
+  formatMemoryStats,
+  formatMemoryStatus,
+  formatMemoryStorage,
+  formatProjectRulesContext,
+  formatProjectRulesRead,
+  getMemoryDirectory,
+  parseMemoryCandidateArgs,
+  removeMemoryFromState,
+  removeMemoryRecord,
+  writeMemoryRecord,
+} from "./tui-memory-runtime.js";
+import {
+  containsSecret,
+  countMemoryScopes,
+  createControlledMemoryInjection,
+  createEvidenceBackedMemoryCandidates,
+  createLinghunMdTemplate,
+  createMemoryCandidate,
+  estimateMemoryTokens,
+  extractLearningCandidatesFromInput,
+  findMemoryRecord,
+  formatControlledMemoryForModel,
+  formatMemoryLearningRun,
+  formatMemoryReview,
+  formatMemoryScope,
+  formatMemoryStats,
+  formatMemoryStatus,
+  formatMemoryStorage,
+  formatProjectRulesContext,
+  formatProjectRulesRead,
+  getMemoryDirectory,
+  parseMemoryCandidateArgs,
+  removeMemoryFromState,
+  removeMemoryRecord,
+  writeMemoryRecord,
+} from "./tui-memory-runtime.js";
 
 async function initLinghunMd(context: TuiContext, output: Writable): Promise<void> {
   if (await pathExists(context.memory.projectRulesPath)) {
@@ -15139,16 +12938,7 @@ async function executeApprovedModelToolUse(
   }
 }
 
-function toPermissionPromptView(permission: PermissionCheck) {
-  return {
-    toolName: permission.request.toolName,
-    decision: permission.decision,
-    risk: permission.request.risk,
-    mode: permission.request.mode,
-    reason: permission.reason,
-    scope: permission.request.files,
-  };
-}
+// Module 3 — toPermissionPromptView 已移至 ./tui-permission-runtime.ts。
 
 // D.13I：deferred dispatch 的特殊执行路径。复用 tool_call_start / tool_result / evidence
 // 三件套，但不调用 runTool（因为 SearchExtraTools / ExecuteExtraTool 不在 builtInTools 里）。
@@ -15830,146 +13620,9 @@ function requireArg(value: string | undefined, usage: string): string {
   return value;
 }
 
-type PermissionCheck = {
-  request: {
-    id: string;
-    toolName: ToolName;
-    mode: PermissionMode;
-    risk: "low" | "medium" | "high";
-    summary: string;
-    files: string[];
-    reason: string;
-  };
-  decision: "allow" | "ask" | "deny";
-  reason: string;
-  preflight?: string;
-};
-
-async function decidePermission(
-  name: ToolName,
-  input: unknown,
-  context: TuiContext,
-  sessionId: string,
-): Promise<PermissionCheck> {
-  const tool = builtInTools[name];
-  const files = collectInputFiles(input);
-  const hardDeny = getHardDenyReason(name, input, files, context.projectPath);
-  const request = {
-    id: randomUUID(),
-    toolName: name,
-    mode: context.permissionMode,
-    risk: tool.permission.risk,
-    summary: formatPermissionSummary(name, files, tool.permission.risk),
-    files,
-    reason: tool.permission.reason,
-  };
-  if (hardDeny) {
-    await recordPermissionDenied(context, name, hardDeny);
-    return { request, decision: "deny", reason: hardDeny };
-  }
-
-  if (context.permissionMode === "plan") {
-    if (isPlanAllowedTool(name, tool.isReadOnly)) {
-      return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。" };
-    }
-    const reason =
-      "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
-  }
-
-  const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
-  if (rule) {
-    if (rule.effect === "deny") {
-      const reason = `命中 deny 规则：${rule.id}`;
-      await recordPermissionDenied(context, name, reason);
-      return { request, decision: "deny", reason };
-    }
-    if (rule.effect === "ask") {
-      const reason = `命中 ask 规则：${rule.id}。需要用户确认后才会执行本次工具。`;
-      await recordPermissionDenied(context, name, reason);
-      return { request, decision: "ask", reason };
-    }
-    return { request, decision: "allow", reason: `命中 allow 规则：${rule.id}` };
-  }
-
-  if (context.permissionMode === "auto-review") {
-    if (isLowRiskWorkspaceEdit(name, tool.permission.risk, files)) {
-      return {
-        request,
-        decision: "allow",
-        reason: "auto-review 自动允许工作区内低风险文件编辑。",
-        preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
-      };
-    }
-    if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。" };
-    }
-    const reason = "auto-review 不自动允许 Bash、高风险或越界操作。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
-  }
-
-  if (context.permissionMode === "full-access") {
-    return {
-      request,
-      decision: "allow",
-      reason: "full-access 已由本地用户显式开启，但硬拒绝和安全路径仍生效。",
-      preflight: tool.isReadOnly
-        ? undefined
-        : formatDiffBeforeWrite(name, files, tool.permission.risk),
-    };
-  }
-
-  if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-    return { request, decision: "allow", reason: "default 模式允许只读或会话内工具。" };
-  }
-  const reason =
-    "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；需要用户确认后才会执行本次工具。";
-  await recordPermissionDenied(context, name, reason);
-  return { request, decision: "ask", reason };
-}
-
-async function recordPermissionDenied(
-  context: TuiContext,
-  toolName: ToolName,
-  reason: string,
-): Promise<void> {
-  context.permissions.recentDenied.unshift({
-    id: randomUUID(),
-    toolName,
-    mode: context.permissionMode,
-    reason,
-    createdAt: new Date().toISOString(),
-  });
-  context.permissions.recentDenied = context.permissions.recentDenied.slice(0, 20);
-  await savePermissionState(context.projectPath, context.permissions);
-}
-
-async function loadPermissionState(projectPath: string): Promise<PermissionState> {
-  try {
-    const raw = await readFile(permissionStatePath(projectPath), "utf8");
-    const parsed = JSON.parse(raw) as Partial<PermissionState>;
-    return {
-      rules: Array.isArray(parsed.rules) ? parsed.rules : [],
-      recentDenied: Array.isArray(parsed.recentDenied) ? parsed.recentDenied : [],
-    };
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { rules: [], recentDenied: [] };
-    }
-    throw error;
-  }
-}
-
-async function savePermissionState(projectPath: string, state: PermissionState): Promise<void> {
-  await mkdir(join(projectPath, ".linghun"), { recursive: true });
-  await writeFile(permissionStatePath(projectPath), `${JSON.stringify(state, null, 2)}\n`, "utf8");
-}
-
-function permissionStatePath(projectPath: string): string {
-  return join(projectPath, ".linghun", "permissions.json");
-}
+// Module 3 — PermissionCheck / decidePermission / recordPermissionDenied /
+// loadPermissionState / savePermissionState / permissionStatePath 已移至
+// ./tui-permission-runtime.ts。
 
 function formatPlanProposal(proposal: PlanProposal): string {
   const lines = [`PlanProposal ${proposal.id}：${proposal.title}`];
