@@ -347,9 +347,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   );
 
   // D.13E Step 2 修正 #1：ConfigPanel 渲染时 Composer.useInput 必须 isActive=false，
-  // 让 ConfigPanel 自己的 useInput 成为 ↑↓/Enter/Esc 的唯一消费者，避免双消费窗口。
-  // permission 优先级最高（permission 渲染时 ConfigPanel 不渲染，ShellApp 互斥保证）。
-  const configPanelActive = Boolean(view.configPanel);
+  // 让 ConfigPanel/HelpPanel/BtwPanel/SessionsPanel 等独立面板自己的 useInput 成为 ↑↓/Enter/Esc
+  // 的唯一消费者，避免双消费窗口。permission 优先级最高（permission 渲染时其它面板不渲染，
+  // ShellApp 互斥保证）。
+  const configPanelActive = Boolean(
+    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
+  );
 
   const text = bufferToString(buffer);
   const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
@@ -825,12 +828,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // D13E-P3 Ctrl+O — 查看完整内容：直接派 /details，让 transcript 上的
-      // hint「Ctrl+O 查看完整内容 / Ctrl+O for details」与按键真正联动。
-      // 不写 buffer，不影响当前编辑状态；slash 路径与用户手敲 /details 一致。
+      // D.13Q-UX Ctrl+O — 查看完整内容：派发 toggle-details 事件，由 onInput
+      // 路由到 handleDetailsCommand。**不再 submit "/details"**，避免 transcript
+      // 命令行里冒出 ❯ /details；/details slash 仍保留为兼容命令，但用户按
+      // Ctrl+O 时不应当作 slash 提交。
       if (key.ctrl && input === "o") {
         clearHintNotice();
-        void onInput({ type: "submit", text: "/details" });
+        void onInput({ type: "toggle-details" });
         return;
       }
 
@@ -992,18 +996,35 @@ function PermissionControl({
     <Box
       flexDirection="column"
       borderStyle="single"
-      borderColor={theme.border}
+      borderColor={theme.permission ?? theme.border}
       paddingX={1}
       width={cardWidth}
     >
-      <Text>{fitText(headline, innerWidth)}</Text>
+      <Text bold color={theme.permission ?? theme.assistantText ?? theme.brand}>
+        {fitText(headline, innerWidth)}
+      </Text>
       <Text color={theme.muted}>{fitText(summaryLine, innerWidth)}</Text>
+      {permission.explanationLines && permission.explanationLines.length > 0 ? (
+        <Box flexDirection="column" marginTop={0}>
+          {permission.explanationLines.map((line, idx) => (
+            <Text key={`exp-${idx}`} color={theme.dim ?? theme.muted} dimColor>
+              {fitText(line, innerWidth)}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       <PermissionActionRow
         actions={actions}
         focused={focused}
         theme={theme}
         width={innerWidth}
       />
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {fitText(
+          isEn ? "Esc to cancel · d for details" : "Esc 取消 · d 查看详情",
+          innerWidth,
+        )}
+      </Text>
     </Box>
   );
 }

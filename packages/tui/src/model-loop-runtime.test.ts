@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  type FreshnessLiteState,
   type SolutionCompletenessStatus,
   createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
@@ -12,14 +11,12 @@ import {
   extractFileSearchKeywords,
   extractNaturalReadPath,
   formatFileCandidates,
-  formatFreshnessLitePrimaryWarning,
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
   isNaturalReadFileRequest,
   looksLikeFilePath,
   matchesFileKeywords,
-  needsFreshnessLiteBoundary,
   normalizeRelativePath,
   readToolInputString,
 } from "./model-loop-runtime.js";
@@ -242,58 +239,9 @@ describe("model-loop-runtime", () => {
     });
   });
 
-  describe("needsFreshnessLiteBoundary", () => {
-    it("detects Chinese freshness keywords", () => {
-      expect(needsFreshnessLiteBoundary("最新版本是什么")).toBe(true);
-      expect(needsFreshnessLiteBoundary("当前价格")).toBe(true);
-    });
-
-    it("detects English freshness keywords", () => {
-      expect(needsFreshnessLiteBoundary("what is the latest version")).toBe(true);
-      expect(needsFreshnessLiteBoundary("current price")).toBe(true);
-    });
-
-    it("returns false for non-freshness text", () => {
-      expect(needsFreshnessLiteBoundary("帮我看看代码")).toBe(false);
-      expect(needsFreshnessLiteBoundary("fix the bug")).toBe(false);
-    });
-  });
-
-  describe("formatFreshnessLitePrimaryWarning", () => {
-    it("returns undefined when not sensitive", () => {
-      const state: FreshnessLiteState = {
-        sensitive: false,
-        webSourceEvidence: "missing",
-      };
-      expect(formatFreshnessLitePrimaryWarning(state, "zh-CN")).toBeUndefined();
-    });
-
-    it("returns undefined when web source present", () => {
-      const state: FreshnessLiteState = {
-        sensitive: true,
-        webSourceEvidence: "present",
-      };
-      expect(formatFreshnessLitePrimaryWarning(state, "zh-CN")).toBeUndefined();
-    });
-
-    it("returns Chinese warning when sensitive and missing", () => {
-      const state: FreshnessLiteState = {
-        sensitive: true,
-        webSourceEvidence: "missing",
-      };
-      const result = formatFreshnessLitePrimaryWarning(state, "zh-CN");
-      expect(result).toContain("web_source");
-    });
-
-    it("returns English warning when sensitive and missing", () => {
-      const state: FreshnessLiteState = {
-        sensitive: true,
-        webSourceEvidence: "missing",
-      };
-      const result = formatFreshnessLitePrimaryWarning(state, "en-US");
-      expect(result).toContain("Freshness note");
-    });
-  });
+  // D.13Q-UX Closure: needsFreshnessLiteBoundary / formatFreshnessLitePrimaryWarning
+  // 已在 model-loop-runtime.ts 中删除（过度设计的普通输入 regex gate）。
+  // 反幻觉边界改放 system prompt + evidence rule，不再由 regex 拦截普通输入。
 
   describe("isNaturalReadFileRequest", () => {
     it("detects Chinese read requests", () => {

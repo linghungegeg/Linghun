@@ -197,7 +197,6 @@ import {
   readProviderEnvApiKeyProviders,
 } from "./model-doctor-runtime.js";
 import {
-  type FreshnessLiteState,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
@@ -214,14 +213,12 @@ import {
   extractFileSearchKeywords,
   extractNaturalReadPath,
   formatFileCandidates,
-  formatFreshnessLitePrimaryWarning,
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
   isNaturalReadFileRequest,
   looksLikeFilePath,
   matchesFileKeywords,
-  needsFreshnessLiteBoundary,
   normalizeRelativePath,
   readToolInputString,
 } from "./model-loop-runtime.js";
@@ -250,7 +247,6 @@ import {
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
   createPendingNaturalCommand,
-  formatCapabilityAnswer,
   formatNaturalStartGate,
   matchesNaturalGateConfirmation,
   routeNaturalIntent,
@@ -752,6 +748,8 @@ type PendingLocalApproval =
       toolName: ToolName;
       sessionId: string;
       continuation?: PendingModelContinuation;
+      // D.13Q-UX Closure: 携带 engine 真实 verdict 给 PermissionPanel 用。
+      verdict?: import("./permission-policy-engine.js").PolicyVerdict;
     }
   | {
       kind: "architecture_drift";
@@ -760,6 +758,7 @@ type PendingLocalApproval =
       sessionId: string;
       warnings: string[];
       continuation?: PendingModelContinuation;
+      verdict?: import("./permission-policy-engine.js").PolicyVerdict;
     };
 
 type PendingModelContinuation = {
@@ -900,6 +899,46 @@ export type TuiContext = {
    * 让连续 `/details` 不会自我覆盖。
    */
   suppressLastFullOutputCapture?: boolean;
+  /**
+   * D.13Q-UX Closure — 轻提示队列。cache-low / setup / shortcut 类提示
+   * 通过 view-model 映射到 view.notifications，由 NotificationStack 右对齐
+   * 单条主显，绝不进 transcript（与 ShellBlockOutput 隔离）。
+   */
+  notifications?: import("./shell/types.js").NotificationView[];
+  /**
+   * D.13Q-UX Closure — HelpPanel 状态。打开时显示三组 Tab + 命令列表。
+   */
+  helpPanelState?: {
+    group: "core" | "advanced" | "details";
+    cursor: number;
+  };
+  /**
+   * D.13Q-UX Closure — BtwPanel 状态（side question 独立面板，不进主 conversation）。
+   */
+  btwPanelState?: {
+    question: string;
+    phase: "loading" | "answered" | "error";
+    answer?: string;
+    error?: string;
+  };
+  /**
+   * D.13Q-UX Closure — SessionsPanel 状态（picker，按 updatedAt 排序）。
+   */
+  sessionsPanelState?: {
+    cursor: number;
+    entries: {
+      id: string;
+      title: string;
+      updatedAt: string;
+      messageCount: number;
+      isCurrent: boolean;
+    }[];
+  };
+  /**
+   * D.13Q-UX Closure — 当前是否在 ink TUI 会话中。runInkShell 启动时设 true，
+   * 让 /btw / /sessions / /resume 等 handler 选择 panel 路径而不是 writeLine。
+   */
+  isInkSession?: boolean;
 };
 
 const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1255,6 +1294,9 @@ async function runInkShell(
   if (!shouldUseInkShell(input, output)) {
     return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
   }
+  // D.13Q-UX Closure: 标记 ink session，让 /btw / /sessions / /resume 等
+  // handler 选择 panel 路径（而不是 plain TUI 的 writeLine fallback）。
+  context.isInkSession = true;
 
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
@@ -1349,6 +1391,18 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      // ─── D.13Q-UX Ctrl+O — toggle-details ───────────────────────────────────
+      // Composer 的 Ctrl+O 派发本事件（不再 submit "/details"），
+      // 这里直接调 handleDetailsCommand([], ...)。effect 等价于 /details 默认分支
+      // 展开"最近一次正文"，但用户输入区不会出现 /details，transcript 命令行也
+      // 不会多出一条 ❯ /details。/details slash 仍保留为兼容命令。
+      if (event.type === "toggle-details") {
+        submittedPending = false;
+        await handleDetailsCommand([], context, shellOutput);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       // ─── D.13E Step 2 修正 #2 — /config 拦截：在 ink 模式下打开真 panel UI ────
       // handleSlashCommand("/config") 仍然只 writeLine(formatConfigOverview(...))，
       // 保留 plain TUI 与 index.test 不破。这里只在 ink 路径上用 panel 接管。
@@ -1358,6 +1412,144 @@ async function runInkShell(
         blocks.push(createCommandBlock(commandSequence++, trimmed));
         context.configPanelState = { phase: "panel_list", cursor: 0 };
         submittedPending = false;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13Q-UX Closure — /help 拦截：ink 模式打开真 HelpPanel ──────────────
+      // plain TUI 仍走 formatCatalogHelp 文本表 fallback；ink 模式不 writeLine，
+      // 直接打开 panel。/help advanced / /help details 进入对应分组。
+      if (event.type === "submit") {
+        const trimmed = event.text.trim();
+        if (trimmed === "/help" || trimmed === "/help advanced" || trimmed === "/help details") {
+          const group: "core" | "advanced" | "details" =
+            trimmed === "/help advanced"
+              ? "advanced"
+              : trimmed === "/help details"
+                ? "details"
+                : "core";
+          blocks.push(createCommandBlock(commandSequence++, trimmed));
+          context.helpPanelState = { group, cursor: 0 };
+          submittedPending = false;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+      }
+      if (event.type === "help-open") {
+        context.helpPanelState = { group: event.group ?? "core", cursor: 0 };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "help-close") {
+        context.helpPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "help-move") {
+        if (!context.helpPanelState) return;
+        const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
+        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const total = entries.length;
+        if (total === 0) return;
+        const next = (context.helpPanelState.cursor + event.delta + total) % total;
+        context.helpPanelState = { ...context.helpPanelState, cursor: next };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "help-switch-group") {
+        if (!context.helpPanelState) return;
+        const groups: ("core" | "advanced" | "details")[] = ["core", "advanced", "details"];
+        const idx = groups.indexOf(context.helpPanelState.group);
+        const next = groups[(idx + event.delta + groups.length) % groups.length] ?? "core";
+        context.helpPanelState = { group: next, cursor: 0 };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "help-enter") {
+        if (!context.helpPanelState) return;
+        const { buildHelpPanelData: build } = await import("./shell/models/help-panel.js");
+        const entries = build(context.helpPanelState.group, 0, context.language).entries;
+        const target = entries[context.helpPanelState.cursor];
+        if (!target) return;
+        context.helpPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        blocks.push(createCommandBlock(commandSequence++, target.slash));
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await processTuiLine(target.slash, context, gateway, shellOutput, store);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13Q-UX Closure — BtwPanel 关闭 ────────────────────────────────────
+      if (event.type === "btw-close") {
+        context.btwPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "btw-open") {
+        context.btwPanelState = { question: event.question, phase: "loading" };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13Q-UX Closure — SessionsPanel 事件 ──────────────────────────────
+      if (event.type === "sessions-close") {
+        context.sessionsPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-move") {
+        if (!context.sessionsPanelState) return;
+        const total = context.sessionsPanelState.entries.length;
+        if (total === 0) return;
+        const next = (context.sessionsPanelState.cursor + event.delta + total) % total;
+        context.sessionsPanelState = { ...context.sessionsPanelState, cursor: next };
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "sessions-resume") {
+        if (!context.sessionsPanelState) return;
+        const target = context.sessionsPanelState.entries[context.sessionsPanelState.cursor];
+        if (!target) return;
+        // D.13Q-UX Closure: 当前 session 不能 resume —— resumeSessionWithHandoff
+        // 需要往新 session 注入 structured handoff，对自身做这件事既是逻辑死循环
+        // 也无意义。给一条 NotificationStack 轻提示并保留 panel 让用户重新选。
+        if (target.isCurrent) {
+          const tip =
+            context.language === "en-US"
+              ? "Already on this session; nothing to resume."
+              : "已在当前会话，无需恢复。";
+          if (!context.notifications) context.notifications = [];
+          context.notifications.push({
+            key: "sessions:resume-current",
+            text: tip,
+            priority: "medium",
+            timeoutMs: 4000,
+            createdAt: Date.now(),
+            tone: "warning",
+          });
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        context.sessionsPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        const cmd = `/resume ${target.id}`;
+        blocks.push(createCommandBlock(commandSequence++, cmd));
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await processTuiLine(cmd, context, gateway, shellOutput, store);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2012,6 +2204,25 @@ export async function handleSlashCommand(
     }
 
     const sessions = await context.store.list();
+    // D.13Q-UX Closure: ink 路径打开 SessionsPanel（不逐行 writeLine）；
+    // plain TUI 仍走旧 writeLine fallback。
+    if ((context as { isInkSession?: boolean }).isInkSession) {
+      const { buildSessionPanelEntries } = await import("./shell/models/session-panel.js");
+      const entries = buildSessionPanelEntries(
+        sessions.map((s) => ({
+          id: s.id,
+          updatedAt: s.updatedAt,
+          summary: s.summary ?? undefined,
+          messageCount:
+            typeof (s as unknown as { messageCount?: number }).messageCount === "number"
+              ? (s as unknown as { messageCount: number }).messageCount
+              : 0,
+        })),
+        context.sessionId,
+      );
+      context.sessionsPanelState = { cursor: 0, entries };
+      return "handled";
+    }
     if (sessions.length === 0) {
       writeLine(output, t(context, "noSessions"));
       return "handled";
@@ -6132,16 +6343,30 @@ async function handleBtwCommand(
     writeLine(output, "用法：/btw <临时小问题>");
     return;
   }
-  const answer = `${t(context, "btwPrefix")}：${question}\n${context.language === "en-US" ? "This temporary answer does not change Todo, plan, or checkpoints." : "这次临时回答不会修改 Todo、Plan 或 checkpoint。"}`;
+  // D.13Q-UX Closure: /btw 当前是 **local note panel**，不调模型 / provider，
+  // 不污染 conversation history / Todo / Plan / checkpoint / job / permission；
+  // 只把临时问题写进 session store（btw_question event）方便 /details 审计。
+  // CCB 风格的 side-question runtime（spinner → Markdown 答案）需要 provider
+  // 调用 + 异步 controller，跨阶段动作较大；本阶段只做本地记录，避免假装是
+  // 模型回答。
+  const note =
+    context.language === "en-US"
+      ? `Local note recorded: ${question}\n/btw is a local note pad — it does not call the model or change Todo / plan / checkpoints. Send the question normally if you need a model answer.`
+      : `已记下临时备忘：${question}\n/btw 只是本地备忘条，不调用模型，也不修改 Todo / Plan / checkpoint。需要模型回答请直接发送问题。`;
   const sessionId = await ensureSession(context);
   await context.store.appendEvent(sessionId, {
     type: "btw_question",
     id: randomUUID(),
     text: question,
-    answer,
+    answer: note,
     createdAt: new Date().toISOString(),
   });
-  writeLine(output, answer);
+  // ink 路径：开 BtwPanel 显示 local note；plain 路径：writeLine 兼容。
+  if ((context as { isInkSession?: boolean }).isInkSession) {
+    context.btwPanelState = { question, phase: "answered", answer: note };
+  } else {
+    writeLine(output, note);
+  }
 }
 
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
@@ -6477,7 +6702,32 @@ async function handleResumeCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const sessionId = args[0] ?? (await context.store.list())[0]?.id;
+  const explicitId = args[0];
+  // D.13Q-UX Closure: ink 路径无参 → 打开 SessionsPanel picker；
+  // 带参或 plain TUI → 仍走 resumeSessionWithHandoff structured handoff。
+  if (!explicitId && (context as { isInkSession?: boolean }).isInkSession) {
+    const sessions = await context.store.list();
+    if (sessions.length === 0) {
+      writeLine(output, "还没有可恢复会话。下一步：先正常对话，或用 /sessions 查看历史。");
+      return;
+    }
+    const { buildSessionPanelEntries } = await import("./shell/models/session-panel.js");
+    const entries = buildSessionPanelEntries(
+      sessions.map((s) => ({
+        id: s.id,
+        updatedAt: s.updatedAt,
+        summary: s.summary ?? undefined,
+        messageCount:
+          typeof (s as unknown as { messageCount?: number }).messageCount === "number"
+            ? (s as unknown as { messageCount: number }).messageCount
+            : 0,
+      })),
+      context.sessionId,
+    );
+    context.sessionsPanelState = { cursor: 0, entries };
+    return;
+  }
+  const sessionId = explicitId ?? (await context.store.list())[0]?.id;
   if (!sessionId) {
     writeLine(output, "还没有可恢复会话。下一步：先正常对话，或用 /sessions 查看历史。");
     return;
@@ -10637,7 +10887,7 @@ function createLightHint(
   };
 }
 
-function writeLightHints(output: Writable, context: TuiContext): void {
+function writeLightHints(_output: Writable, context: TuiContext): void {
   if (context.cache.config.hintsMuted) {
     return;
   }
@@ -10646,27 +10896,24 @@ function writeLightHints(output: Writable, context: TuiContext): void {
     .filter((hint) => now - (context.cache.hintLastShownAt[hint.dedupeKey] ?? 0) >= hint.cooldownMs)
     .sort((a, b) => b.priority - a.priority)
     .slice(0, MAX_LIGHT_HINTS_PER_TURN);
-  // D.13L Block F — 主屏轻提示说人话：不再用 "[提示:warning] ... ；下一步：/break-cache status"
-  // 这种内部术语 + 强 slash 推送的格式。改成单行平铺：dedupeKey 决定语气，
-  //   - cache-hit-low → "最近缓存复用变低，后续响应可能会慢一点。"
-  //   - context-long → "这轮对话较长；如果开始变慢，再按需压缩。"
-  //   - cache-zero-create-with-read → "用量数据可能需要复核后再下结论。"
-  //   - freshness-changed → "项目上下文有变化；结果像旧信息时再刷新。"
-  // suggestedCommand 仍保留在 LightHint 上，给 /usage / /stats / /details 路径
-  // 当数据点用，不再贴到主屏行。
-  //
-  // D.13M-B：写轻提示时设置 suppressLastFullOutputCapture，避免一句"最近缓存
-  // 复用变低..."把刚刚 assistant 答复的 lastFullOutput 替换成单行轻提示，
-  // 让 /details 默认分支仍能展开真正的最近一次正文。
-  const previousSuppress = context.suppressLastFullOutputCapture;
-  context.suppressLastFullOutputCapture = true;
-  try {
-    for (const hint of visibleHints) {
-      context.cache.hintLastShownAt[hint.dedupeKey] = now;
-      writeLine(output, formatPlainLightHint(hint, context.language));
-    }
-  } finally {
-    context.suppressLastFullOutputCapture = previousSuppress;
+  // D.13Q-UX Closure: writeLightHints 不再写主屏 transcript。
+  // 改为推到 context.notifications 队列，由 view-model 复制给 view.notifications，
+  // NotificationStack 右对齐单条主显（priority 高 = immediate）。
+  // 不再需要 suppressLastFullOutputCapture workaround：
+  // 既不写 transcript，就不会替换 lastFullOutput。
+  if (visibleHints.length === 0) return;
+  if (!context.notifications) context.notifications = [];
+  for (const hint of visibleHints) {
+    context.cache.hintLastShownAt[hint.dedupeKey] = now;
+    const text = formatPlainLightHint(hint, context.language);
+    context.notifications.push({
+      key: `lighthint:${hint.dedupeKey}`,
+      text,
+      priority: hint.severity === "warning" ? "medium" : "low",
+      timeoutMs: 5000,
+      createdAt: now,
+      tone: hint.severity === "warning" ? "warning" : "dim",
+    });
   }
 }
 
@@ -11952,8 +12199,6 @@ async function sendMessage(
   context.model = selectedRuntime.model;
   const selectedTools = currentModelSupportsTools(context, selectedRuntime);
   const reportWriteGuard = createReportWriteGuard(text);
-  const freshnessLite = createFreshnessLiteState(text, context);
-  await recordFreshnessLiteBoundary(context, sessionId, freshnessLite);
   await appendSystemEvent(
     context,
     sessionId,
@@ -12232,18 +12477,7 @@ async function sendMessage(
   }
 
   if (assistantText) {
-    const freshnessWarning = formatFreshnessLitePrimaryWarning(freshnessLite, context.language);
     output.write("\n");
-    if (freshnessWarning) {
-      writeLine(output, freshnessWarning);
-      assistantText = `${assistantText}\n\n${freshnessWarning}`;
-      await appendSystemEvent(
-        context,
-        sessionId,
-        "freshness_lite_primary_enforced: web_source_evidence=missing warning=appended",
-        "warning",
-      );
-    }
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
       id: assistantEventId,
@@ -12843,6 +13077,7 @@ async function executeModelToolUse(
         continuation: continuation
           ? createSingleToolCallContinuation(continuation, toolCall)
           : undefined,
+        verdict: permission.verdict,
       };
       return { ok: false, tool: toolName, text, pendingApproval: true };
     }
@@ -13211,7 +13446,6 @@ export function createModelSystemPrompt(
   architectureDirective?: string,
 ): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
-  const freshnessBoundary = createFreshnessLiteBoundary(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
   // 工具继续直接调用；不暴露 raw schema/secret/参数，仅提示发现-执行两步约束。
   const deferredReminder = formatDeferredToolsSystemReminder(
@@ -13230,42 +13464,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "EngineeringStructure=Do not pile logic into existing large files by default. Avoid god files, code blobs, overly long functions (>200 lines), deep nesting (>3 levels), and unbounded global state. Keep responsibility boundaries clear: UI/state/IO/provider/runner/permission/cache/verification. Prefer reusing existing project modules, helpers, presenters, and runtimes over creating a second system. Do not add zero-benefit abstractions for elegance. Each change must have a verifiable boundary (focused tests, typecheck, check). This is not authorization for large refactors."
       : "EngineeringStructure=默认不把逻辑堆进已有大文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。职责边界保持清晰：UI/状态/IO/provider/runner/permission/cache/verification。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。不为了优雅新增无收益抽象。每个改动要有可验证边界（focused tests、typecheck、check）。这不是授权大重构。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}${freshnessBoundary ? `\n${freshnessBoundary}` : ""}\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
-}
-
-function createFreshnessLiteBoundary(text: string, context: TuiContext): string | undefined {
-  const state = createFreshnessLiteState(text, context);
-  if (!state.sensitive) {
-    return undefined;
-  }
-  return context.language === "en-US"
-    ? `FreshnessBoundary=latest/current/external facts requested; web_source_evidence=${state.webSourceEvidence}; if missing, do not present latest/current facts as verified and explicitly mark them as unverified or needing confirmation.`
-    : `FreshnessBoundary=本轮请求涉及最新/当前/外部事实；web_source_evidence=${state.webSourceEvidence}；如缺少 web_source，不得把最新/当前事实写成已验证，必须标记为未验证或需要确认。`;
-}
-
-function createFreshnessLiteState(text: string, context: TuiContext): FreshnessLiteState {
-  return {
-    sensitive: needsFreshnessLiteBoundary(text),
-    webSourceEvidence: context.evidence.some((item) => item.kind === "web_source")
-      ? "present"
-      : "missing",
-  };
-}
-
-async function recordFreshnessLiteBoundary(
-  context: TuiContext,
-  sessionId: string,
-  state: FreshnessLiteState,
-): Promise<void> {
-  if (!state.sensitive) {
-    return;
-  }
-  await appendSystemEvent(
-    context,
-    sessionId,
-    `freshness_lite_boundary: sensitive=yes web_source_evidence=${state.webSourceEvidence}`,
-    state.webSourceEvidence === "missing" ? "warning" : "info",
-  );
+  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 function createEvidenceSummaryForModel(context: TuiContext): string {

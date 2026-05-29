@@ -60,6 +60,12 @@ export type PermissionCheck = {
    * event and can use the verdict to render an explainer line.
    */
   autoAllowReadonly?: PolicyVerdict;
+  /**
+   * D.13Q-UX Closure: 为非 auto-allow 路径也附带 PolicyVerdict（semantic /
+   * pathSafety / redactedSummary / reason），让 PermissionPanel 可以用真实
+   * engine 决策渲染 explanationLines，而不是 toolName 简化推断。
+   */
+  verdict?: PolicyVerdict;
 };
 
 export type AddAllowRuleResult =
@@ -151,6 +157,15 @@ export async function decidePermission(
     return { request, decision: "deny", reason: hardDeny };
   }
 
+  // D.13Q-UX Closure: 始终算一次 verdict 用于 UI 解释行（即使 auto-allow 不命中）。
+  // engine 是纯函数，调用便宜；后续任何 ask/deny 分支返回时都附带 verdict，
+  // 让 PermissionPanel 能用真实 semantic / pathSafety / redactedSummary 渲染。
+  const verdict = classifyToolRequest({
+    toolName: name,
+    input,
+    workspaceRoot: context.projectPath,
+  });
+
   // D.13N — policy engine auto_allow_readonly short-circuit.
   // Runs *after* hard-deny and *before* rule / mode policy so the engine can
   // widen the implicit allow surface for safe readonly Bash / Read calls
@@ -159,12 +174,7 @@ export async function decidePermission(
   // here unchanged so the existing decision tree owns the `ask` / `allow` /
   // `deny` outcome.
   if (context.permissionMode !== "plan" && context.permissionMode !== "auto-review") {
-    const policyVerdict = classifyToolRequest({
-      toolName: name,
-      input,
-      workspaceRoot: context.projectPath,
-    });
-    if (policyVerdict.decision === "auto_allow_readonly") {
+    if (verdict.decision === "auto_allow_readonly") {
       // Honor explicit deny rules even for readonly tools — never override
       // a user-configured deny.
       const denyRule = findPermissionRule(
@@ -176,8 +186,9 @@ export async function decidePermission(
         return {
           request,
           decision: "allow",
-          reason: `policy auto_allow_readonly: ${policyVerdict.reason}`,
-          autoAllowReadonly: policyVerdict,
+          reason: `policy auto_allow_readonly: ${verdict.reason}`,
+          autoAllowReadonly: verdict,
+          verdict,
         };
       }
     }
@@ -185,27 +196,29 @@ export async function decidePermission(
 
   if (context.permissionMode === "plan") {
     if (isPlanAllowedTool(name, tool.isReadOnly)) {
-      return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。" };
+      return { request, decision: "allow", reason: "Plan 模式允许只读或会话内规划工具。", verdict };
     }
     const reason =
       "Plan 模式禁止写入、编辑和 Bash 执行；请先 /plan accept 确认方案并切回执行模式。";
     await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
+    return { request, decision: "deny", reason, verdict };
   }
 
   const rule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
   if (rule) {
     if (rule.effect === "deny") {
-      const reason = `命中 deny 规则：${rule.id}`;
+      // D.13Q-UX：reason 不再拼 rule.id（randomUUID）。user-facing 文案稳定，
+      // 内部 rule.id 仍可在 system event log / details debug 区追踪。
+      const reason = "命中拒绝规则。";
       await recordPermissionDenied(context, name, reason);
-      return { request, decision: "deny", reason };
+      return { request, decision: "deny", reason, verdict };
     }
     if (rule.effect === "ask") {
-      const reason = `命中 ask 规则：${rule.id}。需要用户确认后才会执行本次工具。`;
+      const reason = "命中需确认规则。需要用户确认后才会执行本次工具。";
       await recordPermissionDenied(context, name, reason);
-      return { request, decision: "ask", reason };
+      return { request, decision: "ask", reason, verdict };
     }
-    return { request, decision: "allow", reason: `命中 allow 规则：${rule.id}` };
+    return { request, decision: "allow", reason: "命中允许规则。", verdict };
   }
 
   if (context.permissionMode === "auto-review") {
@@ -215,14 +228,15 @@ export async function decidePermission(
         decision: "allow",
         reason: "auto-review 自动允许工作区内低风险文件编辑。",
         preflight: formatDiffBeforeWrite(name, files, tool.permission.risk),
+        verdict,
       };
     }
     if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-      return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。" };
+      return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
     }
     const reason = "auto-review 不自动允许 Bash、高风险或越界操作。";
     await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason };
+    return { request, decision: "deny", reason, verdict };
   }
 
   if (context.permissionMode === "full-access") {
@@ -233,16 +247,17 @@ export async function decidePermission(
       preflight: tool.isReadOnly
         ? undefined
         : formatDiffBeforeWrite(name, files, tool.permission.risk),
+      verdict,
     };
   }
 
   if (tool.isReadOnly || name === "Todo" || name === "Diff") {
-    return { request, decision: "allow", reason: "default 模式允许只读或会话内工具。" };
+    return { request, decision: "allow", reason: "default 模式允许只读或会话内工具。", verdict };
   }
   const reason =
     "default 模式不会静默执行 Bash、写入、编辑、删除、配置、安装、联网或权限变更；需要用户确认后才会执行本次工具。";
   await recordPermissionDenied(context, name, reason);
-  return { request, decision: "ask", reason };
+  return { request, decision: "ask", reason, verdict };
 }
 
 export async function recordPermissionDenied(

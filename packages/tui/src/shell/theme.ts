@@ -9,6 +9,27 @@ export type ShellTheme = {
   border: string | undefined;
   warning: string | undefined;
   status: Record<ProductBlockStatus, string | undefined>;
+  /**
+   * D.13Q-UX — 消息语义颜色键（CCB Messages.tsx 对照）：
+   * - assistantText: 普通 assistant 正文，默认 brand white；不再借 info=cyan。
+   * - dim: 从属响应 / Ctrl+O hint / 弱提示通用 dim。
+   * - panel: 普通面板（HelpPanel / ConfigPanel）边框色。
+   * - permission: 权限面板独立边框色（独立于普通 panel，让 PermissionPanel 一眼可识别）。
+   * - help: HelpPanel 主题色（professionalBlue 风格，与 permission 区分）。
+   * - diagnostic: /model doctor 等诊断输出色（cyan 等强调色，不与普通正文同源）。
+   * - notification: 轻提示色（默认 dim，warning/error 时另染色）。
+   * - success: 强调成功（与 status.pass 同色，但语义上独立）。
+   * - error: 强调错误（与 status.fail 同色）。
+   */
+  assistantText: string | undefined;
+  dim: string | undefined;
+  panel: string | undefined;
+  permission: string | undefined;
+  help: string | undefined;
+  diagnostic: string | undefined;
+  notification: string | undefined;
+  success: string | undefined;
+  error: string | undefined;
 };
 
 export function createShellTheme(noColor: boolean): ShellTheme {
@@ -28,6 +49,15 @@ export function createShellTheme(noColor: boolean): ShellTheme {
         fail: undefined,
         blocked: undefined,
       },
+      assistantText: undefined,
+      dim: undefined,
+      panel: undefined,
+      permission: undefined,
+      help: undefined,
+      diagnostic: undefined,
+      notification: undefined,
+      success: undefined,
+      error: undefined,
     };
   }
   return {
@@ -45,6 +75,19 @@ export function createShellTheme(noColor: boolean): ShellTheme {
       fail: "red",
       blocked: "yellow",
     },
+    // D.13Q-UX 语义键 —— assistant 正文用 brand white（默认色），不再借 info=cyan
+    // 让 status dot 与正文同色一片青；panel/permission/help 用不同 border 色，
+    // 让 PermissionPanel 一眼能与 ConfigPanel 区分；diagnostic 仍可用 cyan 强调
+    // /model doctor 等诊断输出，但只服务诊断，不再当通用正文色。
+    assistantText: "white",
+    dim: "gray",
+    panel: "gray",
+    permission: "magenta",
+    help: "blueBright",
+    diagnostic: "cyan",
+    notification: "gray",
+    success: "green",
+    error: "red",
   };
 }
 

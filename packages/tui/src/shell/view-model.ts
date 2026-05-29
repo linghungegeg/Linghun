@@ -9,11 +9,15 @@ import {
   getConfigPanels,
   getPanelText,
 } from "./models/config-control-plane.js";
+import { buildFooterView } from "./models/footer-view.js";
+import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
+import { explainHowToUpdate, explainPolicyVerdict, explainSemantic, type PathSafety, type PolicySemantic } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import type {
   BackgroundTaskSummary,
   ConfigPanelView,
+  NotificationView,
   PermissionAction,
   ProductBlockViewModel,
   ShellViewMode,
@@ -309,22 +313,26 @@ export function createShellViewModel(
   // setupHint is intentionally NOT routed through the footer hint slot — long
   // setup sentences belong above the composer (or in /config), not in the
   // 1-line breathing footer. D13E-P3: dropped session id / gate / background.
+  // D.13Q-UX: 走 buildFooterView 纯函数，把 model 占位 / cache 低命中渲染成
+  // dim/warning 语义；setup-needed 时 model 显示 dim "--"，避免兜底 deepseek-chat
+  // 流到主屏。
+  const cyclePermHint =
+    language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
-      : {
-          permissionMode: formatPermissionModeLabel(context.permissionMode, language),
-          model: formatFooterModel(context.model, language, width),
-          cache: formatFooterCache(context.cache?.history?.at(-1)?.hitRate ?? null, language),
-          index: formatIndex(context.index.status, language),
-          cyclePermHint:
-            language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）",
-          reasoning: formatFooterReasoning(
-            options.reasoningLevel,
-            options.reasoningSent,
-            language,
-          ),
-        };
+      : buildFooterView({
+          language,
+          width,
+          permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
+          cyclePermHint,
+          effectiveModel: context.model,
+          setupNeeded,
+          cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
+          indexStatus: context.index.status,
+          reasoningLevel: options.reasoningLevel,
+          reasoningSent: options.reasoningSent,
+        }).view;
 
   // D.13E Step 2 — TaskSuggestionBar 数据（只读，UI 不接键盘）。
   // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
@@ -390,6 +398,30 @@ export function createShellViewModel(
     taskFooter,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
     configPanel,
+    helpPanel: (() => {
+      const state = (context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }).helpPanelState;
+      if (!state) return undefined;
+      return buildHelpPanelData(state.group, state.cursor, language);
+    })(),
+    btwPanel: (context as { btwPanelState?: NonNullable<ShellViewModel["btwPanel"]> }).btwPanelState,
+    sessionsPanel: (context as { sessionsPanelState?: NonNullable<ShellViewModel["sessionsPanel"]> }).sessionsPanelState,
+    notifications: (() => {
+      const ctxNotifs = (context as { notifications?: NotificationView[] }).notifications;
+      if (!ctxNotifs || ctxNotifs.length === 0) return undefined;
+      // D.13Q-UX Closure: 按 createdAt + timeoutMs 过滤过期项。
+      // - createdAt 缺省 → 视为常驻（向后兼容历史 push 路径）
+      // - timeoutMs 缺省 → 常驻直到外部状态显式清空
+      // - createdAt + timeoutMs <= now → 过期，丢弃
+      const now = Date.now();
+      const live = ctxNotifs.filter((n) => {
+        if (typeof n.timeoutMs !== "number") return true;
+        if (typeof n.createdAt !== "number") return true;
+        return n.createdAt + n.timeoutMs > now;
+      });
+      // 同步把 ctxNotifs 收敛为活动队列，避免无限积累。
+      (context as { notifications?: NotificationView[] }).notifications = live;
+      return live.length > 0 ? [...live] : undefined;
+    })(),
   };
 }
 
@@ -503,6 +535,10 @@ export function createOutputBlock(
     // /model doctor body with provider.env merge / endpointPath / providers)
     // are no longer truncated to the first line at this boundary.
     fullText: normalized,
+    // D.13Q-UX: 错误类输出仍走 ProductBlock alert 卡（messageKind: tool_result_error）；
+    // 其余正文走 assistant_text，让 ProductBlock 的 messageKind 分支用 Markdown
+    // 渲染多行正文，而不是把多行文本压成 cyan/info dot 单行。
+    messageKind: isFail ? "tool_result_error" : "assistant_text",
   };
 }
 
@@ -599,6 +635,12 @@ export function mapPendingApprovalToPermission(
         toolName?: string;
         toolCall?: { input?: unknown };
         warnings?: string[];
+        verdict?: {
+          semantic?: PolicySemantic;
+          pathSafety?: PathSafety;
+          redactedSummary?: string;
+          reason?: string;
+        };
       };
     }
   ).pendingLocalApproval;
@@ -606,14 +648,30 @@ export function mapPendingApprovalToPermission(
 
   if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
     const toolName = approval.toolName ?? "unknown";
-    // D.13L Block E — 主屏权限卡只暴露 toolName + 3 项动作。
-    // reason / scope / risk / hint 仍在 TaskPermissionView 上保留为内部字段，
-    // 供 /details 路径或 controller 层使用，但主屏渲染不再读它们。
-    // risk 仍由 toolName 推断（buildElevationOptions 用它判断 allow_always_tool 风险等级）。
+    // D.13Q-UX Closure: 优先用 engine 真实 verdict（semantic / pathSafety /
+    // redactedSummary / reason）装配 explanationLines；engine 没给时才回落到
+    // toolName 简化推断（保兼容）。reason 走 sanitizePermissionReason 脱去
+    // rule.id / hook id 等内部字段。
+    const verdict = approval.verdict;
+    const fallbackSemantic = inferSemanticByToolName(toolName);
+    const semantic: PolicySemantic = verdict?.semantic ?? fallbackSemantic;
+    const risk: "low" | "medium" | "high" = toolName === "Bash" ? "high" : "medium";
+    const explanationLines = verdict
+      ? buildPermissionExplanationLinesFromVerdict(
+          {
+            semantic,
+            pathSafety: verdict.pathSafety,
+            redactedSummary: verdict.redactedSummary,
+            reason: verdict.reason,
+          },
+          risk,
+          context.language,
+        )
+      : buildPermissionExplanationLines(fallbackSemantic, risk, context.language);
     return {
       toolName,
       reason: "",
-      risk: toolName === "Bash" ? "high" : "medium",
+      risk,
       scope: [],
       hint: "",
       actionSummary: buildPermissionActionSummary(
@@ -622,9 +680,73 @@ export function mapPendingApprovalToPermission(
         approval.toolCall?.input,
       ),
       actions: [],
+      explanationLines,
     };
   }
   return undefined;
+}
+
+/**
+ * D.13Q-UX Closure — 用真实 PolicyVerdict（semantic / pathSafety /
+ * redactedSummary / reason）装配 PermissionPanel 解释行。reason 已经过
+ * sanitizePermissionReason 处理（不含 rule.id）。
+ */
+function buildPermissionExplanationLinesFromVerdict(
+  verdict: {
+    semantic: PolicySemantic;
+    pathSafety?: PathSafety;
+    redactedSummary?: string;
+    reason?: string;
+  },
+  risk: "low" | "medium" | "high",
+  language: Language,
+): string[] {
+  const isEn = language === "en-US";
+  const lines: string[] = [];
+  // 1) verdict 多行解释（semantic + pathSafety + redactedSummary + sanitized reason + how-to-update）
+  lines.push(...explainPolicyVerdict(verdict, language));
+  // 2) risk 一行
+  if (risk === "high") {
+    lines.push(isEn ? "Risk: high — review carefully." : "风险：高 — 请仔细确认。");
+  } else if (risk === "medium") {
+    lines.push(isEn ? "Risk: medium." : "风险：中。");
+  } else {
+    lines.push(isEn ? "Risk: low." : "风险：低。");
+  }
+  // 去重（explainPolicyVerdict 末尾就有 /permissions 指引，这里 risk 之后不要再追加）
+  return lines.filter((line, idx, arr) => arr.indexOf(line) === idx);
+}
+
+/**
+ * D.13Q-UX — 用 toolName 粗略推断 PolicySemantic（permission-policy-engine 的精确
+ * verdict 仍由 decidePermission 计算；这里只为 UI 装配 user-facing 解释行，
+ * 与 engine 解耦）。
+ */
+function inferSemanticByToolName(toolName: string): PolicySemantic {
+  if (toolName === "Bash") return "destructive";
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") return "mutating";
+  if (toolName === "Read" || toolName === "Glob" || toolName === "Grep") return "readonly";
+  if (toolName === "WebFetch") return "network";
+  return "unknown";
+}
+
+function buildPermissionExplanationLines(
+  semantic: PolicySemantic,
+  risk: "low" | "medium" | "high",
+  language: Language,
+): string[] {
+  const isEn = language === "en-US";
+  const lines: string[] = [];
+  lines.push(explainSemantic(semantic, language));
+  if (risk === "high") {
+    lines.push(isEn ? "Risk: high — review carefully." : "风险：高 — 请仔细确认。");
+  } else if (risk === "medium") {
+    lines.push(isEn ? "Risk: medium." : "风险：中。");
+  } else {
+    lines.push(isEn ? "Risk: low." : "风险：低。");
+  }
+  lines.push(explainHowToUpdate(language));
+  return lines;
 }
 
 /**
@@ -800,45 +922,9 @@ function formatBackground(count: number, language: Language, width: number): str
   return shellText[language].background(count);
 }
 
-/**
- * Format model label for the task footer.
- * D13E-P3: "模型 X" / "model X" — short and width-aware.
- */
-function formatFooterModel(model: string | undefined, language: Language, width: number): string {
-  const label = language === "en-US" ? "model" : "模型";
-  const value = truncateMiddle(model || "unknown", width <= 60 ? 12 : 22);
-  return `${label} ${value}`;
-}
-
-/**
- * Format cache hit rate for the task footer.
- * D13E-P3: "缓存 92%" / "cache 92%" / "缓存?" / "cache?" when null.
- */
-function formatFooterCache(hitRate: number | null | undefined, language: Language): string {
-  const label = language === "en-US" ? "cache" : "缓存";
-  if (hitRate === null || hitRate === undefined) return `${label}?`;
-  const percent = Math.max(0, Math.min(100, Math.round(hitRate * 100)));
-  return `${label} ${percent}%`;
-}
-
-/**
- * Format reasoning level for the task footer.
- * D13E-P3 cleanup #5: only render when level is non-empty AND reasoningSent is
- * true; otherwise return undefined so the segment is dropped (避免 "推理 unknown"
- * 或 "Reasoning ignored" 这种假信号污染 1 行 footer)。
- */
-function formatFooterReasoning(
-  level: string | undefined,
-  sent: boolean | undefined,
-  language: Language,
-): string | undefined {
-  if (!level) return undefined;
-  if (sent === false) return undefined;
-  const trimmed = level.trim();
-  if (!trimmed) return undefined;
-  const label = language === "en-US" ? "Reasoning" : "推理";
-  return `${label} ${truncateMiddle(trimmed, 12)}`;
-}
+// D.13Q-UX: footer 字段计算迁移到 packages/tui/src/shell/models/footer-view.ts。
+// 旧的 formatFooterModel / formatFooterCache / formatFooterReasoning 已移除，
+// 仅保留 fitBlockToWidth / truncateMiddle 等 block 级 helper（仍在使用）。
 
 function normalizeWidth(width: number | undefined): number {
   if (!width || !Number.isFinite(width)) return 80;
@@ -852,11 +938,30 @@ function normalizeHeight(height: number | undefined): number {
 
 function fitBlockToWidth(block: ProductBlockViewModel, width: number): ProductBlockViewModel {
   const contentWidth = Math.max(18, width - (width < 60 ? 4 : 10));
+  // D.13Q-UX: 消息语义 block（assistant_text / tool_result_* / diagnostic /
+  // local_command_output）由 ProductBlock 内的 MessageMarkdown 自行处理换行/
+  // 段落/列表/代码块，**不应**在此被 fitLine 打平成单行。fitLine 只负责
+  // status / footer / suggestion 等真正需要单行截断的场景。
+  // title 仍可走 truncateMiddle（标题就是单行语义）；nextAction 是 Ctrl+O hint
+  // 单行也合理。summary / detail 在消息语义 block 上保留原样。
+  const isMessageBlock =
+    block.messageKind === "assistant_text" ||
+    block.messageKind === "assistant_thinking" ||
+    block.messageKind === "tool_result_success" ||
+    block.messageKind === "tool_result_error" ||
+    block.messageKind === "tool_result_cancelled" ||
+    block.messageKind === "tool_result_rejected" ||
+    block.messageKind === "diagnostic" ||
+    block.messageKind === "local_command_output";
   return {
     ...block,
     title: truncateMiddle(block.title, contentWidth),
-    summary: fitLine(block.summary, contentWidth),
-    detail: block.detail ? fitLine(block.detail, contentWidth) : undefined,
+    summary: isMessageBlock ? block.summary : fitLine(block.summary, contentWidth),
+    detail: block.detail
+      ? isMessageBlock
+        ? block.detail
+        : fitLine(block.detail, contentWidth)
+      : undefined,
     nextAction: block.nextAction ? fitLine(block.nextAction, contentWidth) : undefined,
   };
 }

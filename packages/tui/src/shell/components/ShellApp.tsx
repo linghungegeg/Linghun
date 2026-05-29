@@ -13,11 +13,15 @@ import type {
   ShellController,
   ShellViewModel,
   TaskActivityView,
-  TaskFooterView,
 } from "../types.js";
+import { BtwPanel } from "./BtwPanel.js";
 import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
+import { HelpPanel } from "./HelpPanel.js";
+import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
+import { SessionsPanel } from "./SessionsPanel.js";
+import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
 import { TaskSuggestionBar } from "./TaskSuggestionBar.js";
 
@@ -171,13 +175,43 @@ function TaskLayout({
       >
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
-        {/* Permission > ConfigPanel 互斥渲染（P0-1）：
-            permission 优先级最高，但 body+actions+hint 已合并到 Composer 内的
-            PermissionControl card；output 区不再渲染独立的 PermissionPrompt，
-            避免 body 与 action row 跨区域分裂、避免重复 toolName/risk 信息。
-            ConfigPanel 只在没有 permission 时渲染。
-            Composer 在 ConfigPanel 渲染时 useInput { isActive: false }，避免双消费。 */}
-        {!view.permission && view.configPanel ? (
+        {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
+            - permission 优先级最高（已合并到 Composer 内的 PermissionControl card）；
+            - HelpPanel / BtwPanel（D.13Q-UX Closure）次之；
+            - ConfigPanel 只在没有 permission / helpPanel / btwPanel 时渲染。
+            Composer 在任一面板打开时 useInput { isActive: false }，避免双消费。 */}
+        {!view.permission && view.helpPanel ? (
+          <HelpPanel
+            panel={view.helpPanel}
+            controller={controller}
+            width={view.width - 4}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
+        {!view.permission && !view.helpPanel && view.btwPanel ? (
+          <BtwPanel
+            panel={view.btwPanel}
+            controller={controller}
+            width={view.width - 4}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
+        {!view.permission && !view.helpPanel && !view.btwPanel && view.sessionsPanel ? (
+          <SessionsPanel
+            panel={view.sessionsPanel}
+            controller={controller}
+            width={view.width - 4}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
+        {!view.permission &&
+        !view.helpPanel &&
+        !view.btwPanel &&
+        !view.sessionsPanel &&
+        view.configPanel ? (
           <ConfigPanel
             panel={view.configPanel}
             controller={controller}
@@ -230,15 +264,22 @@ function TaskLayout({
 
         {/* Task footer — minimal status line: permission mode · index. NOT the
             full StatusTray; the noisy line was identified as the
-            "[Linghun] 会话…" leak source and stays out of Task mode. */}
+            "[Linghun] 会话…" leak source and stays out of Task mode.
+            D.13Q-UX：迁到 StatusFooter（左 mode pill + cyclePermHint，右 model/cache/index/reasoning），
+            window<60 走列向布局；model 占位时 dim，cache 低命中染 warning。 */}
         {view.taskFooter ? (
-          <TaskFooter
+          <StatusFooter
             footer={view.taskFooter}
             theme={theme}
             width={view.width}
             language={view.language}
+            modelDim={view.taskFooter.modelDim}
+            cacheTone={view.taskFooter.cacheTone}
           />
         ) : null}
+
+        {/* D.13Q-UX：通知栈 — 右对齐，单条主显，绝不进 transcript。 */}
+        <NotificationStack notifications={view.notifications} theme={theme} />
 
         {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
             贴在终端最后一行（光标 / 滚动条 / OS 任务栏会与之相邻不舒服）。
@@ -249,53 +290,7 @@ function TaskLayout({
   );
 }
 
-function TaskFooter({
-  footer,
-  theme,
-  width,
-  language,
-}: {
-  footer: TaskFooterView;
-  theme: ReturnType<typeof createShellTheme>;
-  width: number;
-  language: ShellViewModel["language"];
-}): React.ReactNode {
-  // D13E-P3 production footer: 1 line of muted status with bottom breathing
-  // space. Shift+Tab hint sits right after permissionMode (NOT at end of line)
-  // and stays red so it's the first thing the eye picks up.
-  //
-  // Shape: "默认模式（Shift+Tab 切换模式） · 模型 X · 缓存 X% · 索引?"
-  //        "default mode (Shift+Tab switch mode) · model X · cache X% · index?"
-  //
-  // Long sentences (e.g. setup hint) are intentionally NOT routed here —
-  // permissionMode + model + cache + index + optional reasoning is the entire
-  // signal budget. An optional short hint is supported and dropped first when
-  // width is tight. The muted tail is fitText-truncated; the cyclePermHint is
-  // never truncated because it's the discovery affordance for mode switching.
-  void language; // hint copy already localized in view-model
-  const tailSegments: string[] = [footer.model, footer.cache, footer.index];
-  if (footer.reasoning) tailSegments.push(footer.reasoning);
-  if (footer.hint) tailSegments.push(footer.hint);
-  const tail = tailSegments.join(" · ");
-  // Reserve room for "permissionMode" + "cyclePermHint" + " · " separator.
-  const reserved = footer.permissionMode.length + footer.cyclePermHint.length + 3;
-  const tailBudget = Math.max(10, width - 4 - reserved);
-  const fittedTail = fitText(tail, tailBudget);
-  // Nest the three colored runs inside a single parent <Text>. Three sibling
-  // <Text> children of a <Box> would be treated as flex inline-blocks and each
-  // would wrap inside its own column budget — that's why the early version
-  // produced "默认模 （Shift+Tab\n        切换模式）". A single parent Text flows
-  // them as one logical line with inline color changes.
-  return (
-    <Box width={width} paddingX={2} paddingTop={1}>
-      <Text>
-        <Text color={theme.muted}>{footer.permissionMode}</Text>
-        <Text color={theme.status.fail}>{footer.cyclePermHint}</Text>
-        <Text color={theme.muted}> · {fittedTail}</Text>
-      </Text>
-    </Box>
-  );
-}
+// D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
 
 function ActivityIndicator({
   activity,

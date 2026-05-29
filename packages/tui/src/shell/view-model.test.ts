@@ -174,7 +174,10 @@ describe("shell view model", () => {
     expect(routeBlock?.summary).toContain("不要重复填写用户 API key");
   });
 
-  it("summarizes latest output without leaking raw keys or full multiline output", () => {
+  it("preserves multi-line assistant output while masking secrets", () => {
+    // D.13Q-UX：assistant_text block 保留 fullText 多行（不打平到 summary 首行），
+    // sk- 等敏感片段仍走 redactSensitiveText 掩盖。这是 D.13Q-UX 范式：
+    // assistant 正文不再被 fitLine replace(/\s+/gu," ").trim() 打平。
     const block = createOutputBlock(
       "done with apiKey=sk-shell-output-secret\nfull line 2\nfull line 3",
       "en-US",
@@ -188,9 +191,13 @@ describe("shell view model", () => {
 
     expect(block.summary).toBe("done with apiKey=[masked-key]");
     expect(block.detail).toBeUndefined();
+    // D.13Q-UX assistant_text 在 plain 模式应保留所有多行正文。
+    expect(block.messageKind).toBe("assistant_text");
     expect(rendered).toContain("done with apiKey=[masked-key]");
+    expect(rendered).toContain("full line 2");
+    expect(rendered).toContain("full line 3");
+    // 敏感原值仍被 mask。
     expect(rendered).not.toContain("sk-shell-output-secret");
-    expect(rendered).not.toContain("full line 2");
   });
 
   it("keeps 120/80/60/40-column mature shell view models stable without default cards", () => {
@@ -3270,25 +3277,22 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(enView.taskFooter?.index ?? "").not.toContain("unknown");
   });
 
-  it("D13E-P3: ShellApp.TaskFooter places cyclePermHint between permissionMode and tail", async () => {
+  it("D13E-P3 / D.13Q-UX: StatusFooter places cyclePermHint between permissionMode and right segments", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
-    // Three text spans: muted permissionMode, red cyclePermHint, muted " · tail".
-    // The ordering is what guarantees the hint sits *after* "默认模式", not at the
-    // end of the line (which was the pre-D13E-P3 layout that buried discoverability).
-    const fnStart = source.indexOf("function TaskFooter(");
-    const fnEnd = source.indexOf("function ActivityIndicator(");
-    expect(fnStart).toBeGreaterThan(0);
-    expect(fnEnd).toBeGreaterThan(fnStart);
-    const body = source.slice(fnStart, fnEnd);
-    const permIdx = body.indexOf("footer.permissionMode");
-    const hintIdx = body.indexOf("footer.cyclePermHint");
-    const tailIdx = body.indexOf("fittedTail");
+    // D.13Q-UX：旧的 ShellApp.TaskFooter 已迁到独立 StatusFooter 组件，
+    // permissionMode/cyclePermHint 顺序与配色断言指向新文件。
+    const source = await readFile(
+      join(SRC_ROOT, "shell/components/StatusFooter.tsx"),
+      "utf8",
+    );
+    const permIdx = source.indexOf("footer.permissionMode");
+    const hintIdx = source.indexOf("footer.cyclePermHint");
     expect(permIdx).toBeGreaterThan(0);
     expect(hintIdx).toBeGreaterThan(permIdx);
-    expect(tailIdx).toBeGreaterThan(hintIdx);
-    // Hint stays red.
-    expect(body).toMatch(/theme\.status\.fail.*footer\.cyclePermHint/s);
+    // cyclePermHint 仍染 status.fail 红色。
+    expect(source).toMatch(/theme\.status\.fail/);
+    // 右栏（model · cache · index · reasoning · hint）按顺序作为 segments 渲染。
+    expect(source).toContain("rightSegments");
   });
 
   it("D13E-P3: reasoningLevel + reasoningSent surface as 'Reasoning X' / '推理 X' in footer", () => {
@@ -3670,5 +3674,163 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const visible = view.blocks.find((b) => b.id === "assistant-stream-ctrl-o");
     expect(visible).toBeDefined();
     expect(visible?.nextAction ?? "").toContain("Ctrl+O");
+  });
+});
+
+describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer setup-needed", () => {
+  function createContext(overrides: Partial<TuiContext> = {}): TuiContext {
+    const language = overrides.language ?? "zh-CN";
+    return {
+      projectPath: "/tmp/proj",
+      language,
+      model: "deepseek-v4-flash-model-name",
+      permissionMode: "default",
+      sessionId: "session-test",
+      cache: { history: [], config: { warnBelowHitRate: 0.75 } as never },
+      index: { status: "ready" },
+      backgroundTasks: [],
+      permissions: { rules: [], recentDenied: [] },
+      pendingNaturalCommand: null,
+      pendingAutopilot: null,
+      pendingLocalApproval: null,
+      pendingModelSetup: null,
+      config: {
+        workspaceTrust: { recorded: true, level: "trusted" },
+        defaultModel: "deepseek-v4-flash-model-name",
+        modelRoutes: { routes: [] },
+        providers: { deepseek: { model: "deepseek-chat" } },
+      } as never,
+      ...overrides,
+    } as unknown as TuiContext;
+  }
+
+  it("assistant_text block 标记 messageKind=assistant_text 且保留多行 fullText", () => {
+    const block = createOutputBlock("第一行内容\n第二行段落\n第三行收尾", "zh-CN", "out-multi");
+    expect(block.messageKind).toBe("assistant_text");
+    expect(block.fullText).toContain("第一行内容");
+    expect(block.fullText).toContain("第二行段落");
+    expect(block.fullText).toContain("第三行收尾");
+  });
+
+  it("error 输出标记 messageKind=tool_result_error", () => {
+    const block = createOutputBlock("error: something broke\nstack line A", "en-US", "out-err");
+    expect(block.messageKind).toBe("tool_result_error");
+    expect(block.status).toBe("fail");
+  });
+
+  it("assistant_text block 在 plain renderer 中保留多行（不打平到首行）", () => {
+    const block = createOutputBlock("段落一\n段落二\n段落三", "zh-CN", "out-multiline");
+    const view = createShellViewModel(createContext(), {
+      outputBlocks: [block],
+      width: 120,
+      viewMode: "task",
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("段落一");
+    expect(rendered).toContain("段落二");
+    expect(rendered).toContain("段落三");
+  });
+
+  it("setupNeeded=true 时 footer model 显示 dim '--' 占位（不再回退到 deepseek-chat）", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      setupNeeded: true,
+    });
+    expect(view.taskFooter?.model).toMatch(/模型\s*--|model\s*--/);
+    expect(view.taskFooter?.modelDim).toBe(true);
+  });
+
+  it("cache 命中率 < 50% 时 footer cacheTone='warning'", () => {
+    const ctx = createContext();
+    (ctx as unknown as { cache: { history: { hitRate: number }[] } }).cache.history.push({
+      hitRate: 0.4,
+    });
+    const view = createShellViewModel(ctx, {
+      width: 120,
+      viewMode: "task",
+    });
+    expect(view.taskFooter?.cacheTone).toBe("warning");
+  });
+
+  it("权限请求附带 explanationLines（不暴露 rule.id）", () => {
+    const ctx = createContext();
+    (ctx as unknown as {
+      pendingLocalApproval: { kind: string; toolName: string; toolCall: { input: unknown } };
+    }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: { input: { command: "git status" } },
+    };
+    const permission = mapPendingApprovalToPermission(ctx);
+    expect(permission?.explanationLines).toBeDefined();
+    expect(permission?.explanationLines?.length ?? 0).toBeGreaterThan(0);
+    const joined = (permission?.explanationLines ?? []).join("\n");
+    // 不应出现 UUID / rule.id 风格字符串
+    expect(joined).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
+    );
+    // 应包含"如何永久允许"指引
+    expect(joined).toContain("/permissions");
+  });
+
+  it("D.13Q-UX Closure: notifications 按 createdAt+timeoutMs 过期后从 view 移除并收敛 context 队列", () => {
+    const ctx = createContext();
+    const now = Date.now();
+    (ctx as unknown as { notifications?: unknown[] }).notifications = [
+      {
+        key: "expired-1",
+        text: "已过期提示",
+        priority: "low",
+        timeoutMs: 1000,
+        createdAt: now - 2000, // 2 秒前 + 1s 超时 → 过期
+        tone: "dim",
+      },
+      {
+        key: "live-1",
+        text: "仍然活跃",
+        priority: "medium",
+        timeoutMs: 5000,
+        createdAt: now - 100, // 0.1 秒前 + 5s 超时 → 活跃
+        tone: "warning",
+      },
+      {
+        key: "permanent-1",
+        text: "无超时常驻",
+        priority: "low",
+        // 无 timeoutMs → 常驻
+        tone: "dim",
+      },
+    ];
+    const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+    const live = view.notifications ?? [];
+    const liveKeys = live.map((n) => n.key).sort();
+    expect(liveKeys).toEqual(["live-1", "permanent-1"]);
+    // 过期项也从 context 队列里被收敛掉，避免无限积累。
+    const ctxQueue = (ctx as unknown as { notifications?: { key: string }[] }).notifications ?? [];
+    const ctxKeys = ctxQueue.map((n) => n.key).sort();
+    expect(ctxKeys).toEqual(["live-1", "permanent-1"]);
+  });
+
+  it("D.13Q-UX Closure: notifications 不进 transcript 也不替换 lastFullOutput", () => {
+    const ctx = createContext();
+    (ctx as unknown as { lastFullOutput?: string }).lastFullOutput = "已有正文：关键证据 X";
+    (ctx as unknown as { notifications?: unknown[] }).notifications = [
+      {
+        key: "live-2",
+        text: "右对齐轻提示",
+        priority: "medium",
+        timeoutMs: 5000,
+        createdAt: Date.now(),
+        tone: "warning",
+      },
+    ];
+    const view = createShellViewModel(ctx, { width: 120, viewMode: "task" });
+    // notifications 单独走 view.notifications；不进 view.blocks transcript。
+    const transcriptText = view.blocks.map((b) => b.fullText ?? b.summary ?? "").join("\n");
+    expect(transcriptText).not.toContain("右对齐轻提示");
+    // lastFullOutput 不被替换。
+    expect((ctx as unknown as { lastFullOutput?: string }).lastFullOutput).toBe("已有正文：关键证据 X");
+    expect(view.notifications?.[0]?.text).toBe("右对齐轻提示");
   });
 });

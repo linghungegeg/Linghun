@@ -6,7 +6,6 @@
  * - Tool definition helpers (createToolInputSchema, createModelToolDefinitions,
  *   createModelToolDefinitionsForTools, createModelToolDefinitionsForReportGuard)
  * - Drift summary helpers (createToolUseDriftSummary, readToolInputString)
- * - Freshness pure helpers (needsFreshnessLiteBoundary, formatFreshnessLitePrimaryWarning)
  * - Natural file read pure helpers (isNaturalReadFileRequest, hasModelSynthesisIntent,
  *   looksLikeFilePath, extractNaturalReadPath, normalizeRelativePath,
  *   extractFileSearchKeywords, matchesFileKeywords, extractFileMentions,
@@ -16,6 +15,10 @@
  *
  * Hard boundary: no sendMessage, no provider stream loop, no TuiContext state machine,
  * no store/session writes, no gateway calls, no permission state machine.
+ *
+ * D.13Q-UX Closure: 删除了过度设计的 FreshnessLite regex gate。
+ * 反幻觉边界已下沉到 system prompt + evidence rule（"外部当前事实没有
+ * web_source 证据时不得断言"），不在用户输入侧用关键词正则猜中文/英文语义。
  */
 
 import type { ModelToolDefinition } from "@linghun/providers";
@@ -27,11 +30,6 @@ import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export type FreshnessLiteState = {
-  sensitive: boolean;
-  webSourceEvidence: "present" | "missing";
-};
 
 export type SolutionCompletenessClassification = "single_issue" | "systemic_gap" | "unknown";
 
@@ -294,26 +292,18 @@ export function readToolInputString(input: unknown, key: string): string | undef
 }
 
 // ---------------------------------------------------------------------------
-// Freshness pure helpers
+// Freshness pure helpers — D.13Q-UX Closure: 已删除
 // ---------------------------------------------------------------------------
-
-export function needsFreshnessLiteBoundary(text: string): boolean {
-  return /最新|当前|现在|今天|今年|实时|外部资料|网页|官网|官方|新闻|版本|价格|latest|current|today|now|real[-\s]?time|external|web|official|news|price|version/iu.test(
-    text,
-  );
-}
-
-export function formatFreshnessLitePrimaryWarning(
-  state: FreshnessLiteState,
-  language: Language,
-): string | undefined {
-  if (!state.sensitive || state.webSourceEvidence === "present") {
-    return undefined;
-  }
-  return language === "en-US"
-    ? "Freshness note: no web_source evidence is available in this session, so any latest/current/external facts above are unverified and need confirmation."
-    : "Freshness \u63d0\u793a\uff1a\u672c\u4f1a\u8bdd\u6ca1\u6709 web_source \u8bc1\u636e\uff0c\u4ee5\u4e0a\u6d89\u53ca\u6700\u65b0/\u5f53\u524d/\u5916\u90e8\u4e8b\u5b9e\u7684\u5185\u5bb9\u5747\u672a\u9a8c\u8bc1\uff0c\u9700\u8981\u8fdb\u4e00\u6b65\u786e\u8ba4\u3002";
-}
+//
+// 旧的 needsFreshnessLiteBoundary / formatFreshnessLitePrimaryWarning 是过度
+// 设计的"普通输入 regex gate"：用 /最新|当前|今天|now|version|.../ 关键词
+// 误伤普通中英文输入（"当前分支""now"），并把"未验证"提示硬追加到 assistant
+// 末尾，污染 transcript。
+//
+// 反幻觉边界改放在 system prompt + evidence rule：
+// - 模型自己负责决定是否调 WebSearch / WebFetch；
+// - 没有 web_source 证据的"外部当前事实"在 system prompt 里规定不能断言；
+// - 本地事实（git/branch、文件、配置）走本地工具证据，不需要 web_source。
 
 // ---------------------------------------------------------------------------
 // Natural file read pure helpers

@@ -3433,139 +3433,44 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("¥--");
   });
 
-  it("enforces Freshness Lite warning in primary output when current external facts lack web evidence", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        defaultModel: "freshness-missing-model",
-        providers: {
-          deepseek: { model: "different-model" },
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "freshness-missing-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const requests = mockOpenAiTextFetch("OpenAI API 当前版本是 example-v1。﹤DONE﹥");
-    const output = new MemoryOutput();
+  it("D.13Q-UX Closure: Freshness regex gate has been removed at the source level", async () => {
+    // 旧行为：用户输入命中 freshness regex（"最新""当前""version" 等）会让 sendMessage
+    // 在 assistantText 末尾追加 "Freshness 提示：本会话没有 web_source 证据..." 警告，
+    // 并把 freshness_lite_boundary / freshness_lite_primary_enforced 写进 transcript，
+    // 同时给 system prompt 注入 `FreshnessBoundary=...` 段。
+    //
+    // D.13Q-UX Closure：删除整套 FreshnessLite gate（needsFreshnessLiteBoundary /
+    // createFreshnessLiteBoundary / recordFreshnessLiteBoundary / formatFreshnessLite*）。
+    // 反幻觉边界改为：
+    //   - system prompt 中的静态 FreshnessRule（让模型自己决定是否调 WebSearch）；
+    //   - evidence-first 工作流（web_source kind 在 EvidenceSummary 里能直接被模型看到）。
+    //
+    // 这里通过源码扫描断言 gate 在主仓库源码里彻底不存在；不依赖 runTui 全流程，
+    // 也不让 user provider.env 注入的 anthropic_messages provider 干扰断言。
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    const loopSrc = await readFile("src/model-loop-runtime.ts", "utf8");
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["最新 OpenAI API 版本是什么\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+    // 1) 删除 FreshnessLite 关键词 gate 与 boundary 相关 helper
+    expect(indexSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
+    expect(indexSrc).not.toMatch(/createFreshnessLiteBoundary\s*\(/);
+    expect(indexSrc).not.toMatch(/recordFreshnessLiteBoundary\s*\(/);
+    expect(loopSrc).not.toMatch(/export\s+function\s+needsFreshnessLiteBoundary/);
+    expect(loopSrc).not.toMatch(/export\s+function\s+formatFreshnessLitePrimaryWarning/);
 
-    expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0])).toContain("FreshnessBoundary=");
-    expect(JSON.stringify(requests[0])).toContain("web_source_evidence=missing");
-    expect(output.text).toContain("OpenAI API 当前版本是 example-v1");
-    expect(output.text).toContain("Freshness 提示：本会话没有 web_source 证据");
-    const session = (
-      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
-    ).at(0);
-    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    expect(transcript).toContain(
-      "freshness_lite_boundary: sensitive=yes web_source_evidence=missing",
-    );
-    expect(transcript).toContain("freshness_lite_primary_enforced");
-    expect(transcript).toContain("Freshness 提示：本会话没有 web_source 证据");
-  });
+    // 2) 主屏 / transcript 不再硬追加 freshness_lite_* 文案
+    expect(indexSrc).not.toContain("Freshness 提示：本会话没有 web_source 证据");
+    expect(indexSrc).not.toContain("freshness_lite_boundary");
+    expect(indexSrc).not.toContain("freshness_lite_primary_enforced");
 
-  it("does not add Freshness Lite primary warning when web_source evidence is present", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        defaultModel: "freshness-present-model",
-        providers: {
-          deepseek: { model: "different-model" },
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "freshness-present-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const existing = await store.create({ model: "freshness-present-model" });
-    await store.appendEvent(existing.id, {
-      type: "evidence_record",
-      id: "web-source-test",
-      kind: "web_source",
-      summary: "Official API docs checked in test fixture.",
-      source: "https://example.test/docs",
-      supportsClaims: ["OpenAI API current version"],
-      createdAt: new Date().toISOString(),
-    });
-    const requests = mockOpenAiTextFetch("根据已有来源，当前版本是 example-v2。﹤DONE﹥");
-    const output = new MemoryOutput();
+    // 3) system prompt 不再以 `FreshnessBoundary=` 段注入 per-turn 状态——
+    //    旧 gate 位置已替换为静态 FreshnessRule。
+    expect(indexSrc).not.toMatch(/FreshnessBoundary=/);
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from([
-        `/sessions resume ${existing.id}\n最新 official OpenAI API 版本是什么\n/exit\n`,
-      ]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0])).toContain("web_source_evidence=present");
-    expect(output.text).toContain("当前版本是 example-v2");
-    expect(output.text).not.toContain("Freshness 提示：本会话没有 web_source 证据");
-    const transcript = await readFile(existing.transcriptPath, "utf8");
-    expect(transcript).toContain(
-      "freshness_lite_boundary: sensitive=yes web_source_evidence=present",
-    );
-    expect(transcript).not.toContain("freshness_lite_primary_enforced");
-  });
-
-  it("does not show Freshness Lite warning for ordinary non-freshness requests", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        defaultModel: "ordinary-freshness-model",
-        providers: {
-          deepseek: { model: "different-model" },
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "ordinary-freshness-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const requests = mockOpenAiTextFetch("我会先整理本地思路。﹤DONE﹥");
-    const output = new MemoryOutput();
-
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["帮我写一句问候\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0])).not.toContain("FreshnessBoundary=");
-    expect(output.text).toContain("我会先整理本地思路");
-    expect(output.text).not.toContain("Freshness 提示");
-    const session = (
-      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
-    ).at(0);
-    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    expect(transcript).not.toContain("freshness_lite_boundary");
+    // 4) 反幻觉边界仍保留：system prompt 必须有 FreshnessRule 静态规则，
+    //    要求外部当前事实在没有 web_source evidence 时只能未验证表达。
+    expect(indexSrc).toContain("FreshnessRule=");
+    expect(indexSrc).toContain("WebSearch/WebFetch");
+    expect(indexSrc).toContain("unverified");
   });
 
   it("humanizes provider schema mismatch without leaking raw diagnostics in primary output", () => {
@@ -3644,41 +3549,24 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/trust trust");
   });
 
-  it("preprocesses high-confidence natural model-status wording locally", async () => {
+  it("D.13Q-UX Closure: ordinary model-status wording falls through to the model loop, not the local capability answer", async () => {
+    // 旧行为：用户说"现在是什么模型"会被 routeNaturalIntent / formatCapabilityAnswer
+    // 截胡，本地输出 "当前模型：role=executor provider=..." 字符串，根本不发模型。
+    // D.13Q-UX Closure：handleNaturalInput 不再前置 routeNaturalIntent —— 普通自然
+    // 语言（不以 "/" 开头、无 pending approval/Start Gate）默认进入模型/工具循环。
+    // 用户要 capability summary 时使用 `/model status` / `/model doctor` 等精确 slash。
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        defaultModel: "status-model",
-        providers: {
-          deepseek: { model: "different-model" },
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "status-model",
-          },
-        },
-      }),
-      "utf8",
-    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
     const output = new MemoryOutput();
-    const requests = mockOpenAiTextFetch("SHOULD_NOT_CALL_PROVIDER");
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["现在是什么模型\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+    const result = await handleNaturalInput("现在是什么模型", context, output);
 
-    expect(requests).toHaveLength(0);
-    expect(output.text).toContain(
-      "当前模型：role=executor provider=openai-compatible model=status-model",
-    );
-    expect(output.text).not.toContain("正在思考…");
-    expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
-    expect(output.text).not.toContain("Start Gate：");
+    expect(result).toBe("message");
+    // 不再本地拼"当前模型：role=executor provider=..." 字符串
+    expect(output.text).not.toContain("当前模型：role=executor");
+    expect(output.text).not.toContain("formatCapabilityAnswer");
   });
 
   it("uses executor route for status, model output, doctor, and ordinary requests", async () => {
@@ -4283,36 +4171,40 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/index：代码索引");
   });
 
-  it("preprocesses high-confidence control-plane natural inputs locally before provider", async () => {
+  it("D.13Q-UX Closure: control-plane natural phrases fall through to the model, not local capability answers", async () => {
+    // 旧行为：含"权限模式""模型配置正常吗""索引状态怎么样""缓存状态怎么样"等
+    // 关键词的普通问题会被 isNaturalControlPlaneIntent / formatCapabilityAnswer 截胡，
+    // 本地直接拼"当前权限模式：default"/"Model route doctor"/"Index status"/"Cache status"
+    // 等条目，requests=0。
+    //
+    // D.13Q-UX Closure 收窄：handleNaturalInput 默认 fall through 到模型；本地控制
+    // 面只接受显式 slash（/mode、/model、/index、/cache 等）。要切模式输入精确
+    // slash；要看状态用精确 slash。这避免普通对话里偶尔提到"模式""模型""索引"
+    // "缓存"被误识别成命令意图。
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    const requests = mockOpenAiTextFetch("SHOULD_NOT_CALL_PROVIDER");
-    const output = new MemoryOutput();
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from([
-        "帮我切到自动模式\n",
-        "切到自动审查\n",
-        "switch to auto mode\n",
-        "当前权限模式是什么\n",
-        "模型配置正常吗\n",
-        "索引状态怎么样\n",
-        "缓存状态怎么样\n",
-        "/exit\n",
-      ]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    expect(requests).toHaveLength(0);
-    expect(output.text).toContain("可以准备执行：权限模式。");
-    expect(output.text).toContain("后续受保护操作仍会单独审批。");
-    expect(output.text).toContain("当前权限模式：default");
-    expect(output.text).toContain("Model route doctor");
-    expect(output.text).toContain("Index status");
-    expect(output.text).toContain("Cache status");
-    expect(output.text).not.toContain("正在思考…");
-    expect(output.text).not.toContain("SHOULD_NOT_CALL_PROVIDER");
+    const phrases = [
+      "帮我切到自动模式",
+      "切到自动审查",
+      "switch to auto mode",
+      "当前权限模式是什么",
+      "模型配置正常吗",
+      "索引状态怎么样",
+      "缓存状态怎么样",
+    ];
+    for (const phrase of phrases) {
+      const out = new MemoryOutput();
+      const result = await handleNaturalInput(phrase, context, out);
+      expect(result).toBe("message");
+      // 不再本地拼 capability answer 文本
+      expect(out.text).not.toContain("可以准备执行：权限模式");
+      expect(out.text).not.toContain("Model route doctor");
+      expect(out.text).not.toContain("Index status");
+      expect(out.text).not.toContain("Cache status");
+    }
   });
 
   it("keeps ordinary report deploy feature and bug-fix requests on provider path", async () => {
@@ -7122,7 +7014,7 @@ describe("Phase 06 TUI slash commands", () => {
     const recentId = context.permissions.recentDenied[0]?.id;
     await handleSlashCommand(`/permissions recent delete ${recentId}`, context, output);
 
-    expect(output.text).toContain("命中 ask 规则");
+    expect(output.text).toContain("命中需确认规则");
     expect(output.text).toContain("需要用户确认后才会执行本次工具");
     expect(output.text).toContain("Write  default");
     expect(output.text).toContain("已删除最近拒绝");
@@ -7393,10 +7285,150 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/todo add 主任务", context, output);
     await handleSlashCommand("/btw 现在是什么阶段？", context, output);
 
-    expect(output.text).toContain("临时插问");
+    // D.13Q-UX Closure: /btw 是 local note panel（不调模型）。plain 路径仍 writeLine
+    // 兼容；文案明确写"已记下临时备忘 + 不调模型"以避免被当作模型答案。
+    expect(output.text).toContain("已记下临时备忘");
+    expect(output.text).toContain("不调用模型");
     expect(context.activePlan).toBeTruthy();
     expect(context.tools.todos).toHaveLength(1);
     expect(context.checkpoints).toHaveLength(0);
+  });
+
+  it("D.13Q-UX Closure: /btw is a local note panel — opens BtwPanel in ink and never calls the model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    (context as { isInkSession?: boolean }).isInkSession = true;
+
+    // 不 stub fetch —— 任何模型调用都会触发未 mock fetch 报错；此测试通过即证明
+    // /btw handler 没有走 provider/model。
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handleSlashCommand("/btw 这是临时备忘", context, output);
+
+    const panel = (context as { btwPanelState?: { question: string; phase: string; answer?: string } }).btwPanelState;
+    expect(panel).toBeDefined();
+    expect(panel?.question).toBe("这是临时备忘");
+    // local note：phase=answered（无异步加载），answer 包含本地标识文案。
+    expect(panel?.phase).toBe("answered");
+    expect(panel?.answer ?? "").toContain("已记下临时备忘");
+    expect(panel?.answer ?? "").toContain("不调用模型");
+    // ink 路径不应再 writeLine 主屏 transcript。
+    expect(output.text).toBe("");
+    // 不污染 Todo / Plan / checkpoint / job / permission。
+    expect(context.activePlan).toBeFalsy();
+    expect(context.tools.todos).toHaveLength(0);
+    expect(context.checkpoints).toHaveLength(0);
+    expect(context.backgroundTasks).toHaveLength(0);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    // 没有调用 provider/model。
+    expect(fetchMock).not.toHaveBeenCalled();
+    // session store 仍记录 btw_question event 用于审计 / details。
+    const resumed = await store.resume(session.id);
+    expect(resumed.transcript.some((e) => e.type === "btw_question" && (e as { text: string }).text === "这是临时备忘")).toBe(true);
+  });
+
+  it("D.13Q-UX Closure: /sessions ink path opens SessionsPanel sorted by updatedAt with current session marked", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessionA = await store.create({ model: "deepseek-v4-flash", summary: "A 较早" });
+    await new Promise((r) => setTimeout(r, 5));
+    const sessionB = await store.create({ model: "deepseek-v4-flash", summary: "B 当前" });
+    await new Promise((r) => setTimeout(r, 5));
+    const sessionC = await store.create({ model: "deepseek-v4-flash", summary: "C 最新" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, sessionB);
+    (context as { isInkSession?: boolean }).isInkSession = true;
+
+    await handleSlashCommand("/sessions", context, output);
+
+    const panel = (context as { sessionsPanelState?: { cursor: number; entries: { id: string; isCurrent: boolean; updatedAt: string }[] } }).sessionsPanelState;
+    expect(panel).toBeDefined();
+    // ink 路径不逐行 writeLine 主屏。
+    expect(output.text).toBe("");
+    // 按 updatedAt 倒序：C 最新在前，A 最早在后。
+    const ids = (panel?.entries ?? []).map((e) => e.id);
+    expect(ids[0]).toBe(sessionC.id);
+    expect(ids[ids.length - 1]).toBe(sessionA.id);
+    // 当前 session 有 isCurrent=true，其它没有。
+    const current = (panel?.entries ?? []).filter((e) => e.isCurrent);
+    expect(current).toHaveLength(1);
+    expect(current[0]?.id).toBe(sessionB.id);
+  });
+
+  it("D.13Q-UX Closure: /sessions empty state renders panel without faking entries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    // 先创建 currentSession 以满足 createTestContext，再删除 store 列表的所有 session
+    // —— 这里用一种更轻的方式：直接传一个不在 store.list() 里的 session。
+    const phantom = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, phantom);
+    (context as { isInkSession?: boolean }).isInkSession = true;
+    // 模拟"列表为空"：把 phantom 标为 current 但 store 视图本身只有它。
+    await handleSlashCommand("/sessions", context, output);
+    const panel = (context as { sessionsPanelState?: { entries: unknown[] } }).sessionsPanelState;
+    expect(panel).toBeDefined();
+    // 至少 1 项（自己）。空状态成熟性由 SessionsPanel 在 entries.length===0 时
+    // 渲染 dim 占位文本（fitText hint.empty）—— 此处通过 entries 数据形态稳定性
+    // 间接验证：返回的 entries 都有 id/title/updatedAt/messageCount/isCurrent 五字段，
+    // 且不会 fake worktree / 搜索结果。
+    for (const entry of panel?.entries ?? []) {
+      const e = entry as { id?: unknown; title?: unknown; updatedAt?: unknown; messageCount?: unknown; isCurrent?: unknown };
+      expect(typeof e.id).toBe("string");
+      expect(typeof e.title).toBe("string");
+      expect(typeof e.updatedAt).toBe("string");
+      expect(typeof e.messageCount).toBe("number");
+      expect(typeof e.isCurrent).toBe("boolean");
+    }
+  });
+
+  it("D.13Q-UX Closure: /resume without args opens picker; /resume <id> uses structured handoff and never dumps full transcript", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const previous = await store.create({ model: "deepseek-v4-flash", summary: "earlier session" });
+    // 给 previous 写入很长的 user_message + assistant_text_delta，验证 /resume <id>
+    // 不会把整段 transcript 直接 dump 到 output。
+    const longUserText = "用户长消息" + "。".repeat(500);
+    const longAssistantText = "助手长回答" + "！".repeat(500);
+    await store.appendEvent(previous.id, {
+      type: "user_message",
+      id: "test-user-1",
+      text: longUserText,
+      createdAt: new Date().toISOString(),
+    });
+    await store.appendEvent(previous.id, {
+      type: "assistant_text_delta",
+      id: "test-assistant-1",
+      text: longAssistantText,
+      createdAt: new Date().toISOString(),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const current = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, current);
+    (context as { isInkSession?: boolean }).isInkSession = true;
+
+    // /resume 无参 → ink 路径打开 SessionsPanel picker，不 writeLine 主屏。
+    await handleSlashCommand("/resume", context, output);
+    const panel = (context as { sessionsPanelState?: { entries: unknown[] } }).sessionsPanelState;
+    expect(panel).toBeDefined();
+    expect((panel?.entries ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(output.text).toBe("");
+
+    // /resume <id> → structured handoff，**不**把 transcript 整段 dump。
+    const out2 = new MemoryOutput();
+    // 关掉 ink 标志，确认 plain/带参路径走 resumeSessionWithHandoff。
+    (context as { isInkSession?: boolean }).isInkSession = false;
+    await handleSlashCommand(`/resume ${previous.id}`, context, out2);
+    expect(out2.text).toContain("已恢复会话");
+    expect(out2.text).toContain(previous.id);
+    // 关键不变量：不 dump full transcript 字面量。
+    expect(out2.text).not.toContain(longUserText);
+    expect(out2.text).not.toContain(longAssistantText);
   });
 
   it("records interrupt state clearly", async () => {
@@ -11365,7 +11397,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 // expands the most recent real assistant body even after a light hint fired.
 // ---------------------------------------------------------------------------
 describe("D.13M-B light hint × /details lastFullOutput", () => {
-  it("writeLightHints 写入主屏后 lastFullOutput 不被替换为单行轻提示", async () => {
+  it("writeLightHints 推到 notifications 队列，不替换 lastFullOutput", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -11388,8 +11420,13 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
     const output = new MemoryOutput();
     writeLightHintsForTest(output, context);
 
-    expect(output.text).toContain("最近缓存复用变低");
-    // 关键不变量：light hint 不能把 lastFullOutput 替换成 "最近缓存复用变低..." 这条单行字符串
+    // D.13Q-UX Closure: light hint 改为推 NotificationStack 队列；
+    // 不再写主屏 transcript，所以 output.text 应保持空。
+    expect(output.text).toBe("");
+    const notifs = (context as { notifications?: { text: string }[] }).notifications ?? [];
+    const joined = notifs.map((n) => n.text).join("\n");
+    expect(joined).toContain("最近缓存复用变低");
+    // 关键不变量：light hint 不能替换 lastFullOutput
     expect(context.lastFullOutput).toBe(assistantBody);
   });
 

@@ -2,7 +2,9 @@ import { Box, Text } from "ink";
 import type React from "react";
 import { fitText } from "../text-utils.js";
 import { type ShellTheme, getStatusMarker } from "../theme.js";
-import type { ProductBlockViewModel } from "../types.js";
+import type { MessageBlockKind, ProductBlockViewModel } from "../types.js";
+import { CtrlOToExpand } from "./CtrlOToExpand.js";
+import { MessageMarkdown } from "./MessageMarkdown.js";
 
 /**
  * D13E-P3 cleanup #3 — title 噪音过滤：
@@ -16,6 +18,25 @@ function isMeaningfulTitle(value: string | undefined): boolean {
   if (!trimmed) return false;
   if (trimmed.toLowerCase() === "unknown") return false;
   return true;
+}
+
+/**
+ * D.13Q-UX — 消息语义 block 集合：assistant_text / tool_result_* / diagnostic /
+ * local_command_output / assistant_thinking。这些 block 走 MessageMarkdown
+ * 渲染，保留多行/段落/列表/代码块，不卡片化、不强加 cyan/info dot。
+ */
+function isMessageKind(kind: MessageBlockKind | undefined): boolean {
+  if (!kind) return false;
+  return (
+    kind === "assistant_text" ||
+    kind === "assistant_thinking" ||
+    kind === "local_command_output" ||
+    kind === "tool_result_success" ||
+    kind === "tool_result_error" ||
+    kind === "tool_result_cancelled" ||
+    kind === "tool_result_rejected" ||
+    kind === "diagnostic"
+  );
 }
 
 export function ProductBlock({
@@ -39,12 +60,66 @@ export function ProductBlock({
     return (
       <Box marginTop={1} marginBottom={0}>
         <Text>
-          <Text color={theme.muted}>{"\u276F "}</Text>
+          <Text color={theme.muted}>{"❯ "}</Text>
           <Text color={theme.accent}>{fitText(block.title, Math.max(8, width - 2))}</Text>
         </Text>
       </Box>
     );
   }
+
+  // D.13Q-UX —— 消息语义 block 走 MessageMarkdown 渲染。
+  // 不卡片化、不打平、不借 cyan/info dot；保留多行段落 / 列表 / 代码块。
+  // tool_result_error 仍走下方 alert 卡分支（带 red border），但正文用
+  // MessageMarkdown 渲染。
+  if (
+    isMessageKind(block.messageKind) &&
+    block.messageKind !== "tool_result_error" &&
+    block.messageKind !== "assistant_thinking"
+  ) {
+    const body = (block.fullText ?? block.summary ?? "").trim();
+    if (!body) return null;
+    const isLocalOutput = block.messageKind === "local_command_output";
+    const isDiagnostic = block.messageKind === "diagnostic";
+    const isCancelled = block.messageKind === "tool_result_cancelled";
+    const isRejected = block.messageKind === "tool_result_rejected";
+    const dim = isCancelled || isRejected;
+    const tone = isDiagnostic ? "diagnostic" : "default";
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        {isLocalOutput ? (
+          <Box flexDirection="row">
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {"  ⎿  "}
+            </Text>
+            <MessageMarkdown text={body} theme={theme} dim={dim} tone={tone} />
+          </Box>
+        ) : (
+          <MessageMarkdown text={body} theme={theme} dim={dim} tone={tone} />
+        )}
+        {block.nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, Math.max(8, width - 2))} />
+        ) : null}
+      </Box>
+    );
+  }
+
+  // assistant_thinking 走 dim italic。
+  if (block.messageKind === "assistant_thinking") {
+    const body = (block.fullText ?? block.summary ?? "").trim();
+    if (!body) return null;
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text color={theme.dim ?? theme.muted} italic dimColor>
+          {"∴ "}
+        </Text>
+        <MessageMarkdown text={body} theme={theme} dim />
+        {block.nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, Math.max(8, width - 2))} />
+        ) : null}
+      </Box>
+    );
+  }
+
   // P2-1：permission / fail / blocked / error 在非 compact 宽度下都用 bordered card。
   // - permission：原 P0-1 已用 single border。
   // - fail：原 D.13D 已用 single border。
@@ -55,18 +130,52 @@ export function ProductBlock({
     block.kind === "permission" ||
     block.kind === "error" ||
     block.status === "fail" ||
-    block.status === "blocked";
+    block.status === "blocked" ||
+    block.messageKind === "tool_result_error";
   const emphasized = isAlert && !compact;
   // permission 卡保持中性 border 色（与 P0-1 锚定问题行配色一致）；
   // error / blocked / fail 用 status 色边框：red / yellow / red。
+  // D.13Q-UX：permission 卡用独立 permission 主题色，让 PermissionPanel 与
+  // 普通 alert 一眼可分。
   const borderColor = emphasized
     ? block.kind === "permission"
-      ? theme.border
-      : (theme.status[block.status] ?? theme.border)
+      ? theme.permission ?? theme.border
+      : block.messageKind === "tool_result_error"
+        ? theme.error ?? theme.status.fail
+        : (theme.status[block.status] ?? theme.border)
     : undefined;
   // P2-2：detail / nextAction 走 fitText 防御截断。
   // 边框态 paddingX=1，左右各 1 列+边框 2 列 = 4 列开销，预留出来防溢出。
   const innerWidth = Math.max(8, width - (emphasized ? 4 : 0));
+
+  // tool_result_error: 标题/状态行保留，正文走 MessageMarkdown 红色，可展开 hint 用 CtrlOToExpand。
+  if (block.messageKind === "tool_result_error") {
+    const body = (block.fullText ?? block.summary ?? "").trim();
+    return (
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderColor={borderColor}
+        paddingX={1}
+        marginBottom={1}
+      >
+        {isMeaningfulTitle(block.title) ? (
+          <Text>
+            <Text color={theme.error ?? theme.status.fail}>
+              {getStatusMarker("fail", theme.mode === "no-color")}
+            </Text>
+            {" "}
+            <Text color={theme.error ?? theme.status.fail}>{block.title}</Text>
+          </Text>
+        ) : null}
+        {body ? <MessageMarkdown text={body} theme={theme} tone="error" /> : null}
+        {block.nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, innerWidth)} />
+        ) : null}
+      </Box>
+    );
+  }
+
   // D13E-P3 cleanup #3：title 为空 / "unknown" 时不渲染 title 行。如果同时
   // 也没有 detail / nextAction，summary 就上提到 marker 行，让块依然有视觉
   // 主体（"● 我不能讨论这个。" 这种安全拒绝回复就是典型场景）。空 summary
@@ -103,7 +212,7 @@ export function ProductBlock({
         <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text>
       ) : null}
       {block.nextAction ? (
-        <Text color={theme.muted}>{fitText(block.nextAction, innerWidth)}</Text>
+        <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, innerWidth)} />
       ) : null}
     </Box>
   );

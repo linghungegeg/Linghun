@@ -239,6 +239,61 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
     if (block.kind === "command") {
       return [`${dim("\u276F", noColor)} ${colorCyan(block.title, noColor)}`];
     }
+
+    // D.13Q-UX \u2014\u2014 \u6D88\u606F\u8BED\u4E49 block \u5728 plain \u6A21\u5F0F\u6309\u591A\u884C\u539F\u6837\u8F93\u51FA\u3002
+    // assistant_text \u9ED8\u8BA4\u8272\uFF08\u4E0D dim\uFF09\uFF0C\u4FDD\u7559\u6BB5\u843D\u4E0E\u5217\u8868\uFF1Btool_result_cancelled /
+    // tool_result_rejected \u6574\u4F53 dim\uFF1Bdiagnostic \u7528 cyan\uFF1Blocal_command_output
+    // \u7ED9\u6BCF\u884C\u52A0 \u23BF \u524D\u7F00\uFF08dim\uFF09\u540E\u9ED8\u8BA4\u8272\u3002
+    const messageKind = block.messageKind;
+    if (
+      messageKind &&
+      messageKind !== "tool_result_error" &&
+      messageKind !== "assistant_thinking"
+    ) {
+      const body = (block.fullText ?? block.summary ?? "").trim();
+      if (!body) return [];
+      const lines = body.split("\n");
+      const dimAll =
+        messageKind === "tool_result_cancelled" || messageKind === "tool_result_rejected";
+      const isDiagnostic = messageKind === "diagnostic";
+      const isLocalOutput = messageKind === "local_command_output";
+      const out: string[] = lines.map((line) => {
+        if (isLocalOutput) {
+          return `${dim("  \u23BF  ", noColor)}${line}`;
+        }
+        if (dimAll) return dim(line, noColor);
+        if (isDiagnostic) return colorCyan(line, noColor);
+        return line;
+      });
+      if (block.nextAction) {
+        out.push(`  ${dim(block.nextAction, noColor)}`);
+      }
+      return out;
+    }
+
+    if (messageKind === "assistant_thinking") {
+      const body = (block.fullText ?? block.summary ?? "").trim();
+      if (!body) return [];
+      return [`${dim("\u2234 ", noColor)}${dim(body, noColor)}`];
+    }
+
+    if (messageKind === "tool_result_error") {
+      const body = (block.fullText ?? block.summary ?? "").trim();
+      const out: string[] = [];
+      const failMarker = getStatusMarker("fail", noColor);
+      const coloredFailMarker = colorStatus(failMarker, "fail", noColor);
+      if (block.title && block.title.trim().length > 0) {
+        out.push(`${coloredFailMarker} ${colorRed(block.title, noColor)}`);
+      } else {
+        out.push(coloredFailMarker);
+      }
+      if (body) {
+        for (const line of body.split("\n")) out.push(colorRed(line, noColor));
+      }
+      if (block.nextAction) out.push(`  ${dim(block.nextAction, noColor)}`);
+      return out;
+    }
+
     const marker = getStatusMarker(block.status, noColor);
     const coloredMarker = colorStatus(marker, block.status, noColor);
     return [
