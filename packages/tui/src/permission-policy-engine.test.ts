@@ -363,3 +363,76 @@ describe("permission-policy-engine — D.13N-fix env-leak hardening", () => {
     expect(v.redactedSummary).not.toContain("sk-very-long-secret-value-1234567");
   });
 });
+
+describe("D.13R Git — stable redactedSummary for git mutating commands", () => {
+  it('git commit -m "msg" → redactedSummary 稳定为 "git commit"', () => {
+    const a = classifyToolRequest(bash('git commit -m "fix: foo"'));
+    const b = classifyToolRequest(bash("git commit -a --no-verify"));
+    expect(a.decision).toBe("require_permission");
+    expect(b.decision).toBe("require_permission");
+    expect(a.redactedSummary).toBe("git commit");
+    expect(b.redactedSummary).toBe("git commit");
+  });
+
+  it("git push origin main → 'git push'（args 不进 summary，allow_always 命中稳定）", () => {
+    const v = classifyToolRequest(bash("git push origin main"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git push");
+  });
+
+  it("git reset --hard HEAD~1 → 'git reset'", () => {
+    const v = classifyToolRequest(bash("git reset --hard HEAD~1"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git reset");
+  });
+
+  it("git checkout -b feature → 'git checkout'", () => {
+    const v = classifyToolRequest(bash("git checkout -b feature"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git checkout");
+  });
+
+  it("git worktree add ../wt feature → 'git worktree add'（保留 verb 让用户授权时看到真实意图）", () => {
+    const v = classifyToolRequest(bash("git worktree add ../wt feature"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git worktree add");
+  });
+
+  it("git worktree remove ../wt --force → 'git worktree remove'", () => {
+    const v = classifyToolRequest(bash("git worktree remove ../wt --force"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git worktree remove");
+  });
+
+  it("git stash pop → 'git stash pop'", () => {
+    const v = classifyToolRequest(bash("git stash pop"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git stash pop");
+  });
+
+  it("git config user.name 'X' (mutating) → 'git config'", () => {
+    const v = classifyToolRequest(bash('git config --add user.name "X"'));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toContain("git config");
+  });
+
+  it("git remote add origin URL → 'git remote add'", () => {
+    const v = classifyToolRequest(bash("git remote add origin https://example.com/r.git"));
+    expect(v.decision).toBe("require_permission");
+    expect(v.redactedSummary).toBe("git remote add");
+  });
+
+  it("git status / log / diff 等 readonly 子命令仍走 readonly，不弹权限", () => {
+    const status = classifyToolRequest(bash("git status"));
+    const log = classifyToolRequest(bash("git log -1"));
+    const diff = classifyToolRequest(bash("git diff HEAD"));
+    expect(status.decision).toBe("auto_allow_readonly");
+    expect(log.decision).toBe("auto_allow_readonly");
+    expect(diff.decision).toBe("auto_allow_readonly");
+  });
+
+  it("git worktree list 是 readonly", () => {
+    const v = classifyToolRequest(bash("git worktree list --porcelain"));
+    expect(v.decision).toBe("auto_allow_readonly");
+  });
+});

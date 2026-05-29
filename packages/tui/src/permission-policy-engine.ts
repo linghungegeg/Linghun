@@ -394,7 +394,6 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
       redactedSummary,
     };
   }
-
   if (containsBareSensitiveTokenInCommand(command)) {
     return {
       decision: "require_permission",
@@ -429,6 +428,15 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
   const head = tokens[0]?.toLowerCase() ?? "";
   const args = tokens.slice(1);
   const semantic = classifyBashHead(head, args);
+
+  // D.13R Git / Worktree / Stable Point Maturity Sweep — git 命令的 redactedSummary
+  // 用稳定的 "git <subcommand>" 形式覆盖原始命令字符串；这是 allow_always_tool 的
+  // 命中键，避免因为 -m / --no-edit / 文件路径等微小差异导致每次都重弹权限。
+  // 仅作用于 git，且只覆盖 require_permission 路径的 summary（readonly 路径不
+  // 需要持久化权限）。git status / log / diff 等 readonly 子命令仍走 readonly
+  // 路径，保持原 redactedSummary，让审计 log 留有可读信息。
+  const stableSummary = head === "git" ? buildStableGitSummary(args) : null;
+  const finalSummary = stableSummary ?? redactedSummary;
 
   if (semantic === "readonly") {
     if (PATH_READ_HEADS.has(head)) {
@@ -470,8 +478,36 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
     semantic,
     pathSafety: "unknown_path",
     reason: bashReasonFor(semantic, head),
-    redactedSummary,
+    redactedSummary: finalSummary,
   };
+}
+
+/**
+ * D.13R: 把 `git <sub> [args...]` 折叠成稳定的 redactedSummary，让
+ * allow_always_tool 持久化命中不被参数差异打散。返回 null 表示头不是 git，
+ * 调用方应回退到默认 redactedSummary。
+ *
+ * 例：
+ *   git commit -m "fix: foo"          → "git commit"
+ *   git commit -a --no-verify         → "git commit"
+ *   git worktree add ../wt feature    → "git worktree add"
+ *   git worktree remove ../wt --force → "git worktree remove"
+ *   git checkout -b feature           → "git checkout"
+ *   git push origin main              → "git push"
+ *   git reset --hard HEAD~1           → "git reset"
+ *
+ * 子命令清单与 classifyGitSubcommand 一致，保持权限语义和持久化键的对齐。
+ */
+function buildStableGitSummary(args: string[]): string {
+  const sub = args.find((a) => !a.startsWith("-"))?.toLowerCase() ?? "";
+  if (!sub) return "git";
+  // worktree / remote / stash / config 这类多动词子命令，把第二个非 flag token
+  // 也带上（"git worktree add" / "git stash pop"），这是用户授权时关心的真实意图。
+  if (sub === "worktree" || sub === "remote" || sub === "stash" || sub === "config") {
+    const verb = args.filter((a) => !a.startsWith("-"))[1]?.toLowerCase();
+    return verb ? `git ${sub} ${verb}` : `git ${sub}`;
+  }
+  return `git ${sub}`;
 }
 
 function bashReasonFor(semantic: SemanticClass, head: string): string {

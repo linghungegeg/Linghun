@@ -1365,7 +1365,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已写入项目级长期记忆");
     expect(output.text).toContain("memoryHash");
     expect(output.text).toContain("changedKeys: memoryHash");
-    expect(output.text).toContain("已创建分支会话");
+    // D.13R: 文案明确为"会话分支（session branch，不是 git 分支）"，避免与 git branch 混淆。
+    expect(output.text).toContain("已创建会话分支");
+    expect(output.text).toContain("session branch");
     expect(output.text).toContain("禁止事项");
   });
 
@@ -7070,7 +7072,8 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand(`/rewind restore ${checkpointId}`, context, output);
 
     expect(output.text).toContain("已创建 checkpoint");
-    expect(output.text).toContain("已恢复 checkpoint");
+    // D.13R: /rewind 文案明确为 Linghun snapshot checkpoint，不是 git reset。
+    expect(output.text).toContain("已恢复 Linghun snapshot checkpoint");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
   });
 

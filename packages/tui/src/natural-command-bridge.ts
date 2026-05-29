@@ -135,6 +135,11 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/sessions", capabilityId: "sessions", userVisible: true },
   { slash: "/resume", capabilityId: "resume", userVisible: true },
   { slash: "/branch", capabilityId: "branch", userVisible: true },
+  // D.13R Git Readiness — 只读发现层入口（commit/reset/checkout/worktree add/remove
+  // 仍由用户通过 Bash 工具走现有 permission-policy-engine 四档权限链）。
+  { slash: "/git", capabilityId: "git", userVisible: true },
+  { slash: "/worktree", capabilityId: "worktree", userVisible: true },
+  { slash: "/checkpoint", capabilityId: "checkpoint", userVisible: true },
   { slash: "/memory", capabilityId: "memory", userVisible: true },
   { slash: "/mode", capabilityId: "mode", userVisible: true },
   { slash: "/tab", capabilityId: "tab", userVisible: true },
@@ -610,6 +615,46 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "Use for checkpoints and restore risk explanation.",
     "dangerous",
   ),
+  // D.13R Git / Worktree / Stable Point Maturity Sweep — 三个只读发现入口。
+  // 与 /index、/cache 同级别 readonly 状态命令；不会执行任何 git mutating 操作。
+  // 真正的 git commit / reset / checkout / worktree add/remove 由用户通过 Bash
+  // 工具触发，走 permission-policy-engine 现有四档权限链（Bash + decidePermission）。
+  cap(
+    "git",
+    "/git",
+    ["git", "git status", "git stable", "git worktree", "稳定点", "stable point"],
+    "Git 状态",
+    "Git status",
+    "只读探测：当前 branch、clean/dirty、改动数、HEAD、稳定点建议、worktree 摘要。",
+    "Read-only probe: current branch, clean/dirty, change count, HEAD, stable-point hint, worktree summary.",
+    "查看 git 状态、决定要不要做稳定点提交。",
+    "Use to inspect git status and decide whether to record a stable point.",
+    "readonly",
+  ),
+  cap(
+    "worktree",
+    "/worktree",
+    ["worktree", "git worktree", "工作树"],
+    "Git Worktree",
+    "Git Worktree",
+    "只读列出 git worktree；add/remove/switch 不在此处执行（走 Bash + 权限）。",
+    "Read-only listing of git worktrees; add/remove/switch are not performed here (use Bash + permission).",
+    "查看当前 worktree、其他 worktree 列表。",
+    "Use to inspect current and sibling worktrees.",
+    "readonly",
+  ),
+  cap(
+    "checkpoint",
+    "/checkpoint",
+    ["checkpoint", "snapshot", "stable point", "稳定点", "checkpoint stable"],
+    "Linghun 快照",
+    "Linghun checkpoint",
+    "查看 Linghun snapshot checkpoint 列表与 stable-point 建议；不是 git reset。",
+    "Inspect Linghun snapshot checkpoints and stable-point hints; not a git reset.",
+    "查看 Linghun 内部快照或获取稳定点建议。",
+    "Use to inspect Linghun internal snapshots or get stable-point hints.",
+    "readonly",
+  ),
   cap(
     "btw",
     "/btw",
@@ -1007,6 +1052,11 @@ function inferCommandGroup(id: string, slash: string): CommandGroup {
       "claim-check",
       "hooks",
       "rewind",
+      // D.13R: git readiness 的三个只读发现入口归到 diagnostics 组，
+      // 与 /cache、/cache-log 同级（status 类只读命令）。
+      "git",
+      "worktree",
+      "checkpoint",
     ].includes(id)
   ) {
     return "diagnostics";

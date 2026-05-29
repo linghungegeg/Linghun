@@ -122,6 +122,16 @@ import {
 } from "./index-runtime.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
+  formatGitStatusDetails,
+  isGitRepository,
+  readGitStatus,
+  readWorktreeList,
+  suggestStablePoint,
+  type GitStatus,
+  type StablePointHint,
+  type WorktreeReport,
+} from "./git-runtime.js";
+import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
   formatBackgroundTask,
@@ -2492,6 +2502,22 @@ export async function handleSlashCommand(
   }
   if (command === "/branch") {
     await handleBranchCommand(rest, context, output);
+    return "handled";
+  }
+  // D.13R Git / Worktree / Stable Point — 只读探测面板。
+  // /git、/worktree、/checkpoint 默认显示状态摘要，不执行任何 mutating 操作。
+  // 真正的 git commit / reset / checkout / worktree add/remove 走 Bash 工具
+  // + permission-policy-engine 的现有四档权限链。
+  if (command === "/git") {
+    await handleGitCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/worktree") {
+    await handleWorktreeCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/checkpoint") {
+    await handleCheckpointCommand(rest, context, output);
     return "handled";
   }
   if (command === "/memory") {
@@ -6786,6 +6812,13 @@ async function handleRewindCommand(
       writeLine(output, t(context, "checkpointNone"));
       return;
     }
+    // D.13R: 明确这些是 Linghun snapshot checkpoint，不是 git rollback。
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Linghun snapshot checkpoints (in-memory file snapshots; not a git reset):"
+        : "Linghun snapshot checkpoint（内存文件快照，不是 git reset）：",
+    );
     writeLine(
       output,
       context.checkpoints
@@ -6830,7 +6863,12 @@ async function handleRewindCommand(
     checkpointId: checkpoint.id,
     createdAt: new Date().toISOString(),
   });
-  writeLine(output, `${t(context, "checkpointRestored")}：${checkpoint.id}`);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Linghun snapshot checkpoint restored (not a git operation): ${checkpoint.id}`
+      : `已恢复 Linghun snapshot checkpoint（不是 git reset）：${checkpoint.id}`,
+  );
   writeStatus(output, context);
 }
 
@@ -7320,7 +7358,7 @@ async function handleBranchCommand(
     packet: branchPacket,
     createdAt: new Date().toISOString(),
   });
-  writeLine(output, `已创建分支会话：${branch.id}`);
+  writeLine(output, `已创建会话分支（session branch，不是 git 分支）：${branch.id}`);
   writeLine(output, `来源 session：${parentSessionId}`);
   writeLine(output, `目的：${purpose}`);
   writeLine(
@@ -7333,6 +7371,305 @@ async function handleBranchCommand(
   refreshCacheFreshness(context);
   writeStatus(output, context);
 }
+
+/**
+ * D.13R Git / Worktree / Stable Point Maturity Sweep — 只读 git 状态面板。
+ *
+ * 路径：
+ *   /git, /git status     → 状态摘要（branch / clean-dirty / N changed / 最近 stable point / 下一步）
+ *   /git stable           → stable point 建议（只读，不自动 commit）
+ *   /git worktree         → worktree 列表（只读）
+ *   /git doctor           → 完整 details + diagnostics（同 status 但含 detailsText）
+ *
+ * 默认所有 git 子命令都走 CommandPanel，不污染 transcript。真正的 git mutating
+ * 操作（commit / reset / checkout / worktree add/remove / branch -D）由用户
+ * 通过 Bash 工具触发，走 permission-policy-engine 的现有四档权限链。
+ */
+async function handleGitCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = (args[0] ?? "status").toLowerCase();
+  if (action === "stable") {
+    await renderStablePointPanel(context, output);
+    return;
+  }
+  if (action === "worktree") {
+    await renderWorktreePanel(context, output);
+    return;
+  }
+  // status / doctor / 默认走 status 面板
+  await renderGitStatusPanel(context, output, action === "doctor");
+}
+
+async function handleWorktreeCommand(
+  _args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  await renderWorktreePanel(context, output);
+}
+
+async function handleCheckpointCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = (args[0] ?? "list").toLowerCase();
+  if (action === "stable") {
+    await renderStablePointPanel(context, output);
+    return;
+  }
+  // 默认 list 走原 /rewind list 行为，但用 CommandPanel 包装。
+  await renderCheckpointPanel(context, output);
+}
+
+async function renderGitStatusPanel(
+  context: TuiContext,
+  output: Writable,
+  expanded: boolean,
+): Promise<void> {
+  const isEn = context.language === "en-US";
+  const status: GitStatus = await readGitStatus(context.projectPath);
+  const worktrees: WorktreeReport = await readWorktreeList(context.projectPath);
+  if (status.kind === "not_a_git_repo") {
+    showCommandPanel(context, output, {
+      title: "/git",
+      tone: "neutral",
+      summary: [isEn ? "Not a git repository." : "当前目录不是 git 仓库。"],
+      actions: [],
+    });
+    return;
+  }
+  if (status.kind === "git_unavailable") {
+    showCommandPanel(context, output, {
+      title: "/git",
+      tone: "warning",
+      summary: [
+        isEn
+          ? "git binary unavailable; status cannot be probed."
+          : "git 不可用，无法读取状态。",
+      ],
+      detailsText: status.error,
+    });
+    return;
+  }
+  const stable = suggestStablePoint(status);
+  const dirty = status.changedCount > 0 || status.untrackedCount > 0;
+  const summary: string[] = [
+    isEn
+      ? `Branch ${status.branch ?? "(detached)"}${status.upstream ? ` ↔ ${status.upstream}` : ""}${dirty ? " · dirty" : " · clean"}`
+      : `分支 ${status.branch ?? "（游离）"}${status.upstream ? ` ↔ ${status.upstream}` : ""}${dirty ? " · 有改动" : " · 干净"}`,
+  ];
+  if (status.headShort) {
+    summary.push(
+      isEn
+        ? `HEAD ${status.headShort}${status.headSubject ? `  ${status.headSubject}` : ""}`
+        : `HEAD ${status.headShort}${status.headSubject ? `  ${status.headSubject}` : ""}`,
+    );
+  }
+  if (dirty) {
+    summary.push(
+      isEn
+        ? `${status.changedCount} changed · ${status.untrackedCount} untracked`
+        : `已改动 ${status.changedCount} · 未跟踪 ${status.untrackedCount}`,
+    );
+  }
+  if (status.ahead > 0 || status.behind > 0) {
+    summary.push(
+      isEn
+        ? `ahead ${status.ahead} · behind ${status.behind}`
+        : `领先 ${status.ahead} · 落后 ${status.behind}`,
+    );
+  }
+  if (stable.recommended) {
+    summary.push(
+      isEn
+        ? `Stable point: ${stable.suggestedSubject}`
+        : `稳定点建议：${stable.suggestedSubject}`,
+    );
+  }
+  const actions: string[] = [];
+  if (dirty) actions.push("/git stable");
+  actions.push("/git worktree");
+  actions.push("/git doctor");
+  showCommandPanel(context, output, {
+    title: "/git",
+    tone: dirty ? "warning" : "neutral",
+    summary,
+    actions,
+    detailsText: formatGitStatusDetails(status, worktrees),
+    expanded: expanded ? true : undefined,
+  });
+}
+
+async function renderStablePointPanel(
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const isEn = context.language === "en-US";
+  const status = await readGitStatus(context.projectPath);
+  const stable: StablePointHint = suggestStablePoint(status);
+  if (status.kind !== "ok") {
+    showCommandPanel(context, output, {
+      title: "/git stable",
+      tone: status.kind === "git_unavailable" ? "warning" : "neutral",
+      summary: [stable.reason],
+    });
+    return;
+  }
+  if (!stable.recommended) {
+    showCommandPanel(context, output, {
+      title: "/git stable",
+      tone: "neutral",
+      summary: [stable.reason],
+      actions: status.untrackedCount > 0 ? ["/git status"] : [],
+      detailsText: formatGitStatusDetails(status, await readWorktreeList(context.projectPath)),
+    });
+    return;
+  }
+  const summary: string[] = [
+    isEn
+      ? `Recommended: commit ${stable.changedCount} file${stable.changedCount === 1 ? "" : "s"}.`
+      : `建议：将 ${stable.changedCount} 个改动提交为稳定点。`,
+    isEn
+      ? `Suggested subject: ${stable.suggestedSubject}`
+      : `建议提交标题：${stable.suggestedSubject}`,
+    isEn
+      ? "This is a read-only suggestion; Linghun will not auto-commit."
+      : "这是只读建议；Linghun 不会自动提交，需要您显式确认。",
+  ];
+  const detailsParts: string[] = [];
+  detailsParts.push(stable.reason);
+  if (stable.staged.length > 0) {
+    detailsParts.push("");
+    detailsParts.push(isEn ? "staged (preview):" : "已暂存（预览）：");
+    for (const path of stable.staged) detailsParts.push(`  + ${path}`);
+  }
+  if (stable.unstaged.length > 0) {
+    detailsParts.push("");
+    detailsParts.push(isEn ? "unstaged (preview):" : "未暂存（预览）：");
+    for (const path of stable.unstaged) detailsParts.push(`  M ${path}`);
+  }
+  if (stable.untracked.length > 0) {
+    detailsParts.push("");
+    detailsParts.push(isEn ? "untracked (preview):" : "未跟踪（预览）：");
+    for (const path of stable.untracked) detailsParts.push(`  ? ${path}`);
+  }
+  showCommandPanel(context, output, {
+    title: "/git stable",
+    tone: "neutral",
+    summary,
+    actions: ["/git status", "/git doctor"],
+    detailsText: detailsParts.join("\n"),
+  });
+}
+
+async function renderWorktreePanel(
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const isEn = context.language === "en-US";
+  if (!(await isGitRepository(context.projectPath))) {
+    showCommandPanel(context, output, {
+      title: "/worktree",
+      tone: "neutral",
+      summary: [isEn ? "Not a git repository." : "当前目录不是 git 仓库。"],
+    });
+    return;
+  }
+  const report = await readWorktreeList(context.projectPath);
+  if (report.kind !== "ok") {
+    showCommandPanel(context, output, {
+      title: "/worktree",
+      tone: "warning",
+      summary: [
+        isEn ? "git worktree list unavailable." : "无法读取 git worktree 列表。",
+      ],
+      detailsText: report.kind === "git_unavailable" ? report.error : "",
+    });
+    return;
+  }
+  const current = report.entries.find((entry) => entry.isCurrent);
+  const summary: string[] = [
+    isEn
+      ? `${report.entries.length} worktree${report.entries.length === 1 ? "" : "s"} · current: ${current?.branch ?? current?.path ?? "(unknown)"}`
+      : `共 ${report.entries.length} 个 worktree · 当前：${current?.branch ?? current?.path ?? "（未知）"}`,
+    isEn
+      ? "Read-only listing; Linghun does not add/remove/switch worktrees here."
+      : "只读列表；Linghun 不在此处执行 add/remove/switch（mutating 操作走权限面板）。",
+  ];
+  const sections = [
+    {
+      title: isEn ? "Worktrees" : "worktree 列表",
+      rows: report.entries.slice(0, 8).map((entry) => {
+        const marker = entry.isCurrent ? "*" : " ";
+        const branch = entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
+        const head = entry.head ? entry.head.slice(0, 7) : "-";
+        return `${marker} ${entry.path}  ${branch}  ${head}`;
+      }),
+    },
+  ];
+  showCommandPanel(context, output, {
+    title: "/worktree",
+    tone: "neutral",
+    summary,
+    sections,
+    detailsText: formatGitStatusDetails(await readGitStatus(context.projectPath), report),
+  });
+}
+
+async function renderCheckpointPanel(
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const isEn = context.language === "en-US";
+  const checkpoints = context.checkpoints ?? [];
+  if (checkpoints.length === 0) {
+    showCommandPanel(context, output, {
+      title: "/checkpoint",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? "No Linghun snapshot checkpoints yet."
+          : "暂无 Linghun snapshot checkpoint。",
+      ],
+      actions: ["/git stable"],
+    });
+    return;
+  }
+  const summary: string[] = [
+    isEn
+      ? `${checkpoints.length} snapshot checkpoint${checkpoints.length === 1 ? "" : "s"} (read-only).`
+      : `共 ${checkpoints.length} 个 snapshot checkpoint（只读 Linghun 内部快照）。`,
+  ];
+  const sections = [
+    {
+      title: isEn ? "Recent checkpoints" : "最近 checkpoint",
+      rows: checkpoints.slice(0, 8).map((checkpoint) => {
+        const reason = checkpoint.reason ?? "";
+        return `${checkpoint.id}  ${checkpoint.createdAt}  ${reason}`;
+      }),
+    },
+  ];
+  const detailsText = checkpoints
+    .slice(0, 5)
+    .map(
+      (checkpoint) =>
+        `${checkpoint.id}  ${checkpoint.createdAt}\n  reason: ${checkpoint.reason}\n  changedFiles: ${checkpoint.changedFiles.join(", ")}\n  restoreKind: ${checkpoint.restoreKind}`,
+    )
+    .join("\n\n");
+  showCommandPanel(context, output, {
+    title: "/checkpoint",
+    tone: "neutral",
+    summary,
+    sections,
+    actions: ["/rewind restore <id>", "/git stable"],
+    detailsText,
+  });
+}
+
 
 /**
  * D.13Q-UX Task Surface — /memory status / list 的降噪 CommandPanel 视图。

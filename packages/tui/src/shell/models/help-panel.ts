@@ -59,7 +59,10 @@ const ADVANCED_ENTRIES_ZH: HelpPanelEntry[] = [
   { slash: "/skills", description: "管理技能与启用状态" },
   { slash: "/workflows", description: "查看 workflow 状态与触发入口" },
   { slash: "/handoff", description: "导出会话 handoff packet" },
-  { slash: "/branch", description: "查看 / 切换 worktree 分支" },
+  { slash: "/branch", description: "基于 handoff 创建会话分支（不是 git 分支）" },
+  { slash: "/git", description: "查看 git 状态、稳定点建议、worktree 摘要（只读）" },
+  { slash: "/worktree", description: "查看 git worktree 列表（只读）" },
+  { slash: "/checkpoint", description: "查看 Linghun snapshot checkpoint / 稳定点建议" },
   { slash: "/cache", description: "查看 cache 使用情况与冷热分布" },
 ];
 
@@ -70,7 +73,10 @@ const ADVANCED_ENTRIES_EN: HelpPanelEntry[] = [
   { slash: "/skills", description: "Manage skills and their enabled state" },
   { slash: "/workflows", description: "Inspect workflow status and trigger entries" },
   { slash: "/handoff", description: "Export the session handoff packet" },
-  { slash: "/branch", description: "Inspect / switch worktree branches" },
+  { slash: "/branch", description: "Create a session branch from handoff (not a git branch)" },
+  { slash: "/git", description: "Show git status, stable-point hints, worktree summary (read-only)" },
+  { slash: "/worktree", description: "List git worktrees (read-only)" },
+  { slash: "/checkpoint", description: "Inspect Linghun snapshot checkpoints / stable points" },
   { slash: "/cache", description: "Inspect cache usage and hot / cold distribution" },
 ];
 

@@ -622,3 +622,78 @@ describe("Slice D.9: Long Task / Runner Resilience — Natural Language Route", 
     expect(devIntent.capability?.id).not.toBe("background");
   });
 });
+
+describe("D.13R Git Readiness — /git /worktree /checkpoint 在发现层可见", () => {
+  it("git / worktree / checkpoint 在 SLASH_COMMAND_REGISTRY 中可见", async () => {
+    const { SLASH_COMMAND_REGISTRY } = await import("./natural-command-bridge.js");
+    const slashes = SLASH_COMMAND_REGISTRY.filter((entry) => entry.userVisible).map(
+      (entry) => entry.slash,
+    );
+    expect(slashes).toContain("/git");
+    expect(slashes).toContain("/worktree");
+    expect(slashes).toContain("/checkpoint");
+  });
+
+  it("getCommandCapabilityCatalog 含 git / worktree / checkpoint，risk=readonly，userInvocable", () => {
+    const catalog = getCommandCapabilityCatalog();
+    for (const id of ["git", "worktree", "checkpoint"]) {
+      const cap = catalog.find((item) => item.id === id);
+      expect(cap, `${id} should be in catalog`).toBeDefined();
+      expect(cap?.risk).toBe("readonly");
+      expect(cap?.readonly).toBe(true);
+      expect(cap?.userInvocable).toBe(true);
+      // readonly 的命令也应当 modelInvocable=true（与 /index、/cache 同级别）。
+      expect(cap?.modelInvocable).toBe(true);
+      // diagnostics 组（与 /cache、/cache-log 一致）。
+      expect(cap?.group).toBe("diagnostics");
+    }
+  });
+
+  it("getSlashPrefixCandidates 能匹配到 /git / /worktree / /checkpoint 前缀", async () => {
+    const { getSlashPrefixCandidates } = await import("./slash-dispatch.js");
+    const giCandidates = getSlashPrefixCandidates("/gi").map((c) => c.slash);
+    expect(giCandidates).toContain("/git");
+
+    const wkCandidates = getSlashPrefixCandidates("/wo").map((c) => c.slash);
+    expect(wkCandidates).toContain("/worktree");
+
+    const ckCandidates = getSlashPrefixCandidates("/check").map((c) => c.slash);
+    expect(ckCandidates).toContain("/checkpoint");
+  });
+
+  it("/help all 文本含 /git / /worktree / /checkpoint 行", async () => {
+    const { formatCatalogHelp } = await import("./slash-dispatch.js");
+    const helpEn = formatCatalogHelp("en-US", "default", false, "all");
+    const helpZh = formatCatalogHelp("zh-CN", "default", false, "all");
+    expect(helpEn).toContain("/git");
+    expect(helpEn).toContain("/worktree");
+    expect(helpEn).toContain("/checkpoint");
+    expect(helpZh).toContain("/git");
+    expect(helpZh).toContain("/worktree");
+    expect(helpZh).toContain("/checkpoint");
+  });
+
+  it("/help advanced 文本含 /git / /worktree / /checkpoint 行", async () => {
+    const { formatCatalogHelp } = await import("./slash-dispatch.js");
+    const advEn = formatCatalogHelp("en-US", "default", false, "advanced");
+    const advZh = formatCatalogHelp("zh-CN", "default", false, "advanced");
+    expect(advEn).toContain("/git");
+    expect(advEn).toContain("/worktree");
+    expect(advEn).toContain("/checkpoint");
+    expect(advZh).toContain("/git");
+    expect(advZh).toContain("/worktree");
+    expect(advZh).toContain("/checkpoint");
+  });
+
+  it("HelpPanel advanced 分组含 /git / /worktree / /checkpoint", async () => {
+    const { buildHelpPanelData } = await import("./shell/models/help-panel.js");
+    const advancedZh = buildHelpPanelData("advanced", 0, "zh-CN");
+    const advancedEn = buildHelpPanelData("advanced", 0, "en-US");
+    const slashesZh = advancedZh.entries.map((entry) => entry.slash);
+    const slashesEn = advancedEn.entries.map((entry) => entry.slash);
+    for (const slash of ["/git", "/worktree", "/checkpoint"]) {
+      expect(slashesZh).toContain(slash);
+      expect(slashesEn).toContain(slash);
+    }
+  });
+});

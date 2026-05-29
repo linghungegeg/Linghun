@@ -426,7 +426,10 @@ function formatHelpAdvanced(language: Language): string {
       "  /agents show <id>     Show one agent detail",
       "  /agents cancel <id>   Interrupt one agent",
       "  /fork <type> <task>   Start explorer/planner/verifier/worker",
-      "  /rewind               List checkpoints",
+      "  /rewind               List Linghun snapshot checkpoints (not git reset)",
+      "  /git [status|stable|worktree|doctor]  Git status / stable-point hint / worktree (read-only)",
+      "  /worktree             List git worktrees (read-only)",
+      "  /checkpoint [list|stable]   Linghun snapshot checkpoints and stable-point hints",
       "  /verify [plan|last|smoke]  Generate or run verification",
       "  /compact              Compact long conversation context",
       "  /trust                Show or change workspace trust",
@@ -459,7 +462,10 @@ function formatHelpAdvanced(language: Language): string {
     "  /agents show <id>     查看单个 agent 详情",
     "  /agents cancel <id>   中断单个 agent",
     "  /fork <类型> <任务>    派生 explorer/planner/verifier/worker",
-    "  /rewind               列出 checkpoint",
+    "  /rewind               列出 Linghun snapshot checkpoint（不是 git reset）",
+    "  /git [status|stable|worktree|doctor]  Git 状态 / 稳定点建议 / worktree（只读）",
+    "  /worktree             查看 git worktree 列表（只读）",
+    "  /checkpoint [list|stable]   查看 Linghun snapshot checkpoint 与稳定点建议",
     "  /verify [plan|last|smoke]  生成或运行验证",
     "  /compact              压缩长对话上下文",
     "  /trust                查看或更改工作区信任",
@@ -490,6 +496,9 @@ function formatHelpDetails(language: Language): string {
       "  /sessions resume <id> Resume a session via structured handoff",
       "  /resume [id]          Resume latest session without full transcript",
       "  /branch [purpose]     Create a branch session from handoff",
+      "  /git [status|stable|worktree|doctor]  Git status / stable-point hint / worktree (read-only)",
+      "  /worktree             List git worktrees (read-only)",
+      "  /checkpoint [list|stable]   Linghun snapshot checkpoints / stable-point hints",
       "  /problems             Show local Problems Lite summary",
       "  /doctor               Show terminal readiness checklist",
       "  /doctor project       Project Doctor sections",
@@ -520,7 +529,10 @@ function formatHelpDetails(language: Language): string {
     "  /sessions             列出会话",
     "  /sessions resume <id> 基于结构化 handoff 恢复会话",
     "  /resume [id]          恢复最近会话，不注入完整历史",
-    "  /branch [目的]        基于 handoff 创建分支会话",
+    "  /branch [目的]        基于 handoff 创建分支会话（会话分支，不是 git 分支）",
+    "  /git [status|stable|worktree|doctor]  Git 状态 / 稳定点建议 / worktree（只读）",
+    "  /worktree             查看 git worktree 列表（只读）",
+    "  /checkpoint [list|stable]   查看 Linghun snapshot checkpoint / 稳定点建议",
     "  /problems             查看 Problems Lite 摘要",
     "  /doctor               查看就绪 checklist",
     "  /doctor project       Project Doctor 小节",
@@ -570,6 +582,9 @@ function formatHelp(language: Language): string {
   /sessions resume <id> Resume a session using structured handoff
   /resume [id]          Resume latest or selected session without full transcript injection
   /branch [purpose]     Create a normal branch session from structured handoff
+  /git [status|stable|worktree|doctor]  Git status / stable-point hint / worktree (read-only)
+  /worktree             List git worktrees (read-only)
+  /checkpoint [list|stable]   Linghun snapshot checkpoints and stable-point hints
   /memory               Show memory and handoff status
   /memory storage       Show sessions/memory/log/cache storage paths
   /memory review        Review candidate memories before accepting
@@ -669,6 +684,9 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /sessions resume <id> 基于结构化 handoff 恢复历史会话
   /resume [id]          恢复最近或指定会话，不注入完整历史
   /branch [目的]        基于结构化 handoff 创建普通分支会话
+  /git [status|stable|worktree|doctor]  Git 状态 / 稳定点建议 / worktree（只读）
+  /worktree             查看 git worktree 列表（只读）
+  /checkpoint [list|stable]   查看 Linghun snapshot checkpoint 与稳定点建议
   /memory               查看记忆与 handoff 状态
   /memory storage       查看会话/记忆/日志/cache 存储路径
   /memory review        审查候选记忆
