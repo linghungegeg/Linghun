@@ -1838,6 +1838,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   });
 
   it("fail/blocking output prioritized over normal output", () => {
+    // D.13Q-UX Real Smoke Fix v3：fail 块按 append 顺序保留，不再被推到顶；
+    // 限流只对 ephemeral 生效（cap=3），fail/keep 不计入 cap。
     const failBlock: ProductBlockViewModel = {
       id: "out-fail",
       kind: "error",
@@ -1858,7 +1860,14 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     });
     const outputBlocks = view.blocks.filter((b) => b.id.startsWith("out-"));
     expect(outputBlocks.find((b) => b.id === "out-fail")).toBeDefined();
-    expect(outputBlocks.length).toBeLessThanOrEqual(3);
+    // ephemeral cap=3，fail 不计入：1 fail + 最近 3 ephemeral = 4 块。
+    const ephemeralCount = outputBlocks.filter(
+      (b) => b.status !== "fail" && b.status !== "blocked" && !b.keep,
+    ).length;
+    expect(ephemeralCount).toBeLessThanOrEqual(3);
+    // out-1 应该被丢（最早 ephemeral 超出 cap），out-2/3/4 保留。
+    expect(outputBlocks.find((b) => b.id === "out-1")).toBeUndefined();
+    expect(outputBlocks.find((b) => b.id === "out-4")).toBeDefined();
   });
 
   it("normal output max 3 items", () => {
@@ -1913,12 +1922,16 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     );
     expect(multiLine.nextAction).toContain("Ctrl+O");
 
+    // D.13Q-UX Real Smoke Fix v3：含 "error / failed / 失败" 关键词的多行正文
+    // 不再被关键词扫描误标 fail。多行折叠仍挂 Ctrl+O，但走 assistant_text 渲染。
     const errorStack = createOutputBlock(
       "Error: request failed\n  at provider.send\n  at gateway.invoke",
       "zh-CN",
       "out-stack",
     );
-    expect(errorStack.status).toBe("fail");
+    expect(errorStack.status).toBe("info");
+    expect(errorStack.kind).toBe("details");
+    expect(errorStack.messageKind).toBe("assistant_text");
     expect(errorStack.nextAction).toContain("Ctrl+O");
   });
 
@@ -2086,10 +2099,20 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   });
 
   it("error output has Ctrl+O hint for full error", () => {
-    const block = createOutputBlock("error: something failed badly", "zh-CN", "out-err");
-    expect(block.status).toBe("fail");
-    expect(block.kind).toBe("error");
-    expect(block.nextAction).toContain("Ctrl+O");
+    // D.13Q-UX Real Smoke Fix v3：单行短正文（哪怕含 "error / failed"）不再被
+    // 关键词扫描标 fail，也不挂 Ctrl+O；只有真正可折叠（多行/单行明显超长）
+    // 的正文才挂 Ctrl+O。
+    const single = createOutputBlock("error: something failed badly", "zh-CN", "out-err");
+    expect(single.status).toBe("info");
+    expect(single.kind).toBe("details");
+    expect(single.nextAction).toBeUndefined();
+    const multi = createOutputBlock(
+      "error: build failed\n  at compile.ts:42\n  at runner.ts:17",
+      "zh-CN",
+      "out-err-multi",
+    );
+    expect(multi.status).toBe("info");
+    expect(multi.nextAction).toContain("Ctrl+O");
   });
 
   it("permission pending suppresses normal output", () => {
@@ -2184,7 +2207,17 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   });
 
   it("plain renderer Task shows fail/details hint", () => {
-    const block = createOutputBlock("error: crash", "zh-CN", "out-plain-err");
+    // D.13Q-UX Real Smoke Fix v3：fail 块由调用方显式构造，不再依赖关键词扫描。
+    // 多行 fail 正文才挂 Ctrl+O 错误展开 hint。
+    const block: ProductBlockViewModel = {
+      id: "out-plain-err",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      fullText: "exit 1\nstderr line A\nstderr line B",
+      messageKind: "tool_result_error",
+    };
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -2803,13 +2836,27 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
   });
 
   it("Task error/fail/blocked output blocks have distinct semantic status", () => {
-    const failBlock = createOutputBlock("error: compilation failed", "zh-CN", "out-fail");
-    expect(failBlock.status).toBe("fail");
-    expect(failBlock.kind).toBe("error");
+    // D.13Q-UX Real Smoke Fix v3：fail 不再由 createOutputBlock 关键词扫描决定。
+    // 普通正文（即使含 "error/failed"）一律 status=info；显式 fail 块由调用方
+    // （工具运行时 / 错误 reporter）传 status=fail 构造，并保留独立配色。
+    const single = createOutputBlock("error: compilation failed", "zh-CN", "out-fail");
+    expect(single.status).toBe("info");
+    expect(single.kind).toBe("details");
 
     const normalBlock = createOutputBlock("build succeeded", "zh-CN", "out-ok");
     expect(normalBlock.status).toBe("info");
     expect(normalBlock.kind).toBe("details");
+
+    // 真正的 fail 块由调用方显式构造。
+    const explicitFail: ProductBlockViewModel = {
+      id: "explicit-fail",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      messageKind: "tool_result_error",
+    };
+    expect(explicitFail.status).toBe("fail");
   });
 
   it("Task completed(partial) background does not display as PASS", () => {
@@ -3582,7 +3629,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(renderCount).toBeGreaterThanOrEqual(3);
   });
 
-  it("普通 writeLine 后再开 streaming block，writeLine 的 ephemeral splice 不会淘汰 keep streaming block", () => {
+  it("普通 writeLine 后再开 streaming block，writeLine 不再被 ephemeral splice 淘汰；keep streaming block 保留", () => {
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
 
@@ -3592,7 +3639,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("world");
     output.endAssistantStream();
 
-    // 2) 再写两条普通 writeLine（_write 路径），ephemeral splice 只保留最后一条
+    // 2) 再写两条普通 writeLine（_write 路径）
     output.write("first ephemeral line\n");
     output.write("second ephemeral line\n");
 
@@ -3600,10 +3647,12 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-2");
     expect(streamingBlock).toBeDefined();
     expect(streamingBlock?.fullText).toBe("hello world");
-    // 普通 ephemeral 只剩最后一条
+    // D.13Q-UX Real Smoke Fix v3：ShellBlockOutput 不再做 ephemeral splice，
+    // 两条 ephemeral 按 append 时间顺序保留；view-model 才负责 cap 限流。
     const ephemeralBlocks = blocks.filter((b) => !b.keep);
-    expect(ephemeralBlocks).toHaveLength(1);
-    expect(ephemeralBlocks[0]?.summary).toContain("second ephemeral line");
+    expect(ephemeralBlocks).toHaveLength(2);
+    expect(ephemeralBlocks[0]?.summary).toContain("first ephemeral line");
+    expect(ephemeralBlocks[1]?.summary).toContain("second ephemeral line");
   });
 
   it("appendAssistantDelta 在没有 active streaming block 时回退到 _write（不丢内容）", () => {
@@ -3712,10 +3761,15 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(block.fullText).toContain("第三行收尾");
   });
 
-  it("error 输出标记 messageKind=tool_result_error", () => {
+  it("D.13Q-UX Real Smoke Fix v3：含 error/failed 的普通正文不再误标 tool_result_error", () => {
+    // 旧 D.13Q v2 行为：createOutputBlock 用 /error|failed/ 关键词扫描整段正文，
+    // /mcp status 这类 diagnostic 文案也会被标红。v3 已经移除关键词扫描，
+    // 普通正文一律走 messageKind=assistant_text、status=info；真正的工具错误
+    // 由调用方显式构造 tool_result_error block。
     const block = createOutputBlock("error: something broke\nstack line A", "en-US", "out-err");
-    expect(block.messageKind).toBe("tool_result_error");
-    expect(block.status).toBe("fail");
+    expect(block.messageKind).toBe("assistant_text");
+    expect(block.status).toBe("info");
+    expect(block.kind).toBe("details");
   });
 
   it("assistant_text block 在 plain renderer 中保留多行（不打平到首行）", () => {
@@ -3832,5 +3886,413 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     // lastFullOutput 不被替换。
     expect((ctx as unknown as { lastFullOutput?: string }).lastFullOutput).toBe("已有正文：关键证据 X");
     expect(view.notifications?.[0]?.text).toBe("右对齐轻提示");
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — A. submitted thinking activity fallback", () => {
+  it("submitted=true 且 options.activity 缺省时合成 thinking fallback (zh-CN)", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      width: 80,
+      submitted: true,
+    });
+    expect(view.viewMode).toBe("pending");
+    expect(view.activity).toBeDefined();
+    expect(view.activity?.phase).toBe("thinking");
+    expect(view.activity?.text).toBe("正在思考…");
+  });
+
+  it("submitted=true en-US 合成 Thinking… fallback", () => {
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 80,
+      submitted: true,
+    });
+    expect(view.activity?.phase).toBe("thinking");
+    expect(view.activity?.text).toBe("Thinking…");
+  });
+
+  it("真实 activity（mapRequestActivityToView 输出）覆盖 submitted fallback", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      submitted: true,
+      activity: { phase: "tool_running", text: "正在运行 Bash…", toolName: "Bash" },
+    });
+    expect(view.activity?.phase).toBe("tool_running");
+    expect(view.activity?.text).toBe("正在运行 Bash…");
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — B. Composer task width", () => {
+  it("Composer 源码在 task/pending 模式必须用 taskComposerMaxWidth", async () => {
+    const fs = await import("node:fs");
+    const composerSource = fs.readFileSync(
+      join(SRC_ROOT, "shell/components/Composer.tsx"),
+      "utf8",
+    );
+    // 锚定源码规则：避免 ShellApp.TaskLayout 的 cw 与 Composer maxWidth 不一致导致 cursor drift。
+    expect(composerSource).toContain('view.viewMode === "task" || view.viewMode === "pending"');
+    expect(composerSource).toMatch(/taskComposerMaxWidth\(view\.width\)/);
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
+  it("submitted=true 时 view.composer.busy=true 且带 busyHint (zh-CN)", () => {
+    const view = createShellViewModel(createContext({ language: "zh-CN" }), {
+      width: 80,
+      submitted: true,
+    });
+    expect(view.composer.busy).toBe(true);
+    expect(view.composer.busyHint ?? "").toContain("正在处理");
+  });
+
+  it("activeAbortController 存在时 busy=true，即使 submitted=false", () => {
+    const ctx = createContext();
+    (ctx as { activeAbortController?: AbortController }).activeAbortController = new AbortController();
+    const view = createShellViewModel(ctx, { width: 80 });
+    expect(view.composer.busy).toBe(true);
+  });
+
+  it("空闲时 busy=false，busyHint=undefined", () => {
+    const view = createShellViewModel(createContext(), { width: 80 });
+    expect(view.composer.busy).toBe(false);
+    expect(view.composer.busyHint).toBeUndefined();
+  });
+
+  it("Composer 源码在 busy 时 Enter 不提交不清空，仅 showHintNotice", async () => {
+    const fs = await import("node:fs");
+    const composerSource = fs.readFileSync(
+      join(SRC_ROOT, "shell/components/Composer.tsx"),
+      "utf8",
+    );
+    expect(composerSource).toMatch(/view\.composer\.busy && !isSlashSubmit/);
+    expect(composerSource).toMatch(/showHintNotice\([\s\S]*?busyHint/);
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — F. permission 主屏降噪", () => {
+  it("permission view-model 仍持有 explanationLines，但主屏渲染层不展示", () => {
+    const ctx = createContext();
+    (ctx as unknown as { pendingLocalApproval?: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: { input: { command: "git status" } },
+    };
+    const permission = mapPendingApprovalToPermission(ctx);
+    expect(permission).toBeDefined();
+    // explanationLines 仍存在（详情通过 /details 路径展开）
+    expect((permission?.explanationLines ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("Composer 源码 PermissionControl 不再 map explanationLines 到主屏", async () => {
+    const fs = await import("node:fs");
+    const composerSource = fs.readFileSync(
+      join(SRC_ROOT, "shell/components/Composer.tsx"),
+      "utf8",
+    );
+    // 主屏 PermissionControl 不再渲染 explanationLines.map（除了 SlashSuggestions 等不相关 map）
+    // 锚定 Enter/Tab/Esc 提示出现在源码中
+    expect(composerSource).toMatch(/Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*Esc\s*取消/);
+    // 旧的 d 详情提示已替换
+    expect(composerSource).not.toMatch(/Esc\s*取消\s*·\s*d\s*查看详情/);
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — C. user transcript block factory", () => {
+  it("createUserTextBlock 产出 messageKind=user_text 的 keep transcript 行", async () => {
+    const presenterModule = await import("./models/command-transcript-presenter.js");
+    const block = presenterModule.createUserTextBlock(7, "  请帮我看下当前阶段任务  ");
+    expect(block.kind).toBe("command");
+    expect(block.messageKind).toBe("user_text");
+    expect(block.keep).toBe(true);
+    expect(block.title).toBe("请帮我看下当前阶段任务");
+    expect(block.id).toBe("usr:7");
+  });
+
+  it("createUserTextBlock 多行只保留 fullText，title 取首行避免撑爆主屏", async () => {
+    const presenterModule = await import("./models/command-transcript-presenter.js");
+    const block = presenterModule.createUserTextBlock(8, "第一行\n第二行\n第三行");
+    expect(block.title).toBe("第一行");
+    expect(block.fullText).toBe("第一行\n第二行\n第三行");
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v2 — E. permission-action 结构化事件", () => {
+  it("Composer.submitPermissionAction 不再用 PERMISSION_TEXT_MAP 走 submit 文本", async () => {
+    const fs = await import("node:fs");
+    const composerSource = fs.readFileSync(
+      join(SRC_ROOT, "shell/components/Composer.tsx"),
+      "utf8",
+    );
+    // PERMISSION_TEXT_MAP 已删除
+    expect(composerSource).not.toContain("PERMISSION_TEXT_MAP[id]");
+    // submitPermissionAction 派 permission-action 事件
+    expect(composerSource).toMatch(/type:\s*"permission-action"\s*,\s*actionId:\s*id/);
+  });
+});
+
+// ─── D.13Q-UX Real Smoke Fix v3 ──────────────────────────────────────────────
+// 1) transcript 严格按 append 时间顺序（fail / keep 不重排到旧消息上方）
+// 2) /mcp / diagnostic 文案不再被关键词扫描误伤为 fail
+// 3) Ctrl+O hint 只在真有可展开内容时出现
+// 4) provider 括号文案不混入用户消息渲染层
+describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
+  it("user → assistant → diagnostic → user → assistant 时间顺序保留", () => {
+    const userBlocks: ProductBlockViewModel[] = [
+      { id: "usr:1", kind: "command", status: "info", title: "你好", summary: "", keep: true, messageKind: "user_text" },
+      { id: "ai:1", kind: "details", status: "info", title: "", summary: "你好，需要做什么？", fullText: "你好，需要做什么？", keep: true, messageKind: "assistant_text" },
+      { id: "diag:1", kind: "details", status: "info", title: "", summary: "MCP status", fullText: "MCP status\n- enabled: yes", messageKind: "diagnostic" },
+      { id: "usr:2", kind: "command", status: "info", title: "再帮我跑一下", summary: "", keep: true, messageKind: "user_text" },
+      { id: "ai:2", kind: "details", status: "info", title: "", summary: "好的", fullText: "好的", keep: true, messageKind: "assistant_text" },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: userBlocks,
+    });
+    const ids = view.blocks.map((b) => b.id).filter((id) => id.startsWith("usr:") || id.startsWith("ai:") || id.startsWith("diag:"));
+    expect(ids).toEqual(["usr:1", "ai:1", "diag:1", "usr:2", "ai:2"]);
+  });
+
+  it("失败块不会被推到旧消息上方（按出现顺序保留）", () => {
+    const blocks: ProductBlockViewModel[] = [
+      { id: "usr:1", kind: "command", status: "info", title: "old user", summary: "", keep: true, messageKind: "user_text" },
+      { id: "ai:1", kind: "details", status: "info", title: "", summary: "old assistant", fullText: "old assistant", keep: true, messageKind: "assistant_text" },
+      { id: "fail:1", kind: "error", status: "fail", title: "Bash failed", summary: "exit 1\nstderr details", fullText: "exit 1\nstderr details", messageKind: "tool_result_error" },
+      { id: "usr:2", kind: "command", status: "info", title: "new user", summary: "", keep: true, messageKind: "user_text" },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+    const ids = view.blocks.map((b) => b.id).filter((id) => ["usr:1", "ai:1", "fail:1", "usr:2"].includes(id));
+    // fail:1 必须出现在 usr:1/ai:1 之后、usr:2 之前
+    expect(ids).toEqual(["usr:1", "ai:1", "fail:1", "usr:2"]);
+  });
+
+  it("ephemeral 限流只丢最早的 ephemeral，不影响 keep 与 fail 的位置", () => {
+    const blocks: ProductBlockViewModel[] = [
+      { id: "eph:1", kind: "details", status: "info", title: "", summary: "e1", fullText: "e1" },
+      { id: "usr:1", kind: "command", status: "info", title: "kept user", summary: "", keep: true, messageKind: "user_text" },
+      { id: "eph:2", kind: "details", status: "info", title: "", summary: "e2", fullText: "e2" },
+      { id: "eph:3", kind: "details", status: "info", title: "", summary: "e3", fullText: "e3" },
+      { id: "eph:4", kind: "details", status: "info", title: "", summary: "e4", fullText: "e4" },
+      { id: "eph:5", kind: "details", status: "info", title: "", summary: "e5", fullText: "e5" },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+    const ids = view.blocks.map((b) => b.id).filter((id) => id.startsWith("eph:") || id.startsWith("usr:"));
+    // 5 条 ephemeral 超过 cap=3，应丢最早的 2 条；keep 的 usr:1 必须保留且不被推到顶。
+    expect(ids).toContain("usr:1");
+    expect(ids).toContain("eph:3");
+    expect(ids).toContain("eph:4");
+    expect(ids).toContain("eph:5");
+    expect(ids).not.toContain("eph:1");
+    expect(ids).not.toContain("eph:2");
+    // 顺序：先 usr:1（在 eph:2 之前出现），再 eph:3 → eph:4 → eph:5
+    const usrPos = ids.indexOf("usr:1");
+    const eph3Pos = ids.indexOf("eph:3");
+    expect(usrPos).toBeLessThan(eph3Pos);
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () => {
+  it("正文含'失败'字样的 diagnostic 不再变 fail", () => {
+    const block = createOutputBlock(
+      "MCP status\n- 启动或检测失败会隔离\n- enabled: yes",
+      "zh-CN",
+      "out-mcp",
+    );
+    expect(block.status).toBe("info");
+    expect(block.kind).toBe("details");
+    expect(block.messageKind).toBe("assistant_text");
+  });
+
+  it("正文含'error / failed'字样的普通正文不再变 fail", () => {
+    const enBlock = createOutputBlock(
+      "Build summary\n- compile: error count = 0\n- tests: 0 failed",
+      "en-US",
+      "out-build",
+    );
+    expect(enBlock.status).toBe("info");
+    expect(enBlock.kind).toBe("details");
+  });
+
+  it("ShellBlockOutput.writeDiagnosticLine 写入 messageKind=diagnostic 块", () => {
+    const ctx = {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
+      writeDiagnosticLine?: (text: string) => void;
+    };
+    expect(typeof output.writeDiagnosticLine).toBe("function");
+    output.writeDiagnosticLine?.(
+      "MCP status\n- enabled: yes\n- lastDoctor: 未检测，运行 /mcp doctor 检测",
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("diagnostic");
+    expect(blocks[0]?.status).toBe("info");
+  });
+
+  it("ShellBlockOutput.writeErrorLine 写入 messageKind=tool_result_error 块（kind=error/status=fail）", () => {
+    const ctx = {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    expect(typeof output.writeErrorLine).toBe("function");
+    output.writeErrorLine?.(
+      "provider 拒绝了本次请求 schema。请运行 /model doctor 检查 endpointProfile / tools / tool_choice。",
+      "provider 失败",
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(blocks[0]?.kind).toBe("error");
+    expect(blocks[0]?.status).toBe("fail");
+    expect(blocks[0]?.title).toBe("provider 失败");
+    // 单行短错误不挂 Ctrl+O hint
+    expect(blocks[0]?.nextAction).toBeUndefined();
+    // fullText 累计到 lastFullOutput，让 /details 仍能展开
+    expect(ctx.lastFullOutput).toContain("provider 拒绝了本次请求 schema");
+  });
+
+  it("ShellBlockOutput.writeErrorLine 多行错误正文挂 Ctrl+O 错误展开 hint", () => {
+    const ctx = {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    output.writeErrorLine?.(
+      "Provider request failed\n- code: PROVIDER_NETWORK_ERROR\n- detail: ECONNRESET while streaming",
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(blocks[0]?.nextAction).toContain("Ctrl+O");
+  });
+
+  it("普通正文走 _write 路径仍 messageKind=assistant_text/info（含 error/failed 字样不再误标）", () => {
+    const ctx = {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    output.write("error: build failed but this is just narrative\n");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("assistant_text");
+    expect(blocks[0]?.status).toBe("info");
+    expect(blocks[0]?.kind).toBe("details");
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v3 — RuntimeIdentityRule provider 隐藏", () => {
+  it("createModelSystemPrompt 包含 RuntimeIdentityRule（自然语言当前模型回答里禁止 provider 括号）", async () => {
+    const fs = await import("node:fs");
+    const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
+    expect(indexSource).toContain("RuntimeIdentityRule=");
+    expect(indexSource).toMatch(
+      /Do not include provider, endpointProfile, route role, baseUrl/,
+    );
+    expect(indexSource).toContain("(provider: ...)");
+    expect(indexSource).toContain("openai-compatible");
+  });
+
+  it("RuntimeIdentityRule 仍允许 /model doctor 与 /model route doctor 暴露 provider", async () => {
+    const fs = await import("node:fs");
+    const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
+    // RuntimeIdentityRule 显式允许 /model doctor / /model route doctor 暴露 provider
+    expect(indexSource).toMatch(/runs \/model doctor or \/model route doctor/);
+    // 自然语言问"当前模型"被规则拦截，但 /model doctor 显式命令仍能输出 provider 字段。
+    expect(indexSource).toMatch(/provider=\$\{runtime\.provider\}/);
+  });
+});
+
+describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
+  it("短回复（单行无折叠）不带 Ctrl+O hint", () => {
+    const block: ProductBlockViewModel = {
+      id: "short",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "已完成。",
+      fullText: "已完成。",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const out = view.blocks.find((b) => b.id === "short");
+    expect(out?.nextAction).toBeUndefined();
+  });
+
+  it("多行被折叠的 block 才出现 Ctrl+O hint", () => {
+    const block: ProductBlockViewModel = {
+      id: "multi",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "first line",
+      fullText: "first line\nsecond line\nthird line",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const out = view.blocks.find((b) => b.id === "multi");
+    expect(out?.nextAction).toContain("Ctrl+O");
+  });
+
+  it("失败块若没有可折叠正文也不挂 Ctrl+O", () => {
+    const block: ProductBlockViewModel = {
+      id: "short-fail",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      fullText: "exit 1",
+      messageKind: "tool_result_error",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const out = view.blocks.find((b) => b.id === "short-fail");
+    expect(out?.nextAction).toBeUndefined();
+  });
+
+  it("失败块多行正文挂 Ctrl+O 错误展开 hint", () => {
+    const block: ProductBlockViewModel = {
+      id: "long-fail",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      fullText: "exit 1\nstderr line A\nstderr line B",
+      messageKind: "tool_result_error",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const out = view.blocks.find((b) => b.id === "long-fail");
+    expect(out?.nextAction).toContain("Ctrl+O");
   });
 });

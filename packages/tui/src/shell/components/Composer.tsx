@@ -8,7 +8,7 @@ import {
 } from "../../slash-dispatch.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
 import type { TerminalCapability } from "../terminal-capability.js";
-import { charWidth, composerMaxWidth, fitText } from "../text-utils.js";
+import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type {
   PermissionActionId,
@@ -295,18 +295,10 @@ const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
   "deny",
 ];
 
-const PERMISSION_TEXT_MAP: Record<PermissionActionId, string> = {
-  // legacy 别名
-  yes: "yes",
-  no: "no",
-  // 3 档 elevation（主屏可见）
-  allow_once: "allow_once",
-  allow_always_tool: "allow_always_tool",
-  deny: "deny",
-  // details / cancel 走内部路径（Esc / 详情命令），主屏不再渲染
-  details: "details",
-  cancel: "cancel",
-};
+// D.13Q-UX Real Smoke Fix v2 — E. 旧的 PERMISSION_TEXT_MAP 把 PermissionActionId
+// 序列化为 yes / no / allow_once 文本，再通过 submit 文本路径上抛（让用户
+// 输入区里冒出 yes / allow_once 当成自然语言）。新路径直接派发结构化的
+// permission-action 事件，不再需要这张表，因此移除。
 
 // ---------------------------------------------------------------------------
 // Owner-priority dispatcher constants
@@ -333,7 +325,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const lastEscAtRef = useRef(0);
   const lastCtrlCAtRef = useRef(0);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const maxWidth = composerMaxWidth(view.width);
+  // D.13Q-UX Real Smoke Fix v2 — B. task/pending 模式必须用 taskComposerMaxWidth，
+  // 与 ShellApp.TaskLayout 的 cw 对齐；否则 useAnchoredCursor 的父链 Yoga 计算
+  // 出来的 cursor 锚是 80-col 居中容器，而真正的 Composer 容器是 view.width-4，
+  // 视觉上就会出现 cursor 漂移。
+  const maxWidth =
+    view.viewMode === "task" || view.viewMode === "pending"
+      ? taskComposerMaxWidth(view.width)
+      : composerMaxWidth(view.width);
   const noColor = view.themeMode === "no-color";
   const theme = useMemo(() => createShellTheme(noColor), [noColor]);
   const anchorRef = useRef<DOMElement | null>(null);
@@ -402,11 +401,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   const submitPermissionAction = useCallback(
     (id: PermissionActionId) => {
+      // D.13Q-UX Real Smoke Fix v2 — E. 全部走结构化 permission-action 事件，
+      // 不再把 yes / allow_once / allow_always_tool / no 这类内部 id 当成 text
+      // 通过 submit 文本路径回灌（避免被 handleNaturalInput 当用户正常发言）。
+      // cancel 仍上抛 escape 关闭面板（与既有交互链兼容）。
       if (id === "cancel") {
         void onInput({ type: "escape" });
         return;
       }
-      void onInput({ type: "submit", text: PERMISSION_TEXT_MAP[id] });
+      void onInput({ type: "permission-action", actionId: id });
     },
     [onInput],
   );
@@ -624,6 +627,22 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // ─── Submit: Enter（无 shift）─────────────────────────────────────
       if (key.return && !key.shift) {
+        // D.13Q-UX Real Smoke Fix v2 — D. busy guard：模型仍在处理上一条时
+        // Enter 不提交、不清空 buffer，仅显示一行轻提示。Ctrl+C 双击清空 / 上抛
+        // interrupt 由现有分支接管，不在这里处理。slash command / setup flow
+        // 走自己的 submit 路径，不受 busy 限制（slash 通常是控制类命令；setup
+        // flow 在 busy 之前就完成）。
+        const isSlashSubmit = text.startsWith("/");
+        const setupActive = view.composer.setupActive;
+        if (view.composer.busy && !isSlashSubmit && !setupActive) {
+          showHintNotice(
+            view.composer.busyHint ??
+              (view.language === "en-US"
+                ? "Still working on the previous request. Press Ctrl+C to interrupt, then send again."
+                : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"),
+          );
+          return;
+        }
         // slash 可见且光标只在 head 上 → 接受候选再提交。
         if (slashVisible && slashSelection >= 0 && !text.includes(" ")) {
           const picked = slashCandidates[slashSelectionClamped];
@@ -977,10 +996,10 @@ function PermissionControl({
   width: number;
   language: ShellViewModel["language"];
 }): React.ReactNode {
-  // D.13L Block 0-B — 权限卡对齐 CCB：主屏标题改成"需要您授权" / "Permission requested"，
-  // 第二行用 actionSummary 显示"做什么"（来自 toolCall.input 派生），第三行 3 项动作。
-  // reason / risk / scope / proceedQuestion / hint 仍隐藏（保留在 TaskPermissionView 上，
-  // 由 /details 路径展开）。
+  // D.13Q-UX Real Smoke Fix v2 — F. 主屏降噪：
+  //   - headline + 一行 actionSummary + 3 actions + 一行 Enter/Tab/Esc 提示。
+  //   - explanationLines / rule.id / scope / risk 等内部细节不再渲染在主屏。
+  //   - 详情仍可通过 /details 展开（保留 explanationLines 在 view-model 上）。
   const isEn = language === "en-US";
   const cardWidth = Math.min(width, 76);
   const innerWidth = Math.max(20, cardWidth - 4);
@@ -1004,15 +1023,6 @@ function PermissionControl({
         {fitText(headline, innerWidth)}
       </Text>
       <Text color={theme.muted}>{fitText(summaryLine, innerWidth)}</Text>
-      {permission.explanationLines && permission.explanationLines.length > 0 ? (
-        <Box flexDirection="column" marginTop={0}>
-          {permission.explanationLines.map((line, idx) => (
-            <Text key={`exp-${idx}`} color={theme.dim ?? theme.muted} dimColor>
-              {fitText(line, innerWidth)}
-            </Text>
-          ))}
-        </Box>
-      ) : null}
       <PermissionActionRow
         actions={actions}
         focused={focused}
@@ -1021,7 +1031,7 @@ function PermissionControl({
       />
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(
-          isEn ? "Esc to cancel · d for details" : "Esc 取消 · d 查看详情",
+          isEn ? "Enter confirm · Tab switch · Esc cancel" : "Enter 确认 · Tab 切换 · Esc 取消",
           innerWidth,
         )}
       </Text>

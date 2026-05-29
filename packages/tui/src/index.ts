@@ -334,7 +334,7 @@ import {
 } from "./runner-runtime.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
-import { createCommandBlock } from "./shell/models/command-transcript-presenter.js";
+import { createCommandBlock, createUserTextBlock } from "./shell/models/command-transcript-presenter.js";
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
@@ -1396,8 +1396,33 @@ async function runInkShell(
       // 这里直接调 handleDetailsCommand([], ...)。effect 等价于 /details 默认分支
       // 展开"最近一次正文"，但用户输入区不会出现 /details，transcript 命令行也
       // 不会多出一条 ❯ /details。/details slash 仍保留为兼容命令。
+      // D.13Q-UX Real Smoke Fix v3：Ctrl+O 没有可展开内容时不写 transcript
+      // （旧实现会让 /details 把 "当前没有可展开的完整内容。" 推进 transcript
+      // 并污染 lastFullOutput），改成走 notifications 轻提示，单条主显不进
+      // transcript。
       if (event.type === "toggle-details") {
         submittedPending = false;
+        const hasExpandable =
+          Boolean(context.lastFullOutput) ||
+          context.evidence.length > 0 ||
+          context.backgroundTasks.length > 0;
+        if (!hasExpandable) {
+          if (!context.notifications) context.notifications = [];
+          context.notifications.push({
+            key: "ctrl-o-empty",
+            text:
+              context.language === "en-US"
+                ? "Nothing to expand right now."
+                : "当前没有可展开的完整内容。",
+            priority: "low",
+            timeoutMs: 4000,
+            createdAt: Date.now(),
+            tone: "dim",
+          });
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         await handleDetailsCommand([], context, shellOutput);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -1651,12 +1676,21 @@ async function runInkShell(
             // save_failed / invalid 走人性化分支，仍保留可操作信息但不含 rule.id。
             const isEn = context.language === "en-US";
             if (result.kind === "added" || result.kind === "duplicate") {
-              writeLine(
-                shellOutput,
-                isEn
+              // D.13Q-UX Real Smoke Fix v2 — F. allow_always_tool 成功反馈走
+              // NotificationStack 单条主显，不再 writeLine 进 transcript（避免
+              // task transcript 里冒出 "已记住：..." 大块）。NotificationStack
+              // 由 view-model 的 createdAt+timeoutMs 过滤过期项。
+              if (!context.notifications) context.notifications = [];
+              context.notifications.push({
+                key: `permission:remembered:${tool}:${Date.now()}`,
+                text: isEn
                   ? `Remembered: future ${tool} actions like this will be allowed.`
                   : `已记住：以后这类 ${tool} 操作将自动允许。`,
-              );
+                priority: "medium",
+                timeoutMs: 4000,
+                createdAt: Date.now(),
+                tone: "success",
+              });
             }
             if (result.kind === "save_failed") {
               writeLine(
@@ -1703,6 +1737,16 @@ async function runInkShell(
       if (event.type === "submit" && event.text.startsWith("/")) {
         // D.13E Step 2 — 用 createCommandBlock 替代手写 push，统一 transcript 行格式。
         blocks.push(createCommandBlock(commandSequence++, event.text));
+      } else if (event.type === "submit" && event.text.length > 0) {
+        // D.13Q-UX Real Smoke Fix v2 — C. 用户普通消息立即推 user transcript block，
+        // 让任务页"对话流"成立：模型还没回话之前，用户输入也已经在屏幕上可见，
+        // 不会出现"消息被吞"的错觉。pendingModelSetup（apiKey 遮罩流）和正在
+        // 等待 enter confirmation 的特殊路径走单独的 prompt 渲染，不进 transcript。
+        const isModelSetup = Boolean(context.pendingModelSetup);
+        const isPendingConfirm = hasPendingEnterConfirmation(context);
+        if (!isModelSetup && !isPendingConfirm) {
+          blocks.push(createUserTextBlock(commandSequence++, event.text));
+        }
       }
       shell?.rerender();
       await shell?.waitUntilRenderFlush();
@@ -1861,17 +1905,12 @@ class ShellBlockOutput extends Writable {
       if (!this.context.suppressLastFullOutputCapture) {
         this.context.lastFullOutput = normalized;
       }
-      // 只回收非 keep 的 ephemeral 输出，让 keep:true 的 transcript row（slash
-      // command 行等）穿透 splice，保住分层。回收策略：保留所有 keep 块 + 最后
-      // 一条 ephemeral 块。
-      const keepBlocks = this.blocks.filter((b) => b.keep);
-      const ephemeralBlocks = this.blocks.filter((b) => !b.keep);
-      if (ephemeralBlocks.length > 1) {
-        const lastEphemeral = ephemeralBlocks[ephemeralBlocks.length - 1];
-        this.blocks.length = 0;
-        this.blocks.push(...keepBlocks);
-        if (lastEphemeral) this.blocks.push(lastEphemeral);
-      }
+      // D.13Q-UX Real Smoke Fix v3 — 不再在 ShellBlockOutput 内做 ephemeral
+      // splice 重排（旧实现 keep+lastEphemeral 会破坏 user → assistant →
+      // diagnostic → user → assistant 的真实时间线，并且与 view-model 的
+      // selectedBlocks 限流重复）。view-model.createShellViewModel 已按 append
+      // 顺序保留 keep/fail/blocked，并对 ephemeral 做 N 条上限；这里只 append
+      // 后通知 rerender。
       this.onWrite();
     }
     callback();
@@ -1946,6 +1985,79 @@ class ShellBlockOutput extends Writable {
     this.assistantBlockId = undefined;
     this.onWrite();
   }
+
+  /**
+   * D.13Q-UX Real Smoke Fix v3 — 把一段诊断正文（/mcp status / /index status
+   * 等）显式当作 messageKind=diagnostic block 写入 transcript：
+   *   - 不走 createOutputBlock 的 assistant_text 默认分支，避免被当作普通 AI 正文；
+   *   - 不进入 fail/blocked 状态，不再被任何关键词扫描误伤；
+   *   - 仍累计到 lastFullOutput，让 /details + Ctrl+O 能展开完整诊断。
+   * 调用方应自己保证只用于真正的诊断输出（status / doctor 概要 / state dump）。
+   */
+  writeDiagnosticLine(text: string): void {
+    const normalized = text.replace(/\r/g, "").trim();
+    if (!normalized) return;
+    const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
+    const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
+    const hasMore =
+      normalized.length > 0 &&
+      (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
+    const detailsHint =
+      this.context.language === "en-US" ? "Ctrl+O for details" : "Ctrl+O 查看完整内容";
+    this.blocks.push({
+      id: `diag-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: firstLine,
+      fullText: normalized,
+      nextAction: hasMore ? detailsHint : undefined,
+      messageKind: "diagnostic",
+    });
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = normalized;
+    }
+    this.onWrite();
+  }
+
+  /**
+   * D.13Q-UX Real Smoke Fix v3 复核 — 显式结构化错误写入路径：
+   *   - 与 createOutputBlock（不再扫关键词）解耦，由调用方明确表态"这是错误"；
+   *   - 走 messageKind="tool_result_error" / kind="error" / status="fail"，
+   *     ProductBlock 命中红边卡片（带 fail marker + tool_result_error tone）；
+   *   - Ctrl+O hint 沿用 v3 规则：只有多行或单行明显超长才挂 errorDetailsHint；
+   *   - fullText 累计到 lastFullOutput，/details + Ctrl+O 能展开完整错误正文。
+   * 调用点限定为真实错误：provider stream error / final no-tools provider error /
+   * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败 等。
+   * 普通 writeLine / /mcp status / 普通 assistant 正文不要走这条路径。
+   */
+  writeErrorLine(text: string, title?: string): void {
+    const normalized = text.replace(/\r/g, "").trim();
+    if (!normalized) return;
+    const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
+    const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
+    const hasMore =
+      normalized.length > 0 &&
+      (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
+    const errorHint =
+      this.context.language === "en-US"
+        ? "Ctrl+O for full error"
+        : "Ctrl+O 查看完整错误";
+    this.blocks.push({
+      id: `err-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      kind: "error",
+      status: "fail",
+      title: title ?? (this.context.language === "en-US" ? "output failed" : "output 失败"),
+      summary: firstLine,
+      fullText: normalized,
+      nextAction: hasMore ? errorHint : undefined,
+      messageKind: "tool_result_error",
+    });
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = normalized;
+    }
+    this.onWrite();
+  }
 }
 
 /**
@@ -1976,6 +2088,39 @@ function endAssistantStream(output: Writable): void {
   if (typeof candidate.endAssistantStream === "function") {
     candidate.endAssistantStream();
   }
+}
+
+/**
+ * D.13Q-UX Real Smoke Fix v3 — 写诊断正文。Ink shell 注入的 ShellBlockOutput
+ * 命中 writeDiagnosticLine 走 messageKind=diagnostic 分支（dim/cyan，不红框）；
+ * plain TUI / MemoryOutput / 其他 Writable 走 writeLine 兼容回退。
+ */
+function writeDiagnosticLine(output: Writable, text: string): void {
+  const candidate = output as { writeDiagnosticLine?: (text: string) => void };
+  if (typeof candidate.writeDiagnosticLine === "function") {
+    candidate.writeDiagnosticLine(text);
+    return;
+  }
+  writeLine(output, text);
+}
+
+/**
+ * D.13Q-UX Real Smoke Fix v3 复核 — 写真实错误。Ink shell 注入的
+ * ShellBlockOutput 命中 writeErrorLine 走 messageKind=tool_result_error /
+ * kind=error / status=fail（红边卡 + fail marker）；plain TUI / MemoryOutput /
+ * 其他 Writable 走 writeLine 兼容回退（正文文案保持一致）。
+ *
+ * 仅用于真实错误调用点：provider stream error / final no-tools provider error /
+ * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败。
+ * 普通正文 / diagnostic / status 不要走这条路径。
+ */
+function writeErrorLine(output: Writable, text: string, title?: string): void {
+  const candidate = output as { writeErrorLine?: (text: string, title?: string) => void };
+  if (typeof candidate.writeErrorLine === "function") {
+    candidate.writeErrorLine(text, title);
+    return;
+  }
+  writeLine(output, text);
 }
 
 export async function handleSlashCommand(
@@ -5705,7 +5850,7 @@ async function runDetailsCommandBody(
         );
         writeLine(output, formatLogArtifactSlice(slice, context.language));
       } catch (error) {
-        writeLine(output, formatError(error));
+        writeErrorLine(output, formatError(error));
       }
       return;
     }
@@ -6647,20 +6792,21 @@ async function handleMcpCommand(
 ): Promise<void> {
   const action = args[0] ?? "status";
   if (action === "status") {
-    writeLine(output, formatMcpStatus(context));
-    writeStatus(output, context);
+    // D.13Q-UX Real Smoke Fix v3 — /mcp status 是中性 diagnostic，不是 fail。
+    // ink 路径走 writeDiagnosticLine（messageKind=diagnostic），plain TUI 走
+    // 普通 writeLine 兼容。
+    writeDiagnosticLine(output, formatMcpStatus(context));
     return;
   }
   if (action === "tools") {
     context.mcp.tools = stabilizeMcpToolList(context.mcp.tools);
     refreshCacheFreshness(context);
-    writeLine(output, formatMcpTools(context.mcp));
+    writeDiagnosticLine(output, formatMcpTools(context.mcp));
     return;
   }
   if (action === "doctor") {
     await runMcpDoctor(context);
-    writeLine(output, formatMcpStatus(context));
-    writeStatus(output, context);
+    writeDiagnosticLine(output, formatMcpStatus(context));
     return;
   }
   if (action === "validate") {
@@ -7013,7 +7159,7 @@ async function resumeSessionWithHandoff(
     }
     writeStatus(output, context);
   } catch (error) {
-    writeLine(output, formatError(error));
+    writeErrorLine(output, formatError(error));
   }
 }
 
@@ -7872,24 +8018,44 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
 }
 
 function formatMcpStatus(context: TuiContext): string {
+  // D.13Q-UX Real Smoke Fix v3 — /mcp status 默认是中性 diagnostic：
+  //   - lastDoctor 未跑时显示"未检测，运行 /mcp doctor 检测"，不再 unknown 吓人；
+  //   - codebase-memory binary/version 未知时同样显示"未检测"；
+  //   - 末尾"启动或检测失败会隔离"那段触发关键词误伤的文案已删除，统一让
+  //     真实失败由 /mcp doctor 的输出承担。
+  const isEn = context.language === "en-US";
+  const notRunHint = isEn
+    ? "not detected — run /mcp doctor to check"
+    : "未检测，运行 /mcp doctor 检测";
   const servers = context.mcp.servers.map((server) => {
     const suffix = server.error ? ` (${truncateDisplay(server.error, 80)})` : "";
     return `- ${server.name}: ${server.status} command=${redactedPath(server.command)}${suffix}`;
   });
+  const lastDoctor = context.mcp.lastDoctor ?? notRunHint;
+  const memorySource = context.index.binarySource ?? notRunHint;
+  const memoryBinary = context.index.binaryStatus ?? notRunHint;
+  const memoryVersion = context.index.binaryVersion ?? "-";
+  const runtime =
+    context.index.runtime ??
+    (isEn
+      ? "Linghun-managed codebase-memory or external fallback"
+      : "Linghun 内置 codebase-memory 或外部 fallback");
   return [
     "MCP status",
     `- enabled: ${context.mcp.enabled ? "yes" : "no"}`,
     `- servers: ${context.mcp.servers.length}`,
     `- tools(stable): ${context.mcp.tools.length}`,
-    `- lastDoctor: ${context.mcp.lastDoctor ?? "not run"}`,
+    `- lastDoctor: ${lastDoctor}`,
     ...servers,
-    `- codebase-memory source=${context.index.binarySource ?? "unknown"}`,
-    `- codebase-memory binary=${context.index.binaryStatus ?? "unknown"} version=${context.index.binaryVersion ?? "-"}`,
-    `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
+    `- codebase-memory source=${memorySource}`,
+    `- codebase-memory binary=${memoryBinary} version=${memoryVersion}`,
+    `- runtime: ${runtime}`,
     "- guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution; unknown or incomplete tool calls are rejected.",
     "- guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime before execution.",
     "- license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata; external fallback is reported as external, not bundled.",
-    "- note: MCP/codebase-memory 启动或检测失败会隔离，不影响普通聊天、本地工具和 cache/status。",
+    isEn
+      ? "- next: run /mcp doctor for diagnostics, /mcp tools to list registered tools, /index status for codebase-memory state."
+      : "- 下一步：运行 /mcp doctor 做诊断、/mcp tools 查看已登记工具、/index status 查看 codebase-memory 状态。",
   ].join("\n");
 }
 
@@ -12081,11 +12247,12 @@ async function executeIndexIgnoreWritePlan(
     const text = formatError(error, context.language);
     const evidence = await recordToolFailureEvidence(context, sessionId, "Write", text);
     await appendToolResultEvent(context, sessionId, callId, "Write", text, true, evidence.id);
-    writeLine(
+    writeErrorLine(
       output,
       context.language === "en-US"
         ? `${text}\nNext: fix the ignore file path or permissions, then retry the natural request.`
         : `${text}\n下一步：修复 ignore 文件路径或权限后，重试这条自然语言请求。`,
+      context.language === "en-US" ? "ignore write failed" : "ignore 写入失败",
     );
     return false;
   }
@@ -12355,7 +12522,7 @@ async function sendMessage(
             selectedRuntime.model,
             event.error.code ?? "UNKNOWN",
           );
-          writeLine(output, formatProviderFailurePrimary(event.error, context.language));
+          writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
       }
@@ -12370,7 +12537,7 @@ async function sendMessage(
           roundFinishReason,
           roundHadThinking,
         );
-        writeLine(output, message);
+        writeErrorLine(output, message);
         return;
       }
 
@@ -12670,7 +12837,7 @@ async function streamFinalModelAnswerWithoutTools(
         continuation.model,
         event.error.code ?? "UNKNOWN",
       );
-      writeLine(output, formatProviderFailurePrimary(event.error, context.language));
+      writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
       return assistantText;
     }
   }
@@ -12684,7 +12851,7 @@ async function streamFinalModelAnswerWithoutTools(
       finishReason,
       hadThinking,
     );
-    writeLine(output, message);
+    writeErrorLine(output, message);
   }
   endAssistantStream(output);
   return assistantText;
@@ -12768,7 +12935,7 @@ async function continueModelAfterToolResults(
             continuation.model,
             event.error.code ?? "UNKNOWN",
           );
-          writeLine(output, formatProviderFailurePrimary(event.error, context.language));
+          writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
       }
@@ -13464,7 +13631,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "EngineeringStructure=Do not pile logic into existing large files by default. Avoid god files, code blobs, overly long functions (>200 lines), deep nesting (>3 levels), and unbounded global state. Keep responsibility boundaries clear: UI/state/IO/provider/runner/permission/cache/verification. Prefer reusing existing project modules, helpers, presenters, and runtimes over creating a second system. Do not add zero-benefit abstractions for elegance. Each change must have a verifiable boundary (focused tests, typecheck, check). This is not authorization for large refactors."
       : "EngineeringStructure=默认不把逻辑堆进已有大文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。职责边界保持清晰：UI/状态/IO/provider/runner/permission/cache/verification。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。不为了优雅新增无收益抽象。每个改动要有可验证边界（focused tests、typecheck、check）。这不是授权大重构。"
-  }\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel.model.provider is internal context for tool routing and is NOT a user-facing label.\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 function createEvidenceSummaryForModel(context: TuiContext): string {
@@ -13847,7 +14014,7 @@ async function handleToolCommand(
     writeLine(output, formatToolOutput(name, result.output, context.language, evidence?.id));
     writeStatus(output, context);
   } catch (error) {
-    writeLine(output, formatError(error, context.language));
+    writeErrorLine(output, formatError(error, context.language));
   }
 }
 

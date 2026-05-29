@@ -199,6 +199,20 @@ export function createShellViewModel(
         ? "task"
         : "home");
 
+  // D.13Q-UX Real Smoke Fix v2 — A. submitted=true 且 options.activity 缺省时，
+  // 合成一条 thinking fallback activity，避免任务页首帧空白（submittedPending
+  // 已切到 pending viewMode，但 requestActivityPhase 尚未由 streaming 链路置位
+  // 时，主屏没有任何"正在思考…"反馈，看上去像消息被吞）。
+  // 真实 activity（mapRequestActivityToView）会覆盖此 fallback。
+  const effectiveActivity: TaskActivityView | undefined =
+    options.activity ??
+    (options.submitted
+      ? {
+          phase: "thinking",
+          text: language === "en-US" ? "Thinking…" : "正在思考…",
+        }
+      : undefined);
+
   // setup-needed: only surface as setupHint in task/pending mode (not home first-screen).
   // While the model setup flow is actively running (pendingModelSetup), the
   // composer's step label + step placeholder is the single source of truth, so
@@ -228,29 +242,41 @@ export function createShellViewModel(
   }
   if (!options.permission && !setupActiveFlow) {
     const allOutputBlocks = options.outputBlocks ?? [];
-    // Prioritize fail/blocking output over normal output
-    const failBlocks = allOutputBlocks.filter((b) => b.status === "fail" || b.status === "blocked");
-    const normalBlocks = allOutputBlocks.filter(
-      (b) => b.status !== "fail" && b.status !== "blocked",
-    );
-    // keep:true 的 block（例如 slash command 的 transcript row）必须穿透 slice 限流，
-    // 否则连续 tool 输出会把用户提交记录推出可视区，破坏 transcript 分层。
+    // D.13Q-UX Real Smoke Fix v3 — transcript 必须严格按 append 时间顺序排列。
+    // 旧实现 [...failBlocks, ...keepBlocks, ...ephemeralBlocks] 会按类型重排，
+    // 让失败块插队到旧消息上方、ephemeral 推到 keep 后面，破坏 user → assistant
+    // → diagnostic → user → assistant 的真实时间线。
+    //
+    // 新策略：
+    //   - 不按 status / keep 重排，原顺序保留；
+    //   - 只对 ephemeral（!keep && status != fail/blocked）做"最后 N 条"限制，
+    //     超过 cap 的 ephemeral 从最早的起依次丢弃；
+    //   - keep:true 与 fail/blocked 一律保留，按原位出现（不被推到顶部，也不被淘汰）；
+    //   - empty assistant streaming placeholder 仍过滤掉。
     // D.13M-B：assistant streaming block（kind="details" + keep:true）在收到首个
-    // delta 之前 fullText 为空，summary 落在 noVisibleOutput 占位字符串上。这种空
-    // streaming 占位不应当作可见输出：等待态由 ActivityIndicator 接管，正文为空
-    // 时直接从主屏过滤掉，避免 "没有可见输出。" 在 thinking-only / 慢请求等场景
-    // 下闪现。
+    // delta 之前 fullText 为空。这种空 streaming 占位不应当作可见输出：等待态由
+    // ActivityIndicator 接管，正文为空时直接从主屏过滤掉。
     const isEmptyAssistantStreamBlock = (b: ProductBlockViewModel): boolean =>
       b.keep === true &&
       b.kind === "details" &&
       (b.fullText ?? "").trim().length === 0 &&
       !b.title;
-    const keepBlocks = normalBlocks.filter((b) => b.keep && !isEmptyAssistantStreamBlock(b));
-    const ephemeralBlocks = normalBlocks.filter((b) => !b.keep);
-    // Show all fail/blocking + all keep + up to 3 most recent ephemeral
-    // (cap on ephemerals only; fail/keep 不计入 cap，仍作为优先信号保留)。
-    const maxEphemeral = Math.max(0, 3 - failBlocks.length);
-    const selectedBlocks = [...failBlocks, ...keepBlocks, ...ephemeralBlocks.slice(-maxEphemeral)];
+    const isEphemeral = (b: ProductBlockViewModel): boolean =>
+      !b.keep && b.status !== "fail" && b.status !== "blocked";
+    const ephemeralIndices = allOutputBlocks
+      .map((b, i) => (isEphemeral(b) ? i : -1))
+      .filter((i) => i >= 0);
+    const maxEphemeral = 3;
+    const dropEphemeralIndices = new Set<number>(
+      ephemeralIndices.length > maxEphemeral
+        ? ephemeralIndices.slice(0, ephemeralIndices.length - maxEphemeral)
+        : [],
+    );
+    const selectedBlocks = allOutputBlocks.filter((b, i) => {
+      if (isEmptyAssistantStreamBlock(b)) return false;
+      if (dropEphemeralIndices.has(i)) return false;
+      return true;
+    });
     // Add /details hint only to error/blocked blocks (avoid noise on info rows).
     const outputWithHints = selectedBlocks.map((b) => addDetailsHint(b, language));
     blocks.push(...outputWithHints);
@@ -369,7 +395,7 @@ export function createShellViewModel(
     brand: text.brand,
     homeVision,
     setupHint,
-    activity: options.activity,
+    activity: effectiveActivity,
     permission: options.permission
       ? withPermissionActions(options.permission, language, context)
       : undefined,
@@ -392,6 +418,12 @@ export function createShellViewModel(
       masking: context.pendingModelSetup?.step === "apiKey",
       setupActive,
       setupStep: composerSetupStepLabel,
+      busy: computeComposerBusy({ submitted: options.submitted, activity: effectiveActivity, context }),
+      busyHint: computeComposerBusy({ submitted: options.submitted, activity: effectiveActivity, context })
+        ? language === "en-US"
+          ? "Still working on the previous request. Press Ctrl+C to interrupt, then send again."
+          : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"
+        : undefined,
     },
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
@@ -459,6 +491,37 @@ function mapConfigPanelState(
   };
 }
 
+/**
+ * D.13Q-UX Real Smoke Fix v2 — D. busy guard。
+ * 模型仍在处理上一条请求时返回 true：
+ *   - submitted=true 且 activity 还没出真实 phase（首帧 fallback）
+ *   - activity.phase ∈ {thinking, tool_running, continuing, permission_waiting}
+ *   - context.activeAbortController 存在（streaming 在跑）
+ */
+function computeComposerBusy(args: {
+  submitted?: boolean;
+  activity: TaskActivityView | undefined;
+  context: TuiContext;
+}): boolean {
+  const { submitted, activity, context } = args;
+  const hasActiveAbort = Boolean(
+    (context as { activeAbortController?: { signal?: { aborted?: boolean } } })
+      .activeAbortController,
+  );
+  const phase = activity?.phase;
+  if (
+    phase === "thinking" ||
+    phase === "tool_running" ||
+    phase === "continuing" ||
+    phase === "permission_waiting"
+  ) {
+    return true;
+  }
+  if (submitted) return true;
+  if (hasActiveAbort) return true;
+  return false;
+}
+
 function withPermissionActions(
   permission: TaskPermissionView,
   language: Language,
@@ -504,8 +567,13 @@ export function createOutputBlock(
   const normalized = redactSensitiveText(text.replace(/\r/g, "").trim());
   const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
   const copy = shellText[language];
-  const isFail = /错误|失败|error|failed/iu.test(normalized);
   const summary = firstLine || copy.noVisibleOutput;
+  // D.13Q-UX Real Smoke Fix v3 — 不再用正文关键词（错误|失败|error|failed）
+  // 决定 block 是否失败。/mcp status 这类 diagnostic 文案里出现"启动或检测
+  // 失败会隔离"会被旧实现整块标红，造成用户以为 MCP 不可用。失败必须由结构化
+  // 来源（tool_result_error、command exit fail、明确 error block）显式传入；
+  // 普通 writeLine 一律走 info / assistant_text，由 ProductBlock 的
+  // assistant_text 分支用 Markdown 渲染多行正文。
   // D13E-P3 cleanup #2 — Ctrl+O hint discipline:
   // hasMore must mean "the inline summary actually hides content the user
   // could reveal". Two and only two triggers:
@@ -521,24 +589,24 @@ export function createOutputBlock(
     (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16);
   return {
     id,
-    kind: isFail ? "error" : "details",
-    status: isFail ? "fail" : "info",
+    kind: "details",
+    status: "info",
     // D13E-P3 empty title: drop the fixed "最近输出" / "Latest output" title
     // for normal outputs so ProductBlock renders only the summary line and
     // adjacent normal outputs breathe instead of stacking duplicate banners.
-    // Errors keep an explicit title because the alert framing is the signal.
-    title: isFail ? copy.errorTitle("output") : "",
+    title: "",
     summary,
-    nextAction: isFail ? copy.errorDetailsHint : hasMore ? copy.detailsHint : undefined,
+    nextAction: hasMore ? copy.detailsHint : undefined,
     // Preserve the full body so /details can reveal it. The summary keeps the
     // first non-empty line for the inline block; multi-line outputs (e.g. the
     // /model doctor body with provider.env merge / endpointPath / providers)
     // are no longer truncated to the first line at this boundary.
     fullText: normalized,
-    // D.13Q-UX: 错误类输出仍走 ProductBlock alert 卡（messageKind: tool_result_error）；
-    // 其余正文走 assistant_text，让 ProductBlock 的 messageKind 分支用 Markdown
-    // 渲染多行正文，而不是把多行文本压成 cyan/info dot 单行。
-    messageKind: isFail ? "tool_result_error" : "assistant_text",
+    // D.13Q-UX: 普通 writeLine 走 assistant_text，让 ProductBlock 的 messageKind
+    // 分支用 Markdown 渲染多行正文，而不是把多行文本压成 cyan/info dot 单行。
+    // 真正的工具错误由调用方走显式的 tool_result_error block / fail status，
+    // 不再由这里的关键词扫描决定。
+    messageKind: "assistant_text",
   };
 }
 
@@ -551,23 +619,20 @@ export function createOutputBlock(
  */
 function addDetailsHint(block: ProductBlockViewModel, language: Language): ProductBlockViewModel {
   const copy = shellText[language];
-  // Error / blocked blocks always get an explicit error-details hint.
-  if (block.status === "fail" || block.status === "blocked") {
-    return {
-      ...block,
-      nextAction: block.nextAction || copy.errorDetailsHint,
-    };
-  }
-  // Normal blocks only get the hint when fullText is meaningfully longer than
-  // the displayed summary. Final reports / short normal outputs stay clean.
   if (block.nextAction) return block;
+  // D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint 必须只在真正可展开时显示。
+  //   - fullText 比 summary 多内容（多行 / 单行长出 16 字符以上）才算"被折叠"；
+  //   - 普通块 / 错误块共用同一判定，避免短错误（"已拒绝 Bash"）也挂 Ctrl+O。
+  // 区别仅在文案：fail/blocked 用 errorDetailsHint（"按 Ctrl+O 查看完整错误"），
+  // 其余用 detailsHint（"Ctrl+O 查看完整内容"）。
   const fullText = block.fullText ?? "";
   const summary = block.summary ?? "";
   const nonEmptyLines = fullText.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
     fullText.length > 0 && (nonEmptyLines >= 2 || fullText.length > summary.length + 16);
   if (!hasMore) return block;
-  return { ...block, nextAction: copy.detailsHint };
+  const isFailLike = block.status === "fail" || block.status === "blocked";
+  return { ...block, nextAction: isFailLike ? copy.errorDetailsHint : copy.detailsHint };
 }
 
 /**

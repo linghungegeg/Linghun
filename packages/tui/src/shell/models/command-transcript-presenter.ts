@@ -85,3 +85,37 @@ export function getCommandTranscriptText(block: ProductBlockViewModel): string {
 export function isCommandBlock(block: ProductBlockViewModel): boolean {
   return block.kind === "command";
 }
+
+/**
+ * D.13Q-UX Real Smoke Fix v2 — C. 用户普通消息（非 slash）进 transcript 的
+ * user-text 行。视觉与 slash command transcript 区别：
+ *   - 前缀 marker `›`（U+203A，比 slash 的 `❯` 轻），dim 着色，正文默认色。
+ *   - 仍走 ProductBlockKind="command" + keep:true，复用 ProductBlock 的
+ *     command 分支渲染（marker + accent title）。
+ *   - id 用 `usr:<n>:<slug>` 区分，避免与 slash transcript 混淆。
+ *
+ * 注意：保留多行原文。ProductBlock 当前 command 分支只渲染 title 单行，
+ * 长用户消息在主屏只显示首行；fullText 仍持有完整正文，便于 /details 路径展开。
+ */
+export const USER_TEXT_TRANSCRIPT_PREFIX = "›";
+export const USER_TEXT_TRANSCRIPT_ID_PREFIX = "usr:";
+
+export function buildUserTextBlockId(sequence: number, _text: string): string {
+  return `${USER_TEXT_TRANSCRIPT_ID_PREFIX}${sequence}`;
+}
+
+export function createUserTextBlock(sequence: number, text: string): ProductBlockViewModel {
+  const trimmed = text.trim();
+  // 主屏 title 只取首行，多行长粘贴不会撑爆 transcript；fullText 留完整正文。
+  const firstLine = trimmed.split("\n").find((line) => line.trim()) ?? trimmed;
+  return {
+    id: buildUserTextBlockId(sequence, trimmed),
+    kind: "command",
+    status: "info",
+    title: firstLine,
+    summary: "",
+    keep: true,
+    fullText: trimmed,
+    messageKind: "user_text",
+  };
+}

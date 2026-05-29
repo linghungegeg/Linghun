@@ -39,6 +39,7 @@ export type MessageBlockKind =
   | "assistant_text"
   | "assistant_thinking"
   | "command_transcript"
+  | "user_text"
   | "local_command_output"
   | "tool_result_success"
   | "tool_result_error"
@@ -116,6 +117,15 @@ export type ComposerViewModel = {
   setupActive: boolean;
   /** Setup step label, surfaced near the composer when setup is active. */
   setupStep?: string;
+  /**
+   * D.13Q-UX Real Smoke Fix v2 — D. busy guard.
+   * 模型仍在处理上一条请求时为 true（submitted-pending 首帧 / activity phase 在
+   * thinking|tool_running|continuing|permission_waiting / activeAbortController
+   * 还在）。Composer 在 busy=true 时仍允许打字保留草稿，但 Enter 不提交、不清空。
+   */
+  busy?: boolean;
+  /** busy=true 时显示的人类可读提示。"按 Ctrl+C 中断" 类。 */
+  busyHint?: string;
 };
 
 export type ShellViewMode = "home" | "task" | "pending";

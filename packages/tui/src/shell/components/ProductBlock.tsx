@@ -57,11 +57,20 @@ export function ProductBlock({
   // P2-3：command 行额外加 marginTop=1，与上方块拉开 1 行视觉间隔，
   // 不引入全局序号或时间戳（避免依赖外部状态 / 假数据）。
   if (block.kind === "command") {
+    // D.13Q-UX Real Smoke Fix v2 — 用户普通消息（messageKind="user_text"）
+    // 与 slash command transcript 的 marker / 配色区分：
+    //   slash    → ❯ + accent 文本（命令意图）
+    //   user_text → › + 默认色文本（对话语义）
+    // marker 用 dim，文本用默认色，避免被当成 highlight 命令；多行用户消息
+    // title 已截到首行（createUserTextBlock）。
+    const isUserText = block.messageKind === "user_text";
+    const marker = isUserText ? "› " : "❯ ";
+    const textColor = isUserText ? undefined : theme.accent;
     return (
       <Box marginTop={1} marginBottom={0}>
         <Text>
-          <Text color={theme.muted}>{"❯ "}</Text>
-          <Text color={theme.accent}>{fitText(block.title, Math.max(8, width - 2))}</Text>
+          <Text color={theme.muted}>{marker}</Text>
+          <Text color={textColor}>{fitText(block.title, Math.max(8, width - 2))}</Text>
         </Text>
       </Box>
     );

@@ -65,6 +65,7 @@ import {
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
   writeLightHintsForTest,
+  __testCreateShellBlockOutput,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
@@ -78,6 +79,7 @@ import {
 } from "./provider-circuit-breaker.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
 import { createOutputBlock } from "./shell/view-model.js";
+import type { ProductBlockViewModel } from "./shell/types.js";
 import {
   type TerminalReadinessView,
   createReadinessItems,
@@ -11238,7 +11240,11 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
 
     expect(block.summary).toBe("Provider request failed");
     expect(block.fullText).toBe(errorBody);
-    expect(block.kind).toBe("error");
+    // D.13Q-UX Real Smoke Fix v3：createOutputBlock 不再用关键词扫描决定 fail；
+    // 普通 writeLine 一律 kind="details" / status="info"。真正的工具错误由
+    // 调用方显式构造 tool_result_error block。/details 仍能展开 fullText。
+    expect(block.kind).toBe("details");
+    expect(block.status).toBe("info");
 
     // 模拟 ShellBlockOutput 把这条错误写到 lastFullOutput，然后 /details 展开
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -11459,6 +11465,91 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
     expect(detailsOut.text).toContain("关键证据 Y");
     // /details 默认分支当然也不能把 lastFullOutput 改写
     expect(context.lastFullOutput).toBe(assistantBody);
+  });
+});
+
+// ─── D.13Q-UX Real Smoke Fix v3 复核 ────────────────────────────────────────
+// writeErrorLine 结构化错误路径：真实错误（provider failure / formatError catch /
+// empty response / ignore 写入失败）通过 Ink ShellBlockOutput.writeErrorLine 走
+// messageKind=tool_result_error / kind=error / status=fail；普通正文 / /mcp
+// status / diagnostic 仍然 info。
+describe("D.13Q-UX Real Smoke Fix v3 复核 — writeErrorLine 真实错误路径", () => {
+  function makeFakeContext(): TuiContext {
+    return {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+  }
+
+  it("provider stream failure 文案通过 ShellBlockOutput.writeErrorLine 产 tool_result_error/fail", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    const failure = formatProviderFailurePrimary(
+      { code: "PROVIDER_HTTP_ERROR", status: 502, message: "bad gateway" } as unknown as Error,
+      "zh-CN",
+    );
+    output.writeErrorLine?.(failure);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(blocks[0]?.kind).toBe("error");
+    expect(blocks[0]?.status).toBe("fail");
+  });
+
+  it("formatError catch 文案通过 ShellBlockOutput.writeErrorLine 产 tool_result_error/fail", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    const errorText = "ENOENT: 找不到文件 /tmp/missing.json";
+    output.writeErrorLine?.(errorText);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("tool_result_error");
+    expect(blocks[0]?.status).toBe("fail");
+    expect(blocks[0]?.fullText).toContain("ENOENT");
+  });
+
+  it("/mcp status diagnostic 仍走 messageKind=diagnostic / status=info（不染红）", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks) as unknown as {
+      writeDiagnosticLine?: (text: string) => void;
+    };
+    output.writeDiagnosticLine?.(
+      "MCP status\n- enabled: yes\n- lastDoctor: 未检测，运行 /mcp doctor 检测",
+    );
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("diagnostic");
+    expect(blocks[0]?.status).toBe("info");
+    expect(blocks[0]?.kind).toBe("details");
+  });
+
+  it("普通正文含 error/failed 字样仍 messageKind=assistant_text / status=info", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+    output.write("error: build failed but this is just narrative\n");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("assistant_text");
+    expect(blocks[0]?.status).toBe("info");
+  });
+
+  it("短错误不挂 Ctrl+O hint；多行错误挂 Ctrl+O 错误展开 hint", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    output.writeErrorLine?.("provider 拒绝了本次请求 schema");
+    expect(blocks[0]?.nextAction).toBeUndefined();
+
+    const blocks2: ProductBlockViewModel[] = [];
+    const output2 = __testCreateShellBlockOutput(makeFakeContext(), blocks2) as unknown as {
+      writeErrorLine?: (text: string, title?: string) => void;
+    };
+    output2.writeErrorLine?.(
+      "Provider request failed\n- code: PROVIDER_NETWORK_ERROR\n- detail: ECONNRESET while streaming",
+    );
+    expect(blocks2[0]?.nextAction).toContain("Ctrl+O");
   });
 });
 
