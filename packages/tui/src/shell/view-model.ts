@@ -420,7 +420,7 @@ export function createShellViewModel(
       : undefined,
     status: {
       project: text.project(projectName),
-      model: text.model(truncateMiddle(context.model || "unknown", width <= 40 ? 12 : 22)),
+      model: text.model(truncateMiddle(context.model || "--", width <= 40 ? 12 : 22)),
       permission: text.permission(formatPermissionModeLabel(context.permissionMode, language)),
       trust: text.trust(formatTrust(context, language)),
       index: formatIndex(context.index.status, language),

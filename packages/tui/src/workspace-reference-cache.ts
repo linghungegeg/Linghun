@@ -217,6 +217,11 @@ async function _getWorkspaceReferenceSnapshotInner(
     }
 
     const changedKeys = diffWorkspaceReference(previous, key, scanned);
+    // D.13V-C P2-7：source: "stale" 是历史命名，实际语义是"rescan 后 key 变更，
+    // 上次 cache 已不再代表当前 workspace（即缓存层面已过期，但本次 scanned 是
+    // 新鲜数据）"。caller 应当把它当作"new confirmed scan"，不要错把它当 stale
+    // file system data。新增 source 类型是公共 schema 改动；本阶段保留命名，
+    // 仅以注释和 D.13V-A 的 fallback-stale / fallback-empty 区分语义。
     const snapshot: WorkspaceReferenceSnapshot = {
       key,
       source: previous ? "stale" : "miss",

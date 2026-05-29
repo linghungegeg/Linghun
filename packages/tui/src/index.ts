@@ -212,7 +212,9 @@ import {
   type SolutionCompletenessStatus,
   EXECUTE_EXTRA_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
+  buildExtendedDowngradedFinalAnswer,
   createDeferredToolDispatchDefinitions,
+  createExtendedFinalAnswerReminder,
   createFinalAnswerClaimReminder,
   createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
@@ -222,19 +224,24 @@ import {
   createToolUseDriftSummary,
   buildDowngradedFinalAnswer,
   deriveToolSupportsClaims,
+  evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
   extractNaturalReadPath,
+  finalAnswerHasCompletenessClassification,
   formatFileCandidates,
   formatSolutionCompletenessTrigger,
+  hasArchitectureEvidenceForClaims,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
   isNaturalReadFileRequest,
   looksLikeFilePath,
   matchesFileKeywords,
   normalizeRelativePath,
+  projectRuntimeStatusForPrompt,
   readToolInputString,
+  sanitizeDeferredToolPrimaryText,
 } from "./model-loop-runtime.js";
 import {
   type ModelSetupMessageKey,
@@ -6437,6 +6444,14 @@ function refreshBackgroundLifecycle(context: TuiContext): void {
   }
 }
 
+// D.13V-C — Resource / concurrency guard，并非第五种权限模式。
+// 命名/语义说明：
+// - 此 guard 仅做 concurrency cap（前台模型请求互斥 + 后台任务上限），不做 access control。
+// - mutating access control 仍由 default / auto-review / plan / full-access 四档权限管道决策。
+// - 文案、报告、UI、smoke 全部应避免把 "resource guard" 称为 "permission mode" 或第五权限。
+// - 测试在 docs/delivery/phase-13V-* 与 D13T audit 已记录；此常量是源码级断言锚点。
+export const RESOURCE_GUARD_KIND = "concurrency-cap" as const;
+
 function checkResourceGuard(
   context: TuiContext,
   kind: BackgroundTaskState["kind"] | "model" | "heavy",
@@ -6445,14 +6460,14 @@ function checkResourceGuard(
   refreshBackgroundLifecycle(context);
   if (kind === "model") {
     return context.activeAbortController
-      ? "已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。"
+      ? "并发上限：已有前台模型请求正在运行；请等待完成或使用 /interrupt 取消后再继续。这是 resource/concurrency cap，不是权限拒绝。"
       : null;
   }
   const activeTasks = context.backgroundTasks.filter(
     (task) => task.id !== ignoreTaskId && isActiveBackgroundStatus(task.status),
   );
   if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
-    return `后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。`;
+    return `并发上限：后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。这是 resource/concurrency cap，不是权限拒绝。`;
   }
   if (kind === "heavy") {
     const heavy = activeTasks.find(
@@ -6464,12 +6479,12 @@ function checkResourceGuard(
         task.kind === "job",
     );
     return heavy
-      ? `已有重任务正在运行：${heavy.kind} ${heavy.id}。请等待完成、查看 /background，或先 /interrupt。`
+      ? `并发上限：已有重任务正在运行：${heavy.kind} ${heavy.id}。请等待完成、查看 /background，或先 /interrupt。这是 resource/concurrency cap，不是权限拒绝。`
       : null;
   }
   const cap = BACKGROUND_KIND_CAPS[kind];
   if (cap !== undefined && activeTasks.filter((task) => task.kind === kind).length >= cap) {
-    return `${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。`;
+    return `并发上限：${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。这是 resource/concurrency cap，不是权限拒绝。`;
   }
   return null;
 }
@@ -13576,6 +13591,26 @@ async function sendMessage(
             continue;
           }
         }
+        // D.13V-B — Architecture / Completeness Final Gate（共享一次重试预算）
+        if (!finalAnswerClaimRetried && assistantText) {
+          const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
+          if (extended.status === "needs_disclaimer") {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_extended_gate retry kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            messages.push({
+              role: "user",
+              content: createExtendedFinalAnswerReminder(extended.verdict, context.language),
+            });
+            finalAnswerClaimRetried = true;
+            assistantText = "";
+            discardAssistantBlock(output, assistantStreamBlockId);
+            continue;
+          }
+        }
         break;
       }
       if (roundAssistantText) {
@@ -13662,6 +13697,22 @@ async function sendMessage(
         assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
         // D.13V — 同步把 streaming block 与 lastFullOutput 替换为降级文本，
         // 避免主屏 / Ctrl+O / details 仍展示原始违规文本。
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      }
+      // D.13V-B — Architecture / Completeness 降级（与 D.13U 共享 retry 预算）
+      const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
+      if (extended.status === "needs_disclaimer") {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+          "warning",
+        );
+        assistantText = buildExtendedDowngradedFinalAnswer(
+          assistantText,
+          extended.verdict,
+          context.language,
+        );
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
@@ -14024,6 +14075,26 @@ async function continueModelAfterToolResults(
             continue;
           }
         }
+        // D.13V-B — Architecture / Completeness Final Gate（continuation 镜像）
+        if (!finalAnswerClaimRetried && assistantText) {
+          const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
+          if (extended.status === "needs_disclaimer") {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_extended_gate retry kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            continuation.messages.push({
+              role: "user",
+              content: createExtendedFinalAnswerReminder(extended.verdict, context.language),
+            });
+            finalAnswerClaimRetried = true;
+            assistantText = "";
+            discardAssistantBlock(output, assistantStreamBlockId);
+            continue;
+          }
+        }
         break;
       }
       if (roundAssistantText) {
@@ -14085,6 +14156,22 @@ async function continueModelAfterToolResults(
           );
           assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
           // D.13V — 同步替换 continuation streaming block 与 lastFullOutput。
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        }
+        // D.13V-B — Architecture / Completeness 降级（continuation 镜像）
+        const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
+        if (extended.status === "needs_disclaimer") {
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+            "warning",
+          );
+          assistantText = buildExtendedDowngradedFinalAnswer(
+            assistantText,
+            extended.verdict,
+            context.language,
+          );
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
@@ -14150,6 +14237,50 @@ function needsSolutionCompletenessReportClosure(
     return false;
   }
   return !/single_issue|systemic_gap/u.test(assistantText);
+}
+
+// D.13V-B：在 final answer push 之前对 architecture / completeness 做一次额外 gate。
+// 与 D.13U evaluateFinalAnswerClaims 平行，不重写它。共享 finalAnswerClaimRetried 一次重试预算。
+function runArchitectureAndCompletenessFinalGate(
+  context: TuiContext,
+  assistantText: string,
+):
+  | {
+      status: "passed";
+    }
+  | {
+      status: "needs_disclaimer";
+      verdict: ReturnType<typeof evaluateArchitectureAndCompletenessClaims>;
+    } {
+  if (!assistantText) {
+    return { status: "passed" };
+  }
+  const card = context.currentArchitectureCard;
+  let driftWarnings: string[] = [];
+  if (card) {
+    // 用 final answer 文本作为 nextAction.summary，复用 detectArchitectureDrift 的
+    // treatsUnknownOrStaleAsFact / violatesNonGoals 检查。toolName 留空，避免触发
+    // dependency/file scope 误报；本 gate 只关心"事实层面是否被声明为已闭合"。
+    const drift = detectArchitectureDrift(card, { summary: assistantText });
+    driftWarnings = drift.warnings;
+  }
+  const verdict = evaluateArchitectureAndCompletenessClaims(
+    assistantText,
+    {
+      hasActiveCard: Boolean(card),
+      driftWarnings,
+      hasArchitectureEvidence: hasArchitectureEvidenceForClaims(context.evidence),
+    },
+    {
+      classificationRequired: context.solutionCompleteness.classificationRequired,
+      classification: context.solutionCompleteness.classification,
+      textHasClassification: finalAnswerHasCompletenessClassification(assistantText),
+    },
+  );
+  if (verdict.status === "needs_disclaimer") {
+    return { status: "needs_disclaimer", verdict };
+  }
+  return { status: "passed" };
 }
 
 function formatSolutionCompletenessReportBlock(context: TuiContext): string {
@@ -14529,7 +14660,16 @@ async function executeDeferredDispatchToolUse(
         evidence?.id,
       );
       clearRequestActivity(context);
-      writeLine(output, result.text);
+      // D.13V-C — 主屏只显示降噪后的产品文案；raw text 已经写入 tool_result store，
+      // doctor / details / Ctrl+O 仍可看到。
+      writeLine(
+        output,
+        sanitizeDeferredToolPrimaryText(result.text, context.language, {
+          dispatchKind: "SearchExtraTools",
+          ok: true,
+          matchedCount: result.data.total,
+        }),
+      );
       return {
         ok: true,
         tool: dispatchName,
@@ -14591,7 +14731,14 @@ async function executeDeferredDispatchToolUse(
         evidence.id,
       );
       clearRequestActivity(context);
-      writeLine(output, result.text);
+      // D.13V-C — 失败也要降噪：主屏不暴露 ExecuteExtraTool / dispatcher 等内部词。
+      writeLine(
+        output,
+        sanitizeDeferredToolPrimaryText(result.text, context.language, {
+          dispatchKind: "ExecuteExtraTool",
+          ok: false,
+        }),
+      );
       return { ok: false, tool: dispatchName, text: result.text, evidenceId: evidence.id };
     }
     const evidence = await recordToolEvidence(context, sessionId, "Read", {
@@ -14608,7 +14755,13 @@ async function executeDeferredDispatchToolUse(
       evidence?.id,
     );
     clearRequestActivity(context);
-    writeLine(output, result.text);
+    writeLine(
+      output,
+      sanitizeDeferredToolPrimaryText(result.text, context.language, {
+        dispatchKind: "ExecuteExtraTool",
+        ok: true,
+      }),
+    );
     return {
       ok: true,
       tool: dispatchName,
@@ -14706,7 +14859,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "EngineeringStructure=Do not pile logic into existing large files by default. Avoid god files, code blobs, overly long functions (>200 lines), deep nesting (>3 levels), and unbounded global state. Keep responsibility boundaries clear: UI/state/IO/provider/runner/permission/cache/verification. Prefer reusing existing project modules, helpers, presenters, and runtimes over creating a second system. Do not add zero-benefit abstractions for elegance. Each change must have a verifiable boundary (focused tests, typecheck, check). This is not authorization for large refactors."
       : "EngineeringStructure=默认不把逻辑堆进已有大文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。职责边界保持清晰：UI/状态/IO/provider/runner/permission/cache/verification。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。不为了优雅新增无收益抽象。每个改动要有可验证边界（focused tests、typecheck、check）。这不是授权大重构。"
-  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel.model.provider is internal context for tool routing and is NOT a user-facing label.\nRuntimeStatusForModel=${JSON.stringify(runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nRuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 function createEvidenceSummaryForModel(context: TuiContext): string {

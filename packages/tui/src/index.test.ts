@@ -12192,3 +12192,71 @@ describe("D.13O safety boundary — UNC/WebDAV hard deny", () => {
     expect(text).toMatch(/UNC|WebDAV/iu);
   });
 });
+
+// D.13V-B/C — 主链接入与默认降噪：源码级 invariant。运行时行为已由
+// model-loop-runtime.test.ts / tool-output-presenter.test.ts 单元覆盖；
+// 这里只锁定接入点位与降噪点位不被悄悄回退。
+describe("D.13V-B/C source invariants", () => {
+  it("source: sendMessage 接入 architecture/completeness final gate", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    expect(text).toContain("runArchitectureAndCompletenessFinalGate");
+    expect(text).toContain("evaluateArchitectureAndCompletenessClaims");
+    expect(text).toContain("createExtendedFinalAnswerReminder");
+    expect(text).toContain("buildExtendedDowngradedFinalAnswer");
+    // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimRetried）
+    expect(text).toMatch(/finalAnswerClaimRetried[\s\S]{0,1200}runArchitectureAndCompletenessFinalGate/);
+  });
+
+  it("source: continueModelAfterToolResults 镜像同一 gate", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    const start = text.indexOf("async function continueModelAfterToolResults");
+    expect(start).toBeGreaterThan(-1);
+    const body = text.slice(start, start + 12000);
+    expect(body).toContain("runArchitectureAndCompletenessFinalGate");
+    expect(body).toContain("buildExtendedDowngradedFinalAnswer");
+  });
+
+  it("source: createModelSystemPrompt 用 projectRuntimeStatusForPrompt 投影 runtimeStatus", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    expect(text).toContain("projectRuntimeStatusForPrompt(runtimeStatus)");
+    // RuntimeIdentityRule 不再依赖软约束：硬声明 RuntimeStatusForModel 不含 provider
+    expect(text).toMatch(
+      /RuntimeStatusForModel does not contain provider\/baseUrl\/endpointProfile by default/,
+    );
+  });
+
+  it("source: deferred tool 主屏 writeLine 走 sanitizeDeferredToolPrimaryText", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    // executeDeferredDispatchToolUse 不应再出现 `writeLine(output, result.text)`
+    // 直接传 raw text 的写法（这会泄漏 SearchExtraTools/ExecuteExtraTool 字面）。
+    const dispatchStart = text.indexOf("async function executeDeferredDispatchToolUse");
+    expect(dispatchStart).toBeGreaterThan(-1);
+    const body = text.slice(dispatchStart, dispatchStart + 8000);
+    expect(body).not.toMatch(/writeLine\(output, result\.text\);/);
+    expect(body).toContain("sanitizeDeferredToolPrimaryText");
+    expect(body).toContain('dispatchKind: "SearchExtraTools"');
+    expect(body).toContain('dispatchKind: "ExecuteExtraTool"');
+  });
+
+  it("source: resource guard 文案标注 concurrency cap，不是权限拒绝", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    expect(text).toContain("RESOURCE_GUARD_KIND");
+    // checkResourceGuard 的所有用户可见返回都应明确"并发上限/不是权限拒绝"。
+    const guardStart = text.indexOf("function checkResourceGuard");
+    expect(guardStart).toBeGreaterThan(-1);
+    const guardBody = text.slice(guardStart, guardStart + 2000);
+    expect(guardBody).toContain("并发上限");
+    expect(guardBody).toContain("不是权限拒绝");
+    // 不允许把 resource guard 声称为新权限模式
+    expect(guardBody).not.toMatch(/(?:第五|fifth)\s*(?:权限|permission)/);
+  });
+
+  it("source: permission 仍然只有 default/auto-review/plan/full-access 四档", async () => {
+    const text = await readFile("src/runtime-status-presenter.ts", "utf8");
+    // formatPermissionModeLabel 必须保持四档；新增第五种会破坏分支
+    expect(text).toMatch(/default:\s*"default mode"/);
+    expect(text).toMatch(/"auto-review":\s*"auto mode"/);
+    expect(text).toMatch(/plan:\s*"plan mode"/);
+    expect(text).toMatch(/"full-access":\s*"bypass approvals"/);
+  });
+});

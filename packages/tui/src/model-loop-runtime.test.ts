@@ -945,4 +945,274 @@ describe("model-loop-runtime", () => {
       expect(src).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
     });
   });
+
+  describe("D.13V-B Architecture / Completeness final answer gates", () => {
+    it("普通文本不触发", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "你好，今天我们继续修一些 bug。",
+        { hasActiveCard: false },
+        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+      );
+      expect(v.status).toBe("passed");
+      expect(v.matchedClaims).toHaveLength(0);
+    });
+
+    it("声称符合架构边界但无 active card → needs_disclaimer", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "本次改动符合架构边界，没有架构漂移。",
+        { hasActiveCard: false },
+        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+      );
+      expect(v.status).toBe("needs_disclaimer");
+      expect(v.unsupportedKinds).toContain("architecture_boundary");
+    });
+
+    it("声称架构闭合 + 有 card 但 driftWarnings 非空 → needs_disclaimer", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "架构已闭合。",
+        {
+          hasActiveCard: true,
+          driftWarnings: ["Architecture drift: scope expanded (foo.ts)."],
+          hasArchitectureEvidence: true,
+        },
+        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+      );
+      expect(v.status).toBe("needs_disclaimer");
+      expect(v.unsupportedKinds).toContain("architecture_boundary");
+    });
+
+    it("声称架构闭合 + card + 无 drift + 有 evidence → passed", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "架构已闭合。",
+        {
+          hasActiveCard: true,
+          driftWarnings: [],
+          hasArchitectureEvidence: true,
+        },
+        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+      );
+      expect(v.status).toBe("passed");
+    });
+
+    it("英文 'no architecture drift' 也命中", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "There is no architecture drift in this change.",
+        { hasActiveCard: false },
+        { classificationRequired: false, classification: "unknown", textHasClassification: false },
+      );
+      expect(v.status).toBe("needs_disclaimer");
+      expect(v.matchedClaims.some((m) => m.kind === "architecture_boundary")).toBe(true);
+    });
+
+    it("声称没有遗漏 + classificationRequired + 未给分类 → needs_disclaimer", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "所有任务完整完成，没有遗漏。",
+        { hasActiveCard: false },
+        {
+          classificationRequired: true,
+          classification: "unknown",
+          textHasClassification: false,
+        },
+      );
+      expect(v.status).toBe("needs_disclaimer");
+      expect(v.unsupportedKinds).toContain("completeness");
+    });
+
+    it("声称没有遗漏 + 已给 classification + textHasClassification → passed", async () => {
+      const { evaluateArchitectureAndCompletenessClaims } = await import(
+        "./model-loop-runtime.js"
+      );
+      const v = evaluateArchitectureAndCompletenessClaims(
+        "本次属于 single_issue，没有遗漏。",
+        { hasActiveCard: false },
+        {
+          classificationRequired: true,
+          classification: "single_issue",
+          textHasClassification: true,
+        },
+      );
+      expect(v.status).toBe("passed");
+    });
+
+    it("finalAnswerHasCompletenessClassification 识别 single_issue / systemic_gap", async () => {
+      const { finalAnswerHasCompletenessClassification } = await import(
+        "./model-loop-runtime.js"
+      );
+      expect(finalAnswerHasCompletenessClassification("属于 single_issue")).toBe(true);
+      expect(finalAnswerHasCompletenessClassification("It is a systemic_gap")).toBe(true);
+      expect(finalAnswerHasCompletenessClassification("已修复")).toBe(false);
+    });
+
+    it("hasArchitectureEvidenceForClaims 识别 architecture_boundary_check 与 architecture-* file_read", async () => {
+      const { hasArchitectureEvidenceForClaims } = await import("./model-loop-runtime.js");
+      expect(
+        hasArchitectureEvidenceForClaims([
+          { supportsClaims: ["architecture_boundary_check"] },
+        ]),
+      ).toBe(true);
+      expect(
+        hasArchitectureEvidenceForClaims([
+          {
+            supportsClaims: ["local_read"],
+            kind: "file_read",
+            source: "packages/tui/src/architecture-runtime.ts",
+          },
+        ]),
+      ).toBe(true);
+      expect(
+        hasArchitectureEvidenceForClaims([{ supportsClaims: ["local_read"], kind: "file_read", source: "src/index.ts" }]),
+      ).toBe(false);
+    });
+
+    it("createExtendedFinalAnswerReminder 含 phrase + 缺失类型，且不泄漏 internal validator id", async () => {
+      const { createExtendedFinalAnswerReminder } = await import("./model-loop-runtime.js");
+      const reminder = createExtendedFinalAnswerReminder(
+        {
+          status: "needs_disclaimer",
+          matchedClaims: [{ kind: "architecture_boundary", phrase: "符合架构边界" }],
+          unsupportedKinds: ["architecture_boundary"],
+          missingEvidenceKinds: ["Architecture Card 与 drift check"],
+        },
+        "zh-CN",
+      );
+      expect(reminder).toContain("符合架构边界");
+      expect(reminder).toContain("Architecture Card 与 drift check");
+      expect(reminder).not.toContain("FinalAnswerClaimGate");
+      expect(reminder).not.toContain("evaluateArchitectureAndCompletenessClaims");
+    });
+
+    it("buildExtendedDowngradedFinalAnswer 把声明替换为 [未验证]，并附人话提示", async () => {
+      const { buildExtendedDowngradedFinalAnswer } = await import("./model-loop-runtime.js");
+      const out = buildExtendedDowngradedFinalAnswer(
+        "本次改动符合架构边界，没有架构漂移。",
+        {
+          status: "needs_disclaimer",
+          matchedClaims: [
+            { kind: "architecture_boundary", phrase: "符合架构边界" },
+            { kind: "architecture_boundary", phrase: "没有架构漂移" },
+          ],
+          unsupportedKinds: ["architecture_boundary"],
+          missingEvidenceKinds: ["Architecture Card 与 drift check"],
+        },
+        "zh-CN",
+      );
+      expect(out).toContain("[未验证]");
+      expect(out).not.toContain("符合架构边界");
+      expect(out).not.toContain("没有架构漂移");
+      expect(out).toContain("未验证");
+    });
+  });
+
+  describe("D.13V-C RuntimeStatus prompt projection", () => {
+    it("剔除 provider，保留 model.name 与 index/cache/permissionMode", async () => {
+      const { projectRuntimeStatusForPrompt } = await import("./model-loop-runtime.js");
+      const projected = projectRuntimeStatusForPrompt({
+        memory: { linghunMd: "found", candidates: 0, accepted: 1, autoAccept: false },
+        index: { status: "ready", changedFiles: 0 },
+        cache: { latestHitRate: 0.42, changedKeys: ["a", "b"] },
+        model: { provider: "openai-compatible", name: "claude-opus-4-7" },
+        permissionMode: "default",
+        extensions: {
+          skills: { enabled: true, count: 3 },
+          plugins: { enabled: false, count: 0 },
+          hooks: { enabled: false, count: 0 },
+        },
+      });
+      expect(projected).not.toBeNull();
+      expect(projected?.model).toEqual({ name: "claude-opus-4-7" });
+      expect(JSON.stringify(projected)).not.toContain("provider");
+      expect(JSON.stringify(projected)).not.toContain("openai-compatible");
+      expect(projected?.index.status).toBe("ready");
+      expect(projected?.cache.latestHitRate).toBe(0.42);
+      expect(projected?.permissionMode).toBe("default");
+    });
+
+    it("缺失字段降级为 unknown / default，但不抛异常", async () => {
+      const { projectRuntimeStatusForPrompt } = await import("./model-loop-runtime.js");
+      const projected = projectRuntimeStatusForPrompt({});
+      expect(projected?.model.name).toBe("unknown");
+      expect(projected?.permissionMode).toBe("default");
+      expect(projected?.index.status).toBe("unknown");
+    });
+
+    it("完全非法输入返回 null", async () => {
+      const { projectRuntimeStatusForPrompt } = await import("./model-loop-runtime.js");
+      expect(projectRuntimeStatusForPrompt(undefined)).toBeNull();
+      expect(projectRuntimeStatusForPrompt(null)).toBeNull();
+      expect(projectRuntimeStatusForPrompt(42)).toBeNull();
+    });
+  });
+
+  describe("D.13V-C deferred tool primary text 降噪", () => {
+    it("SearchExtraTools 成功 → 主屏只显示数量，不含字面工具名", async () => {
+      const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
+      const out = sanitizeDeferredToolPrimaryText(
+        'SearchExtraTools matched 3/12 deferred tools (query="").',
+        "zh-CN",
+        { dispatchKind: "SearchExtraTools", ok: true, matchedCount: 3 },
+      );
+      expect(out).not.toContain("SearchExtraTools");
+      expect(out).not.toContain("ExecuteExtraTool");
+      expect(out).not.toContain("dispatcher");
+      expect(out).toContain("3");
+      expect(out).toContain("扩展工具");
+    });
+
+    it("ExecuteExtraTool 成功 → 主屏只显示完成", async () => {
+      const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
+      const out = sanitizeDeferredToolPrimaryText(
+        "ExecuteExtraTool(codebase-memory:search_code) 完成。",
+        "zh-CN",
+        { dispatchKind: "ExecuteExtraTool", ok: true },
+      );
+      expect(out).not.toContain("ExecuteExtraTool");
+      expect(out).not.toContain("codebase-memory:search_code");
+      expect(out).toContain("扩展工具");
+      expect(out).toContain("完成");
+    });
+
+    it("ExecuteExtraTool 失败 → 主屏含 reason 但去掉内部 token", async () => {
+      const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
+      const out = sanitizeDeferredToolPrimaryText(
+        "ExecuteExtraTool: 工具 mcp:foo:bar 没有可用的安全执行适配器。",
+        "zh-CN",
+        { dispatchKind: "ExecuteExtraTool", ok: false },
+      );
+      expect(out).not.toContain("ExecuteExtraTool");
+      expect(out).not.toContain("dispatcher");
+      expect(out).not.toContain("executeDeferredDispatchToolUse");
+      expect(out).toContain("失败");
+      expect(out).toContain("没有可用的安全执行适配器");
+    });
+
+    it("英文也产出本地化文案", async () => {
+      const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
+      const out = sanitizeDeferredToolPrimaryText(
+        "SearchExtraTools matched 0/0 deferred tools (query=\"\").",
+        "en-US",
+        { dispatchKind: "SearchExtraTools", ok: true, matchedCount: 0 },
+      );
+      expect(out).not.toContain("SearchExtraTools");
+      expect(out).toContain("Found 0");
+      expect(out.toLowerCase()).toContain("extension tool");
+    });
+  });
 });

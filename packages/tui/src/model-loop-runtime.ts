@@ -801,6 +801,334 @@ function escapeRegExp(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// D.13V-B \u2014 Architecture / Completeness final answer gates (pure helpers)
+// ---------------------------------------------------------------------------
+//
+// \u8bbe\u8ba1\u539f\u5219\uff1a
+// - \u4e0d\u91cd\u5199 evaluateFinalAnswerClaims\uff1b\u4ec5\u4f5c\u4e3a\u989d\u5916\u7684 final-answer hook \u4e0e D.13U \u5e76\u8054\u3002
+// - \u4e0d\u5728\u666e\u901a\u8f93\u5165\u4fa7\u505a\u5173\u952e\u8bcd\u62e6\u622a\uff1b\u53ea\u5728 final answer \u51fa\u73b0"\u58f0\u79f0\u7b26\u5408\u67b6\u6784\u8fb9\u754c / \u6ca1\u6709\u67b6\u6784\u6f02\u79fb
+//   / \u5168\u90e8\u5b8c\u6210\u3001\u6ca1\u6709\u9057\u6f0f"\u7b49\u9ad8\u98ce\u9669\u7ed3\u8bba\u65f6\u68c0\u67e5\u3002
+// - \u6ca1\u6709 architecture card / drift \u68c0\u67e5 / completeness \u5206\u7c7b\u65f6\uff0c\u76f8\u5e94 claim \u88ab\u6807\u8bb0\u4e3a
+//   needs_disclaimer\uff0c\u89e6\u53d1 retry \u6216\u672c\u5730\u964d\u7ea7\u3002
+// - \u590d\u7528\u73b0\u6709 architecture-runtime \u7684 detectArchitectureDrift / architecture-boundary \u7684
+//   validateChangeDeclaration \u80fd\u529b\uff0c\u4e0d\u65b0\u5efa\u7b2c\u4e8c\u5957\u7cfb\u7edf\u3002
+
+const ARCHITECTURE_BOUNDARY_CLAIM_PATTERNS: RegExp[] = [
+  /\u7b26\u5408\u67b6\u6784\u8fb9\u754c/u, // \u7b26\u5408\u67b6\u6784\u8fb9\u754c
+  /\u67b6\u6784\u5df2\u95ed\u5408/u, // \u67b6\u6784\u5df2\u95ed\u5408
+  /\u67b6\u6784\u8fb9\u754c\u5df2\u95ed\u5408/u, // \u67b6\u6784\u8fb9\u754c\u5df2\u95ed\u5408
+  /\u6ca1\u6709\u67b6\u6784\u6f02\u79fb/u, // \u6ca1\u6709\u67b6\u6784\u6f02\u79fb
+  /\u67b6\u6784\u6ca1\u6709\u6f02\u79fb/u, // \u67b6\u6784\u6ca1\u6709\u6f02\u79fb
+  /\u67b6\u6784\u4e0d\u4f1a\u6f02\u79fb/u, // \u67b6\u6784\u4e0d\u4f1a\u6f02\u79fb
+  /\bno\s+architecture\s+drift\b/iu,
+  /\barchitecture\s+(?:is\s+)?(?:closed|aligned|clean|consistent)\b/iu,
+  /\barchitecture\s+boundaries?\s+(?:closed|clean|respected)\b/iu,
+  /\bboundaries?\s+(?:are\s+)?(?:respected|honored|clean)\b/iu,
+];
+
+const COMPLETENESS_CLAIM_PATTERNS: RegExp[] = [
+  /\u6240\u6709\u4efb\u52a1\u5b8c\u6574\u5b8c\u6210/u, // \u6240\u6709\u4efb\u52a1\u5b8c\u6574\u5b8c\u6210
+  /\u6240\u6709\u95ee\u9898\u90fd\u5df2\u89e3\u51b3/u, // \u6240\u6709\u95ee\u9898\u90fd\u5df2\u89e3\u51b3
+  /\u6ca1\u6709\u9057\u6f0f/u, // \u6ca1\u6709\u9057\u6f0f
+  /\u4e00\u4e2a\u90fd\u4e0d\u5c11/u, // \u4e00\u4e2a\u90fd\u4e0d\u5c11
+  /\u5168\u90e8\u5b8c\u6574/u, // \u5168\u90e8\u5b8c\u6574
+  /\u5168\u9762\u8986\u76d6/u, // \u5168\u9762\u8986\u76d6
+  /\b(?:no|zero)\s+omissions?\b/iu,
+  /\bnothing\s+left\s+behind\b/iu,
+  /\ball\s+(?:tasks|items|issues)\s+(?:are\s+)?(?:complete|completed|resolved)\b/iu,
+  /\bfull(?:ly)?\s+(?:complete|comprehensive|covered)\b/iu,
+];
+
+export type FinalAnswerArchitectureCheckInput = {
+  hasActiveCard: boolean;
+  driftWarnings?: string[];
+  hasArchitectureEvidence?: boolean;
+};
+
+export type FinalAnswerCompletenessCheckInput = {
+  classificationRequired: boolean;
+  classification: SolutionCompletenessClassification;
+  textHasClassification: boolean;
+};
+
+export type FinalAnswerExtendedClaimKind = "architecture_boundary" | "completeness";
+
+export type FinalAnswerExtendedVerdict = {
+  status: "passed" | "needs_disclaimer";
+  matchedClaims: { kind: FinalAnswerExtendedClaimKind; phrase: string }[];
+  unsupportedKinds: FinalAnswerExtendedClaimKind[];
+  missingEvidenceKinds: string[];
+};
+
+// \u4e0e D.13U \u5e73\u884c\u7684\u7eaf\u51fd\u6570\uff1a\u68c0\u67e5\u6700\u7ec8\u56de\u7b54\u662f\u5426\u58f0\u79f0"\u7b26\u5408\u67b6\u6784\u8fb9\u754c"\u6216"\u65e0\u9057\u6f0f"\u3002
+// \u4e0e evaluateFinalAnswerClaims \u4e0d\u540c\uff1a\u672c\u68c0\u67e5\u4e0d\u9700\u8981 EvidenceRecord \u6570\u7ec4\uff0c
+// \u800c\u662f\u4f9d\u8d56 sendMessage \u5f53\u8f6e\u5df2\u7ecf\u6536\u96c6\u5230\u7684\u8fd0\u884c\u671f\u4fe1\u53f7\uff08card / drift / classification\uff09\u3002
+export function evaluateArchitectureAndCompletenessClaims(
+  text: string,
+  architecture: FinalAnswerArchitectureCheckInput,
+  completeness: FinalAnswerCompletenessCheckInput,
+): FinalAnswerExtendedVerdict {
+  const matched: { kind: FinalAnswerExtendedClaimKind; phrase: string }[] = [];
+  for (const re of ARCHITECTURE_BOUNDARY_CLAIM_PATTERNS) {
+    const match = re.exec(text);
+    if (match) {
+      matched.push({ kind: "architecture_boundary", phrase: match[0] });
+    }
+  }
+  for (const re of COMPLETENESS_CLAIM_PATTERNS) {
+    const match = re.exec(text);
+    if (match) {
+      matched.push({ kind: "completeness", phrase: match[0] });
+    }
+  }
+  if (matched.length === 0) {
+    return {
+      status: "passed",
+      matchedClaims: [],
+      unsupportedKinds: [],
+      missingEvidenceKinds: [],
+    };
+  }
+  const unsupported: FinalAnswerExtendedClaimKind[] = [];
+  const missing: string[] = [];
+  const matchedKinds = new Set(matched.map((m) => m.kind));
+  if (matchedKinds.has("architecture_boundary")) {
+    const supported =
+      architecture.hasActiveCard &&
+      (architecture.driftWarnings?.length ?? 0) === 0 &&
+      architecture.hasArchitectureEvidence !== false;
+    if (!supported) {
+      unsupported.push("architecture_boundary");
+      missing.push("Architecture Card \u4e0e drift check");
+    }
+  }
+  if (matchedKinds.has("completeness")) {
+    // \u6709\u58f0\u660e\u4f46\u672a\u505a single_issue/systemic_gap \u5206\u7c7b \u2192 \u4e0d\u653e\u884c\u3002
+    const supported =
+      !completeness.classificationRequired ||
+      (completeness.classification !== "unknown" && completeness.textHasClassification);
+    if (!supported) {
+      unsupported.push("completeness");
+      missing.push("Solution Completeness classification (single_issue / systemic_gap)");
+    }
+  }
+  if (unsupported.length === 0) {
+    return {
+      status: "passed",
+      matchedClaims: matched,
+      unsupportedKinds: [],
+      missingEvidenceKinds: [],
+    };
+  }
+  return {
+    status: "needs_disclaimer",
+    matchedClaims: matched,
+    unsupportedKinds: unsupported,
+    missingEvidenceKinds: missing,
+  };
+}
+
+export function createExtendedFinalAnswerReminder(
+  verdict: FinalAnswerExtendedVerdict,
+  language: Language,
+): string {
+  const phrases = Array.from(new Set(verdict.matchedClaims.map((m) => m.phrase))).slice(0, 6);
+  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
+  if (language === "en-US") {
+    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching support (missing: ${kinds}). Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or run a tool / call /claim-check to gather evidence first. You have only one rewrite chance.`;
+  }
+  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177 / \u5148\u8d70 /claim-check \u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
+}
+
+export function buildExtendedDowngradedFinalAnswer(
+  originalText: string,
+  verdict: FinalAnswerExtendedVerdict,
+  language: Language,
+): string {
+  let safeText = originalText;
+  for (const match of verdict.matchedClaims) {
+    if (verdict.unsupportedKinds.includes(match.kind)) {
+      const re = new RegExp(escapeRegExp(match.phrase), "giu");
+      safeText = safeText.replace(re, language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]");
+    }
+  }
+  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
+  const notice =
+    language === "en-US"
+      ? `\nI can't confirm these claims due to missing ${kinds} support; the reply above has been rephrased as unverified.`
+      : `\n\u6211\u4e0d\u80fd\u786e\u8ba4\u8fd9\u4e9b\u58f0\u660e\uff0c\u56e0\u4e3a\u7f3a\u5c11 ${kinds}\uff1b\u4ee5\u4e0a\u56de\u7b54\u5df2\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002`;
+  return safeText + notice;
+}
+
+export function finalAnswerHasCompletenessClassification(text: string): boolean {
+  return /\b(single_issue|systemic_gap)\b/u.test(text);
+}
+
+export function hasArchitectureEvidenceForClaims(
+  evidence: { supportsClaims: string[]; kind?: string; source?: string }[],
+): boolean {
+  // \u63a5\u53d7\u4ee5\u4e0b\u4efb\u4e00\u4f5c\u4e3a"\u67b6\u6784\u8fb9\u754c"\u5c42\u9762\u8bc1\u636e\uff1a
+  // - supportsClaims \u4e2d\u542b "architecture_boundary_check"\uff08\u672a\u6765\u7531 architecture-boundary \u63a5\u5165\u4ea7\u751f\uff09
+  // - architecture-runtime \u7684 system_event card \u5728 evidence \u4e2d\u4fdd\u7559 supportsClaims=["architecture_card"]
+  // - evidence source \u547d\u4e2d\u672c\u4ed3\u5e93\u5185 architecture-* \u6a21\u5757\u7684 file_read\uff08\u8bf4\u660e\u6a21\u578b\u786e\u5b9e\u8bfb\u8fc7\u67b6\u6784\u76f8\u5173\u6e90\u7801\uff09
+  return evidence.some((rec) => {
+    const claims = rec.supportsClaims ?? [];
+    if (
+      claims.includes("architecture_boundary_check") ||
+      claims.includes("architecture_card") ||
+      claims.includes("architecture_runtime")
+    ) {
+      return true;
+    }
+    const source = (rec.source ?? "").toLowerCase();
+    if (rec.kind === "file_read" && /architecture-(?:boundary|runtime)/.test(source)) {
+      return true;
+    }
+    return false;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// D.13V-C \u2014 RuntimeStatus prompt projection (split internal / external)
+// ---------------------------------------------------------------------------
+//
+// \u65e7 system prompt \u76f4\u63a5 JSON.stringify(runtimeStatus)\uff0c\u628a provider/baseUrl/endpointProfile
+// \u5f53\u539f\u6587\u585e\u8fdb prompt\uff0c\u4f9d\u8d56 RuntimeIdentityRule \u8f6f\u7ea6\u675f\u8ba9\u6a21\u578b\u4e0d\u8981\u6cc4\u6f0f\u3002
+// \u62c6\u6210 internalForLog / externalForPrompt\uff1a
+// - externalForPrompt \u53ea\u542b\u6a21\u578b\u56de\u7b54\u81ea\u7136\u8bed\u8a00\u65f6\u786e\u5b9e\u9700\u8981\u7684\u5b57\u6bb5\uff08model name\u3001permission mode\u3001
+//   index/cache \u6982\u89c8\u3001\u6269\u5c55\u5de5\u5177\u662f\u5426\u542f\u7528\u3001memory \u6982\u89c8\uff09\u3002
+// - \u4e0d\u542b provider / baseUrl / endpointProfile / \u8def\u7531\u4fe1\u606f\u3002
+// - \u7528\u6237\u95ee provider/route/doctor \u65f6\u4ecd\u53ef\u901a\u8fc7 /model doctor\u3001/model route doctor \u66b4\u9732\u5b8c\u6574\u4fe1\u606f\u3002
+
+export type RuntimeStatusForPrompt = {
+  memory: {
+    linghunMd: "found" | "missing" | "unreadable";
+    candidates: number;
+    accepted: number;
+    autoAccept: boolean;
+  };
+  index: { status: string; changedFiles: number | null };
+  cache: { latestHitRate: number | null; changedKeys: string[] };
+  model: { name: string };
+  permissionMode: string;
+  extensions: {
+    skills: { enabled: boolean; count: number };
+    plugins: { enabled: boolean; count: number };
+    hooks: { enabled: boolean; count: number };
+  };
+};
+
+export function projectRuntimeStatusForPrompt(
+  runtimeStatus: unknown,
+): RuntimeStatusForPrompt | null {
+  if (!runtimeStatus || typeof runtimeStatus !== "object") return null;
+  const r = runtimeStatus as Record<string, unknown>;
+  const model =
+    r.model && typeof r.model === "object"
+      ? (r.model as { name?: string }).name ?? "unknown"
+      : "unknown";
+  const memory = (r.memory ?? {}) as Record<string, unknown>;
+  const index = (r.index ?? {}) as Record<string, unknown>;
+  const cache = (r.cache ?? {}) as Record<string, unknown>;
+  const extensions = (r.extensions ?? {}) as Record<string, unknown>;
+  const skills = (extensions.skills ?? {}) as Record<string, unknown>;
+  const plugins = (extensions.plugins ?? {}) as Record<string, unknown>;
+  const hooks = (extensions.hooks ?? {}) as Record<string, unknown>;
+  return {
+    memory: {
+      linghunMd: ((memory.linghunMd as RuntimeStatusForPrompt["memory"]["linghunMd"]) ??
+        "missing") as RuntimeStatusForPrompt["memory"]["linghunMd"],
+      candidates: typeof memory.candidates === "number" ? memory.candidates : 0,
+      accepted: typeof memory.accepted === "number" ? memory.accepted : 0,
+      autoAccept: memory.autoAccept === true,
+    },
+    index: {
+      status: typeof index.status === "string" ? index.status : "unknown",
+      changedFiles:
+        typeof index.changedFiles === "number" ? (index.changedFiles as number) : null,
+    },
+    cache: {
+      latestHitRate:
+        typeof cache.latestHitRate === "number" ? (cache.latestHitRate as number) : null,
+      changedKeys: Array.isArray(cache.changedKeys)
+        ? (cache.changedKeys as string[]).filter((k) => typeof k === "string")
+        : [],
+    },
+    model: { name: typeof model === "string" ? model : "unknown" },
+    permissionMode: typeof r.permissionMode === "string" ? r.permissionMode : "default",
+    extensions: {
+      skills: {
+        enabled: skills.enabled === true,
+        count: typeof skills.count === "number" ? (skills.count as number) : 0,
+      },
+      plugins: {
+        enabled: plugins.enabled === true,
+        count: typeof plugins.count === "number" ? (plugins.count as number) : 0,
+      },
+      hooks: {
+        enabled: hooks.enabled === true,
+        count: typeof hooks.count === "number" ? (hooks.count as number) : 0,
+      },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D.13V-C \u2014 deferred tool \u9ed8\u8ba4\u4e3b\u5c4f\u6587\u6848\u964d\u566a\uff08pure helper\uff09
+// ---------------------------------------------------------------------------
+//
+// SearchExtraTools / ExecuteExtraTool \u7684 result.text \u542b\u5b57\u9762\u5de5\u5177\u540d\uff08"SearchExtraTools matched ..."\u3001
+// "ExecuteExtraTool: \u5de5\u5177 ..."\uff09\uff0c\u8fd9\u4e9b\u662f\u7ed9 verifier / tool_result / details \u770b\u7684\u5185\u90e8\u8bf4\u660e\u3002
+// \u4e3b\u5c4f\uff08writeLine\uff09\u9ed8\u8ba4\u663e\u793a\u4ea7\u54c1\u8bed\u8a00\uff1a
+//   - "\u5df2\u53d1\u73b0 N \u4e2a\u6269\u5c55\u5de5\u5177"
+//   - "\u6269\u5c55\u5de5\u5177\u8c03\u7528\u5b8c\u6210 / \u5931\u8d25\uff1a<\u539f\u56e0\u6458\u8981>"
+// raw text \u4ecd\u4fdd\u7559\u5728 store \u7684 tool_result \u4e8b\u4ef6\u91cc\uff0cdoctor / details / Ctrl+O \u80fd\u770b\u5230\u3002
+
+export function sanitizeDeferredToolPrimaryText(
+  rawText: string,
+  language: Language,
+  options: {
+    dispatchKind: "SearchExtraTools" | "ExecuteExtraTool";
+    ok: boolean;
+    matchedCount?: number;
+  },
+): string {
+  if (options.dispatchKind === "SearchExtraTools" && options.ok) {
+    const count = options.matchedCount ?? extractMatchedCount(rawText);
+    return language === "en-US"
+      ? `Found ${count} extension tool(s).`
+      : `\u5df2\u53d1\u73b0 ${count} \u4e2a\u6269\u5c55\u5de5\u5177\u3002`;
+  }
+  if (options.dispatchKind === "ExecuteExtraTool" && options.ok) {
+    return language === "en-US"
+      ? "Extension tool finished."
+      : "\u6269\u5c55\u5de5\u5177\u8c03\u7528\u5b8c\u6210\u3002";
+  }
+  // \u5931\u8d25\uff1a\u53bb\u6389\u524d\u7f00\u5b57\u9762\uff0c\u53ea\u4fdd\u7559\u53ef\u8bfb\u539f\u56e0\u3002raw text \u4ecd\u5199\u5165 tool_result store\u3002
+  const reason = stripDeferredInternalTokens(rawText);
+  return language === "en-US"
+    ? `Extension tool call failed: ${reason}`
+    : `\u6269\u5c55\u5de5\u5177\u8c03\u7528\u5931\u8d25\uff1a${reason}`;
+}
+
+function extractMatchedCount(text: string): number {
+  const m = /matched\s+(\d+)/iu.exec(text);
+  return m && m[1] ? Number.parseInt(m[1], 10) : 0;
+}
+
+function stripDeferredInternalTokens(text: string): string {
+  return text
+    .replace(/^SearchExtraTools[:\s]+/iu, "")
+    .replace(/^ExecuteExtraTool[\s(:][^\uff1a:]*[\uff09)]?[:\s]*/iu, "")
+    .replace(/SearchExtraTools/giu, "")
+    .replace(/ExecuteExtraTool/giu, "")
+    .replace(/executeDeferredDispatchToolUse/giu, "")
+    .replace(/dispatcher/giu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
 // D.13U \u2014 recordToolEvidence supportsClaims \u6d3e\u751f\u5668\uff08\u7eaf\u51fd\u6570\uff09
 // ---------------------------------------------------------------------------
 //
