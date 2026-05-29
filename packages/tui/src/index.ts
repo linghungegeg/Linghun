@@ -120,6 +120,12 @@ import {
   createIndexState,
   findCurrentIndexProject,
 } from "./index-runtime.js";
+import {
+  formatIndexSafetyWarning,
+  isIgnoredIndexPath,
+  scanIndexSafety,
+  summarizeIndexResult,
+} from "./index-result-presenter.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   formatGitStatusDetails,
@@ -315,6 +321,48 @@ import {
 } from "./permission-presenter.js";
 import { classifyToolRequest } from "./permission-policy-engine.js";
 import {
+  type DeferredToolDescriptor,
+  type DeferredToolDiscoverySnapshot,
+  type DeferredToolKind,
+  type DiscoveredDeferredToolsSummary,
+  deferredToolListHashInput,
+  findDeferredTool,
+  formatDeferredToolsSystemReminder,
+  getCodebaseMemoryToolRisk,
+  isCodebaseMemoryToolName,
+  isLocalStdioMcpServer,
+  listDeferredTools,
+  parseMcpDeferredToolName,
+  sanitizeDiscoveredDeferredToolName,
+  searchDeferredTools,
+  snapshotDeferredTools,
+  snapshotDeferredToolsSummary,
+  snapshotDiscoveredDeferredToolsSummary,
+  summarizeDeferredToolMatch,
+  validateCodebaseMemoryToolExecution,
+} from "./deferred-tools-catalog.js";
+// D.14A — deferred tools catalog moved to ./deferred-tools-catalog.ts.
+// Re-export to preserve existing external / test imports from "./index.js".
+export {
+  type DeferredToolDescriptor,
+  type DeferredToolDiscoverySnapshot,
+  type DeferredToolKind,
+  type DiscoveredDeferredToolsSummary,
+  deferredToolListHashInput,
+  findDeferredTool,
+  formatDeferredToolsSystemReminder,
+  getCodebaseMemoryToolRisk,
+  isLocalStdioMcpServer,
+  listDeferredTools,
+  parseMcpDeferredToolName,
+  sanitizeDiscoveredDeferredToolName,
+  searchDeferredTools,
+  snapshotDeferredTools,
+  snapshotDeferredToolsSummary,
+  snapshotDiscoveredDeferredToolsSummary,
+  validateCodebaseMemoryToolExecution,
+} from "./deferred-tools-catalog.js";
+import {
   createProcessGuard,
   installProcessGuardExitHandlers,
   requestTrackedProcessStop,
@@ -406,6 +454,7 @@ import {
   formatTerminalReadinessStatus,
 } from "./terminal-readiness-presenter.js";
 import { formatToolOutput, formatToolStart } from "./tool-output-presenter.js";
+import { type MessageKey, messages } from "./tui-messages.js";
 import {
   type WorkspaceReferenceCache,
   createWorkspaceReferenceCache,
@@ -651,48 +700,6 @@ export type {
   ModelSetupPrefill,
   ModelSetupMessageKey,
 } from "./model-setup-runtime.js";
-
-type MessageKey =
-  | "appTitle"
-  | "intro"
-  | "currentModel"
-  | "unknownCommand"
-  | "languageSwitchedZh"
-  | "languageSwitchedEn"
-  | "modeCurrent"
-  | "modeOptions"
-  | "modeBoundary"
-  | "modeUnknown"
-  | "modeFullAccessPlanBlocked"
-  | "modeFullAccessOptInBlocked"
-  | "modeSwitched"
-  | "modePlanBoundary"
-  | "startGateConfirmed"
-  | "startGateExpired"
-  | "startGateExactRequired"
-  | "startGatePlainConfirmationRejected"
-  | "exit"
-  | "status"
-  | "statusShort"
-  | "help"
-  | "inputPrompt"
-  | "noSessions"
-  | "sessionHeader"
-  | "noSummary"
-  | "checkpointCreated"
-  | "checkpointNone"
-  | "checkpointRestored"
-  | "checkpointMissing"
-  | "backgroundNone"
-  | "backgroundEmptyOutput"
-  | "backgroundRunning"
-  | "interruptIdle"
-  | "interruptCancelled"
-  | "btwPrefix"
-  | "evidenceBlocked"
-  | "claimNeedsDisclaimer"
-  | "projectRulesMissingHint"
-  | "toolInterrupted";
 
 export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/help",
@@ -983,25 +990,6 @@ const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
 const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 const MAX_MODEL_TOOL_ROUNDS = 4;
-const LARGE_INDEX_FILE_BYTES = 1_000_000;
-const LARGE_INDEX_FILE_LIMIT = 12;
-const LARGE_INDEX_RISK_EXTENSIONS = new Set([".json", ".sql", ".xml"]);
-const LARGE_INDEX_RISK_DIRS = new Set([
-  ".next",
-  ".turbo",
-  ".venv",
-  "assets",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "out",
-  "public",
-  "target",
-  "vendor",
-  "venv",
-]);
-const INDEX_SCAN_SKIP_DIRS = new Set([".git", ".codebase-memory", ".linghun"]);
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_STATUS_WIDTH = 160;
@@ -9418,236 +9406,6 @@ function formatIndexRefreshSummary(
   ].join("\n");
 }
 
-function summarizeIndexResult(tool: "search_code" | "get_architecture", data: unknown): string {
-  if (tool === "get_architecture" && isRecord(data)) {
-    return [
-      "Index architecture（短摘要）",
-      `- project: ${String(data.project ?? "unknown")}`,
-      `- nodes/edges: ${String(data.total_nodes ?? "-")}/${String(data.total_edges ?? "-")}`,
-      `- node labels: ${summarizeNamedCounts(data.node_labels)}`,
-      `- edge types: ${summarizeNamedCounts(data.edge_types)}`,
-    ].join("\n");
-  }
-  if (isRecord(data)) {
-    const raw = Array.isArray(data.results) ? data.results : [];
-    const matches = raw
-      .slice(0, 5)
-      .map((item, index) => `- #${index + 1} ${summarizeIndexSearchItem(item)}`);
-    return [
-      "Index search（短摘要，最多 5 条）",
-      `- total: ${String(data.total_results ?? raw.length)}`,
-      ...matches,
-      matches.length === 0
-        ? "- no matches"
-        : "- truncated: full source is not dumped into transcript/status bar.",
-    ].join("\n");
-  }
-  return `Index result: ${truncateDisplay(stableStringify(data), 500)}`;
-}
-
-function summarizeIndexSearchItem(item: unknown): string {
-  if (!isRecord(item)) {
-    return truncateDisplay(String(item), 120);
-  }
-  const path = String(item.path ?? item.file ?? item.file_path ?? "unknown");
-  const symbol = item.symbol ?? item.name ?? item.qualified_name;
-  const kind = item.kind ?? item.type ?? item.label;
-  const parts = [`path=${truncateDisplay(path, 80)}`];
-  if (symbol !== undefined) {
-    parts.push(`symbol=${truncateDisplay(String(symbol), 60)}`);
-  }
-  if (kind !== undefined) {
-    parts.push(`kind=${truncateDisplay(String(kind), 40)}`);
-  }
-  return parts.join(" ");
-}
-
-function summarizeNamedCounts(value: unknown): string {
-  if (!Array.isArray(value)) {
-    return "-";
-  }
-  return value
-    .slice(0, 6)
-    .map((item) => {
-      if (!isRecord(item)) {
-        return truncateDisplay(String(item), 32);
-      }
-      return `${String(item.label ?? item.type ?? item.name ?? "?")}=${String(item.count ?? "?")}`;
-    })
-    .join(", ");
-}
-
-type IndexSafetyResult = {
-  riskyFiles: IndexSafetyFile[];
-  truncated: boolean;
-};
-
-async function scanIndexSafety(projectPath: string): Promise<IndexSafetyResult> {
-  const ignorePatterns = await readIndexIgnorePatterns(projectPath);
-  const riskyFiles: IndexSafetyFile[] = [];
-  let truncated = false;
-
-  async function visit(directory: string): Promise<void> {
-    if (riskyFiles.length >= LARGE_INDEX_FILE_LIMIT) {
-      truncated = true;
-      return;
-    }
-    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (riskyFiles.length >= LARGE_INDEX_FILE_LIMIT) {
-        truncated = true;
-        return;
-      }
-      const absolutePath = join(directory, entry.name);
-      const relativePath = normalizePath(relative(projectPath, absolutePath));
-      if (!relativePath || isIgnoredIndexPath(relativePath, ignorePatterns)) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        if (INDEX_SCAN_SKIP_DIRS.has(entry.name)) {
-          continue;
-        }
-        if (LARGE_INDEX_RISK_DIRS.has(entry.name)) {
-          riskyFiles.push({
-            path: `${relativePath}/`,
-            size: 0,
-            reason: "generated/dependency directory",
-          });
-          continue;
-        }
-        await visit(absolutePath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const fileRisk = getIndexFileRisk(relativePath);
-      if (!fileRisk) {
-        continue;
-      }
-      let fileStat: Awaited<ReturnType<typeof stat>>;
-      try {
-        fileStat = await stat(absolutePath);
-      } catch {
-        continue;
-      }
-      if (fileStat.size < LARGE_INDEX_FILE_BYTES) {
-        continue;
-      }
-      riskyFiles.push({ path: relativePath, size: fileStat.size, reason: fileRisk });
-    }
-  }
-
-  await visit(projectPath);
-  return { riskyFiles, truncated };
-}
-
-async function readIndexIgnorePatterns(projectPath: string): Promise<string[]> {
-  const patterns: string[] = [];
-  for (const fileName of [".linghunignore", ".cbmignore"]) {
-    try {
-      const text = await readFile(join(projectPath, fileName), "utf8");
-      patterns.push(
-        ...text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0 && !line.startsWith("#"))
-          .map((line) => normalizePath(line)),
-      );
-    } catch {
-      // Ignore file is optional; missing or unreadable files must not break /index commands.
-    }
-  }
-  return patterns;
-}
-
-function isIgnoredIndexPath(relativePath: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => {
-    const normalized = pattern.replace(/^\//, "");
-    if (!normalized) {
-      return false;
-    }
-    if (normalized.endsWith("/")) {
-      return relativePath.startsWith(normalized);
-    }
-    if (normalized.includes("*")) {
-      const escaped = normalized.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
-      return (
-        new RegExp(`^${escaped}$`).test(relativePath) ||
-        new RegExp(`(^|/)${escaped}$`).test(relativePath)
-      );
-    }
-    return relativePath === normalized || relativePath.startsWith(`${normalized}/`);
-  });
-}
-
-function getIndexFileRisk(relativePath: string): string | null {
-  const fileName = basename(relativePath);
-  const extension = extname(relativePath).toLowerCase();
-  const segments = relativePath.split("/");
-  if (fileName.endsWith(".min.js")) {
-    return "minified javascript";
-  }
-  if (LARGE_INDEX_RISK_EXTENSIONS.has(extension)) {
-    return `${extension} file`;
-  }
-  if (segments.some((segment) => LARGE_INDEX_RISK_DIRS.has(segment))) {
-    return "generated/resource directory";
-  }
-  return null;
-}
-
-function formatIndexSafetyWarning(
-  safety: IndexSafetyResult,
-  actionLabel: "init fast" | "refresh",
-  layer: "primary" | "details" = "primary",
-): string {
-  const hiddenCount = safety.riskyFiles.length;
-  if (layer === "primary") {
-    return [
-      `索引安全门：/index ${actionLabel} 发现 ${hiddenCount} 项未排除的大文件风险，默认阻止索引。`,
-      "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
-      "主屏不展开完整风险清单；完整清单已写入 transcript/evidence。",
-      "建议 ignore 文件：.linghunignore 或 .cbmignore",
-      "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
-      "重试命令：/index refresh",
-      "如确认要继续，可显式追加 --force。",
-    ].join("\n");
-  }
-
-  const files = safety.riskyFiles.map((file) => {
-    const size = file.size > 0 ? `${formatBytes(file.size)}, ` : "";
-    return `- ${file.path} (${size}${file.reason})`;
-  });
-  const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
-  return [
-    `索引安全门详情：/index ${actionLabel} 发现未排除的大文件风险。`,
-    "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
-    ...files,
-    safety.truncated ? `- 仅记录前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
-    "建议 ignore 文件：.linghunignore 或 .cbmignore",
-    "建议加入条目：",
-    ...ignoreEntries,
-    "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
-    "重试命令：/index refresh",
-    "如确认要继续，可显式追加 --force。",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1_000_000) {
-    return `${(bytes / 1_000_000).toFixed(1)} MB`;
-  }
-  return `${Math.round(bytes / 1_000)} KB`;
-}
-
 async function runCodebaseMemoryCli(
   context: TuiContext,
   tool: string,
@@ -9683,385 +9441,6 @@ async function runCodebaseMemoryCli(
   } catch (error) {
     return { ok: false, summary: `无法解析 codebase-memory-mcp 输出：${formatError(error)}` };
   }
-}
-
-function codebaseMemoryRequiredArgs(): Record<string, string[]> {
-  return {
-    list_projects: [],
-    index_status: ["project"],
-    detect_changes: ["project"],
-    index_repository: ["repo_path"],
-    search_code: ["project", "pattern"],
-    get_architecture: ["project"],
-    get_code_snippet: ["project", "qualified_name"],
-    query_graph: ["project", "query"],
-    trace_path: ["project", "from", "to"],
-    search_graph: ["project", "query"],
-  };
-}
-
-// D.13J Block 3 — codebase-memory 工具 risk 分层。
-// readonly = 只读查询，无 session 权限门槛；mutating = 可能写入索引/触发昂贵操作，
-// 必须显式权限授予。order: whitelist → required-args → permission gate → spawn。
-function codebaseMemoryRiskClass(): Record<string, "readonly" | "mutating"> {
-  return {
-    list_projects: "readonly",
-    index_status: "readonly",
-    search_code: "readonly",
-    get_architecture: "readonly",
-    get_code_snippet: "readonly",
-    query_graph: "readonly",
-    trace_path: "readonly",
-    search_graph: "readonly",
-    index_repository: "mutating",
-    detect_changes: "mutating",
-  };
-}
-
-export function getCodebaseMemoryToolRisk(
-  tool: string,
-): "readonly" | "mutating" | "unknown" {
-  return codebaseMemoryRiskClass()[tool] ?? "unknown";
-}
-
-export function validateCodebaseMemoryToolExecution(
-  tool: string,
-  input: Record<string, unknown>,
-): { ok: true } | { ok: false; summary: string } {
-  const requiredArgs = codebaseMemoryRequiredArgs();
-  if (!(tool in requiredArgs)) {
-    return {
-      ok: false,
-      summary: `MCP deferred tool guard: ${tool} 尚未经过 discovery/schema/trust/runtime 登记，已拒绝执行。请先运行 /mcp doctor 或使用已发现且可信的工具入口。`,
-    };
-  }
-  const missing = requiredArgs[tool]?.filter(
-    (key) => input[key] === undefined || input[key] === null || input[key] === "",
-  );
-  if (missing && missing.length > 0) {
-    return {
-      ok: false,
-      summary: `MCP deferred tool guard: ${tool} 缺少 required args：${missing.join(", ")}。已拒绝盲执行。`,
-    };
-  }
-  return { ok: true };
-}
-
-// ===========================================================================
-// D.13I — Self-built deferred tools dispatch
-// ---------------------------------------------------------------------------
-// SearchExtraTools / ExecuteExtraTool 是 Linghun 自研的 deferred 调用层。模型必须
-// 先调用 SearchExtraTools 获得 executable=true 的工具，再用 ExecuteExtraTool 调用。
-// 不发 Anthropic defer_loading / tool_reference / anthropic-beta；不新建 runner；
-// 仍走既有 permission / tool_result / evidence / continuation 链路。
-// 执行分层：
-//   - codebase-memory：白名单 10 个工具，复用 runCodebaseMemoryCli + validateCodebaseMemoryToolExecution
-//   - MCP server tools：仅 schemaLoaded+trusted+server.enabled 时 discoverable；本阶段
-//     不接通用 MCP 调用 adapter，所以 executable=false
-//   - skills：discover trusted manifest，autoExecute=no，executable=false
-//   - plugins：discover trusted manifest contribution，autoExecute=no，executable=false
-// ===========================================================================
-
-export type DeferredToolKind = "codebase-memory" | "mcp" | "skill" | "plugin";
-
-export type DeferredToolDescriptor = {
-  name: string;
-  kind: DeferredToolKind;
-  description: string;
-  requiredArgs: string[];
-  executable: boolean;
-  reason: string;
-};
-
-export type DeferredToolDiscoverySnapshot = {
-  generatedAt: string;
-  total: number;
-  byKind: Record<DeferredToolKind, number>;
-  executableCount: number;
-  tools: DeferredToolDescriptor[];
-};
-
-const CODEBASE_MEMORY_DESCRIPTIONS: Record<string, string> = {
-  list_projects: "List indexed projects in codebase-memory.",
-  index_status: "Get current index status (nodes/edges/status) for a project.",
-  detect_changes: "Detect uncovered file changes for a project's index.",
-  index_repository: "Build or refresh the codebase-memory index for a repo path.",
-  search_code: "Pattern search across an indexed project.",
-  get_architecture: "Project architecture summary (modules, entry points).",
-  get_code_snippet: "Read a code snippet by qualified name in an indexed project.",
-  query_graph: "Run a graph query (CALLS / IMPORTS) on an indexed project.",
-  trace_path: "Trace a function call chain from -> to in an indexed project.",
-  search_graph: "Find similar implementations / SIMILAR_TO entries in a project.",
-};
-
-function listCodebaseMemoryDeferredTools(): DeferredToolDescriptor[] {
-  const required = codebaseMemoryRequiredArgs();
-  return Object.keys(required)
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => ({
-      name,
-      kind: "codebase-memory" as const,
-      description: CODEBASE_MEMORY_DESCRIPTIONS[name] ?? `codebase-memory tool: ${name}`,
-      requiredArgs: [...required[name]],
-      executable: true,
-      reason: "codebase-memory static whitelist; required args validated before execution.",
-    }));
-}
-
-function listMcpDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
-  if (!context.mcp.enabled) return [];
-  const enabledServers = new Set(
-    context.mcp.servers
-      .filter((server) => server.status !== "disabled" && server.status !== "missing")
-      .map((server) => server.name),
-  );
-  return context.mcp.tools
-    .filter((tool) => enabledServers.has(tool.server))
-    .filter((tool) => tool.discovery === "discovered")
-    .filter((tool) => tool.schemaLoaded === true)
-    .filter((tool) => tool.trusted === true)
-    .map((tool) => {
-      // D.13J Block 4 — local stdio MCP runtime adapter.
-      // Server is executable iff它在 config 里且有 command（即本地 stdio 启动方式）。
-      // 远程/HTTP MCP 仍保持 executable=false：这是 D.13J Block 4 的明确范围边界。
-      const serverConfig = context.config.mcp.servers[tool.server];
-      const localStdio = isLocalStdioMcpServer(serverConfig);
-      return {
-        name: `mcp:${tool.server}:${tool.name}`,
-        kind: "mcp" as const,
-        // truncate is already enforced by stabilizeMcpToolList; do not echo raw schema
-        description: tool.description || `MCP tool ${tool.server}:${tool.name}`,
-        requiredArgs: [],
-        executable: localStdio,
-        reason: localStdio
-          ? "MCP server tool discovered (local stdio); JSON-RPC tools/call adapter available. Mutating use needs session permission."
-          : "MCP server tool discovered with schema and trusted, but server is not local stdio (no command); Linghun has no remote MCP transport adapter yet.",
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-// D.13J Block 4 — local stdio identification. command 必须是非空字符串；若 command 缺失
-// 表示 server 仅以远程 HTTP 形式注册（不在本 Block 范围）。
-function isLocalStdioMcpServer(server: McpServerConfig | undefined): boolean {
-  if (!server) return false;
-  if (server.disabled === true) return false;
-  if (typeof server.command !== "string") return false;
-  if (server.command.trim() === "") return false;
-  return true;
-}
-
-function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
-  if (!context.skills.enabled) return [];
-  const disabled = new Set(context.skills.disabledIds);
-  const trusted = new Set(context.skills.trustedIds);
-  return context.skills.skills
-    .filter((skill) => !disabled.has(skill.id))
-    .filter((skill) => trusted.has(skill.id))
-    .map((skill) => ({
-      name: `skill:${skill.id}`,
-      kind: "skill" as const,
-      description: truncateDisplay(
-        (skill.description ?? skill.name ?? skill.id).replace(/\s+/g, " "),
-        160,
-      ),
-      requiredArgs: [],
-      executable: false,
-      reason: skillManifestHasContribution(skill)
-        ? "Skill manifest contributes commands/tools (enabled+trusted), but Linghun has no safe skill execution adapter yet; review manifest manually or run /skills status."
-        : "Skill manifest is metadata-only (no command/tool contribution); not executable. Run /skills status for details.",
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-// D.13J Block 5 — manifest 事实裁决：根据 manifest 字段区分"贡献了 command/tool"
-// 与"纯 metadata"。仅读取已加载的 manifest 字段，不执行 postinstall/hook。
-// SkillSummary 上没有显式 commands 字段，但 triggers 是 skill 的命令/工具触发入口；
-// 同时兼容 manifest 上可能存在的 commands/tools 数组（通过 raw 字段读取）。
-function skillManifestHasContribution(skill: SkillSummary): boolean {
-  const triggers = skill.triggers ?? [];
-  if (Array.isArray(triggers) && triggers.length > 0) return true;
-  const raw = skill as unknown as { commands?: unknown; tools?: unknown };
-  if (Array.isArray(raw.commands) && raw.commands.length > 0) return true;
-  if (Array.isArray(raw.tools) && raw.tools.length > 0) return true;
-  return false;
-}
-
-function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
-  if (!context.plugins.enabled) return [];
-  const disabled = new Set(context.plugins.disabledIds);
-  const trusted = new Set(context.plugins.trustedIds);
-  return context.plugins.plugins
-    .filter((plugin) => !disabled.has(plugin.id))
-    .filter((plugin) => trusted.has(plugin.id))
-    .map((plugin) => ({
-      name: `plugin:${plugin.id}`,
-      kind: "plugin" as const,
-      description: truncateDisplay(
-        (plugin.description ?? plugin.name ?? plugin.id).replace(/\s+/g, " "),
-        160,
-      ),
-      requiredArgs: [],
-      executable: false,
-      reason: pluginManifestHasContribution(plugin)
-        ? "Plugin manifest contributes commands/tools (enabled+trusted), but Linghun has no safe plugin execution adapter yet; review contributions manually or run /plugins doctor."
-        : "Plugin manifest is metadata-only (no command/tool contribution); not executable. Run /plugins doctor for details.",
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function pluginManifestHasContribution(plugin: PluginSummary): boolean {
-  const c = plugin.contributions;
-  if (!c) return false;
-  return (
-    (c.commands?.length ?? 0) > 0 ||
-    (c.mcpServers?.length ?? 0) > 0 ||
-    (c.providers?.length ?? 0) > 0 ||
-    (c.hooks?.length ?? 0) > 0 ||
-    (c.workflows?.length ?? 0) > 0 ||
-    (c.skills?.length ?? 0) > 0
-  );
-}
-
-export function listDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
-  return [
-    ...listCodebaseMemoryDeferredTools(),
-    ...listMcpDeferredTools(context),
-    ...listSkillDeferredTools(context),
-    ...listPluginDeferredTools(context),
-  ];
-}
-
-export function snapshotDeferredTools(context: TuiContext): DeferredToolDiscoverySnapshot {
-  const tools = listDeferredTools(context);
-  const byKind: Record<DeferredToolKind, number> = {
-    "codebase-memory": 0,
-    mcp: 0,
-    skill: 0,
-    plugin: 0,
-  };
-  let executableCount = 0;
-  for (const tool of tools) {
-    byKind[tool.kind] += 1;
-    if (tool.executable) executableCount += 1;
-  }
-  return {
-    generatedAt: new Date().toISOString(),
-    total: tools.length,
-    byKind,
-    executableCount,
-    tools,
-  };
-}
-
-// D.13I：仅用于 doctor 的非泄漏摘要——不含 raw schema/secret/参数，只输出 total/byKind/executableCount。
-export function snapshotDeferredToolsSummary(
-  context: TuiContext,
-): { total: number; byKind: Record<DeferredToolKind, number>; executableCount: number } {
-  const snapshot = snapshotDeferredTools(context);
-  return {
-    total: snapshot.total,
-    byKind: snapshot.byKind,
-    executableCount: snapshot.executableCount,
-  };
-}
-
-// D.13J Block 2：D.13I session-scoped discovered Set 的 doctor 摘要。
-// `executeSearchExtraTools` 把匹配上的 deferred 工具名写入 `context.discoveredDeferredToolNames`，
-// `executeExtraTool` 必须先看 Set 才放行。出于排查 ExecuteExtraTool 拒绝的需要，doctor 必须能看见
-// 当前 session "已发现"了哪些工具。但只能输出"经过 sanitize 的工具名 + 数量"——
-// 不能输出 raw 参数、不能透出 secret，因为发现集合里有可能包含将来引入的非 codebase-memory 工具名。
-//
-// sanitize 规则：
-//   - 仅保留字母/数字/下划线/冒号/连字符/点号；其他字符替换为 "_"
-//   - 长度上限 80；超长直接截断（避免日志爆炸）
-//   - 总数上限 32；超过则按字典序保留前 32 项 + 一个 "+N more" 提示位
-export type DiscoveredDeferredToolsSummary = {
-  total: number;
-  names: string[];
-  truncated: boolean;
-};
-
-const DISCOVERED_NAME_MAX_LEN = 80;
-const DISCOVERED_NAMES_MAX_COUNT = 32;
-
-export function sanitizeDiscoveredDeferredToolName(name: string): string {
-  // 仅保留 A-Za-z0-9_:.- ；其他都替换为 "_"，避免在 doctor 输出里出现奇怪字符。
-  const cleaned = name.replace(/[^A-Za-z0-9_:.\-]/g, "_");
-  if (cleaned.length <= DISCOVERED_NAME_MAX_LEN) return cleaned;
-  return `${cleaned.slice(0, DISCOVERED_NAME_MAX_LEN)}…`;
-}
-
-export function snapshotDiscoveredDeferredToolsSummary(
-  context: TuiContext,
-): DiscoveredDeferredToolsSummary {
-  const sorted = Array.from(context.discoveredDeferredToolNames).sort();
-  const sanitized = sorted.map(sanitizeDiscoveredDeferredToolName);
-  if (sanitized.length <= DISCOVERED_NAMES_MAX_COUNT) {
-    return { total: sanitized.length, names: sanitized, truncated: false };
-  }
-  return {
-    total: sanitized.length,
-    names: sanitized.slice(0, DISCOVERED_NAMES_MAX_COUNT),
-    truncated: true,
-  };
-}
-
-export function searchDeferredTools(
-  query: string,
-  tools: DeferredToolDescriptor[],
-): DeferredToolDescriptor[] {
-  const trimmed = query.trim().toLowerCase();
-  if (trimmed === "") return tools;
-  return tools.filter((tool) => {
-    const haystack = `${tool.name} ${tool.description} ${tool.kind}`.toLowerCase();
-    return haystack.includes(trimmed);
-  });
-}
-
-export function findDeferredTool(
-  toolName: string,
-  tools: DeferredToolDescriptor[],
-): DeferredToolDescriptor | undefined {
-  return tools.find((tool) => tool.name === toolName);
-}
-
-// stableHash 输入：仅暴露 name/kind/executable/requiredArgs；不进 raw schema/secret。
-export function deferredToolListHashInput(tools: DeferredToolDescriptor[]): unknown {
-  return tools
-    .map((tool) => ({
-      name: tool.name,
-      kind: tool.kind,
-      executable: tool.executable,
-      requiredArgs: [...tool.requiredArgs].sort((a, b) => a.localeCompare(b)),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-// 仅当 deferred 列表非空时给出 system reminder。core tools 仍直接调用，不进 ExecuteExtraTool。
-export function formatDeferredToolsSystemReminder(
-  language: Language,
-  snapshot: DeferredToolDiscoverySnapshot,
-): string | undefined {
-  if (snapshot.total === 0) return undefined;
-  return language === "en-US"
-    ? "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) are still called directly."
-    : "Additional tools must be discovered via SearchExtraTools, then invoked via ExecuteExtraTool.";
-}
-
-function isCodebaseMemoryToolName(name: string): boolean {
-  return name in codebaseMemoryRequiredArgs();
-}
-
-function summarizeDeferredToolMatch(tool: DeferredToolDescriptor): Record<string, unknown> {
-  return {
-    name: tool.name,
-    kind: tool.kind,
-    description: tool.description,
-    requiredArgs: tool.requiredArgs,
-    executable: tool.executable,
-    reason: tool.reason,
-  };
 }
 
 export function executeSearchExtraTools(
@@ -10207,21 +9586,6 @@ export async function executeExtraTool(
     ok: false,
     text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 没有可用的安全执行适配器。`,
   };
-}
-
-// D.13J Block 4 — `mcp:<server>:<tool>` 名称解析。server 不能含冒号，tool 名允许出现冒号
-// 以兼容 `server.tool` 形态（如 `codebase-memory.list_projects` 或 `srv:tool:sub`）。
-export function parseMcpDeferredToolName(
-  name: string,
-): { server: string; tool: string } | undefined {
-  if (!name.startsWith("mcp:")) return undefined;
-  const rest = name.slice(4);
-  const idx = rest.indexOf(":");
-  if (idx <= 0) return undefined;
-  const server = rest.slice(0, idx);
-  const tool = rest.slice(idx + 1);
-  if (server.trim() === "" || tool.trim() === "") return undefined;
-  return { server, tool };
 }
 
 // D.13J Block 4 — mutating heuristic for generic MCP tools。我们不知道具体 server 的工具语义，
@@ -16098,111 +15462,6 @@ function t(context: TuiContext, key: MessageKey, values: Record<string, string> 
   }
   return template;
 }
-
-const messages: Record<Language, Record<MessageKey, string>> = {
-  "zh-CN": {
-    appTitle: "{name} TUI / REPL",
-    intro: "输入普通消息开始对话；输入 /help 查看命令；输入 /exit 退出。",
-    currentModel: "当前模型",
-    unknownCommand: "未知命令",
-    languageSwitchedZh: "语言已切换为中文。",
-    languageSwitchedEn: "Language switched to English.",
-    modeCurrent: "当前权限模式：{mode}",
-    modeOptions: "可选：default / auto-review / plan / full-access",
-    modeBoundary:
-      "边界：full-access 需要本地显式 opt-in；auto-review 只自动允许低风险工作区编辑。Plan approval 不授权所有工具。",
-    modeUnknown: "未知模式。可选：default / auto-review / plan / full-access",
-    modeFullAccessPlanBlocked:
-      "Plan 模式不能直接切到 full-access 执行写入。请先批准计划的明确边界，或切回 default。",
-    modeFullAccessOptInBlocked:
-      "已拒绝切换 full-access：full-access 必须本地显式 opt-in，不能由自然语言、workflow、agent、plugin 或 hook 静默开启。",
-    modeSwitched: "已切换权限模式：{mode}",
-    modePlanBoundary:
-      "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后仍不等于授权所有工具。",
-    startGateConfirmed: "已确认，正在进入本地动作路径；后续受保护操作仍会单独审批。",
-    startGateExpired: "确认已过期。请重新发起请求。",
-    startGateExactRequired: "该动作需要输入精确 slash command 才能继续；这条输入未执行。",
-    startGatePlainConfirmationRejected: "该动作需要精确确认；普通 yes/确认 未放行。",
-    exit: "已退出 Linghun。",
-    status:
-      "状态栏：session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",
-    statusShort: "状态栏：{mode} · bg {background}",
-    help: "帮助",
-    inputPrompt: "你> ",
-    noSessions: "当前项目还没有会话。",
-    sessionHeader: "会话ID  更新时间  摘要",
-    noSummary: "（无摘要）",
-    checkpointCreated: "已创建 checkpoint",
-    checkpointNone: "当前没有 checkpoint。",
-    checkpointRestored: "已恢复 checkpoint",
-    checkpointMissing: "未找到 checkpoint",
-    backgroundNone: "当前没有后台任务。",
-    backgroundEmptyOutput: "尚未产生有效输出",
-    backgroundRunning: "仍在运行",
-    interruptIdle: "当前没有正在运行的长任务；状态为 idle。",
-    interruptCancelled: "已标记当前长任务为 cancelled。",
-    btwPrefix: "临时插问",
-    evidenceBlocked:
-      "尚未确认，需要先检查。涉及代码事实的结论必须先通过 /read、/grep、索引查询或命令输出获得证据。",
-    claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
-    projectRulesMissingHint:
-      "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
-    toolInterrupted: "当前模型响应或工具调用已取消；可以继续输入。",
-  },
-  "en-US": {
-    appTitle: "{name} TUI / REPL",
-    intro: "Type a message to chat; use /help for commands; use /exit to quit.",
-    currentModel: "Current model",
-    unknownCommand: "Unknown command",
-    languageSwitchedZh: "语言已切换为中文。",
-    languageSwitchedEn: "Language switched to English.",
-    modeCurrent: "Current permission mode: {mode}",
-    modeOptions: "Options: default / auto-review / plan / full-access",
-    modeBoundary:
-      "Boundary: full-access requires local opt-in; auto-review only allows low-risk workspace edits automatically. Plan approval does not authorize every tool.",
-    modeUnknown: "Unknown mode. Options: default / auto-review / plan / full-access",
-    modeFullAccessPlanBlocked:
-      "Plan mode cannot switch directly to full-access for writes. Approve a clear plan boundary first, or switch back to default.",
-    modeFullAccessOptInBlocked:
-      "Refused to switch to full-access: full-access requires local opt-in and cannot be silently enabled by natural language, workflow, agent, plugin, or hook.",
-    modeSwitched: "Permission mode switched: {mode}",
-    modePlanBoundary:
-      "Plan mode only allows Read / Grep / Glob / Diff / Todo and session-scoped actions. Accepting a plan still does not authorize every tool.",
-    startGateConfirmed:
-      "Confirmed; entering the local action path. Protected follow-up actions still require separate approval.",
-    startGateExpired: "Confirmation expired. Reissue the request.",
-    startGateExactRequired:
-      "This action requires the exact slash command before it can continue. This input was not executed.",
-    startGatePlainConfirmationRejected:
-      "This action requires exact confirmation; plain yes/confirm was not accepted.",
-    exit: "Exited Linghun.",
-    status:
-      "Status: session {session} · model {model} · mode {mode} · bg {background} · cache {cache} · index {index} · gate {gate}",
-    statusShort: "Status: {mode} · bg {background}",
-    help: "Help",
-    inputPrompt: "you> ",
-    noSessions: "No sessions for this project yet.",
-    sessionHeader: "Session ID  Updated At  Summary",
-    noSummary: "(no summary)",
-    checkpointCreated: "Checkpoint created",
-    checkpointNone: "No checkpoints yet.",
-    checkpointRestored: "Checkpoint restored",
-    checkpointMissing: "Checkpoint not found",
-    backgroundNone: "No background tasks.",
-    backgroundEmptyOutput: "no valid output yet",
-    backgroundRunning: "still running",
-    interruptIdle: "No long task is running; state is idle.",
-    interruptCancelled: "Current long task marked as cancelled.",
-    btwPrefix: "Temporary question",
-    evidenceBlocked:
-      "Not confirmed yet; evidence is required first. Use /read, /grep, index query, or command output before code-fact claims.",
-    claimNeedsDisclaimer:
-      "Evidence is missing; downgrade to unverified or pending confirmation wording.",
-    projectRulesMissingHint:
-      "[hint:info] LINGHUN.md project rules are missing. To create a basic template, run /memory init. I will not generate it automatically or interrupt input.",
-    toolInterrupted: "The current model response or tool call was cancelled; input is ready again.",
-  },
-};
 
 function createUserMessageEvent(text: string): TranscriptEvent {
   return {
