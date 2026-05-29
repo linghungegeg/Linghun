@@ -19,6 +19,7 @@ import {
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
+  isEvidenceStaleForClaim,
   isNaturalReadFileRequest,
   looksLikeFilePath,
   matchesFileKeywords,
@@ -724,6 +725,212 @@ describe("model-loop-runtime", () => {
       expect(downgraded).toContain("我不能确认这些声明");
       expect(downgraded).not.toContain("FinalAnswerClaimGate");
       expect(downgraded).not.toContain("evidence_id");
+    });
+  });
+
+  describe("D.13V-A evaluateFinalAnswerClaims staleness", () => {
+    const NOW = new Date("2026-05-30T12:00:00Z");
+    const minutesAgo = (m: number) =>
+      new Date(NOW.getTime() - m * 60 * 1000).toISOString();
+    const hoursAgo = (h: number) =>
+      new Date(NOW.getTime() - h * 60 * 60 * 1000).toISOString();
+
+    it("fresh test_passed evidence still allows PASS (baseline)", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: vitest --run",
+          createdAt: minutesAgo(10),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("stale test_passed evidence (>30min) blocks PASS", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: vitest --run",
+          createdAt: minutesAgo(45),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
+      expect(verdict.staleKinds ?? []).toContain("completion_pass");
+    });
+
+    it("fresh Read evidence still allows code_fact (baseline)", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "file_read",
+          supportsClaims: ["Read", "local_read"],
+          createdAt: minutesAgo(20),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        "代码里已经实现 X，调用链是 A→B。",
+        evidence,
+        NOW,
+      );
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("stale Read evidence (>60min) blocks code_fact", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "file_read",
+          supportsClaims: ["Read", "local_read"],
+          createdAt: minutesAgo(90),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        "代码里已经实现 X，调用链是 A→B。",
+        evidence,
+        NOW,
+      );
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+      expect(verdict.staleKinds ?? []).toContain("code_fact");
+    });
+
+    it("fresh web_source evidence still allows external_current_fact (baseline)", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "web_source",
+          supportsClaims: ["web_source"],
+          source: "https://openai.com/pricing",
+          createdAt: hoursAgo(2),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        "今天 OpenAI 最新价格是 $0.01。",
+        evidence,
+        NOW,
+      );
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("stale web_source (>24h) blocks external_current_fact", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "web_source",
+          supportsClaims: ["web_source"],
+          source: "https://openai.com/pricing",
+          createdAt: hoursAgo(48),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims(
+        "今天 OpenAI 最新价格是 $0.01。",
+        evidence,
+        NOW,
+      );
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("external_current_fact");
+      expect(verdict.staleKinds ?? []).toContain("external_current_fact");
+    });
+
+    it("ccb_parity is not affected by staleness threshold", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "file_read",
+          supportsClaims: ["Read", "local_read"],
+          source: "F:/ccb-source/packages/cli/index.ts",
+          summary: "Read ccb-source file for parity check",
+          createdAt: hoursAgo(72),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("现在等于 CCB 了", evidence, NOW);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("local 'current branch' query passes even when all evidence is stale", () => {
+      // 当前分支白名单使 detectHighRiskClaims 不命中 external_current_fact，
+      // 因此即便所有 evidence 都过期，也仍然 pass（保持 D.13U 行为）。
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: [
+            "Bash",
+            "command_ran",
+            "bash_exit_0",
+            "git_status",
+            "git_local_fact",
+          ],
+          summary: "Bash: git status -b",
+          createdAt: hoursAgo(48),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("当前分支是 master。", evidence, NOW);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("mixed fresh + stale evidence: fresh still satisfies the claim", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          id: "e-stale",
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: old vitest",
+          createdAt: minutesAgo(120),
+        }),
+        makeEvidence({
+          id: "e-fresh",
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: recent vitest",
+          createdAt: minutesAgo(5),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("staleKinds is omitted when no matching evidence existed at all", () => {
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", [], NOW);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
+      expect(verdict.staleKinds ?? []).not.toContain("completion_pass");
+    });
+
+    it("isEvidenceStaleForClaim respects per-kind thresholds and ccb_parity exemption", () => {
+      const completionEv = makeEvidence({
+        kind: "command_output",
+        supportsClaims: ["test_passed"],
+        createdAt: minutesAgo(45),
+      });
+      const codeEv = makeEvidence({
+        kind: "file_read",
+        supportsClaims: ["local_read"],
+        createdAt: minutesAgo(45),
+      });
+      const externalEv = makeEvidence({
+        kind: "web_source",
+        supportsClaims: ["web_source"],
+        createdAt: hoursAgo(48),
+      });
+      expect(isEvidenceStaleForClaim(completionEv, "completion_pass", NOW)).toBe(true);
+      // 同一条 45min 老的证据，对 code_fact（60min 阈值）尚不算 stale。
+      expect(isEvidenceStaleForClaim(codeEv, "code_fact", NOW)).toBe(false);
+      expect(isEvidenceStaleForClaim(externalEv, "external_current_fact", NOW)).toBe(true);
+      // ccb_parity 不应用 staleness 阈值，永远返回 false。
+      expect(isEvidenceStaleForClaim(externalEv, "ccb_parity", NOW)).toBe(false);
+    });
+
+    it("reminder mentions stale evidence when applicable", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["test_passed"],
+          createdAt: minutesAgo(120),
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      const text = createFinalAnswerClaimReminder(verdict, "zh-CN");
+      expect(text).toContain("已过期");
     });
   });
 

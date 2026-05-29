@@ -32,7 +32,18 @@ const DEFAULT_WATCHED_FILES = [
 ];
 const DEFAULT_WATCHED_DIRECTORIES = [".", ".linghun"];
 
-export type WorkspaceReferenceCacheSource = "hit" | "miss" | "stale" | "fallback";
+// D.13V — `rescanned` 是 `stale` 的更准确语义命名（probe 失配后重新扫描得到的
+// 新 confirmed 数据），保留旧 `stale` 作为别名兼容现有 caller，但新写入路径只
+// 输出 rescanned。`fallback-stale` 表示 catch 分支并复用上次成功的旧数据，
+// `fallback-empty` 表示 catch 分支但连 cache.latest 也为空。
+export type WorkspaceReferenceCacheSource =
+  | "hit"
+  | "miss"
+  | "stale"
+  | "rescanned"
+  | "fallback"
+  | "fallback-stale"
+  | "fallback-empty";
 
 export type WorkspaceReferenceDimensions = {
   configHash: string;
@@ -228,11 +239,20 @@ async function _getWorkspaceReferenceSnapshotInner(
     return snapshot;
   } catch (error) {
     cache.failures += 1;
+    // D.13V — fallback 不再静默冒充上次成功；区分两种形态：
+    // - fallback-stale：cache.latest 存在，复用旧 files 但显式打 source 标，
+    //   hash 必然不同，caller 不会把它当 confirmed。
+    // - fallback-empty：连 cache.latest 也没有，files/directories 为空，
+    //   提示 caller 这次 scan 完全失败、没有任何文件级数据。
+    const hasPrev = Boolean(cache.latest);
+    const fallbackSource: WorkspaceReferenceCacheSource = hasPrev
+      ? "fallback-stale"
+      : "fallback-empty";
     return {
       key: cache.latest?.key ?? "fallback",
-      source: "fallback",
+      source: fallbackSource,
       createdAt: new Date().toISOString(),
-      changedKeys: ["workspaceReferenceUnavailable"],
+      changedKeys: ["workspaceReferenceUnavailable", fallbackSource],
       dimensions: input.dimensions,
       files: cache.latest?.files ?? [],
       directories: cache.latest?.directories ?? [],
@@ -254,7 +274,30 @@ export function workspaceReferenceHash(snapshot: WorkspaceReferenceSnapshot | un
   if (!snapshot) {
     return stableHash("none");
   }
-  return stableHash({ key: snapshot.key, changedKeys: snapshot.changedKeys });
+  // D.13V — 把 source 编码进 hash，让 fallback / fallback-stale / fallback-empty
+  // 与正常 hit/miss/rescanned 必然产生不同 hash，cache-freshness diff 能直接
+  // 命名 pluginListHash changed key，caller 不会把 fallback 当 confirmed。
+  return stableHash({
+    key: snapshot.key,
+    changedKeys: snapshot.changedKeys,
+    source: snapshot.source,
+  });
+}
+
+/**
+ * D.13V — 判定 snapshot 是否处于 fallback 状态（catch 分支构造的）。caller
+ * 装配 readiness/step facts/system prompt 时应据此把 confirmed 字段降级为
+ * stale-fallback / missing 二态，避免把 stale 当 current fact。
+ */
+export function isFallbackWorkspaceReferenceSnapshot(
+  snapshot: WorkspaceReferenceSnapshot | undefined,
+): boolean {
+  if (!snapshot) return false;
+  return (
+    snapshot.source === "fallback" ||
+    snapshot.source === "fallback-stale" ||
+    snapshot.source === "fallback-empty"
+  );
 }
 
 async function scanWorkspaceReference(

@@ -403,6 +403,7 @@ import {
   type WorkspaceReferenceCache,
   createWorkspaceReferenceCache,
   getWorkspaceReferenceSnapshot,
+  isFallbackWorkspaceReferenceSnapshot,
   workspaceReferenceHash,
 } from "./workspace-reference-cache.js";
 
@@ -447,6 +448,7 @@ export {
   formatVerificationLevel,
   compareVerificationLevels,
 } from "./verification-level.js";
+import { classifyVerificationLevel } from "./verification-level.js";
 
 export type {
   TuiRuntimePath,
@@ -2075,6 +2077,41 @@ class ShellBlockOutput extends Writable {
   }
 
   /**
+   * D.13V — Final Answer Gate 在 retry 前丢弃当前 streaming block 的全部累计
+   * 内容。保留 active id，让接下来的 delta 可以重新填回同一条 block；
+   * 同时清掉 lastFullOutput 中可能残留的违规原文，避免 Ctrl+O / details 拉到。
+   */
+  discardAssistantBlock(id: string): void {
+    const block = this.blocks.find((b) => b.id === id);
+    if (block) {
+      block.fullText = "";
+      block.summary = "";
+    }
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = undefined;
+    }
+    this.onWrite();
+  }
+
+  /**
+   * D.13V — Final Answer Gate 在本地降级时把 streaming block 的 fullText
+   * 替换成已经过 buildDowngradedFinalAnswer 处理过的安全文本；同时把
+   * lastFullOutput 同步为同一份安全文本，让 Ctrl+O / details 也只看降级版。
+   */
+  replaceAssistantBlockContent(id: string, text: string): void {
+    const block = this.blocks.find((b) => b.id === id);
+    if (block) {
+      block.fullText = text;
+      const firstLine = text.split("\n").find((line) => line.trim()) ?? text;
+      block.summary = firstLine || block.summary;
+    }
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = text;
+    }
+    this.onWrite();
+  }
+
+  /**
    * D.13Q-UX Real Smoke Fix v3 — 把一段诊断正文（/mcp status / /index status
    * 等）显式当作 messageKind=diagnostic block 写入 transcript：
    *   - 不走 createOutputBlock 的 assistant_text 默认分支，避免被当作普通 AI 正文；
@@ -2175,6 +2212,31 @@ function endAssistantStream(output: Writable): void {
   const candidate = output as { endAssistantStream?: () => void };
   if (typeof candidate.endAssistantStream === "function") {
     candidate.endAssistantStream();
+  }
+}
+
+/**
+ * D.13V — Final Answer Gate retry 前调用，清空当前 streaming block 累计的
+ * 违规原文与 lastFullOutput，避免 Ctrl+O/details 残留。Plain Writable / 测试
+ * MemoryOutput 自动跳过（无 ShellBlockOutput 状态可清）。
+ */
+function discardAssistantBlock(output: Writable, id: string): void {
+  const candidate = output as { discardAssistantBlock?: (id: string) => void };
+  if (typeof candidate.discardAssistantBlock === "function") {
+    candidate.discardAssistantBlock(id);
+  }
+}
+
+/**
+ * D.13V — Final Answer Gate 本地降级时替换 streaming block 的 fullText 与
+ * lastFullOutput 为安全文本（buildDowngradedFinalAnswer 输出）。
+ */
+function replaceAssistantBlockContent(output: Writable, id: string, text: string): void {
+  const candidate = output as {
+    replaceAssistantBlockContent?: (id: string, text: string) => void;
+  };
+  if (typeof candidate.replaceAssistantBlockContent === "function") {
+    candidate.replaceAssistantBlockContent(id, text);
   }
 }
 
@@ -6097,6 +6159,13 @@ function createDurableJobStepFacts(
 ): string[] {
   const workspaceRef = context.cache.workspaceReference.latest;
   const workspaceSnapshot = workspaceRef?.workspaceSnapshot;
+  // D.13V — fallback snapshot 在 step facts 中显式标 "stale-fallback"，不让
+  // 模型把上次成功的旧数据当 confirmed current fact。
+  const snapshotState = !workspaceSnapshot
+    ? "missing"
+    : isFallbackWorkspaceReferenceSnapshot(workspaceRef)
+      ? "stale-fallback"
+      : "ready";
   return [
     `step=${stepIndex + 1}/${job.plan.length}`,
     `goal=${truncateDisplay(job.goal, 120)}`,
@@ -6104,7 +6173,7 @@ function createDurableJobStepFacts(
     `target=${job.target}`,
     `handoff=${job.handoffPacket?.id ?? "missing"}`,
     `index=${context.index.status}${context.index.projectName ? `:${context.index.projectName}` : ""}`,
-    `workspaceCache=${workspaceRef?.source ?? "missing"};snapshot=${workspaceSnapshot ? "ready" : "missing"}`,
+    `workspaceCache=${workspaceRef?.source ?? "missing"};snapshot=${snapshotState}`,
     `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
     `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
     `logs=${job.logPath};report=${job.reportPath}`,
@@ -10925,9 +10994,13 @@ function createTerminalReadinessView(context: TuiContext): TerminalReadinessView
     cache: {
       latestHitRate: latestCache?.hitRate ?? null,
       compacted: context.cache.compacted,
-      workspaceSnapshot: context.cache.workspaceReference.latest?.workspaceSnapshot
-        ? "ready"
-        : "missing",
+      // D.13V — fallback snapshot 不再当 ready；区分 ready / stale-fallback / missing。
+      workspaceSnapshot: (() => {
+        const latest = context.cache.workspaceReference.latest;
+        if (!latest?.workspaceSnapshot) return "missing";
+        if (isFallbackWorkspaceReferenceSnapshot(latest)) return "stale-fallback";
+        return "ready";
+      })(),
     },
     memory: {
       projectRules: context.memory.projectRulesError
@@ -11008,7 +11081,7 @@ function createRuntimePathForReadiness(_context: TuiContext): TerminalReadinessV
 
 function createVerificationLevelForReadiness(
   context: TuiContext,
-): TerminalReadinessView["verificationLevel"] {
+): NonNullable<TerminalReadinessView["verificationLevel"]> {
   const lastVerification = context.lastVerification;
   if (!lastVerification) {
     return {
@@ -11018,21 +11091,57 @@ function createVerificationLevelForReadiness(
       upgradeBlocked: false,
     };
   }
-  // Infer level from verification status
+  // D.13V P0-3 — 走 verification-level.ts 的统一分级器，不再用
+  // `status === "pass" && unverified.length === 0` 直升 real-smoke。
+  //
+  // 分级器入参从 VerificationReport 推导：
+  //   - realProcessObserved：仅当报告里**有 smoke kind 的命令且该命令 pass**
+  //     才算真实拉起进程观察过；只跑了 vitest/tsc/build 不算 real-smoke。
+  //   - simulatedOrPartial / fallbackUsed：任何 partial/stale/cancelled/timeout/
+  //     skipped 命令、unverified 列表非空、status=partial、status=stale、或
+  //     runnerError 都触发降级（分级器内部会 cap 到 mock）。
+  //   - buildPassed：status=pass 且没有降级因子。
+  //   - localTestRunner：有 test kind 命令。
+  // 目的是让 readiness 不再绕过 verification-level.ts 的真实证据要求，build
+  // 通过即报 real-smoke 的 false positive 在分级器入口被拒。
   const status = lastVerification.status;
-  const hasRealSmoke = status === "pass" && lastVerification.unverified.length === 0;
-  const hasBuild = status === "pass" || status === "partial";
+  const commands = lastVerification.commands ?? [];
+  const hasRunnerError = commands.some((c) => Boolean(c.runnerError));
+  const hasPartialOrSkipped = commands.some(
+    (c) =>
+      c.status === "partial" ||
+      c.status === "skipped" ||
+      c.status === "stale" ||
+      c.status === "cancelled" ||
+      c.status === "timeout",
+  );
+  const hasFailedCommand = commands.some((c) => c.status === "fail");
+  const smokePassed = commands.some((c) => c.kind === "smoke" && c.status === "pass");
+  const realProcessObserved =
+    status === "pass" &&
+    smokePassed &&
+    !hasRunnerError &&
+    !hasPartialOrSkipped &&
+    !hasFailedCommand &&
+    lastVerification.unverified.length === 0;
+  const simulatedOrPartial =
+    status === "partial" || lastVerification.unverified.length > 0 || hasPartialOrSkipped;
+  const fallbackUsed = hasRunnerError || status === "stale";
+  const buildPassed = status === "pass" && !simulatedOrPartial && !fallbackUsed;
+  const localTestRunner = commands.some((c) => c.kind === "test");
+  const classification = classifyVerificationLevel({
+    realProcessObserved,
+    simulatedOrPartial,
+    fallbackUsed,
+    buildPassed,
+    localTestRunner,
+  });
   return {
-    level: hasRealSmoke ? "real-smoke" : hasBuild ? "build" : "local",
-    canClaimPass: hasBuild,
-    canClaimMature: hasRealSmoke,
-    upgradeBlocked: status === "partial" || status === "stale",
-    blockReason:
-      status === "partial"
-        ? "partial-verification"
-        : status === "stale"
-          ? "stale-verification"
-          : undefined,
+    level: classification.level,
+    canClaimPass: classification.canClaimPass,
+    canClaimMature: classification.canClaimMature,
+    upgradeBlocked: classification.upgradeBlocked,
+    blockReason: classification.blockReason,
   };
 }
 
@@ -11192,7 +11301,10 @@ function createContextPickerLite(
   context: TuiContext,
   webSourceEvidence: "present" | "missing",
 ): TerminalReadinessView["contextPicker"] {
-  const hasWorkspaceSnapshot = Boolean(context.cache.workspaceReference.latest?.workspaceSnapshot);
+  // D.13V — fallback workspace snapshot 不再算 hasWorkspaceSnapshot。
+  const wsLatest = context.cache.workspaceReference.latest;
+  const hasWorkspaceSnapshot =
+    Boolean(wsLatest?.workspaceSnapshot) && !isFallbackWorkspaceReferenceSnapshot(wsLatest);
   const refs = [
     context.memory.projectRulesExists ? "project-rules" : undefined,
     hasWorkspaceSnapshot ? "workspace-snapshot" : undefined,
@@ -13458,6 +13570,9 @@ async function sendMessage(
             });
             finalAnswerClaimRetried = true;
             assistantText = "";
+            // D.13V — 同时清掉本轮 streaming block 累计的违规原文，
+            // 避免 Ctrl+O/details/lastFullOutput 残留。
+            discardAssistantBlock(output, assistantStreamBlockId);
             continue;
           }
         }
@@ -13512,6 +13627,7 @@ async function sendMessage(
           sessionId,
           output,
           controller.signal,
+          assistantStreamBlockId,
         );
         assistantText += finalText;
       }
@@ -13544,6 +13660,9 @@ async function sendMessage(
           "warning",
         );
         assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+        // D.13V — 同步把 streaming block 与 lastFullOutput 替换为降级文本，
+        // 避免主屏 / Ctrl+O / details 仍展示原始违规文本。
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
     output.write("\n");
@@ -13666,12 +13785,19 @@ async function streamFinalModelAnswerWithoutTools(
   sessionId: string,
   output: Writable,
   signal: AbortSignal,
+  // D.13V — 外层（sendMessage / continueModelAfterToolResults）已经在用某个
+  // assistantStreamBlockId 累计 round 文本，这里复用同一 id，downgrade/discard
+  // 才能命中真实 block。不传则保持旧行为新建一个 final 专用 id。
+  reuseAssistantStreamBlockId?: string,
 ): Promise<string> {
   let assistantText = "";
   // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
-  const assistantStreamBlockId = `assistant-stream-final-${randomUUID()}`;
-  beginAssistantStream(output, assistantStreamBlockId);
+  const assistantStreamBlockId =
+    reuseAssistantStreamBlockId ?? `assistant-stream-final-${randomUUID()}`;
+  if (!reuseAssistantStreamBlockId) {
+    beginAssistantStream(output, assistantStreamBlockId);
+  }
   let chunkCount = 0;
   let hadUsage = false;
   let finishReason: string | undefined;
@@ -13755,7 +13881,10 @@ async function streamFinalModelAnswerWithoutTools(
     );
     writeErrorLine(output, message);
   }
-  endAssistantStream(output);
+  // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
+  if (!reuseAssistantStreamBlockId) {
+    endAssistantStream(output);
+  }
   return assistantText;
 }
 
@@ -13890,6 +14019,8 @@ async function continueModelAfterToolResults(
             });
             finalAnswerClaimRetried = true;
             assistantText = "";
+            // D.13V — 同步丢弃 continuation 当前 streaming block 累计的违规原文。
+            discardAssistantBlock(output, assistantStreamBlockId);
             continue;
           }
         }
@@ -13936,6 +14067,7 @@ async function continueModelAfterToolResults(
           sessionId,
           output,
           controller.signal,
+          assistantStreamBlockId,
         );
         assistantText += finalText;
       }
@@ -13952,6 +14084,8 @@ async function continueModelAfterToolResults(
             "warning",
           );
           assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+          // D.13V — 同步替换 continuation streaming block 与 lastFullOutput。
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
       output.write("\n");
@@ -15948,6 +16082,10 @@ export function __testCreateShellBlockOutput(
   beginAssistantStream(id: string): void;
   appendAssistantDelta(text: string): void;
   endAssistantStream(): void;
+  // D.13V — 暴露 retry/downgrade 路径上的 streaming block 操作，便于单测验证
+  // unsupported first-pass final answer 不残留于 streaming block / lastFullOutput。
+  discardAssistantBlock(id: string): void;
+  replaceAssistantBlockContent(id: string, text: string): void;
 } {
   return new ShellBlockOutput(context, blocks, onWrite);
 }
@@ -15961,4 +16099,15 @@ export function __testBuildToggleDetailsCommandPanel(
   context: TuiContext,
 ): import("./shell/types.js").CommandPanelView | undefined {
   return buildToggleDetailsCommandPanel(context);
+}
+
+/**
+ * D.13V-A — 测试入口：暴露 createVerificationLevelForReadiness。单测用它
+ * 验证 readiness 不再绕过 verification-level 分级器（仅 build pass 的报告
+ * 不应出现 level=real-smoke）。
+ */
+export function __testCreateVerificationLevelForReadiness(
+  context: TuiContext,
+): NonNullable<TerminalReadinessView["verificationLevel"]> {
+  return createVerificationLevelForReadiness(context);
 }

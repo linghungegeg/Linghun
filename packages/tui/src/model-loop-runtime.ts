@@ -514,7 +514,37 @@ export type FinalAnswerClaimVerdict = {
   matchedClaims: FinalAnswerClaimMatch[];
   unsupportedKinds: FinalAnswerClaimKind[];
   missingEvidenceKinds: string[];
+  // D.13V-A: kinds whose only matching evidence was filtered out as stale.
+  // 仅在 status==="needs_disclaimer" 且确有过期证据被忽略时出现；不影响 D.13U 的现有判定语义。
+  staleKinds?: FinalAnswerClaimKind[];
 };
+
+// D.13V-A — 按 claim 类型分级的 evidence 过期阈值（毫秒）。null 表示不应用过期判断。
+// 阈值依据真实工程节奏：
+// - completion_pass：测试/构建/typecheck/diff-check/smoke 跑过 30 分钟后，代码可能已被改动，再当 PASS 不安全。
+// - code_fact：Read/Grep/index 读到的源码事实，60 分钟后文件可能已变；再当"现在的代码事实"不安全。
+// - external_current_fact：web_source 24 小时内变化大；超 24h 不再当"今天最新"。
+// - ccb_parity：与文件版本快照绑定，不按时间过期。
+// - beta_readiness：由 createPhase15BetaVerdictScope 主管，不在此引入额外 staleness。
+const STALE_THRESHOLDS_MS: Record<FinalAnswerClaimKind, number | null> = {
+  completion_pass: 30 * 60 * 1000,
+  code_fact: 60 * 60 * 1000,
+  external_current_fact: 24 * 60 * 60 * 1000,
+  ccb_parity: null,
+  beta_readiness: null,
+};
+
+export function isEvidenceStaleForClaim(
+  record: EvidenceRecord,
+  kind: FinalAnswerClaimKind,
+  now: Date = new Date(),
+): boolean {
+  const threshold = STALE_THRESHOLDS_MS[kind];
+  if (threshold === null) return false;
+  const created = Date.parse(record.createdAt);
+  if (Number.isNaN(created)) return false;
+  return now.getTime() - created > threshold;
+}
 
 const COMPLETION_PASS_PATTERNS: RegExp[] = [
   /\u5df2\u5b8c\u6210/u, // \u5df2\u5b8c\u6210
@@ -664,6 +694,7 @@ const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
 export function evaluateFinalAnswerClaims(
   text: string,
   evidence: EvidenceRecord[],
+  now: Date = new Date(),
 ): FinalAnswerClaimVerdict {
   const matches = detectHighRiskClaims(text);
   if (matches.length === 0) {
@@ -676,22 +707,32 @@ export function evaluateFinalAnswerClaims(
   }
   const matchedKinds = new Set<FinalAnswerClaimKind>(matches.map((item) => item.kind));
   const unsupported: FinalAnswerClaimKind[] = [];
+  // D.13V-A\uff1a\u8bb0\u5f55"\u66fe\u7ecf\u547d\u4e2d\u4f46\u5168\u90e8 stale \u800c\u88ab\u5ffd\u7565"\u7684 claim \u7c7b\u578b\uff0c\u7528\u4e8e reminder/downgrade \u63d0\u793a\u3002
+  const staleKinds: FinalAnswerClaimKind[] = [];
   for (const kind of matchedKinds) {
     let supported = false;
+    let supporter: (record: EvidenceRecord) => boolean;
     if (kind === "completion_pass") {
-      supported = evidence.some(evidenceSupportsCompletion);
+      supporter = evidenceSupportsCompletion;
     } else if (kind === "code_fact") {
-      supported = evidence.some(evidenceSupportsCodeFact);
+      supporter = evidenceSupportsCodeFact;
     } else if (kind === "external_current_fact") {
-      supported = evidence.some(evidenceSupportsExternalCurrent);
+      supporter = evidenceSupportsExternalCurrent;
     } else if (kind === "ccb_parity") {
-      supported = evidence.some(evidenceSupportsCcbParity);
-    } else if (kind === "beta_readiness") {
-      // beta \u7531\u73b0\u6709 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u4ec5\u6807\u8bb0\u9700\u964d\u7ea7
-      supported = false;
+      supporter = evidenceSupportsCcbParity;
+    } else {
+      // beta_readiness \u7531 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u6c38\u8fdc\u4e0d\u653e\u884c\u3002
+      supporter = () => false;
     }
+    const matching = evidence.filter(supporter);
+    const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
+    supported = fresh.length > 0;
     if (!supported) {
       unsupported.push(kind);
+      // \u4ec5\u5f53\u5b58\u5728\u88ab\u5254\u9664\u7684 stale \u8bc1\u636e\u65f6\u8bb0\u5f55\uff1b\u7eaf\u7cb9\u7f3a\u8bc1\u636e\u7684\u4e0d\u7b97 stale\u3002
+      if (matching.length > 0 && fresh.length === 0) {
+        staleKinds.push(kind);
+      }
     }
   }
   if (unsupported.length === 0) {
@@ -703,12 +744,16 @@ export function evaluateFinalAnswerClaims(
     };
   }
   const missingEvidenceKinds = unsupported.map((kind) => REQUIRED_EVIDENCE_LABEL[kind]);
-  return {
+  const verdict: FinalAnswerClaimVerdict = {
     status: "needs_disclaimer",
     matchedClaims: matches,
     unsupportedKinds: unsupported,
     missingEvidenceKinds,
   };
+  if (staleKinds.length > 0) {
+    verdict.staleKinds = staleKinds;
+  }
+  return verdict;
 }
 
 // \u7ed9\u6a21\u578b\u6ce8\u5165\u7684 user reminder\uff08\u4ec5\u4e00\u8f6e\uff09\u3002\u4e2d\u6587\u77ed\u53e5 + \u5217\u51fa\u7f3a\u4ec0\u4e48\u7c7b\u578b\u8bc1\u636e\u3002
@@ -718,10 +763,15 @@ export function createFinalAnswerClaimReminder(
 ): string {
   const phrases = Array.from(new Set(verdict.matchedClaims.map((m) => m.phrase))).slice(0, 6);
   const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
+  const hasStale = verdict.staleKinds && verdict.staleKinds.length > 0;
   if (language === "en-US") {
-    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}). Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or call a tool first to gather evidence. You have only one rewrite chance.`;
+    const stalePart = hasStale
+      ? " Some prior evidence was ignored because it is too old to support these claims."
+      : "";
+    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}).${stalePart} Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or call a tool first to gather evidence. You have only one rewrite chance.`;
   }
-  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
+  const stalePart = hasStale ? "\u90e8\u5206\u65e9\u671f\u8bc1\u636e\u5df2\u8fc7\u671f\u88ab\u5ffd\u7565\u3002" : "";
+  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002${stalePart}\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
 }
 
 // \u4fee\u6b63\u5931\u8d25\u540e\u672c\u5730\u964d\u7ea7\uff1a\u628a\u8fdd\u89c4 phrase \u4ece\u539f\u6587\u66ff\u6362\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u5e76\u8ffd\u52a0\u4e00\u6bb5\u4eba\u8bdd\u77ed\u63d0\u793a\u3002

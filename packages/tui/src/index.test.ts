@@ -66,6 +66,7 @@ import {
   validateExtensionContributionExecution,
   writeLightHintsForTest,
   __testCreateShellBlockOutput,
+  __testCreateVerificationLevelForReadiness,
 } from "./index.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
@@ -11641,6 +11642,326 @@ describe("D.13Q-UX Real Smoke Fix v3 复核 — writeErrorLine 真实错误路�
       "Provider request failed\n- code: PROVIDER_NETWORK_ERROR\n- detail: ECONNRESET while streaming",
     );
     expect(blocks2[0]?.nextAction).toContain("Ctrl+O");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D.13V-A item 1 — streaming residue reality check
+//   验证 Final Answer Gate retry / downgrade 路径上：
+//   - retry：违规原文从 streaming block 与 lastFullOutput 同步消失，下一轮 delta
+//     可以正常重新填回同一条 keep:true block。
+//   - downgrade：违规原文被替换为安全文本，主屏 / Ctrl+O / details 拉到的
+//     都是降级版，不再泄漏 unsupported first-pass final answer。
+//   - createVerificationLevelForReadiness 改写后 readiness 走 verification-level
+//     分级器，build-only readiness 不再越级 real-smoke。
+// ---------------------------------------------------------------------------
+describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
+  function makeFakeContext(): TuiContext {
+    return {
+      language: "zh-CN",
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as unknown as TuiContext;
+  }
+
+  it("discardAssistantBlock 清空 streaming block fullText/summary 与 lastFullOutput", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    const id = "assistant-stream-test-1";
+    output.beginAssistantStream(id);
+    output.appendAssistantDelta("已完成所有测试，PASS。");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.fullText).toContain("已完成");
+    expect(ctx.lastFullOutput).toContain("已完成");
+
+    output.discardAssistantBlock(id);
+    expect(blocks[0]?.fullText).toBe("");
+    expect(blocks[0]?.summary).toBe("");
+    expect(ctx.lastFullOutput).toBeUndefined();
+
+    output.appendAssistantDelta("我没有跑测试，无法确认。");
+    expect(blocks[0]?.fullText).toBe("我没有跑测试，无法确认。");
+    expect(ctx.lastFullOutput).toBe("我没有跑测试，无法确认。");
+  });
+
+  it("replaceAssistantBlockContent 用降级文本替换 fullText/summary 与 lastFullOutput", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    const id = "assistant-stream-test-2";
+    output.beginAssistantStream(id);
+    output.appendAssistantDelta("测试已通过，可以发布。");
+    expect(blocks[0]?.fullText).toContain("测试已通过");
+    expect(ctx.lastFullOutput).toContain("测试已通过");
+
+    const downgraded = "[未验证] 测试已通过，可以发布。\n（缺少 test_passed 证据。）";
+    output.replaceAssistantBlockContent(id, downgraded);
+    expect(blocks[0]?.fullText).toBe(downgraded);
+    expect(blocks[0]?.summary).toContain("[未验证]");
+    expect(ctx.lastFullOutput).toBe(downgraded);
+  });
+
+  it("retry 后 discardAssistantBlock 让 Ctrl+O / details 拉不到违规原文", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    const id = "assistant-stream-test-3";
+    output.beginAssistantStream(id);
+    output.appendAssistantDelta("已完成，所有 build/test 已通过。");
+    output.discardAssistantBlock(id);
+    output.appendAssistantDelta("我没有调用任何工具，无法确认 build/test 状态。");
+
+    expect(blocks).toHaveLength(1);
+    const fullText = blocks[0]?.fullText ?? "";
+    expect(fullText).not.toContain("已完成");
+    expect(fullText).not.toContain("通过");
+    expect(fullText).toContain("无法确认");
+    expect(ctx.lastFullOutput).toBe(fullText);
+  });
+
+  it("suppressLastFullOutputCapture=true 时 discard/replace 不会写穿 lastFullOutput", () => {
+    const ctx = {
+      language: "zh-CN" as const,
+      lastFullOutput: "preserved",
+      suppressLastFullOutputCapture: true,
+    } as unknown as TuiContext;
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    const id = "assistant-stream-test-4";
+    output.beginAssistantStream(id);
+    output.appendAssistantDelta("已完成，PASS。");
+    expect(ctx.lastFullOutput).toBe("preserved");
+
+    output.discardAssistantBlock(id);
+    expect(ctx.lastFullOutput).toBe("preserved");
+
+    output.replaceAssistantBlockContent(id, "[未验证] downgrade");
+    expect(ctx.lastFullOutput).toBe("preserved");
+  });
+
+  it("源码：streamFinalModelAnswerWithoutTools 复用外层 assistantStreamBlockId", async () => {
+    const fs = await import("node:fs/promises");
+    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    expect(indexSrc).toContain("reuseAssistantStreamBlockId");
+    expect(indexSrc).toMatch(
+      /assistantStreamBlockId\s*=\s*\n?\s*reuseAssistantStreamBlockId\s*\?\?/,
+    );
+    expect(indexSrc).toMatch(
+      /streamFinalModelAnswerWithoutTools\([^)]*assistantStreamBlockId,?\s*\)/s,
+    );
+  });
+
+  it("源码：sendMessage / continueModelAfterToolResults 在 retry 后调 discardAssistantBlock", async () => {
+    const fs = await import("node:fs/promises");
+    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    const occurrences = indexSrc.match(/discardAssistantBlock\(output, assistantStreamBlockId\)/g);
+    expect(occurrences?.length).toBeGreaterThanOrEqual(2);
+    const downgrade = indexSrc.match(
+      /replaceAssistantBlockContent\(output, assistantStreamBlockId, assistantText\)/g,
+    );
+    expect(downgrade?.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D.13V-A item 2 — verification classifier 不再被绕过
+//   readiness 不再用 `status===pass && unverified=0` 直升 real-smoke。
+//   只有真实 smoke kind 命令 pass 才算 realProcessObserved；
+//   build/test/typecheck/lint 全 pass 顶到 build 级；
+//   partial / unverified / fallback / runnerError 命中 mock 级 + upgradeBlocked。
+// ---------------------------------------------------------------------------
+describe("D.13V-A item 2: createVerificationLevelForReadiness routes through classifier", () => {
+  function makeCtxWithReport(report: VerificationReport | undefined): TuiContext {
+    return {
+      lastVerification: report,
+    } as unknown as TuiContext;
+  }
+  function step(
+    kind: "test" | "typecheck" | "build" | "lint" | "smoke",
+    status: "pass" | "fail" | "partial" | "skipped" | "stale" | "cancelled" | "timeout",
+    overrides: Partial<{ runnerError: string }> = {},
+  ) {
+    return {
+      kind,
+      command: `${kind} command`,
+      reason: "test",
+      status,
+      durationMs: 100,
+      summary: `${kind} ${status}`,
+      ...overrides,
+    };
+  }
+
+  it("无 lastVerification 时返回 source 级、不可 pass/mature", () => {
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(undefined));
+    expect(result.level).toBe("source");
+    expect(result.canClaimPass).toBe(false);
+    expect(result.canClaimMature).toBe(false);
+    expect(result.upgradeBlocked).toBe(false);
+  });
+
+  it("仅 build pass 不再被报告为 real-smoke（修复 P0-3）", () => {
+    const report: VerificationReport = {
+      id: "r1",
+      status: "pass",
+      summary: "build only",
+      commands: [step("build", "pass")],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).not.toBe("real-smoke");
+    expect(result.canClaimMature).toBe(false);
+    expect(result.canClaimPass).toBe(true);
+  });
+
+  it("vitest+tsc+build 全 pass 但无 smoke kind → 仍非 real-smoke", () => {
+    const report: VerificationReport = {
+      id: "r2",
+      status: "pass",
+      summary: "all but smoke",
+      commands: [step("test", "pass"), step("typecheck", "pass"), step("build", "pass")],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).not.toBe("real-smoke");
+    expect(result.canClaimMature).toBe(false);
+  });
+
+  it("smoke kind pass + 全 pass + unverified=0 → real-smoke", () => {
+    const report: VerificationReport = {
+      id: "r3",
+      status: "pass",
+      summary: "real smoke",
+      commands: [step("test", "pass"), step("smoke", "pass")],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).toBe("real-smoke");
+    expect(result.canClaimMature).toBe(true);
+    expect(result.canClaimPass).toBe(true);
+    expect(result.upgradeBlocked).toBe(false);
+  });
+
+  it("status=partial 触发 simulatedOrPartial → upgradeBlocked", () => {
+    const report: VerificationReport = {
+      id: "r4",
+      status: "partial",
+      summary: "partial",
+      commands: [step("test", "partial")],
+      unverified: ["smoke not run"],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.upgradeBlocked).toBe(true);
+    expect(result.canClaimMature).toBe(false);
+    expect(result.blockReason).toBe("simulated-or-partial");
+  });
+
+  it("unverified 列表非空时即使 status=pass 也降级 + upgradeBlocked", () => {
+    const report: VerificationReport = {
+      id: "r5",
+      status: "pass",
+      summary: "pass with unverified",
+      commands: [step("test", "pass"), step("smoke", "pass")],
+      unverified: ["mobile not tested"],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.upgradeBlocked).toBe(true);
+    expect(result.canClaimMature).toBe(false);
+    expect(result.level).not.toBe("real-smoke");
+  });
+
+  it("runnerError 触发 fallbackUsed → mock 级", () => {
+    const report: VerificationReport = {
+      id: "r6",
+      status: "pass",
+      summary: "fallback",
+      commands: [step("test", "pass", { runnerError: "node fallback used" })],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.upgradeBlocked).toBe(true);
+    expect(result.blockReason).toBe("fallback-path-used");
+    expect(result.canClaimPass).toBe(false);
+    expect(result.canClaimMature).toBe(false);
+  });
+
+  it("status=stale 触发 fallback → upgradeBlocked", () => {
+    const report: VerificationReport = {
+      id: "r7",
+      status: "stale",
+      summary: "stale report",
+      commands: [step("test", "pass")],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.upgradeBlocked).toBe(true);
+    expect(result.canClaimPass).toBe(false);
+  });
+
+  it("某条 command timeout 即使 status=pass 也降级", () => {
+    const report: VerificationReport = {
+      id: "r8",
+      status: "pass",
+      summary: "one command timed out",
+      commands: [step("test", "pass"), step("smoke", "timeout")],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.upgradeBlocked).toBe(true);
+    expect(result.canClaimMature).toBe(false);
+  });
+
+  it("源码：createVerificationLevelForReadiness 调用 classifyVerificationLevel", async () => {
+    const fs = await import("node:fs/promises");
+    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    expect(indexSrc).toMatch(
+      /createVerificationLevelForReadiness[\s\S]{0,5000}classifyVerificationLevel\(/,
+    );
+    // 旧 P0-3 假升级表达式不能再出现
+    expect(indexSrc).not.toMatch(
+      /hasRealSmoke\s*\?\s*"real-smoke"\s*:\s*hasBuild\s*\?\s*"build"/,
+    );
   });
 });
 

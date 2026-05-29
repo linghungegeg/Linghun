@@ -10,6 +10,8 @@ import {
   type WorkspaceReferenceDimensions,
   createWorkspaceReferenceCache,
   getWorkspaceReferenceSnapshot,
+  isFallbackWorkspaceReferenceSnapshot,
+  workspaceReferenceHash,
 } from "./workspace-reference-cache.js";
 
 function dimensions(
@@ -122,9 +124,11 @@ describe("workspace reference cache", () => {
       },
     );
 
-    expect(snapshot.source).toBe("fallback");
+    expect(snapshot.source).toBe("fallback-empty");
     expect(snapshot.changedKeys).toContain("workspaceReferenceUnavailable");
+    expect(snapshot.changedKeys).toContain("fallback-empty");
     expect(cache.failures).toBe(1);
+    expect(isFallbackWorkspaceReferenceSnapshot(snapshot)).toBe(true);
   });
 
   it("tracks directory summary changes without storing directory contents", async () => {
@@ -428,5 +432,148 @@ describe("workspace reference cache", () => {
     expect(source).toContain('await open(absolutePath, "r")');
     expect(source).toContain("handle.read(buffer, 0, bytesToRead, 0)");
     expect(source).not.toContain("await readFile(absolutePath)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D.13V-A item 3 — fallback / stale / fresh 语义可区分
+//   修复 P0-4：fallback 路径不再静默冒充上次成功；区分 fallback-stale
+//   （cache.latest 存在，复用旧 files 但显式打 source 标）和 fallback-empty
+//   （连 cache.latest 也没有）。hash 编码 source，连续两次 fallback 不会被当
+//   稳定状态。caller 可用 isFallbackWorkspaceReferenceSnapshot 把 fallback
+//   降级为 stale-fallback / missing。
+// ---------------------------------------------------------------------------
+describe("D.13V-A item 3: workspace reference cache fallback semantics", () => {
+  it("fallback-empty 在没有 prev cache 时出现，files/directories 为空", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    const cache = createWorkspaceReferenceCache();
+    const snapshot = await getWorkspaceReferenceSnapshot(
+      cache,
+      {
+        projectPath: project,
+        dimensions: dimensions(),
+        runtimeStatus: { index: { status: "unknown" } },
+        toolCapabilitySummary: "tools",
+      },
+      async () => {
+        throw new Error("scan failed");
+      },
+    );
+    expect(snapshot.source).toBe("fallback-empty");
+    expect(snapshot.files).toEqual([]);
+    expect(snapshot.directories).toEqual([]);
+    expect(isFallbackWorkspaceReferenceSnapshot(snapshot)).toBe(true);
+  });
+
+  it("fallback-stale 在有 prev cache 时出现，复用旧 files 但 source 显式标 stale", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    await writeFile(join(project, "README.md"), "# v1\n", "utf8");
+    const cache = createWorkspaceReferenceCache();
+    // 第一次成功 scan，让 cache.latest 有内容
+    const fresh = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+    });
+    expect(["miss", "rescanned", "stale"]).toContain(fresh.source);
+    expect(isFallbackWorkspaceReferenceSnapshot(fresh)).toBe(false);
+
+    // 触发 cache miss + 异常 → fallback 路径
+    const stale = await getWorkspaceReferenceSnapshot(
+      cache,
+      {
+        projectPath: project,
+        dimensions: dimensions({ configHash: "config-b" }),
+        runtimeStatus: { index: { status: "ready" } },
+        toolCapabilitySummary: "tools",
+      },
+      async () => {
+        throw new Error("scan failed");
+      },
+    );
+    expect(stale.source).toBe("fallback-stale");
+    expect(isFallbackWorkspaceReferenceSnapshot(stale)).toBe(true);
+    // files/directories 复用了旧 cache.latest（不为空，但 source 已经显式标 stale）
+    expect(stale.files.length).toBeGreaterThan(0);
+  });
+
+  it("workspaceReferenceHash 把 source 编码进 hash —— fallback 与 fresh 必产不同 hash", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workspace-cache-"));
+    await writeFile(join(project, "README.md"), "# hash check\n", "utf8");
+    const cache = createWorkspaceReferenceCache();
+    const fresh = await getWorkspaceReferenceSnapshot(cache, {
+      projectPath: project,
+      dimensions: dimensions(),
+      runtimeStatus: {},
+      toolCapabilitySummary: "tools",
+    });
+    const stale = await getWorkspaceReferenceSnapshot(
+      cache,
+      {
+        projectPath: project,
+        dimensions: dimensions({ configHash: "config-different" }),
+        runtimeStatus: {},
+        toolCapabilitySummary: "tools",
+      },
+      async () => {
+        throw new Error("scan failed");
+      },
+    );
+    expect(workspaceReferenceHash(fresh)).not.toBe(workspaceReferenceHash(stale));
+  });
+
+  it("isFallbackWorkspaceReferenceSnapshot 对 fresh/missing 返回 false", () => {
+    expect(isFallbackWorkspaceReferenceSnapshot(undefined)).toBe(false);
+    expect(
+      isFallbackWorkspaceReferenceSnapshot({
+        key: "k",
+        source: "miss",
+        createdAt: "",
+        changedKeys: [],
+        dimensions: dimensions(),
+        files: [],
+        directories: [],
+        runtimeStatus: {},
+        toolCapabilitySummary: "tools",
+        evidenceRefs: [],
+        logRefs: [],
+      }),
+    ).toBe(false);
+    expect(
+      isFallbackWorkspaceReferenceSnapshot({
+        key: "k",
+        source: "rescanned",
+        createdAt: "",
+        changedKeys: [],
+        dimensions: dimensions(),
+        files: [],
+        directories: [],
+        runtimeStatus: {},
+        toolCapabilitySummary: "tools",
+        evidenceRefs: [],
+        logRefs: [],
+      }),
+    ).toBe(false);
+  });
+
+  it("isFallbackWorkspaceReferenceSnapshot 对所有 fallback 变体返回 true", () => {
+    for (const source of ["fallback", "fallback-stale", "fallback-empty"] as const) {
+      expect(
+        isFallbackWorkspaceReferenceSnapshot({
+          key: "k",
+          source,
+          createdAt: "",
+          changedKeys: [],
+          dimensions: dimensions(),
+          files: [],
+          directories: [],
+          runtimeStatus: {},
+          toolCapabilitySummary: "tools",
+          evidenceRefs: [],
+          logRefs: [],
+        }),
+      ).toBe(true);
+    }
   });
 });
