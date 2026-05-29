@@ -26,6 +26,7 @@ import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
+import type { EvidenceRecord } from "./tui-data-types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -484,4 +485,341 @@ export function formatSolutionCompletenessTrigger(
     return "\u6700\u8fd1\u540c\u7c7b\u6743\u9650\u62d2\u7edd\u53cd\u590d\u51fa\u73b0\u3002";
   }
   return "\u672a\u89e6\u53d1\u3002";
+}
+
+// ---------------------------------------------------------------------------
+// D.13U \u2014 Final Answer Claim Gate pure helpers
+// ---------------------------------------------------------------------------
+//
+// \u8bbe\u8ba1\u539f\u5219\uff08\u4e0d\u6062\u590d FreshnessLite\uff09\uff1a
+// - \u4e0d\u5728\u7528\u6237\u8f93\u5165\u4fa7\u505a\u5173\u952e\u8bcd\u62e6\u622a\uff08"\u5f53\u524d/\u6700\u65b0/\u4eca\u5929/now/\u9a8c\u8bc1"\uff09\u3002
+// - \u53ea\u5728\u6700\u7ec8 assistantText \u5165 transcript \u524d\u5bf9"\u9ad8\u98ce\u9669\u58f0\u660e"\u505a\u8bc1\u636e\u5339\u914d\u3002
+// - claim \u7c7b\u578b\u9a71\u52a8 evidence \u7c7b\u578b\uff1b\u4e0d\u518d `evidence.length > 0` \u4e07\u80fd\u653e\u884c\u3002
+// - \u666e\u901a\u8f93\u5165\uff08\u95f2\u804a/\u6982\u5ff5\u89e3\u91ca/\u65b9\u6848\u8ba8\u8bba\uff09\u4e0d\u5e94\u89e6\u53d1\u3002
+
+export type FinalAnswerClaimKind =
+  | "completion_pass"
+  | "code_fact"
+  | "external_current_fact"
+  | "ccb_parity"
+  | "beta_readiness";
+
+export type FinalAnswerClaimMatch = {
+  kind: FinalAnswerClaimKind;
+  phrase: string;
+};
+
+export type FinalAnswerClaimVerdict = {
+  status: "passed" | "needs_disclaimer";
+  matchedClaims: FinalAnswerClaimMatch[];
+  unsupportedKinds: FinalAnswerClaimKind[];
+  missingEvidenceKinds: string[];
+};
+
+const COMPLETION_PASS_PATTERNS: RegExp[] = [
+  /\u5df2\u5b8c\u6210/u, // \u5df2\u5b8c\u6210
+  /\u5df2\u4fee\u590d/u, // \u5df2\u4fee\u590d
+  /\u5df2\u9a8c\u8bc1/u, // \u5df2\u9a8c\u8bc1
+  /\u6d4b\u8bd5\u901a\u8fc7/u, // \u6d4b\u8bd5\u901a\u8fc7
+  /\u6210\u719f\u53ef\u53d1\u5e03/u, // \u6210\u719f\u53ef\u53d1\u5e03
+  /\u65e0\u98ce\u9669/u, // \u65e0\u98ce\u9669
+  /\bbuild\s+(?:has\s+)?passed\b/iu,
+  /\btsc\s+(?:has\s+)?passed\b/iu,
+  /\bdiff[-\s]?check\s+passed\b/iu,
+  /\btests?\s+passed\b/iu,
+  /\bsmoke[-\s]?ready\b/iu,
+  /\b(?:release|production)[-\s]?ready\b/iu,
+  /\bcompleted\b/iu,
+  /\bfixed\b/iu,
+  /\bverified\b/iu,
+  /(?:^|[\s"'\u201c])PASS(?=[\s.\u3002\u3001!?,;:"'\u201d]|$)/u,
+  /\bmature\s+(?:tool|implementation|module)\b/iu,
+];
+
+const CODE_FACT_PATTERNS: RegExp[] = [
+  /\u4ee3\u7801\u91cc/u, // \u4ee3\u7801\u91cc
+  /\u8c03\u7528\u94fe\u662f/u, // \u8c03\u7528\u94fe\u662f
+  /(?:\u51fd\u6570|\u65b9\u6cd5).{0,20}\u5728.{0,50}\u6587\u4ef6/u,
+  /\u5f53\u524d\u5b9e\u73b0\u662f/u, // \u5f53\u524d\u5b9e\u73b0\u662f
+  /\u914d\u7f6e\u662f/u, // \u914d\u7f6e\u662f
+  /\bin\s+the\s+code\b/iu,
+  /\bcall\s+chain\s+is\b/iu,
+  /\bthe\s+function\s+\w+\s+(?:is\s+(?:in|at|defined)|exists)/iu,
+  /\bthe\s+config\s+is\b/iu,
+];
+
+const CCB_PARITY_PATTERNS: RegExp[] = [
+  /\u7b49\u4e8e\s*ccb/iu, // \u7b49\u4e8e CCB
+  /\u4e0e\s*ccb\s*(?:\u4e00\u81f4|\u5bf9\u9f50|parity)/iu,
+  /\bccb\s+parity\b/iu,
+  /\bproduction[-\s]?ready\b/iu,
+];
+
+const EXTERNAL_CURRENT_PATTERNS: RegExp[] = [
+  /\u4eca\u5929/u, // \u4eca\u5929
+  /\u6700\u65b0\u7248\u672c/u, // \u6700\u65b0\u7248\u672c
+  /\u6700\u65b0\u6a21\u578b/u, // \u6700\u65b0\u6a21\u578b
+  /\u5f53\u524d\u5b98\u7f51/u, // \u5f53\u524d\u5b98\u7f51
+  /\u5f53\u524d\u4ef7\u683c/u, // \u5f53\u524d\u4ef7\u683c
+  /\u5f53\u524d\s*api/iu, // \u5f53\u524d API
+  /\u6700\u65b0\u4ef7\u683c/u, // \u6700\u65b0\u4ef7\u683c
+  /\bToday'?s\b/iu,
+  /\bcurrent\s+(?:price|version|API|website)/iu,
+  /\blatest\s+(?:price|version|model|release)/iu,
+];
+
+// \u672c\u5730"\u5f53\u524d X"\u767d\u540d\u5355\uff1a\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6/\u4f1a\u8bdd/\u9879\u76ee/\u914d\u7f6e/\u5de5\u4f5c\u76ee\u5f55 \u7b49
+// \u547d\u4e2d\u5373\u4e0d\u7b97 external_current_fact\uff0c\u907f\u514d\u8bef\u4f24\u666e\u901a\u672c\u5730\u67e5\u8be2\u3002
+const LOCAL_CURRENT_WHITELIST =
+  /\u5f53\u524d(?:\u5206\u652f|\u76ee\u5f55|\u6587\u4ef6|\u4f1a\u8bdd|\u9879\u76ee|\u5de5\u4f5c\u76ee\u5f55|\u6a21\u5f0f|\u7ec4\u4ef6|\u5b9e\u73b0\u662f)/u;
+
+const BETA_READINESS_PATTERNS: RegExp[] = [
+  /\bbeta\s+(?:ready|readiness|pass|completed)\b/iu,
+  /\u8fdb\u5165\s*beta/u, // \u8fdb\u5165 beta
+  /\u53ef\u4ee5\s*(?:\u8fdb\u5165|\u53d1\u5e03)\s*beta/u,
+];
+
+function detectMatches(
+  text: string,
+  patterns: RegExp[],
+  kind: FinalAnswerClaimKind,
+): FinalAnswerClaimMatch[] {
+  const out: FinalAnswerClaimMatch[] = [];
+  for (const re of patterns) {
+    const match = re.exec(text);
+    if (match) {
+      out.push({ kind, phrase: match[0] });
+    }
+  }
+  return out;
+}
+
+export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
+  if (!text) return [];
+  const matches: FinalAnswerClaimMatch[] = [];
+  matches.push(...detectMatches(text, BETA_READINESS_PATTERNS, "beta_readiness"));
+  matches.push(...detectMatches(text, COMPLETION_PASS_PATTERNS, "completion_pass"));
+  matches.push(...detectMatches(text, CODE_FACT_PATTERNS, "code_fact"));
+  matches.push(...detectMatches(text, CCB_PARITY_PATTERNS, "ccb_parity"));
+  // \u5916\u90e8\u5f53\u524d\u4e8b\u5b9e\uff1a\u5148\u53bb\u9664"\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6..."\u7b49\u672c\u5730\u767d\u540d\u5355\uff0c\u518d\u5339\u914d
+  const sanitized = text.replace(LOCAL_CURRENT_WHITELIST, "");
+  matches.push(...detectMatches(sanitized, EXTERNAL_CURRENT_PATTERNS, "external_current_fact"));
+  return matches;
+}
+
+function evidenceTokens(record: EvidenceRecord): string {
+  return [record.kind, record.source, record.summary, ...record.supportsClaims]
+    .join(" ")
+    .toLowerCase();
+}
+
+function evidenceSupportsCompletion(record: EvidenceRecord): boolean {
+  if (record.kind === "test_result") {
+    return /(?:status[=:\s]+)?pass(?![a-z])/iu.test(evidenceTokens(record));
+  }
+  const tokens = evidenceTokens(record);
+  return /(?:test_passed|build_passed|typecheck_passed|diff_check_passed|smoke_passed|verified|tests passed|\u5df2\u9a8c\u8bc1|\u9a8c\u8bc1\u901a\u8fc7|\u6d4b\u8bd5\u901a\u8fc7)/iu.test(
+    tokens,
+  );
+}
+
+function evidenceSupportsCodeFact(record: EvidenceRecord): boolean {
+  if (
+    record.kind === "file_read" ||
+    record.kind === "grep_result" ||
+    record.kind === "index_query"
+  ) {
+    return true;
+  }
+  const tokens = evidenceTokens(record);
+  return /(?:local_read|grep_match|file:|git_local_fact|git_status)/iu.test(tokens);
+}
+
+function evidenceSupportsExternalCurrent(record: EvidenceRecord): boolean {
+  if (record.kind === "web_source") return true;
+  return /(?:web_source|external_current_fact)/iu.test(evidenceTokens(record));
+}
+
+function evidenceSupportsCcbParity(record: EvidenceRecord): boolean {
+  const tokens = evidenceTokens(record);
+  if (/(?:ccb_parity_verified|ccb_audit)/iu.test(tokens)) return true;
+  // /ccb-source \u8def\u5f84\u4e0b\u7684 file_read / grep_result \u4e5f\u7b97
+  if (
+    (record.kind === "file_read" || record.kind === "grep_result") &&
+    /ccb-source|\bccb\b/iu.test(tokens)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
+  completion_pass: "test/build/typecheck/diff-check/smoke",
+  code_fact: "Read/Grep/index",
+  external_current_fact: "web_source",
+  ccb_parity: "ccb-source \u672c\u5730\u8bc1\u636e\u6216 web_source",
+  beta_readiness: "Beta readiness verdict (real-tui report-generation PASS)",
+};
+
+export function evaluateFinalAnswerClaims(
+  text: string,
+  evidence: EvidenceRecord[],
+): FinalAnswerClaimVerdict {
+  const matches = detectHighRiskClaims(text);
+  if (matches.length === 0) {
+    return {
+      status: "passed",
+      matchedClaims: [],
+      unsupportedKinds: [],
+      missingEvidenceKinds: [],
+    };
+  }
+  const matchedKinds = new Set<FinalAnswerClaimKind>(matches.map((item) => item.kind));
+  const unsupported: FinalAnswerClaimKind[] = [];
+  for (const kind of matchedKinds) {
+    let supported = false;
+    if (kind === "completion_pass") {
+      supported = evidence.some(evidenceSupportsCompletion);
+    } else if (kind === "code_fact") {
+      supported = evidence.some(evidenceSupportsCodeFact);
+    } else if (kind === "external_current_fact") {
+      supported = evidence.some(evidenceSupportsExternalCurrent);
+    } else if (kind === "ccb_parity") {
+      supported = evidence.some(evidenceSupportsCcbParity);
+    } else if (kind === "beta_readiness") {
+      // beta \u7531\u73b0\u6709 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u4ec5\u6807\u8bb0\u9700\u964d\u7ea7
+      supported = false;
+    }
+    if (!supported) {
+      unsupported.push(kind);
+    }
+  }
+  if (unsupported.length === 0) {
+    return {
+      status: "passed",
+      matchedClaims: matches,
+      unsupportedKinds: [],
+      missingEvidenceKinds: [],
+    };
+  }
+  const missingEvidenceKinds = unsupported.map((kind) => REQUIRED_EVIDENCE_LABEL[kind]);
+  return {
+    status: "needs_disclaimer",
+    matchedClaims: matches,
+    unsupportedKinds: unsupported,
+    missingEvidenceKinds,
+  };
+}
+
+// \u7ed9\u6a21\u578b\u6ce8\u5165\u7684 user reminder\uff08\u4ec5\u4e00\u8f6e\uff09\u3002\u4e2d\u6587\u77ed\u53e5 + \u5217\u51fa\u7f3a\u4ec0\u4e48\u7c7b\u578b\u8bc1\u636e\u3002
+export function createFinalAnswerClaimReminder(
+  verdict: FinalAnswerClaimVerdict,
+  language: Language,
+): string {
+  const phrases = Array.from(new Set(verdict.matchedClaims.map((m) => m.phrase))).slice(0, 6);
+  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
+  if (language === "en-US") {
+    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}). Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or call a tool first to gather evidence. You have only one rewrite chance.`;
+  }
+  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
+}
+
+// \u4fee\u6b63\u5931\u8d25\u540e\u672c\u5730\u964d\u7ea7\uff1a\u628a\u8fdd\u89c4 phrase \u4ece\u539f\u6587\u66ff\u6362\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u5e76\u8ffd\u52a0\u4e00\u6bb5\u4eba\u8bdd\u77ed\u63d0\u793a\u3002
+// \u4e0d\u66b4\u9732 internal validator id / FinalAnswerClaimGate / EvidenceSummary \u7b49\u5185\u90e8\u8bcd\u3002
+export function buildDowngradedFinalAnswer(
+  originalText: string,
+  verdict: FinalAnswerClaimVerdict,
+  language: Language,
+): string {
+  let safeText = originalText;
+  for (const match of verdict.matchedClaims) {
+    if (verdict.unsupportedKinds.includes(match.kind)) {
+      const re = new RegExp(escapeRegExp(match.phrase), "giu");
+      safeText = safeText.replace(re, language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]");
+    }
+  }
+  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
+  const notice =
+    language === "en-US"
+      ? `\nI can't confirm these claims due to missing ${kinds} evidence; the reply above has been rephrased as unverified.`
+      : `\n\u6211\u4e0d\u80fd\u786e\u8ba4\u8fd9\u4e9b\u58f0\u660e\uff0c\u56e0\u4e3a\u7f3a\u5c11 ${kinds} \u8bc1\u636e\uff1b\u4ee5\u4e0a\u56de\u7b54\u5df2\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002`;
+  return safeText + notice;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+// ---------------------------------------------------------------------------
+// D.13U \u2014 recordToolEvidence supportsClaims \u6d3e\u751f\u5668\uff08\u7eaf\u51fd\u6570\uff09
+// ---------------------------------------------------------------------------
+//
+// \u65e7 recordToolEvidence \u4ec5\u5199 [name]\uff0c\u5bfc\u81f4\u4efb\u4f55\u5de5\u5177\u8c03\u7528\u90fd\u88ab\u5f53\u6210\u4e07\u80fd\u8bc1\u636e\u3002
+// \u65b0\u7248\u6309 \u5de5\u5177 + \u547d\u4ee4\u6587\u672c + exit code \u6d3e\u751f\u5177\u4f53 claim \u7c7b\u578b\u3002
+
+export function deriveToolSupportsClaims(
+  name: ToolName,
+  input: unknown,
+  output: { text?: string; data?: unknown },
+): string[] {
+  const claims = new Set<string>([name]);
+  const inputObj = (input ?? {}) as Record<string, unknown>;
+
+  if (name === "Read") {
+    claims.add("local_read");
+    const filePath = typeof inputObj.file_path === "string" ? inputObj.file_path : undefined;
+    if (filePath) claims.add(`file:${filePath}`);
+  }
+  if (name === "Grep") {
+    claims.add("local_read");
+    claims.add("grep_match");
+    const pattern = typeof inputObj.pattern === "string" ? inputObj.pattern : undefined;
+    if (pattern) claims.add(`pattern:${pattern.slice(0, 60)}`);
+  }
+  if (name === "Glob") {
+    claims.add("local_read");
+    claims.add("grep_match");
+  }
+  if (name === "Write" || name === "Edit" || name === "MultiEdit") {
+    claims.add("file_written");
+    const filePath = typeof inputObj.file_path === "string" ? inputObj.file_path : undefined;
+    if (filePath) claims.add(`file:${filePath}`);
+  }
+  if (name === "Bash") {
+    const command = typeof inputObj.command === "string" ? inputObj.command : "";
+    claims.add("command_ran");
+    const dataExit = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
+    const exitOk =
+      (typeof dataExit === "number" && dataExit === 0) ||
+      (typeof dataExit !== "number" && /(?:^|\s)exit\s*code\s*0(?:\s|$)/iu.test(output.text ?? ""));
+    claims.add(exitOk ? "bash_exit_0" : "bash_exit_nonzero");
+    const cmd = command.toLowerCase();
+    if (exitOk) {
+      if (
+        /(?:^|[\s&|;])(?:vitest|jest|pytest|go\s+test|cargo\s+test|mocha|jasmine|tap\b)/iu.test(cmd)
+      ) {
+        claims.add("test_passed");
+      }
+      if (/(?:^|[\s&|;])(?:tsc)(?:\s|$)/iu.test(cmd) || /tsc\s+--noemit/iu.test(cmd)) {
+        claims.add("typecheck_passed");
+      }
+      if (
+        /(?:^|[\s&|;])(?:pnpm|npm|yarn)\s+(?:run\s+)?build(?:\s|$)/iu.test(cmd) ||
+        /(?:^|[\s&|;])(?:cargo|go)\s+build(?:\s|$)/iu.test(cmd)
+      ) {
+        claims.add("build_passed");
+      }
+      if (/git\s+diff\s+--check/iu.test(cmd)) {
+        claims.add("diff_check_passed");
+      }
+      if (/(?:^|[\s&|;])(?:smoke|run-smoke|.*\bsmoke\b.*)/iu.test(cmd)) {
+        claims.add("smoke_ran");
+      }
+      if (/git\s+(?:status|branch|rev-parse|log|show-ref|symbolic-ref)/iu.test(cmd)) {
+        claims.add("git_status");
+        claims.add("git_local_fact");
+      }
+    }
+  }
+  return Array.from(claims);
 }

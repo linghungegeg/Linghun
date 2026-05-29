@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   type SolutionCompletenessStatus,
+  buildDowngradedFinalAnswer,
+  createFinalAnswerClaimReminder,
   createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
   createModelToolDefinitionsForTools,
   createSolutionCompletenessStatus,
   createToolInputSchema,
   createToolUseDriftSummary,
+  deriveToolSupportsClaims,
+  detectHighRiskClaims,
+  evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
   extractNaturalReadPath,
@@ -20,6 +25,7 @@ import {
   normalizeRelativePath,
   readToolInputString,
 } from "./model-loop-runtime.js";
+import type { EvidenceRecord } from "./tui-data-types.js";
 
 describe("model-loop-runtime", () => {
   describe("createToolInputSchema", () => {
@@ -458,6 +464,278 @@ describe("model-loop-runtime", () => {
 
     it("formats none", () => {
       expect(formatSolutionCompletenessTrigger("none")).toContain("未触发");
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // D.13U — Final Answer Claim Gate evaluator tests
+  // ---------------------------------------------------------------------------
+
+  function makeEvidence(partial: Partial<EvidenceRecord>): EvidenceRecord {
+    return {
+      id: "evid-test",
+      kind: "command_output",
+      summary: "",
+      source: "",
+      supportsClaims: [],
+      createdAt: new Date().toISOString(),
+      ...partial,
+    };
+  }
+
+  describe("D.13U detectHighRiskClaims", () => {
+    it("does not flag ordinary chitchat or concept explanation", () => {
+      expect(detectHighRiskClaims("可以，我来解释这个概念")).toEqual([]);
+      expect(detectHighRiskClaims("你想做哪个方向？我可以帮你列几个选项。")).toEqual([]);
+      expect(detectHighRiskClaims("Hello, how can I help?")).toEqual([]);
+    });
+
+    it("flags completion / PASS phrases", () => {
+      const matches = detectHighRiskClaims("已完成，测试通过，PASS。");
+      expect(matches.some((m) => m.kind === "completion_pass")).toBe(true);
+    });
+
+    it("flags external current fact phrases (today / latest)", () => {
+      const matches = detectHighRiskClaims("今天 OpenAI 最新模型是 GPT-X，价格 $0.01。");
+      expect(matches.some((m) => m.kind === "external_current_fact")).toBe(true);
+    });
+
+    it("does NOT flag local current branch / dir as external_current_fact", () => {
+      const matches = detectHighRiskClaims("当前分支是 master，当前目录干净。");
+      expect(matches.some((m) => m.kind === "external_current_fact")).toBe(false);
+    });
+
+    it("flags code-fact phrases", () => {
+      const matches = detectHighRiskClaims("代码里已经实现 X，调用链是 A→B。");
+      expect(matches.some((m) => m.kind === "code_fact")).toBe(true);
+    });
+
+    it("flags ccb parity / production-ready", () => {
+      expect(
+        detectHighRiskClaims("现在等于 CCB 了").some((m) => m.kind === "ccb_parity"),
+      ).toBe(true);
+      expect(
+        detectHighRiskClaims("This is production-ready").some((m) => m.kind === "ccb_parity"),
+      ).toBe(true);
+    });
+  });
+
+  describe("D.13U evaluateFinalAnswerClaims", () => {
+    it("passes when there is no high-risk claim", () => {
+      const verdict = evaluateFinalAnswerClaims("可以，我来解释这个概念", []);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+          summary: "Bash: echo hello",
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过，PASS。", evidence);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
+    });
+
+    it("passes completion/PASS when test_passed evidence exists", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: vitest --run all green",
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks code-fact claims when no Read/Grep/index evidence", () => {
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", []);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
+    it("passes code-fact claims when Read/Grep evidence exists", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({ kind: "grep_result", supportsClaims: ["Grep", "local_read"] }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks external current fact when no web_source evidence", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("今天最新价格是 $0.01。", evidence);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("external_current_fact");
+    });
+
+    it("passes external current fact when web_source evidence exists", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "web_source",
+          supportsClaims: ["web_source"],
+          source: "https://openai.com/pricing",
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("does not require web_source for local 'current branch' query", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "git_status", "git_local_fact"],
+          summary: "Bash: git status -b",
+        }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("当前分支是 master。", evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks beta_readiness claims regardless of unrelated evidence", () => {
+      const evidence: EvidenceRecord[] = [
+        makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
+      ];
+      const verdict = evaluateFinalAnswerClaims("Beta ready 了。", evidence);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("beta_readiness");
+    });
+  });
+
+  describe("D.13U deriveToolSupportsClaims", () => {
+    it("Read derives local_read + file path", () => {
+      const claims = deriveToolSupportsClaims(
+        "Read",
+        { file_path: "src/index.ts" },
+        { text: "" },
+      );
+      expect(claims).toContain("Read");
+      expect(claims).toContain("local_read");
+      expect(claims).toContain("file:src/index.ts");
+    });
+
+    it("Bash exit 0 vitest derives test_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "vitest --run" },
+        { text: "all good", data: { exitCode: 0 } },
+      );
+      expect(claims).toContain("test_passed");
+      expect(claims).toContain("bash_exit_0");
+    });
+
+    it("Bash exit 0 tsc --noEmit derives typecheck_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "tsc --noEmit" },
+        { text: "", data: { exitCode: 0 } },
+      );
+      expect(claims).toContain("typecheck_passed");
+    });
+
+    it("Bash exit 0 pnpm build derives build_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "pnpm build" },
+        { text: "", data: { exitCode: 0 } },
+      );
+      expect(claims).toContain("build_passed");
+    });
+
+    it("Bash exit 0 git diff --check derives diff_check_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "git diff --check" },
+        { text: "", data: { exitCode: 0 } },
+      );
+      expect(claims).toContain("diff_check_passed");
+    });
+
+    it("Bash exit 0 git status derives git_local_fact", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "git status -b" },
+        { text: "", data: { exitCode: 0 } },
+      );
+      expect(claims).toContain("git_local_fact");
+      expect(claims).toContain("git_status");
+    });
+
+    it("Bash exit nonzero vitest does NOT derive test_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "vitest --run" },
+        { text: "fails", data: { exitCode: 1 } },
+      );
+      expect(claims).not.toContain("test_passed");
+      expect(claims).toContain("bash_exit_nonzero");
+    });
+
+    it("Bash echo does NOT derive test_passed/build_passed/typecheck_passed", () => {
+      const claims = deriveToolSupportsClaims(
+        "Bash",
+        { command: "echo hello" },
+        { text: "hello", data: { exitCode: 0 } },
+      );
+      expect(claims).not.toContain("test_passed");
+      expect(claims).not.toContain("build_passed");
+      expect(claims).not.toContain("typecheck_passed");
+    });
+
+    it("Write derives file_written + file path", () => {
+      const claims = deriveToolSupportsClaims(
+        "Write",
+        { file_path: "report.md", content: "x" },
+        { text: "" },
+      );
+      expect(claims).toContain("file_written");
+      expect(claims).toContain("file:report.md");
+    });
+  });
+
+  describe("D.13U Final Answer reminder/downgrade text", () => {
+    it("createFinalAnswerClaimReminder lists kinds and phrases", () => {
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
+      const text = createFinalAnswerClaimReminder(verdict, "zh-CN");
+      expect(text).toContain("高风险声明");
+      expect(text).toContain("已完成");
+      expect(text).toContain("缺：");
+      expect(text).toContain("仅本轮一次修正机会");
+      expect(text).not.toContain("FinalAnswerClaimGate");
+      expect(text).not.toContain("EvidenceSummary");
+      expect(text).not.toContain("validator");
+    });
+
+    it("buildDowngradedFinalAnswer replaces claim phrases with [未验证] and appends notice", () => {
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
+      const downgraded = buildDowngradedFinalAnswer(
+        "已完成，测试通过。",
+        verdict,
+        "zh-CN",
+      );
+      expect(downgraded).toContain("[未验证]");
+      expect(downgraded).toContain("我不能确认这些声明");
+      expect(downgraded).not.toContain("FinalAnswerClaimGate");
+      expect(downgraded).not.toContain("evidence_id");
+    });
+  });
+
+  describe("D.13U FreshnessLite is not restored", () => {
+    it("source has no FreshnessLite function definitions or call sites", async () => {
+      const fs = await import("node:fs/promises");
+      const src = await fs.readFile("src/model-loop-runtime.ts", "utf8");
+      // 注释/comment 中的字面量允许（D.13Q-UX 的删除说明），但不允许实际定义或调用。
+      expect(src).not.toMatch(/export function needsFreshnessLiteBoundary/);
+      expect(src).not.toMatch(/function formatFreshnessLitePrimaryWarning/);
+      expect(src).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
+      expect(src).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
     });
   });
 });

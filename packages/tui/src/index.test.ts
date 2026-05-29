@@ -1968,6 +1968,94 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Claim Checker：通过");
   });
 
+  // ---------------------------------------------------------------------------
+  // D.13U — /claim-check shares evaluator with auto Final Answer Gate
+  // ---------------------------------------------------------------------------
+
+  it("D.13U: /claim-check rejects '已完成 测试通过 PASS' even when Read evidence is present", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    // 注入仅 Read 类型 evidence —— 旧逻辑会因 evidence.length>0 直接放行；
+    // D.13U 必须仍然拦截"PASS / 已完成 / 测试通过"类高风险声明。
+    context.evidence.push({
+      id: "evid-read-1",
+      kind: "file_read",
+      summary: "Read: src/index.ts",
+      source: "Read",
+      supportsClaims: ["Read", "local_read", "file:src/index.ts"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand("/claim-check 已完成，测试通过，PASS。", context, output);
+
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).not.toContain("Claim Checker：通过");
+  });
+
+  it("D.13U: /claim-check passes 'tests passed' when test_passed evidence exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.evidence.push({
+      id: "evid-test-1",
+      kind: "command_output",
+      summary: "Bash: vitest run all green",
+      source: "Bash",
+      supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand("/claim-check 测试通过", context, output);
+
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).not.toContain("缺少证据");
+  });
+
+  it("D.13U: ordinary slash output stays free of internal validator names", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 已完成", context, output);
+
+    expect(output.text).not.toContain("FinalAnswerClaimGate");
+    expect(output.text).not.toContain("EvidenceSummary");
+    expect(output.text).not.toContain("SearchExtraTools");
+    expect(output.text).not.toContain("ExecuteExtraTool");
+    expect(output.text).not.toContain("evidence_id=");
+  });
+
+  it("D.13U: '当前分支' query is not a high-risk external_current_fact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    // 没有任何 evidence，但 claim 只是描述本地 git 状态 —— 不应该被 /claim-check 拦截。
+    await handleSlashCommand("/claim-check 当前分支是 master", context, output);
+
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).not.toContain("缺少证据");
+  });
+
+  it("D.13U: source has no FreshnessLite gate restored and has Final Answer Gate wired", async () => {
+    const fs = await import("node:fs/promises");
+    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    expect(indexSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
+    expect(indexSrc).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
+    expect(indexSrc).toContain("evaluateFinalAnswerClaims(assistantText, context.evidence)");
+    expect(indexSrc).toContain("createFinalAnswerClaimReminder(verdict, context.language)");
+    expect(indexSrc).not.toMatch(/"FinalAnswerClaimGate"/);
+  });
+
   it("keeps Verdict Evidence Gate internals out of ordinary development requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });

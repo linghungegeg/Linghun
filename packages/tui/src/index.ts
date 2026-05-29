@@ -213,12 +213,16 @@ import {
   EXECUTE_EXTRA_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
   createDeferredToolDispatchDefinitions,
+  createFinalAnswerClaimReminder,
   createModelToolDefinitions,
   createModelToolDefinitionsForReportGuard,
   createModelToolDefinitionsForTools,
   createSolutionCompletenessStatus,
   createToolInputSchema,
   createToolUseDriftSummary,
+  buildDowngradedFinalAnswer,
+  deriveToolSupportsClaims,
+  evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
   extractNaturalReadPath,
@@ -13090,7 +13094,7 @@ async function executeIndexIgnoreWritePlan(
   try {
     const result = await runTool("Write", input, context.tools);
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
-    const evidence = await recordToolEvidence(context, sessionId, "Write", result.output);
+    const evidence = await recordToolEvidence(context, sessionId, "Write", result.output, input);
     rememberToolFiles(context, "Write", input, result.output);
     await appendToolResultEvent(
       context,
@@ -13245,6 +13249,7 @@ async function sendMessage(
   const assistantStreamBlockId = `assistant-stream-${assistantEventId}`;
   beginAssistantStream(output, assistantStreamBlockId);
   let assistantText = "";
+  let finalAnswerClaimRetried = false;
   const controller = new AbortController();
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
@@ -13437,6 +13442,25 @@ async function sendMessage(
           reportWriteGuard.finalReferenceReminderSent = true;
           continue;
         }
+        // D.13U — Final Answer Claim Gate（仅一次自我修正）
+        if (!finalAnswerClaimRetried && assistantText) {
+          const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+          if (verdict.status === "needs_disclaimer") {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_claim_gate retry kinds=${verdict.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            messages.push({
+              role: "user",
+              content: createFinalAnswerClaimReminder(verdict, context.language),
+            });
+            finalAnswerClaimRetried = true;
+            assistantText = "";
+            continue;
+          }
+        }
         break;
       }
       if (roundAssistantText) {
@@ -13509,6 +13533,19 @@ async function sendMessage(
   }
 
   if (assistantText) {
+    // D.13U — 最后一道关卡：若已用过一次 retry 仍违规，本地降级，原文不入 transcript
+    if (finalAnswerClaimRetried) {
+      const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+      if (verdict.status === "needs_disclaimer") {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
+          "warning",
+        );
+        assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+      }
+    }
     output.write("\n");
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
@@ -13734,6 +13771,7 @@ async function continueModelAfterToolResults(
   context.interrupt = { type: "running", taskId: "model-continuation", canCancel: true };
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
+  let finalAnswerClaimRetried = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
   let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
@@ -13836,6 +13874,25 @@ async function continueModelAfterToolResults(
           reportWriteGuard.finalReferenceReminderSent = true;
           continue;
         }
+        // D.13U — Final Answer Claim Gate（仅一次自我修正，continuation 镜像）
+        if (!finalAnswerClaimRetried && assistantText) {
+          const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+          if (verdict.status === "needs_disclaimer") {
+            await appendSystemEvent(
+              context,
+              sessionId,
+              `final_answer_claim_gate retry kinds=${verdict.unsupportedKinds.join(",")}`,
+              "warning",
+            );
+            continuation.messages.push({
+              role: "user",
+              content: createFinalAnswerClaimReminder(verdict, context.language),
+            });
+            finalAnswerClaimRetried = true;
+            assistantText = "";
+            continue;
+          }
+        }
         break;
       }
       if (roundAssistantText) {
@@ -13884,6 +13941,19 @@ async function continueModelAfterToolResults(
       }
     }
     if (assistantText) {
+      // D.13U — 最后一道关卡：retry 后仍违规则降级，原文不入 transcript
+      if (finalAnswerClaimRetried) {
+        const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+        if (verdict.status === "needs_disclaimer") {
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
+            "warning",
+          );
+          assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+        }
+      }
       output.write("\n");
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",
@@ -14197,7 +14267,13 @@ async function executeApprovedModelToolUse(
     clearRequestActivity(context);
     await context.store.appendEvent(sessionId, createToolEndEvent(toolCall.id, result.output));
     await appendDerivedToolEvents(context, sessionId, toolName, result.output);
-    const evidence = await recordToolEvidence(context, sessionId, toolName, result.output);
+    const evidence = await recordToolEvidence(
+      context,
+      sessionId,
+      toolName,
+      result.output,
+      toolCall.input,
+    );
     if (reportWriteGuard && (toolName === "Read" || toolName === "Glob" || toolName === "Grep")) {
       reportWriteGuard.evidenceRead = true;
     }
@@ -14865,7 +14941,7 @@ async function handleToolCommand(
     }
     await context.store.appendEvent(sessionId, createToolEndEvent(callId, result.output));
     await appendDerivedToolEvents(context, sessionId, name, result.output);
-    const evidence = await recordToolEvidence(context, sessionId, name, result.output);
+    const evidence = await recordToolEvidence(context, sessionId, name, result.output, input);
     rememberToolFiles(context, name, input, result.output);
     await appendToolResultEvent(
       context,
@@ -15323,6 +15399,7 @@ async function recordToolEvidence(
   sessionId: string,
   name: ToolName,
   output: ToolOutput,
+  input?: unknown,
 ): Promise<EvidenceRecord | null> {
   const kind =
     name === "Read"
@@ -15339,7 +15416,7 @@ async function recordToolEvidence(
     kind,
     `${name}: ${truncateDisplay(output.text.replace(/\s+/g, " "), 120)}`,
     output.fullOutputPath ?? name,
-    [name],
+    deriveToolSupportsClaims(name, input, output),
   );
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, {
@@ -15384,7 +15461,16 @@ function checkEvidenceGate(text: string, context: TuiContext): string | null {
   if (!asksCodeFact) {
     return null;
   }
-  if (context.evidence.length > 0) {
+  // D.13U：不再"任意 evidence 即放行"。要求至少一条本地代码事实证据
+  // （file_read / grep_result / index_query 或带 git_local_fact / local_read 标记）。
+  const hasLocalCodeEvidence = context.evidence.some(
+    (item) =>
+      item.kind === "file_read" ||
+      item.kind === "grep_result" ||
+      item.kind === "index_query" ||
+      item.supportsClaims.some((c) => c === "local_read" || c === "git_local_fact"),
+  );
+  if (hasLocalCodeEvidence) {
     return null;
   }
   return t(context, "evidenceBlocked");
@@ -15564,6 +15650,8 @@ function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
     };
   }
 
+  // D.13U：复用 evaluateFinalAnswerClaims，按 claim 类型匹配 evidence 类型。
+  // 任意 evidence > 0 不再当通行证；保留固定中英 phrase 列表用于 unsupportedClaims 文案。
   const highRisk = [
     "已完成",
     "已修复",
@@ -15587,7 +15675,11 @@ function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
     "in the code",
   ];
   const unsupportedClaims = highRisk.filter((item) => normalizedClaim.includes(item.toLowerCase()));
-  if (unsupportedClaims.length === 0 || context.evidence.length > 0) {
+  if (unsupportedClaims.length === 0) {
+    return { status: "passed", unsupportedClaims: [] };
+  }
+  const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
+  if (verdict.status === "passed") {
     return { status: "passed", unsupportedClaims: [] };
   }
   return { status: "needs_disclaimer", unsupportedClaims };
