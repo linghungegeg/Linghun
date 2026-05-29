@@ -248,6 +248,46 @@ export type ConfigPanelView =
       actions: { id: string; label: string }[];
     };
 
+/**
+ * D.13Q-UX Task Surface Maturity Sweep — 通用 CommandPanel 视图。
+ *
+ * 高级命令（/mcp, /memory, /index status, /cache, /background, /job,
+ * /plugins, /skills, /remote, /doctor, /model 等）默认输出走这条通道，
+ * 不再以 assistant_text 写进 transcript。结构上：
+ *   - title：命令名（"/mcp", "/index status"）。
+ *   - summary：短状态行（"MCP 已连接：3 / 3"），数组以支持多行轻摘要。
+ *   - sections：分组小表（每组一个标题 + 若干行）。
+ *   - actions：建议的下一步命令（"/mcp doctor"）。
+ *   - detailsText：完整明细文本，供 Ctrl+O / /details 展开。
+ *   - tone：neutral / warning / error，控制边框色与状态色。
+ *   - cursor / scrollOffset：面板自身可滚动时使用。
+ */
+export type CommandPanelView = {
+  title: string;
+  summary?: string[];
+  sections?: { title?: string; rows: string[] }[];
+  actions?: string[];
+  detailsText?: string;
+  tone?: "neutral" | "warning" | "error";
+  cursor?: number;
+  scrollOffset?: number;
+  /** 面板内部是否处于"展开 detailsText"状态（受 Ctrl+O toggle 影响）。 */
+  expanded?: boolean;
+};
+
+/**
+ * D.13Q-UX Task Surface — 任务区滚动视图。
+ *   - scrollOffset：从顶部开始的滚动行数（Yoga 通过子容器的 marginTop 实现）。
+ *   - stickToBottom：true 时新输出强制吸底；用户手动向上滚动后置 false，
+ *     直到下次 End 或 submit 新消息时再吸底。
+ *   - hasOverflow：是否有内容溢出可滚动区，用于决定底部是否露出 hint。
+ */
+export type TaskScrollView = {
+  scrollOffset: number;
+  stickToBottom: boolean;
+  hasOverflow?: boolean;
+};
+
 export type ShellViewModel = {
   language: Language;
   projectName: string;
@@ -283,6 +323,16 @@ export type ShellViewModel = {
    * 与 view.permission 互斥（permission 优先级更高，ShellApp 互斥渲染）。
    */
   configPanel?: ConfigPanelView;
+  /**
+   * D.13Q-UX Task Surface — 通用 CommandPanel UI 状态。高级 slash 命令的结果
+   * 默认进入此面板（与 transcript 隔离）。空时 ShellApp 不渲染。
+   */
+  commandPanel?: CommandPanelView;
+  /**
+   * D.13Q-UX Task Surface — 任务区滚动状态。home 模式不存在；task/pending
+   * 模式始终存在，默认 scrollOffset=0 / stickToBottom=true。
+   */
+  taskScroll?: TaskScrollView;
   /**
    * D.13Q-UX Closure — HelpPanel UI 状态。打开时显示三组 Tab + 命令列表，
    * Enter dispatch slash，Esc 关闭。
@@ -361,7 +411,17 @@ export type ShellInputEvent =
   | { type: "sessions-open" }
   | { type: "sessions-move"; delta: -1 | 1 }
   | { type: "sessions-resume" }
-  | { type: "sessions-close" };
+  | { type: "sessions-close" }
+  /**
+   * D.13Q-UX Task Surface Maturity Sweep — 任务区滚动事件。
+   *   - task-scroll: PageUp/PageDown/wheel 改变 scrollOffset。delta 为正
+   *     向下、负向上；以行为单位（不是字符）。
+   *   - task-scroll-end: End 键回到底部并重新吸底。
+   *   - command-panel-close: Esc 关闭通用 CommandPanel。
+   */
+  | { type: "task-scroll"; delta: number }
+  | { type: "task-scroll-end" }
+  | { type: "command-panel-close" };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;

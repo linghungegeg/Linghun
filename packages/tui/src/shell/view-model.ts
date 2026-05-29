@@ -16,6 +16,7 @@ import { explainHowToUpdate, explainPolicyVerdict, explainSemantic, type PathSaf
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import type {
   BackgroundTaskSummary,
+  CommandPanelView,
   ConfigPanelView,
   NotificationView,
   PermissionAction,
@@ -25,6 +26,7 @@ import type {
   TaskActivityView,
   TaskFooterView,
   TaskPermissionView,
+  TaskScrollView,
 } from "./types.js";
 
 const shellText = {
@@ -383,6 +385,23 @@ export function createShellViewModel(
     ? mapConfigPanelState(options.configPanelState, language)
     : undefined;
 
+  // D.13Q-UX Task Surface — CommandPanel view 装配。controller 持有
+  // context.commandPanelState，view-model 直接透传给 UI；UI 层不解析数据，
+  // 只负责渲染 title/sections/actions/detailsText。空状态时 commandPanel 为 undefined。
+  const commandPanel: CommandPanelView | undefined =
+    (context as { commandPanelState?: CommandPanelView }).commandPanelState ?? undefined;
+
+  // D.13Q-UX Task Surface — TaskScroll view 装配。home 模式下不暴露 taskScroll；
+  // task/pending 模式默认 stickToBottom=true / scrollOffset=0；上层 controller
+  // 通过 context.taskScrollState 写入用户的滚动位置。
+  const taskScroll: TaskScrollView | undefined =
+    effectiveViewMode === "home"
+      ? undefined
+      : ((context as { taskScrollState?: TaskScrollView }).taskScrollState ?? {
+          scrollOffset: 0,
+          stickToBottom: true,
+        });
+
   return {
     language,
     projectName,
@@ -430,6 +449,8 @@ export function createShellViewModel(
     taskFooter,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
     configPanel,
+    commandPanel,
+    taskScroll,
     helpPanel: (() => {
       const state = (context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }).helpPanelState;
       if (!state) return undefined;

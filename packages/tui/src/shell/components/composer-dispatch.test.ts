@@ -25,6 +25,7 @@ import {
   isDoublePressWithin,
   shouldEnterPastePath,
   shouldUnstickSlashHidden,
+  splitLineAtDisplayCol,
 } from "./Composer.js";
 
 // ---------------------------------------------------------------------------
@@ -306,6 +307,26 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.cursorRow).toBe(0);
       expect(r.cursorCol).toBeLessThanOrEqual(80);
       expect(r.cursorCol).toBe(62);
+    });
+  });
+
+  describe("D.13Q-UX Task Surface — splitLineAtDisplayCol inline cursor", () => {
+    it("拆分点在中间：before / cursorChar / after", () => {
+      const r = splitLineAtDisplayCol("abcdef", 3);
+      expect(r.before).toBe("abc");
+      expect(r.cursorChar).toBe("d");
+      expect(r.after).toBe("ef");
+    });
+    it("拆分点在行尾：before=full、cursorChar=空格", () => {
+      const r = splitLineAtDisplayCol("abc", 3);
+      expect(r.before).toBe("abc");
+      expect(r.cursorChar).toBe(" ");
+      expect(r.after).toBe("");
+    });
+    it("CJK 宽字符不被拆开：cursor 落在第二列时仍把整字当作 cursorChar", () => {
+      const r = splitLineAtDisplayCol("中a", 1);
+      expect(r.cursorChar).toBe("中");
+      expect(r.after).toBe("a");
     });
   });
 });

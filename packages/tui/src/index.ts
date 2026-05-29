@@ -939,6 +939,17 @@ export type TuiContext = {
    * 让 /btw / /sessions / /resume 等 handler 选择 panel 路径而不是 writeLine。
    */
   isInkSession?: boolean;
+  /**
+   * D.13Q-UX Task Surface — 通用 CommandPanel 状态。高级 slash 命令的结果
+   * 由命令处理器 set 进这里，view-model 透传给 view.commandPanel。
+   * undefined = 没有面板打开。
+   */
+  commandPanelState?: import("./shell/types.js").CommandPanelView;
+  /**
+   * D.13Q-UX Task Surface — 任务区滚动状态。home 模式下不读取；task/pending
+   * 模式默认为 { scrollOffset: 0, stickToBottom: true }。
+   */
+  taskScrollState?: import("./shell/types.js").TaskScrollView;
 };
 
 const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1323,6 +1334,10 @@ async function runInkShell(
         submitted: submittedPending,
         reasoningLevel: runtime.reasoningLevel,
         reasoningSent: runtime.reasoningSent,
+        // D.13Q-UX Task Surface — controller 持有的 configPanelState 必须显式
+        // 喂给 view-model；旧实现遗漏这一行，导致 /config submit 后 ConfigPanel
+        // 永远不会出现在 ShellViewModel.configPanel 上。
+        configPanelState: context.configPanelState,
         backgroundSummaries: context.backgroundTasks
           .filter(
             (t) =>
@@ -1392,38 +1407,97 @@ async function runInkShell(
         return;
       }
       // ─── D.13Q-UX Ctrl+O — toggle-details ───────────────────────────────────
-      // Composer 的 Ctrl+O 派发本事件（不再 submit "/details"），
-      // 这里直接调 handleDetailsCommand([], ...)。effect 等价于 /details 默认分支
-      // 展开"最近一次正文"，但用户输入区不会出现 /details，transcript 命令行也
-      // 不会多出一条 ❯ /details。/details slash 仍保留为兼容命令。
-      // D.13Q-UX Real Smoke Fix v3：Ctrl+O 没有可展开内容时不写 transcript
-      // （旧实现会让 /details 把 "当前没有可展开的完整内容。" 推进 transcript
-      // 并污染 lastFullOutput），改成走 notifications 轻提示，单条主显不进
-      // transcript。
+      // Composer 的 Ctrl+O 派发本事件（不再 submit "/details"），用户输入区不会
+      // 出现 /details，transcript 命令行也不会多出一条 ❯ /details。/details slash
+      // 仍保留为兼容命令（显式诊断走原 handleDetailsCommand 链路）。
+      //
+      // D.13Q-UX Task Surface Maturity Sweep：Ctrl+O 完全脱离 transcript。
+      //   优先 1：commandPanel 已打开且有 detailsText —— toggle expanded。
+      //   优先 2：最近的 fail/blocked/error block 有 fullText —— 升级为 commandPanel 详情。
+      //   优先 3：lastFullOutput / evidence / background 任一存在 —— 装配为
+      //           commandPanel detailsText（不再调 handleDetailsCommand 写 transcript）。
+      //   都没有：notifications 轻提示，不写 transcript。
       if (event.type === "toggle-details") {
         submittedPending = false;
-        const hasExpandable =
-          Boolean(context.lastFullOutput) ||
-          context.evidence.length > 0 ||
-          context.backgroundTasks.length > 0;
-        if (!hasExpandable) {
-          if (!context.notifications) context.notifications = [];
-          context.notifications.push({
-            key: "ctrl-o-empty",
-            text:
-              context.language === "en-US"
-                ? "Nothing to expand right now."
-                : "当前没有可展开的完整内容。",
-            priority: "low",
-            timeoutMs: 4000,
-            createdAt: Date.now(),
-            tone: "dim",
-          });
+        // 1) commandPanel 内 toggle
+        if (context.commandPanelState && context.commandPanelState.detailsText) {
+          context.commandPanelState = {
+            ...context.commandPanelState,
+            expanded: !context.commandPanelState.expanded,
+          };
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           return;
         }
-        await handleDetailsCommand([], context, shellOutput);
+        // 2) 最近 block 有可展开 fullText 时，把它升级为 commandPanel 详情
+        const expandableBlock = [...blocks].reverse().find(
+          (b) => (b.fullText ?? "").trim().length > (b.summary ?? "").length + 1,
+        );
+        if (expandableBlock?.fullText) {
+          context.commandPanelState = {
+            title:
+              expandableBlock.title?.trim() ||
+              (context.language === "en-US" ? "Latest output" : "最近输出"),
+            tone: expandableBlock.status === "fail" || expandableBlock.status === "blocked"
+              ? "error"
+              : "neutral",
+            summary: [expandableBlock.summary],
+            detailsText: expandableBlock.fullText,
+            expanded: true,
+          };
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        // 3) lastFullOutput / evidence / background fallback：装配 commandPanel
+        //    detailsText 而不是写 transcript。
+        const fallbackPanel = buildToggleDetailsCommandPanel(context);
+        if (fallbackPanel) {
+          context.commandPanelState = fallbackPanel;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        // 4) 全空：notifications 轻提示，不写 transcript。
+        if (!context.notifications) context.notifications = [];
+        context.notifications.push({
+          key: "ctrl-o-empty",
+          text:
+            context.language === "en-US"
+              ? "Nothing to expand right now."
+              : "当前没有可展开的完整内容。",
+          priority: "low",
+          timeoutMs: 4000,
+          createdAt: Date.now(),
+          tone: "dim",
+        });
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13Q-UX Task Surface — CommandPanel 关闭 ──────────────────────────
+      if (event.type === "command-panel-close") {
+        context.commandPanelState = undefined;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      // ─── D.13Q-UX Task Surface — 任务区滚动 ─────────────────────────────────
+      // 推进逻辑下沉到 reduceTaskScroll 纯函数（packages/tui/src/shell/models/
+      // task-scroll-state.ts），保持 controller 层只做事件路由 + rerender。
+      if (event.type === "task-scroll") {
+        const { reduceTaskScroll } = await import("./shell/models/task-scroll-state.js");
+        context.taskScrollState = reduceTaskScroll(context.taskScrollState, {
+          type: "scroll",
+          delta: event.delta,
+        });
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "task-scroll-end") {
+        const { reduceTaskScroll } = await import("./shell/models/task-scroll-state.js");
+        context.taskScrollState = reduceTaskScroll(context.taskScrollState, { type: "end" });
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2121,6 +2195,146 @@ function writeErrorLine(output: Writable, text: string, title?: string): void {
     return;
   }
   writeLine(output, text);
+}
+
+/**
+ * D.13Q-UX Task Surface Maturity Sweep — 通用 CommandPanel 设置器。
+ *
+ * 高级 slash 命令（/mcp, /memory, /index status, /cache, /background, /job,
+ * /plugins, /skills, /remote, /doctor, /model 等）的默认输出应走这条路径，
+ * 让命令结果落到独立面板，不污染 transcript / assistant_text 流。
+ *
+ * - ink session（context.isInkSession === true）走 commandPanelState 路径，
+ *   shell.rerender 由调用栈外面统一触发。
+ * - 非 ink（plain TUI / 非交互）走 writeDiagnosticLine fallback：把 panel
+ *   的 summary + sections 拼成可读多行文本，保留原行为。
+ *
+ * 调用方应当只把"用户面向"的关键状态填进 panel；guard / runtime / binary /
+ * source / version / schemaLoaded / trustLevel / endpoint 等内部字段一律
+ * 不进 summary / sections，要么入 detailsText（Ctrl+O 展开），要么仅在
+ * doctor 子命令路径上输出。
+ */
+/**
+ * D.13Q-UX Task Surface Maturity Sweep — Ctrl+O fallback 装配器。
+ *
+ * 当 commandPanel 未打开、最近 block 也没有可展开 fullText 时，把
+ * lastFullOutput / evidence / background 装配成一个 CommandPanel detailsText
+ * 视图，让 Ctrl+O **始终走 panel 路径**，绝不调 handleDetailsCommand
+ * （那会 writeLine 进 transcript，污染 lastFullOutput 并出现 "Linghun details"
+ * 计数行）。
+ *
+ * 返回 undefined 表示三类内容都为空 —— 调用方走 notifications 轻提示。
+ */
+function buildToggleDetailsCommandPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView | undefined {
+  const isEn = context.language === "en-US";
+  const hasOutput = Boolean(context.lastFullOutput);
+  const evidenceCount = context.evidence.length;
+  const backgroundCount = context.backgroundTasks.length;
+  if (!hasOutput && evidenceCount === 0 && backgroundCount === 0) {
+    return undefined;
+  }
+  const sections: { title?: string; rows: string[] }[] = [];
+  const detailsParts: string[] = [];
+  if (context.lastFullOutput) {
+    const header = isEn ? "Latest output (full body):" : "最近一次输出（完整正文）：";
+    detailsParts.push(header);
+    detailsParts.push(context.lastFullOutput);
+  }
+  if (evidenceCount > 0) {
+    sections.push({
+      title: isEn ? `Evidence (${evidenceCount})` : `证据（${evidenceCount}）`,
+      rows: context.evidence
+        .slice(0, 5)
+        .map((e) => `${e.id} · ${e.kind} · ${e.source}`),
+    });
+    detailsParts.push("");
+    detailsParts.push(isEn ? "Recent evidence:" : "最近证据：");
+    for (const e of context.evidence.slice(0, 5)) {
+      detailsParts.push(`  - ${e.id} ${e.kind} ${e.source}: ${e.summary}`);
+    }
+  }
+  if (backgroundCount > 0) {
+    sections.push({
+      title: isEn ? `Background (${backgroundCount})` : `后台任务（${backgroundCount}）`,
+      rows: context.backgroundTasks
+        .slice(0, 5)
+        .map((t) => `${t.id} · ${t.kind} · ${t.status}`),
+    });
+    detailsParts.push("");
+    detailsParts.push(isEn ? "Recent background:" : "最近后台：");
+    for (const t of context.backgroundTasks.slice(0, 5)) {
+      detailsParts.push(`  - ${t.id} ${t.kind} ${t.status}: ${t.userVisibleSummary}`);
+    }
+  }
+  const summary: string[] = [];
+  if (hasOutput) {
+    summary.push(isEn ? "Latest output available." : "最近一次输出可展开。");
+  }
+  if (evidenceCount > 0) {
+    summary.push(
+      isEn
+        ? `${evidenceCount} evidence record${evidenceCount === 1 ? "" : "s"}.`
+        : `证据 ${evidenceCount} 条。`,
+    );
+  }
+  if (backgroundCount > 0) {
+    summary.push(
+      isEn
+        ? `${backgroundCount} background task${backgroundCount === 1 ? "" : "s"}.`
+        : `后台任务 ${backgroundCount} 条。`,
+    );
+  }
+  return {
+    title: isEn ? "Details" : "详情",
+    tone: "neutral",
+    summary,
+    sections,
+    actions: [
+      "/details",
+      ...(evidenceCount > 0 ? ["/details evidence <id>"] : []),
+      ...(backgroundCount > 0 ? ["/details background <id>"] : []),
+    ],
+    detailsText: detailsParts.join("\n"),
+    expanded: true,
+  };
+}
+
+function showCommandPanel(
+  context: TuiContext,
+  output: Writable,
+  panel: import("./shell/types.js").CommandPanelView,
+): void {
+  if (context.isInkSession) {
+    context.commandPanelState = panel;
+    return;
+  }
+  // Non-ink (plain TUI / non-interactive / tests): preserve the legacy full
+  // text output so existing string-level assertions in index.test.ts and
+  // scripted callers continue to see the unchanged formatXxxStatus body.
+  // We write detailsText if present (which is the full legacy formatter
+  // output), otherwise stitch summary + sections + actions for shorter
+  // panels (/background empty, etc).
+  if (panel.detailsText && panel.detailsText.trim().length > 0) {
+    writeLine(output, panel.detailsText);
+    return;
+  }
+  const lines: string[] = [];
+  lines.push(`❯ ${panel.title}`);
+  if (panel.summary && panel.summary.length > 0) {
+    lines.push(...panel.summary);
+  }
+  if (panel.sections) {
+    for (const section of panel.sections) {
+      if (section.title) lines.push(section.title);
+      lines.push(...section.rows);
+    }
+  }
+  if (panel.actions && panel.actions.length > 0) {
+    for (const action of panel.actions) lines.push(`→ ${action}`);
+  }
+  writeLine(output, lines.join("\n"));
 }
 
 export async function handleSlashCommand(
@@ -3092,11 +3306,30 @@ async function handleSkillsCommand(
 ): Promise<void> {
   const action = args[0];
   if (!action) {
-    writeLine(output, formatSkills(context));
+    // D.13Q-UX Task Surface — /skills 默认走降噪 CommandPanel。
+    const isEn = context.language === "en-US";
+    const total = context.skills.skills.length;
+    const enabled = context.skills.skills.filter((s) => s.enabled).length;
+    showCommandPanel(context, output, {
+      title: "/skills",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? `Skills · ${total} total · ${enabled} enabled`
+          : `技能 · 共 ${total} · 启用 ${enabled}`,
+      ],
+      actions: ["/skills status", "/skills doctor"],
+      detailsText: formatSkills(context),
+    });
     return;
   }
   if (action === "status") {
-    writeLine(output, formatExtensionStatus("skills", context));
+    showCommandPanel(context, output, {
+      title: "/skills status",
+      tone: "neutral",
+      summary: [],
+      detailsText: formatExtensionStatus("skills", context),
+    });
     return;
   }
   if (action === "doctor") {
@@ -3296,11 +3529,30 @@ async function handlePluginsCommand(
 ): Promise<void> {
   const action = args[0];
   if (!action) {
-    writeLine(output, formatPlugins(context));
+    // D.13Q-UX Task Surface — /plugins 默认走降噪 CommandPanel。
+    const isEn = context.language === "en-US";
+    const total = context.plugins.plugins.length;
+    const enabled = context.plugins.plugins.filter((p) => p.enabled).length;
+    showCommandPanel(context, output, {
+      title: "/plugins",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? `Plugins · ${total} total · ${enabled} enabled`
+          : `插件 · 共 ${total} · 启用 ${enabled}`,
+      ],
+      actions: ["/plugins status", "/plugins doctor"],
+      detailsText: formatPlugins(context),
+    });
     return;
   }
   if (action === "status") {
-    writeLine(output, formatExtensionStatus("plugins", context));
+    showCommandPanel(context, output, {
+      title: "/plugins status",
+      tone: "neutral",
+      summary: [],
+      detailsText: formatExtensionStatus("plugins", context),
+    });
     return;
   }
   if (action === "doctor") {
@@ -3474,24 +3726,38 @@ async function handleModelCommand(
     return;
   }
   const runtime = getSelectedModelRuntime(context);
-  writeLine(
-    output,
-    `${t(context, "currentModel")}：role=${runtime.role} provider=${runtime.provider} model=${runtime.model} reasoning=${runtime.reasoningStatus}`,
-  );
+  // D.13Q-UX Task Surface — /model 默认走降噪 CommandPanel：仅显示 role /
+  // provider / model / reasoning，路由摘要和"运行 /model doctor"建议进 panel
+  // actions / detailsText（Ctrl+O 展开），不再 writeLine 多行写进 transcript。
+  // body 仍保留 `reasoning=${runtime.reasoningStatus}` 字面量，让用户能在
+  // detailsText（Ctrl+O 展开）里看到运行时决策。
+  const isEn = context.language === "en-US";
+  const reasoningSegment = `reasoning=${runtime.reasoningStatus}`;
+  const summary: string[] = [
+    isEn
+      ? `Model · ${runtime.provider}/${runtime.model}`
+      : `模型 · ${runtime.provider}/${runtime.model}`,
+    isEn
+      ? `Role: ${runtime.role} · ${reasoningSegment}`
+      : `角色：${runtime.role} · ${reasoningSegment}`,
+  ];
   if (context.config.defaultModel && context.config.defaultModel !== runtime.model) {
-    writeLine(
-      output,
-      `说明：defaultModel=${context.config.defaultModel}，普通开发请求按 executor route=${runtime.provider}/${runtime.model} 执行。`,
+    summary.push(
+      isEn
+        ? `defaultModel=${context.config.defaultModel} (executor stays on ${runtime.model})`
+        : `defaultModel=${context.config.defaultModel}（实际 executor=${runtime.model}）`,
     );
   }
-  writeLine(output, formatModelRouteSummary(context.config));
-  writeLine(output, "提示：如需诊断配置，可运行 /model doctor 或 /model route doctor。");
+  showCommandPanel(context, output, {
+    title: "/model",
+    tone: "neutral",
+    summary,
+    actions: ["/model doctor", "/model route", "/model setup"],
+    detailsText: `${t(context, "currentModel")}：role=${runtime.role} provider=${runtime.provider} model=${runtime.model} ${reasoningSegment}\n\n${formatModelRouteSummary(context.config)}`,
+  });
   // Task-mode denoise: previously this called writeStatus(output, context),
-  // which emits the full `[Linghun] 会话 … 模型 … 模式 … 缓存 … 索引 … 确认
-  // … 后台 …` line and is the dominant noise source above the composer.
-  // /model already prints role / provider / model / reasoning above; the
-  // remaining signals users need (permission mode + index) live in the
-  // TaskFooter beneath the composer. We omit the status echo here entirely.
+  // which emits the full `[Linghun] 会话 …` line and is the dominant noise
+  // source above the composer.
 }
 
 async function startModelSetup(
@@ -4920,6 +5186,46 @@ async function handleBackgroundCommand(
 ): Promise<void> {
   await hydrateDurableJobBackgroundTasks(context);
   refreshBackgroundLifecycle(context);
+  // D.13Q-UX Task Surface — ink session 走降噪 CommandPanel；
+  // plain TUI / 非交互保留旧 writeLine 行为，避免破坏既有字符串断言。
+  if (context.isInkSession) {
+    const isEn = context.language === "en-US";
+    const total = context.backgroundTasks.length;
+    if (total === 0) {
+      showCommandPanel(context, output, {
+        title: "/background",
+        tone: "neutral",
+        summary: [isEn ? "No background tasks." : "没有后台任务。"],
+      });
+      return;
+    }
+    const running = context.backgroundTasks.filter((t) => t.status === "running").length;
+    const failed = context.backgroundTasks.filter((t) => t.status === "failed").length;
+    const completed = context.backgroundTasks.filter((t) => t.status === "completed").length;
+    const summary: string[] = [
+      isEn
+        ? `Background · ${total} total · ${running} running · ${failed} failed · ${completed} done`
+        : `后台 · 共 ${total} · 运行中 ${running} · 失败 ${failed} · 已完成 ${completed}`,
+    ];
+    const sections = [
+      {
+        title: isEn ? "Tasks" : "任务",
+        rows: context.backgroundTasks.slice(0, 8).map((t) => `${t.title} · ${t.status}`),
+      },
+    ];
+    const detailsText = context.backgroundTasks
+      .map((task) => formatBackgroundTask(task, context.language))
+      .join("\n\n");
+    showCommandPanel(context, output, {
+      title: "/background",
+      tone: failed > 0 ? "warning" : "neutral",
+      summary,
+      sections,
+      actions: failed > 0 ? ["/job logs <id>"] : [],
+      detailsText,
+    });
+    return;
+  }
   if (context.backgroundTasks.length === 0) {
     writeLine(output, t(context, "backgroundNone"));
     return;
@@ -4937,7 +5243,27 @@ async function handleRemoteCommand(
   refreshRemoteState(context);
   const action = args[0] ?? "status";
   if (action === "status") {
-    writeLine(output, formatRemoteStatus(context.remote));
+    // D.13Q-UX Task Surface — /remote status 默认走降噪 CommandPanel。
+    const isEn = context.language === "en-US";
+    const enabled = context.remote.enabled;
+    const lastDoctor = context.remote.lastDoctor;
+    const summary: string[] = [
+      isEn
+        ? `Remote ${enabled ? "enabled" : "disabled"}`
+        : `远程 ${enabled ? "已启用" : "未启用"}`,
+    ];
+    if (!lastDoctor) {
+      summary.push(
+        isEn ? "Not yet diagnosed — run /remote doctor." : "尚未诊断 — 运行 /remote doctor。",
+      );
+    }
+    showCommandPanel(context, output, {
+      title: "/remote",
+      tone: "neutral",
+      summary,
+      actions: ["/remote doctor"],
+      detailsText: formatRemoteStatus(context.remote),
+    });
     return;
   }
   if (action === "doctor") {
@@ -5209,7 +5535,37 @@ async function handleJobCommand(
   await hydrateDurableJobBackgroundTasks(context);
   if (action === "list") {
     const jobs = await listDurableJobs(context);
-    writeLine(output, formatJobList(jobs, context));
+    // D.13Q-UX Task Surface — /job list 默认走降噪 CommandPanel。
+    const isEn = context.language === "en-US";
+    const total = jobs.length;
+    const running = jobs.filter((j) => j.status === "running").length;
+    const failed = jobs.filter((j) => j.status === "failed").length;
+    if (total === 0) {
+      showCommandPanel(context, output, {
+        title: "/job",
+        tone: "neutral",
+        summary: [isEn ? "No jobs." : "没有 job。"],
+        actions: ["/job run <goal>"],
+      });
+      return;
+    }
+    showCommandPanel(context, output, {
+      title: "/job",
+      tone: failed > 0 ? "warning" : "neutral",
+      summary: [
+        isEn
+          ? `Jobs · ${total} total · ${running} running · ${failed} failed`
+          : `Job · 共 ${total} · 运行中 ${running} · 失败 ${failed}`,
+      ],
+      sections: [
+        {
+          title: isEn ? "Recent" : "最近",
+          rows: jobs.slice(0, 8).map((j) => `${j.id} · ${j.status}`),
+        },
+      ],
+      actions: ["/job status <id>", "/job logs <id>"],
+      detailsText: formatJobList(jobs, context),
+    });
     return;
   }
   if (action === "run" || action === "create" || action === "new") {
@@ -6661,6 +7017,44 @@ async function handleCacheLogCommand(
   writeLine(output, formatCacheLog(context));
 }
 
+/**
+ * D.13Q-UX Task Surface — /cache 的降噪 CommandPanel 视图。
+ * 仅暴露：是否启用、最近一轮 hitRate、是否 cache_low、下一步。
+ * compacted / cacheReadTokens / cacheWriteTokens / freshness 等内部字段
+ * 进 detailsText（Ctrl+O 展开）。
+ */
+function buildCacheStatusPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView {
+  const isEn = context.language === "en-US";
+  const last = context.cache.history.at(-1);
+  const hitRate = last?.hitRate ?? null;
+  const summary: string[] = [];
+  if (hitRate === null || Number.isNaN(hitRate)) {
+    summary.push(isEn ? "Cache · no usage yet" : "缓存 · 尚无样本");
+  } else {
+    const pct = `${Math.round(hitRate * 100)}%`;
+    summary.push(isEn ? `Cache hit rate: ${pct}` : `缓存命中率：${pct}`);
+  }
+  const isLow =
+    typeof hitRate === "number" && Number.isFinite(hitRate) && hitRate < 0.3;
+  const tone: "neutral" | "warning" = isLow ? "warning" : "neutral";
+  if (isLow) {
+    summary.push(
+      isEn
+        ? "Hit rate is low — try /cache warmup or check provider usage."
+        : "命中率偏低 — 可运行 /cache warmup 或核对 provider usage。",
+    );
+  }
+  return {
+    title: "/cache",
+    tone,
+    summary,
+    actions: ["/cache warmup", "/cache refresh"],
+    detailsText: formatCacheStatus(context),
+  };
+}
+
 async function handleCacheCommand(
   args: string[],
   context: TuiContext,
@@ -6668,7 +7062,8 @@ async function handleCacheCommand(
 ): Promise<void> {
   const action = args[0];
   if (!action || action === "status") {
-    writeLine(output, formatCacheStatus(context));
+    // D.13Q-UX Task Surface — /cache 默认走降噪 CommandPanel。
+    showCommandPanel(context, output, buildCacheStatusPanel(context));
     return;
   }
   if (action === "warmup" || action === "refresh") {
@@ -6792,10 +7187,10 @@ async function handleMcpCommand(
 ): Promise<void> {
   const action = args[0] ?? "status";
   if (action === "status") {
-    // D.13Q-UX Real Smoke Fix v3 — /mcp status 是中性 diagnostic，不是 fail。
-    // ink 路径走 writeDiagnosticLine（messageKind=diagnostic），plain TUI 走
-    // 普通 writeLine 兼容。
-    writeDiagnosticLine(output, formatMcpStatus(context));
+    // D.13Q-UX Task Surface — /mcp status 默认走 CommandPanel（降噪），
+    // 内部细节（guard / license / runtime / binary / source / schemaLoaded）
+    // 进 detailsText 由 Ctrl+O 展开。plain TUI 走旧 writeDiagnosticLine 兼容。
+    showCommandPanel(context, output, buildMcpStatusPanel(context));
     return;
   }
   if (action === "tools") {
@@ -6806,6 +7201,7 @@ async function handleMcpCommand(
   }
   if (action === "doctor") {
     await runMcpDoctor(context);
+    // /mcp doctor 仍显式输出完整诊断（含 guard / license / runtime / endpoint）。
     writeDiagnosticLine(output, formatMcpStatus(context));
     return;
   }
@@ -6938,6 +7334,42 @@ async function handleBranchCommand(
   writeStatus(output, context);
 }
 
+/**
+ * D.13Q-UX Task Surface — /memory status / list 的降噪 CommandPanel 视图。
+ * 仅暴露：候选/已接受/已禁用计数、注入条数、autoLearning 是否开启、下一步。
+ * promptInjection 内部参数（topK / estimatedTokens）、lastHandoff、详细 hint
+ * 进 detailsText（Ctrl+O 展开）。
+ */
+function buildMemoryStatusPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView {
+  const isEn = context.language === "en-US";
+  const candidates = context.memory.candidates.length;
+  const accepted = context.memory.accepted.length;
+  const disabled = context.memory.disabled.length;
+  const rejected = context.memory.rejected.length;
+  const learning = context.memory.learningMode === "active";
+  const summary: string[] = [
+    isEn
+      ? `Memory · accepted ${accepted} · candidates ${candidates} · disabled ${disabled}${rejected > 0 ? ` · rejected ${rejected}` : ""}`
+      : `记忆 · 已接受 ${accepted} · 候选 ${candidates} · 已禁用 ${disabled}${rejected > 0 ? ` · 已拒绝 ${rejected}` : ""}`,
+    isEn
+      ? `Auto-learning: ${learning ? "on" : "off"}`
+      : `自动学习：${learning ? "已开启" : "已关闭"}`,
+  ];
+  const actions: string[] = [];
+  if (candidates > 0) actions.push("/memory review");
+  if (!learning) actions.push("/memory learn on");
+  actions.push("/memory storage");
+  return {
+    title: "/memory",
+    tone: candidates > 0 ? "warning" : "neutral",
+    summary,
+    actions,
+    detailsText: formatMemoryStatus(context),
+  };
+}
+
 async function handleMemoryCommand(
   args: string[],
   context: TuiContext,
@@ -6945,7 +7377,8 @@ async function handleMemoryCommand(
 ): Promise<void> {
   const action = args[0] ?? "status";
   if (action === "status" || action === "list") {
-    writeLine(output, formatMemoryStatus(context));
+    // D.13Q-UX Task Surface — /memory status / list 默认走降噪 CommandPanel。
+    showCommandPanel(context, output, buildMemoryStatusPanel(context));
     return;
   }
   if (action === "storage") {
@@ -7593,8 +8026,9 @@ async function handleIndexCommand(
   const action = args[0] ?? "status";
   if (action === "status") {
     await refreshIndexStatus(context, args.includes("--fresh"));
-    writeLine(output, formatIndexStatus(context));
-    writeStatus(output, context);
+    // D.13Q-UX Task Surface — /index status 默认走 CommandPanel 降噪。
+    showCommandPanel(context, output, buildIndexStatusPanel(context));
+    if (!context.isInkSession) writeStatus(output, context);
     return;
   }
   if (action === "doctor") {
@@ -8017,6 +8451,59 @@ async function runMcpDoctor(context: TuiContext): Promise<void> {
   refreshCacheFreshness(context);
 }
 
+/**
+ * D.13Q-UX Task Surface — /mcp status 的降噪 CommandPanel 视图。
+ * 仅暴露：是否启用、server 数量、工具数量、是否需要 doctor、下一步。
+ * guard / license / runtime / binary / source / schemaLoaded / endpoint
+ * 等内部字段不进 summary / sections，全量原文进 detailsText（Ctrl+O 展开）。
+ */
+function buildMcpStatusPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView {
+  const isEn = context.language === "en-US";
+  const enabled = context.mcp.enabled;
+  const serverCount = context.mcp.servers.length;
+  const toolCount = context.mcp.tools.length;
+  const needsDoctor = !context.mcp.lastDoctor;
+  const summary: string[] = [
+    isEn
+      ? `MCP ${enabled ? "enabled" : "disabled"} · ${serverCount} server${serverCount === 1 ? "" : "s"} · ${toolCount} tool${toolCount === 1 ? "" : "s"}`
+      : `MCP ${enabled ? "已启用" : "未启用"} · 服务器 ${serverCount} · 工具 ${toolCount}`,
+  ];
+  if (needsDoctor) {
+    summary.push(
+      isEn
+        ? "Not yet diagnosed — run /mcp doctor to check."
+        : "尚未诊断 — 运行 /mcp doctor 检测。",
+    );
+  }
+  const failingServers = context.mcp.servers.filter(
+    (s) => s.status === "error" || s.status === "missing",
+  );
+  const sections: { title?: string; rows: string[] }[] = [];
+  if (serverCount > 0) {
+    sections.push({
+      title: isEn ? "Servers" : "服务器",
+      rows: context.mcp.servers
+        .slice(0, 8)
+        .map((s) => `${s.name} · ${s.status}`),
+    });
+  }
+  const actions = [
+    "/mcp doctor",
+    "/mcp tools",
+  ];
+  if (failingServers.length > 0) actions.push("/mcp validate");
+  return {
+    title: "/mcp",
+    tone: failingServers.length > 0 ? "warning" : "neutral",
+    summary,
+    sections,
+    actions,
+    detailsText: formatMcpStatus(context),
+  };
+}
+
 function formatMcpStatus(context: TuiContext): string {
   // D.13Q-UX Real Smoke Fix v3 — /mcp status 默认是中性 diagnostic：
   //   - lastDoctor 未跑时显示"未检测，运行 /mcp doctor 检测"，不再 unknown 吓人；
@@ -8407,6 +8894,47 @@ async function recordIndexEvidence(
   };
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
+/**
+ * D.13Q-UX Task Surface — /index status 的降噪 CommandPanel 视图。
+ * 仅暴露：是否启用 / 当前 status / 是否需要 doctor / 下一步建议。
+ * source / binaryStatus / binaryCommand / version / artifactPath / runtime /
+ * nodes/edges / changedFiles / safety 等内部字段不进 summary，全量原文进
+ * detailsText（Ctrl+O 展开）。
+ */
+function buildIndexStatusPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView {
+  const isEn = context.language === "en-US";
+  const status = context.index.status;
+  const enabled = context.index.enabled;
+  const isError = status === "error" || status === "missing";
+  const summary: string[] = [
+    isEn
+      ? `Index ${enabled ? "enabled" : "disabled"} · status: ${status}`
+      : `索引 ${enabled ? "已启用" : "未启用"} · 状态：${status}`,
+  ];
+  const actions: string[] = [];
+  if (status === "missing") {
+    summary.push(isEn ? "Not built yet — run /index init fast." : "尚未建立 — 运行 /index init fast。");
+    actions.push("/index init fast");
+  } else if (status === "stale") {
+    summary.push(isEn ? "Stale — /index refresh recommended." : "已过期 — 建议运行 /index refresh。");
+    actions.push("/index refresh");
+  } else if (status === "error") {
+    summary.push(isEn ? "Error — run /index doctor." : "出错 — 运行 /index doctor。");
+    actions.push("/index doctor");
+  } else if (status === "ready") {
+    actions.push("/index search", "/index architecture");
+  }
+  return {
+    title: "/index",
+    tone: isError ? "error" : status === "stale" ? "warning" : "neutral",
+    summary,
+    actions,
+    detailsText: formatIndexStatus(context),
+  };
 }
 
 function formatIndexStatus(context: TuiContext): string {
@@ -14993,4 +15521,15 @@ export function __testCreateShellBlockOutput(
   endAssistantStream(): void;
 } {
   return new ShellBlockOutput(context, blocks, onWrite);
+}
+
+/**
+ * D.13Q-UX Task Surface — 测试入口：暴露 Ctrl+O fallback panel 装配器。
+ * 单测用它验证 lastFullOutput / evidence / background 的 panel 化行为，
+ * 不再触发 handleDetailsCommand 写 transcript。
+ */
+export function __testBuildToggleDetailsCommandPanel(
+  context: TuiContext,
+): import("./shell/types.js").CommandPanelView | undefined {
+  return buildToggleDetailsCommandPanel(context);
 }

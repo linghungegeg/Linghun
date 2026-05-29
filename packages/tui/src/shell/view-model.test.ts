@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { __testCreateShellBlockOutput, type TuiContext } from "../index.js";
+import { __testBuildToggleDetailsCommandPanel, __testCreateShellBlockOutput, type TuiContext } from "../index.js";
 import {
   bufferInsert,
   bufferMoveDown,
@@ -4294,5 +4294,149 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     });
     const out = view.blocks.find((b) => b.id === "long-fail");
     expect(out?.nextAction).toContain("Ctrl+O");
+  });
+});
+
+// ─── D.13Q-UX Task Surface Maturity Sweep ────────────────────────────────────
+
+describe("D.13Q-UX Task Surface — ConfigPanel 装配", () => {
+  it("configPanelState=panel_list 后 view.configPanel 为 panel_list", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      configPanelState: { phase: "panel_list", cursor: 0 },
+    });
+    expect(view.configPanel).toBeDefined();
+    expect(view.configPanel?.phase).toBe("panel_list");
+    if (view.configPanel?.phase === "panel_list") {
+      expect(view.configPanel.panels.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("configPanelState 缺省时 view.configPanel 为 undefined", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+    });
+    expect(view.configPanel).toBeUndefined();
+  });
+});
+
+describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
+  it("commandPanelState 装配为 view.commandPanel，含 sections / actions / detailsText", () => {
+    const ctx = createContext() as TuiContext & {
+      commandPanelState?: unknown;
+    };
+    ctx.commandPanelState = {
+      title: "/mcp",
+      tone: "neutral",
+      summary: ["MCP 已连接：3 / 3"],
+      sections: [
+        { title: "服务器", rows: ["server-a · ready", "server-b · ready"] },
+      ],
+      actions: ["/mcp doctor"],
+      detailsText: "完整 MCP 状态详细 dump …",
+    };
+    const view = createShellViewModel(ctx, { width: 80, viewMode: "task" });
+    expect(view.commandPanel).toBeDefined();
+    expect(view.commandPanel?.title).toBe("/mcp");
+    expect(view.commandPanel?.summary).toEqual(["MCP 已连接：3 / 3"]);
+    expect(view.commandPanel?.sections?.[0]?.rows).toContain("server-a · ready");
+    expect(view.commandPanel?.actions).toContain("/mcp doctor");
+    expect(view.commandPanel?.detailsText).toBeDefined();
+  });
+
+  it("无 commandPanelState 时 view.commandPanel 为 undefined", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+    });
+    expect(view.commandPanel).toBeUndefined();
+  });
+});
+
+describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
+  it("taskScrollState 装配为 view.taskScroll，包含 scrollOffset 与 stickToBottom", () => {
+    const ctx = createContext() as TuiContext & {
+      taskScrollState?: { scrollOffset: number; stickToBottom: boolean };
+    };
+    ctx.taskScrollState = { scrollOffset: 4, stickToBottom: false };
+    const view = createShellViewModel(ctx, { width: 80, viewMode: "task" });
+    expect(view.taskScroll).toBeDefined();
+    expect(view.taskScroll?.scrollOffset).toBe(4);
+    expect(view.taskScroll?.stickToBottom).toBe(false);
+  });
+
+  it("无 taskScrollState 时 view.taskScroll 为默认 stickToBottom=true / offset=0", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+    });
+    expect(view.taskScroll).toBeDefined();
+    expect(view.taskScroll?.scrollOffset).toBe(0);
+    expect(view.taskScroll?.stickToBottom).toBe(true);
+  });
+});
+
+describe("D.13Q-UX Task Surface — Ctrl+O fallback 走 commandPanel detailsText", () => {
+  it("有 lastFullOutput 时返回带 detailsText 的 panel（不进 transcript）", () => {
+    const ctx = createContext() as TuiContext & { lastFullOutput?: string };
+    ctx.lastFullOutput = "完整 /model doctor 多行输出\n provider.env merge=...\nproviders=...";
+    ctx.evidence = [];
+    ctx.backgroundTasks = [];
+    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    expect(panel).toBeDefined();
+    expect(panel?.detailsText).toContain("完整 /model doctor");
+    expect(panel?.expanded).toBe(true);
+    expect(panel?.actions).toContain("/details");
+  });
+
+  it("有 evidence 时 panel.sections 含 evidence 摘要", () => {
+    const ctx = createContext() as TuiContext;
+    ctx.lastFullOutput = undefined;
+    ctx.evidence = [
+      {
+        id: "ev-1",
+        kind: "file",
+        source: "Read",
+        summary: "package.json read",
+        createdAt: new Date().toISOString(),
+      },
+    ] as unknown as TuiContext["evidence"];
+    ctx.backgroundTasks = [];
+    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    expect(panel).toBeDefined();
+    expect(panel?.sections?.some((s) => s.title?.includes("证据") || s.title?.includes("Evidence"))).toBe(true);
+    expect(panel?.detailsText).toContain("ev-1");
+  });
+
+  it("有 backgroundTasks 时 panel.sections 含 background 摘要", () => {
+    const ctx = createContext() as TuiContext;
+    ctx.lastFullOutput = undefined;
+    ctx.evidence = [];
+    ctx.backgroundTasks = [
+      {
+        id: "bg-1",
+        kind: "bash",
+        title: "node --version",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        userVisibleSummary: "running node --version",
+      },
+    ] as unknown as TuiContext["backgroundTasks"];
+    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    expect(panel).toBeDefined();
+    expect(panel?.sections?.some((s) => s.title?.includes("后台") || s.title?.includes("Background"))).toBe(true);
+    expect(panel?.detailsText).toContain("bg-1");
+  });
+
+  it("三类内容全空时返回 undefined（调用方应走 notifications，不写 transcript）", () => {
+    const ctx = createContext() as TuiContext;
+    ctx.lastFullOutput = undefined;
+    ctx.evidence = [];
+    ctx.backgroundTasks = [];
+    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    expect(panel).toBeUndefined();
   });
 });

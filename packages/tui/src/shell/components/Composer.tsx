@@ -348,9 +348,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // D.13E Step 2 修正 #1：ConfigPanel 渲染时 Composer.useInput 必须 isActive=false，
   // 让 ConfigPanel/HelpPanel/BtwPanel/SessionsPanel 等独立面板自己的 useInput 成为 ↑↓/Enter/Esc
   // 的唯一消费者，避免双消费窗口。permission 优先级最高（permission 渲染时其它面板不渲染，
-  // ShellApp 互斥保证）。
+  // ShellApp 互斥保证）。D.13Q-UX Task Surface：commandPanel 同样独占 Esc，
+  // Composer 在 commandPanel 渲染时也应让出输入。
   const configPanelActive = Boolean(
-    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
+    view.configPanel ||
+      view.helpPanel ||
+      view.btwPanel ||
+      view.sessionsPanel ||
+      view.commandPanel,
   );
 
   const text = bufferToString(buffer);
@@ -625,6 +630,27 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // ─── 4. Composer default owner ────────────────────────────────────────
 
+      // D.13Q-UX Task Surface — 任务区滚动键（PageUp / PageDown / End）。
+      // 方向语义：scrollOffset = 从底部向上偏移的行数。
+      //   - PgUp / wheel-up / 空 buffer ↑ → 向上看更早内容 → delta=+N（offset 增大）
+      //   - PgDn / wheel-down / 空 buffer ↓ → 向下回到更新内容 → delta=-N
+      //   - End → task-scroll-end，offset 归零
+      // 仅在 task / pending 模式生效；home 模式无 transcript 滚动需求。
+      const inTaskMode = view.viewMode === "task" || view.viewMode === "pending";
+      const k = key as { pageUp?: boolean; pageDown?: boolean; end?: boolean; home?: boolean };
+      if (inTaskMode && k.pageUp) {
+        void onInput({ type: "task-scroll", delta: 5 });
+        return;
+      }
+      if (inTaskMode && k.pageDown) {
+        void onInput({ type: "task-scroll", delta: -5 });
+        return;
+      }
+      if (inTaskMode && k.end && text.length === 0) {
+        void onInput({ type: "task-scroll-end" });
+        return;
+      }
+
       // ─── Submit: Enter（无 shift）─────────────────────────────────────
       if (key.return && !key.shift) {
         // D.13Q-UX Real Smoke Fix v2 — D. busy guard：模型仍在处理上一条时
@@ -737,12 +763,21 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
+      // D.13Q-UX Task Surface — 鼠标滚轮归属：在 task/pending 模式下 buffer 为空时，
+      // ↑↓ 派发 task-scroll（Win10 conhost 等终端把 wheel 报告为 ↑↓），让滚轮
+      // 滚动 transcript 而不是切 history。buffer 非空时仍走 history（用户已经
+      // 在打字，明确在用键盘 ↑↓ 翻 history 草稿）。
+      const inTaskModeWheel = view.viewMode === "task" || view.viewMode === "pending";
       if (key.upArrow) {
         if (slashVisible && slashSelection >= 0) {
           setSlashSelection((current) => {
             const safe = current < 0 ? 0 : current;
             return safe === 0 ? slashCandidates.length - 1 : safe - 1;
           });
+          return;
+        }
+        if (inTaskModeWheel && text.length === 0) {
+          void onInput({ type: "task-scroll", delta: 1 });
           return;
         }
         const { row } = getCursorLinePosition(buffer);
@@ -764,6 +799,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             const safe = current < 0 ? 0 : current;
             return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
           });
+          return;
+        }
+        if (inTaskModeWheel && text.length === 0) {
+          void onInput({ type: "task-scroll", delta: -1 });
           return;
         }
         const { row } = getCursorLinePosition(buffer);
@@ -899,25 +938,24 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // selector row owns the visible focus. The native cursor MUST NOT also be
   // positioned over the buffer line; otherwise the user sees two competing
   // focus owners. We pass null so useAnchoredCursor hides the cursor instead.
-  // Task-mode fallback: real-machine smoke showed yoga parent-chain cursor
-  // accumulation drifting on Win10 conhost when the Composer band sits below
-  // a flexGrow output region. Task mode therefore yields the native cursor
-  // (declared=null) and renders an inline reverse-video cursor character at
-  // (cursorRow, cursorCol). Home keeps native cursor for parity with the
-  // 80-col centered composer.
-  // Truncation indicator rows have been removed (cursor-centered viewport
-  // already conveys overflow), so cursorRow is used as-is without an offset.
-  // D13E-P3: drop the Task-mode inline reverse-video cursor. Both Home and
-  // Task modes route the native cursor through useAnchoredCursor — yoga
-  // parent-chain accumulation has stabilized on Win10 conhost since the
-  // shell band layout settled, and the inline cursor produced flicker on
-  // multi-line buffers. Permission flow still hides the native cursor (null
-  // branch) so the permission action row owns visible focus.
+  // D.13Q-UX Task Surface — 光标分层（用户实测在 task / pending 模式下出现
+  // 1-2 行错位，且任务区滚动后 yoga marginTop 不进 getComputedLayout，使
+  // parent-chain accumulation 给出的 y 坐标不再可靠）：
+  //   - home: useAnchoredCursor 原生光标（Yoga parent-chain 在居中容器下稳定）。
+  //   - task / pending: 让出 native cursor（declared=null），改用 inline
+  //     reverse-video cursor（splitLineAtDisplayCol 在 cursorRow 行做拆分），
+  //     不依赖父链坐标。
+  //   - permissionActive: 永远隐藏 native cursor，让 PermissionControl 独占焦点。
   void truncatedAbove;
   void truncatedBelow;
+  const isTaskMode = view.viewMode === "task" || view.viewMode === "pending";
+  // D.13Q-UX Task Surface — task / pending 模式下让出 native cursor，改用 inline
+  // reverse-video cursor。useInlineCursor 与 permissionActive 任一为真都要把
+  // useAnchoredCursor 切到 null（permission 卡独占焦点 / inline cursor 自己画）。
+  const useInlineCursor = isTaskMode;
   const declaredRow = cursorRow;
   useAnchoredCursor(
-    permissionActive ? null : { row: declaredRow, col: cursorCol },
+    permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },
     anchorRef,
     capability,
   );
@@ -960,10 +998,19 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
         {lines.map((line, index) => {
-          // D13E-P3: single-branch render — no inline reverse-video cursor.
-          // useAnchoredCursor positions the native terminal cursor at
-          // (cursorRow, cursorCol) for both Home and Task modes.
-          void index;
+          // D.13Q-UX Task Surface — task / pending 模式 + 非 permission 时，
+          // 在 cursorRow 这一行渲染 inline reverse-video cursor；其他行原样渲染。
+          // home 模式仍用 useAnchoredCursor 的 native cursor，这里直接原样渲染。
+          if (useInlineCursor && !permissionActive && index === cursorRow) {
+            const { before, cursorChar, after } = splitLineAtDisplayCol(line, cursorCol);
+            return (
+              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
+                {fitText(before, maxWidth)}
+                <Text inverse>{cursorChar}</Text>
+                {fitText(after, Math.max(0, maxWidth - before.length - 1))}
+              </Text>
+            );
+          }
           return (
             <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
               {fitText(line, maxWidth)}

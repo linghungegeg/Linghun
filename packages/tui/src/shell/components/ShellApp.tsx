@@ -15,6 +15,7 @@ import type {
   TaskActivityView,
 } from "../types.js";
 import { BtwPanel } from "./BtwPanel.js";
+import { CommandPanel } from "./CommandPanel.js";
 import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
@@ -158,7 +159,15 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const composerLine = lineChar(noColor, capability).repeat(cw);
-
+  // D.13Q-UX Task Surface — 任务区滚动：
+  // - taskScroll.scrollOffset 表示从底部往上偏移的行数；用 marginTop=-offset
+  //   把 transcript 整体上移，外层 overflow=hidden 把超出可见区域的部分裁掉。
+  // - 没溢出时 marginTop=0，透明无副作用。
+  const scrollOffset = view.taskScroll?.scrollOffset ?? 0;
+  const scrollHintText =
+    view.language === "en-US"
+      ? "Wheel/PgUp/PgDn to scroll · End to bottom"
+      : "滚轮/PgUp/PgDn 滚动 · End 回到底部";
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       {/* Output region: top-left, fills remaining vertical space. Long output
@@ -173,6 +182,7 @@ function TaskLayout({
         paddingX={2}
         paddingTop={1}
       >
+        <Box flexDirection="column" marginTop={scrollOffset > 0 ? -scrollOffset : 0}>
         {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
 
         {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
@@ -220,6 +230,22 @@ function TaskLayout({
             language={view.language}
           />
         ) : null}
+        {/* D.13Q-UX Task Surface — 通用 CommandPanel：当所有其他面板都关闭时，
+            高级 slash 命令的输出走这里。与 transcript 隔离。 */}
+        {!view.permission &&
+        !view.helpPanel &&
+        !view.btwPanel &&
+        !view.sessionsPanel &&
+        !view.configPanel &&
+        view.commandPanel ? (
+          <CommandPanel
+            panel={view.commandPanel}
+            controller={controller}
+            width={view.width - 4}
+            noColor={noColor}
+            language={view.language}
+          />
+        ) : null}
 
         {view.blocks.length > 0 ? (
           <Box flexDirection="column" marginTop={view.activity || view.permission ? 1 : 0}>
@@ -248,7 +274,18 @@ function TaskLayout({
             ))}
           </Box>
         ) : null}
+        </Box>
       </Box>
+
+      {/* D.13Q-UX Task Surface — 滚动提示：scrollOffset > 0 时露出，提醒
+          用户可以用 PgUp/PgDn/End 与滚轮控制 transcript 滚动位置；不进 transcript。 */}
+      {scrollOffset > 0 ? (
+        <Box flexShrink={0} paddingX={2}>
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {fitText(scrollHintText, view.width - 4)}
+          </Text>
+        </Box>
+      ) : null}
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
           Yoga from collapsing the band when output is tall. Left alignment
