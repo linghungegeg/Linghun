@@ -77,30 +77,37 @@ export type StablePointHint = {
  * custom runner to exercise the fail-closed branches (status fail / repoCheck
  * non-stderr error / worktree list lock).
  */
-async function defaultRunGit(
-  cwd: string,
-  args: string[],
-): Promise<GitRunResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync("git", args, {
-      cwd,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_ASKPASS: "",
-      },
-    });
-    return { stdout: stdout.toString().trimEnd(), ok: true, stderr: stderr.toString() };
-  } catch (error) {
-    const stderr =
-      error && typeof error === "object" && "stderr" in error
-        ? String((error as { stderr?: unknown }).stderr ?? "")
-        : "";
-    return { stdout: "", ok: false, stderr };
-  }
+/**
+ * Build a GitRunner with the given spawn timeout. Credential prompts are
+ * disabled so we never block on /dev/tty or askpass GUIs. Mutating callers
+ * (git-operation-runtime: commit / worktree add) reuse this factory with a
+ * longer timeout than the 5s read-only probe default.
+ */
+export function createGitRunner(timeoutMs: number): GitRunner {
+  return async (cwd: string, args: string[]): Promise<GitRunResult> => {
+    try {
+      const { stdout, stderr } = await execFileAsync("git", args, {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_ASKPASS: "",
+        },
+      });
+      return { stdout: stdout.toString().trimEnd(), ok: true, stderr: stderr.toString() };
+    } catch (error) {
+      const stderr =
+        error && typeof error === "object" && "stderr" in error
+          ? String((error as { stderr?: unknown }).stderr ?? "")
+          : "";
+      return { stdout: "", ok: false, stderr };
+    }
+  };
 }
+
+const defaultRunGit: GitRunner = createGitRunner(GIT_TIMEOUT_MS);
 
 export async function isGitRepository(
   cwd: string,

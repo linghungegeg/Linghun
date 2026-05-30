@@ -2,6 +2,85 @@ import type { Writable } from "node:stream";
 import type { TuiContext } from "./index.js";
 import { formatGitStatusDetails, isGitRepository, readGitStatus, readWorktreeList, suggestStablePoint, type GitStatus, type StablePointHint, type WorktreeReport } from "./git-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import { resolveManagedWorktreeRoot, redactWorktreePath, MANAGED_WORKTREE_DIRNAME } from "./git-operation-runtime.js";
+import {
+  type GitSlashDeps,
+  runStablePointCreateSlash,
+  runWorktreeCreateSlash,
+  runWorktreeRemoveSlash,
+} from "./git-slash-runtime.js";
+
+/**
+ * D.13R/D.14G Git / Worktree / Stable Point slash 入口。
+ *
+ * 只读路径（不确认）：/git, /git status, /git stable, /git worktree, /git doctor。
+ * mutating slash 路径（确定入口，直接走 runtime，不经模型）：
+ *   /git stable create "<message>" [--include-untracked]
+ *   /worktree create <name> [--branch <b>] [--from <ref>]
+ *   /worktree remove <name> [--force]
+ * slash 与模型工具共用同一 git-operation-runtime；worktree remove 走 pendingLocalApproval
+ * 轻/强确认。危险 git mutating（reset / checkout overwrite / branch -D）本阶段不提供。
+ */
+export async function handleGitCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+  deps: GitSlashDeps,
+): Promise<void> {
+  const action = (args[0] ?? "status").toLowerCase();
+  if (action === "stable") {
+    const sub = (args[1] ?? "").toLowerCase();
+    if (sub === "create") {
+      await runStablePointCreateSlash(args.slice(2), context, output, deps);
+      return;
+    }
+    await renderStablePointPanel(context, output);
+    return;
+  }
+  if (action === "worktree") {
+    await renderWorktreePanel(context, output);
+    return;
+  }
+  await renderGitStatusPanel(context, output, action === "doctor");
+}
+
+export async function handleWorktreeCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+  deps: GitSlashDeps,
+): Promise<void> {
+  const action = (args[0] ?? "list").toLowerCase();
+  if (action === "create") {
+    await runWorktreeCreateSlash(args.slice(1), context, output, deps);
+    return;
+  }
+  if (action === "remove") {
+    await runWorktreeRemoveSlash(args.slice(1), context, output, deps);
+    return;
+  }
+  await renderWorktreePanel(context, output);
+}
+
+export async function handleCheckpointCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+  deps: GitSlashDeps,
+): Promise<void> {
+  const action = (args[0] ?? "list").toLowerCase();
+  if (action === "create") {
+    // /checkpoint create 与 /git stable create 同义：先 snapshot 安全垫，再按 git 状态决定。
+    await runStablePointCreateSlash(args.slice(1), context, output, deps);
+    return;
+  }
+  if (action === "stable") {
+    await renderStablePointPanel(context, output);
+    return;
+  }
+  await renderCheckpointPanel(context, output);
+}
+
 
 export async function renderGitStatusPanel(
   context: TuiContext,
@@ -69,8 +148,8 @@ export async function renderGitStatusPanel(
     );
   }
   const actions: string[] = [];
-  if (dirty) actions.push("/git stable");
-  actions.push("/git worktree");
+  if (dirty) actions.push('/git stable create "<message>"');
+  actions.push("/worktree");
   actions.push("/git doctor");
   showCommandPanel(context, output, {
     title: "/git",
@@ -141,7 +220,7 @@ export async function renderStablePointPanel(
     title: "/git stable",
     tone: "neutral",
     summary,
-    actions: ["/git status", "/git doctor"],
+    actions: ['/git stable create "<message>"', "/git status", "/git doctor"],
     detailsText: detailsParts.join("\n"),
   });
 }
@@ -174,13 +253,20 @@ export async function renderWorktreePanel(
     return;
   }
   const current = report.entries.find((entry) => entry.isCurrent);
+  const managedRoot = resolveManagedWorktreeRoot(context.projectPath);
+  const managedPrefix = `${MANAGED_WORKTREE_DIRNAME}/`;
+  const isManaged = (path: string): boolean =>
+    redactWorktreePath(path).startsWith(managedPrefix);
   const summary: string[] = [
     isEn
       ? `${report.entries.length} worktree${report.entries.length === 1 ? "" : "s"} · current: ${current?.branch ?? current?.path ?? "(unknown)"}`
       : `共 ${report.entries.length} 个 worktree · 当前：${current?.branch ?? current?.path ?? "（未知）"}`,
     isEn
-      ? "Read-only listing; Linghun does not add/remove/switch worktrees here."
-      : "只读列表；Linghun 不在此处执行 add/remove/switch（mutating 操作走权限面板）。",
+      ? `Managed root: ${redactWorktreePath(managedRoot)}`
+      : `受控目录：${redactWorktreePath(managedRoot)}`,
+    isEn
+      ? "Create/remove managed worktrees via slash; external worktrees are listed but cannot be removed here."
+      : "用 slash 创建/删除受控 worktree；external worktree 仅列出，不允许在此删除。",
   ];
   const sections = [
     {
@@ -189,7 +275,8 @@ export async function renderWorktreePanel(
         const marker = entry.isCurrent ? "*" : " ";
         const branch = entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
         const head = entry.head ? entry.head.slice(0, 7) : "-";
-        return `${marker} ${entry.path}  ${branch}  ${head}`;
+        const tag = isManaged(entry.path) ? "" : isEn ? "  [external]" : "  [external]";
+        return `${marker} ${redactWorktreePath(entry.path)}  ${branch}  ${head}${tag}`;
       }),
     },
   ];
@@ -198,6 +285,7 @@ export async function renderWorktreePanel(
     tone: "neutral",
     summary,
     sections,
+    actions: ["/worktree create <name>", "/worktree remove <name>"],
     detailsText: formatGitStatusDetails(await readGitStatus(context.projectPath), report),
   });
 }
@@ -216,17 +304,20 @@ export async function renderCheckpointPanel(
       tone: "neutral",
       summary: [
         isEn
-          ? "No Linghun snapshot checkpoints yet."
-          : "暂无 Linghun snapshot checkpoint。",
+          ? "No Linghun snapshot checkpoints yet. Linghun snapshots are in-memory file snapshots, not git commits."
+          : "暂无 Linghun snapshot checkpoint。Linghun snapshot 是内存文件快照，不是 git commit。",
       ],
-      actions: ["/git stable"],
+      actions: ['/checkpoint create "<message>"', "/git stable"],
     });
     return;
   }
   const summary: string[] = [
     isEn
-      ? `${checkpoints.length} snapshot checkpoint${checkpoints.length === 1 ? "" : "s"} (read-only).`
-      : `共 ${checkpoints.length} 个 snapshot checkpoint（只读 Linghun 内部快照）。`,
+      ? `${checkpoints.length} snapshot checkpoint${checkpoints.length === 1 ? "" : "s"} (Linghun in-memory snapshots, not git commits).`
+      : `共 ${checkpoints.length} 个 snapshot checkpoint（Linghun 内存快照，不是 git commit）。`,
+    isEn
+      ? 'For a real git stable point use /checkpoint create "<message>" or /git stable create.'
+      : '需要真实 git 稳定点请用 /checkpoint create "<message>" 或 /git stable create。',
   ];
   const sections = [
     {

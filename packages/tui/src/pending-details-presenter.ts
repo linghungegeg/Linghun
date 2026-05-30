@@ -73,6 +73,25 @@ export function formatPendingApprovalDetails(approval: PendingLocalApproval, con
           "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
         ].join("\n");
   }
+  if (approval.kind === "git_worktree_remove") {
+    return context.language === "en-US"
+      ? [
+          "Pending confirmation: remove managed worktree",
+          `- worktree: ${approval.name}`,
+          `- mode: ${approval.strong ? "force (dirty — uncommitted changes will be lost)" : "clean"}`,
+          "- action: git worktree remove (no branch deletion, no rm -rf).",
+          "- raw path, tokens, request ids, and internal ids are hidden.",
+          "- next: yes/confirm to remove once; no/cancel/Esc to keep it.",
+        ].join("\n")
+      : [
+          "待确认：删除 managed worktree",
+          `- worktree：${approval.name}`,
+          `- 方式：${approval.strong ? "强制（有未提交改动，将丢失）" : "干净"}`,
+          "- 动作：git worktree remove（不删分支，不 rm -rf）。",
+          "- raw 路径、token、request id 和内部 id 已隐藏。",
+          "- 下一步：yes/确认 删除一次；no/cancel/Esc 保留。",
+        ].join("\n");
+  }
   return context.language === "en-US"
     ? [
         "Pending permission details",

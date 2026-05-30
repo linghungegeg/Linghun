@@ -136,16 +136,6 @@ import {
 } from "./index-result-presenter.js";
 import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
-  formatGitStatusDetails,
-  isGitRepository,
-  readGitStatus,
-  readWorktreeList,
-  suggestStablePoint,
-  type GitStatus,
-  type StablePointHint,
-  type WorktreeReport,
-} from "./git-runtime.js";
-import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
   formatBackgroundTask,
@@ -500,7 +490,24 @@ export { createModelSystemPrompt } from "./model-prompt-runtime.js";
 // RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; RuntimeIdentityRule allows when the user runs /model doctor or /model route doctor; doctor may print provider=${runtime.provider}.
 // /model echo still includes reasoning=${runtime.reasoningStatus}; async function handleModelCommand( uses formatModelRouteSummary and intentionally omits trailing writeStatus(output, context).
 import { buildToggleDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
-import { renderCheckpointPanel, renderGitStatusPanel, renderStablePointPanel, renderWorktreePanel } from "./git-command-runtime.js";
+import {
+  handleCheckpointCommand,
+  handleGitCommand,
+  handleWorktreeCommand,
+} from "./git-command-runtime.js";
+import { computeWorktreeContext } from "./git-operation-runtime.js";
+import {
+  type GitToolDispatchDeps,
+  type WorktreeRemoveResolveDeps,
+  executeGitToolUse,
+  resolveWorktreeRemoveApprove,
+  resolveWorktreeRemoveDeny,
+} from "./git-tool-dispatch-runtime.js";
+import type { GitSlashDeps } from "./git-slash-runtime.js";
+import {
+  isGitToolName,
+  summarizeWorktreeContextForPrompt,
+} from "./git-tool-runtime.js";
 import { buildIndexStatusPanel, buildMcpStatusPanel, formatIndexRefreshSummary, formatIndexStatus, formatMcpStatus } from "./mcp-index-command-runtime.js";
 import {
   configureMcpIndexRuntime,
@@ -852,9 +859,22 @@ type PendingLocalApproval =
       warnings: string[];
       continuation?: PendingModelContinuation;
       verdict?: import("./permission-policy-engine.js").PolicyVerdict;
+    }
+  | {
+      // D.14G — managed worktree remove 确认（clean=轻确认；strong=dirty+force 强确认）。
+      // 复用 pendingLocalApproval / yes-no glue，不新增第五种权限模式。continuation 仅
+      // 模型工具路径需要（回灌结果给模型续轮）；slash 路径为 undefined。
+      kind: "git_worktree_remove";
+      sessionId: string;
+      name: string;
+      path: string;
+      force: boolean;
+      strong: boolean;
+      continuation?: PendingModelContinuation;
+      toolCall?: ModelToolCall;
     };
 
-type PendingModelContinuation = {
+export type PendingModelContinuation = {
   messages: ModelMessage[];
   provider: string;
   model: string;
@@ -1073,6 +1093,47 @@ const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>>
 };
 const MAX_CHECKPOINTS = 20;
 const MAX_ROUTE_DECISIONS = 50;
+
+// D.14G-Refactor-Closure composition root：注入 index.ts hoisted 函数到迁出的 git 模块。
+const gitToolDispatchDeps: GitToolDispatchDeps = {
+  maxCheckpoints: MAX_CHECKPOINTS,
+  startRequestActivity,
+  clearRequestActivity,
+  writeLine,
+  formatError,
+  appendSystemEvent,
+  createEvidenceRecord,
+  rememberEvidence,
+  recordToolEvidence,
+  recordToolFailureEvidence,
+  appendDeferredToolResultEvent,
+  createSingleToolCallContinuation,
+  randomUUID,
+  resolvePath: resolve,
+  readFileUtf8: (path) => readFile(path, "utf8"),
+};
+
+const gitSlashDeps: GitSlashDeps = {
+  dispatch: gitToolDispatchDeps,
+  ensureSession,
+  writeLine,
+  writeStatus,
+};
+
+// git_worktree_remove yes/no 解析 deps。continueAfterToolResults 仅 gateway 在场时回灌续轮。
+function createWorktreeRemoveResolveDeps(
+  gateway: ModelGateway | undefined,
+): WorktreeRemoveResolveDeps {
+  return {
+    ...gitToolDispatchDeps,
+    writeLightHints,
+    writeStatus,
+    formatPermissionDenialPrimary,
+    continueAfterToolResults: async (continuation, context, output) => {
+      if (gateway) await continueModelAfterToolResults(continuation, context, gateway, output);
+    },
+  };
+}
 
 // Module 2 (state-runtime) — pure state factories and their leaf helpers
 // moved to ./tui-state-runtime.ts. Only `refreshRemoteState` stays here
@@ -2138,15 +2199,15 @@ export async function handleSlashCommand(
   // 真正的 git commit / reset / checkout / worktree add/remove 走 Bash 工具
   // + permission-policy-engine 的现有四档权限链。
   if (command === "/git") {
-    await handleGitCommand(rest, context, output);
+    await handleGitCommand(rest, context, output, gitSlashDeps);
     return "handled";
   }
   if (command === "/worktree") {
-    await handleWorktreeCommand(rest, context, output);
+    await handleWorktreeCommand(rest, context, output, gitSlashDeps);
     return "handled";
   }
   if (command === "/checkpoint") {
-    await handleCheckpointCommand(rest, context, output);
+    await handleCheckpointCommand(rest, context, output, gitSlashDeps);
     return "handled";
   }
   if (command === "/memory") {
@@ -2809,6 +2870,8 @@ async function cancelPendingInteraction(
     context.pendingLocalApproval = undefined;
     if (approval.kind === "index_ignore_write") {
       writeLine(output, "已取消待确认权限；未写入文件，也未刷新索引。可修改请求后重试。");
+    } else if (approval.kind === "git_worktree_remove") {
+      writeLine(output, `已取消删除 worktree；「${approval.name}」未被删除。可调整请求后重试。`);
     } else {
       writeLine(output, "已取消待确认权限；工具尚未执行。可调整请求或继续说明目标。");
     }
@@ -3328,6 +3391,15 @@ async function executePermissionApprove(
     writeStatus(output, context);
     return;
   }
+  if (approval.kind === "git_worktree_remove") {
+    await resolveWorktreeRemoveApprove(
+      approval,
+      context,
+      output,
+      createWorktreeRemoveResolveDeps(gateway),
+    );
+    return;
+  }
 }
 
 /**
@@ -3432,6 +3504,16 @@ async function executePermissionDeny(
       writeStatus(output, context);
       return;
     }
+  }
+  if (approval.kind === "git_worktree_remove") {
+    await resolveWorktreeRemoveDeny(
+      approval,
+      context,
+      output,
+      cancelled,
+      createWorktreeRemoveResolveDeps(gateway),
+    );
+    return;
   }
   writeLine(output, formatPermissionDenialPrimary(context.language));
   writeStatus(output, context);
@@ -4377,59 +4459,6 @@ async function handleBranchCommand(
   }
   refreshCacheFreshness(context);
   writeStatus(output, context);
-}
-
-/**
- * D.13R Git / Worktree / Stable Point Maturity Sweep — 只读 git 状态面板。
- *
- * 路径：
- *   /git, /git status     → 状态摘要（branch / clean-dirty / N changed / 最近 stable point / 下一步）
- *   /git stable           → stable point 建议（只读，不自动 commit）
- *   /git worktree         → worktree 列表（只读）
- *   /git doctor           → 完整 details + diagnostics（同 status 但含 detailsText）
- *
- * 默认所有 git 子命令都走 CommandPanel，不污染 transcript。真正的 git mutating
- * 操作（commit / reset / checkout / worktree add/remove / branch -D）由用户
- * 通过 Bash 工具触发，走 permission-policy-engine 的现有四档权限链。
- */
-async function handleGitCommand(
-  args: string[],
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
-  const action = (args[0] ?? "status").toLowerCase();
-  if (action === "stable") {
-    await renderStablePointPanel(context, output);
-    return;
-  }
-  if (action === "worktree") {
-    await renderWorktreePanel(context, output);
-    return;
-  }
-  // status / doctor / 默认走 status 面板
-  await renderGitStatusPanel(context, output, action === "doctor");
-}
-
-async function handleWorktreeCommand(
-  _args: string[],
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
-  await renderWorktreePanel(context, output);
-}
-
-async function handleCheckpointCommand(
-  args: string[],
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
-  const action = (args[0] ?? "list").toLowerCase();
-  if (action === "stable") {
-    await renderStablePointPanel(context, output);
-    return;
-  }
-  // 默认 list 走原 /rewind list 行为，但用 CommandPanel 包装。
-  await renderCheckpointPanel(context, output);
 }
 
 // Module 7 (tui-memory-runtime): formatMemoryLearningRun /
@@ -5641,7 +5670,15 @@ async function sendMessage(
     ? createArchitectureRuntimeDirective(architectureCard)
     : undefined;
   await refreshWorkspaceReferenceCache(context, runtimeStatus);
-  const systemPrompt = createModelSystemPrompt(text, context, runtimeStatus, architectureDirective);
+  // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
+  const worktreeContext = await computeWorktreeContext(context.projectPath);
+  const systemPrompt = createModelSystemPrompt(
+    text,
+    context,
+    runtimeStatus,
+    architectureDirective,
+    summarizeWorktreeContextForPrompt(worktreeContext),
+  );
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
       context,
@@ -6515,6 +6552,11 @@ async function executeModelToolUse(
     toolCall.name === EXECUTE_EXTRA_TOOL_NAME
   ) {
     return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
+  }
+  // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
+  // git-tool-dispatch-runtime 真实执行（status 只读；create safe-create；remove 走确认）。
+  if (isGitToolName(toolCall.name)) {
+    return executeGitToolUse(toolCall, context, sessionId, output, gitToolDispatchDeps, continuation);
   }
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {

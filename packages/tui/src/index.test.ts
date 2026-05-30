@@ -12484,3 +12484,310 @@ describe("D.13V-B/C source invariants", () => {
     expect(boundarySrc).toContain("Does NOT modify any files");
   });
 });
+
+describe("D.14G git stable point / managed worktree product closure", () => {
+  // 在 throwaway 临时仓库里设置 local-only git identity（-c 形式，不写用户全局 config）。
+  function gitInitRepo(dir: string): void {
+    spawnSync("git", ["init"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.email", "test@linghun.local"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.name", "linghun-test"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir, windowsHide: true });
+  }
+  function gitCommitAll(dir: string, message: string): void {
+    spawnSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["commit", "-m", message], { cwd: dir, windowsHide: true });
+  }
+  const hasGit = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
+  const gitIt = hasGit ? it : it.skip;
+
+  // runTui-based tests resolve the provider/model from the real machine config
+  // (~/.linghun/provider.env) unless isolated. Mirror the CLI test's isolation:
+  // point LINGHUN_CONFIG_DIR at a throwaway home and clear provider/model env vars
+  // so the project's openai-compatible settings deterministically win.
+  const MODEL_ENV_KEYS = [
+    "LINGHUN_OPENAI_API_KEY",
+    "LINGHUN_OPENAI_BASE_URL",
+    "LINGHUN_OPENAI_MODEL",
+    "LINGHUN_DEEPSEEK_API_KEY",
+    "LINGHUN_DEEPSEEK_BASE_URL",
+    "LINGHUN_DEEPSEEK_MODEL",
+    "LINGHUN_DEFAULT_MODEL",
+    "LINGHUN_INFERENCE_LEVEL",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+  ];
+  async function isolateModelEnv(): Promise<void> {
+    const home = await mkdtemp(join(tmpdir(), "linghun-d14g-home-"));
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    for (const key of MODEL_ENV_KEYS) {
+      vi.stubEnv(key, undefined as unknown as string);
+    }
+  }
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // SSE-headed mock: the provider requires content-type to include event-stream,
+  // so a bare new Response() (text/plain) is rejected as PROVIDER_NON_SSE_STREAM.
+  // Each request N replies with toolCalls[N-1] if present, else the final text.
+  function mockSseToolSequence(
+    toolCalls: Array<{ toolName: string; input: unknown }>,
+    finalText: string,
+  ): unknown[] {
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        const tc = toolCalls[requests.length - 1];
+        const body = tc
+          ? `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { tool_calls: [{ id: `call-${requests.length}`, type: "function", function: { name: tc.toolName, arguments: JSON.stringify(tc.input) } }] } }] })}\n\ndata: [DONE]\n\n`
+          : `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+    return requests;
+  }
+
+  async function makeRepoContext(): Promise<{ project: string; context: TuiContext; store: SessionStore }> {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d14g-"));
+    gitInitRepo(project);
+    await writeFile(join(project, "README.md"), "# repo\n", "utf8");
+    gitCommitAll(project, "init");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    return { project, context, store };
+  }
+
+  gitIt("/git stable create commits tracked changes and records git_operation evidence", async () => {
+    const { project, context } = await makeRepoContext();
+    await writeFile(join(project, "README.md"), "# repo\n\nchanged\n", "utf8");
+    const output = new MemoryOutput();
+
+    await handleSlashCommand('/git stable create "feat: d14g stable"', context, output);
+
+    expect(output.text).toContain("已建立稳定点");
+    // 真实 commit 落地：git log 顶部是我们的 subject。
+    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
+    expect(log.stdout.toString().trim()).toBe("feat: d14g stable");
+    // git_operation evidence 记录，可支撑“已建立稳定点”声明。
+    expect(
+      context.evidence.some((e) => e.supportsClaims.includes("stable_point_created")),
+    ).toBe(true);
+  });
+
+  gitIt("/git stable create on clean repo skips (no empty commit)", async () => {
+    const { project, context } = await makeRepoContext();
+    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand('/git stable create "noop"', context, output);
+
+    expect(output.text).toContain("干净");
+    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    expect(after).toBe(before);
+  });
+
+  gitIt("/git stable create with only untracked → snapshot, no commit", async () => {
+    const { project, context } = await makeRepoContext();
+    await writeFile(join(project, "new-untracked.ts"), "export const x = 1;\n", "utf8");
+    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand('/git stable create "untracked"', context, output);
+
+    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    expect(after).toBe(before);
+    expect(output.text).toMatch(/snapshot|未跟踪/);
+  });
+
+  gitIt("/git stable create --include-untracked excludes sensitive files", async () => {
+    const { project, context } = await makeRepoContext();
+    await writeFile(join(project, "safe.ts"), "export const y = 2;\n", "utf8");
+    await writeFile(join(project, ".env"), "SECRET=should-not-commit\n", "utf8");
+    const output = new MemoryOutput();
+
+    await handleSlashCommand('/git stable create "feat: incl" --include-untracked', context, output);
+
+    // safe.ts committed; .env never tracked.
+    const tracked = spawnSync("git", ["ls-files"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(tracked).toContain("safe.ts");
+    expect(tracked).not.toContain(".env");
+  });
+
+  gitIt("/worktree create makes a managed worktree under the controlled root", async () => {
+    const { project, context } = await makeRepoContext();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/worktree create d14g-feat", context, output);
+
+    expect(output.text).toContain("已创建 worktree");
+    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(list).toContain(".linghun-worktrees");
+    expect(list).toContain("d14g-feat");
+    expect(
+      context.evidence.some((e) => e.supportsClaims.includes("worktree_created")),
+    ).toBe(true);
+  });
+
+  gitIt("/worktree create rejects an invalid (escaping) name without touching git", async () => {
+    const { project, context } = await makeRepoContext();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/worktree create ../escape", context, output);
+
+    expect(output.text).toMatch(/非法|invalid|不能/);
+    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(list).not.toContain("escape");
+  });
+
+  gitIt("/worktree remove on a clean managed worktree asks for confirmation, then removes on yes", async () => {
+    const { project, context } = await makeRepoContext();
+    const createOut = new MemoryOutput();
+    await handleSlashCommand("/worktree create d14g-rm", context, createOut);
+    expect(createOut.text).toContain("已创建 worktree");
+
+    const removeOut = new MemoryOutput();
+    await handleSlashCommand("/worktree remove d14g-rm", context, removeOut);
+    // 进入确认，未删除。
+    expect(removeOut.text).toContain("确认删除");
+    expect(context.pendingLocalApproval?.kind).toBe("git_worktree_remove");
+    let list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(list).toContain("d14g-rm");
+
+    // 确认 yes → 真正删除。
+    const yesOut = new MemoryOutput();
+    await handleNaturalInput("yes", context, yesOut);
+    expect(yesOut.text).toContain("已删除 worktree");
+    expect(context.pendingLocalApproval).toBeUndefined();
+    list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(list).not.toContain("d14g-rm");
+    expect(
+      context.evidence.some((e) => e.supportsClaims.includes("worktree_removed")),
+    ).toBe(true);
+  });
+
+  gitIt("/worktree remove deny (no) keeps the worktree", async () => {
+    const { project, context } = await makeRepoContext();
+    await handleSlashCommand("/worktree create d14g-keep", context, new MemoryOutput());
+
+    await handleSlashCommand("/worktree remove d14g-keep", context, new MemoryOutput());
+    expect(context.pendingLocalApproval?.kind).toBe("git_worktree_remove");
+
+    const noOut = new MemoryOutput();
+    await handleNaturalInput("no", context, noOut);
+    expect(context.pendingLocalApproval).toBeUndefined();
+    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(list).toContain("d14g-keep");
+  });
+
+  gitIt("/worktree remove of an unmanaged worktree is refused (no confirmation)", async () => {
+    const { project, context } = await makeRepoContext();
+    // 在受控目录外创建一个 external worktree。
+    const external = await mkdtemp(join(tmpdir(), "linghun-ext-"));
+    spawnSync("git", ["worktree", "add", join(external, "ext-wt")], { cwd: project, windowsHide: true });
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/worktree remove ext-wt", context, output);
+
+    expect(output.text).toMatch(/external|受控目录|not_managed|不允许/);
+    expect(context.pendingLocalApproval).toBeUndefined();
+  });
+
+  gitIt("model GitStablePointCreate tool_use executes a real commit and the final answer is evidence-backed", async () => {
+    await isolateModelEnv();
+    const { project, context, store } = await makeRepoContext();
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "git-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "git-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "README.md"), "# repo\n\nmodel-change\n", "utf8");
+
+    const requests = mockSseToolSequence(
+      [{ toolName: "GitStablePointCreate", input: { message: "feat: via model" } }],
+      "已建立稳定点。",
+    );
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我建立一个稳定点\n", "/exit\n"]),
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+    });
+
+    // 模型确实发了 tool_call（≥2 轮）。
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    // 真实 commit 落地。
+    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
+    expect(log.stdout.toString().trim()).toBe("feat: via model");
+    // git_operation evidence 写入 transcript。
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      ),
+    ).toBe(true);
+  });
+
+  gitIt("model claims a stable point WITHOUT calling the tool → final gate downgrades the claim", async () => {
+    await isolateModelEnv();
+    const { project, store } = await makeRepoContext();
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "git-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "git-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    // 模型不调用工具，两轮都空口声称已建立稳定点。
+    mockSseToolSequence([], "已建立稳定点，当前状态已保存。");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["建立一个稳定点\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 没有 git_operation evidence → final gate 降级，不能让原文“已建立稳定点”原样通过。
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    const hasGitEvidence = transcript.some(
+      (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+    );
+    expect(hasGitEvidence).toBe(false);
+    const downgraded = transcript.some(
+      (e) =>
+        e.type === "system_event" && /final_answer_claim_gate (?:retry|downgrade)/.test(e.message),
+    );
+    expect(downgraded).toBe(true);
+  });
+});

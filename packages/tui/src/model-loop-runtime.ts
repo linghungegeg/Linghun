@@ -25,8 +25,10 @@ import type { ModelToolDefinition } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
+import { createGitToolDefinitions } from "./git-tool-runtime.js";
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
+
 
 // ---------------------------------------------------------------------------
 // Types
@@ -231,11 +233,14 @@ export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
 export function createModelToolDefinitions(): ModelToolDefinition[] {
   // D.13I：full-tool 模式才附加 deferred dispatch（SearchExtraTools / ExecuteExtraTool）；
   // reportGuard 受限子集走 createModelToolDefinitionsForTools，不附加。
+  // D.14G：full-tool 模式附加结构化 Git 能力（stable point / status / managed worktree），
+  // 让模型需要执行 Git 时调用真实工具，而不是靠本地自然语言 regex 拦截。
   return [
     ...createModelToolDefinitionsForTools(
       Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
     ),
     ...createDeferredToolDispatchDefinitions(),
+    ...createGitToolDefinitions(),
   ];
 }
 
@@ -502,7 +507,8 @@ export type FinalAnswerClaimKind =
   | "code_fact"
   | "external_current_fact"
   | "ccb_parity"
-  | "beta_readiness";
+  | "beta_readiness"
+  | "git_operation";
 
 export type FinalAnswerClaimMatch = {
   kind: FinalAnswerClaimKind;
@@ -532,6 +538,8 @@ const STALE_THRESHOLDS_MS: Record<FinalAnswerClaimKind, number | null> = {
   external_current_fact: 24 * 60 * 60 * 1000,
   ccb_parity: null,
   beta_readiness: null,
+  // D.14G：git 稳定点/worktree 操作绑定到本会话真实 git_operation evidence，不按时间过期。
+  git_operation: null,
 };
 
 export function isEvidenceStaleForClaim(
@@ -609,6 +617,21 @@ const BETA_READINESS_PATTERNS: RegExp[] = [
   /\u53ef\u4ee5\s*(?:\u8fdb\u5165|\u53d1\u5e03)\s*beta/u,
 ];
 
+// D.14G \u2014 git \u64cd\u4f5c\u9ad8\u98ce\u9669\u58f0\u660e\uff1a\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9 / \u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001 / \u5df2\u521b\u5efa / \u5df2\u5220\u9664 worktree\u3002
+// \u8fd9\u4e9b claim \u5fc5\u987b\u6709\u5bf9\u5e94 git_operation evidence\uff08\u771f\u5b9e runtime \u6267\u884c\u8fc7\uff09\uff0c\u5426\u5219\u964d\u7ea7\u3002
+const GIT_OPERATION_PATTERNS: RegExp[] = [
+  /\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9/u, // \u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9
+  /\u5df2\u521b\u5efa\u7a33\u5b9a\u70b9/u, // \u5df2\u521b\u5efa\u7a33\u5b9a\u70b9
+  /\u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001/u, // \u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001
+  /\u7a33\u5b9a\u70b9\u5df2(?:\u521b\u5efa|\u5efa\u7acb|\u4fdd\u5b58)/u, // \u7a33\u5b9a\u70b9\u5df2\u521b\u5efa/\u5efa\u7acb/\u4fdd\u5b58
+  /\u5df2(?:\u521b\u5efa|\u751f\u6210).{0,6}worktree/iu, // \u5df2\u521b\u5efa/\u751f\u6210 ... worktree
+  /\u5df2\u5220\u9664.{0,6}worktree/iu, // \u5df2\u5220\u9664 ... worktree
+  /worktree\s+(?:created|removed|deleted)/iu,
+  /\bstable\s+point\s+(?:created|saved)\b/iu,
+  /\bcreated\s+(?:a\s+)?(?:managed\s+)?worktree\b/iu,
+  /\bremoved\s+(?:the\s+)?(?:managed\s+)?worktree\b/iu,
+];
+
 function detectMatches(
   text: string,
   patterns: RegExp[],
@@ -631,6 +654,7 @@ export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
   matches.push(...detectMatches(text, COMPLETION_PASS_PATTERNS, "completion_pass"));
   matches.push(...detectMatches(text, CODE_FACT_PATTERNS, "code_fact"));
   matches.push(...detectMatches(text, CCB_PARITY_PATTERNS, "ccb_parity"));
+  matches.push(...detectMatches(text, GIT_OPERATION_PATTERNS, "git_operation"));
   // \u5916\u90e8\u5f53\u524d\u4e8b\u5b9e\uff1a\u5148\u53bb\u9664"\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6..."\u7b49\u672c\u5730\u767d\u540d\u5355\uff0c\u518d\u5339\u914d
   const sanitized = text.replace(LOCAL_CURRENT_WHITELIST, "");
   matches.push(...detectMatches(sanitized, EXTERNAL_CURRENT_PATTERNS, "external_current_fact"));
@@ -683,12 +707,27 @@ function evidenceSupportsCcbParity(record: EvidenceRecord): boolean {
   return false;
 }
 
+// D.14G\uff1agit \u64cd\u4f5c evidence\u3002recordGitOperationEvidence \u5199\u5165 supportsClaims \u542b
+// git_operation \u4e0e\u5177\u4f53\u64cd\u4f5c\u6807\u7b7e\uff08stable_point_created / worktree_created /
+// worktree_removed\uff09\uff0c\u4e14\u4ec5\u5728\u771f\u5b9e runtime \u6210\u529f\u6267\u884c\u540e\u5199\u5165\u3002
+function evidenceSupportsGitOperation(record: EvidenceRecord): boolean {
+  return record.supportsClaims.some(
+    (claim) =>
+      claim === "git_operation" ||
+      claim === "stable_point_created" ||
+      claim === "worktree_created" ||
+      claim === "worktree_resumed" ||
+      claim === "worktree_removed",
+  );
+}
+
 const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
   completion_pass: "test/build/typecheck/diff-check/smoke",
   code_fact: "Read/Grep/index",
   external_current_fact: "web_source",
   ccb_parity: "ccb-source \u672c\u5730\u8bc1\u636e\u6216 web_source",
   beta_readiness: "Beta readiness verdict (real-tui report-generation PASS)",
+  git_operation: "git_operation evidence (real stable point / worktree create / worktree remove)",
 };
 
 export function evaluateFinalAnswerClaims(
@@ -720,6 +759,8 @@ export function evaluateFinalAnswerClaims(
       supporter = evidenceSupportsExternalCurrent;
     } else if (kind === "ccb_parity") {
       supporter = evidenceSupportsCcbParity;
+    } else if (kind === "git_operation") {
+      supporter = evidenceSupportsGitOperation;
     } else {
       // beta_readiness \u7531 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u6c38\u8fdc\u4e0d\u653e\u884c\u3002
       supporter = () => false;

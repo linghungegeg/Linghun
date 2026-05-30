@@ -112,6 +112,14 @@ describe("model-loop-runtime", () => {
         expect(def.inputSchema).toBeDefined();
       }
     });
+
+    it("D.14G: exposes structured Git tools to the model (full-tool mode)", () => {
+      const names = createModelToolDefinitions().map((d) => d.name);
+      expect(names).toContain("GitStablePointCreate");
+      expect(names).toContain("GitStatusInspect");
+      expect(names).toContain("ManagedWorktreeCreate");
+      expect(names).toContain("ManagedWorktreeRemove");
+    });
   });
 
   describe("createModelToolDefinitionsForReportGuard", () => {
@@ -607,6 +615,43 @@ describe("model-loop-runtime", () => {
       const verdict = evaluateFinalAnswerClaims("Beta ready 了。", evidence);
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("beta_readiness");
+    });
+
+    it("D.14G: git_operation claim needs git_operation evidence", () => {
+      // 模型空口声称“已建立稳定点”，没有 git_operation evidence → 拦截。
+      const noEvidence = evaluateFinalAnswerClaims("已建立稳定点，代码已保存。", []);
+      expect(noEvidence.status).toBe("needs_disclaimer");
+      expect(noEvidence.unsupportedKinds).toContain("git_operation");
+
+      // 有真实 stable_point_created evidence → 放行。
+      const withEvidence = evaluateFinalAnswerClaims("已建立稳定点。", [
+        makeEvidence({
+          kind: "command_output",
+          source: "git-operation:stable_point_created",
+          supportsClaims: ["git_operation", "stable_point_created"],
+        }),
+      ]);
+      expect(withEvidence.status).toBe("passed");
+    });
+
+    it("D.14G: worktree created/removed claims gated on worktree evidence", () => {
+      const created = evaluateFinalAnswerClaims("已创建 worktree d14b。", []);
+      expect(created.status).toBe("needs_disclaimer");
+      expect(created.unsupportedKinds).toContain("git_operation");
+
+      const ok = evaluateFinalAnswerClaims("已删除 worktree d14b。", [
+        makeEvidence({
+          kind: "command_output",
+          source: "git-operation:worktree_removed",
+          supportsClaims: ["git_operation", "worktree_removed"],
+        }),
+      ]);
+      expect(ok.status).toBe("passed");
+    });
+
+    it("D.14G: ordinary git discussion does not trigger git_operation gate", () => {
+      // 普通讨论“稳定点是什么”不应被当成已执行声明。
+      expect(detectHighRiskClaims("稳定点是用来回滚的一个安全垫。").some((m) => m.kind === "git_operation")).toBe(false);
     });
   });
 
