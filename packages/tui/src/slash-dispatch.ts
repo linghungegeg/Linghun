@@ -594,6 +594,9 @@ function formatHelp(language: Language): string {
   /memory forget <id>   Alias for /memory delete
   /memory init          Create a basic LINGHUN.md template on explicit request
   /memory import sessions [source] [query]  Import external AI session summary/evidence only
+  /failures             Show reusable lessons from real failures (provider/tool/verification/git/final-gate/report-guard/resource-cap)
+  /failures resolve <id>  Mark a failure lesson resolved (stops surfacing it to the model)
+  /failures ignore <id>   Mute a failure lesson without deleting it
   /mode                 Show permission mode
   /mode default|auto-review|plan|full-access  Switch mode
   /tab                  Shift+Tab equivalent: cycle common modes
@@ -696,6 +699,9 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /memory forget <id>   等同 /memory delete
   /memory init          显式生成基础 LINGHUN.md 模板
   /memory import sessions [source] [query]  只导入外部 AI 会话摘要和证据引用
+  /failures             查看从真实失败（provider/工具/验证/git/最终回答降级/报告守卫/并发上限）提取的可复用教训
+  /failures resolve <id>  标记某条失败教训已解决（不再投影给模型）
+  /failures ignore <id>   忽略某条失败教训但保留记录
   /mode                 查看权限模式
   /mode default|auto-review|plan|full-access  切换模式
   /tab                  等价 Shift+Tab：循环切换常用模式

@@ -409,6 +409,18 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "start_gate",
   ),
   cap(
+    "failures",
+    "/failures",
+    ["failures", "失败学习", "failure learning", "lessons", "教训", "踩坑"],
+    "失败学习",
+    "Failure learning",
+    "查看从真实失败（provider/工具/验证/git/最终回答降级/报告守卫/并发上限）提取的可复用教训；resolve/ignore 需明确命令。",
+    "Shows reusable lessons from real failures (provider/tool/verification/git/final-gate/report-guard/resource-cap); resolve/ignore need explicit commands.",
+    "想查看历史失败教训、避免重复踩坑，或标记某条已解决/忽略。",
+    "Use to review past failure lessons or mark one resolved/ignored.",
+    "start_gate",
+  ),
+  cap(
     "mode",
     "/mode",
     [

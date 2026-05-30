@@ -28,6 +28,7 @@ import {
   addAllowRuleForTest,
   containsSecret,
   createCacheState,
+  createFailureLearningState,
   createHookState,
   createIndexState,
   createMcpState,
@@ -83,6 +84,11 @@ import {
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
+import {
+  buildFailureLearningSummaryForPrompt,
+  loadFailureRecords,
+  mergeFailureRecord,
+} from "./failure-learning-runtime.js";
 import { createOutputBlock } from "./shell/view-model.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import {
@@ -351,6 +357,7 @@ async function createTestContext(
       retired: [],
       learningMode: "off",
     },
+    failureLearning: createFailureLearningState(project),
     skills: await createSkillState(config, project),
     workflows: createWorkflowState(config),
     hooks: await createHookState(config, project),
@@ -12789,5 +12796,266 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         e.type === "system_event" && /final_answer_claim_gate (?:retry|downgrade)/.test(e.message),
     );
     expect(downgraded).toBe(true);
+  });
+});
+
+describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
+  const hasGit = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
+  const gitIt = hasGit ? it : it.skip;
+
+  function gitInitRepo(dir: string): void {
+    spawnSync("git", ["init"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.email", "test@linghun.local"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.name", "linghun-test"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir, windowsHide: true });
+  }
+
+  const MODEL_ENV_KEYS = [
+    "LINGHUN_OPENAI_API_KEY",
+    "LINGHUN_OPENAI_BASE_URL",
+    "LINGHUN_OPENAI_MODEL",
+    "LINGHUN_DEEPSEEK_API_KEY",
+    "LINGHUN_DEEPSEEK_BASE_URL",
+    "LINGHUN_DEEPSEEK_MODEL",
+    "LINGHUN_DEFAULT_MODEL",
+    "LINGHUN_INFERENCE_LEVEL",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+  ];
+  async function isolateModelEnv(): Promise<void> {
+    const home = await mkdtemp(join(tmpdir(), "linghun-d14b-home-"));
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    for (const key of MODEL_ENV_KEYS) {
+      vi.stubEnv(key, undefined as unknown as string);
+    }
+  }
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function mockSseFinalText(finalText: string): unknown[] {
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        const body = `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+    return requests;
+  }
+
+  function mergeFailureRecordForTest(
+    context: TuiContext,
+    input: Parameters<typeof mergeFailureRecord>[1],
+  ) {
+    return mergeFailureRecord(context.failureLearning, input).record;
+  }
+
+  async function loadFailureRecordsForTest(context: TuiContext) {
+    return loadFailureRecords(context.failureLearning);
+  }
+
+  async function makePromptContext(): Promise<TuiContext> {
+    const project = await mkdtemp(join(tmpdir(), "linghun-d14b-prompt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    return createTestContext(project, store, session);
+  }
+
+  async function readFailureFiles(
+    project: string,
+  ): Promise<Array<{ category: string; failureSummary: string }>> {
+    const dir = join(project, ".linghun", "failures");
+    const fsp = await import("node:fs/promises");
+    let files: string[];
+    try {
+      files = await fsp.readdir(dir);
+    } catch {
+      return [];
+    }
+    const out: Array<{ category: string; failureSummary: string }> = [];
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      out.push(JSON.parse(await fsp.readFile(join(dir, f), "utf8")));
+    }
+    return out;
+  }
+
+  it("user cancel / permission deny is NOT recorded as a model failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await handleNaturalInput("no", context, output);
+
+    // 拒绝/取消走 recordToolFailureEvidence（evidence 层），但绝不进 failure learning。
+    expect(context.failureLearning.records).toHaveLength(0);
+  });
+
+  it("/failures is summary-first, lists active lessons, and never leaks sourceRef/secret", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    mergeFailureRecordForTest(context, {
+      category: "provider_failure",
+      failureSummary: "provider request failed code=PROVIDER_RATE_LIMITED https://relay.example.com sk-leak123",
+      rootCauseGuess: "rate limited",
+      avoidNextTime: "back off before retrying provider calls",
+      sourceRef: "evidence:abc123",
+      relatedTarget: "PROVIDER_RATE_LIMITED",
+      severity: "high",
+    });
+
+    await handleSlashCommand("/failures", context, output);
+
+    expect(output.text).toContain("失败学习");
+    expect(output.text).toContain("back off");
+    // 主屏摘要与 details 都不得泄漏 baseUrl/secret（sourceRef 是内部 evidence id，等同 memory 的 source=，允许）。
+    expect(output.text).not.toContain("relay.example.com");
+    expect(output.text).not.toContain("sk-leak123");
+  });
+
+  it("/failures resolve marks a record resolved and persists it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const record = mergeFailureRecordForTest(context, {
+      category: "tool_failure",
+      failureSummary: "Bash exited non-zero",
+      rootCauseGuess: "command failed",
+      avoidNextTime: "inspect the output",
+      sourceRef: "evidence:abc",
+      relatedTarget: "Bash",
+      severity: "medium",
+    });
+
+    await handleSlashCommand(`/failures resolve ${record.id}`, context, output);
+
+    expect(output.text).toContain("已解决");
+    expect(context.failureLearning.records[0].status).toBe("resolved");
+    const reloaded = await loadFailureRecordsForTest(context);
+    expect(reloaded.find((r) => r.id === record.id)?.status).toBe("resolved");
+  });
+
+  it("FailureLearningSummary is injected into system prompt with a risk-hint rule and no secrets", async () => {
+    const context = await makePromptContext();
+    mergeFailureRecordForTest(context, {
+      category: "provider_failure",
+      failureSummary: "POST https://relay.example.com sk-leak999 failed",
+      rootCauseGuess: "auth Bearer secret.token rejected",
+      avoidNextTime: "verify provider config before retrying",
+      sourceRef: "evidence:secret-id",
+      relatedTarget: "PROVIDER_ERROR",
+      severity: "high",
+    });
+
+    const prompt = createModelSystemPrompt(
+      "继续",
+      context,
+      undefined,
+      undefined,
+      null,
+      buildFailureLearningSummaryForPrompt(context.failureLearning),
+    );
+
+    expect(prompt).toContain("FailureLearningSummary=");
+    expect(prompt).toContain("FailureLearningRule=");
+    expect(prompt).toContain("verify provider config");
+    // gate / anti-hallucination 边界：不得把历史失败当作已修复/已验证证据。
+    expect(prompt).toMatch(/do NOT mean the current task has failed, is fixed, or is verified/);
+    // 脱敏：prompt 不泄漏 secret/baseUrl/sourceRef。
+    expect(prompt).not.toContain("relay.example.com");
+    expect(prompt).not.toContain("sk-leak999");
+    expect(prompt).not.toContain("secret.token");
+    expect(prompt).not.toContain("secret-id");
+  });
+
+  it("no active lessons → FailureLearningSummary is not injected", async () => {
+    const context = await makePromptContext();
+    const prompt = createModelSystemPrompt(
+      "继续",
+      context,
+      undefined,
+      undefined,
+      null,
+      buildFailureLearningSummaryForPrompt(context.failureLearning),
+    );
+    expect(prompt).not.toContain("FailureLearningSummary=");
+  });
+
+  gitIt("final answer gate downgrade records a final_gate_downgrade lesson on disk", async () => {
+    await isolateModelEnv();
+    const project = await mkdtemp(join(tmpdir(), "linghun-d14b-"));
+    gitInitRepo(project);
+    await writeFile(join(project, "README.md"), "# repo\n", "utf8");
+    spawnSync("git", ["add", "-A"], { cwd: project, windowsHide: true });
+    spawnSync("git", ["commit", "-m", "init"], { cwd: project, windowsHide: true });
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "fl-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "fl-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // 模型空口声称"已完成、测试通过"，无 evidence → final gate 降级 → failure learning。
+    // 输入本身不含代码事实关键词，避免命中输入侧 evidence gate；违规声明出现在模型回答里。
+    mockSseFinalText("已完成，测试通过，PASS，一切就绪。");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我看看现在的整体情况\n", "/exit\n"]),
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+    });
+
+    const files = await readFailureFiles(project);
+    const categories = files.map((f) => f.category);
+    expect(categories).toContain("final_gate_downgrade");
+    // 持久化文件不含 secret/baseUrl。
+    const raw = JSON.stringify(files);
+    expect(raw).not.toContain("example.test");
+    expect(raw).not.toContain("sk-test");
+  });
+
+  it("D.14B source invariant: business logic lives in failure-learning modules, index.ts only glues", async () => {
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    // index.ts 只接线：调用 captureFailureLearning / 投影 summary / dispatch slash。
+    expect(indexSrc).toContain("captureFailureLearning(context, sessionId");
+    expect(indexSrc).toContain("buildFailureLearningSummaryForPrompt(context.failureLearning)");
+    expect(indexSrc).toContain('handleFailuresCommand(rest, context, output)');
+    // 业务逻辑（脱敏 / 去重 / 投影构建）不在 index.ts 重新实现。
+    expect(indexSrc).not.toContain("function sanitizeFailureText");
+    expect(indexSrc).not.toContain("function failureDedupeHash");
+    expect(indexSrc).not.toContain("function buildFailureLearningSummaryForPrompt");
+
+    const runtimeSrc = await readFile("src/failure-learning-runtime.ts", "utf8");
+    expect(runtimeSrc).toContain("export function sanitizeFailureText");
+    expect(runtimeSrc).toContain("export function failureDedupeHash");
+    expect(runtimeSrc).toContain("export function buildFailureLearningSummaryForPrompt");
   });
 });

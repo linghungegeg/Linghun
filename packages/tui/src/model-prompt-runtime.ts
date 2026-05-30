@@ -15,6 +15,9 @@ export function createModelSystemPrompt(
   // D.14G — 最小 WorktreeContext 投影（已 redacted，不含 provider/baseUrl）。
   // 由 sendMessage 异步计算后传入；undefined 时不注入。
   worktreeContextSummary?: Record<string, unknown> | null,
+  // D.14B — 紧凑 FailureLearningSummary（已脱敏，不含 secret/baseUrl/长路径/sourceRef 内部）。
+  // 只投影当前项目少量 active 高价值教训；null/undefined 时不注入。
+  failureLearningSummary?: { count: number; text: string } | null,
 ): string {
   const solutionCompletenessWarning = updateSolutionCompletenessGate(text, context);
   // D.13I：仅当 deferred 列表非空时注入 SearchExtraTools/ExecuteExtraTool 提示。built-in
@@ -26,6 +29,11 @@ export function createModelSystemPrompt(
   const worktreeContextLine =
     worktreeContextSummary && worktreeContextSummary.isWorktree === true
       ? `\nWorktreeContext=${JSON.stringify(worktreeContextSummary)}`
+      : "";
+  // D.14B — FailureLearningSummary 是历史风险提示，不是已发生/已修复事实，不构成 completion evidence。
+  const failureLearningLine =
+    failureLearningSummary && failureLearningSummary.count > 0
+      ? `\nFailureLearningSummary=${failureLearningSummary.text}\nFailureLearningRule=These are lessons from PAST real failures in this project, surfaced as risk hints only. They do NOT mean the current task has failed, is fixed, or is verified. Use them to double-check risky steps; never cite them as evidence that something is already done/fixed/verified. Say "history shows / may be related", not present-tense facts.`
       : "";
   return `${
     context.language === "en-US"
@@ -39,7 +47,7 @@ export function createModelSystemPrompt(
     context.language === "en-US"
       ? "EngineeringStructure=Do not pile logic into existing large files by default. Avoid god files, code blobs, overly long functions (>200 lines), deep nesting (>3 levels), and unbounded global state. Keep responsibility boundaries clear: UI/state/IO/provider/runner/permission/cache/verification. Prefer reusing existing project modules, helpers, presenters, and runtimes over creating a second system. Do not add zero-benefit abstractions for elegance. Each change must have a verifiable boundary (focused tests, typecheck, check). This is not authorization for large refactors."
       : "EngineeringStructure=默认不把逻辑堆进已有大文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。职责边界保持清晰：UI/状态/IO/provider/runner/permission/cache/verification。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。不为了优雅新增无收益抽象。每个改动要有可验证边界（focused tests、typecheck、check）。这不是授权大重构。"
-  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nRuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}${worktreeContextLine}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
+  }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nRuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}${worktreeContextLine}${failureLearningLine}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
 

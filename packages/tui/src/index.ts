@@ -531,6 +531,19 @@ import {
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
 export { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
+import {
+  configureFailureLearningCommandRuntime,
+  handleFailuresCommand,
+} from "./failure-learning-command-runtime.js";
+import {
+  type FailureLearningInput,
+  buildFailureLearningSummaryForPrompt,
+  createFailureLearningState,
+  loadFailureRecords,
+  mergeFailureRecord,
+  writeFailureRecord,
+} from "./failure-learning-runtime.js";
+export { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createHandoffPacket, formatResumePacket, hydrateResumeContext, isHandoffPacket, loadOrCreateHandoffPacket, validateHandoffPacket, writeHandoffPacket } from "./handoff-session-runtime.js";
 
 export type { IndexState } from "./index-runtime.js";
@@ -651,6 +664,11 @@ import type {
   ExtensionScope,
   ExtensionSource,
   ExtensionTrustLevel,
+  FailureLearningCategory,
+  FailureLearningRecord,
+  FailureLearningSeverity,
+  FailureLearningState,
+  FailureLearningStatus,
   HandoffPacket,
   HookState,
   HookSummary,
@@ -716,6 +734,11 @@ export type {
   ExtensionScope,
   ExtensionSource,
   ExtensionTrustLevel,
+  FailureLearningCategory,
+  FailureLearningRecord,
+  FailureLearningSeverity,
+  FailureLearningState,
+  FailureLearningStatus,
   HandoffPacket,
   HookState,
   HookSummary,
@@ -948,6 +971,7 @@ export type TuiContext = {
   mcp: McpState;
   index: IndexState;
   memory: MemoryState;
+  failureLearning: FailureLearningState;
   skills: SkillState;
   workflows: WorkflowState;
   hooks: HookState;
@@ -1200,6 +1224,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
+    failureLearning: createFailureLearningState(projectPath),
     skills: await createSkillState(config, projectPath),
     workflows: createWorkflowState(config),
     hooks: await createHookState(config, projectPath),
@@ -1221,6 +1246,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   };
   installProcessGuardExitHandlers();
   await hydrateDurableJobBackgroundTasks(context);
+  context.failureLearning.records = await loadFailureRecords(context.failureLearning);
   const gateway = createModelGateway(config);
 
   const startup = await prepareTuiStartup(input, output, context);
@@ -2212,6 +2238,10 @@ export async function handleSlashCommand(
   }
   if (command === "/memory") {
     await handleMemoryCommand(rest, context, output);
+    return "handled";
+  }
+  if (command === "/failures") {
+    await handleFailuresCommand(rest, context, output);
     return "handled";
   }
   if (command === "/skills") {
@@ -4607,6 +4637,12 @@ configureMemoryCommandRuntime({
   writeStatus,
 });
 
+configureFailureLearningCommandRuntime({
+  appendSystemEvent,
+  ensureSession,
+  writeStatus,
+});
+
 configureExtensionSlashRuntime({
   appendSystemEvent,
   ensureSession,
@@ -5081,6 +5117,25 @@ async function recordVerificationEvidence(
     type: "evidence_record",
     ...evidence,
   });
+  // D.14B — 验证失败转 failure learning。只记 fail/partial/timeout（真实失败）；
+  // cancelled（用户取消）/stale（过期非失败）/skipped 不记为模型失败。
+  if (report.status === "fail" || report.status === "partial" || report.status === "timeout") {
+    const failedCommand = report.commands.find(
+      (c) => c.status === "fail" || c.status === "timeout",
+    );
+    await captureFailureLearning(context, sessionId, {
+      category: "verification_failure",
+      failureSummary: `verification ${report.status}: ${report.summary}`,
+      rootCauseGuess: failedCommand
+        ? `verification command failed (exit ${failedCommand.exitCode ?? "n/a"})`
+        : `verification did not reach pass (${report.status})`,
+      avoidNextTime:
+        "Fix the failing verification command and re-run it; do not claim verified/passed until status=pass",
+      sourceRef: `evidence:${evidence.id}`,
+      relatedTarget: failedCommand?.kind ?? "verification",
+      severity: report.status === "fail" ? "high" : "medium",
+    });
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -5596,6 +5651,18 @@ async function sendMessage(
   const modelGuard = checkResourceGuard(context, "model");
   if (modelGuard) {
     writeLine(output, modelGuard);
+    // D.14B — 并发上限拒绝是真实的"任务无法继续"事件（不是权限拒绝、不是用户取消）。
+    const guardSessionId = await ensureSession(context);
+    await captureFailureLearning(context, guardSessionId, {
+      category: "resource_cap",
+      failureSummary: "model request blocked by concurrency cap (a foreground request is already running)",
+      rootCauseGuess: "started a new model request while one was still active",
+      avoidNextTime:
+        "Wait for the active model request to finish or use /interrupt before starting another",
+      sourceRef: `event:${RESOURCE_GUARD_KIND}`,
+      relatedTarget: "model",
+      severity: "low",
+    });
     return;
   }
   const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
@@ -5678,6 +5745,7 @@ async function sendMessage(
     runtimeStatus,
     architectureDirective,
     summarizeWorktreeContextForPrompt(worktreeContext),
+    buildFailureLearningSummaryForPrompt(context.failureLearning),
   );
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
@@ -5972,6 +6040,17 @@ async function sendMessage(
         // D.13V — 同步把 streaming block 与 lastFullOutput 替换为降级文本，
         // 避免主屏 / Ctrl+O / details 仍展示原始违规文本。
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        // D.14B — final answer gate 降级是真实失败：模型空口声称未被 evidence 支持。
+        await captureFailureLearning(context, sessionId, {
+          category: "final_gate_downgrade",
+          failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
+          rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
+          avoidNextTime:
+            "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+          sourceRef: "event:final_answer_claim_gate",
+          relatedTarget: verdict.unsupportedKinds.join(","),
+          severity: "high",
+        });
       }
       // D.13V-B — Architecture / Completeness 降级（与 D.13U 共享 retry 预算）
       const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
@@ -6431,6 +6510,17 @@ async function continueModelAfterToolResults(
           assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
           // D.13V — 同步替换 continuation streaming block 与 lastFullOutput。
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+          // D.14B — continuation 路径的 final gate 降级镜像。
+          await captureFailureLearning(context, sessionId, {
+            category: "final_gate_downgrade",
+            failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
+            rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
+            avoidNextTime:
+              "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+            sourceRef: "event:final_answer_claim_gate",
+            relatedTarget: verdict.unsupportedKinds.join(","),
+            severity: "high",
+          });
         }
         // D.13V-B — Architecture / Completeness 降级（continuation 镜像）
         const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
@@ -6556,7 +6646,29 @@ async function executeModelToolUse(
   // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
   // git-tool-dispatch-runtime 真实执行（status 只读；create safe-create；remove 走确认）。
   if (isGitToolName(toolCall.name)) {
-    return executeGitToolUse(toolCall, context, sessionId, output, gitToolDispatchDeps, continuation);
+    const gitResult = await executeGitToolUse(
+      toolCall,
+      context,
+      sessionId,
+      output,
+      gitToolDispatchDeps,
+      continuation,
+    );
+    // D.14B — git 操作真实失败转 failure learning。pendingApproval（等待用户确认）
+    // 不是失败，不记录；只有 runtime 真正失败/拒绝（ok=false 且非 pending）才记。
+    if (!gitResult.ok && !gitResult.pendingApproval) {
+      await captureFailureLearning(context, sessionId, {
+        category: "git_operation_failure",
+        failureSummary: `git operation failed: ${gitResult.text}`,
+        rootCauseGuess: `${toolCall.name} git operation failed or was rejected by runtime validation`,
+        avoidNextTime:
+          "Check repo/worktree state and arguments before retrying the git operation; do not claim it succeeded",
+        sourceRef: gitResult.evidenceId ? `evidence:${gitResult.evidenceId}` : `tool:${toolCall.name}`,
+        relatedTarget: toolCall.name,
+        severity: "medium",
+      });
+    }
+    return gitResult;
   }
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
@@ -6775,6 +6887,18 @@ async function executeApprovedModelToolUse(
       isError,
       evidence?.id,
     );
+    if (isError) {
+      // D.14B — Bash/command 退出码非 0（非异常）也是真实失败。
+      await captureFailureLearning(context, sessionId, {
+        category: "tool_failure",
+        failureSummary: `${toolName} exited non-zero: ${result.output.text}`,
+        rootCauseGuess: `${toolName} command returned a non-zero exit code`,
+        avoidNextTime: "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
+        sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${toolName}`,
+        relatedTarget: toolName,
+        severity: "medium",
+      });
+    }
     clearBackgroundAbortController(context, task?.id ?? "");
     if (backgroundController) {
       context.tools.abortSignal = previousAbortSignal;
@@ -6807,6 +6931,15 @@ async function executeApprovedModelToolUse(
     const text = formatError(error, context.language);
     const evidence = await recordToolFailureEvidence(context, sessionId, toolName, text);
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
+    await captureFailureLearning(context, sessionId, {
+      category: "tool_failure",
+      failureSummary: text,
+      rootCauseGuess: `${toolName} tool threw an error during execution`,
+      avoidNextTime: `Re-check ${toolName} inputs/preconditions before retrying; verify the error, do not assume it succeeded`,
+      sourceRef: `evidence:${evidence.id}`,
+      relatedTarget: toolName,
+      severity: "medium",
+    });
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
 }
@@ -7136,6 +7269,17 @@ async function recordReportIncompleteEvidence(
     `report_incomplete: missing Write evidence for ${guard.requestedPath}; evidence=${evidence.id}`,
     "warning",
   );
+  // D.14B — report guard 未满足转 failure learning。relatedTarget 用脱敏路径基名，不记完整绝对路径。
+  await captureFailureLearning(context, sessionId, {
+    category: "report_guard",
+    failureSummary: `report write blocked: missing Write evidence for ${basename(guard.requestedPath)}`,
+    rootCauseGuess: "claimed a report/file was written without an actual Write tool_use",
+    avoidNextTime:
+      "Actually run the Write tool before claiming a report/file is written; the report guard requires Write evidence",
+    sourceRef: `evidence:${evidence.id}`,
+    relatedTarget: basename(guard.requestedPath),
+    severity: "medium",
+  });
   return formatReportIncompletePrimary(guard.requestedPath, context.language);
 }
 
@@ -7711,6 +7855,20 @@ async function recordProviderFailureEvidence(
     evidenceId: evidence.id,
     createdAt: evidence.createdAt,
   };
+  // D.14B — provider/model 请求失败转 failure learning。不记录 baseUrl/key/Authorization；
+  // failureSummary 只含错误码与脱敏 message，relatedTarget 用错误码。
+  await captureFailureLearning(context, sessionId, {
+    category: "provider_failure",
+    failureSummary: `provider request failed code=${code} message=${sanitizeProviderFailureText(message)}`,
+    rootCauseGuess: `model/provider request failed with ${code}`,
+    avoidNextTime:
+      code === "PROVIDER_RATE_LIMITED"
+        ? "Back off / reduce request rate before retrying provider calls"
+        : `Check provider config and request shape for ${code} before retrying; do not assume the request succeeded`,
+    sourceRef: `evidence:${evidence.id}`,
+    relatedTarget: code,
+    severity: "high",
+  });
   return evidence;
 }
 
@@ -7752,6 +7910,28 @@ async function recordToolFailureEvidence(
     ...evidence,
   });
   return evidence;
+}
+
+// D.14B Failure Learning — 薄接线：在已判定失败的站点搭车记录一条 failure learning。
+// 不做新的失败检测；只把已发生的真实失败（含 evidence/event 引用）转成脱敏后的可复用教训，
+// 去重合并 count/lastSeen 后持久化。绝不在用户取消/权限拒绝路径调用本函数。
+async function captureFailureLearning(
+  context: TuiContext,
+  sessionId: string,
+  input: FailureLearningInput,
+): Promise<void> {
+  try {
+    const { record } = mergeFailureRecord(context.failureLearning, input);
+    await writeFailureRecord(context.failureLearning, record);
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `failure_learning recorded category=${record.category} count=${record.count} severity=${record.severity}`,
+      "info",
+    );
+  } catch {
+    // 失败学习是加性能力；记录自身失败不得影响主链。
+  }
 }
 
 async function recordArchitectureRuntimeCard(

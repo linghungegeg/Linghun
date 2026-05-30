@@ -613,6 +613,54 @@ export type MemoryState = {
   lastResumeReadonly?: boolean;
 };
 
+// D.14B Failure Learning — 从真实失败事件（provider/tool/verification/git/final
+// gate/report guard/resource cap）提取的可复用教训。与 D.14B 受控记忆学习
+// （从用户输入提取偏好）是两套独立系统，互不复用。所有字段均为脱敏后内容，
+// 绝不持久化 secret/apiKey/baseUrl/token/Authorization/完整 env/长绝对路径。
+export type FailureLearningCategory =
+  | "provider_failure"
+  | "tool_failure"
+  | "verification_failure"
+  | "git_operation_failure"
+  | "final_gate_downgrade"
+  | "report_guard"
+  | "resource_cap";
+
+export type FailureLearningSeverity = "low" | "medium" | "high";
+export type FailureLearningStatus = "active" | "resolved" | "ignored";
+
+export type FailureLearningRecord = {
+  id: string;
+  createdAt: string;
+  lastSeen: string;
+  // 项目作用域键（脱敏后的项目名/根标识），用于只投影当前项目的教训。
+  projectScope: string;
+  // 触发本记录的来源事件标识（evidence id / event 标识），仅引用不含正文。
+  sourceRef: string;
+  category: FailureLearningCategory;
+  // 脱敏后的短失败摘要。
+  failureSummary: string;
+  // 推断的根因，必须标记 inferred=true 且只能基于 evidence。
+  rootCauseGuess: string;
+  inferred: boolean;
+  // 可执行、短的"下次避免"提示（脱敏）。
+  avoidNextTime: string;
+  // 关联的命令/工具/provider/git 操作（脱敏，可空）。
+  relatedTarget?: string;
+  severity: FailureLearningSeverity;
+  // 去重 hash：基于脱敏后的 category + source/target + 归一化 message。
+  dedupeHash: string;
+  count: number;
+  status: FailureLearningStatus;
+};
+
+export type FailureLearningState = {
+  // 存储目录（项目作用域）：<project>/.linghun/failures
+  directory: string;
+  projectScope: string;
+  records: FailureLearningRecord[];
+};
+
 export type ExtensionSource = "local" | "official" | "third-party";
 export type ExtensionScope = "project" | "user";
 
