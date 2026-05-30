@@ -204,6 +204,11 @@ export function summarizeArchitectureCard(card: ArchitectureCard): ArchitectureC
 }
 
 export function createArchitectureRuntimeDirective(card: ArchitectureCard): string {
+  // D.14A-R-Fix P1-7 — AntiCodeBlob / LegacyLargeFileDebt 是 prompt-only guidance：
+  // 只作为给模型的 system prompt 指令进入此 directive，不是 hard gate、不是
+  // pre-write/pre-edit 拦截、不是 linter/AST 阻断、不是权限拒绝。architecture-boundary.ts
+  // 的检测器是 standalone helper / 报告用，主链 Write/Edit/MultiEdit/Bash 路径不会自动
+  // 调用它阻断写入。下面文案只描述工程建议，不得被理解为会阻断写入的运行时闸门。
   return [
     "ArchitectureRuntime=triggered",
     "主屏只输出 1-2 行面向用户的行动摘要；不要把 Architecture Card、字段名或内部审计结构输出到主屏。",

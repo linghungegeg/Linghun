@@ -223,6 +223,7 @@ describe("guard-wiring", () => {
         provider: "test",
         model: "test",
         endpointProfile: "default",
+        providerLiveVerified: false,
         permissionMode: "default" as const,
         language: "zh-CN" as const,
         index: { status: "ready" },

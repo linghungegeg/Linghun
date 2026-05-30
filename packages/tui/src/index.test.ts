@@ -68,6 +68,10 @@ import {
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
 } from "./index.js";
+import {
+  formatSolutionCompletenessReportBlock,
+  needsSolutionCompletenessReportClosure,
+} from "./final-answer-gate.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -1119,6 +1123,7 @@ describe("Phase 06 TUI slash commands", () => {
       provider: "deepseek",
       model: "deepseek-v4-flash",
       endpointProfile: "chat_completions",
+      providerLiveVerified: false,
       permissionMode: "auto-review",
       language: "zh-CN",
       index: { status: "ready", changedFiles: 0 },
@@ -1160,6 +1165,87 @@ describe("Phase 06 TUI slash commands", () => {
     expect(items.find((item) => item.id === "freshness")?.summary).toContain(
       "local presence is not source validation",
     );
+    // D.14A-R-Fix P1-5 — baseView.providerLiveVerified=false → provider 不 pass
+    const providerItem = items.find((item) => item.id === "provider");
+    expect(providerItem?.status).toBe("partial");
+    expect(providerItem?.summary).toContain("not live-verified");
+  });
+
+  // D.14A-R-Fix P1-5 — provider/model readiness 口径：
+  //   - 无 live evidence（providerLiveVerified=false）→ 非 pass（partial / configured）
+  //   - 有真实 provider live evidence（providerLiveVerified=true）→ pass
+  //   - last failure → fail（即使 providerLiveVerified 为 true 也由 failure 接管）
+  it("provider readiness 没有真实 live evidence 时不 pass", () => {
+    const make = (overrides: Partial<TerminalReadinessView>): TerminalReadinessView => ({
+      projectPath: "F:/Linghun",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      endpointProfile: "chat_completions",
+      providerLiveVerified: false,
+      permissionMode: "default",
+      language: "zh-CN",
+      index: { status: "ready", changedFiles: 0 },
+      cache: { latestHitRate: null, compacted: false, workspaceSnapshot: "ready" },
+      memory: { projectRules: "found", candidates: 0, accepted: 0 },
+      mcp: { enabled: false, servers: 0, tools: 0, errors: 0 },
+      background: { total: 0, running: 0, blocked: 0 },
+      freshness: { webSourceEvidence: "missing" },
+      projectDoctor: {
+        status: "pass",
+        packageManager: "pnpm",
+        scripts: [],
+        configFiles: [],
+        ciFiles: [],
+        projectRules: "found",
+        checks: [],
+        unknown: [],
+      },
+      sourceDrift: { status: "pass", checked: [], issues: [], nextAction: "none" },
+      contextPicker: { status: "pass", refs: [], evidenceKinds: [], indexFreshness: "fresh" },
+      rollbackCoach: {
+        status: "pass",
+        changedFiles: 0,
+        untrackedFiles: 0,
+        checkpoints: 0,
+        gitStatus: "clean",
+        mode: "advisory-only",
+        nextAction: "none",
+      },
+      costPreview: { status: "pass", level: "light", labels: [], nextAction: "none" },
+      problems: [],
+      ...overrides,
+    });
+
+    const notVerified = createReadinessItems(make({ providerLiveVerified: false })).find(
+      (item) => item.id === "provider",
+    );
+    expect(notVerified?.status).toBe("partial");
+    expect(notVerified?.summary).toContain("not live-verified");
+
+    const liveVerified = createReadinessItems(make({ providerLiveVerified: true })).find(
+      (item) => item.id === "provider",
+    );
+    expect(liveVerified?.status).toBe("pass");
+    expect(liveVerified?.summary).toContain("live-verified");
+
+    const failed = createReadinessItems(
+      make({
+        providerLiveVerified: true,
+        providerFailure: {
+          code: "PROVIDER_BAD_REQUEST",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          endpointProfile: "chat_completions",
+          summary: "boom",
+        },
+      }),
+    ).find((item) => item.id === "provider");
+    expect(failed?.status).toBe("fail");
+
+    const unknownProvider = createReadinessItems(
+      make({ provider: "unknown", providerLiveVerified: false }),
+    ).find((item) => item.id === "provider");
+    expect(unknownProvider?.status).toBe("unknown");
   });
 
   it("shows Phase 15.5F Project Doctor, context picker, rollback coach, and cost preview Lite", async () => {
@@ -11780,7 +11866,7 @@ describe("D.13V-A item 2: createVerificationLevelForReadiness routes through cla
   function step(
     kind: "test" | "typecheck" | "build" | "lint" | "smoke",
     status: "pass" | "fail" | "partial" | "skipped" | "stale" | "cancelled" | "timeout",
-    overrides: Partial<{ runnerError: string }> = {},
+    overrides: Partial<{ runnerError: string; synthetic: boolean }> = {},
   ) {
     return {
       kind,
@@ -11962,6 +12048,70 @@ describe("D.13V-A item 2: createVerificationLevelForReadiness routes through cla
     expect(indexSrc).not.toMatch(
       /hasRealSmoke\s*\?\s*"real-smoke"\s*:\s*hasBuild\s*\?\s*"build"/,
     );
+  });
+
+  // D.14A-R-Fix P1-2 — 合成 smoke（synthetic=true）pass 不得升级 real-smoke；
+  // 只有真实（非合成）smoke kind pass 才允许 real-smoke。partial/stale/mock 仍不升级。
+  it("合成 smoke（synthetic）pass 不升级 real-smoke", () => {
+    const report: VerificationReport = {
+      id: "r-syn",
+      status: "pass",
+      summary: "synthetic smoke",
+      commands: [step("smoke", "pass", { synthetic: true })],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).not.toBe("real-smoke");
+    expect(result.canClaimMature).toBe(false);
+  });
+
+  it("真实（非合成）smoke pass 才允许 real-smoke", () => {
+    const report: VerificationReport = {
+      id: "r-real",
+      status: "pass",
+      summary: "real smoke",
+      commands: [step("smoke", "pass", { synthetic: false })],
+      unverified: [],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).toBe("real-smoke");
+    expect(result.canClaimMature).toBe(true);
+  });
+
+  it("合成 smoke + partial 仍不升级", () => {
+    const report: VerificationReport = {
+      id: "r-syn-partial",
+      status: "partial",
+      summary: "synthetic smoke partial",
+      commands: [step("smoke", "pass", { synthetic: true })],
+      unverified: ["nothing real verified"],
+      risk: [],
+      startedAt: "",
+      endedAt: "",
+      durationMs: 0,
+      nextAction: "",
+    };
+    const result = __testCreateVerificationLevelForReadiness(makeCtxWithReport(report));
+    expect(result.level).not.toBe("real-smoke");
+    expect(result.upgradeBlocked).toBe(true);
+  });
+
+  it("源码：/verify 合成 smoke 标记 synthetic=true，readiness 据此拒绝升级", async () => {
+    const fs = await import("node:fs/promises");
+    const planSrc = await fs.readFile("src/verification-command-runtime.ts", "utf8");
+    expect(planSrc).toContain("synthetic: true");
+    const readinessSrc = await fs.readFile("src/terminal-readiness-runtime.ts", "utf8");
+    expect(readinessSrc).toMatch(/c\.synthetic\s*!==\s*true/);
   });
 });
 
@@ -12220,6 +12370,55 @@ describe("D.13V-B/C source invariants", () => {
     expect(body).toContain("buildExtendedDowngradedFinalAnswer");
   });
 
+  // D.14A-R-Fix P1-1 — continuation 路径也要追加 Solution Completeness closure block，
+  // 与 sendMessage 路径一致；且 closure 必须在安全 final answer 入 transcript 之后，
+  // 不得位于 D.13U/D.13V retry/downgrade 之前（否则违规原文会先进 transcript）。
+  it("source: continueModelAfterToolResults 镜像 Solution Completeness closure", async () => {
+    const text = await readFile("src/index.ts", "utf8");
+    const start = text.indexOf("async function continueModelAfterToolResults");
+    expect(start).toBeGreaterThan(-1);
+    const body = text.slice(start, start + 12000);
+    expect(body).toContain("needsSolutionCompletenessReportClosure");
+    expect(body).toContain("formatSolutionCompletenessReportBlock");
+    // closure 必须在 assistant_text_delta append 之后（安全文本入 transcript 后才追加）
+    const appendIdx = body.indexOf('type: "assistant_text_delta"');
+    const closureIdx = body.indexOf("needsSolutionCompletenessReportClosure");
+    expect(appendIdx).toBeGreaterThan(-1);
+    expect(closureIdx).toBeGreaterThan(appendIdx);
+    // closure 必须在 downgrade gate（buildExtendedDowngradedFinalAnswer）之后
+    const downgradeIdx = body.lastIndexOf("buildExtendedDowngradedFinalAnswer");
+    expect(closureIdx).toBeGreaterThan(downgradeIdx);
+  });
+
+  // D.14A-R-Fix P1-1 — closure helper 行为锁定：classification 已给出时不追加，
+  // classificationRequired 且缺 classification 时才追加；block 文案不含违规原文。
+  it("closure helper: 缺 classification 才追加，已分类不追加", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-closure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.solutionCompleteness = {
+      ...createSolutionCompletenessStatus(),
+      triggered: true,
+      classificationRequired: true,
+      classification: "unknown",
+      impactAreas: ["runtime_behavior"],
+    };
+    // 最终答复未给 single_issue/systemic_gap → 需要 closure
+    expect(needsSolutionCompletenessReportClosure(context, "我做了一些改动。")).toBe(true);
+    const block = formatSolutionCompletenessReportBlock(context);
+    expect(block).toContain("Solution Completeness Gate report");
+    expect(block).toContain("classification:");
+    expect(block).not.toContain("我做了一些改动。");
+    // 最终答复已显式给出分类 → 不需要 closure
+    expect(
+      needsSolutionCompletenessReportClosure(context, "结论：这是 systemic_gap，影响面如下。"),
+    ).toBe(false);
+    // classificationRequired=false → 永不追加
+    context.solutionCompleteness = createSolutionCompletenessStatus();
+    expect(needsSolutionCompletenessReportClosure(context, "随便一句话")).toBe(false);
+  });
+
   it("source: createModelSystemPrompt 用 projectRuntimeStatusForPrompt 投影 runtimeStatus", async () => {
     const text = await readFile("src/index.ts", "utf8");
     expect(text).toContain("projectRuntimeStatusForPrompt(runtimeStatus)");
@@ -12262,5 +12461,26 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/"auto-review":\s*"auto mode"/);
     expect(text).toMatch(/plan:\s*"plan mode"/);
     expect(text).toMatch(/"full-access":\s*"bypass approvals"/);
+  });
+
+  // D.14A-R-Fix P1-7 — AntiCodeBlob 锁定为 prompt-only：它只出现在 prompt/directive，
+  // 不是 hard gate；architecture-boundary 检测器不接入 Write/Edit/MultiEdit/Bash 主链阻断。
+  it("source: AntiCodeBlob 是 prompt-only，不是 hard write gate", async () => {
+    const promptSrc = await readFile("src/model-prompt-runtime.ts", "utf8");
+    const archSrc = await readFile("src/architecture-runtime.ts", "utf8");
+    // AntiCodeBlob/EngineeringStructure 仅作为 prompt/directive 文案存在
+    expect(promptSrc).toContain("EngineeringStructure=");
+    expect(archSrc).toContain("AntiCodeBlob=");
+    // directive 必须显式标注 prompt-only / 不是 hard gate
+    expect(archSrc).toContain("prompt-only");
+    expect(archSrc).toMatch(/不是 hard gate|不是.*pre-write|不会自动.*阻断/);
+    // 主链不得在写入前自动调用 architecture-boundary 检测器阻断
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    expect(indexSrc).not.toMatch(/checkBoundaries\(/);
+    expect(indexSrc).not.toMatch(/checkFileBoundaries\(/);
+    expect(indexSrc).not.toMatch(/validateChangeDeclaration\(/);
+    // architecture-boundary.ts 自身声明只检测、不改文件
+    const boundarySrc = await readFile("src/architecture-boundary.ts", "utf8");
+    expect(boundarySrc).toContain("Does NOT modify any files");
   });
 });

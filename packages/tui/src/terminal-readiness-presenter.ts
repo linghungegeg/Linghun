@@ -22,6 +22,10 @@ export type TerminalReadinessView = {
   provider: string;
   model: string;
   endpointProfile: string;
+  // D.14A-R-Fix P1-5 — provider/model readiness 只有在本会话观察到真实 provider
+  // 响应（cache history 有真实 usage 记录）时才算 live-verified；仅"配置存在"
+  // 不算 provider 可用，避免 readiness/status/doctor 误读为 pass。
+  providerLiveVerified: boolean;
   permissionMode: PermissionMode;
   language: Language;
   index: { status: string; changedFiles?: number | null; staleHint?: string };
@@ -262,11 +266,26 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
     {
       id: "provider",
       label: "provider/model",
-      status: view.providerFailure ? "fail" : view.provider === "unknown" ? "unknown" : "pass",
+      // D.14A-R-Fix P1-5 — 没有真实 endpoint/provider evidence 时不显示 pass。
+      // last failure → fail；provider unknown → unknown；已配置但未 live-verified
+      // → partial（configured / not live-verified）；只有 live-verified 才 pass。
+      status: view.providerFailure
+        ? "fail"
+        : view.provider === "unknown"
+          ? "unknown"
+          : view.providerLiveVerified
+            ? "pass"
+            : "partial",
       summary: view.providerFailure
         ? `last failure ${view.providerFailure.code} on ${view.providerFailure.provider}/${view.providerFailure.model}`
-        : `configured ${view.provider}/${view.model}`,
-      nextAction: view.providerFailure ? "/model doctor" : "/model doctor for details",
+        : view.providerLiveVerified
+          ? `live-verified ${view.provider}/${view.model}`
+          : `configured ${view.provider}/${view.model}; not live-verified`,
+      nextAction: view.providerFailure
+        ? "/model doctor"
+        : view.providerLiveVerified
+          ? "/model doctor for details"
+          : "send a message or run a real provider smoke to live-verify; /model doctor for config",
     },
     {
       id: "index",

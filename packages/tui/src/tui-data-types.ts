@@ -94,6 +94,11 @@ export type VerificationStep = {
   kind: VerificationStepKind;
   command: string;
   reason: string;
+  // D.14A-R-Fix P1-2 — true 表示这是 Linghun 自动生成的合成 smoke（如
+  // `node -e "console.log(...)"` 或无脚本时的 `node --version` 降级），只能证明
+  // 本地 Node 进程可运行，不能当作真实 provider/TUI/render/report 主链 smoke。
+  // readiness 分级器据此拒绝把合成 smoke pass 升级为 real-smoke。
+  synthetic?: boolean;
 };
 
 export type VerificationRuntimeStatus =

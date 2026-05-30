@@ -28,6 +28,10 @@ export function createTerminalReadinessView(context: TuiContext): TerminalReadin
     provider: runtime.provider,
     model: runtime.model,
     endpointProfile: runtime.endpointProfile,
+    // D.14A-R-Fix P1-5 — 只有本会话观察到真实 provider usage（cache history 有记录）
+    // 才算 live-verified；仅配置存在不算 provider 可用。lastProviderFailure 时不算
+    // live-verified，由 providerFailure 分支接管为 fail。
+    providerLiveVerified: context.cache.history.length > 0 && !context.lastProviderFailure,
     permissionMode: context.permissionMode,
     language: context.language,
     index: {
@@ -164,7 +168,12 @@ export function createVerificationLevelForReadiness(
       c.status === "timeout",
   );
   const hasFailedCommand = commands.some((c) => c.status === "fail");
-  const smokePassed = commands.some((c) => c.kind === "smoke" && c.status === "pass");
+  // D.14A-R-Fix P1-2 — 只有**非合成** smoke kind 命令 pass 才算真实拉起进程观察过。
+  // `/verify smoke` 的合成 node smoke（synthetic=true）只证明本地 Node 进程可运行，
+  // 不是真实 provider/TUI/render/report 主链 smoke，不能升级为 real-smoke。
+  const smokePassed = commands.some(
+    (c) => c.kind === "smoke" && c.status === "pass" && c.synthetic !== true,
+  );
   const realProcessObserved =
     status === "pass" &&
     smokePassed &&

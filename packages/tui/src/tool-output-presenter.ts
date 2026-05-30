@@ -79,14 +79,45 @@ function formatBashEndSummary(
 }
 
 /**
+ * Redact secret-bearing fragments from a tool-start banner arg before it ever
+ * reaches the main screen / lastFullOutput. Applied uniformly to every tool's
+ * arg (Bash is the main risk, but a Read/Write path could in theory carry a
+ * token too). Only the secret substrings are rewritten; the rest of the
+ * command is left intact so plain commands like `git status` are unchanged.
+ */
+function redactBannerArg(value: string): string {
+  return (
+    value
+      // Bearer tokens: `Bearer <token>` -> `Bearer ***`
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer ***")
+      // Authorization header (non-Bearer single-token values; Bearer handled above).
+      .replace(/\b(Authorization)\s*:\s*(?!Bearer\b)[^\s"'&]+/gi, "$1: ***")
+      // Secret env-var assignments (upper-case names), keep name, redact value.
+      .replace(
+        /\b([A-Z0-9_]*(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|KEY))=\S+/g,
+        "$1=***",
+      )
+      // api_key= / apikey= / api-key= (case-insensitive), value until ws/&/quote.
+      .replace(/\b(api[_-]?key)=[^\s&"']+/gi, "$1=***")
+      // token= query/value params (case-insensitive).
+      .replace(/\b(token)=[^\s&"']+/gi, "$1=***")
+      // key= query params in URLs (case-insensitive).
+      .replace(/\b(key)=[^\s&"']+/gi, "$1=***")
+      // sk-style long secret tokens.
+      .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-***")
+  );
+}
+
+/**
  * D.13L Section 4 — Tool start banner shown immediately before runTool.
  * Mirrors CCB AssistantToolUseMessage rendering: `<UserFacingName>(<arg>)`.
  *   Bash(<command>) / Read(<path>) / Edit(<file>) / Write(<file>) /
  *   Grep(<pattern>) / Glob(<pattern>) / MultiEdit(<file>).
  *
  * Only emits when we can produce a single readable arg from input; otherwise
- * returns undefined so the caller can skip the writeLine. Long commands /
- * paths are clamped to 120 chars to keep one transcript line.
+ * returns undefined so the caller can skip the writeLine. The arg is redacted
+ * for secrets FIRST, then long commands / paths are clamped to 120 chars to
+ * keep one transcript line.
  */
 export function formatToolStart(name: ToolName, input: unknown): string | undefined {
   const obj = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
@@ -108,7 +139,7 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
     arg = str("pattern") ?? str("path");
   }
   if (!arg) return undefined;
-  return `${name}(${clamp(arg)})`;
+  return `${name}(${clamp(redactBannerArg(arg))})`;
 }
 
 function formatDetailsHint(language: Language): string {

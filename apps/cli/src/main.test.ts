@@ -1,13 +1,53 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getProviderEnvPath } from "@linghun/config";
+import { defaultConfig, getProviderEnvPath } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCli } from "./cli.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
+
+// 真实运行时默认 DeepSeek 模型（D.13P-hotfix）。配置里 deepseek-v4-flash 已是 placeholder，
+// 现役默认为 deepseek-chat（见 packages/config defaultDeepSeekModel）。doctor 解析的是
+// config.defaultModel/route，而不是 project-settings 里 providers.deepseek.model 本身。
+const DEFAULT_DEEPSEEK_MODEL = defaultConfig.defaultModel;
+
+// CLI doctor/model 测试必须自带隔离，避免读到本机 ~/.linghun/provider.env、全局 settings 或
+// shell 里的 provider/model 环境变量。隔离 HOME 维度（LINGHUN_CONFIG_DIR）+ 清空所有会影响
+// provider/model 选择的环境变量，并切到独立 cwd（project）后执行回调。
+async function withIsolatedCliConfig<T>(
+  run: (paths: { home: string; project: string }) => Promise<T>,
+): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), "linghun-cli-home-"));
+  const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
+  await mkdir(join(home, ".linghun"), { recursive: true });
+  vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+  for (const key of [
+    "LINGHUN_OPENAI_BASE_URL",
+    "LINGHUN_OPENAI_API_KEY",
+    "LINGHUN_OPENAI_MODEL",
+    "LINGHUN_OPENAI_ENDPOINT_PROFILE",
+    "LINGHUN_DEEPSEEK_BASE_URL",
+    "LINGHUN_DEEPSEEK_API_KEY",
+    "LINGHUN_DEEPSEEK_MODEL",
+    "LINGHUN_DEFAULT_MODEL",
+    "LINGHUN_INFERENCE_LEVEL",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+  ]) {
+    vi.stubEnv(key, undefined);
+  }
+  const previousCwd = process.cwd();
+  try {
+    process.chdir(project);
+    return await run({ home, project });
+  } finally {
+    process.chdir(previousCwd);
+  }
+}
 
 describe("CLI", () => {
   it("prints the version without help text", async () => {
@@ -56,17 +96,15 @@ describe("CLI", () => {
   });
 
   it("shows and diagnoses the current model through slash commands", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
-    const previousCwd = process.cwd();
-
-    try {
-      process.chdir(project);
+    await withIsolatedCliConfig(async () => {
       const shown = await runCli(["/model"]);
       const switched = await runCli(["/model", "set", "deepseek-v4-pro"]);
       const doctor = await runCli(["/model", "doctor"]);
 
       expect(shown.stdout).toContain("DeepSeek V4 Flash");
       expect(shown.stdout).toContain("上下文窗口：128000");
+      expect(shown.stdout).toContain("base_url：present");
+      expect(shown.stdout).not.toContain("https://api.deepseek.com");
       expect(switched.stdout).toContain("deepseek-v4-pro");
       expect(switched.stdout).toContain("上下文窗口：1048576");
       expect(switched.stdout).toContain("最大输出：16384");
@@ -79,40 +117,36 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain("缺少 api_key");
       expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
       expect(doctor.exitCode).toBe(0);
-    } finally {
-      process.chdir(previousCwd);
-    }
+    });
   });
 
   it("warns when headless model doctor reads apiKey from project settings", async () => {
-    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", undefined);
-    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        providers: {
-          deepseek: {
-            type: "deepseek",
-            baseUrl: "https://api.deepseek.com/v1",
-            apiKey: "sk-cli-project-secret",
-            model: "deepseek-v4-flash",
+    await withIsolatedCliConfig(async ({ project }) => {
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          providers: {
+            deepseek: {
+              type: "deepseek",
+              baseUrl: "https://api.deepseek.com/v1",
+              apiKey: "sk-cli-project-secret",
+              model: "deepseek-v4-flash",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    const previousCwd = process.cwd();
+        }),
+        "utf8",
+      );
 
-    try {
-      process.chdir(project);
       const doctor = await runCli(["/model", "doctor"]);
 
       expect(doctor.stdout).toContain("apiKey=present source=project-settings-legacy");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
       expect(doctor.stdout).toContain("环境变量或私有配置");
-      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-flash");
+      // doctor 解析的是 route/defaultModel（真实默认 deepseek-chat），project-settings 里
+      // providers.deepseek.model 本身不改变 route defaultModel；这是真实行为，不是测试缺陷。
+      expect(doctor.stdout).toContain(`provider=deepseek model=${DEFAULT_DEEPSEEK_MODEL}`);
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
       expect(doctor.stdout).toContain("baseUrl=present");
@@ -120,39 +154,35 @@ describe("CLI", () => {
       expect(doctor.stdout).not.toContain("sk-cli-project-secret");
       expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
-    } finally {
-      process.chdir(previousCwd);
-    }
+    });
   });
 
   it("shows env source when headless model doctor env apiKey overrides project settings", async () => {
-    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-cli-env-secret");
-    const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        providers: {
-          deepseek: {
-            type: "deepseek",
-            baseUrl: "https://api.deepseek.com/v1",
-            apiKey: "sk-cli-project-overridden-secret",
-            model: "deepseek-v4-flash",
+    await withIsolatedCliConfig(async ({ project }) => {
+      vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-cli-env-secret");
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          providers: {
+            deepseek: {
+              type: "deepseek",
+              baseUrl: "https://api.deepseek.com/v1",
+              apiKey: "sk-cli-project-overridden-secret",
+              model: "deepseek-v4-flash",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    const previousCwd = process.cwd();
+        }),
+        "utf8",
+      );
 
-    try {
-      process.chdir(project);
       const doctor = await runCli(["/model", "doctor"]);
 
       expect(doctor.stdout).toContain("apiKey=present source=env");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
-      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-flash");
+      // 同上：doctor 报告 route/defaultModel（真实默认 deepseek-chat），不是 settings provider.model。
+      expect(doctor.stdout).toContain(`provider=deepseek model=${DEFAULT_DEEPSEEK_MODEL}`);
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
       expect(doctor.stdout).toContain("baseUrl=present");
@@ -161,9 +191,7 @@ describe("CLI", () => {
       expect(doctor.stdout).not.toContain("sk-cli-env-secret");
       expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
-    } finally {
-      process.chdir(previousCwd);
-    }
+    });
   });
 
   it("shows provider.env source for headless openai-compatible model doctor", async () => {

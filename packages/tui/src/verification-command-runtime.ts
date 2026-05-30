@@ -22,7 +22,9 @@ export async function createVerificationPlan(
       {
         kind: "smoke",
         command: "node -e \"console.log('linghun verify smoke')\"",
-        reason: "最小 smoke 验证，确认 Verification Runner 可执行命令并归档 evidence。",
+        reason:
+          "最小合成 smoke：仅确认 Verification Runner 可执行命令并归档 evidence；不是真实 provider/TUI/render/report 主链 smoke。",
+        synthetic: true,
       },
     ];
   }
@@ -44,6 +46,7 @@ export async function createVerificationPlan(
       kind: "smoke",
       command: "node --version",
       reason: "未发现项目验证脚本，降级为 Node 运行环境 smoke 检查。",
+      synthetic: true,
     },
   ];
 }

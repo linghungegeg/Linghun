@@ -197,7 +197,7 @@ function formatModelInfo(
   maxOutputTokens: number | undefined,
 ): string {
   const model = models.find((item) => item.id === modelId) ?? models[0];
-  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ?? "未配置"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
+  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
 }
 
 type DoctorProviderConfig = {

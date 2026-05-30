@@ -6419,6 +6419,15 @@ async function continueModelAfterToolResults(
         text: assistantText,
         createdAt: new Date().toISOString(),
       });
+      // D.14A-R-Fix P1-1 — continuation 镜像 sendMessage 的 Solution Completeness
+      // 收口：在安全 final answer 入 transcript 之后追加人话 closure block，与
+      // index.ts sendMessage 路径保持一致。closure 仅在 D.13U/D.13V gate 已放行/
+      // 降级后的 assistantText 上运行，不改变上面的 retry/downgrade 顺序。
+      if (needsSolutionCompletenessReportClosure(context, assistantText)) {
+        const message = formatSolutionCompletenessReportBlock(context);
+        writeLine(output, message);
+        await appendSystemEvent(context, sessionId, message, "warning");
+      }
     }
     endAssistantStream(output);
   } finally {
