@@ -69,9 +69,11 @@ export function CommandPanel({
       marginTop={1}
       width={cardWidth}
     >
-      <Text color={theme.accent} bold>
-        {fitText(`❯ ${panel.title}`, innerWidth)}
-      </Text>
+      {panel.title && panel.title.trim().length > 0 ? (
+        <Text color={theme.accent} bold>
+          {fitText(`❯ ${panel.title}`, innerWidth)}
+        </Text>
+      ) : null}
       {panel.summary && panel.summary.length > 0 ? (
         <Box flexDirection="column">
           {panel.summary.map((line, idx) => (

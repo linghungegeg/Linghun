@@ -26,6 +26,7 @@ import type { Language } from "@linghun/shared";
 import { type ToolName, builtInTools } from "@linghun/tools";
 
 import { createGitToolDefinitions } from "./git-tool-runtime.js";
+import { createIndexToolDefinitions } from "./index-tool-runtime.js";
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
@@ -241,6 +242,9 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
     ),
     ...createDeferredToolDispatchDefinitions(),
     ...createGitToolDefinitions(),
+    // D.14D-R P0-2 — 结构化索引能力：模型需要"看索引 / 更新索引"时调用真实工具，
+    // 而不是文本冒充执行，也不是本地 NL 正则；mutating 刷新/修复走权限确认。
+    ...createIndexToolDefinitions(),
   ];
 }
 

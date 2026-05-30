@@ -120,6 +120,13 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("ManagedWorktreeCreate");
       expect(names).toContain("ManagedWorktreeRemove");
     });
+
+    it("D.14D-R P0-2: exposes structured index tools to the model (full-tool mode)", () => {
+      const names = createModelToolDefinitions().map((d) => d.name);
+      expect(names).toContain("IndexStatusInspect");
+      expect(names).toContain("IndexRefresh");
+      expect(names).toContain("IndexRepair");
+    });
   });
 
   describe("createModelToolDefinitionsForReportGuard", () => {

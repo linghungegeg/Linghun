@@ -327,6 +327,7 @@ export async function createDurableJob(
       remainingTokens: options.maxTokens,
       usedSteps: 0,
       maxRuntimeMs: options.timeoutMs,
+      explicit: { ...options.budgetExplicit },
     },
     timeoutMs: options.timeoutMs,
     permissionPolicy: context.permissionMode,
@@ -539,7 +540,9 @@ export async function runDurableJobLiteTick(context: TuiContext, job: DurableJob
 
   while (job.status === "running" && (job.budget.usedSteps ?? 0) < job.plan.length) {
     const stepIndex = job.budget.usedSteps ?? 0;
-    if (stepIndex >= getDurableJobMaxSteps(job)) {
+    // P1-5 — maxSteps 预算只在用户显式设置（--max-steps）时强制；默认无用户可见
+    // 预算（默认 maxSteps 等于 plan 步数，while 条件自然终止，不走该 blocked 分支）。
+    if (job.budget.explicit?.steps === true && stepIndex >= getDurableJobMaxSteps(job)) {
       job.result = {
         status: "blocked",
         summary: "Durable worker stopped at maxSteps; no PASS evidence generated.",
@@ -575,7 +578,11 @@ export async function runDurableJobLiteTick(context: TuiContext, job: DurableJob
       "No full transcript/source/index/log output was injected.",
     ].join(" ");
     const estimatedTokens = estimateJobTokens(`${summary}\n${stepFacts.join("\n")}`);
-    if ((job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens) {
+    // P1-5 — token 预算只在用户显式设置（--tokens）时强制；默认无用户可见预算。
+    if (
+      job.budget.explicit?.tokens === true &&
+      (job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens
+    ) {
       job.result = {
         status: "overbudget",
         summary:
@@ -734,7 +741,8 @@ export async function applyDurableJobBudgetStop(
   const started = Date.parse(job.startedAt ?? job.createdAt);
   const runtimeMs = Number.isNaN(started) ? 0 : Date.now() - started;
   const maxRuntimeMs = job.budget.maxRuntimeMs ?? job.timeoutMs;
-  if (runtimeMs > maxRuntimeMs) {
+  // P1-5 — runtime/timeout 预算只在用户显式设置（--timeout/--max-runtime-ms）时强制。
+  if (job.budget.explicit?.runtime === true && runtimeMs > maxRuntimeMs) {
     await transitionDurableJob(
       job,
       context,
@@ -752,7 +760,7 @@ export async function applyDurableJobBudgetStop(
     await writeDurableJobReport(job);
     return true;
   }
-  if ((job.budget.usedTokens ?? 0) > job.budget.maxTokens) {
+  if (job.budget.explicit?.tokens === true && (job.budget.usedTokens ?? 0) > job.budget.maxTokens) {
     await transitionDurableJob(job, context, "blocked", `budget_exceeded:${phase}`);
     return true;
   }

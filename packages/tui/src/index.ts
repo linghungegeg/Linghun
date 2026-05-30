@@ -503,6 +503,16 @@ import {
   isGitToolName,
   summarizeWorktreeContextForPrompt,
 } from "./git-tool-runtime.js";
+import {
+  INDEX_REFRESH,
+  INDEX_REPAIR,
+  INDEX_STATUS_INSPECT,
+  isIndexToolName,
+  isMutatingIndexTool,
+  parseIndexRefreshInput,
+  summarizeIndexRefreshOutcome,
+  summarizeIndexStatusInspect,
+} from "./index-tool-runtime.js";
 import { buildIndexStatusPanel, buildMcpStatusPanel, formatIndexRefreshSummary, formatIndexStatus, formatMcpStatus } from "./mcp-index-command-runtime.js";
 import {
   configureMcpIndexRuntime,
@@ -890,6 +900,17 @@ type PendingLocalApproval =
       strong: boolean;
       continuation?: PendingModelContinuation;
       toolCall?: ModelToolCall;
+    }
+  | {
+      // D.14D-R P0-2 — 结构化索引工具（IndexRefresh / IndexRepair）的 mutating
+      // 权限确认。复用 pendingLocalApproval / PermissionPanel 管道；continuation
+      // 仅模型工具路径需要（回灌工具结果给模型续轮）。
+      kind: "index_tool";
+      indexAction: "refresh" | "repair";
+      toolCall: ModelToolCall;
+      sessionId: string;
+      force?: boolean;
+      continuation?: PendingModelContinuation;
     };
 
 export type PendingModelContinuation = {
@@ -3448,6 +3469,28 @@ async function executePermissionApprove(
     );
     return;
   }
+  if (approval.kind === "index_tool") {
+    // D.14D-R P0-2 — 用户确认后真实刷新/修复索引，并把工具结果回灌模型续轮。
+    const result = await executeApprovedIndexToolUse(
+      approval.toolCall,
+      approval.indexAction,
+      approval.force,
+      context,
+      approval.sessionId,
+      output,
+    );
+    if (gateway && approval.continuation) {
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(result),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    }
+    writeLightHints(output, context);
+    writeStatus(output, context);
+    return;
+  }
 }
 
 /**
@@ -3562,6 +3605,44 @@ async function executePermissionDeny(
       createWorktreeRemoveResolveDeps(gateway),
     );
     return;
+  }
+  if (approval.kind === "index_tool") {
+    // D.14D-R P0-2 — 拒绝索引刷新/修复：记录失败，回灌"未执行"工具结果给模型，
+    // 让 final answer 不会声称索引已刷新。
+    const evidence = await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      "Write",
+      `${outcomeText}: index ${approval.indexAction}`,
+    );
+    const deniedResult = {
+      ok: false,
+      tool: approval.indexAction === "repair" ? INDEX_REPAIR : INDEX_REFRESH,
+      text: `${outcomeText}; the index was NOT refreshed.`,
+      outcome: cancelled ? "cancelled" : "denied",
+      evidenceId: evidence.id,
+    };
+    await appendToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      "Write",
+      deniedResult.text,
+      true,
+      evidence.id,
+    );
+    if (gateway && approval.continuation) {
+      writeLine(output, formatPermissionDenialPrimary(context.language));
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(deniedResult),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+      writeLightHints(output, context);
+      writeStatus(output, context);
+      return;
+    }
   }
   writeLine(output, formatPermissionDenialPrimary(context.language));
   writeStatus(output, context);
@@ -5441,20 +5522,24 @@ async function runIndexIgnoreWritePlan(
   });
   if (permission.decision === "ask") {
     context.pendingLocalApproval = { kind: "index_ignore_write", plan };
-    writeLine(
-      output,
-      formatLocalToolPermissionPrompt(
-        {
-          toolName: "Write",
-          decision: permission.decision,
-          risk: permission.request.risk,
-          mode: permission.request.mode,
-          reason: permission.reason,
-          scope: permission.request.files,
-        },
-        context.language,
-      ),
-    );
+    // P0-1 — ink 主屏走 PermissionPanel（index_ignore_write 已被
+    // mapPendingApprovalToPermission 映射）；plain TUI / 非交互保留文本 yes/no。
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatLocalToolPermissionPrompt(
+          {
+            toolName: "Write",
+            decision: permission.decision,
+            risk: permission.request.risk,
+            mode: permission.request.mode,
+            reason: permission.reason,
+            scope: permission.request.files,
+          },
+          context.language,
+        ),
+      );
+    }
     return false;
   }
   if (permission.decision === "deny") {
@@ -5715,12 +5800,14 @@ async function sendMessage(
     systemPrompt,
     text,
   );
-  const budget = estimateModelMessageChars(messages);
-  if (budget > MAX_CONTEXT_CHARS) {
+  const contextChars = estimateModelMessageChars(messages);
+  if (contextChars > MAX_CONTEXT_CHARS) {
+    // P1-5 — 这是上下文长度安全保护（context safety limit），不是用户预算。
+    // 文案不得使用"预算"字样，避免让没设过预算的用户误以为系统强加了预算。
     const warning =
       context.language === "en-US"
-        ? `Context budget exceeded before provider call: ${budget}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
-        : `上下文预算超限，已在请求 provider 前停止：${budget}/${MAX_CONTEXT_CHARS} 字符。请先运行 /sessions summary 或减少最近上下文后重试。`;
+        ? `Context length exceeds the current model/provider input limit before provider call: ${contextChars}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
+        : `当前上下文长度超过此模型/provider 可承载范围，已在请求 provider 前停止：${contextChars}/${MAX_CONTEXT_CHARS} 字符。请运行 /sessions summary 或减少最近上下文后重试。`;
     await appendSystemEvent(context, sessionId, warning, "warning");
     clearRequestActivity(context);
     context.activeAbortController = undefined;
@@ -5941,8 +6028,8 @@ async function sendMessage(
         writeLine(
           output,
           context.language === "en-US"
-            ? "Tool round limit reached; requesting one final model answer without tools."
-            : "已达到工具轮次上限；将不再调用工具，并请求模型给出最终回答。",
+            ? "Reached the tool-call limit for this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
+            : "本轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。",
         );
         const finalText = await streamFinalModelAnswerWithoutTools(
           {
@@ -6446,8 +6533,8 @@ async function continueModelAfterToolResults(
         writeLine(
           output,
           context.language === "en-US"
-            ? "Tool round limit reached during continuation; requesting one final model answer without tools."
-            : "续轮已达到工具轮次上限；将不再调用工具，并请求模型给出最终回答。",
+            ? "Reached the tool-call limit while continuing this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
+            : "续轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。",
         );
         const finalText = await streamFinalModelAnswerWithoutTools(
           continuation,
@@ -6644,6 +6731,11 @@ async function executeModelToolUse(
     }
     return gitResult;
   }
+  // D.14D-R P0-2 — 结构化索引工具不走 builtInTools / runTool；只读 Inspect 直接执行，
+  // mutating Refresh/Repair 走既有 pendingLocalApproval / PermissionPanel 确认管道。
+  if (isIndexToolName(toolCall.name)) {
+    return executeIndexToolUse(toolCall, context, sessionId, output, continuation);
+  }
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
     return { ok: false, tool: toolCall.name, text: `Unknown tool: ${toolCall.name}` };
@@ -6729,17 +6821,24 @@ async function executeModelToolUse(
   if (permission.decision !== "allow") {
     clearRequestActivity(context);
     const text = `${permission.decision}: ${permission.reason}`;
-    writeLine(
-      output,
-      formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
-    );
-    if (
+    const isAskWithPanel =
       permission.decision === "ask" &&
       (toolName === "Write" ||
         toolName === "Edit" ||
         toolName === "MultiEdit" ||
-        toolName === "Bash")
-    ) {
+        toolName === "Bash");
+    // P0-1 — ink 主屏的提权 UI 必须是 PermissionPanel（pendingLocalApproval →
+    // mapPendingApprovalToPermission → view.permission），不得用 writeLine 把
+    // "Linghun 想执行 …？yes/no" 当作普通 assistant/output 文本糊到主屏。
+    // ink ask 路径只设 pendingLocalApproval，由 PermissionPanel 渲染；
+    // plain TUI / 非交互 / 测试仍走文本 yes/no fallback（保留既有断言）。
+    if (!(context.isInkSession && isAskWithPanel)) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+    }
+    if (isAskWithPanel) {
       context.pendingLocalApproval = {
         kind: "model_tool_use",
         toolCall,
@@ -7157,6 +7256,172 @@ async function appendToolResultEvent(
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+}
+
+// D.14D-R P0-2 — 结构化索引工具执行 glue。
+//   IndexStatusInspect（只读）：刷新状态读取并返回摘要，明确"未刷新"，立即执行。
+//   IndexRefresh / IndexRepair（mutating）：进入 pendingLocalApproval（PermissionPanel）
+//   确认管道；用户确认后由 executeApprovedIndexToolUse 复用 runIndexRepository /
+//   runIndexSafetyRepair 真实执行，再回灌工具结果给模型续轮。
+async function executeIndexToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  continuation?: PendingModelContinuation,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  pendingApproval?: boolean;
+}> {
+  const name = toolCall.name;
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (name === INDEX_STATUS_INSPECT) {
+    // 只读：刷新状态读取（不重建），返回摘要。明确标注"仅检查，未刷新"。
+    startRequestActivity(output, context, "tool_running", { toolName: name });
+    await refreshIndexStatus(context);
+    clearRequestActivity(context);
+    const text = summarizeIndexStatusInspect(
+      context.index.status,
+      context.index.projectName,
+      context.index.nodes,
+      context.index.edges,
+      context.language,
+    );
+    const evidence = createEvidenceRecord(
+      "command_output",
+      `index_operation inspect: ${text}`,
+      "index-operation:inspect",
+      ["index_operation", "index_status_inspect"],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+    await appendToolResultEvent(context, sessionId, toolCall.id, "Read", text, false, evidence.id);
+    writeLine(output, text);
+    return { ok: true, tool: name, text, evidenceId: evidence.id };
+  }
+
+  // IndexRefresh / IndexRepair — mutating：走权限确认。
+  const action: "refresh" | "repair" = name === INDEX_REPAIR ? "repair" : "refresh";
+  const parsed = parseIndexRefreshInput(toolCall.input);
+  // 复用既有 decidePermission（Write 语义代表索引写入/外部 runtime 写入）。default /
+  // auto-review 下 Write 为 ask；命中允许规则或 full-access 时直接执行。
+  const permission = await decidePermission("Write", { path: ".linghun/index" }, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: { ...permission.request, toolName: name as unknown as ToolName },
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision === "deny") {
+    clearRequestActivity(context);
+    const text = `deny: ${permission.reason}`;
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+    }
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `index ${action} ${text}`,
+    );
+    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+    return { ok: false, tool: name, text, evidenceId: evidence.id };
+  }
+  if (permission.decision === "ask") {
+    clearRequestActivity(context);
+    context.pendingLocalApproval = {
+      kind: "index_tool",
+      indexAction: action,
+      toolCall,
+      sessionId,
+      force: parsed.force,
+      continuation,
+    };
+    // ink 主屏走 PermissionPanel；plain 保留文本 yes/no。
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+    }
+    return { ok: false, tool: name, text: `ask: ${permission.reason}`, pendingApproval: true };
+  }
+  // allow（命中允许规则 / full-access）：直接执行。
+  return executeApprovedIndexToolUse(toolCall, action, parsed.force, context, sessionId, output);
+}
+
+// 用户确认（或已允许）后真实执行索引刷新/修复，复用受控 runtime 路径。
+async function executeApprovedIndexToolUse(
+  toolCall: ModelToolCall,
+  action: "refresh" | "repair",
+  force: boolean | undefined,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+}> {
+  const name = action === "repair" ? INDEX_REPAIR : INDEX_REFRESH;
+  startRequestActivity(output, context, "tool_running", { toolName: name });
+  if (action === "repair") {
+    // 复用 /index repair 续跑：追加 ignore 条目后刷新（内部已有 writeLine 摘要）。
+    await runIndexSafetyRepair(context, output);
+  } else {
+    await runIndexRepository(context, context.config.index.mode, "refresh", Boolean(force), output);
+  }
+  clearRequestActivity(context);
+  const ok = context.index.status === "ready" || context.index.status === "stale";
+  const text = ok
+    ? summarizeIndexRefreshOutcome(action, context.index.status, context.language)
+    : context.language === "en-US"
+      ? `Index ${action} did not complete: status=${context.index.status}. ${context.index.error ?? ""}`.trim()
+      : `索引${action === "repair" ? "修复" : "刷新"}未完成：状态=${context.index.status}。${context.index.error ?? ""}`.trim();
+  if (ok) {
+    const evidence = createEvidenceRecord(
+      "command_output",
+      `index_operation ${action}: ${text}`,
+      `index-operation:${action}`,
+      ["index_operation", `index_${action}`],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, false, evidence.id);
+    writeLine(output, text);
+    return { ok: true, tool: name, text, evidenceId: evidence.id };
+  }
+  const evidence = await recordToolFailureEvidence(
+    context,
+    sessionId,
+    "Write",
+    `index ${action}: ${text}`,
+  );
+  await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+  writeLine(output, text);
+  return { ok: false, tool: name, text, evidenceId: evidence.id };
 }
 
 function rememberToolFiles(

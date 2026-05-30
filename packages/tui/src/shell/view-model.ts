@@ -190,6 +190,12 @@ export function createShellViewModel(
   const text = shellText[language];
 
   // Determine effective view mode early to decide block filtering and setupHint visibility
+  // P1-4 — commandPanelState 也是 task 触发条件：高级 slash 面板（/model、/index
+  // doctor、/memory review 等）即使没有 output block，也应进入 TaskLayout 渲染
+  // CommandPanel，而不是停留在 Home（CommandPanel 只在 TaskLayout 渲染）。
+  const hasCommandPanel = Boolean(
+    (context as { commandPanelState?: unknown }).commandPanelState,
+  );
   const effectiveViewMode: ShellViewMode =
     options.viewMode ??
     (options.submitted
@@ -197,7 +203,8 @@ export function createShellViewModel(
       : options.outputBlocks?.length ||
           options.activity ||
           options.permission ||
-          options.denialFeedback
+          options.denialFeedback ||
+          hasCommandPanel
         ? "task"
         : "home");
 
@@ -580,12 +587,43 @@ export function getComposerPlaceholder(language: Language): string {
   return shellText[language].placeholder;
 }
 
+// P1-1 — tool-output-presenter 在正文里内嵌的折叠提示行。ink 主屏统一用
+// block.nextAction 渲染 Ctrl+O 提示，所以 createOutputBlock 在装配 block 前
+// 把这些内嵌行剥掉，避免同一块出现两次 Ctrl+O。两种语言、可能带 "- " 前缀。
+const EMBEDDED_FOLD_HINTS = [
+  "输出已折叠，按 Ctrl+O 展开。",
+  "Output folded. Press Ctrl+O to expand.",
+];
+
+function stripEmbeddedFoldHint(text: string): { text: string; stripped: boolean } {
+  if (!text) return { text, stripped: false };
+  const lines = text.split("\n");
+  let stripped = false;
+  const kept = lines.filter((line) => {
+    const trimmed = line.replace(/^[-\s]+/, "").trim();
+    if (EMBEDDED_FOLD_HINTS.includes(trimmed)) {
+      stripped = true;
+      return false;
+    }
+    return true;
+  });
+  return { text: kept.join("\n").trim(), stripped };
+}
+
 export function createOutputBlock(
   text: string,
   language: Language,
   id = `output-${Date.now()}`,
 ): ProductBlockViewModel {
-  const normalized = redactSensitiveText(text.replace(/\r/g, "").trim());
+  const rawNormalized = redactSensitiveText(text.replace(/\r/g, "").trim());
+  // P1-1 — Ctrl+O hint 单一来源：tool-output-presenter 在正文里自带一行折叠
+  // 提示（"输出已折叠，按 Ctrl+O 展开。" / "Output folded. Press Ctrl+O to
+  // expand."）。ink 主屏的 Ctrl+O 提示统一由 block.nextAction（detailsHint）
+  // 渲染，所以这里把正文内嵌的折叠提示行剥掉，避免同一块出现两次 Ctrl+O。
+  // 命中折叠提示即视为"显式折叠"，强制挂 nextAction。
+  const foldHintStripped = stripEmbeddedFoldHint(rawNormalized);
+  const normalized = foldHintStripped.text;
+  const explicitFold = foldHintStripped.stripped;
   const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
   const copy = shellText[language];
   const summary = firstLine || copy.noVisibleOutput;
@@ -606,8 +644,9 @@ export function createOutputBlock(
   // echoes never satisfy either condition and stay clean (no hint row).
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
-    normalized.length > 0 &&
-    (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16);
+    explicitFold ||
+    (normalized.length > 0 &&
+      (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16));
   return {
     id,
     kind: "details",
@@ -721,6 +760,8 @@ export function mapPendingApprovalToPermission(
         toolName?: string;
         toolCall?: { input?: unknown };
         warnings?: string[];
+        plan?: { path?: string };
+        indexAction?: "refresh" | "repair";
         verdict?: {
           semantic?: PolicySemantic;
           pathSafety?: PathSafety;
@@ -731,6 +772,47 @@ export function mapPendingApprovalToPermission(
     }
   ).pendingLocalApproval;
   if (!approval) return undefined;
+
+  // P0-1 — /index repair 的 ignore 写入也是一次 Write 提权；ink 主屏必须走
+  // PermissionPanel，而不是 writeLine 文本。映射成 Write 语义的权限视图。
+  if (approval.kind === "index_ignore_write") {
+    const path = approval.plan?.path ?? ".linghunignore";
+    const isEn = context.language === "en-US";
+    return {
+      toolName: "Write",
+      reason: "",
+      risk: "medium",
+      scope: [path],
+      hint: "",
+      actionSummary: isEn ? `Edit file: ${path}` : `修改文件：${path}`,
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
+
+  // D.14D-R P0-2 — 结构化索引工具（IndexRefresh / IndexRepair）的 mutating 提权，
+  // ink 主屏走同一 PermissionPanel；动作说明用人话。
+  if (approval.kind === "index_tool") {
+    const isEn = context.language === "en-US";
+    const action = approval.indexAction === "repair" ? "repair" : "refresh";
+    const actionSummary = isEn
+      ? action === "repair"
+        ? "Repair and refresh the codebase index"
+        : "Refresh (rebuild) the codebase index"
+      : action === "repair"
+        ? "修复并刷新代码索引"
+        : "刷新（重建）代码索引";
+    return {
+      toolName: "IndexRefresh",
+      reason: "",
+      risk: "medium",
+      scope: [],
+      hint: "",
+      actionSummary,
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
 
   if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
     const toolName = approval.toolName ?? "unknown";

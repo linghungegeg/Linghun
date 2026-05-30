@@ -162,6 +162,49 @@ describe("parseJobRunOptions", () => {
     expect(result.plan).toHaveLength(4);
     expect(result.plan[0]).toBe("fix bug");
   });
+
+  it("D.14D-R P1-5: default run has no explicit budget", () => {
+    const result = parseJobRunOptions(["do work"]);
+    expect(result.budgetExplicit).toEqual({ tokens: false, steps: false, runtime: false });
+  });
+
+  it("D.14D-R P1-5: explicit budget flags are tracked", () => {
+    const result = parseJobRunOptions([
+      "do work",
+      "--tokens",
+      "50000",
+      "--max-steps",
+      "2",
+      "--timeout",
+      "60000",
+    ]);
+    expect(result.budgetExplicit).toEqual({ tokens: true, steps: true, runtime: true });
+  });
+});
+
+describe("D.14D-R P1-5 job budget display semantics", () => {
+  it("default job (no explicit budget) shows 预算：未设置, not default max numbers", () => {
+    const job = createMinimalJob();
+    job.budget.explicit = undefined; // 旧 state.json / 未设置
+    const status = formatJobStatus(job);
+    expect(status).toContain("预算：未设置");
+    expect(status).toContain("tokens=0/未设置");
+    expect(status).toContain("steps=0/未设置");
+    expect(status).toContain("timeoutMs=未设置");
+    // 不展示默认 max 数值。
+    expect(status).not.toContain("/120000");
+  });
+
+  it("explicitly-budgeted job shows real budget numbers", () => {
+    const job = createMinimalJob();
+    job.budget.explicit = { tokens: true, steps: true, runtime: true };
+    job.budget.maxTokens = 50000;
+    job.budget.maxSteps = 2;
+    const status = formatJobStatus(job);
+    expect(status).toContain("tokens=0/50000");
+    expect(status).toContain("steps=0/2");
+    expect(status).not.toContain("预算：未设置");
+  });
 });
 
 describe("clampPositiveInt", () => {

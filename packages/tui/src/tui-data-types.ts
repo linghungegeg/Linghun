@@ -435,6 +435,9 @@ export type DurableJobState = {
     remainingTokens?: number;
     usedSteps?: number;
     maxRuntimeMs?: number;
+    // P1-5 — 仅当用户显式设置时为 true；未设置时 /job 无用户可见预算，
+    // enforcement 不触发，UI 显示"预算：未设置"。缺省（旧 state.json）按未设置处理。
+    explicit?: { tokens?: boolean; steps?: boolean; runtime?: boolean };
   };
   timeoutMs: number;
   permissionPolicy: PermissionMode;

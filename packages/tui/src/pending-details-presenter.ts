@@ -92,17 +92,35 @@ export function formatPendingApprovalDetails(approval: PendingLocalApproval, con
           "- 下一步：yes/确认 删除一次；no/cancel/Esc 保留。",
         ].join("\n");
   }
+  if (approval.kind === "index_tool") {
+    const action = approval.indexAction === "repair" ? "repair" : "refresh";
+    return context.language === "en-US"
+      ? [
+          "Pending permission details",
+          `- action: index ${action} (rebuild the codebase index, reusing the controlled /index ${action} path)`,
+          "- this writes the index artifact and runs the external index runtime.",
+          "- raw paths, tokens, request ids, and internal gate ids are hidden.",
+          "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
+        ].join("\n")
+      : [
+          "待确认权限详情",
+          `- 动作：索引${action === "repair" ? "修复" : "刷新"}（重建代码索引，复用受控的 /index ${action} 路径）`,
+          "- 该操作会写入索引产物并运行外部索引 runtime。",
+          "- raw 路径、token、request id 和内部 gate id 已隐藏。",
+          "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
+        ].join("\n");
+  }
   return context.language === "en-US"
     ? [
         "Pending permission details",
-        `- tool: ${approval.toolName}`,
+        `- tool: ${"toolName" in approval ? approval.toolName : "tool"}`,
         "- reason: protected tool requires approval before running",
         "- tool input, tokens, request ids, and internal gate ids are hidden.",
         "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
       ].join("\n")
     : [
         "待确认权限详情",
-        `- 工具：${approval.toolName}`,
+        `- 工具：${"toolName" in approval ? approval.toolName : "tool"}`,
         "- 原因：受保护工具运行前需要审批",
         "- tool input、token、request id 和内部 gate id 已隐藏。",
         "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",

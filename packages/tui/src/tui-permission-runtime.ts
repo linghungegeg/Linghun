@@ -234,7 +234,8 @@ export async function decidePermission(
     if (tool.isReadOnly || name === "Todo" || name === "Diff") {
       return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
     }
-    const reason = "auto-review 不自动允许 Bash、高风险或越界操作。";
+    const reason =
+      "自动模式会自动通过低风险动作；Bash、联网、未知命令和高风险操作仍按权限策略确认或拒绝。本次动作不在自动放行范围。";
     await recordPermissionDenied(context, name, reason);
     return { request, decision: "deny", reason, verdict };
   }

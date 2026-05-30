@@ -89,7 +89,8 @@ import {
   loadFailureRecords,
   mergeFailureRecord,
 } from "./failure-learning-runtime.js";
-import { createOutputBlock } from "./shell/view-model.js";
+import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
+import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import {
   type TerminalReadinessView,
@@ -4721,6 +4722,53 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
   });
 
+  it("D.14D-R P1-3: tool round exhaustion shows a mature summary, not a scary failure box", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-rounds-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-rounds-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // 4 个只读 Read 工具调用（MAX_MODEL_TOOL_ROUNDS=4），最后一轮触发轮次上限。
+    // Read 走 auto-allow（readonly），不会被 permission 打断。
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+      ],
+      "已综合现有信息回答。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请反复读取并分析\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 成熟摘要文案：不再是"将不再调用工具，并请求模型给出最终回答"这种机械文案。
+    expect(output.text).toContain("本轮工具调用已达上限");
+    expect(output.text).toContain("/index refresh");
+    // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
+    expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
+    expect(requests.length).toBeGreaterThanOrEqual(4);
+  });
+
   it("continues after denied model tool permission as a tool_result", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -5831,6 +5879,168 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toBe("large.json\n");
     expect(output.text).toContain("ignore 写入跳过");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
+  it("D.14D-R P0-1: /index repair in ink mode sets pendingLocalApproval and does not leak prompt text", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    // P0-1 — ink 主屏：提权走 PermissionPanel，不把文本提示糊到主屏。
+    (context as { isInkSession?: boolean }).isInkSession = true;
+
+    await handleSlashCommand("/index refresh", context, output);
+    await handleSlashCommand("/index repair", context, output);
+
+    // ask 路径已挂起，等待 PermissionPanel 确认。
+    expect((context as { pendingLocalApproval?: { kind?: string } }).pendingLocalApproval?.kind).toBe(
+      "index_ignore_write",
+    );
+    // ink 主屏不再出现文本提权提示（PermissionPanel 是唯一提权 UI）。
+    expect(output.text).not.toContain("需要先确认权限");
+    // 文件尚未写入（等待确认）。
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    // PermissionPanel 视图可由 pendingLocalApproval 装配（Write 语义）。
+    const view = mapPendingApprovalToPermission(context);
+    expect(view?.toolName).toBe("Write");
+    expect(view?.scope).toContain(".linghunignore");
+  });
+
+  it("D.14D-R P0-2: model IndexRefresh tool routes through permission panel and refreshes after approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
+      status: "ready",
+    });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "index-refresh-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "index-refresh-model",
+          },
+        },
+        mcp: config.mcp,
+      }),
+      "utf8",
+    );
+    // 模型对"更新一下索引"回以结构化 IndexRefresh 工具调用；确认后给最终回答。
+    const requests = mockOpenAiToolFetch("IndexRefresh", {}, "索引已刷新完成。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["更新一下索引\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 第一轮模型请求触发 IndexRefresh → 权限确认（plain 文本 yes/no）→ yes → 真实刷新 → 续轮。
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    // 真实调用了 index_repository（受控刷新路径），不是文本冒充。
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    // 主屏出现"已刷新"成熟摘要。
+    expect(output.text).toContain("索引");
+    // final answer 后未把工具结果伪装；transcript 含 index_operation evidence。
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("index_operation");
+  });
+
+  it("D.14D-R P0-2: model IndexRefresh denied → no index_repository, model told NOT refreshed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
+      status: "ready",
+    });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "index-deny-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "index-deny-model",
+          },
+        },
+        mcp: config.mcp,
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch("IndexRefresh", {}, "我不会声称索引已刷新。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["更新一下索引\nno\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 拒绝后没有真实刷新索引。
+    expect(await readMockCalls(callsPath)).not.toContain("index_repository");
+    // 回灌给模型的 tool_result 明确"未刷新"。
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second?.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain("NOT refreshed");
+  });
+
+  it("D.14D-R P1-2: index refresh success with delayed status read-back shows a mature footer, not 索引?", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    // projects: [] → index_repository 成功，但随后的 list_projects 读不到当前项目
+    // （read-back 延迟），refreshIndexStatus 回落 missing。footer 不能显示 索引?。
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
+      projects: [],
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    // 刷新成功后状态升级为成熟的 stale（新鲜度待确认），不再是 missing/unknown。
+    expect(context.index.status).toBe("stale");
+    expect(context.index.indexedAt).toBeTruthy();
+    expect(context.index.staleHint).toContain("待确认");
+    // footer 不再显示 `索引?`。
+    const footer = formatFooterIndexLabel(context.language, context.index.status);
+    expect(footer).not.toBe("索引?");
+    expect(footer).toContain("stale");
+  });
+
+  it("D.14D-R P1-2: index refresh success with confirmed status shows ready in footer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
+      status: "ready",
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(context.index.status).toBe("ready");
+    const footer = formatFooterIndexLabel(context.language, context.index.status);
+    expect(footer).toContain("ready");
+    expect(footer).not.toBe("索引?");
   });
 
   it("D.14D: /index repair does not write or refresh when approval is denied", async () => {
@@ -7328,7 +7538,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已切换权限模式：auto-review");
     expect(output.text).toContain("写入前摘要");
     expect(output.text).toContain("工具 Edit 已完成");
-    expect(output.text).toContain("auto-review 不自动允许 Bash");
+    expect(output.text).toContain("自动模式会自动通过低风险动作");
+    expect(output.text).toContain("Bash、联网、未知命令和高风险操作仍按权限策略确认或拒绝");
     expect(output.text).toContain("风险：low");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
     await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
@@ -10947,11 +11158,12 @@ describe("D.13J Block 3 — codebase-memory mutating permission gate", () => {
       context,
     );
     expect(result.ok).toBe(false);
-    expect(result.text).toContain("权限");
+    expect(result.text).toContain("写操作");
     expect(result.text).toContain("detect_changes");
     expect(result.text).toContain("mutating");
-    // D.13J tail fix（Block B）：codebase-memory mutating 死路必须重定向到真实 slash 命令，
-    // 而不是写不存在的 /mcp permission / /codebase-memory permission。
+    // D.14D-R P0-2：codebase-memory mutating 死路改人话，重定向到结构化工具
+    // IndexRefresh / IndexRepair；不写不存在的 /mcp permission / /codebase-memory permission。
+    expect(result.text).toContain("IndexRefresh");
     expect(result.text).not.toContain("/mcp permission");
     expect(result.text).not.toContain("/codebase-memory permission");
     expect(result.text).toContain("/index refresh");
@@ -11438,8 +11650,10 @@ describe("D.13J Block 4 — local stdio MCP runtime adapter", () => {
       context,
     );
     expect(result.ok).toBe(false);
-    expect(result.text).toContain("mutating");
-    expect(result.text).toContain("mcp 写权限");
+    expect(result.text).toContain("写操作");
+    expect(result.text).toContain("不通过本入口执行");
+    // D.14D-R P0-2：mutating 死路文案改人话，指向结构化工具 IndexRefresh / IndexRepair。
+    expect(result.text).toContain("IndexRefresh");
     // D.13J tail fix（Block B）：mutating 死路文案禁止再出现 /mcp permission 这种不存在的 slash 入口。
     expect(result.text).not.toContain("/mcp permission");
     expect(result.text).not.toContain("/codebase-memory permission");

@@ -85,6 +85,9 @@ export type ParsedJobRunOptions = {
   allowEdit: boolean;
   allowBash: boolean;
   allowMultiAgent: boolean;
+  // P1-5 — 仅当用户显式传入 --tokens / --max-steps / --timeout 时为 true。
+  // 未显式设置时 /job 没有用户可见预算，enforcement 不触发，UI 显示"预算：未设置"。
+  budgetExplicit: { tokens: boolean; steps: boolean; runtime: boolean };
 };
 
 export type JobContext = {
@@ -108,6 +111,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   let allowEdit = false;
   let allowBash = false;
   let allowMultiAgent = false;
+  const budgetExplicit = { tokens: false, steps: false, runtime: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) {
@@ -130,16 +134,19 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     }
     if (arg === "--tokens") {
       maxTokens = clampPositiveInt(args[index + 1], DEFAULT_JOB_BUDGET_TOKENS, 10_000_000);
+      budgetExplicit.tokens = true;
       index += 1;
       continue;
     }
     if (arg === "--max-steps" || arg === "--steps") {
       maxSteps = clampPositiveInt(args[index + 1], DEFAULT_JOB_MAX_STEPS, MAX_JOB_MAX_STEPS);
+      budgetExplicit.steps = true;
       index += 1;
       continue;
     }
     if (arg === "--timeout" || arg === "--max-runtime-ms") {
       timeoutMs = clampPositiveInt(args[index + 1], DEFAULT_JOB_TIMEOUT_MS, 24 * 60 * 60 * 1000);
+      budgetExplicit.runtime = true;
       index += 1;
       continue;
     }
@@ -176,6 +183,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     allowEdit,
     allowBash,
     allowMultiAgent,
+    budgetExplicit,
   };
 }
 
@@ -197,6 +205,27 @@ export function estimateJobTokens(text: string): number {
 
 export function getDurableJobMaxSteps(job: DurableJobState): number {
   return Math.max(1, Math.min(job.budget.maxSteps ?? DEFAULT_JOB_MAX_STEPS, MAX_JOB_MAX_STEPS));
+}
+
+// P1-5 — 预算只指用户主动设置的预算（--tokens / --max-steps / --timeout）。
+// 未显式设置时 /job 没有用户可见预算，状态/报告显示"预算：未设置"，不展示默认 max。
+function formatJobBudgetLine(job: DurableJobState): string {
+  const explicit = job.budget.explicit;
+  const parts: string[] = [];
+  if (explicit?.tokens === true) {
+    parts.push(`tokens=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}`);
+  } else {
+    parts.push(`tokens=${job.budget.usedTokens ?? 0}/未设置`);
+  }
+  if (explicit?.steps === true) {
+    parts.push(`steps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`);
+  } else {
+    parts.push(`steps=${job.budget.usedSteps ?? 0}/未设置`);
+  }
+  parts.push(explicit?.runtime === true ? `timeoutMs=${job.timeoutMs}` : "timeoutMs=未设置");
+  const anyExplicit = Boolean(explicit?.tokens || explicit?.steps || explicit?.runtime);
+  const prefix = anyExplicit ? "budget" : "budget(预算：未设置)";
+  return `- ${prefix}: ${parts.join("; ")}`;
 }
 
 export function countDurableJobAgents(job: DurableJobState): Record<DurableJobAgentStatus, number> {
@@ -525,7 +554,7 @@ export function formatJobStatus(job: DurableJobState): string {
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
     `- agent labels: ${formatJobAgentLabels(job.agents)}`,
-    `- budget: tokens=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}; steps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}`,
+    formatJobBudgetLine(job),
     `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
@@ -544,7 +573,7 @@ export function formatJobReport(job: DurableJobState): string {
     `- task graph: ${job.plan.length} steps; worker=${job.worker?.status ?? "not_started"}; usedSteps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
-    `- budget: tokens=${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}; steps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; timeoutMs=${job.timeoutMs}`,
+    formatJobBudgetLine(job),
     `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,

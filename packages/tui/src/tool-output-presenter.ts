@@ -50,8 +50,13 @@ export function formatToolOutput(
   if (layered.preview) {
     lines.push(layered.preview);
   }
+  // P1-1 — summary-first preview 已自带一行折叠提示（createSummaryFirstPreview）。
+  // 这里只在 preview 尚未包含折叠提示时补一行，避免同一块出现两次 Ctrl+O 提示。
   if (layered.details || layered.truncated) {
-    lines.push(formatDetailsHint(language));
+    const hint = formatDetailsHint(language);
+    if (!layered.preview || !layered.preview.includes(hint)) {
+      lines.push(hint);
+    }
   }
   // D.13L Section 4 — Bash 单独再补一行人类可读终态：
   //   "Command exited 0" / "命令已退出 0"
@@ -251,10 +256,7 @@ function createSummaryFirstPreview(
       stats.push(language === "en-US" ? `read guard ${readGuard}` : `读取保护 ${readGuard}`);
     }
   }
-  const hint =
-    language === "en-US"
-      ? "Output folded. Press Ctrl+O to expand."
-      : "输出已折叠，按 Ctrl+O 展开。";
+  const hint = formatDetailsHint(language);
   return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
 }
 

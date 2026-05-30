@@ -1022,13 +1022,21 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result?.actionSummary).toContain("修改文件");
   });
 
-  it("returns undefined for unrecognized approval kinds", () => {
+  it("D.14D-R P0-1: maps index_ignore_write approval to a Write PermissionPanel view", () => {
+    // /index repair 的 ignore 写入是一次 Write 提权；ink 主屏必须走 PermissionPanel。
     const ctx = createContext({
       pendingLocalApproval: {
         kind: "index_ignore_write",
+        plan: { path: ".linghunignore" },
       },
-    } as Partial<TuiContext>);
-    expect(mapPendingApprovalToPermission(ctx)).toBeUndefined();
+    } as unknown as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("Write");
+    expect(result?.risk).toBe("medium");
+    expect(result?.scope).toContain(".linghunignore");
+    expect(result?.actionSummary).toContain(".linghunignore");
+    expect(result?.actionSummary).toContain("修改文件");
   });
 
   it("maps en-US language hint correctly", () => {
@@ -4366,6 +4374,85 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     });
     expect(view.commandPanel).toBeUndefined();
   });
+
+  it("D.14D-R P1-4: CommandPanel 空 title 不渲染顶部空框（无 ❯ 标题行）", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const ctx = createContext() as TuiContext & { commandPanelState?: unknown };
+    // 空 title 面板：顶部不应出现 "❯" 空标题行。
+    ctx.commandPanelState = {
+      title: "",
+      tone: "neutral",
+      summary: ["有正文摘要XZX"],
+      detailsText: "完整明细YQY",
+    };
+    // 带一个 output block 把 viewMode 推到 task（CommandPanel 只在 TaskLayout 渲染）。
+    const blocks: ProductBlockViewModel[] = [
+      { id: "b1", kind: "details", status: "info", title: "块", summary: "占位", keep: true },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(ctx, {
+          width: output.columns,
+          height: output.rows,
+          outputBlocks: blocks,
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    const text = output.text;
+    expect(text).toContain("有正文摘要XZX");
+    // 空 title 不渲染 "❯" 标题前缀（顶部不再是空框）。
+    expect(text).not.toContain("❯ ");
+  });
+
+  it("D.14D-R P1-4: CommandPanel 有 title 时正常渲染 ❯ 标题行", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const ctx = createContext() as TuiContext & { commandPanelState?: unknown };
+    ctx.commandPanelState = {
+      title: "模型诊断XZX",
+      tone: "neutral",
+      summary: ["摘要行ABC"],
+    };
+    const blocks: ProductBlockViewModel[] = [
+      { id: "b1", kind: "details", status: "info", title: "块", summary: "占位", keep: true },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(ctx, {
+          width: output.columns,
+          height: output.rows,
+          outputBlocks: blocks,
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("模型诊断XZX");
+    expect(output.text).toContain("❯");
+  });
 });
 
 describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
@@ -4392,6 +4479,28 @@ describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
 });
 
 describe("D.14D Ctrl+O summary-first details viewer", () => {
+  it("D.14D-R P1-1: tool 输出块同一块只出现一次 Ctrl+O 提示（内嵌折叠行被剥离）", () => {
+    // 模拟 tool-output-presenter 产出的正文：摘要 + 内嵌折叠提示行。
+    const body = ["工具 Read 已完成", "- 120 行", "- 输出已折叠，按 Ctrl+O 展开。"].join("\n");
+    const block = createOutputBlock(body, "zh-CN", "out-fold");
+    // 正文内嵌的折叠提示行已被剥离，不再出现在 fullText/summary 里。
+    expect(block.fullText).not.toContain("输出已折叠");
+    // ink 主屏的 Ctrl+O 提示统一由 nextAction 渲染（单一来源）。
+    expect(block.nextAction).toContain("Ctrl+O");
+    // 渲染层只剩一处 Ctrl+O：fullText + nextAction 合计仅一次。
+    const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
+    expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
+  it("D.14D-R P1-1: 英文 tool 输出块同样只保留一次 Ctrl+O 提示", () => {
+    const body = ["Tool Read completed", "- 30 line(s)", "- Output folded. Press Ctrl+O to expand."].join("\n");
+    const block = createOutputBlock(body, "en-US", "out-fold-en");
+    expect(block.fullText).not.toContain("Output folded");
+    expect(block.nextAction).toContain("Ctrl+O");
+    const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
+    expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
   it("有 lastFullOutput 时返回 panel：summary-first，正文只进 detailsText，默认折叠", () => {
     const ctx = createContext() as TuiContext & { lastFullOutput?: string };
     ctx.lastFullOutput = "完整 /model doctor 多行输出\n provider.env merge=...\nproviders=...";

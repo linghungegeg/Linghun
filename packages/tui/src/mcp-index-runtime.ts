@@ -835,6 +835,27 @@ export async function runIndexRepository(
     return;
   }
   await refreshIndexStatus(context);
+  // P1-2 — index_repository 已成功（result.ok）。若紧随的 refreshIndexStatus 因
+  // list_projects/index_status 读回延迟未能确认 ready/stale（回落到 missing/
+  // unknown/error），footer 不能显示 `索引?` 这种"从没建过"的假信号。这里把它
+  // 升级成一个可解释的成熟状态：索引刚刷新过、新鲜度待确认（stale + staleHint）。
+  const statusAfterRefresh: string = context.index.status;
+  if (
+    statusAfterRefresh === "missing" ||
+    statusAfterRefresh === "unknown" ||
+    statusAfterRefresh === "error"
+  ) {
+    context.index.status = "stale";
+    context.index.artifactStatus = "stale";
+    context.index.indexedAt = new Date().toISOString();
+    context.index.error = undefined;
+    context.index.staleHint =
+      context.language === "en-US"
+        ? "Index just refreshed; status read-back is pending. Run /index status to confirm."
+        : "索引已刷新，状态待确认。运行 /index status 可确认。";
+  } else {
+    context.index.indexedAt = new Date().toISOString();
+  }
   task.status = "completed";
   task.result = "pass";
   task.currentStep = "index finished";
@@ -1002,7 +1023,7 @@ export async function executeExtraTool(
     if (risk === "mutating" && !context.codebaseMemoryMutatingGranted) {
       return {
         ok: false,
-        text: `ExecuteExtraTool: codebase-memory tool ${target.name} 需要 mutating 权限。当前 session 默认拒绝 mutating；如果你确实要刷新索引，请使用真实的 slash 命令 /index refresh 或 /index init fast --force（这两个命令会走 Linghun 受控路径，不需要本入口）。`,
+        text: `ExecuteExtraTool: codebase-memory 工具 ${target.name} 是写操作（mutating），不通过本入口执行。要刷新/重建索引，请直接调用结构化工具 IndexRefresh（或 IndexRepair），它会走 Linghun 受控权限确认路径；也可使用 /index refresh 命令。`,
       };
     }
     const cliResult = await runCodebaseMemoryCli(context, target.name, params, context.projectPath);
@@ -1041,7 +1062,7 @@ export async function executeExtraTool(
     if (!context.mcpStdioMutatingGranted && isPotentiallyMutatingMcpTool(parsed.tool)) {
       return {
         ok: false,
-        text: `ExecuteExtraTool: MCP 工具 ${target.name} 看起来是 mutating（write/delete/update/index/create 类）。当前 session 默认拒绝 mcp 写权限，无 slash 入口可显式授予；如果该工具是 codebase-memory 索引写入，请改用 /index refresh 或 /index init fast --force 走受控路径，否则请在 server 自身或 .linghun/settings.json 中关闭对应 mutating 工具。`,
+        text: `ExecuteExtraTool: MCP 工具 ${target.name} 看起来是写操作（write/delete/update/index/create 类），不通过本入口执行。若是 codebase-memory 索引写入，请改用结构化工具 IndexRefresh / IndexRepair（走 Linghun 受控权限确认）或 /index refresh；否则请在 server 自身或 .linghun/settings.json 中关闭对应写工具。`,
       };
     }
     const stdio = await runMcpStdioToolCall(
