@@ -20,7 +20,7 @@ import {
 } from "node:process";
 import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
-import { type Readable, Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   type LinghunConfig,
@@ -99,6 +99,16 @@ import {
   summarizeArchitectureCard,
 } from "./architecture-runtime.js";
 import {
+  appendBreakCacheEvent,
+  buildPromptCacheRequestFields,
+  clearBreakCacheMarker,
+  formatBreakCacheStatus,
+  writeBreakCacheMarker,
+} from "./break-cache-runtime.js";
+// D.14A-2 — break-cache runtime moved to ./break-cache-runtime.ts.
+// Re-export the test hooks to preserve model-doctor-runtime.test.ts imports from "./index.js".
+export { type BreakCacheTestHooks, breakCacheTestHooks } from "./break-cache-runtime.js";
+import {
   createCacheFreshness,
   createConfigFreshnessSummary,
   diffFreshness,
@@ -112,6 +122,17 @@ import {
   microCompactMessages,
 } from "./compact-context.js";
 import { estimateModelMessageChars, estimateTranscriptContextChars } from "./context-estimator.js";
+import {
+  checkClaimSupport,
+  checkEvidenceGate,
+  createHandoffPendingItems,
+  createHandoffRiskItems,
+  createPhase15BetaVerdictScope,
+  formatClaimCheck,
+  formatSolutionCompletenessReportBlock,
+  needsSolutionCompletenessReportClosure,
+  runArchitectureAndCompletenessFinalGate,
+} from "./final-answer-gate.js";
 import {
   type CodebaseMemoryBinarySource,
   type CodebaseMemoryBinaryStatus,
@@ -230,15 +251,12 @@ import {
   createToolUseDriftSummary,
   buildDowngradedFinalAnswer,
   deriveToolSupportsClaims,
-  evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
   extractNaturalReadPath,
-  finalAnswerHasCompletenessClassification,
   formatFileCandidates,
   formatSolutionCompletenessTrigger,
-  hasArchitectureEvidenceForClaims,
   hasModelSynthesisIntent,
   inferSolutionCompletenessImpactAreas,
   isNaturalReadFileRequest,
@@ -455,6 +473,23 @@ import {
 } from "./terminal-readiness-presenter.js";
 import { formatToolOutput, formatToolStart } from "./tool-output-presenter.js";
 import { type MessageKey, messages } from "./tui-messages.js";
+import {
+  ShellBlockOutput,
+  beginAssistantStream,
+  createShellBlockOutputForTest,
+  discardAssistantBlock,
+  endAssistantStream,
+  replaceAssistantBlockContent,
+  writeAssistantDelta,
+  writeDiagnosticLine,
+  writeErrorLine,
+} from "./tui-output-surface.js";
+import {
+  CHAT_COMPLETIONS_ENDPOINT,
+  formatPercent,
+  formatStats,
+  formatUsage,
+} from "./usage-stats-presenter.js";
 import {
   type WorkspaceReferenceCache,
   createWorkspaceReferenceCache,
@@ -988,7 +1023,6 @@ const MIN_CACHE_HISTORY_SIZE = 1;
 const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
-const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 const MAX_MODEL_TOOL_ROUNDS = 4;
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
@@ -1924,348 +1958,6 @@ async function shouldEnterInkShell(input: Readable, output: Writable): Promise<b
   if (!shouldEnterProductShellCandidate(input, output)) return false;
   const { shouldUseInkShell } = await import("./shell/ink-renderer.js");
   return shouldUseInkShell(input, output);
-}
-
-/**
- * D13E-P3 cleanup #4 — 识别 plain TUI 的 StatusTray raw 行
- * （`formatRuntimeStatusLine` 的产出）。Ink 模式下任何残留 writeLine 该格式
- * 的字符串都视为噪音，必须从 ShellBlockOutput._write 静默丢弃。
- *
- * 命中条件（任意一条即可，line 已经 trim）：
- *   - "[Linghun] 会话 …" / "[Linghun] 会话 ..." 中文格式
- *   - "Status: Session …" 英文格式
- *   - 同时包含 "确认 " 与 "后台 "（中文 fallback）
- *   - 同时包含 "Gate " 与 "BG "（英文 fallback；前导可有可无的 "· "
- *     分隔符，所以这里只查 token 关键字）
- *
- * 故意保守：长 doctor 报告 / 错误堆栈 / 用户回声不会同时命中两个 token。
- */
-function isRuntimeStatusDump(line: string): boolean {
-  if (line.startsWith("[Linghun] 会话 ")) return true;
-  if (line.startsWith("Status: Session ")) return true;
-  if (line.includes("确认 ") && line.includes("后台 ")) return true;
-  if (line.includes("Gate ") && line.includes("BG ")) return true;
-  return false;
-}
-
-class ShellBlockOutput extends Writable {
-  /**
-   * 当前 active 的 assistant streaming block id（keep:true，由
-   * beginAssistantStream 注册）。endAssistantStream 之后清空，下一轮
-   * 再 begin 时换新 id。
-   *
-   * 这条路径专门绕开 _write 的 createOutputBlock + ephemeral splice 逻辑：
-   * 流式 assistant_text_delta 不应被当作普通 writeLine 反复 push/splice，
-   * 否则只会留下最后一片 chunk 而非完整文本。
-   */
-  private assistantBlockId: string | undefined;
-
-  constructor(
-    private readonly context: TuiContext,
-    private readonly blocks: ProductBlockViewModel[],
-    private readonly onWrite: () => void,
-  ) {
-    super();
-  }
-
-  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
-    const text = chunk.toString();
-    const normalized = text.trim();
-    if (normalized) {
-      // D13E-P3 cleanup #4 — 拦截 plain TUI 用的 StatusTray raw 行（writeStatus
-      // 的产出）。Ink 路径下任何 writeLine/handleTuiKeypress 残留写出
-      // "[Linghun] 会话 ... · 后台 N" / "Status: Session ..." 都会被这里 drop，
-      // 让 task transcript 永远看不到那条噪音。新 TaskFooter 已经覆盖必要状态
-      // （permission · model · cache · index · reasoning），所以丢弃这条不损失信号。
-      if (isRuntimeStatusDump(normalized)) {
-        callback();
-        return;
-      }
-      this.blocks.push(createOutputBlock(normalized, this.context.language));
-      // 缓存"最近一次普通 writeLine 的完整正文"，让 /details 默认分支可以展开
-      // 长正文（如 /model doctor 的 provider.env merge / providers / endpointPath
-      // 等多行 body）。/details 自身不能覆盖这条记录，否则连续 /details 会陷入
-      // 套娃；handleDetailsCommand 在执行期间设置 suppressLastFullOutputCapture
-      // 标记位跳过缓存。
-      if (!this.context.suppressLastFullOutputCapture) {
-        this.context.lastFullOutput = normalized;
-      }
-      // D.13Q-UX Real Smoke Fix v3 — 不再在 ShellBlockOutput 内做 ephemeral
-      // splice 重排（旧实现 keep+lastEphemeral 会破坏 user → assistant →
-      // diagnostic → user → assistant 的真实时间线，并且与 view-model 的
-      // selectedBlocks 限流重复）。view-model.createShellViewModel 已按 append
-      // 顺序保留 keep/fail/blocked，并对 ephemeral 做 N 条上限；这里只 append
-      // 后通知 rerender。
-      this.onWrite();
-    }
-    callback();
-  }
-
-  /**
-   * 注册一条 assistant streaming block id，但 **不立即** 推入 blocks 数组。
-   * 真正的 keep:true block 在第一次 appendAssistantDelta 收到非空文本时才创建
-   * （ensureAssistantBlock）。这样在 thinking-only / 空响应 / 慢请求等场景下，
-   * 主屏不会出现一条空 block 渲染成"没有可见输出。"占位行 —— 等待态由
-   * requestActivityPhase / mapRequestActivityToView 驱动的 ActivityIndicator
-   * 单独负责（"正在思考…" / "Thinking…"）。
-   *
-   * id 由调用方传入（每个 request 用一个稳定 id），便于多轮请求各自占用
-   * 独立 block，互不覆盖。
-   */
-  beginAssistantStream(id: string): void {
-    this.assistantBlockId = id;
-    // 不再 push 初始空 block；只通知一次 rerender（让 ActivityIndicator 起来）。
-    this.onWrite();
-  }
-
-  private ensureAssistantBlock(id: string): ProductBlockViewModel | undefined {
-    const existing = this.blocks.find((b) => b.id === id);
-    if (existing) return existing;
-    // 复用 createOutputBlock 拿到 i18n 后的 title / 占位 summary，再补 keep:true。
-    // 初始 fullText 用空串，由调用者紧接着覆盖为首个 delta 文本。
-    const block = createOutputBlock("", this.context.language, id);
-    block.keep = true;
-    block.fullText = "";
-    block.nextAction = undefined;
-    this.blocks.push(block);
-    return block;
-  }
-
-  /**
-   * 将一段 assistant_text_delta 追加到当前 streaming block。
-   * - 第一次收到非空 delta 时才创建 keep:true block（避免空占位行）
-   * - fullText 累计完整正文
-   * - summary 取累计正文的首个非空行
-   * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
-   */
-  appendAssistantDelta(text: string): void {
-    if (!text) return;
-    const id = this.assistantBlockId;
-    if (!id) {
-      this._write(text, "utf8", () => {});
-      return;
-    }
-    const block = this.ensureAssistantBlock(id);
-    if (!block) {
-      this.assistantBlockId = undefined;
-      this._write(text, "utf8", () => {});
-      return;
-    }
-    const nextFull = `${block.fullText ?? ""}${text}`;
-    const firstLine = nextFull.split("\n").find((line) => line.trim()) ?? nextFull;
-    block.fullText = nextFull;
-    block.summary = firstLine || block.summary;
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = nextFull;
-    }
-    this.onWrite();
-  }
-
-  /**
-   * 结束当前 streaming block 的 active 状态。block 保留在 this.blocks
-   * 中作为 transcript row（keep:true 已确保 view-model 不会 slice 它），
-   * 只清掉 active id，下一轮 beginAssistantStream 会换新 id。
-   */
-  endAssistantStream(): void {
-    this.assistantBlockId = undefined;
-    this.onWrite();
-  }
-
-  /**
-   * D.13V — Final Answer Gate 在 retry 前丢弃当前 streaming block 的全部累计
-   * 内容。保留 active id，让接下来的 delta 可以重新填回同一条 block；
-   * 同时清掉 lastFullOutput 中可能残留的违规原文，避免 Ctrl+O / details 拉到。
-   */
-  discardAssistantBlock(id: string): void {
-    const block = this.blocks.find((b) => b.id === id);
-    if (block) {
-      block.fullText = "";
-      block.summary = "";
-    }
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = undefined;
-    }
-    this.onWrite();
-  }
-
-  /**
-   * D.13V — Final Answer Gate 在本地降级时把 streaming block 的 fullText
-   * 替换成已经过 buildDowngradedFinalAnswer 处理过的安全文本；同时把
-   * lastFullOutput 同步为同一份安全文本，让 Ctrl+O / details 也只看降级版。
-   */
-  replaceAssistantBlockContent(id: string, text: string): void {
-    const block = this.blocks.find((b) => b.id === id);
-    if (block) {
-      block.fullText = text;
-      const firstLine = text.split("\n").find((line) => line.trim()) ?? text;
-      block.summary = firstLine || block.summary;
-    }
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = text;
-    }
-    this.onWrite();
-  }
-
-  /**
-   * D.13Q-UX Real Smoke Fix v3 — 把一段诊断正文（/mcp status / /index status
-   * 等）显式当作 messageKind=diagnostic block 写入 transcript：
-   *   - 不走 createOutputBlock 的 assistant_text 默认分支，避免被当作普通 AI 正文；
-   *   - 不进入 fail/blocked 状态，不再被任何关键词扫描误伤；
-   *   - 仍累计到 lastFullOutput，让 /details + Ctrl+O 能展开完整诊断。
-   * 调用方应自己保证只用于真正的诊断输出（status / doctor 概要 / state dump）。
-   */
-  writeDiagnosticLine(text: string): void {
-    const normalized = text.replace(/\r/g, "").trim();
-    if (!normalized) return;
-    const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
-    const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
-    const hasMore =
-      normalized.length > 0 &&
-      (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
-    const detailsHint =
-      this.context.language === "en-US" ? "Ctrl+O for details" : "Ctrl+O 查看完整内容";
-    this.blocks.push({
-      id: `diag-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      kind: "details",
-      status: "info",
-      title: "",
-      summary: firstLine,
-      fullText: normalized,
-      nextAction: hasMore ? detailsHint : undefined,
-      messageKind: "diagnostic",
-    });
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = normalized;
-    }
-    this.onWrite();
-  }
-
-  /**
-   * D.13Q-UX Real Smoke Fix v3 复核 — 显式结构化错误写入路径：
-   *   - 与 createOutputBlock（不再扫关键词）解耦，由调用方明确表态"这是错误"；
-   *   - 走 messageKind="tool_result_error" / kind="error" / status="fail"，
-   *     ProductBlock 命中红边卡片（带 fail marker + tool_result_error tone）；
-   *   - Ctrl+O hint 沿用 v3 规则：只有多行或单行明显超长才挂 errorDetailsHint；
-   *   - fullText 累计到 lastFullOutput，/details + Ctrl+O 能展开完整错误正文。
-   * 调用点限定为真实错误：provider stream error / final no-tools provider error /
-   * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败 等。
-   * 普通 writeLine / /mcp status / 普通 assistant 正文不要走这条路径。
-   */
-  writeErrorLine(text: string, title?: string): void {
-    const normalized = text.replace(/\r/g, "").trim();
-    if (!normalized) return;
-    const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
-    const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
-    const hasMore =
-      normalized.length > 0 &&
-      (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
-    const errorHint =
-      this.context.language === "en-US"
-        ? "Ctrl+O for full error"
-        : "Ctrl+O 查看完整错误";
-    this.blocks.push({
-      id: `err-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      kind: "error",
-      status: "fail",
-      title: title ?? (this.context.language === "en-US" ? "output failed" : "output 失败"),
-      summary: firstLine,
-      fullText: normalized,
-      nextAction: hasMore ? errorHint : undefined,
-      messageKind: "tool_result_error",
-    });
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = normalized;
-    }
-    this.onWrite();
-  }
-}
-
-/**
- * Duck-typed helpers for assistant streaming. Ink shell 注入 ShellBlockOutput
- * 时走 begin/append/end 三段式，把每个 assistant_text_delta 累积到同一条
- * keep:true block；其他 Writable（plain TUI、MemoryOutput、tests）走原始
- * output.write 路径，保持非交互行为不变。
- */
-function beginAssistantStream(output: Writable, id: string): void {
-  const candidate = output as { beginAssistantStream?: (id: string) => void };
-  if (typeof candidate.beginAssistantStream === "function") {
-    candidate.beginAssistantStream(id);
-  }
-}
-
-function writeAssistantDelta(output: Writable, _id: string, text: string): void {
-  if (!text) return;
-  const candidate = output as { appendAssistantDelta?: (text: string) => void };
-  if (typeof candidate.appendAssistantDelta === "function") {
-    candidate.appendAssistantDelta(text);
-    return;
-  }
-  output.write(text);
-}
-
-function endAssistantStream(output: Writable): void {
-  const candidate = output as { endAssistantStream?: () => void };
-  if (typeof candidate.endAssistantStream === "function") {
-    candidate.endAssistantStream();
-  }
-}
-
-/**
- * D.13V — Final Answer Gate retry 前调用，清空当前 streaming block 累计的
- * 违规原文与 lastFullOutput，避免 Ctrl+O/details 残留。Plain Writable / 测试
- * MemoryOutput 自动跳过（无 ShellBlockOutput 状态可清）。
- */
-function discardAssistantBlock(output: Writable, id: string): void {
-  const candidate = output as { discardAssistantBlock?: (id: string) => void };
-  if (typeof candidate.discardAssistantBlock === "function") {
-    candidate.discardAssistantBlock(id);
-  }
-}
-
-/**
- * D.13V — Final Answer Gate 本地降级时替换 streaming block 的 fullText 与
- * lastFullOutput 为安全文本（buildDowngradedFinalAnswer 输出）。
- */
-function replaceAssistantBlockContent(output: Writable, id: string, text: string): void {
-  const candidate = output as {
-    replaceAssistantBlockContent?: (id: string, text: string) => void;
-  };
-  if (typeof candidate.replaceAssistantBlockContent === "function") {
-    candidate.replaceAssistantBlockContent(id, text);
-  }
-}
-
-/**
- * D.13Q-UX Real Smoke Fix v3 — 写诊断正文。Ink shell 注入的 ShellBlockOutput
- * 命中 writeDiagnosticLine 走 messageKind=diagnostic 分支（dim/cyan，不红框）；
- * plain TUI / MemoryOutput / 其他 Writable 走 writeLine 兼容回退。
- */
-function writeDiagnosticLine(output: Writable, text: string): void {
-  const candidate = output as { writeDiagnosticLine?: (text: string) => void };
-  if (typeof candidate.writeDiagnosticLine === "function") {
-    candidate.writeDiagnosticLine(text);
-    return;
-  }
-  writeLine(output, text);
-}
-
-/**
- * D.13Q-UX Real Smoke Fix v3 复核 — 写真实错误。Ink shell 注入的
- * ShellBlockOutput 命中 writeErrorLine 走 messageKind=tool_result_error /
- * kind=error / status=fail（红边卡 + fail marker）；plain TUI / MemoryOutput /
- * 其他 Writable 走 writeLine 兼容回退（正文文案保持一致）。
- *
- * 仅用于真实错误调用点：provider stream error / final no-tools provider error /
- * slash/tool catch / executeIndexIgnoreWritePlan ignore 写入失败。
- * 普通正文 / diagnostic / status 不要走这条路径。
- */
-function writeErrorLine(output: Writable, text: string, title?: string): void {
-  const candidate = output as { writeErrorLine?: (text: string, title?: string) => void };
-  if (typeof candidate.writeErrorLine === "function") {
-    candidate.writeErrorLine(text, title);
-    return;
-  }
-  writeLine(output, text);
 }
 
 /**
@@ -7250,7 +6942,7 @@ async function handleBreakCacheCommand(
   // packages/providers 不读不写本地文件。--clear 可放在第一个或第二个位置。
   const clearFlag = args.includes("--clear");
   if (action === "status" && !clearFlag) {
-    writeLine(output, formatBreakCacheStatus(context));
+    writeLine(output, formatBreakCacheStatus(context, getCurrentFreshness(context)));
     return;
   }
   if (clearFlag) {
@@ -7259,7 +6951,7 @@ async function handleBreakCacheCommand(
     await appendBreakCacheEvent(context, "cleared");
     refreshCacheFreshness(context);
     writeLine(output, "已清除 break-cache marker（once + always）。下次请求不再附加 nonce。");
-    writeLine(output, formatBreakCacheStatus(context));
+    writeLine(output, formatBreakCacheStatus(context, getCurrentFreshness(context)));
     return;
   }
   if (action === "once") {
@@ -10962,372 +10654,6 @@ function formatCompactStatus(context: TuiContext): string {
   ].join("\n");
 }
 
-// ---------------------------------------------------------------------------
-// D.13F：/break-cache marker 文件 + 有界事件 jsonl 助手
-// ---------------------------------------------------------------------------
-// 设计要点：
-// - marker 文件位于 .linghun/，文件存在即代表对应模式生效；once 命中后由 runtime 删除。
-// - event log 仅记录动作类型与时间戳；不记录 prompt / api key / raw request / raw response。
-// - 容量上限 200 行（按行截断），写入失败不抛；读取失败返回空数组。
-// - 全部 IO 集中在 TUI/runtime 层，packages/providers 只接收最终的 cacheBreakNonce 输入。
-
-type BreakCacheMode = "off" | "once" | "always";
-type BreakCacheMarker = { mode: BreakCacheMode; nonce?: string };
-type BreakCacheEvent = { action: string; createdAt: string };
-
-const BREAK_CACHE_ONCE_FILENAME = ".break-cache-once";
-const BREAK_CACHE_ALWAYS_FILENAME = ".break-cache-always";
-const BREAK_CACHE_EVENTS_FILENAME = "break-cache-events.jsonl";
-const BREAK_CACHE_EVENTS_MAX_LINES = 200;
-
-function getBreakCacheDir(context: TuiContext): string {
-  return join(context.projectPath, ".linghun");
-}
-
-function getBreakCacheOncePath(context: TuiContext): string {
-  return join(getBreakCacheDir(context), BREAK_CACHE_ONCE_FILENAME);
-}
-
-function getBreakCacheAlwaysPath(context: TuiContext): string {
-  return join(getBreakCacheDir(context), BREAK_CACHE_ALWAYS_FILENAME);
-}
-
-function getBreakCacheEventsPath(context: TuiContext): string {
-  return join(getBreakCacheDir(context), BREAK_CACHE_EVENTS_FILENAME);
-}
-
-function readBreakCacheMarkerSync(context: TuiContext): BreakCacheMarker {
-  // always 优先于 once；off 表示无 marker。任何读取错误一律视为 off。
-  try {
-    const alwaysPath = getBreakCacheAlwaysPath(context);
-    if (existsSync(alwaysPath)) {
-      const nonce = readFileSync(alwaysPath, "utf8").trim();
-      return { mode: "always", nonce: nonce || undefined };
-    }
-    const oncePath = getBreakCacheOncePath(context);
-    if (existsSync(oncePath)) {
-      const nonce = readFileSync(oncePath, "utf8").trim();
-      return { mode: "once", nonce: nonce || undefined };
-    }
-  } catch {
-    // 静默降级到 off；marker 不可读不应阻断主流程。
-  }
-  return { mode: "off" };
-}
-
-function readRecentBreakCacheEventsSync(context: TuiContext, limit: number): BreakCacheEvent[] {
-  try {
-    const path = getBreakCacheEventsPath(context);
-    if (!existsSync(path)) return [];
-    const raw = readFileSync(path, "utf8");
-    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-    const recent = lines.slice(-Math.max(1, limit));
-    const events: BreakCacheEvent[] = [];
-    for (const line of recent) {
-      try {
-        const parsed = JSON.parse(line) as Partial<BreakCacheEvent>;
-        if (typeof parsed.action === "string" && typeof parsed.createdAt === "string") {
-          events.push({ action: parsed.action, createdAt: parsed.createdAt });
-        }
-      } catch {
-        // 跳过损坏行，不抛
-      }
-    }
-    return events;
-  } catch {
-    return [];
-  }
-}
-
-async function appendBreakCacheEvent(context: TuiContext, action: string): Promise<void> {
-  // 有界 jsonl：先 append，再按 200 行截断重写。失败不抛，避免破坏主流程。
-  try {
-    await mkdir(getBreakCacheDir(context), { recursive: true });
-    const path = getBreakCacheEventsPath(context);
-    const event: BreakCacheEvent = { action, createdAt: new Date().toISOString() };
-    await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
-    const raw = await readFile(path, "utf8").catch(() => "");
-    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-    if (lines.length > BREAK_CACHE_EVENTS_MAX_LINES) {
-      const trimmed = lines.slice(-BREAK_CACHE_EVENTS_MAX_LINES).join("\n");
-      await writeFile(path, `${trimmed}\n`, "utf8");
-    }
-  } catch {
-    // ignore
-  }
-}
-
-async function writeBreakCacheMarker(
-  context: TuiContext,
-  mode: "once" | "always",
-  nonce: string,
-): Promise<void> {
-  await mkdir(getBreakCacheDir(context), { recursive: true });
-  const path = mode === "once" ? getBreakCacheOncePath(context) : getBreakCacheAlwaysPath(context);
-  await writeFile(path, nonce, "utf8");
-}
-
-async function clearBreakCacheMarker(context: TuiContext, mode: BreakCacheMode | "all"): Promise<void> {
-  const targets: string[] = [];
-  if (mode === "once" || mode === "all") targets.push(getBreakCacheOncePath(context));
-  if (mode === "always" || mode === "all") targets.push(getBreakCacheAlwaysPath(context));
-  for (const target of targets) {
-    try {
-      if (existsSync(target)) {
-        await rm(target, { force: true });
-      }
-    } catch {
-      // ignore；下次状态读取仍能反映真实文件状态
-    }
-  }
-}
-
-// D.13F：导出 path-based pure helper 仅供 model-doctor / break-cache 单元测试使用。
-// 不依赖 TuiContext，避免测试构造庞大的运行时上下文。生产代码继续使用 context-based 形态。
-export type BreakCacheTestHooks = {
-  writeMarker: (
-    projectPath: string,
-    mode: "once" | "always",
-    nonce: string,
-  ) => Promise<void>;
-  clearMarker: (projectPath: string, mode: "off" | "once" | "always" | "all") => Promise<void>;
-  readMarker: (projectPath: string) => { mode: "off" | "once" | "always"; nonce?: string };
-  consumeNonce: (projectPath: string) => Promise<string | undefined>;
-  appendEvent: (projectPath: string, action: string) => Promise<void>;
-  readRecentEvents: (
-    projectPath: string,
-    limit: number,
-  ) => Array<{ action: string; createdAt: string }>;
-  buildPromptCacheFields: (
-    projectPath: string,
-    enabled: boolean,
-    systemTtl: "5m" | "1h",
-  ) => Promise<{
-    promptCacheEnabled?: boolean;
-    promptCacheTtl?: "1h";
-    cacheBreakNonce?: string;
-  }>;
-  paths: (projectPath: string) => {
-    onceMarker: string;
-    alwaysMarker: string;
-    eventsLog: string;
-  };
-  eventsMaxLines: number;
-};
-
-function makeFakeContextForPath(projectPath: string): TuiContext {
-  // 单元测试专用：仅提供 break-cache 助手所需的 projectPath 字段。
-  // 其它字段访问会抛 TypeError，迫使新依赖在测试覆盖中显式增加。
-  return { projectPath } as unknown as TuiContext;
-}
-
-export const breakCacheTestHooks: BreakCacheTestHooks = {
-  writeMarker: (projectPath, mode, nonce) =>
-    writeBreakCacheMarker(makeFakeContextForPath(projectPath), mode, nonce),
-  clearMarker: (projectPath, mode) =>
-    clearBreakCacheMarker(makeFakeContextForPath(projectPath), mode),
-  readMarker: (projectPath) => readBreakCacheMarkerSync(makeFakeContextForPath(projectPath)),
-  consumeNonce: (projectPath) =>
-    consumeBreakCacheNonceForRequest(makeFakeContextForPath(projectPath)),
-  appendEvent: (projectPath, action) =>
-    appendBreakCacheEvent(makeFakeContextForPath(projectPath), action),
-  readRecentEvents: (projectPath, limit) =>
-    readRecentBreakCacheEventsSync(makeFakeContextForPath(projectPath), limit),
-  buildPromptCacheFields: async (projectPath, enabled, systemTtl) => {
-    if (!enabled) return {};
-    const nonce = await consumeBreakCacheNonceForRequest(makeFakeContextForPath(projectPath));
-    return {
-      promptCacheEnabled: true,
-      ...(systemTtl === "1h" ? { promptCacheTtl: "1h" as const } : {}),
-      ...(nonce ? { cacheBreakNonce: nonce } : {}),
-    };
-  },
-  paths: (projectPath) => {
-    const ctx = makeFakeContextForPath(projectPath);
-    return {
-      onceMarker: getBreakCacheOncePath(ctx),
-      alwaysMarker: getBreakCacheAlwaysPath(ctx),
-      eventsLog: getBreakCacheEventsPath(ctx),
-    };
-  },
-  eventsMaxLines: BREAK_CACHE_EVENTS_MAX_LINES,
-};
-
-// 由请求 dispatch 路径调用：返回当轮要写进 ModelRequest 的 cacheBreakNonce，
-// 并在 once 命中后立即消费 marker（删除 once 文件）。always 不消费。
-async function consumeBreakCacheNonceForRequest(context: TuiContext): Promise<string | undefined> {
-  const marker = readBreakCacheMarkerSync(context);
-  if (marker.mode === "off") return undefined;
-  const nonce = marker.nonce && marker.nonce.length > 0 ? marker.nonce : randomUUID();
-  if (marker.mode === "once") {
-    try {
-      await rm(getBreakCacheOncePath(context), { force: true });
-    } catch {
-      // ignore
-    }
-    await appendBreakCacheEvent(context, "once_consumed");
-  }
-  return nonce;
-}
-
-// D.13F：把 promptCache 配置 + 当轮 nonce 折叠成 ModelRequest 片段。
-// enabled=false 时返回空对象，请求体不会带 cache_control / nonce。
-async function buildPromptCacheRequestFields(context: TuiContext): Promise<{
-  promptCacheEnabled?: boolean;
-  promptCacheTtl?: "1h";
-  cacheBreakNonce?: string;
-}> {
-  const config = context.config.promptCache;
-  if (!config.enabled) return {};
-  const nonce = await consumeBreakCacheNonceForRequest(context);
-  return {
-    promptCacheEnabled: true,
-    ...(config.systemTtl === "1h" ? { promptCacheTtl: "1h" as const } : {}),
-    ...(nonce ? { cacheBreakNonce: nonce } : {}),
-  };
-}
-
-function formatBreakCacheStatus(context: TuiContext): string {
-  const current = getCurrentFreshness(context);
-  const changed = diffFreshness(context.cache.lastFreshness, current);
-  const keys =
-    changed.length > 0
-      ? changed
-      : context.cache.lastFreshness?.changedKeys.length
-        ? context.cache.lastFreshness.changedKeys
-        : (context.cache.history.at(-1)?.freshness.changedKeys ?? []);
-  // D.13F：standalone marker mode 与最近事件摘要，仅作只读展示。
-  const marker = readBreakCacheMarkerSync(context);
-  const recentEvents = readRecentBreakCacheEventsSync(context, 3);
-  return [
-    "Break-cache status",
-    `- systemPromptHash: ${current.systemPromptHash}`,
-    `- toolSchemaHash: ${current.toolSchemaHash}`,
-    `- mcpToolListHash: ${current.mcpToolListHash}`,
-    `- modelProviderHash: ${current.modelProviderHash}`,
-    `- reasoningEffortHash: ${current.reasoningEffortHash ?? "-"}`,
-    `- projectRulesHash: ${current.projectRulesHash ?? "-"}`,
-    `- memoryHash: ${current.memoryHash ?? "-"}`,
-    `- compactHash: ${current.compactHash ?? "-"}`,
-    `- pluginListHash: ${current.pluginListHash ?? "-"}`,
-    `- endpointProfileHash: ${current.endpointProfileHash ?? "-"}`,
-    `- cacheControlHash: ${current.cacheControlHash ?? "-"}`,
-    `- cacheTtlHash: ${current.cacheTtlHash ?? "-"}`,
-    `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl}`,
-    `- mode: ${marker.mode}${marker.nonce ? ` nonce=${marker.nonce.slice(0, 8)}…` : ""}${marker.mode === "always" ? "（固定 break-cache namespace；不会每次请求都破坏缓存）" : ""}`,
-    `- recent break-cache events: ${recentEvents.length === 0 ? "none" : recentEvents.map((event) => `${event.action}@${event.createdAt}`).join("; ")}`,
-    `- changedKeys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
-    "- usage: /break-cache status | once | always | off | --clear；marker 与 event 仅记录动作，不记录 prompt/key/raw request/response。always=固定 nonce 切到新 cache namespace（stable nonce），不是每次请求都破坏缓存。",
-    "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list / endpoint profile / cacheControl / cacheTtl 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
-  ].join("\n");
-}
-
-function formatUsage(context: TuiContext): string {
-  const totals = sumCacheHistory(context.cache.history);
-  const latest = context.cache.history.at(-1);
-  return [
-    "Usage（本会话原始 token/cache usage）",
-    `- input tokens: ${totals.inputTokens}`,
-    `- output tokens: ${totals.outputTokens}`,
-    `- cache read tokens: ${totals.cacheReadTokens}`,
-    `- cache write/create tokens: ${totals.cacheWriteTokens}`,
-    `- model: ${latest?.model ?? context.model}`,
-    `- provider: ${latest?.provider ?? "unknown"}`,
-    `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
-    `- compact: ${context.cache.compacted ? "yes" : "no"}`,
-    `- rawUsage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
-    "- role usage (estimated):",
-    ...formatRoleUsageLines(context),
-    "- billing: 未记录真实账单字段；任何金额只能标记 estimated。",
-  ].join("\n");
-}
-
-function formatRoleUsageLines(context: TuiContext): string[] {
-  if (context.roleUsage.length === 0) {
-    return ["  - none yet"];
-  }
-  return context.roleUsage.map(
-    (usage) =>
-      `  - ${usage.role}/${usage.provider}/${usage.model}: input=${usage.inputTokens} output=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens} estimatedCny=${usage.estimatedCny.toFixed(4)} estimated createdAt=${usage.createdAt} fallbackUsed=${usage.fallbackUsed ? "yes" : "no"} budgetStop=${usage.budgetStop ? "yes" : "no"} contribution=${usage.contributionSummary}`,
-  );
-}
-
-function formatStats(args: string[], context: TuiContext): string {
-  if (args[0] === "endpoints") {
-    return formatEndpointStats(context.cache.history);
-  }
-  const totals = sumCacheHistory(context.cache.history);
-  const latest = context.cache.history.at(-1);
-  const provider = latest?.provider ?? "unknown";
-  const hitRate = computePromptCacheHitRate({
-    inputTokens: totals.inputTokens,
-    outputTokens: totals.outputTokens,
-    cacheReadTokens: totals.cacheReadTokens,
-    cacheWriteTokens: totals.cacheWriteTokens,
-    provider,
-    model: context.model,
-  });
-  return [
-    "Stats",
-    `- samples: ${context.cache.history.length}`,
-    `- elapsedMs: ${Date.now() - context.cache.startedAt}`,
-    `- model: ${context.model}`,
-    `- provider: ${provider}`,
-    `- hitRate: ${formatPercent(hitRate)}`,
-    `- tokens: input=${totals.inputTokens}, output=${totals.outputTokens}, cache_read=${totals.cacheReadTokens}, cache_write=${totals.cacheWriteTokens}`,
-    "- role/model/provider usage (estimated):",
-    ...formatRoleUsageLines(context),
-    "- cost: estimated unavailable（未配置价格；不伪装成真实账单；状态栏不显示金额）",
-  ].join("\n");
-}
-
-function formatEndpointStats(history: CacheTurnStats[]): string {
-  if (history.length === 0) {
-    return "Endpoint stats：暂无样本。";
-  }
-  const groups = new Map<string, CacheTurnStats[]>();
-  for (const item of history) {
-    const key = item.endpoint ?? "unknown";
-    groups.set(key, [...(groups.get(key) ?? []), item]);
-  }
-  return [
-    "Endpoint stats",
-    ...[...groups.entries()].map(([endpoint, items]) => {
-      const totals = sumCacheHistory(items);
-      const hitRate = computePromptCacheHitRate({
-        inputTokens: totals.inputTokens,
-        outputTokens: totals.outputTokens,
-        cacheReadTokens: totals.cacheReadTokens,
-        cacheWriteTokens: totals.cacheWriteTokens,
-        provider: items[0]?.provider ?? "unknown",
-        model: items[0]?.model ?? "unknown",
-      });
-      return `- ${endpoint}: samples=${items.length} hitRate=${formatPercent(hitRate)} input=${totals.inputTokens} output=${totals.outputTokens} cache_read=${totals.cacheReadTokens} cache_write=${totals.cacheWriteTokens}`;
-    }),
-  ].join("\n");
-}
-
-function sumCacheHistory(history: CacheTurnStats[]): {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-} {
-  return history.reduce(
-    (total, item) => ({
-      inputTokens: total.inputTokens + item.inputTokens,
-      outputTokens: total.outputTokens + item.outputTokens,
-      cacheReadTokens: total.cacheReadTokens + item.cacheReadTokens,
-      cacheWriteTokens: total.cacheWriteTokens + item.cacheWriteTokens,
-    }),
-    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-  );
-}
-
-function formatPercent(value: number | null): string {
-  return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
-}
-
 function collectLightHints(context: TuiContext): LightHint[] {
   const latest = context.cache.history.at(-1);
   const hints: LightHint[] = [];
@@ -13593,76 +12919,6 @@ async function recordProviderEmptyResponse(
   return formatProviderEmptyResponsePrimary(context.language);
 }
 
-function needsSolutionCompletenessReportClosure(
-  context: TuiContext,
-  assistantText: string,
-): boolean {
-  if (!context.solutionCompleteness.classificationRequired) {
-    return false;
-  }
-  return !/single_issue|systemic_gap/u.test(assistantText);
-}
-
-// D.13V-B：在 final answer push 之前对 architecture / completeness 做一次额外 gate。
-// 与 D.13U evaluateFinalAnswerClaims 平行，不重写它。共享 finalAnswerClaimRetried 一次重试预算。
-function runArchitectureAndCompletenessFinalGate(
-  context: TuiContext,
-  assistantText: string,
-):
-  | {
-      status: "passed";
-    }
-  | {
-      status: "needs_disclaimer";
-      verdict: ReturnType<typeof evaluateArchitectureAndCompletenessClaims>;
-    } {
-  if (!assistantText) {
-    return { status: "passed" };
-  }
-  const card = context.currentArchitectureCard;
-  let driftWarnings: string[] = [];
-  if (card) {
-    // 用 final answer 文本作为 nextAction.summary，复用 detectArchitectureDrift 的
-    // treatsUnknownOrStaleAsFact / violatesNonGoals 检查。toolName 留空，避免触发
-    // dependency/file scope 误报；本 gate 只关心"事实层面是否被声明为已闭合"。
-    const drift = detectArchitectureDrift(card, { summary: assistantText });
-    driftWarnings = drift.warnings;
-  }
-  const verdict = evaluateArchitectureAndCompletenessClaims(
-    assistantText,
-    {
-      hasActiveCard: Boolean(card),
-      driftWarnings,
-      hasArchitectureEvidence: hasArchitectureEvidenceForClaims(context.evidence),
-    },
-    {
-      classificationRequired: context.solutionCompleteness.classificationRequired,
-      classification: context.solutionCompleteness.classification,
-      textHasClassification: finalAnswerHasCompletenessClassification(assistantText),
-    },
-  );
-  if (verdict.status === "needs_disclaimer") {
-    return { status: "needs_disclaimer", verdict };
-  }
-  return { status: "passed" };
-}
-
-function formatSolutionCompletenessReportBlock(context: TuiContext): string {
-  const status = context.solutionCompleteness;
-  const classification =
-    status.classification === "unknown" ? "systemic_gap" : status.classification;
-  const impact = status.impactAreas.length > 0 ? status.impactAreas.join(", ") : "unknown";
-  const severity = status.severity === "unknown" ? "blocking_P1" : status.severity;
-  return [
-    "Solution Completeness Gate report",
-    `- classification: ${classification}`,
-    `- impactAreas: ${impact}`,
-    `- severity: ${severity}`,
-    "- phaseBoundary: stay in the current approved scope; do not enter Beta or later roadmap stages automatically.",
-    "- validation: list focused tests/check/typecheck/build/diff-check before claiming closure.",
-  ].join("\n");
-}
-
 function currentModelSupportsTools(
   context: TuiContext,
   runtime = getSelectedModelRuntime(context),
@@ -15105,270 +14361,6 @@ async function appendRouteDecisionEvent(
   );
 }
 
-function checkEvidenceGate(text: string, context: TuiContext): string | null {
-  const lower = text.toLowerCase();
-  const asksCodeFact =
-    /代码|函数|调用链|实现|修复|验证|code|function|call chain|fixed|verified/.test(lower);
-  if (!asksCodeFact) {
-    return null;
-  }
-  // D.13U：不再"任意 evidence 即放行"。要求至少一条本地代码事实证据
-  // （file_read / grep_result / index_query 或带 git_local_fact / local_read 标记）。
-  const hasLocalCodeEvidence = context.evidence.some(
-    (item) =>
-      item.kind === "file_read" ||
-      item.kind === "grep_result" ||
-      item.kind === "index_query" ||
-      item.supportsClaims.some((c) => c === "local_read" || c === "git_local_fact"),
-  );
-  if (hasLocalCodeEvidence) {
-    return null;
-  }
-  return t(context, "evidenceBlocked");
-}
-
-type ClaimCheck = {
-  status: "passed" | "needs_disclaimer" | "blocked";
-  unsupportedClaims: string[];
-  verdict?: VerdictEvidenceScope;
-};
-
-function createHandoffPendingItems(evidence: EvidenceRecord[]): string[] {
-  return createPhase15BetaVerdictScope(evidence).uncoveredItems;
-}
-
-function createHandoffRiskItems(evidence: EvidenceRecord[]): string[] {
-  return createPhase15BetaVerdictScope(evidence).residualRisks;
-}
-
-function createPhase15BetaVerdictScope(
-  evidence: EvidenceRecord[] = [],
-  transcript: TranscriptEvent[] = [],
-): VerdictEvidenceScope {
-  const requiredEvidence = [
-    {
-      key: "real-tui-report-generation",
-      missing: "real TUI report-generation path lacks PASS evidence",
-      present: hasEvidenceClaim(
-        evidence,
-        /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass/iu,
-      ),
-    },
-    {
-      key: "deepseek-dual-provider-pass",
-      missing: "DeepSeek dual-provider live report evidence is missing",
-      present: hasEvidenceClaim(evidence, /deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass/iu),
-    },
-    {
-      key: "openai-compatible-dual-provider-pass",
-      missing: "OpenAI-compatible dual-provider live report evidence is missing",
-      present: hasEvidenceClaim(
-        evidence,
-        /openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass/iu,
-      ),
-    },
-    {
-      key: "write-evidence",
-      missing: "report Write evidence is missing",
-      present: hasReportWriteEvidence(evidence),
-    },
-    {
-      key: "final-answer-report-reference",
-      missing: "final answer does not reference the generated report",
-      present: hasFinalAnswerReportReference(evidence, transcript),
-    },
-  ];
-  const hasBlockingGate = hasBlockingGateEvidence(evidence, transcript);
-  const uncoveredItems = requiredEvidence
-    .filter((item) => !item.present)
-    .map((item) => item.missing);
-  const residualRisks: string[] = [];
-  if (uncoveredItems.length > 0) {
-    residualRisks.push(
-      "live provider basic text PASS is not live provider tool/report PASS",
-      "mock provider PASS and focused test PASS cannot prove Beta readiness",
-    );
-  }
-  if (hasBlockingGate) {
-    uncoveredItems.push("blocking gate evidence still contains SKIPPED, PARTIAL, or BLOCKED");
-    residualRisks.push("blocking gate is not fully closed");
-  }
-  return {
-    scope: "beta",
-    status: uncoveredItems.length === 0 ? "PASS" : "PARTIAL",
-    evidenceRefs: evidence.filter((item) => isBetaVerdictEvidence(item)).map((item) => item.id),
-    validationCommands: [
-      "corepack pnpm test -- --run packages/tui/src/index.test.ts packages/tui/src/natural-command-bridge.test.ts",
-      "corepack pnpm test",
-      "corepack pnpm check",
-      "corepack pnpm typecheck",
-      "corepack pnpm build",
-      "git diff --check",
-    ],
-    uncoveredItems,
-    residualRisks,
-    nextAction:
-      uncoveredItems.length === 0
-        ? "All required Beta readiness evidence is present. User confirmation is still required before Beta."
-        : "Fix or re-smoke the real provider + real TUI report-generation path before any Beta readiness PASS claim.",
-  };
-}
-
-function hasEvidenceClaim(evidence: EvidenceRecord[], pattern: RegExp): boolean {
-  return evidence.some((item) =>
-    pattern.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
-  );
-}
-
-function hasReportWriteEvidence(evidence: EvidenceRecord[]): boolean {
-  return evidence.some(
-    (item) =>
-      item.kind === "command_output" &&
-      (item.source === "Write" || item.supportsClaims.includes("Write")) &&
-      /report|报告|\.md\b/iu.test([item.summary, item.source, ...item.supportsClaims].join(" ")),
-  );
-}
-
-function hasFinalAnswerReportReference(
-  evidence: EvidenceRecord[],
-  transcript: TranscriptEvent[],
-): boolean {
-  if (hasEvidenceClaim(evidence, /final answer.*report|最终回答.*报告|reference.*report/iu)) {
-    return true;
-  }
-  return [...transcript]
-    .reverse()
-    .some(
-      (event) =>
-        event.type === "assistant_text_delta" &&
-        /(?:report[\w./\\-]*\.md|报告文件|生成的报告|saved report)/iu.test(event.text),
-    );
-}
-
-function hasBlockingGateEvidence(
-  evidence: EvidenceRecord[],
-  transcript: TranscriptEvent[],
-): boolean {
-  const blockingStatusPattern =
-    /(?:blocking|阻塞|gate|闸门).{0,80}(?:SKIPPED|PARTIAL|BLOCKED|跳过|部分|阻塞)|(?:SKIPPED|PARTIAL|BLOCKED).{0,80}(?:blocking|阻塞|gate|闸门)/iu;
-  if (hasEvidenceClaim(evidence, blockingStatusPattern)) {
-    return true;
-  }
-  return transcript.some((event) => {
-    if (event.type === "verification_end") {
-      return (
-        event.report.status === "partial" ||
-        event.report.commands.some(
-          (command) => command.status === "partial" || command.status === "skipped",
-        )
-      );
-    }
-    if (event.type === "system_event" || event.type === "assistant_text_delta") {
-      const text = event.type === "system_event" ? event.message : event.text;
-      return blockingStatusPattern.test(text);
-    }
-    return false;
-  });
-}
-
-function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
-  return (
-    /real[-\s]?tui.*report.*pass|report[-\s]?generation.*pass|deepseek.*(?:gate\s*f|dual[-\s]?provider).*pass|openai[-\s]?compatible.*(?:gate\s*f|dual[-\s]?provider).*pass|final answer.*report|最终回答.*报告/iu.test(
-      [item.summary, item.source, ...item.supportsClaims].join(" "),
-    ) || hasReportWriteEvidence([item])
-  );
-}
-
-function isBetaReadinessClaim(normalizedClaim: string): boolean {
-  return (
-    normalizedClaim.includes("beta") &&
-    (normalizedClaim.includes("ready") ||
-      normalizedClaim.includes("readiness") ||
-      normalizedClaim.includes("pass") ||
-      normalizedClaim.includes("完成") ||
-      normalizedClaim.includes("就绪") ||
-      normalizedClaim.includes("通过"))
-  );
-}
-
-function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
-  const normalizedClaim = claim.toLowerCase();
-  if (isBetaReadinessClaim(normalizedClaim)) {
-    return {
-      status: "needs_disclaimer",
-      unsupportedClaims: ["Beta readiness PASS"],
-      verdict: createPhase15BetaVerdictScope(context.evidence),
-    };
-  }
-
-  // D.13U：复用 evaluateFinalAnswerClaims，按 claim 类型匹配 evidence 类型。
-  // 任意 evidence > 0 不再当通行证；保留固定中英 phrase 列表用于 unsupportedClaims 文案。
-  const highRisk = [
-    "已完成",
-    "已修复",
-    "已验证",
-    "无风险",
-    "等于 ccb",
-    "成熟工具",
-    "可以进入 beta",
-    "测试通过",
-    "代码里",
-    "调用链是",
-    "不会影响",
-    "completed",
-    "fixed",
-    "verified",
-    "no risk",
-    "ccb parity",
-    "ready for beta",
-    "release ready",
-    "tests passed",
-    "in the code",
-  ];
-  const unsupportedClaims = highRisk.filter((item) => normalizedClaim.includes(item.toLowerCase()));
-  if (unsupportedClaims.length === 0) {
-    return { status: "passed", unsupportedClaims: [] };
-  }
-  const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
-  if (verdict.status === "passed") {
-    return { status: "passed", unsupportedClaims: [] };
-  }
-  return { status: "needs_disclaimer", unsupportedClaims };
-}
-
-function formatClaimCheck(result: ClaimCheck, language: Language): string {
-  if (result.verdict) {
-    const evidenceStatus = result.verdict.evidenceRefs.length > 0 ? "recorded" : "missing";
-    const validation = result.verdict.validationCommands.join("; ");
-    const uncovered = result.verdict.uncoveredItems.join("; ");
-    const risks = result.verdict.residualRisks.join("; ");
-    return language === "en-US"
-      ? [
-          `Claim Checker: verdict=${result.verdict.status}; scope=${result.verdict.scope}.`,
-          `Evidence is ${evidenceStatus}; use /details evidence for details.`,
-          `Validation: ${validation}.`,
-          `Uncovered: ${uncovered}.`,
-          `Risk: ${risks}.`,
-          `Next: ${result.verdict.nextAction}`,
-        ].join("\n")
-      : [
-          `Claim Checker：verdict=${result.verdict.status}；scope=${result.verdict.scope}。`,
-          `证据已${evidenceStatus === "recorded" ? "记录" : "缺失"}；详情用 /details evidence。`,
-          `Validation：${validation}。`,
-          `Uncovered：${uncovered}。`,
-          `Risk：${risks}。`,
-          `Next：${result.verdict.nextAction}`,
-        ].join("\n");
-  }
-  if (result.status === "passed") {
-    return language === "en-US" ? "Claim check passed." : "Claim Checker：通过。";
-  }
-  const claims = result.unsupportedClaims.join(", ");
-  return language === "en-US"
-    ? `Claim needs disclaimer: ${claims}. Use unverified / pending confirmation wording.`
-    : `Claim Checker：缺少证据，需降级表述：${claims}。请改写为“未验证 / 待确认”。`;
-}
-
 function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
   return {
     type: "tool_call_end",
@@ -15499,7 +14491,7 @@ export function __testCreateShellBlockOutput(
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
 } {
-  return new ShellBlockOutput(context, blocks, onWrite);
+  return createShellBlockOutputForTest(context, blocks, onWrite);
 }
 
 /**

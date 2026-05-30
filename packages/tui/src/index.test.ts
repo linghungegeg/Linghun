@@ -12200,7 +12200,11 @@ describe("D.13V-B/C source invariants", () => {
   it("source: sendMessage 接入 architecture/completeness final gate", async () => {
     const text = await readFile("src/index.ts", "utf8");
     expect(text).toContain("runArchitectureAndCompletenessFinalGate");
-    expect(text).toContain("evaluateArchitectureAndCompletenessClaims");
+    // D.14A-2：gate 判定核心移至 final-answer-gate.ts（行为不变）；
+    // index.ts 仍负责把 runArchitectureAndCompletenessFinalGate 接入主链。
+    const gate = await readFile("src/final-answer-gate.ts", "utf8");
+    expect(gate).toContain("runArchitectureAndCompletenessFinalGate");
+    expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");
     expect(text).toContain("createExtendedFinalAnswerReminder");
     expect(text).toContain("buildExtendedDowngradedFinalAnswer");
     // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimRetried）
