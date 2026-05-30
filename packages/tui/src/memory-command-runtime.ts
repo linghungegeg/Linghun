@@ -88,15 +88,45 @@ export async function handleMemoryCommand(
     return;
   }
   if (action === "storage") {
-    writeLine(output, formatMemoryStorage(context));
+    // D.14D-E — /memory storage 走降噪 CommandPanel：完整存储路径进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/memory storage",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Memory storage paths — Ctrl+O for details."
+          : "记忆存储路径 — Ctrl+O 查看详情。",
+      ],
+      detailsText: formatMemoryStorage(context),
+    });
     return;
   }
   if (action === "review") {
-    writeLine(output, formatMemoryReview(context));
+    // D.14D-E — /memory review 走降噪 CommandPanel：完整复核清单进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/memory review",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Memory review — Ctrl+O for details."
+          : "记忆复核 — Ctrl+O 查看详情。",
+      ],
+      detailsText: formatMemoryReview(context),
+    });
     return;
   }
   if (action === "stats") {
-    writeLine(output, formatMemoryStats(context));
+    // D.14D-E — /memory stats 走降噪 CommandPanel：完整统计进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/memory stats",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Memory stats — Ctrl+O for details."
+          : "记忆统计 — Ctrl+O 查看详情。",
+      ],
+      detailsText: formatMemoryStats(context),
+    });
     return;
   }
   if (action === "learn") {
@@ -135,7 +165,17 @@ export async function handleMemoryCommand(
       return;
     }
     const result = await runControlledMemoryLearning(context);
-    writeLine(output, formatMemoryLearningRun(result, context.language));
+    // D.14D-E — /memory learn 运行结果走降噪 CommandPanel：完整 run 报告进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/memory learn",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? `Memory learn — ${result.candidatesCreated} candidate(s); Ctrl+O for details.`
+          : `记忆学习 — 新候选 ${result.candidatesCreated} 条；Ctrl+O 查看详情。`,
+      ],
+      detailsText: formatMemoryLearningRun(result, context.language),
+    });
     return;
   }
   if (action === "candidate") {

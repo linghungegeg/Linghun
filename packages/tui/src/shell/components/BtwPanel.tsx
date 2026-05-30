@@ -6,33 +6,31 @@ import { createShellTheme } from "../theme.js";
 import type { ShellController } from "../types.js";
 
 /**
- * BtwPanel — D.13Q-UX Closure
+ * BtwPanel — D.14D model-backed side question
  *
- * 当前实现是 **local note panel**：把 /btw 输入的临时小问题以 inline side
- * panel 形式记录在 session store，**不调模型 / provider**，不污染 main
- * conversation / Todo / Plan / checkpoint / job / permission。
+ * /btw 是 model-backed 临时插问（参考 CCB sideQuestion.ts 行为）：隔离单轮、
+ * 无工具调用，**不污染** main conversation / Todo / Plan / checkpoint / job /
+ * permission / evidence / completion gate。逻辑在 btw-runtime.ts，index.ts 只接线。
  *
  * UI 形态：
- * - 标题：/btw <question>（warning 黄 + bold） + dim 副标 "本地备忘 · 不调模型"
- * - 内容：local note 文本（plain 文本，不再走 Markdown 假装答案）
- * - 关闭：Esc / Enter / Space / Ctrl+C / Ctrl+D（统一 onDone）
+ * - 标题：/btw <question>（warning 黄 + bold） + dim 副标 "临时插问 · 不影响主任务"
+ * - 状态：loading（正在询问）/ answered（模型答案，逐行）/ error（可见错误）
+ * - 关闭：Esc / Enter / Space（统一 onDone）
  * - 与 Composer 互斥（Composer.useInput 在 btwPanel 渲染时 isActive=false）
- *
- * 真异步 side-question runtime（spinner → 模型答案）需要 provider 调用 +
- * 异步 controller，跨阶段动作较大；本阶段不做。如需模型回答，直接发普通
- * 输入。
  */
 
 const HINT_TEXT = {
   "zh-CN": {
     title: "/btw",
-    subtitle: "本地备忘 · 不调模型",
+    subtitle: "临时插问 · 不影响主任务",
     nav: "Esc / Enter / Space 关闭",
+    loading: "正在询问模型…",
   },
   "en-US": {
     title: "/btw",
-    subtitle: "Local note · model not called",
+    subtitle: "Side question · main task unaffected",
     nav: "Esc / Enter / Space dismiss",
+    loading: "Asking the model…",
   },
 } as const;
 
@@ -84,6 +82,11 @@ export function BtwPanel({
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(hint.nav, innerWidth)}
       </Text>
+      {panel.phase === "loading" ? (
+        <Text color={theme.status.running ?? theme.accent}>
+          {fitText(hint.loading, innerWidth)}
+        </Text>
+      ) : null}
       {panel.phase === "answered" && panel.answer
         ? panel.answer.split("\n").map((line, idx) => (
             <Text key={`${idx}-${line.slice(0, 8)}`}>{fitText(line, innerWidth)}</Text>

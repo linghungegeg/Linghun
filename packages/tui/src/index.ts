@@ -64,6 +64,7 @@ import {
   type ModelUsage,
   findKnownModel,
 } from "@linghun/providers";
+import { runBtwSideQuestion } from "./btw-runtime.js";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
   type DiffSummary,
@@ -134,7 +135,6 @@ import {
   scanIndexSafety,
   summarizeIndexResult,
 } from "./index-result-presenter.js";
-import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
 import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
@@ -251,10 +251,7 @@ import {
   type SLASH_COMMAND_REGISTRY,
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
-  createPendingNaturalCommand,
-  formatNaturalStartGate,
   matchesNaturalGateConfirmation,
-  routeNaturalIntent,
 } from "./natural-command-bridge.js";
 import {
   type ModelToolCallLike,
@@ -408,9 +405,7 @@ import {
   formatUnknownSlashCommand,
   getSlashPrefixCandidates,
   isAllowedModeStartGate,
-  isWorkspaceTrustNaturalStartGate,
   looksLikeOrdinaryDevelopmentRequest,
-  looksLikeWorkspaceTrustNaturalRequest,
   slashCommandToTool,
 } from "./slash-dispatch.js";
 import {
@@ -482,7 +477,7 @@ import {
 } from "./job-agent-command-runtime.js";
 export { validateExtensionContributionExecution } from "./extension-command-runtime.js";
 import { createReviewReport, createVerificationPlan, formatVerificationLast, formatVerificationPlan, formatVerificationReport, runVerificationCommand, runVerificationPlan } from "./verification-command-runtime.js";
-import { createModelSystemPrompt } from "./model-prompt-runtime.js";
+import { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 export { createModelSystemPrompt } from "./model-prompt-runtime.js";
 // D.14A-3 source anchors for source-level D.13 tests after modular split:
 // createVerificationLevelForReadiness -> classifyVerificationLevel(...); createModelSystemPrompt still projects with projectRuntimeStatusForPrompt(runtimeStatus).
@@ -1077,6 +1072,19 @@ export type TuiContext = {
    */
   isInkSession?: boolean;
   /**
+   * D.14D — 当前会话的 ModelGateway 引用。runTui 创建 gateway 后挂上，让
+   * /btw 这类需要发起隔离单轮模型请求（无工具、不污染主 conversation）的
+   * 命令可以拿到 gateway，而不必修改 handleSlashCommand 的签名。普通模型主链
+   * 仍走显式 gateway 参数；这里只是给 side-question runtime 一个稳定入口。
+   */
+  modelGateway?: ModelGateway;
+  /**
+   * D.14D — ink shell 的 rerender 钩子（runInkShell 启动后挂上）。让需要在
+   * 单次 handler 内"先显示 loading 帧、再 await 异步结果"的命令（如 /btw 调模型）
+   * 能在 await 前主动刷新一帧。plain TUI / 测试无此钩子时安全跳过。
+   */
+  shellRerender?: () => void;
+  /**
    * D.13Q-UX Task Surface — 通用 CommandPanel 状态。高级 slash 命令的结果
    * 由命令处理器 set 进这里，view-model 透传给 view.commandPanel。
    * undefined = 没有面板打开。
@@ -1248,7 +1256,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   await hydrateDurableJobBackgroundTasks(context);
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
   const gateway = createModelGateway(config);
-
+  // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
+  context.modelGateway = gateway;
   const startup = await prepareTuiStartup(input, output, context);
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
@@ -2000,6 +2009,8 @@ async function runInkShell(
       stdout: output,
       stderr: errorOutput,
     });
+    // D.14D — 暴露 rerender 钩子给需要在 handler 内先刷 loading 帧的命令（/btw）。
+    context.shellRerender = () => shell?.rerender();
   } catch (error) {
     blocks.push(
       createOutputBlock(
@@ -2209,6 +2220,13 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/index") {
+    // D.14D — /index repair 是显式入口：在安全门阻塞（有 risky files）时把缺失的
+    // ignore 条目写入并刷新索引。历史上这条只能通过自然语言续跑触发；现在改为显式
+    // slash，普通自然语言不再被关键词截胡。ignore 写入仍走权限管道（decidePermission）。
+    if ((rest[0] ?? "") === "repair") {
+      await runIndexSafetyRepair(context, output);
+      return "handled";
+    }
     await handleIndexCommand(rest, context, output);
     return "handled";
   }
@@ -4095,32 +4113,68 @@ async function handleBtwCommand(
 ): Promise<void> {
   const question = args.join(" ").trim();
   if (!question) {
-    writeLine(output, "用法：/btw <临时小问题>");
+    writeLine(
+      output,
+      context.language === "en-US" ? "Usage: /btw <side question>" : "用法：/btw <临时小问题>",
+    );
     return;
   }
-  // D.13Q-UX Closure: /btw 当前是 **local note panel**，不调模型 / provider，
-  // 不污染 conversation history / Todo / Plan / checkpoint / job / permission；
-  // 只把临时问题写进 session store（btw_question event）方便 /details 审计。
-  // CCB 风格的 side-question runtime（spinner → Markdown 答案）需要 provider
-  // 调用 + 异步 controller，跨阶段动作较大；本阶段只做本地记录，避免假装是
-  // 模型回答。
-  const note =
-    context.language === "en-US"
-      ? `Local note recorded: ${question}\n/btw is a local note pad — it does not call the model or change Todo / plan / checkpoints. Send the question normally if you need a model answer.`
-      : `已记下临时备忘：${question}\n/btw 只是本地备忘条，不调用模型，也不修改 Todo / Plan / checkpoint。需要模型回答请直接发送问题。`;
+  // D.14D — /btw 现在是 model-backed side question（参考 CCB sideQuestion.ts 行为）：
+  // 隔离单轮、无工具、不污染 main conversation / Todo / Plan / checkpoint / git stable
+  // point / evidence / D.13U/D.13V completion gate。只把临时问题与答案写进 session
+  // store（btw_question event）供 /details 审计；不调用 recordToolEvidence，也不进
+  // final-answer claim gate。
   const sessionId = await ensureSession(context);
+  const gateway = context.modelGateway;
+  // ink 路径：先开 loading 面板，让用户看到"正在回答"；plain 路径无面板。
+  if (context.isInkSession) {
+    context.btwPanelState = { question, phase: "loading" };
+    // 在 await 模型前主动刷一帧 loading，否则单次 handler 内的 loading 态不可见。
+    context.shellRerender?.();
+  }
+  if (!gateway) {
+    // gateway 不可用（理论上仅在未走 runTui 的测试桩里）——可见降级，不假装答案。
+    const msg =
+      context.language === "en-US"
+        ? "Side question unavailable: model gateway is not ready."
+        : "临时插问不可用：模型网关尚未就绪。";
+    if (context.isInkSession) {
+      context.btwPanelState = { question, phase: "error", error: msg };
+    } else {
+      writeLine(output, msg);
+    }
+    return;
+  }
+  const runtime = getSelectedModelRuntime(context);
+  const controller = new AbortController();
+  const result = await runBtwSideQuestion(
+    question,
+    gateway,
+    {
+      provider: runtime.provider,
+      model: runtime.model,
+      endpointProfile: runtime.endpointProfile,
+      reasoningLevel: runtime.reasoningLevel,
+      reasoningSent: runtime.reasoningSent,
+    },
+    context.language,
+    controller.signal,
+  );
+  // 记录 side question（含答案/错误）供 /details 审计；不写 evidence，不进 completion gate。
   await context.store.appendEvent(sessionId, {
     type: "btw_question",
     id: randomUUID(),
     text: question,
-    answer: note,
+    answer: result.status === "answered" ? result.answer : `error: ${result.error}`,
     createdAt: new Date().toISOString(),
   });
-  // ink 路径：开 BtwPanel 显示 local note；plain 路径：writeLine 兼容。
-  if ((context as { isInkSession?: boolean }).isInkSession) {
-    context.btwPanelState = { question, phase: "answered", answer: note };
+  if (context.isInkSession) {
+    context.btwPanelState =
+      result.status === "answered"
+        ? { question, phase: "answered", answer: result.answer }
+        : { question, phase: "error", error: result.error };
   } else {
-    writeLine(output, note);
+    writeLine(output, result.status === "answered" ? result.answer : result.error);
   }
 }
 
@@ -4663,6 +4717,7 @@ configureJobAgentCommandRuntime({
   ensureSession,
   refreshBackgroundLifecycle,
   writeStatus,
+  captureFailureLearning,
 });
 
 function normalizePath(path: string): string {
@@ -5142,81 +5197,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function formatCompositeStatusQuery(text: string, context: TuiContext): string | null {
-  const normalized = text.trim().toLowerCase();
-  if (
-    !/(状态|正常|吗|准备好|配好|可用|ready|status|doctor|configured|available|working)/i.test(
-      normalized,
-    )
-  ) {
-    return null;
-  }
-  const sections: string[] = [];
-  const add = (key: string, line: string): void => {
-    if (matchesCompositeStatusKey(normalized, key)) {
-      sections.push(line);
-    }
-  };
-
-  add(
-    "model",
-    `- model/provider: provider=${getRuntimeStatusProvider(context)} model=${context.model}`,
-  );
-  add(
-    "index",
-    `- index: status=${context.index.status} changedFiles=${context.index.changedFiles ?? "-"}`,
-  );
-  add(
-    "permission",
-    `- permissions: mode=${context.permissionMode} recentDenied=${context.permissions.recentDenied.length}`,
-  );
-  add(
-    "cache",
-    `- cache: latestHitRate=${context.cache.history[0]?.hitRate ?? "-"} changedKeys=${context.cache.lastFreshness?.changedKeys?.join(",") || "-"}`,
-  );
-  add(
-    "memory",
-    `- memory: projectRules=${context.memory.projectRulesExists ? "found" : "missing"} candidates=${context.memory.candidates.length} accepted=${context.memory.accepted.length}`,
-  );
-  add(
-    "mcp",
-    `- mcp: enabled=${context.mcp.enabled ? "yes" : "no"} servers=${context.mcp.servers.length} tools=${context.mcp.tools.length}`,
-  );
-  add(
-    "background",
-    `- background: tasks=${context.backgroundTasks.length} running=${context.backgroundTasks.filter((task) => task.status === "running").length}`,
-  );
-  add(
-    "gate",
-    `- gate: pendingNaturalCommand=${context.pendingNaturalCommand ? context.pendingNaturalCommand.exactCommand : "none"}`,
-  );
-
-  if (sections.length < 2) {
-    return null;
-  }
-  return [
-    context.language === "en-US" ? "Composite local status" : "组合本地状态",
-    ...sections,
-    context.language === "en-US"
-      ? "- next: use the exact slash command for details; this status was not sent to the model."
-      : "- 下一步：需要细节时输入对应 slash command；本次状态查询未发送给模型。",
-  ].join("\n");
-}
-
-function matchesCompositeStatusKey(text: string, key: string): boolean {
-  const patterns: Record<string, RegExp> = {
-    model: /模型|provider|route|model/,
-    index: /索引|index|codebase-memory/,
-    permission: /权限|permission|审批|mode|模式/,
-    cache: /缓存|cache|hit rate|命中/,
-    memory: /记忆|memory|linghun\.md|规则/,
-    mcp: /\bmcp\b|codebase-memory|服务器/,
-    background: /后台|background|任务|task/,
-    gate: /gate|确认|confirmation|start gate|pending/,
-  };
-  return patterns[key]?.test(text) ?? false;
-}
-
 export async function handleNaturalInput(
   text: string,
   context: TuiContext,
@@ -5302,38 +5282,24 @@ export async function handleNaturalInput(
     return "handled";
   }
 
-  // Narrow workspace-trust intent (P3 收口): only the explicit "trust this folder /
-  // 信任这个项目" wording opens a Start Gate. Everything else falls through to the
-  // model — we do NOT restore the broad routeNaturalIntent / handleLocalControlPlaneInput
-  // pre-route path that historically swallowed ordinary natural language.
-  if (looksLikeWorkspaceTrustNaturalRequest(text)) {
-    const intent = routeNaturalIntent(text, context.language);
-    if (isWorkspaceTrustNaturalStartGate(intent)) {
-      const gate = createPendingNaturalCommand(intent, context);
-      if (gate) {
-        context.pendingNaturalCommand = gate;
-        writeLine(output, formatNaturalStartGate(intent, context, gate));
-        writeStatus(output, context);
-        return "handled";
-      }
-    }
-  }
-
+  // D.14D — 模型未配好时的 onboarding 入口（state-gated，不是普通自然语言截胡）。
+  // 只有当 shouldOfferUserScopedModelSetup 为真（即当前没有可用的 user provider 配置）
+  // 时才命中；模型一旦配好，这条永远不触发，普通自然语言照常进模型主链。这是新手安全
+  // 配置路径，不依赖关键词把普通对话转 slash。
   if (shouldOfferUserScopedModelSetup(context) && looksLikeModelSetupInput(text)) {
     await startModelSetup(context, output, parseModelSetupPrefill(text));
     return "handled";
   }
 
-  const indexRepair = await handleIndexSafetyRepairContinuation(text, context, output);
-  if (indexRepair === "handled") {
-    return "handled";
-  }
-
-  // CCB 输入路由边界：普通自然语言（不以 "/" 开头、无 pending approval/Start Gate）
-  // 默认必须发送给模型。本地控制面（routeNaturalIntent / capability answer / composite
-  // status / 文件读取兜底）不再前置截胡——历史上这条路径会把 "你好"/"模型这里是不是
-  // 有问题"/"how do I configure model" 这种普通对话误识别成本地命令意图，让 gateway.stream
-  // 永远不被触发。要使用本地控制面，请输入精确 slash command（例如 `/model doctor`）。
+  // D.14D — CCB 输入路由边界（源码对照 F:\ccb-source\src\utils\processUserInput\
+  // processUserInput.ts:546-550：plain text 永远进模型，唯一分支是 "/" 前缀）。
+  // 普通自然语言（不以 "/" 开头、无 pending approval / 无 pending Start Gate）默认必须
+  // 发送给模型。这里**不再**做任何本地 NL 关键词截胡：
+  //   - 已移除 workspace-trust NL Start Gate（"信任这个项目"等）；
+  //   - 已移除 index safety repair NL 续跑（"把这些文件加入 ignore 后刷新索引"等）；
+  //   - 已移除 composite local status NL 应答（"索引和记忆 MCP 打开了吗"等）。
+  // 这些产品能力仍可通过精确 slash command 使用（/trust、/index、/doctor、/status），
+  // 普通自然语言不再被中文/英文关键词表转成本地命令意图。
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
@@ -5348,31 +5314,20 @@ export async function handleNaturalInput(
   return "message";
 }
 
-async function handleIndexSafetyRepairContinuation(
-  text: string,
+async function runIndexSafetyRepair(
   context: TuiContext,
   output: Writable,
-): Promise<"handled" | "pass"> {
+): Promise<void> {
   const riskyFiles = context.index.safetyRiskyFiles ?? [];
   if (riskyFiles.length === 0 || !context.index.safetyWarning) {
-    return "pass";
-  }
-  const continuation = classifyIndexSafetyRepairContinuation(text, {
-    hasSafetyWarning: Boolean(context.index.safetyWarning),
-    riskyFileCount: riskyFiles.length,
-  });
-  if (continuation.action === "force") {
     writeLine(
       output,
       context.language === "en-US"
-        ? "Index force/rebuild is not accepted through natural language. Type the exact high-risk slash command if you really want to force it."
-        : "索引 force/rebuild 不能通过自然语言直通。如确需强制执行，请输入精确高风险 slash command。",
+        ? "No active index safety blocker. Run /index refresh first; if large/risky files block it, /index repair will then add ignore entries and refresh."
+        : "当前没有待处理的索引安全门。请先运行 /index refresh；若有大文件/风险文件阻塞，再用 /index repair 追加 ignore 条目并刷新。",
     );
     writeStatus(output, context);
-    return "handled";
-  }
-  if (continuation.action !== "repair") {
-    return "pass";
+    return;
   }
 
   const plan = await createIndexSafetyRepairPlan(context, riskyFiles);
@@ -5397,7 +5352,7 @@ async function handleIndexSafetyRepairContinuation(
     const writeResult = await runIndexIgnoreWritePlan(plan, context, output);
     if (!writeResult) {
       writeStatus(output, context);
-      return "handled";
+      return;
     }
   } else {
     writeLine(
@@ -5411,7 +5366,6 @@ async function handleIndexSafetyRepairContinuation(
   await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
   writeLine(output, formatIndexRefreshSummary(context));
   writeStatus(output, context);
-  return "handled";
 }
 
 type IndexSafetyRepairPlan = {
@@ -6026,6 +5980,17 @@ async function sendMessage(
   }
 
   if (assistantText) {
+    // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
+    // （RuntimeStatusForModel= / ControlledMemorySummary= / MemoryBoundary= /
+    // EvidenceSummary= / CommandCapabilitySummary= 等）原样复述，进主屏前清掉，
+    // 避免内部运行时 token 泄漏。doctor/details 诊断能力不受影响。
+    {
+      const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
+      if (sanitized !== assistantText) {
+        assistantText = sanitized;
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      }
+    }
     // D.13U — 最后一道关卡：若已用过一次 retry 仍违规，本地降级，原文不入 transcript
     if (finalAnswerClaimRetried) {
       const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
@@ -6497,6 +6462,15 @@ async function continueModelAfterToolResults(
       }
     }
     if (assistantText) {
+      // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
+      // 同样在 assistant 文本进主屏前清掉内部 system-prompt 字段复述。
+      {
+        const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
+        if (sanitized !== assistantText) {
+          assistantText = sanitized;
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        }
+      }
       // D.13U — 最后一道关卡：retry 后仍违规则降级，原文不入 transcript
       if (finalAnswerClaimRetried) {
         const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);

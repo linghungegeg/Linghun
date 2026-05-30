@@ -40,7 +40,19 @@ export async function handleModelCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }));
+    // D.14D-E — /model doctor 走降噪 CommandPanel：完整诊断进 detailsText
+    // （Ctrl+O 展开），非 ink 仍 writeLine 完整正文，保留既有断言。
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/model doctor",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? "Model route doctor — Ctrl+O for full diagnostics."
+          : "模型路由诊断 — Ctrl+O 查看完整诊断。",
+      ],
+      detailsText: await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }),
+    });
     return;
   }
   const runtime = getSelectedModelRuntime(context);
@@ -194,11 +206,34 @@ export async function handleModelRouteCommand(
 ): Promise<void> {
   const action = args[0];
   if (!action) {
-    writeLine(output, formatModelRoutes(context.config));
+    // D.14D-E — /model route 走降噪 CommandPanel：完整路由表进 detailsText。
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/model route",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? `Model routes · ${context.config.modelRoutes.routes.length} roles — Ctrl+O for details.`
+          : `模型路由 · ${context.config.modelRoutes.routes.length} 个角色 — Ctrl+O 查看详情。`,
+      ],
+      actions: ["/model route doctor"],
+      detailsText: formatModelRoutes(context.config),
+    });
     return;
   }
   if (action === "doctor") {
-    writeLine(output, await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }));
+    // D.14D-E — /model route doctor 走降噪 CommandPanel：完整诊断进 detailsText。
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/model route doctor",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? "Model route doctor — Ctrl+O for full diagnostics."
+          : "模型路由诊断 — Ctrl+O 查看完整诊断。",
+      ],
+      detailsText: await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }),
+    });
     return;
   }
   if (action === "set") {

@@ -3584,13 +3584,26 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(taskLayoutStart).toBeGreaterThan(0);
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
-    // Output region uses flexGrow=1 + overflow=hidden, composer band uses flexShrink=0.
+    // Output region uses flexGrow=1; the composer band uses flexShrink=0.
+    // D.14D-C2: overflow="hidden" culling moved into the measured ScrollViewport
+    // (TaskLayout delegates the output region to it), so it lives there now.
     expect(body).toContain("flexGrow={1}");
-    expect(body).toContain('overflow="hidden"');
+    expect(body).toContain("<ScrollViewport");
     expect(body).toContain("flexShrink={0}");
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
+  });
+
+  it("D.14D-C2: ScrollViewport owns the measured overflow=hidden culling", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(
+      join(SRC_ROOT, "shell/components/ScrollViewport.tsx"),
+      "utf8",
+    );
+    expect(source).toContain('overflow="hidden"');
+    expect(source).toContain("clampTaskScroll");
+    expect(source).toContain("getComputedHeight");
   });
 });
 
@@ -4378,20 +4391,25 @@ describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
   });
 });
 
-describe("D.13Q-UX Task Surface — Ctrl+O fallback 走 commandPanel detailsText", () => {
-  it("有 lastFullOutput 时返回带 detailsText 的 panel（不进 transcript）", () => {
+describe("D.14D Ctrl+O summary-first details viewer", () => {
+  it("有 lastFullOutput 时返回 panel：summary-first，正文只进 detailsText，默认折叠", () => {
     const ctx = createContext() as TuiContext & { lastFullOutput?: string };
     ctx.lastFullOutput = "完整 /model doctor 多行输出\n provider.env merge=...\nproviders=...";
     ctx.evidence = [];
     ctx.backgroundTasks = [];
     const panel = __testBuildToggleDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
+    // 完整正文只进 detailsText（Ctrl+O 展开层），不进 summary/section 主屏行。
     expect(panel?.detailsText).toContain("完整 /model doctor");
-    expect(panel?.expanded).toBe(true);
+    // D.14D：默认折叠（summary-first）；首次 Ctrl+O 看摘要，再按一次才展开。
+    expect(panel?.expanded).toBe(false);
     expect(panel?.actions).toContain("/details");
+    // 主屏 section 行不得包含完整正文。
+    const sectionRows = (panel?.sections ?? []).flatMap((s) => s.rows).join("\n");
+    expect(sectionRows).not.toContain("provider.env merge");
   });
 
-  it("有 evidence 时 panel.sections 含 evidence 摘要", () => {
+  it("有 evidence 时主屏 sections 只给计数/kind 摘要，不泄漏 id/source；id 只进 detailsText", () => {
     const ctx = createContext() as TuiContext;
     ctx.lastFullOutput = undefined;
     ctx.evidence = [
@@ -4406,11 +4424,18 @@ describe("D.13Q-UX Task Surface — Ctrl+O fallback 走 commandPanel detailsText
     ctx.backgroundTasks = [];
     const panel = __testBuildToggleDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
-    expect(panel?.sections?.some((s) => s.title?.includes("证据") || s.title?.includes("Evidence"))).toBe(true);
+    expect(
+      panel?.sections?.some((s) => s.title?.includes("证据") || s.title?.includes("Evidence")),
+    ).toBe(true);
+    // 主屏 section 行不得泄漏内部 id / source。
+    const sectionRows = (panel?.sections ?? []).flatMap((s) => s.rows).join("\n");
+    expect(sectionRows).not.toContain("ev-1");
+    expect(sectionRows).not.toContain("Read");
+    // id 仍可在展开层（detailsText）查看。
     expect(panel?.detailsText).toContain("ev-1");
   });
 
-  it("有 backgroundTasks 时 panel.sections 含 background 摘要", () => {
+  it("有 backgroundTasks 时主屏只给运行/失败计数，不泄漏 id；id 只进 detailsText", () => {
     const ctx = createContext() as TuiContext;
     ctx.lastFullOutput = undefined;
     ctx.evidence = [];
@@ -4427,8 +4452,42 @@ describe("D.13Q-UX Task Surface — Ctrl+O fallback 走 commandPanel detailsText
     ] as unknown as TuiContext["backgroundTasks"];
     const panel = __testBuildToggleDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
-    expect(panel?.sections?.some((s) => s.title?.includes("后台") || s.title?.includes("Background"))).toBe(true);
+    expect(
+      panel?.sections?.some((s) => s.title?.includes("后台") || s.title?.includes("Background")),
+    ).toBe(true);
+    const sectionRows = (panel?.sections ?? []).flatMap((s) => s.rows).join("\n");
+    expect(sectionRows).not.toContain("bg-1");
     expect(panel?.detailsText).toContain("bg-1");
+  });
+
+  it("多源组合时分区齐全（最近输出 / 证据 / 后台），detailsText 不互相套娃", () => {
+    const ctx = createContext() as TuiContext & { lastFullOutput?: string };
+    ctx.lastFullOutput = "最近输出正文";
+    ctx.evidence = [
+      {
+        id: "ev-9",
+        kind: "grep_result",
+        source: "Grep",
+        summary: "matched 3",
+        createdAt: new Date().toISOString(),
+      },
+    ] as unknown as TuiContext["evidence"];
+    ctx.backgroundTasks = [
+      {
+        id: "bg-9",
+        kind: "bash",
+        title: "build",
+        status: "failed",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        userVisibleSummary: "build failed",
+      },
+    ] as unknown as TuiContext["backgroundTasks"];
+    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    expect(panel?.sections?.length).toBe(3);
+    // detailsText 只出现一次每个分区标题（无套娃重复）。
+    const evidenceHeaders = (panel?.detailsText ?? "").match(/## (证据|Evidence)/g) ?? [];
+    expect(evidenceHeaders.length).toBe(1);
   });
 
   it("三类内容全空时返回 undefined（调用方应走 notifications，不写 transcript）", () => {
@@ -4438,5 +4497,128 @@ describe("D.13Q-UX Task Surface — Ctrl+O fallback 走 commandPanel detailsText
     ctx.backgroundTasks = [];
     const panel = __testBuildToggleDetailsCommandPanel(ctx);
     expect(panel).toBeUndefined();
+  });
+});
+
+describe("D.14D-C — scroll hint noise + activity placement", () => {
+  const SCROLL_HINT_ZH = "滚轮/PgUp/PgDn 滚动 · End 回到底部";
+  const SCROLL_HINT_EN = "Wheel/PgUp/PgDn to scroll · End to bottom";
+
+  it("scroll hint 文案不进 transcript（view.blocks 任何字段都不含）", () => {
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "out-1",
+        kind: "details",
+        status: "info",
+        title: "结果",
+        summary: "一些输出",
+        keep: true,
+      },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      outputBlocks: blocks,
+      activity: { phase: "thinking", text: "正在思考…" },
+    });
+    const serialized = JSON.stringify(view.blocks);
+    expect(serialized).not.toContain(SCROLL_HINT_ZH);
+    expect(serialized).not.toContain(SCROLL_HINT_EN);
+    expect(serialized).not.toContain("PgUp");
+  });
+
+  it("activity 暴露在 view 上（与 blocks 分离，供 ShellApp 在块之后渲染）", () => {
+    const blocks: ProductBlockViewModel[] = [
+      { id: "out-1", kind: "details", status: "info", title: "t", summary: "s", keep: true },
+    ];
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      outputBlocks: blocks,
+      activity: { phase: "thinking", text: "正在思考…" },
+    });
+    expect(view.activity?.text).toBe("正在思考…");
+    // activity 不混进 blocks。
+    expect(view.blocks.some((b) => b.summary === "正在思考…")).toBe(false);
+  });
+
+  it("Ink task 渲染：activity 出现在最新块之后（底部对话流）", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "u1",
+        kind: "command",
+        status: "info",
+        title: "用户最早的消息标记XZX",
+        summary: "用户最早的消息标记XZX",
+        messageKind: "user_text",
+        keep: true,
+      },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          outputBlocks: blocks,
+          activity: { phase: "thinking", text: "活动标记QWQ" },
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    const text = output.text;
+    const blockPos = text.indexOf("用户最早的消息标记XZX");
+    const activityPos = text.indexOf("活动标记QWQ");
+    expect(blockPos).toBeGreaterThanOrEqual(0);
+    expect(activityPos).toBeGreaterThanOrEqual(0);
+    // C3：activity 渲染在块之后（更靠 composer 的对话流底部）。
+    expect(activityPos).toBeGreaterThan(blockPos);
+  });
+
+  it("Ink task 渲染：滚动状态下主屏不再出现常驻 scroll hint 行", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const blocks: ProductBlockViewModel[] = [
+      { id: "o1", kind: "details", status: "info", title: "块", summary: "内容", keep: true },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(
+          createContext({ taskScrollState: { scrollOffset: 5, stickToBottom: false } }),
+          {
+            width: output.columns,
+            height: output.rows,
+            outputBlocks: blocks,
+          },
+        ),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).not.toContain(SCROLL_HINT_ZH);
+    expect(output.text).not.toContain("PgUp");
+    expect(output.text).not.toContain("PgDn");
   });
 });

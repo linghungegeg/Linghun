@@ -64,7 +64,17 @@ export async function handleSkillsCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, validateExtensionItems("skills", context));
+    // D.14D-E — /skills doctor 走降噪 CommandPanel：完整校验进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/skills doctor",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Skills doctor — Ctrl+O for details."
+          : "技能诊断 — Ctrl+O 查看详情。",
+      ],
+      detailsText: validateExtensionItems("skills", context),
+    });
     return;
   }
   if (action === "add" || action === "install") {
@@ -97,7 +107,17 @@ export async function handleSkillsCommand(
     return;
   }
   if (action === "validate") {
-    writeLine(output, validateExtensionItems("skills", context, args[1]));
+    // D.14D-E — /skills validate 走降噪 CommandPanel：完整校验进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/skills validate",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Skills validate — Ctrl+O for details."
+          : "技能校验 — Ctrl+O 查看详情。",
+      ],
+      detailsText: validateExtensionItems("skills", context, args[1]),
+    });
     return;
   }
   if (action === "evolve") {
@@ -268,7 +288,17 @@ export async function handlePluginsCommand(
     return;
   }
   if (action === "doctor") {
-    writeLine(output, formatPluginsDoctor(context));
+    // D.14D-E — /plugins doctor 走降噪 CommandPanel：完整诊断进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/plugins doctor",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Plugins doctor — Ctrl+O for details."
+          : "插件诊断 — Ctrl+O 查看详情。",
+      ],
+      detailsText: formatPluginsDoctor(context),
+    });
     return;
   }
   if (action === "add" || action === "install") {
@@ -302,7 +332,17 @@ export async function handlePluginsCommand(
     return;
   }
   if (action === "validate") {
-    writeLine(output, validateExtensionItems("plugins", context, args[1]));
+    // D.14D-E — /plugins validate 走降噪 CommandPanel：完整校验进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/plugins validate",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Plugins validate — Ctrl+O for details."
+          : "插件校验 — Ctrl+O 查看详情。",
+      ],
+      detailsText: validateExtensionItems("plugins", context, args[1]),
+    });
     return;
   }
   if (action === "remove") {

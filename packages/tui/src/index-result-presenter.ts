@@ -228,7 +228,7 @@ export function formatIndexSafetyWarning(
       "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
       "主屏不展开完整风险清单；完整清单已写入 transcript/evidence。",
       "建议 ignore 文件：.linghunignore 或 .cbmignore",
-      "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
+      "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
       "重试命令：/index refresh",
       "如确认要继续，可显式追加 --force。",
     ].join("\n");
@@ -247,7 +247,7 @@ export function formatIndexSafetyWarning(
     "建议 ignore 文件：.linghunignore 或 .cbmignore",
     "建议加入条目：",
     ...ignoreEntries,
-    "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
+    "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
     "重试命令：/index refresh",
     "如确认要继续，可显式追加 --force。",
   ]

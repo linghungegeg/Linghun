@@ -97,12 +97,32 @@ export async function handleMcpCommand(
   }
   if (action === "doctor") {
     await runMcpDoctor(context);
-    // /mcp doctor 仍显式输出完整诊断（含 guard / license / runtime / endpoint）。
-    writeDiagnosticLine(output, formatMcpStatus(context));
+    // D.14D-E — /mcp doctor 走降噪 CommandPanel：完整诊断（含 guard / license /
+    // runtime / endpoint）进 detailsText（Ctrl+O 展开），非 ink 仍写完整正文。
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/mcp doctor",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? "MCP doctor — Ctrl+O for full diagnostics."
+          : "MCP 诊断 — Ctrl+O 查看完整诊断。",
+      ],
+      detailsText: formatMcpStatus(context),
+    });
     return;
   }
   if (action === "validate") {
-    writeLine(output, validateMcpServers(context, args[1]));
+    // D.14D-E — /mcp validate 走降噪 CommandPanel：完整校验结果进 detailsText。
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/mcp validate",
+      tone: "neutral",
+      summary: [
+        isEn ? "MCP validate — Ctrl+O for details." : "MCP 校验 — Ctrl+O 查看详情。",
+      ],
+      detailsText: validateMcpServers(context, args[1]),
+    });
     return;
   }
   if (action === "add" || action === "install") {
@@ -150,14 +170,16 @@ export async function handleIndexCommand(
   }
   if (action === "doctor") {
     await refreshIndexStatus(context, true);
-    writeLine(output, formatIndexStatus(context));
-    deps().writeStatus(output, context);
+    // D.14D-E — /index doctor 走降噪 CommandPanel：完整状态进 detailsText。
+    showCommandPanel(context, output, buildIndexStatusPanel(context));
+    if (!context.isInkSession) deps().writeStatus(output, context);
     return;
   }
   if (action === "check") {
     await refreshIndexStatus(context, true);
-    writeLine(output, formatIndexStatus(context));
-    deps().writeStatus(output, context);
+    // D.14D-E — /index check 走降噪 CommandPanel：完整状态进 detailsText。
+    showCommandPanel(context, output, buildIndexStatusPanel(context));
+    if (!context.isInkSession) deps().writeStatus(output, context);
     return;
   }
   if (action === "init" && args[1] === "fast") {
@@ -200,14 +222,34 @@ export async function handleIndexCommand(
     }
     const result = await runIndexQuery(context, "search_code", { pattern: query, limit: 5 });
     await recordIndexEvidence(context, `search ${query}`, result.summary);
-    writeLine(output, result.summary);
+    // D.14D-E — /index search 短摘要走降噪 CommandPanel；进度/错误不走面板。
+    showCommandPanel(context, output, {
+      title: "/index search",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Index search result — Ctrl+O for details."
+          : "索引搜索结果 — Ctrl+O 查看详情。",
+      ],
+      detailsText: result.summary,
+    });
     deps().writeStatus(output, context);
     return;
   }
   if (action === "architecture") {
     const result = await runIndexQuery(context, "get_architecture", {});
     await recordIndexEvidence(context, "architecture", result.summary);
-    writeLine(output, result.summary);
+    // D.14D-E — /index architecture 短摘要走降噪 CommandPanel。
+    showCommandPanel(context, output, {
+      title: "/index architecture",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Index architecture summary — Ctrl+O for details."
+          : "索引架构摘要 — Ctrl+O 查看详情。",
+      ],
+      detailsText: result.summary,
+    });
     deps().writeStatus(output, context);
     return;
   }

@@ -41,39 +41,74 @@ export function buildToggleDetailsCommandPanel(
   if (!hasOutput && evidenceCount === 0 && backgroundCount === 0) {
     return undefined;
   }
+  // D.14D — summary-first details viewer。主屏（summary + sections）只展示人话
+  // 摘要与计数，绝不泄漏内部 id / kind / source / path。完整明细（含 id / kind /
+  // source）只进 detailsText，由 Ctrl+O 展开后才可见、可滚动。分区：最近输出 /
+  // 证据 / 后台 / 诊断。
   const sections: { title?: string; rows: string[] }[] = [];
   const detailsParts: string[] = [];
+
+  // ── 分区 1：最近输出（完整正文只进 detailsText）──────────────────────────
   if (context.lastFullOutput) {
-    const header = isEn ? "Latest output (full body):" : "最近一次输出（完整正文）：";
-    detailsParts.push(header);
+    const lineCount = context.lastFullOutput.split("\n").filter((l) => l.trim()).length;
+    sections.push({
+      title: isEn ? "Last output" : "最近输出",
+      rows: [
+        isEn
+          ? `1 captured output (${lineCount} line${lineCount === 1 ? "" : "s"})`
+          : `1 条最近输出（${lineCount} 行）`,
+      ],
+    });
+    detailsParts.push(isEn ? "## Last output (full body)" : "## 最近输出（完整正文）");
     detailsParts.push(context.lastFullOutput);
   }
+
+  // ── 分区 2：证据（主屏只给计数 + kind 分布；id/source 进 detailsText）───────
   if (evidenceCount > 0) {
+    const kindCounts = new Map<string, number>();
+    for (const e of context.evidence) {
+      kindCounts.set(e.kind, (kindCounts.get(e.kind) ?? 0) + 1);
+    }
+    const kindSummary = [...kindCounts.entries()].map(([kind, n]) => `${kind}×${n}`).join(", ");
     sections.push({
       title: isEn ? `Evidence (${evidenceCount})` : `证据（${evidenceCount}）`,
-      rows: context.evidence
-        .slice(0, 5)
-        .map((e) => `${e.id} · ${e.kind} · ${e.source}`),
+      rows: [kindSummary || (isEn ? "recorded" : "已记录")],
     });
     detailsParts.push("");
-    detailsParts.push(isEn ? "Recent evidence:" : "最近证据：");
-    for (const e of context.evidence.slice(0, 5)) {
-      detailsParts.push(`  - ${e.id} ${e.kind} ${e.source}: ${e.summary}`);
+    detailsParts.push(isEn ? "## Evidence" : "## 证据");
+    for (const e of context.evidence.slice(0, 8)) {
+      detailsParts.push(`- ${e.id} · ${e.kind} · ${e.source}: ${e.summary}`);
+    }
+    if (evidenceCount > 8) {
+      detailsParts.push(isEn ? `… and ${evidenceCount - 8} more` : `… 还有 ${evidenceCount - 8} 条`);
     }
   }
+
+  // ── 分区 3：后台任务（主屏只给运行/失败/已结束计数；id 进 detailsText）──────
   if (backgroundCount > 0) {
+    const running = context.backgroundTasks.filter((t) => t.status === "running").length;
+    const failed = context.backgroundTasks.filter((t) => t.status === "failed").length;
+    const others = backgroundCount - running - failed;
+    const parts: string[] = [];
+    if (running > 0) parts.push(isEn ? `${running} running` : `运行中 ${running}`);
+    if (failed > 0) parts.push(isEn ? `${failed} failed` : `失败 ${failed}`);
+    if (others > 0) parts.push(isEn ? `${others} other` : `其他 ${others}`);
     sections.push({
       title: isEn ? `Background (${backgroundCount})` : `后台任务（${backgroundCount}）`,
-      rows: context.backgroundTasks
-        .slice(0, 5)
-        .map((t) => `${t.id} · ${t.kind} · ${t.status}`),
+      rows: [parts.join(", ") || (isEn ? "tracked" : "已跟踪")],
     });
     detailsParts.push("");
-    detailsParts.push(isEn ? "Recent background:" : "最近后台：");
-    for (const t of context.backgroundTasks.slice(0, 5)) {
-      detailsParts.push(`  - ${t.id} ${t.kind} ${t.status}: ${t.userVisibleSummary}`);
+    detailsParts.push(isEn ? "## Background tasks" : "## 后台任务");
+    for (const t of context.backgroundTasks.slice(0, 8)) {
+      detailsParts.push(`- ${t.id} · ${t.kind} · ${t.status}: ${t.userVisibleSummary}`);
+    }
+    if (backgroundCount > 8) {
+      detailsParts.push(
+        isEn ? `… and ${backgroundCount - 8} more` : `… 还有 ${backgroundCount - 8} 条`,
+      );
     }
   }
+
   const summary: string[] = [];
   if (hasOutput) {
     summary.push(isEn ? "Latest output available." : "最近一次输出可展开。");
@@ -103,7 +138,10 @@ export function buildToggleDetailsCommandPanel(
       ...(backgroundCount > 0 ? ["/details background <id>"] : []),
     ],
     detailsText: detailsParts.join("\n"),
-    expanded: true,
+    // D.14D — 默认折叠：主屏只显示 summary + 分区计数；Ctrl+O 再展开 detailsText
+    // （含 id/source）。这样首次 Ctrl+O 看摘要，再按一次才展开完整明细，避免
+    // 一上来就把内部 id / 完整正文糊一屏。
+    expanded: false,
   };
 }
 

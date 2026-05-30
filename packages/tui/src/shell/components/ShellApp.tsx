@@ -21,6 +21,7 @@ import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
+import { ScrollViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
@@ -159,32 +160,20 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const composerLine = lineChar(noColor, capability).repeat(cw);
-  // D.13Q-UX Task Surface — 任务区滚动：
-  // - taskScroll.scrollOffset 表示从底部往上偏移的行数；用 marginTop=-offset
-  //   把 transcript 整体上移，外层 overflow=hidden 把超出可见区域的部分裁掉。
-  // - 没溢出时 marginTop=0，透明无副作用。
-  const scrollOffset = view.taskScroll?.scrollOffset ?? 0;
-  const scrollHintText =
-    view.language === "en-US"
-      ? "Wheel/PgUp/PgDn to scroll · End to bottom"
-      : "滚轮/PgUp/PgDn 滚动 · End 回到底部";
+  // D.14D-C2 Task Surface — 任务区滚动改用 ScrollViewport（测量 + 夹紧）。
+  // 旧实现是无界的 marginTop={-scrollOffset}，offset 没有上界，用户可以一直
+  // 向上滚动把内容整体推出可视区进入空白。ScrollViewport 量出内容/可视高度后
+  // 把偏移夹到 [0, contentH-viewH]，并在 stickToBottom 时自动吸底。
+  // C1：原来在 output 区与 composer 之间常驻的滚动提示行已删除（噪音），
+  // footer 已承载状态；如需 hint 只在 footer/help 区，不在主流。
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       {/* Output region: top-left, fills remaining vertical space. Long output
           gets the full terminal width; padding keeps the visual breathing room.
-          overflow=hidden + minHeight=0 prevents Yoga from shrinking children
-          to zero when content overflows. */}
-      <Box
-        flexDirection="column"
-        flexGrow={1}
-        minHeight={0}
-        overflow="hidden"
-        paddingX={2}
-        paddingTop={1}
-      >
-        <Box flexDirection="column" marginTop={scrollOffset > 0 ? -scrollOffset : 0}>
-        {view.activity ? <ActivityIndicator activity={view.activity} theme={theme} /> : null}
-
+          ScrollViewport owns overflow=hidden + minHeight=0 and the measured,
+          clamped translate; this wrapper only supplies padding + flexGrow. */}
+      <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
+        <ScrollViewport scroll={view.taskScroll}>
         {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
             - permission 优先级最高（已合并到 Composer 内的 PermissionControl card）；
             - HelpPanel / BtwPanel（D.13Q-UX Closure）次之；
@@ -247,11 +236,23 @@ function TaskLayout({
           />
         ) : null}
 
+        {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
+            ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
+            blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
         {view.blocks.length > 0 ? (
-          <Box flexDirection="column" marginTop={view.activity || view.permission ? 1 : 0}>
+          <Box flexDirection="column">
             {view.blocks.map((block) => (
               <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
             ))}
+          </Box>
+        ) : null}
+
+        {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
+            用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
+            压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
+        {view.activity ? (
+          <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
+            <ActivityIndicator activity={view.activity} theme={theme} />
           </Box>
         ) : null}
 
@@ -274,18 +275,8 @@ function TaskLayout({
             ))}
           </Box>
         ) : null}
-        </Box>
+        </ScrollViewport>
       </Box>
-
-      {/* D.13Q-UX Task Surface — 滚动提示：scrollOffset > 0 时露出，提醒
-          用户可以用 PgUp/PgDn/End 与滚轮控制 transcript 滚动位置；不进 transcript。 */}
-      {scrollOffset > 0 ? (
-        <Box flexShrink={0} paddingX={2}>
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {fitText(scrollHintText, view.width - 4)}
-          </Text>
-        </Box>
-      ) : null}
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
           Yoga from collapsing the band when output is tall. Left alignment

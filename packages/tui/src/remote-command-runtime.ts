@@ -82,11 +82,31 @@ export async function handleRemoteCommand(
       `remote_doctor ${remoteTranscriptSummary(report)}`,
       "info",
     );
-    writeLine(output, report);
+    // D.14D-E — /remote doctor 走降噪 CommandPanel：完整诊断进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/remote doctor",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Remote doctor — Ctrl+O for details."
+          : "远程诊断 — Ctrl+O 查看详情。",
+      ],
+      detailsText: report,
+    });
     return;
   }
   if (action === "setup") {
-    writeLine(output, formatRemoteSetup(args[1], context));
+    // D.14D-E — /remote setup 引导信息走降噪 CommandPanel：完整步骤进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/remote setup",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? "Remote setup guidance — Ctrl+O for details."
+          : "远程接入引导 — Ctrl+O 查看详情。",
+      ],
+      detailsText: formatRemoteSetup(args[1], context),
+    });
     return;
   }
   if (action === "test") {
@@ -108,7 +128,17 @@ export async function handleRemoteCommand(
       `remote_test channel=${channel.id} status=${result.status} summary=${event.redactedSummary}`,
       result.status === "sent" ? "info" : "warning",
     );
-    writeLine(output, formatRemoteTestResult(channel, result));
+    // D.14D-E — /remote test 结果走降噪 CommandPanel：完整结果进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/remote test",
+      tone: result.status === "sent" ? "neutral" : "warning",
+      summary: [
+        context.language === "en-US"
+          ? `Remote test ${channel.id} · ${result.status} — Ctrl+O for details.`
+          : `远程测试 ${channel.id} · ${result.status} — Ctrl+O 查看详情。`,
+      ],
+      detailsText: formatRemoteTestResult(channel, result),
+    });
     return;
   }
   if (action === "disable") {
@@ -124,10 +154,17 @@ export async function handleRemoteCommand(
     channel.lastError = "disabled_by_user";
     channel.nextAction = `/remote setup ${channel.id}`;
     await appendRemoteSystemEvent(context, `remote_disabled channel=${channel.id}`, "info");
-    writeLine(
-      output,
-      `Remote channel disabled：${channel.id}\n- 本地 TUI 不受影响。\n- 如需重新连接：/remote setup ${channel.id}`,
-    );
+    // D.14D-E — /remote disable 结果走降噪 CommandPanel：完整结果进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/remote disable",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? `Remote channel disabled: ${channel.id} — Ctrl+O for details.`
+          : `已禁用远程通道：${channel.id} — Ctrl+O 查看详情。`,
+      ],
+      detailsText: `Remote channel disabled：${channel.id}\n- 本地 TUI 不受影响。\n- 如需重新连接：/remote setup ${channel.id}`,
+    });
     return;
   }
   writeLine(

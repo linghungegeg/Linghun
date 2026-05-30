@@ -13,25 +13,13 @@ import { formatAgentDetails } from "./tui-details-runtime.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
-import { appendJobLog, createDurableJobAgents, deriveAgentDisplayName, estimateJobTokens, formatJobAgentLabels, formatJobStatus, getDurableJobMaxSteps, parseJobRunOptions, persistDurableJob, rescheduleDurableJobAgents, writeDurableJobReport, type ParsedJobRunOptions } from "./job-runtime.js";
+import { appendJobLog, createDurableJobAgents, deriveAgentDisplayName, estimateJobTokens, formatJobAgentLabels, formatJobStatus, getDurableJobMaxSteps, parseJobRunOptions, persistDurableJob, rescheduleDurableJobAgents, writeDurableJobReport, DEFAULT_JOB_RUNNING_AGENT_CAP, JOB_AGENT_HIGH_CONFIG_CANDIDATE, JOB_RECOVERY_HEARTBEAT_STALE_MS, MAX_AGENTS, type ParsedJobRunOptions } from "./job-runtime.js";
 import { formatBackgroundTask, mapDurableJobToBackgroundResult, mapDurableJobToBackgroundStatus, formatJobRunnerInline } from "./job-runner-presenter.js";
 import { markJobRunnerTerminal, refreshRunnerStatusForJob as refreshRunnerStatusForJobImpl, startRunnerForDurableJob as startRunnerForDurableJobImpl, stopRunnerForDurableJob as stopRunnerForDurableJobImpl, type RunnerContext, type RunnerRuntimeDeps } from "./runner-runtime.js";
 import { createAgentBackgroundTask, createAgentContextSummary, createEmptyAgentCost, findAgent, findDurableJob, formatAgentSummary, formatJobList, formatJobLogs, formatJobPrimary, formatJobReport, getAgentPermissionMode, getAgentRole, getDurableJobPaths, isActiveBackgroundStatus, isAgentType, listDurableJobs, mapAgentBackgroundResult, rememberBackgroundTask, toJobContext, upsertJobBackgroundTask } from "./tui-agent-job-runtime.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { AgentRun, AgentType, BackgroundTaskState, DurableJobState, DurableJobStatus, RoleHandoff, RoleRouteDecision } from "./tui-data-types.js";
-
-const DEFAULT_JOB_RUNNING_AGENT_CAP = 3;
-const JOB_AGENT_HIGH_CONFIG_CANDIDATE = "8";
-const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
-const MAX_AGENTS = 20;
-const BACKGROUND_RUNNING_GLOBAL_CAP = 4;
-const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>> = {
-  bash: 1,
-  verification: 1,
-  index: 1,
-  agent: 3,
-  job: 1,
-};
 
 export type JobAgentCommandRuntimeDeps = {
   addRoleUsage: (
@@ -50,6 +38,11 @@ export type JobAgentCommandRuntimeDeps = {
   ensureSession: (context: TuiContext) => Promise<string>;
   refreshBackgroundLifecycle: (context: TuiContext) => void;
   writeStatus: (output: Writable, context: TuiContext) => void;
+  captureFailureLearning: (
+    context: TuiContext,
+    sessionId: string,
+    input: FailureLearningInput,
+  ) => Promise<void>;
 };
 
 let runtimeDeps: JobAgentCommandRuntimeDeps | undefined;
@@ -222,7 +215,17 @@ export async function handleJobCommand(
       await persistDurableJob(job);
       await writeDurableJobReport(job);
       upsertJobBackgroundTask(context, job);
-      writeLine(output, formatJobStatus(job));
+      // D.14D-E — /job status 走降噪 CommandPanel：完整状态进 detailsText。
+      showCommandPanel(context, output, {
+        title: "/job status",
+        tone: "neutral",
+        summary: [
+          context.language === "en-US"
+            ? `Job ${job.id} · ${job.status} — Ctrl+O for details.`
+            : `Job ${job.id} · ${job.status} — Ctrl+O 查看详情。`,
+        ],
+        detailsText: formatJobStatus(job),
+      });
       return;
     }
     if (action === "report") {
@@ -230,11 +233,31 @@ export async function handleJobCommand(
       await persistDurableJob(job);
       await writeDurableJobReport(job);
       upsertJobBackgroundTask(context, job);
-      writeLine(output, formatJobReport(job));
+      // D.14D-E — /job report 走降噪 CommandPanel：完整报告进 detailsText。
+      showCommandPanel(context, output, {
+        title: "/job report",
+        tone: "neutral",
+        summary: [
+          context.language === "en-US"
+            ? `Job ${job.id} report — Ctrl+O for details.`
+            : `Job ${job.id} 报告 — Ctrl+O 查看详情。`,
+        ],
+        detailsText: formatJobReport(job),
+      });
       return;
     }
     if (action === "logs") {
-      writeLine(output, await formatJobLogs(job));
+      // D.14D-E — /job logs 走降噪 CommandPanel：完整日志尾部进 detailsText。
+      showCommandPanel(context, output, {
+        title: "/job logs",
+        tone: "neutral",
+        summary: [
+          context.language === "en-US"
+            ? `Job ${job.id} logs — Ctrl+O for details.`
+            : `Job ${job.id} 日志 — Ctrl+O 查看详情。`,
+        ],
+        detailsText: await formatJobLogs(job),
+      });
       return;
     }
     if (action === "pause") {
@@ -747,12 +770,43 @@ export async function handleAgentsCommand(
 ): Promise<void> {
   const action = args[0] ?? "list";
   if (action === "list") {
-    writeLine(output, formatAgentsList(context));
+    // D.14D-E — /agents 走降噪 CommandPanel：完整 agent 列表进 detailsText。
+    const isEn = context.language === "en-US";
+    const total = context.agents.length;
+    const running = context.agents.filter((a) => a.status === "running").length;
+    showCommandPanel(context, output, {
+      title: "/agents",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? `Agents · ${total} total · ${running} running — Ctrl+O for details.`
+          : `Agents · 共 ${total} · 运行中 ${running} — Ctrl+O 查看详情。`,
+      ],
+      actions:
+        total > 0
+          ? ["/agents show <id>", "/agents cancel <id>"]
+          : ["/fork explorer|planner|verifier|worker <task>"],
+      detailsText: formatAgentsList(context),
+    });
     return;
   }
   if (action === "show") {
     const agent = findAgent(context, args[1]);
-    writeLine(output, agent ? formatAgentDetails(agent, context) : "未找到 agent。");
+    if (!agent) {
+      writeLine(output, "未找到 agent。");
+      return;
+    }
+    // D.14D-E — /agents show 走降噪 CommandPanel：完整 agent 详情进 detailsText。
+    showCommandPanel(context, output, {
+      title: "/agents show",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? `Agent ${agent.id} · ${agent.status} — Ctrl+O for details.`
+          : `Agent ${agent.id} · ${agent.status} — Ctrl+O 查看详情。`,
+      ],
+      detailsText: formatAgentDetails(agent, context),
+    });
     return;
   }
   if (action === "cancel" || action === "interrupt") {
@@ -784,8 +838,11 @@ export async function handleForkCommand(
     return;
   }
   const runningCount = context.agents.filter((agent) => agent.status === "running").length;
-  if (runningCount >= 3) {
-    writeLine(output, "最多同时运行 3 个 agent；请先 /agents cancel <id> 或等待完成。");
+  if (runningCount >= DEFAULT_JOB_RUNNING_AGENT_CAP) {
+    writeLine(
+      output,
+      `最多同时运行 ${DEFAULT_JOB_RUNNING_AGENT_CAP} 个 agent；请先 /agents cancel <id> 或等待完成。`,
+    );
     return;
   }
 
@@ -858,7 +915,13 @@ export async function completeAgent(
   output: Writable,
 ): Promise<void> {
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
-  const summary = await runAgentWork(agent, context, output);
+  let summary: string;
+  try {
+    summary = await runAgentWork(agent, context, output);
+  } catch (error) {
+    await failAgent(agent, task, context, output, parentSessionId, error);
+    return;
+  }
   const now = new Date().toISOString();
   agent.status = "completed";
   agent.summary = summary;
@@ -903,6 +966,55 @@ export async function completeAgent(
   });
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   writeLine(output, formatAgentSummary(agent, context));
+  deps().writeStatus(output, context);
+}
+
+// D.14C — agent 真实执行异常（非用户取消、非权限拒绝）才走这里。把 agent/task
+// 标记 failed，记 agent_end(failed)，并搭车进 D.14B failure learning。用户取消由
+// cancelAgent 处理（status=cancelled，不调用本函数）；worker 权限拒绝由
+// runWorkerAgent 返回普通 summary 字符串（不抛异常），也不会进这里。
+async function failAgent(
+  agent: AgentRun,
+  task: BackgroundTaskState,
+  context: TuiContext,
+  output: Writable,
+  parentSessionId: string,
+  error: unknown,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const message = error instanceof Error ? error.message : String(error);
+  agent.status = "failed";
+  agent.summary = `agent ${agent.id} 执行失败：${truncateDisplay(message, 160)}`;
+  agent.updatedAt = now;
+  task.status = "failed";
+  task.result = "fail";
+  task.currentStep = context.language === "en-US" ? "failed" : "已失败";
+  task.updatedAt = now;
+  task.lastOutputAt = now;
+  task.nextAction =
+    context.language === "en-US"
+      ? "Inspect /agents show output and retry if needed."
+      : "查看 /agents show 输出，必要时重试。";
+  await context.store.appendEvent(parentSessionId, {
+    type: "agent_end",
+    agentId: agent.id,
+    status: "failed",
+    summary: agent.summary,
+    createdAt: now,
+  });
+  await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+  // 真实失败搭车进 D.14B；失败摘要交给 captureFailureLearning 内部脱敏，只当风险提示，
+  // 不进 context.evidence，不污染 D.13U/D.13V final answer gate。
+  await deps().captureFailureLearning(context, parentSessionId, {
+    category: "tool_failure",
+    failureSummary: `agent ${agent.type} execution threw: ${message}`,
+    rootCauseGuess: `agent ${agent.type} work failed before producing a summary`,
+    avoidNextTime: `Check the ${agent.type} agent task and inputs before re-running; do not assume the agent succeeded`,
+    sourceRef: `agent:${agent.id}`,
+    relatedTarget: `agent_${agent.type}`,
+    severity: "medium",
+  });
+  writeLine(output, agent.summary);
   deps().writeStatus(output, context);
 }
 

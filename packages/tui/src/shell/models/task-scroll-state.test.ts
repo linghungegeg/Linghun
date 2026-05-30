@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampTaskScroll,
   createInitialTaskScroll,
   reduceTaskScroll,
 } from "./task-scroll-state.js";
@@ -57,5 +58,52 @@ describe("D.13Q-UX Task Surface — reduceTaskScroll", () => {
     s = reduceTaskScroll(s, { type: "scroll", delta: 1 });
     expect(s.scrollOffset).toBe(11);
     expect(s.stickToBottom).toBe(false);
+  });
+});
+
+describe("D.14D-C2 Task Surface — clampTaskScroll", () => {
+  it("offset 不超过 maxOffset（内容溢出时夹到上界）", () => {
+    const detached = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 50 });
+    // 内容比可视区多 10 行 → 最多向上滚 10 行。
+    const clamped = clampTaskScroll(detached, 10);
+    expect(clamped.scrollOffset).toBe(10);
+    expect(clamped.hasOverflow).toBe(true);
+    // stickToBottom 由 reducer 决定，clamp 不改它。
+    expect(clamped.stickToBottom).toBe(false);
+  });
+
+  it("内容未溢出（maxOffset<=0）时强制 offset=0 / hasOverflow=false", () => {
+    const detached = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 7 });
+    const clamped = clampTaskScroll(detached, 0);
+    expect(clamped.scrollOffset).toBe(0);
+    expect(clamped.hasOverflow).toBe(false);
+  });
+
+  it("offset 在 [0, maxOffset] 区间内保持不变", () => {
+    const detached = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 3 });
+    const clamped = clampTaskScroll(detached, 10);
+    expect(clamped.scrollOffset).toBe(3);
+    expect(clamped.hasOverflow).toBe(true);
+  });
+
+  it("负 maxOffset 视为无溢出，offset 归零", () => {
+    const detached = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 4 });
+    const clamped = clampTaskScroll(detached, -5);
+    expect(clamped.scrollOffset).toBe(0);
+    expect(clamped.hasOverflow).toBe(false);
+  });
+
+  it("undefined state 视为初始（吸底）状态", () => {
+    const clamped = clampTaskScroll(undefined, 10);
+    expect(clamped.scrollOffset).toBe(0);
+    expect(clamped.stickToBottom).toBe(true);
+    expect(clamped.hasOverflow).toBe(true);
+  });
+
+  it("小数 maxOffset 向下取整作为上界", () => {
+    const detached = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 50 });
+    const clamped = clampTaskScroll(detached, 5.9);
+    expect(clamped.scrollOffset).toBe(5);
+    expect(clamped.hasOverflow).toBe(true);
   });
 });

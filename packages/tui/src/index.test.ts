@@ -17,8 +17,7 @@ import {
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyIndexSafetyRepairContinuation } from "./index-safety-repair.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
@@ -33,6 +32,7 @@ import {
   createIndexState,
   createMcpState,
   createMemoryState,
+  createModelGateway,
   createModelSystemPrompt,
   createPluginState,
   createRemoteEvent,
@@ -129,7 +129,7 @@ function mockOpenAiTextFetch(finalText = "done"): unknown[] {
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
       const body = `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
-      return new Response(body, { status: 200 });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
   return requests;
@@ -141,7 +141,7 @@ function mockOpenAiEmptyFetch(body = "data: [DONE]\n\n"): unknown[] {
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
-      return new Response(body, { status: 200 });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
   return requests;
@@ -154,7 +154,7 @@ function mockOpenAiErrorFetch(): unknown[] {
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
       const body = `data: ${JSON.stringify({ error: { message: "quota exceeded" } })}\n\ndata: [DONE]\n\n`;
-      return new Response(body, { status: 200 });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
   return requests;
@@ -198,7 +198,7 @@ function mockOpenAiToolSequence(
             "data: [DONE]\n\n",
           ].join("")
         : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
-      return new Response(body, { status: 200 });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
   return requests;
@@ -586,6 +586,43 @@ async function waitForTestCondition(predicate: () => boolean, timeoutMs = 1_000)
 }
 
 describe("Phase 06 TUI slash commands", () => {
+  // D.14C baseline closure — isolate model env so the real machine's
+  // ~/.linghun/provider.env (and any LINGHUN_*/OPENAI/ANTHROPIC keys) cannot
+  // override per-test config. getUserConfigDir falls back to homedir()/.linghun
+  // when LINGHUN_CONFIG_DIR is unset; without this, the dev box's openai-compat
+  // key forces model=claude-opus-4-7 → anthropic_messages and the OpenAI-shaped
+  // mocks below are rejected. Tests that need a specific home re-stub
+  // LINGHUN_CONFIG_DIR themselves (later stub wins); the file-level afterEach
+  // already calls vi.unstubAllEnvs().
+  const PHASE06_MODEL_ENV_KEYS = [
+    "LINGHUN_OPENAI_API_KEY",
+    "LINGHUN_OPENAI_BASE_URL",
+    "LINGHUN_OPENAI_MODEL",
+    "LINGHUN_OPENAI_ENDPOINT_PROFILE",
+    "LINGHUN_OPENAI_INCLUDE_USAGE",
+    "LINGHUN_DEEPSEEK_API_KEY",
+    "LINGHUN_DEEPSEEK_BASE_URL",
+    "LINGHUN_DEEPSEEK_MODEL",
+    "LINGHUN_DEFAULT_MODEL",
+    "LINGHUN_INFERENCE_LEVEL",
+    "LINGHUN_AUX_MODEL",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+  ];
+  beforeEach(async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-phase06-home-"));
+    await mkdir(join(home, ".linghun", "data"), { recursive: true });
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    // jobs/sessions/index default to the user DATA dir (getUserDataDir), which is
+    // independent of LINGHUN_CONFIG_DIR. Without isolating it, the dev box's
+    // persisted ~/.linghun/data/jobs leak into /job list and /background tests.
+    vi.stubEnv("LINGHUN_DATA_DIR", join(home, ".linghun", "data"));
+    for (const key of PHASE06_MODEL_ENV_KEYS) {
+      vi.stubEnv(key, undefined as unknown as string);
+    }
+  });
+
   it("detects catalog drift against real user-visible slash dispatch", () => {
     expect(validateCommandCapabilityCoverage([...USER_VISIBLE_DISPATCH_SLASH_COMMANDS])).toEqual(
       [],
@@ -611,7 +648,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Linghun TUI / REPL");
     expect(output.text).toContain("项目 linghun-tui-project-");
-    expect(output.text).toContain("模型 deepseek-v4-flash");
+    expect(output.text).toContain("模型 deepseek-chat");
     expect(output.text).toContain("模式 默认模式");
     expect(output.text).toContain("可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。");
     expect(output.text).toContain("需要精确命令时，用 /help 查看。");
@@ -2185,6 +2222,68 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("verdict=PARTIAL");
   });
 
+  it("D.14D: sanitizes internal prompt-token echoes from the committed answer (ink main-screen source of truth)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "leak-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "leak-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // 模拟模型把内部 system-prompt 字段原样复述（用户说"翻译成人话"时常见的泄漏形态）。
+    const leaky = [
+      "好的，翻译成人话：",
+      'RuntimeStatusForModel={"memory":{"linghunMd":"missing"},"index":{"status":"ready"}}',
+      "ControlledMemorySummary=accepted:0 candidates:0",
+      "MemoryBoundary=acceptedOnly; topK=3; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
+      "EvidenceSummary=[]",
+      "你的环境基本正常。",
+    ].join("\n");
+    mockOpenAiTextFetch(leaky);
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["翻译成人话\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 真实 ink 主屏从已提交的 assistant_text_delta 事件（block fullText 的同源）
+    // 渲染。该提交文本必须已脱去内部 token。注：plain-mode 的 output.write 流式
+    // 字节在到达时即写出，无法事后撤回，因此断言落在 mode-independent 的提交文本上。
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    expect(session?.id).toBeTruthy();
+    const resumed = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).resume(session?.id ?? "missing");
+    const finalAnswer = [...resumed.transcript]
+      .reverse()
+      .find((e) => e.type === "assistant_text_delta") as { text: string } | undefined;
+    expect(finalAnswer).toBeDefined();
+    const committed = finalAnswer?.text ?? "";
+    expect(committed).not.toContain("RuntimeStatusForModel");
+    expect(committed).not.toContain("ControlledMemorySummary");
+    expect(committed).not.toContain("MemoryBoundary");
+    expect(committed).not.toContain("EvidenceSummary");
+    expect(committed).not.toContain("doNotWriteLongTermMemoryWithoutExplicitMemoryAccept");
+    expect(committed).not.toContain('"linghunMd"');
+    // 人话正文仍保留。
+    expect(committed).toContain("你的环境基本正常");
+  });
+
   it("includes engineering structure constraints in zh-CN system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3675,36 +3774,24 @@ describe("Phase 06 TUI slash commands", () => {
     expect(primary).not.toContain("123e4567");
   });
 
-  it("preprocesses Polish B natural workspace trust as light confirmation with Details", async () => {
+  it("D.14D: natural workspace-trust wording falls through to the model, not a local Start Gate", async () => {
+    // D.14D — 移除 workspace-trust 自然语言截胡。普通自然语言（含"信任这个项目"）
+    // 默认进入模型主链；要调整信任请输入精确 /trust slash。
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
     const output = new MemoryOutput();
 
-    await handleNaturalInput("信任这个项目", context, output);
+    const result = await handleNaturalInput("信任这个项目", context, output);
 
-    expect(context.pendingNaturalCommand?.capabilityId).toBe("trust");
-    expect(context.pendingNaturalCommand?.exactCommand).toBe("/trust status");
-    expect(context.pendingNaturalCommand?.exactCommand).not.toBe("/trust trust");
-    expect(output.text).toContain("我识别到你想调整工作区信任。是否授权？");
-    expect(output.text).toContain("Yes");
-    expect(output.text).toContain("No");
-    expect(output.text).toContain("Details");
-    expect(output.text).not.toContain("信任后 Linghun 可以在当前目录读、改、运行命令");
-    expect(output.text).not.toContain("/trust trust");
-
-    await handleNaturalInput("details", context, output);
-
-    expect(output.text).toContain("信任后 Linghun 可以在当前目录读、改、运行命令");
-    expect(output.text).toContain("Start Gate");
-    expect(output.text).toContain("Plan approval");
-    expect(output.text).toContain("permission pipeline");
-    expect(output.text).toContain("/trust 仍是高级恢复/状态入口");
-    expect(output.text).not.toContain("/trust trust");
+    expect(result).toBe("message");
+    expect(context.pendingNaturalCommand).toBeUndefined();
+    expect(output.text).not.toContain("我识别到你想调整工作区信任");
+    expect(output.text).not.toContain("/trust");
   });
 
-  it("preprocesses English Polish B natural workspace trust without using /trust trust", async () => {
+  it("D.14D: English natural workspace-trust wording falls through to the model", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3712,27 +3799,11 @@ describe("Phase 06 TUI slash commands", () => {
     context.language = "en-US";
     const output = new MemoryOutput();
 
-    await handleNaturalInput("trust this folder", context, output);
+    const result = await handleNaturalInput("trust this folder", context, output);
 
-    expect(context.pendingNaturalCommand?.capabilityId).toBe("trust");
-    expect(context.pendingNaturalCommand?.exactCommand).toBe("/trust status");
-    expect(context.pendingNaturalCommand?.exactCommand).not.toBe("/trust trust");
-    expect(output.text).toContain(
-      "I recognized that you want to adjust workspace trust. Authorize?",
-    );
-    expect(output.text).toContain("Yes");
-    expect(output.text).toContain("No");
-    expect(output.text).toContain("Details");
-    expect(output.text).not.toContain("If trusted, Linghun can read, edit, and run commands");
-
-    await handleNaturalInput("Details", context, output);
-
-    expect(output.text).toContain("If trusted, Linghun can read, edit, and run commands");
-    expect(output.text).toContain("Start Gate");
-    expect(output.text).toContain("Plan approval");
-    expect(output.text).toContain("permission pipeline");
-    expect(output.text).toContain("/trust remains an advanced recovery/status entry");
-    expect(output.text).not.toContain("/trust trust");
+    expect(result).toBe("message");
+    expect(context.pendingNaturalCommand).toBeUndefined();
+    expect(output.text).not.toContain("I recognized that you want to adjust workspace trust");
   });
 
   it("D.13Q-UX Closure: ordinary model-status wording falls through to the model loop, not the local capability answer", async () => {
@@ -3753,6 +3824,101 @@ describe("Phase 06 TUI slash commands", () => {
     // 不再本地拼"当前模型：role=executor provider=..." 字符串
     expect(output.text).not.toContain("当前模型：role=executor");
     expect(output.text).not.toContain("formatCapabilityAnswer");
+  });
+
+  describe("D.14D natural-language input boundary", () => {
+    const ordinaryInputs = [
+      "刷新索引",
+      "更新索引",
+      "帮我看看状态",
+      "模型这里是不是有问题",
+      "翻译成人话",
+      "测试一下",
+      "索引和记忆 MCP 打开了吗",
+      "信任这个项目",
+      "把这些文件加入 ignore 后刷新索引",
+      "refresh the index",
+      "is the model broken here",
+    ];
+
+    for (const input of ordinaryInputs) {
+      it(`routes ordinary natural language to the model: ${input}`, async () => {
+        const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+        // 配好 provider，避免触发"模型未配置"onboarding 路径，确保本测试只检验
+        // 自然语言路由边界（onboarding 是另一条 state-gated 行为，单独测试）。
+        await mkdir(join(project, ".linghun"), { recursive: true });
+        await writeFile(
+          join(project, ".linghun", "settings.json"),
+          JSON.stringify({
+            defaultModel: "nl-model",
+            providers: {
+              "openai-compatible": {
+                baseUrl: "https://example.test/v1",
+                apiKey: "sk-test",
+                model: "nl-model",
+              },
+            },
+          }),
+          "utf8",
+        );
+        const config = await loadConfig(project);
+        const store = new SessionStore({
+          sessionRootDir: getSessionRootDir(),
+          projectPath: project,
+        });
+        const session = await store.create({ model: "nl-model" });
+        const context = await createTestContext(project, store, session, config);
+        const output = new MemoryOutput();
+
+        const result = await handleNaturalInput(input, context, output);
+
+        expect(result).toBe("message");
+        // 不再本地截胡到 composite status / trust gate / index repair。
+        expect(output.text).not.toContain("组合本地状态");
+        expect(output.text).not.toContain("Composite local status");
+        expect(output.text).not.toContain("我识别到你想调整工作区信任");
+        expect(output.text).not.toContain("索引安全修复续跑");
+        expect(context.pendingNaturalCommand).toBeUndefined();
+      });
+    }
+
+    it("still dispatches explicit slash commands locally (not to the model)", async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const context = await createTestContext(project, store, session);
+      const output = new MemoryOutput();
+
+      // handleSlashCommand 处理显式 slash；handleNaturalInput 只处理非 slash 文本。
+      const result = await handleSlashCommand("/help", context, output);
+
+      expect(result).toBe("handled");
+      expect(output.text.length).toBeGreaterThan(0);
+    });
+
+    it("still handles pending-approval yes/no/details locally without sending to the model", async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const context = await createTestContext(project, store, session);
+      const output = new MemoryOutput();
+
+      context.pendingLocalApproval = {
+        kind: "model_tool_use",
+        toolName: "Bash",
+        toolCall: { id: "call-1", name: "Bash", input: { command: "echo hi" } },
+        sessionId: session.id,
+      } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+      const detailsResult = await handleNaturalInput("details", context, output);
+      expect(detailsResult).toBe("handled");
+      // 仍有 pending approval（details 不消费它）
+      expect(context.pendingLocalApproval).toBeDefined();
+
+      const denyResult = await handleNaturalInput("no", context, output);
+      expect(denyResult).toBe("handled");
+      expect(context.pendingLocalApproval).toBeUndefined();
+    });
   });
 
   it("uses executor route for status, model output, doctor, and ordinary requests", async () => {
@@ -3797,8 +3963,10 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
-    expect(output.text).toContain("defaultModel=gpt-5.5");
-    expect(output.text).toContain("普通开发请求按 executor route=deepseek/deepseek-v4-pro 执行");
+    expect(output.text).toContain("openai-compatible: type=openai-compatible provider=openai-compatible model=gpt-5.5");
+    expect(output.text).toContain(
+      "角色路由摘要：planner:deepseek/deepseek-v4-pro；executor:deepseek/deepseek-v4-pro",
+    );
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).toContain(
@@ -3901,7 +4069,7 @@ describe("Phase 06 TUI slash commands", () => {
       reasoning: { effort: "Medium" },
     });
     const modelRequestJson = JSON.stringify(requests[0]);
-    expect(modelRequestJson).toContain('"tools":[{"type":"function","name":"Read"');
+    expect(modelRequestJson).toContain('{"type":"function","name":"Read"');
     expect(modelRequestJson).toContain('"name":"Write"');
     expect(modelRequestJson).toContain('"expectedHash":{"type":"string"}');
     expect(modelRequestJson).toContain('"name":"Edit"');
@@ -3979,10 +4147,22 @@ describe("Phase 06 TUI slash commands", () => {
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
         ...config,
+        defaultModel: "control-plane-model",
+        providers: {
+          ...config.providers,
+          deepseek: { ...(config.providers?.deepseek ?? {}), model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "control-plane-model",
+          },
+        },
         storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
       }),
       "utf8",
     );
+    // 两条直接读文件的自然语言走模型主链路并调用 Read 工具（不被 slash 控制面截胡）。
+    mockOpenAiToolFetch("Read", { path: "LINGHUN.md" }, "已读取 LINGHUN.md。");
     const output = new MemoryOutput();
 
     await runTui({
@@ -4003,7 +4183,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain(
-      "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
+      "当前模型：role=executor provider=openai-compatible model=control-plane-model reasoning=未生效",
     );
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("索引初始化完成");
@@ -4427,7 +4607,11 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests.length).toBeGreaterThanOrEqual(4);
+    // D.13V architecture/completeness gate intercepts systemic-change inputs
+    // ("修复这个 bug" / "实现导出报表功能") locally with an evidence-first card,
+    // so not every input reaches the provider. The ordinary analysis/report
+    // inputs still reach gateway.stream; assert those rather than a fixed count.
+    expect(requests.length).toBeGreaterThanOrEqual(2);
     expect(output.text).toContain("普通任务进入模型主链路");
     expect(output.text).not.toContain("/index：代码索引");
     expect(output.text).not.toContain("我可以准备执行：权限模式");
@@ -4470,35 +4654,29 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("/index：代码索引");
   });
 
-  it("answers composite Chinese and English readiness locally", async () => {
+  it("D.14D: composite readiness wording no longer answers locally; falls through to the model", async () => {
+    // D.14D — 移除 composite local status 自然语言截胡。"索引和记忆 MCP 打开了吗"
+    // 这类普通自然语言不再本地拼"组合本地状态"，默认进入模型主链。要看综合状态请
+    // 使用精确 slash（/doctor、/status、/index status 等）。
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({ language: "en-US" }),
-      "utf8",
-    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
     const output = new MemoryOutput();
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from([
-        "索引和记忆 MCP 打开了吗\n",
-        "Are model, index and permissions ready?\n",
-        "/exit\n",
-      ]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+    const zhResult = await handleNaturalInput("索引和记忆 MCP 打开了吗", context, output);
+    context.language = "en-US";
+    const enResult = await handleNaturalInput(
+      "Are model, index and permissions ready?",
+      context,
+      output,
+    );
 
-    expect(output.text).toContain("Composite local status");
-    expect(output.text).toContain("- index: status=");
-    expect(output.text).toContain("- memory: projectRules=");
-    expect(output.text).toContain("- mcp: enabled=");
-    expect(output.text).toContain("- model/provider: provider=");
-    expect(output.text).toContain("- permissions: mode=");
-    expect(output.text).toContain("not sent to the model");
-    expect(output.text).not.toContain("Status: requesting model");
+    expect(zhResult).toBe("message");
+    expect(enResult).toBe("message");
+    expect(output.text).not.toContain("Composite local status");
+    expect(output.text).not.toContain("组合本地状态");
+    expect(output.text).not.toContain("not sent to the model");
   });
 
   it("shows model tool permission prompts and waits for local approval", async () => {
@@ -4519,7 +4697,7 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
-    const requests = mockOpenAiToolFetch("Bash", { command: "echo SHOULD_NOT_RUN" });
+    const requests = mockOpenAiToolFetch("Bash", { command: "mkdir SHOULD_NOT_RUN" });
     const output = new MemoryOutput();
 
     await runTui({
@@ -4563,7 +4741,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const requests = mockOpenAiToolFetch(
       "Bash",
-      { command: "echo SHOULD_NOT_RUN" },
+      { command: "mkdir SHOULD_NOT_RUN" },
       "我已收到拒绝结果，将改用不执行命令的说明。",
     );
     const output = new MemoryOutput();
@@ -4718,7 +4896,7 @@ describe("Phase 06 TUI slash commands", () => {
                           type: "function",
                           function: {
                             name: "Bash",
-                            arguments: JSON.stringify({ command: "ls -la" }),
+                            arguments: JSON.stringify({ command: "mkdir build-out" }),
                           },
                         },
                         {
@@ -4737,7 +4915,7 @@ describe("Phase 06 TUI slash commands", () => {
               "data: [DONE]\n\n",
             ].join("")
           : `data: ${JSON.stringify({ id: "chatcmpl-test-2", choices: [{ delta: { content: "已收到拒绝结果。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
       }),
     );
     const output = new MemoryOutput();
@@ -4921,7 +5099,7 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(JSON.parse(String(init.body)));
         if (requests.length === 1) {
           const body = `data: ${JSON.stringify({ id: "chatcmpl-test-1", choices: [{ delta: { content: "我先看一下。" } }] })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -4943,7 +5121,7 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         if (requests.length === 3) {
           const body = `data: ${JSON.stringify({
@@ -4968,10 +5146,10 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         const body = `data: ${JSON.stringify({ id: "chatcmpl-test-4", choices: [{ delta: { content: "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开报告复核。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
       }),
     );
     const output = new MemoryOutput();
@@ -5196,7 +5374,7 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -5218,7 +5396,7 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         const body = `data: ${JSON.stringify({
           id: "chatcmpl-test-3",
@@ -5231,7 +5409,7 @@ describe("Phase 06 TUI slash commands", () => {
             },
           ],
         })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
       }),
     );
     const output = new MemoryOutput();
@@ -5563,13 +5741,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("主屏不展开完整风险清单");
     expect(output.text).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
     expect(output.text).not.toContain("- large.json");
+    // D.14D — 修复路径改为显式 /index repair slash，不再指向自然语言。
     expect(output.text).toContain(
-      "修复路径：可以用自然语言要求排除这些大文件并更新索引；写入 ignore 文件仍会进入权限管道。",
+      "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
     );
     expect(output.text).toContain("重试命令：/index refresh");
   });
 
-  it("continues index safety repair after an active safety blocker", async () => {
+  it("D.14D: /index repair continues after an active safety blocker", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5580,7 +5759,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput("帮我排除大文件更新索引", context, output);
+    await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("确认", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
@@ -5590,7 +5769,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("continues index safety repair from Chinese natural language after permission allows Write", async () => {
+  it("D.14D: /index repair writes ignore then refreshes after Write is allowed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5602,7 +5781,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/permissions add allow Write medium", context, output);
     await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await handleSlashCommand("/index repair", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("索引安全修复续跑");
@@ -5613,7 +5792,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("continues index safety repair from English natural language", async () => {
+  it("D.14D: English /index repair writes ignore then refreshes after Write is allowed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5626,11 +5805,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/permissions add allow Write medium", context, output);
     await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput(
-      "exclude those large files and refresh the project index",
-      context,
-      output,
-    );
+    await handleSlashCommand("/index repair", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
     expect(output.text).toContain("Index safety repair continuation");
@@ -5639,7 +5814,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("does not duplicate existing ignore entries before continuing refresh", async () => {
+  it("D.14D: /index repair does not duplicate existing ignore entries before refresh", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5651,14 +5826,14 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
     await writeFile(join(project, ".linghunignore"), "large.json\n", "utf8");
-    await handleNaturalInput("帮我排除这些大文件并刷新索引", context, output);
+    await handleSlashCommand("/index repair", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toBe("large.json\n");
     expect(output.text).toContain("ignore 写入跳过");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("does not write or refresh when index safety repair approval is denied", async () => {
+  it("D.14D: /index repair does not write or refresh when approval is denied", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5669,7 +5844,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("no", context, output);
 
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
@@ -5678,7 +5853,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
 
-  it("continues index safety repair after default Write approval", async () => {
+  it("D.14D: /index repair continues after default Write approval", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5689,7 +5864,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
+    await handleSlashCommand("/index repair", context, output);
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     await handleNaturalInput("确认", context, output);
 
@@ -5699,9 +5874,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("does not allow natural-language force or rebuild through index safety continuation", async () => {
+  it("D.14D: /index repair with no active blocker explains how to trigger it", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
     const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -5709,14 +5883,14 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
 
-    await handleSlashCommand("/index refresh", context, output);
-    await handleNaturalInput("force rebuild the index", context, output);
+    await handleSlashCommand("/index repair", context, output);
 
-    expect(output.text).toContain("索引 force/rebuild 不能通过自然语言直通");
+    expect(output.text).toContain("当前没有待处理的索引安全门");
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
 
-  it("leaves ordinary development requests to the model loop even after index safety pause", async () => {
+  it("D.14D: ordinary development requests reach the model loop even after an index safety pause", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5728,31 +5902,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    await expect(handleNaturalInput("帮我实现登录功能", context, output)).resolves.toBe("message");
-  });
-
-  it("classifies index safety continuation from active blocker state", () => {
-    const state = { hasSafetyWarning: true, riskyFileCount: 2 };
-
-    expect(
-      classifyIndexSafetyRepairContinuation("把这些文件加入 ignore 后刷新索引", state).action,
-    ).toBe("repair");
-    expect(
-      classifyIndexSafetyRepairContinuation(
-        "please skip risky files and update the codebase index",
-        state,
-      ).action,
-    ).toBe("repair");
-    expect(classifyIndexSafetyRepairContinuation("force rebuild the index", state).action).toBe(
-      "force",
+    // D.14D — index safety pause 不再截胡自然语言。"把这些文件加入 ignore 后刷新索引"
+    // 这种自然语言也照常进入模型主链；要修复请显式 /index repair。
+    await expect(handleNaturalInput("把这些文件加入 ignore 后刷新索引", context, output)).resolves.toBe(
+      "message",
     );
-    expect(classifyIndexSafetyRepairContinuation("帮我实现登录功能", state).action).toBe("pass");
-    expect(
-      classifyIndexSafetyRepairContinuation("把这些文件加入 ignore 后刷新索引", {
-        hasSafetyWarning: false,
-        riskyFileCount: 0,
-      }).action,
-    ).toBe("pass");
+    await expect(handleNaturalInput("帮我实现登录功能", context, output)).resolves.toBe("message");
   });
 
   it("does not execute Bash silently in default mode", async () => {
@@ -5897,12 +6052,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/glob *.txt src", context, output);
 
     expect(output.text).toContain("主输出已隐藏 2 条 Todo");
-    expect(output.text).toContain("输出已摘要");
+    expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toContain("120 行");
     expect(output.text).toContain("90 条结果");
-    expect(output.text).toContain(
-      "详情：用 /details output <id> 查看完整结果，或用 /details 查看最近条目",
-    );
+    expect(output.text).not.toContain("详情：用 /details output <id>");
     expect(output.text).not.toContain("主屏为 summary-first");
     expect(output.text).not.toContain("完整结果已保存在主屏之外");
     expect(output.text).not.toContain("tool_result");
@@ -5986,6 +6139,29 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("does not generate LINGHUN.md when direct project-rules file read is missing", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "missing-rules-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "missing-rules-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // 模型主动 Read 缺失的 LINGHUN.md → readTool 抛 ENOENT → tool_result 含错误，
+    // 模型据此说明而非自动生成。验证：不写入 LINGHUN.md、不出现"已生成基础 LINGHUN.md"。
+    mockOpenAiToolFetch(
+      "Read",
+      { path: "LINGHUN.md" },
+      "LINGHUN.md 不存在；可运行 /memory init 生成基础模板，但我不会自动生成。",
+    );
     const output = new MemoryOutput();
 
     await runTui({
@@ -5995,7 +6171,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("ENOENT");
+    // 工具错误（ENOENT）按产品策略不刷主屏原文；主屏只显示 Read 工具调用与模型说明。
+    // 核心不变式：缺失 LINGHUN.md 不会被自动生成（无"已生成基础 LINGHUN.md"，文件不存在）。
+    expect(output.text).toContain("Read(LINGHUN.md)");
     expect(output.text).toContain("LINGHUN.md");
     expect(output.text).toContain("/memory init");
     expect(output.text).not.toContain("已生成基础 LINGHUN.md");
@@ -6071,7 +6249,7 @@ describe("Phase 06 TUI slash commands", () => {
       "fetch",
       vi.fn(async () => {
         const body = `data: ${JSON.stringify({ error: { message: "quota exceeded sk-provider-secret C:/Users/Admin/Linghun api_key=private" } })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
       }),
     );
     const output = new MemoryOutput();
@@ -6741,10 +6919,10 @@ describe("Phase 06 TUI slash commands", () => {
     await waitForTestCondition(() => output.text.includes("工作区信任"));
     await expect(readFile(join(project, ".linghun", "settings.json"), "utf8")).rejects.toThrow();
     expect(await readFile(getUserSettingsPath(), "utf8")).toContain('"language": "zh-CN"');
-    expect(output.text).toContain(`当前目录：${project}`);
+    expect(output.text).toContain(`│  ${project}`);
     expect(output.text).toContain("是否信任这个项目");
-    expect(output.text).toContain("Enter/yes：信任此项目");
-    expect(output.text).toContain("权限管道约束");
+    expect(output.text).toContain("信任此项目 (yes)");
+    expect(output.text).toContain("信任后可读写和运行命令；安全审批仍生效");
     input.write("\n");
     await waitForTestCondition(() => output.text.includes("工作区信任：trusted"));
     input.write("/exit\n");
@@ -7059,7 +7237,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
     await handleNaturalInput("yes", context, output);
     expect(context.permissionMode).toBe("default");
-    expect(output.text).toContain("普通 yes/确认 未放行");
+    // D.13D 移除了自然语言→full-access 的 Start Gate；裸 yes 落到 no-pending 分支，
+    // 不放行、不发模型。硬边界仍在（mode 始终保持 default）。
+    expect(output.text).toContain("当前没有等待确认的 Start Gate");
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/write sample.txt beta", context, output);
@@ -7461,61 +7641,141 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("未验证 / 待确认");
   });
 
-  it("keeps /btw isolated from todo, plan, and checkpoints", async () => {
+  it("D.14D: /btw is model-backed but isolated from todo, plan, and checkpoints", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "btw-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "btw-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
+    const session = await store.create({ model: "btw-model" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiTextFetch("当前在 D.14D 阶段。");
 
     await handleSlashCommand("/plan", context, output);
     await handleSlashCommand("/todo add 主任务", context, output);
     await handleSlashCommand("/btw 现在是什么阶段？", context, output);
 
-    // D.13Q-UX Closure: /btw 是 local note panel（不调模型）。plain 路径仍 writeLine
-    // 兼容；文案明确写"已记下临时备忘 + 不调模型"以避免被当作模型答案。
-    expect(output.text).toContain("已记下临时备忘");
-    expect(output.text).toContain("不调用模型");
+    // D.14D: /btw 现在调模型，plain 路径 writeLine 模型答案（不再是本地备忘文案）。
+    expect(output.text).toContain("当前在 D.14D 阶段。");
+    expect(output.text).not.toContain("已记下临时备忘");
+    // 不污染 Todo / Plan / checkpoint。
     expect(context.activePlan).toBeTruthy();
     expect(context.tools.todos).toHaveLength(1);
     expect(context.checkpoints).toHaveLength(0);
+    // 不写 evidence、不进 final-answer / completion gate。
+    expect(context.evidence).toHaveLength(0);
+    expect(context.solutionCompleteness.triggered).toBeFalsy();
   });
 
-  it("D.13Q-UX Closure: /btw is a local note panel — opens BtwPanel in ink and never calls the model", async () => {
+  it("D.14D: /btw calls the model and opens an answered BtwPanel in ink; records btw_question without evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "btw-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "btw-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
+    const session = await store.create({ model: "btw-model" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    (context as { isInkSession?: boolean }).isInkSession = true;
+    const context = await createTestContext(project, store, session, config);
+    context.isInkSession = true;
+    context.modelGateway = createModelGateway(config);
+    const requests = mockOpenAiTextFetch("这是模型给出的临时回答。");
 
-    // 不 stub fetch —— 任何模型调用都会触发未 mock fetch 报错；此测试通过即证明
-    // /btw handler 没有走 provider/model。
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    await handleSlashCommand("/btw 帮我解释一下这段逻辑", context, output);
 
-    await handleSlashCommand("/btw 这是临时备忘", context, output);
-
-    const panel = (context as { btwPanelState?: { question: string; phase: string; answer?: string } }).btwPanelState;
+    const panel = (
+      context as { btwPanelState?: { question: string; phase: string; answer?: string } }
+    ).btwPanelState;
     expect(panel).toBeDefined();
-    expect(panel?.question).toBe("这是临时备忘");
-    // local note：phase=answered（无异步加载），answer 包含本地标识文案。
+    expect(panel?.question).toBe("帮我解释一下这段逻辑");
     expect(panel?.phase).toBe("answered");
-    expect(panel?.answer ?? "").toContain("已记下临时备忘");
-    expect(panel?.answer ?? "").toContain("不调用模型");
-    // ink 路径不应再 writeLine 主屏 transcript。
+    expect(panel?.answer ?? "").toContain("这是模型给出的临时回答。");
+    // ink 路径不 writeLine transcript（答案进面板）。
     expect(output.text).toBe("");
-    // 不污染 Todo / Plan / checkpoint / job / permission。
+    // 真的调了 provider（单轮、无工具）。
+    expect(requests.length).toBeGreaterThan(0);
+    const body = requests[0] as { tool_choice?: unknown; tools?: unknown };
+    expect(body.tools ?? []).toEqual([]);
+    // 不污染 Todo / Plan / checkpoint / job / permission / evidence。
     expect(context.activePlan).toBeFalsy();
     expect(context.tools.todos).toHaveLength(0);
     expect(context.checkpoints).toHaveLength(0);
     expect(context.backgroundTasks).toHaveLength(0);
     expect(context.pendingLocalApproval).toBeUndefined();
-    // 没有调用 provider/model。
-    expect(fetchMock).not.toHaveBeenCalled();
-    // session store 仍记录 btw_question event 用于审计 / details。
+    expect(context.evidence).toHaveLength(0);
+    expect(context.solutionCompleteness.triggered).toBeFalsy();
+    // session store 记录 btw_question event（含答案）用于审计 / details。
     const resumed = await store.resume(session.id);
-    expect(resumed.transcript.some((e) => e.type === "btw_question" && (e as { text: string }).text === "这是临时备忘")).toBe(true);
+    expect(
+      resumed.transcript.some(
+        (e) => e.type === "btw_question" && (e as { text: string }).text === "帮我解释一下这段逻辑",
+      ),
+    ).toBe(true);
+  });
+
+  it("D.14D: /btw shows a visible error when the provider fails, without polluting evidence or gates", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "btw-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "btw-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "btw-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.isInkSession = true;
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiErrorFetch();
+
+    await handleSlashCommand("/btw 这条会失败", context, output);
+
+    const panel = (
+      context as { btwPanelState?: { question: string; phase: string; error?: string } }
+    ).btwPanelState;
+    expect(panel?.phase).toBe("error");
+    expect(panel?.error ?? "").toContain("quota exceeded");
+    // 失败不写 evidence、不进 completion gate。
+    expect(context.evidence).toHaveLength(0);
+    expect(context.solutionCompleteness.triggered).toBeFalsy();
   });
 
   it("D.13Q-UX Closure: /sessions ink path opens SessionsPanel sorted by updatedAt with current session marked", async () => {
@@ -8345,11 +8605,13 @@ describe("Phase 06 TUI slash commands", () => {
     context.language = "en-US";
     writeLightHintsForTest(output, context);
 
-    expect(output.text).toContain(
-      "[hint:warning] Reuse became less effective in the latest turn; next: /break-cache status",
-    );
+    // D.13Q-UX：light hints 不再写主屏 transcript，改推到 context.notifications 队列，
+    // 由 view-model 复制给 view.notifications 渲染——这正是"hints 不进 prompt/input 区"的实现。
+    const hintTexts = (context.notifications ?? []).map((note) => note.text);
+    expect(hintTexts.some((text) => text.includes("Cache reuse dipped a bit"))).toBe(true);
     expect(output.text).not.toContain("你> [hint");
     expect(output.text).not.toContain("you> [hint");
+    expect(output.text).not.toContain("[hint:warning]");
     expect(output.text).not.toContain("¥");
   });
 
@@ -8700,7 +8962,7 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(JSON.parse(String(init.body)));
         if (requests.length === 1) {
           const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-1", choices: [{ delta: { content: "已记录 Architecture Card。" } }] })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -8725,10 +8987,10 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200 });
+          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-3", choices: [{ delta: { content: "小修已完成。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200 });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
       }),
     );
     const output = new MemoryOutput();
@@ -8740,7 +9002,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(3);
+    // D.13V architecture/completeness gate adds one deterministic retry on the
+    // systemic input (#1 "加一个导出报表功能") before the small-task Write turn.
+    expect(requests).toHaveLength(4);
     expect(output.text).not.toContain("Architecture drift");
     expect(output.text).toContain("Linghun 想执行 Write packages/other/src/small.ts。");
     expect(output.text).toContain("允许本次执行？yes / no");
@@ -8903,7 +9167,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("摘要");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
     expect(output.text).toContain("工具 Bash 已完成");
-    expect(output.text).toContain("输出已摘要");
+    expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");
@@ -13057,5 +13321,124 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(runtimeSrc).toContain("export function sanitizeFailureText");
     expect(runtimeSrc).toContain("export function failureDedupeHash");
     expect(runtimeSrc).toContain("export function buildFailureLearningSummaryForPrompt");
+  });
+});
+
+describe("D.14C Multi-Agent baseline closure — agent failure wiring & source invariants", () => {
+  it("D.14C: a forked worker whose write throws is marked failed and recorded as a real D.14B failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+
+    // 用真实文件系统冲突触发真实异常：在 "blocked" 处先建文件，再让 worker 写
+    // "blocked/child.txt"。writeTool 的 mkdir(dirname) 会因父路径是文件而抛 ENOTDIR。
+    await writeFile(join(project, "blocked"), "occupied", "utf8");
+    await handleSlashCommand("/fork worker write blocked/child.txt hello", context, output);
+
+    // agent 真实失败：状态 failed、background result=fail（不是 cancelled、不是 pass）。
+    const failed = context.agents.find((agent) => agent.type === "worker");
+    expect(failed?.status).toBe("failed");
+    expect(output.text).toContain("执行失败");
+    const agentTask = context.backgroundTasks.find((task) => task.id === failed?.id);
+    expect(agentTask?.status).toBe("failed");
+    expect(agentTask?.result).toBe("fail");
+
+    // 真实失败搭车进 D.14B：落盘一条 tool_failure 教训；不进 context.evidence。
+    const failures = await loadFailureRecords(context.failureLearning);
+    const agentFailure = failures.find((record) => record.relatedTarget === "agent_worker");
+    expect(agentFailure?.category).toBe("tool_failure");
+    expect(agentFailure?.inferred).toBe(true);
+    expect(context.evidence.some((item) => item.id === agentFailure?.id)).toBe(false);
+
+    // 失败事件进父会话 transcript（status=failed），可追溯。
+    const parentTranscript = (await store.resume(session.id)).transcript;
+    expect(
+      parentTranscript.some(
+        (event) => event.type === "agent_end" && event.status === "failed",
+      ),
+    ).toBe(true);
+  });
+
+  it("D.14C: user-cancelled agent is NOT recorded as a model failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    // 手动塞一个 running agent + 对应 background，再 /agents cancel 走真实取消路径。
+    const now = new Date().toISOString();
+    const child = await store.create({ model: session.model, summary: "agent:explorer:cancel me" });
+    context.agents.unshift({
+      id: "agent-cancel-d14c",
+      type: "explorer",
+      role: "executor",
+      provider: "deepseek",
+      parentSessionId: session.id,
+      forkedFrom: "handoff-test",
+      task: "cancel me",
+      model: session.model,
+      permissionMode: "plan",
+      status: "running",
+      transcriptPath: child.transcriptPath,
+      transcriptSessionId: child.id,
+      summary: "agent running",
+      contextSummary: "trimmed",
+      cost: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      startedAt: now,
+      updatedAt: now,
+    });
+    context.backgroundTasks.unshift({
+      id: "agent-cancel-d14c",
+      kind: "agent",
+      title: "Agent cancel me",
+      status: "running",
+      startedAt: now,
+      updatedAt: now,
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: true,
+      userVisibleSummary: "agent running",
+    });
+
+    await handleSlashCommand("/agents cancel agent-cancel-d14c", context, output);
+
+    expect(context.agents[0]?.status).toBe("cancelled");
+    // 用户取消不是模型失败：不落任何 failure learning 记录。
+    const failures = await loadFailureRecords(context.failureLearning);
+    expect(failures).toHaveLength(0);
+  });
+
+  it("D.14C source invariant: agent business logic lives in job-agent-command-runtime, index.ts only glues", async () => {
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    // index.ts 只接线：dispatch /agents、/fork，并把 captureFailureLearning 注入运行时。
+    expect(indexSrc).toContain("handleAgentsCommand(rest, context, output)");
+    expect(indexSrc).toContain("handleForkCommand(rest, context, output)");
+    expect(indexSrc).toContain("captureFailureLearning,");
+    // agent 生命周期业务逻辑不在 index.ts 重新实现。
+    expect(indexSrc).not.toContain("async function completeAgent");
+    expect(indexSrc).not.toContain("async function runAgentWork");
+    expect(indexSrc).not.toContain("async function runWorkerAgent");
+    expect(indexSrc).not.toContain("async function failAgent");
+    expect(indexSrc).not.toContain("async function cancelAgent");
+
+    const agentSrc = await readFile("src/job-agent-command-runtime.ts", "utf8");
+    expect(agentSrc).toContain("export async function completeAgent");
+    expect(agentSrc).toContain("export async function runAgentWork");
+    expect(agentSrc).toContain("export async function cancelAgent");
+    // 失败接入 D.14B 且只在真实异常路径（completeAgent catch → failAgent）。
+    expect(agentSrc).toContain("async function failAgent");
+    expect(agentSrc).toContain("captureFailureLearning");
+    // cancelAgent 不调用 captureFailureLearning（用户取消不是模型失败）。
+    const cancelBody = agentSrc.slice(agentSrc.indexOf("export async function cancelAgent"));
+    expect(cancelBody.slice(0, cancelBody.indexOf("\n}\n"))).not.toContain("captureFailureLearning");
+
+    // 并发常量单一来源：job-agent-command-runtime 不再本地重复声明。
+    expect(agentSrc).not.toContain("const DEFAULT_JOB_RUNNING_AGENT_CAP = 3");
+    expect(agentSrc).not.toContain("const MAX_AGENTS = 20");
+    expect(agentSrc).not.toContain("const BACKGROUND_KIND_CAPS");
   });
 });
