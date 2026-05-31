@@ -4699,6 +4699,73 @@ describe("Phase 06 TUI slash commands", () => {
     }
   });
 
+  it("D.14H-F: workflow plan injects core-system summaries into details without main-screen noise", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.memory.projectRulesExists = true;
+    context.memory.projectRulesSummary = "Use pnpm and keep changes focused.";
+    context.memory.accepted.push({
+      id: "mem-auto-1",
+      scope: "project",
+      status: "accepted",
+      summary: "Prefer focused vitest before full suite.",
+      source: "auto-learning:verification",
+      sourceRefs: ["hidden-ref"],
+      risk: "low",
+      inferred: true,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    context.memory.candidates.push({
+      id: "mem-candidate-1",
+      scope: "project",
+      status: "candidate",
+      summary: "Candidate memory should not enter workflow.",
+      source: "manual",
+      sourceRefs: ["hidden-ref"],
+      risk: "low",
+      inferred: true,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const failure = mergeFailureRecord(context.failureLearning, {
+      category: "provider_failure",
+      failureSummary: "DeepSeek returned reasoning only.",
+      rootCauseGuess: "reasoning-first stream",
+      avoidNextTime: "Treat reasoning-only stream as live provider evidence.",
+      sourceRef: "provider-event-secret-source",
+      relatedTarget: "deepseek",
+    }).record;
+    context.cache.lastFreshness = {
+      systemPromptHash: "sys",
+      toolSchemaHash: "tool",
+      mcpToolListHash: "mcp",
+      modelProviderHash: "model-provider",
+      memoryHash: "memory",
+      changedKeys: ["memoryHash", "modelProviderHash"],
+    };
+
+    const out = new MemoryOutput();
+    const result = await handleNaturalInput(
+      "工作流计划：实现缓存命中率报告，接入架构、记忆、失败反思、缓存预算和稳定点",
+      context,
+      out,
+    );
+
+    expect(result).toBe("handled");
+    expect(out.text).toContain("工作流计划预览");
+    expect(out.text).not.toContain("Risk Hints:");
+    expect(out.text).not.toContain("Candidate memory should not enter workflow.");
+    expect(context.lastFullOutput).toContain("Risk Hints:");
+    expect(context.lastFullOutput).toContain(
+      "Treat reasoning-only stream as live provider evidence.",
+    );
+    expect(context.lastFullOutput).toContain(`provider_failure:${failure.id.slice(0, 8)}`);
+    expect(context.lastFullOutput).toContain("architecture-boundary-check");
+    expect(context.lastFullOutput).not.toContain("provider-event-secret-source");
+    expect(context.lastFullOutput).not.toContain("Candidate memory should not enter workflow.");
+  });
+
   it("keeps ordinary report deploy feature and bug-fix requests on provider path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -14842,7 +14909,7 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
         'data: {"id":"chatcmpl-ds-reason","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}',
         "data: [DONE]",
       ]
-        .map((l) => l + "\n\n")
+        .map((l) => `${l}\n\n`)
         .join(""),
     );
 

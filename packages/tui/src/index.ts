@@ -2525,6 +2525,7 @@ async function handleWorkflowsCommand(
     const result = generateWorkflowPlanPreview({
       goal,
       permissionMode: context.permissionMode,
+      ...buildWorkflowPlannerContextInput(context),
     });
     writeLine(output, formatWorkflowPlanPreview(result, context.language));
     if (result.ok) {
@@ -2551,6 +2552,49 @@ async function handleWorkflowsCommand(
       "- finish check: 输出修改文件、验证结果、已知限制、交付检查与是否越界。",
     ].join("\n"),
   );
+}
+
+function buildWorkflowPlannerContextInput(context: TuiContext): {
+  controlledMemoryRef?: { rulesFound: boolean; summary?: string };
+  selfLearningHints?: string[];
+  failureLearningRefs?: Array<{ lesson: string; source: string }>;
+  cacheFreshnessHint?: string;
+} {
+  const controlledMemoryRef =
+    context.memory.projectRulesExists && context.memory.projectRulesSummary
+      ? { rulesFound: true, summary: context.memory.projectRulesSummary }
+      : undefined;
+  const selfLearningHints = context.memory.accepted
+    .filter((item) => item.source.startsWith("auto-learning:"))
+    .slice(0, 5)
+    .map((item) => item.summary)
+    .filter(Boolean);
+  const activeFailures = context.failureLearning.records
+    .filter(
+      (item) =>
+        item.status === "active" && item.projectScope === context.failureLearning.projectScope,
+    )
+    .slice(0, 5)
+    .map((item) => ({
+      lesson: item.avoidNextTime,
+      source: `${item.category}:${item.id.slice(0, 8)}`,
+    }));
+  return {
+    ...(controlledMemoryRef ? { controlledMemoryRef } : {}),
+    ...(selfLearningHints.length > 0 ? { selfLearningHints } : {}),
+    ...(activeFailures.length > 0 ? { failureLearningRefs: activeFailures } : {}),
+    ...(context.cache.lastFreshness
+      ? { cacheFreshnessHint: summarizeWorkflowCacheFreshness(context.cache.lastFreshness) }
+      : {}),
+  };
+}
+
+function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {
+  const changed =
+    freshness.changedKeys.length > 0
+      ? `changed=${freshness.changedKeys.slice(0, 5).join(",")}`
+      : "changed=none";
+  return `${changed}; modelProviderHash=${freshness.modelProviderHash}; memoryHash=${freshness.memoryHash}`;
 }
 
 async function handleDoctorCommand(
@@ -5545,8 +5589,9 @@ function extractWorkflowPlanNaturalGoal(text: string): string | null {
     /^(?:请)?(?:生成|创建)工作流[：:\s]*(.+)$/u.exec(normalized);
   if (zhMatch?.[1]?.trim()) return zhMatch[1].trim();
   // 英文：以 "workflow plan" / "create a workflow plan" 开头，后跟目标
-  const enMatch =
-    /^(?:please\s+)?(?:create\s+(?:a\s+)?)?workflow\s+plan[:\s]*(.+)$/iu.exec(normalized);
+  const enMatch = /^(?:please\s+)?(?:create\s+(?:a\s+)?)?workflow\s+plan[:\s]*(.+)$/iu.exec(
+    normalized,
+  );
   if (enMatch?.[1]?.trim()) return enMatch[1].trim();
   return null;
 }
