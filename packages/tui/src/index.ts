@@ -359,6 +359,7 @@ import {
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
 import { formatMcpTools } from "./remote-mcp-presenter.js";
+import { decideRemoteInbox, processRemoteBindCommand } from "./remote-inbound-bridge-runtime.js";
 import {
   configureRemoteCommandRuntime,
   createRemoteEvent,
@@ -366,13 +367,30 @@ import {
   processRemoteApprovalForTest,
   processRemoteInbound,
   sendRemoteEventReal,
+  validateRemoteInboundEnvelope,
+  validateRemotePairingEnvelope,
+  consumeRemoteInboundMessage,
 } from "./remote-command-runtime.js";
 export {
   createRemoteEvent,
+  consumeRemoteInboundMessage,
   processRemoteApprovalForTest,
   processRemoteInbound,
   sendRemoteEventReal,
+  validateRemoteInboundEnvelope,
+  validateRemotePairingEnvelope,
 } from "./remote-command-runtime.js";
+export {
+  createRemotePairing,
+  createSignedRemoteInboundFixture,
+  decideRemoteInbox,
+  dingtalkBridgeAdapter,
+  feishuBridgeAdapter,
+  formatRemoteBridgeDoctor,
+  getRemoteBridgeDoctor,
+  processRemoteBindCommand,
+  wecomBridgeAdapter,
+} from "./remote-inbound-bridge-runtime.js";
 import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
@@ -6198,6 +6216,44 @@ export async function handleRemoteInboundMessage(
   gateway: ModelGateway | undefined,
   output: Writable,
 ): Promise<RemoteInboundDecision> {
+  const channel = context.remote.channels.find((item) => item.id === message.channel);
+  if (channel && message.kind === "natural_language_message") {
+    if ((message.text ?? "").trim().match(/^\/bind\s+[A-Z0-9]{6}$/i)) {
+      const envelope = validateRemotePairingEnvelope(context, message);
+      const sessionId = await ensureSession(context);
+      if (envelope.status !== "envelope_accepted") {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `remote_pair_bind channel=${message.channel} status=${envelope.status} summary=${envelope.summary}`,
+          "warning",
+        );
+        return {
+          kind: "natural_language_message",
+          status: envelope.status,
+          summary: envelope.summary,
+          evidenceCreated: false,
+        };
+      }
+      const bind = processRemoteBindCommand(context.remote, channel, message);
+      if (!bind) return processRemoteInbound(context, message);
+      if (bind.status === "bound") {
+        consumeRemoteInboundMessage(context, message.messageId);
+      }
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `remote_pair_bind channel=${message.channel} status=${bind.status} summary=${bind.summary}`,
+        bind.status === "bound" ? "info" : "warning",
+      );
+      return {
+        kind: "natural_language_message",
+        status: bind.status === "bound" ? "accepted" : "blocked",
+        summary: bind.summary,
+        evidenceCreated: false,
+      };
+    }
+  }
   const decision = processRemoteInbound(context, message);
   const sessionId = await ensureSession(context);
   await appendSystemEvent(
@@ -6226,6 +6282,29 @@ export async function handleRemoteInboundMessage(
     return decision;
   }
   if (decision.kind === "natural_language_message" && decision.routedText) {
+    const inbox = decideRemoteInbox(context.remote, message, {
+      activeModelTurn: Boolean(context.activeAbortController),
+      activeJob: context.backgroundTasks.some((task) => task.kind === "job" && task.status === "running"),
+      toolRunning: context.backgroundTasks.some(
+        (task) => task.kind !== "job" && task.status === "running",
+      ),
+      pendingApproval: Boolean(context.pendingLocalApproval),
+      sessionId,
+    });
+    if (inbox.status === "queued") {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `remote_inbox_queued channel=${message.channel} id=${inbox.item.id} reason=${inbox.reason}`,
+        "info",
+      );
+      return {
+        ...decision,
+        status: "accepted",
+        summary: `remote natural-language message queued; ${inbox.reason}`,
+        routedText: undefined,
+      };
+    }
     if (gateway) {
       await sendMessage(decision.routedText, context, gateway, output);
     }

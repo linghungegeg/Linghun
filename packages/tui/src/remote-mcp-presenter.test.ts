@@ -29,6 +29,8 @@ describe("remote MCP presenters", () => {
       events: [],
       processedMessageIds: [],
       sessionDisabledChannelIds: [],
+      pairings: [],
+      inbox: [],
     };
 
     expect(formatRemoteStatus(remote)).toBe(

@@ -6,6 +6,19 @@ import type { TuiContext } from "./index.js";
 import { redactRemoteSummary, remoteTranscriptSummary } from "./permission-continuation-runtime.js";
 import { formatRemoteStatus, formatRemoteTestResult } from "./remote-mcp-presenter.js";
 import {
+  cancelRemotePairing,
+  clearRemoteInbox,
+  createSignedRemoteInboundFixture,
+  createRemotePairing,
+  drainRemoteInbox,
+  formatRemoteBridgeDoctor,
+  formatRemoteInbox,
+  formatRemotePairing,
+  formatRemotePairingStatus,
+  getRemoteBridgeDoctor,
+  rejectRemoteInboxItem,
+} from "./remote-inbound-bridge-runtime.js";
+import {
   type RemoteTransportDeps,
   buildOfficialCliInvocation,
   buildWebhookRequest,
@@ -190,7 +203,7 @@ export async function handleRemoteCommand(
     });
     return;
   }
-  if (action === "events" || action === "inbox") {
+  if (action === "events") {
     showCommandPanel(context, output, {
       title: "/remote events",
       tone: "neutral",
@@ -203,9 +216,203 @@ export async function handleRemoteCommand(
     });
     return;
   }
+  if (action === "inbox") {
+    await handleRemoteInboxCommand(args.slice(1), context, output);
+    return;
+  }
+  if (action === "bridge") {
+    await handleRemoteBridgeCommand(args.slice(1), context, output);
+    return;
+  }
   writeLine(
     output,
-    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote disable <channel>",
+    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote inbox | /remote bridge doctor|pair|test-inbound|test-approval|test-status <channel> | /remote disable <channel>",
+  );
+}
+
+async function handleRemoteInboxCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "list";
+  let detail = formatRemoteInbox(context.remote);
+  if (action === "clear") {
+    const count = clearRemoteInbox(context.remote);
+    detail = `Remote inbox cleared：${count}`;
+  } else if (action === "reject") {
+    const id = args[1] ?? "";
+    detail = rejectRemoteInboxItem(context.remote, id)
+      ? `Remote inbox rejected：${id}`
+      : `Remote inbox item not found：${id}`;
+  } else if (action === "drain") {
+    const drained = drainRemoteInbox(context.remote);
+    detail = `Remote inbox drain/export and clear：${drained.length}\n${drained
+      .map((item) => `- ${item.id}: ${item.channel}; ${item.text}`)
+      .join("\n")}\nThese messages were exported and cleared only; they were not sent to sendMessage.`;
+  }
+  await appendRemoteSystemEvent(context, `remote_inbox action=${action} size=${context.remote.inbox.length}`, "info");
+  showCommandPanel(context, output, {
+    title: "/remote inbox",
+    tone: "neutral",
+    summary: [
+      context.language === "en-US"
+        ? `Remote inbox: ${context.remote.inbox.length} queued — Ctrl+O for details.`
+        : `远程收件箱：${context.remote.inbox.length} 条排队 — Ctrl+O 查看详情。`,
+    ],
+    detailsText: detail,
+  });
+}
+
+async function handleRemoteBridgeCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "doctor";
+  if (action === "pair" && args[1] === "status") {
+    showCommandPanel(context, output, {
+      title: "/remote bridge pair status",
+      tone: "neutral",
+      summary: ["Remote pairing status — Ctrl+O for details."],
+      detailsText: formatRemotePairingStatus(context.remote),
+    });
+    return;
+  }
+  if (action === "pair" && args[1] === "cancel") {
+    const decision = cancelRemotePairing(context.remote, args[2]);
+    await appendRemoteSystemEvent(context, `remote_pair_cancel status=${decision.status}`, "info");
+    showCommandPanel(context, output, {
+      title: "/remote bridge pair cancel",
+      tone: decision.status === "cancelled" ? "neutral" : "warning",
+      summary: [decision.summary],
+      detailsText: decision.summary,
+    });
+    return;
+  }
+  const channel = findRemoteChannel(context, args[1]);
+  if (!channel) {
+    writeLine(
+      output,
+      "Remote bridge：未识别通道。用法：/remote bridge doctor|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
+    );
+    return;
+  }
+  const report = getRemoteBridgeDoctor(context.remote, channel.id);
+  if (action === "pair") {
+    if (report.readiness === "notification-only") {
+      showCommandPanel(context, output, {
+        title: "/remote bridge pair",
+        tone: "warning",
+        summary: [
+          context.language === "en-US"
+            ? "Pairing blocked: webhook is notification-only."
+            : "绑定被阻断：webhook 只能通知，不能真实绑定。",
+        ],
+        detailsText: [
+          formatRemoteBridgeDoctor(report),
+          "Pairing needs a platform app plus callback/daemon; do not treat webhook as mobile control.",
+        ].join("\n"),
+      });
+      return;
+    }
+    const pairing = createRemotePairing(
+      context.remote,
+      channel,
+      context.projectPath,
+      await deps().ensureSession(context),
+    );
+    await appendRemoteSystemEvent(
+      context,
+      `remote_pair_create channel=${channel.id} status=${pairing.status} expiresAt=${
+        pairing.status === "created" ? pairing.pairing.expiresAt : "none"
+      }`,
+      "info",
+    );
+    showCommandPanel(context, output, {
+      title: "/remote bridge pair",
+      tone: "neutral",
+      summary: [
+        pairing.status === "created"
+          ? `Pairing code ${pairing.pairing.code} — Ctrl+O for details.`
+          : pairing.summary,
+      ],
+      detailsText: formatRemotePairing(pairing),
+    });
+    return;
+  }
+  if (action === "doctor") {
+    showCommandPanel(context, output, {
+      title: "/remote bridge doctor",
+      tone: report.readiness === "notification-only" ? "warning" : "neutral",
+      summary: [
+        context.language === "en-US"
+          ? `Bridge ${channel.id}: ${report.readiness} — Ctrl+O for details.`
+          : `手机桥接 ${channel.id}: ${report.readiness} — Ctrl+O 查看详情。`,
+      ],
+      detailsText: formatRemoteBridgeDoctor(report),
+    });
+    return;
+  }
+  if (action === "test-inbound" || action === "test-status" || action === "test-approval") {
+    if (!report.canRunLocalFixture) {
+      showCommandPanel(context, output, {
+        title: `/remote bridge ${action}`,
+        tone: "warning",
+        summary: [
+          context.language === "en-US"
+            ? `Bridge fixture blocked: ${report.readiness} — Ctrl+O for details.`
+            : `桥接 fixture 被阻断：${report.readiness} — Ctrl+O 查看详情。`,
+        ],
+        detailsText: formatRemoteBridgeDoctor(report),
+      });
+      return;
+    }
+    const kind =
+      action === "test-approval"
+        ? "approval_response"
+        : action === "test-status"
+          ? "status_query"
+          : "natural_language_message";
+    const event =
+      kind === "approval_response"
+        ? context.remote.events.find(
+            (item) => item.channel === channel.id && item.eventType === "approval_request",
+          )
+        : undefined;
+    const fixture = createSignedRemoteInboundFixture(channel, {
+      kind,
+      text: kind === "natural_language_message" ? "D.14F deterministic bridge fixture" : undefined,
+      eventId: event?.id,
+      nonce: event?.nonce,
+      approve: kind === "approval_response" ? true : undefined,
+    });
+    const decision = processRemoteInbound(context, fixture);
+    await appendRemoteSystemEvent(
+      context,
+      `remote_bridge_fixture channel=${channel.id} kind=${kind} status=${decision.status} summary=${decision.summary}`,
+      decision.status === "accepted" || decision.status === "approved" ? "info" : "warning",
+    );
+    showCommandPanel(context, output, {
+      title: `/remote bridge ${action}`,
+      tone: decision.status === "accepted" || decision.status === "approved" ? "neutral" : "warning",
+      summary: [
+        context.language === "en-US"
+          ? `Bridge fixture ${channel.id}: ${decision.status} — Ctrl+O for details.`
+          : `桥接 fixture ${channel.id}: ${decision.status} — Ctrl+O 查看详情。`,
+      ],
+      detailsText: [
+        formatRemoteBridgeDoctor(report),
+        `fixture kind: ${kind}`,
+        `decision: ${decision.status}`,
+        `summary: ${decision.summary}`,
+      ].join("\n"),
+    });
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/remote bridge doctor|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
   );
 }
 
@@ -229,10 +436,12 @@ export function formatRemoteDoctor(context: TuiContext): string {
   ];
   for (const channel of context.remote.channels) {
     const grade = getRemoteCapabilityGrade(channel);
+    const bridge = getRemoteBridgeDoctor(context.remote, channel.id);
     lines.push(`- ${channel.id}: ${channel.runtimeStatus}`);
     lines.push(`  binding: ${channel.bindingStatus}`);
     lines.push(`  transport: ${channel.config.transport}; status=${channel.transportStatus}`);
     lines.push(`  capability: ${grade.grade} — ${grade.reason}`);
+    lines.push(`  bridge: ${bridge.readiness}; ${bridge.nextAction}`);
     lines.push(`  last error: ${channel.lastError ?? "none"}`);
     lines.push(`  allowed events: ${channel.config.allowedEventTypes.join(", ")}`);
     lines.push(`  next action: ${channel.nextAction}`);
@@ -245,7 +454,13 @@ export function formatRemoteDoctor(context: TuiContext): string {
 
 export type RemoteCapabilityGrade =
   | "notification-only"
+  | "needs-app-setup"
+  | "needs-dingtalk-app"
+  | "needs-wecom-app"
+  | "needs-daemon"
   | "approval-capable"
+  | "stream-callback-capable"
+  | "app-callback-capable"
   | "natural-language-inbound-capable"
   | "full-mobile-control-capable";
 
@@ -271,20 +486,38 @@ export function getRemoteCapabilityGrade(channel: RemoteChannelState): {
     };
   }
   if (type === "feishu" || type === "lark") {
+    if (!channel.config.appIdRef || !channel.config.appSecretRef) {
+      return {
+        grade: "needs-app-setup",
+        reason: "Feishu/Lark 入站需要 appId/appSecret 引用和事件订阅配置；未配置不能显示 ready",
+      };
+    }
     return {
       grade: "full-mobile-control-capable",
-      reason: "官方 CLI 事件订阅+审批域，支持审批与自然语言回传",
+      reason: "官方应用事件/回调或 CLI 消费可接入审批与自然语言；真实手机入站仍需 callback/daemon",
     };
   }
   if (type === "wecom" || type === "enterprise-wechat") {
+    if (!channel.config.appIdRef && !channel.config.tokenRef) {
+      return {
+        grade: "needs-wecom-app",
+        reason: "企业微信入站需要应用回调或 CLI poll 凭证；未配置显示 needs-wecom-app",
+      };
+    }
     return {
       grade: "natural-language-inbound-capable",
-      reason: "官方 CLI 可轮询消息历史接收自然语言；交互审批需自建应用回调",
+      reason: "应用回调/CLI poll 可接收自然语言；webhook 仍仅通知",
+    };
+  }
+  if (!channel.config.appIdRef && !channel.config.tokenRef) {
+    return {
+      grade: "needs-dingtalk-app",
+      reason: "钉钉入站/审批需要应用或 Stream 配置；未配置显示 needs-dingtalk-app",
     };
   }
   return {
     grade: "approval-capable",
-    reason: "官方 CLI 审批操作可用；实时消息回传需 Stream/回调应用",
+    reason: "应用/Stream 配置后可做审批回传；实时消息需 daemon 或 callback",
   };
 }
 
@@ -330,6 +563,14 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
     );
     lines.push(
       field(
+        "appIdRef/appSecretRef 或 tokenRef",
+        Boolean(config.appIdRef || config.tokenRef) &&
+          (config.type !== "feishu" && config.type !== "lark" || Boolean(config.appSecretRef)),
+        "填环境变量引用，不填明文；未配置时 bridge 显示 needs-app-setup",
+      ),
+    );
+    lines.push(
+      field(
         "入站模式 inboundMode",
         Boolean(config.inboundMode && config.inboundMode !== "none"),
         "poll=CLI 拉取消息 / callback=已部署回调端点；none 仅出站通知",
@@ -357,6 +598,15 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
         "回调端点 callbackEndpoint",
         Boolean(config.callbackEndpoint),
         "仅 inboundMode=callback 需要；poll 模式可留空",
+      ),
+    );
+    lines.push(
+      field(
+        "encryptKeyRef / verificationTokenRef",
+        config.type === "feishu" || config.type === "lark"
+          ? Boolean(config.encryptKeyRef && config.verificationTokenRef)
+          : true,
+        "Feishu/Lark callback 模式需要事件回调校验引用",
       ),
     );
   }
@@ -584,7 +834,10 @@ export function verifyRemoteInboundSignature(
   message: RemoteInboundMessage,
 ): boolean {
   if (!channel.config.signingSecretRef) {
-    return message.signature === `mock:inbound:${message.messageId}:${message.nonce}`;
+    return (
+      message.origin === "fixture" &&
+      message.signature === `mock:inbound:${message.messageId}:${message.nonce}`
+    );
   }
   return typeof message.signature === "string" && message.signature.startsWith("ref:");
 }
@@ -597,6 +850,103 @@ export function processRemoteInbound(
   context: TuiContext,
   message: RemoteInboundMessage,
 ): RemoteInboundDecision {
+  const envelope = validateRemoteInboundEnvelope(context, message);
+  if (envelope.status !== "envelope_accepted") return envelope;
+  const channel = envelope.channel;
+  const consume = (): void => consumeRemoteInboundMessage(context, message.messageId);
+  if (message.kind === "approval_response") {
+    // plan 模式恒只读：远程 approve 不能执行任何写操作。pending approval 在 plan
+    // 模式下只会是 mutating 操作，因此直接在边界拒绝，不消费 nonce。
+    if (context.permissionMode === "plan") {
+      return {
+        kind: message.kind,
+        status: "blocked",
+        summary: "plan mode keeps writes read-only; remote approval cannot execute mutating operations",
+        evidenceCreated: false,
+      };
+    }
+    if (!context.pendingLocalApproval) {
+      return {
+        kind: message.kind,
+        status: "no_pending_approval",
+        summary: "no local pending approval to resume",
+        evidenceCreated: false,
+      };
+    }
+    const event = message.eventId
+      ? context.remote.events.find((item) => item.id === message.eventId)
+      : undefined;
+    if (!event || event.eventType !== "approval_request") {
+      return {
+        kind: message.kind,
+        status: "blocked",
+        summary: "approval_response does not match a known approval_request",
+        evidenceCreated: false,
+      };
+    }
+    // D.14E 小返修 — 必须校验被引用的 approval_request 自身是否过期，而不只是入站消息
+    // 的 expiresAt；否则过期的审批请求仍可能被新的手机消息 approve。expired 不消费
+    // messageId、不改 event.status、不清 pendingLocalApproval、不执行 approve/deny。
+    if (Date.parse(event.expiresAt) <= Date.now()) {
+      return {
+        kind: message.kind,
+        status: "expired",
+        summary: "approval_request expired",
+        evidenceCreated: false,
+      };
+    }
+    if (message.nonce !== event.nonce) {
+      return {
+        kind: message.kind,
+        status: "bad_signature",
+        summary: "approval_response nonce mismatch",
+        evidenceCreated: false,
+      };
+    }
+    consume();
+    event.status = message.approve ? "approved" : "rejected";
+    return {
+      kind: "approval_response",
+      status: message.approve ? "approved" : "rejected",
+      summary: message.approve
+        ? "remote approval validated; local permission pipeline remains the execution boundary"
+        : "remote approval rejected by user",
+      evidenceCreated: false,
+    };
+  }
+  if (message.kind === "natural_language_message") {
+    const text = (message.text ?? "").trim();
+    if (!text) {
+      return {
+        kind: message.kind,
+        status: "blocked",
+        summary: "natural_language_message is empty",
+        evidenceCreated: false,
+      };
+    }
+    consume();
+    return {
+      kind: "natural_language_message",
+      status: "accepted",
+      summary: "remote natural-language message accepted; routing into local model main chain",
+      routedText: text,
+      evidenceCreated: false,
+    };
+  }
+  void channel;
+  consume();
+  return {
+    kind: "status_query",
+    status: "accepted",
+    summary: "remote status query accepted; returning redacted local status summary",
+    evidenceCreated: false,
+  };
+}
+
+export function validateRemoteInboundEnvelope(
+  context: TuiContext,
+  message: RemoteInboundMessage,
+): RemoteInboundDecision | { status: "envelope_accepted"; channel: RemoteChannelState } {
   const channel = context.remote.channels.find((item) => item.id === message.channel);
   const reject = (
     status: RemoteInboundDecision["status"],
@@ -632,69 +982,43 @@ export function processRemoteInbound(
   if (!verifyRemoteInboundSignature(channel, message)) {
     return reject("bad_signature", "remote inbound signature check failed");
   }
-  const consume = (): void => {
-    context.remote.processedMessageIds.unshift(message.messageId);
-    context.remote.processedMessageIds = context.remote.processedMessageIds.slice(0, 50);
-  };
-  if (message.kind === "approval_response") {
-    // plan 模式恒只读：远程 approve 不能执行任何写操作。pending approval 在 plan
-    // 模式下只会是 mutating 操作，因此直接在边界拒绝，不消费 nonce。
-    if (context.permissionMode === "plan") {
-      return reject(
-        "blocked",
-        "plan mode keeps writes read-only; remote approval cannot execute mutating operations",
-      );
-    }
-    if (!context.pendingLocalApproval) {
-      return reject("no_pending_approval", "no local pending approval to resume");
-    }
-    const event = message.eventId
-      ? context.remote.events.find((item) => item.id === message.eventId)
-      : undefined;
-    if (!event || event.eventType !== "approval_request") {
-      return reject("blocked", "approval_response does not match a known approval_request");
-    }
-    // D.14E 小返修 — 必须校验被引用的 approval_request 自身是否过期，而不只是入站消息
-    // 的 expiresAt；否则过期的审批请求仍可能被新的手机消息 approve。expired 不消费
-    // messageId、不改 event.status、不清 pendingLocalApproval、不执行 approve/deny。
-    if (Date.parse(event.expiresAt) <= Date.now()) {
-      return reject("expired", "approval_request expired");
-    }
-    if (message.nonce !== event.nonce) {
-      return reject("bad_signature", "approval_response nonce mismatch");
-    }
-    consume();
-    event.status = message.approve ? "approved" : "rejected";
-    return {
-      kind: "approval_response",
-      status: message.approve ? "approved" : "rejected",
-      summary: message.approve
-        ? "remote approval validated; local permission pipeline remains the execution boundary"
-        : "remote approval rejected by user",
-      evidenceCreated: false,
-    };
+  return { status: "envelope_accepted", channel };
+}
+
+export function validateRemotePairingEnvelope(
+  context: TuiContext,
+  message: RemoteInboundMessage,
+): RemoteInboundDecision | { status: "envelope_accepted"; channel: RemoteChannelState } {
+  const channel = context.remote.channels.find((item) => item.id === message.channel);
+  const reject = (
+    status: RemoteInboundDecision["status"],
+    summary: string,
+  ): RemoteInboundDecision => ({ kind: message.kind, status, summary, evidenceCreated: false });
+  if (!channel || channel.runtimeStatus !== "ready") {
+    return reject("channel_not_ready", "remote channel is not ready");
   }
-  if (message.kind === "natural_language_message") {
-    const text = (message.text ?? "").trim();
-    if (!text) {
-      return reject("blocked", "natural_language_message is empty");
-    }
-    consume();
-    return {
-      kind: "natural_language_message",
-      status: "accepted",
-      summary: "remote natural-language message accepted; routing into local model main chain",
-      routedText: text,
-      evidenceCreated: false,
-    };
+  if (
+    channel.config.transport !== "official_cli" ||
+    !channel.config.inboundMode ||
+    channel.config.inboundMode === "none"
+  ) {
+    return reject("inbound_disabled", "remote channel is notification-only; inbound is disabled");
   }
-  consume();
-  return {
-    kind: "status_query",
-    status: "accepted",
-    summary: "remote status query accepted; returning redacted local status summary",
-    evidenceCreated: false,
-  };
+  if (Date.parse(message.expiresAt) <= Date.now()) {
+    return reject("expired", "remote pairing message expired");
+  }
+  if (context.remote.processedMessageIds.includes(message.messageId)) {
+    return reject("replayed", "remote pairing message replayed");
+  }
+  if (!verifyRemoteInboundSignature(channel, message)) {
+    return reject("bad_signature", "remote pairing signature check failed");
+  }
+  return { status: "envelope_accepted", channel };
+}
+
+export function consumeRemoteInboundMessage(context: TuiContext, messageId: string): void {
+  context.remote.processedMessageIds.unshift(messageId);
+  context.remote.processedMessageIds = context.remote.processedMessageIds.slice(0, 50);
 }
 
 export async function appendRemoteSystemEvent(

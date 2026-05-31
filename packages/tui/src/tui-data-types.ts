@@ -583,6 +583,7 @@ export type RemoteInboundMessage = {
   // 入站消息自带过期时间（手机端发起，无对应出站 nonce 时用它做时效校验）。
   expiresAt: string;
   receivedAt?: string;
+  origin?: "fixture" | "adapter";
   // approval_response：引用此前发出的 approval_request event id 并回显 nonce。
   eventId?: string;
   approve?: boolean;
@@ -613,12 +614,39 @@ export type RemoteInboundDecision = {
   evidenceCreated: false;
 };
 
+export type RemotePairingState = {
+  code: string;
+  channel: string;
+  source: string;
+  projectPath: string;
+  sessionId: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedMessageIds: string[];
+  status: "pending" | "bound" | "expired" | "cancelled";
+};
+
+export type RemoteInboxItem = {
+  id: string;
+  channel: string;
+  messageId: string;
+  source: string;
+  bindingUserId: string;
+  text: string;
+  priority: "normal" | "interrupt";
+  reason: string;
+  createdAt: string;
+  sessionId?: string;
+};
+
 export type RemoteState = {
   enabled: boolean;
   channels: RemoteChannelState[];
   events: RemoteEvent[];
   processedMessageIds: string[];
   sessionDisabledChannelIds: string[];
+  pairings: RemotePairingState[];
+  inbox: RemoteInboxItem[];
   lastDoctor?: string;
   lastApproval?: RemoteApprovalDecision;
 };

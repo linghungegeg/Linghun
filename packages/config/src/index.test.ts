@@ -565,6 +565,7 @@ describe("config directories", () => {
       bindingUserId: "user-1",
       redactionPolicy: "summary_only",
       trustedSources: [],
+      inboundMode: "none",
     });
     expect(config.remote.channels.feishu?.allowedEventTypes).toEqual([
       "approval_request",
@@ -577,6 +578,45 @@ describe("config directories", () => {
     ]);
     expect(config.remote.channels.wecom?.enabled).toBe(false);
     expect(config.remote.channels.dingtalk?.cliPath).toBe("dws");
+  });
+
+  it("accepts D.14F remote bridge app refs without storing secret values", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await mkdir(getProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      getProjectSettingsPath(project),
+      JSON.stringify({
+        remote: {
+          enabled: true,
+          channels: {
+            feishu: {
+              enabled: true,
+              inboundMode: "callback",
+              appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+              appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+              encryptKeyRef: "LINGHUN_REMOTE_FEISHU_ENCRYPT_KEY",
+              verificationTokenRef: "LINGHUN_REMOTE_FEISHU_VERIFY_TOKEN",
+              callbackEndpoint: "local-callback-ref",
+              localBridgePort: 18731,
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadConfig(project);
+
+    expect(config.remote.channels.feishu).toMatchObject({
+      inboundMode: "callback",
+      appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+      appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+      encryptKeyRef: "LINGHUN_REMOTE_FEISHU_ENCRYPT_KEY",
+      verificationTokenRef: "LINGHUN_REMOTE_FEISHU_VERIFY_TOKEN",
+      callbackEndpoint: "local-callback-ref",
+      localBridgePort: 18731,
+    });
+    expect(config.remote.channels.feishu?.appSecretRef).not.toContain("secret-value");
   });
 
   it("deep merges Phase 17C native runner settings", async () => {

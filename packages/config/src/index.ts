@@ -159,9 +159,13 @@ export type RemoteChannelConfig = {
   transport: RemoteTransport;
   endpoint?: string;
   cliPath?: string;
+  appIdRef?: string;
+  appSecretRef?: string;
   bindingUserId?: string;
   bindingDeviceId?: string;
   signingSecretRef?: string;
+  encryptKeyRef?: string;
+  verificationTokenRef?: string;
   tokenRef?: string;
   redactionPolicy: "summary_only";
   allowedEventTypes: RemoteEventType[];
@@ -171,6 +175,7 @@ export type RemoteChannelConfig = {
   inboundMode?: RemoteInboundMode;
   // callback 模式下用户已部署的回调端点引用（脱敏，仅 doctor 内部判断 ready）。
   callbackEndpoint?: string;
+  localBridgePort?: number;
 };
 
 export type RemoteConfig = {
@@ -1525,9 +1530,13 @@ function validateRemote(remote: RemoteConfig): void {
     }
     assertOptionalString(channel.endpoint, `${path}.endpoint`);
     assertOptionalString(channel.cliPath, `${path}.cliPath`);
+    assertOptionalString(channel.appIdRef, `${path}.appIdRef`);
+    assertOptionalString(channel.appSecretRef, `${path}.appSecretRef`);
     assertOptionalString(channel.bindingUserId, `${path}.bindingUserId`);
     assertOptionalString(channel.bindingDeviceId, `${path}.bindingDeviceId`);
     assertOptionalString(channel.signingSecretRef, `${path}.signingSecretRef`);
+    assertOptionalString(channel.encryptKeyRef, `${path}.encryptKeyRef`);
+    assertOptionalString(channel.verificationTokenRef, `${path}.verificationTokenRef`);
     assertOptionalString(channel.tokenRef, `${path}.tokenRef`);
     if (channel.redactionPolicy !== "summary_only") {
       throw new Error(`${path}.redactionPolicy must be summary_only`);
@@ -1555,6 +1564,7 @@ function validateRemote(remote: RemoteConfig): void {
       }
     }
     assertOptionalString(channel.callbackEndpoint, `${path}.callbackEndpoint`);
+    assertOptionalPositiveNumber(channel.localBridgePort, `${path}.localBridgePort`);
   }
 }
 

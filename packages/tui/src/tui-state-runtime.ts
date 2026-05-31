@@ -110,6 +110,8 @@ export function createRemoteState(config: LinghunConfig): RemoteState {
     events: [],
     processedMessageIds: [],
     sessionDisabledChannelIds: [],
+    pairings: [],
+    inbox: [],
   };
 }
 
