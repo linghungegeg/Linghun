@@ -16,7 +16,7 @@ Linghun starts from evidence-first. A model can reason and generate, but critica
 
 ## Product Philosophy: Strong Foundation, Engineering Discipline, Low Learning Cost
 
-Linghun is no longer just "a terminal UI around a model." It decomposes AI coding into composable modules: model understanding, tool execution, permission decisions, evidence recording, verification loops, cache cost, long-term context, failure reflection, Git stable points, multi-agent work, and local process supervision. These modules are then connected to one auditable engineering mainline.
+Linghun is no longer just "a terminal UI around a model." It decomposes AI coding into composable modules: model understanding, tool execution, permission decisions, evidence recording, verification loops, cache cost, long-term context, failure reflection, Git stable points, multi-agent work, local intelligent orchestration, and local process supervision. These modules are then connected to one auditable engineering mainline.
 
 Linghun's product philosophy can be summarized in three statements:
 
@@ -26,9 +26,13 @@ Linghun's product philosophy can be summarized in three statements:
 
 Code hygiene is also part of this philosophy. Linghun does not want AI to write process explanations such as "what I did", "this is a demo", or "temporary debugging" into source code. It also discourages meaningless comments as a substitute for clear naming. Explanations belong in replies, reports, reviews, or handoff records. Source code should keep only information that has long-term maintenance value.
 
-Together, these three ideas form Linghun's long-term design principle: use a strong foundation to carry strong models, use engineering discipline to reduce uncertainty, and use low learning cost to let ordinary developers benefit in real work. Users see a developer workbench that can chat, execute, verify, roll back, and accumulate experience. Internally, the system is a runtime that continuously constrains facts, permissions, cost, and risk.
+Together, these three ideas form Linghun's long-term design principle: use a strong foundation to carry strong models, use engineering discipline to reduce uncertainty, and use low learning cost to let ordinary developers benefit in real work. Users see a developer workbench that can chat, execute, verify, roll back, decompose complex tasks, and accumulate experience. Internally, the system is a runtime that continuously constrains facts, permissions, cost, orchestration, and risk.
 
 Controlled memory, self-learning, and reflection make this workbench avoid starting from zero every turn. Linghun gradually adapts to the user's wording, verification habits, project rules, and common commands, reducing the cost of re-explaining the same context. In later similar tasks, the model can work more smoothly, drift less often, and repeat fewer mistakes.
+
+Local intelligent orchestration is the next layer of this philosophy. Linghun's direction is to decompose complex goals into workflow plans, then map those plans back onto the existing architecture system, permission system, job, fork, agent, verification, Git stable point suggestions, cache budget, memory summaries, failure risks, and evidence merge mainline. The model is responsible for understanding and reasoning. Linghun is responsible for turning that reasoning into controlled engineering units: who explores, who implements, who verifies, where permission is needed, which historical failures should be avoided, which evidence can support PASS, and which information is only context.
+
+This does not add a separate complex mode. It combines the existing four permission modes, multi-agent work, long tasks, evidence, architecture, memory, reflection, and verification systems into a lower-learning-cost product experience. Users only need to state the goal; the system decides whether it is an ordinary conversation, a background task, a multi-agent split, or a complex engineering flow that needs a Workflow Matrix.
 
 ### Value of a Strong Foundation
 
@@ -87,6 +91,7 @@ Linghun is positioned as a local developer workbench:
 - It uses a terminal TUI to support daily coding, review, verification, and long-running tasks.
 - It uses Chinese-friendly natural language and diagnostic entry points to support real developer expression, rather than serving only users fluent in English commands.
 - It uses staged engineering orchestration to connect requirement understanding, code location, implementation, verification, stable points, handoff, and failure reflection, improving the success rate of moving new projects from idea to runnable product.
+- It uses local intelligent orchestration to decompose complex goals into Workflow Plans, phases, slices, roles, risk hints, runtime proposals, and evidence requirements, then reuses the architecture, job, fork, agents, verification, Git, memory, failure learning, and remote-summary mainline to move work forward.
 - It uses durable jobs, background tasks, agent transcripts, budgets, step limits, logs, reports, and handoff to host long tasks, so complex work has observable state from goal, plan, and execution to handoff.
 - It uses evidence-first, verification boundaries, and architecture constraints to move from "AI generates code" toward "AI participates in product-grade project delivery", reducing the gap between demos, sample code, and hallucinated answers.
 - It uses multi-model routing to assign planning, execution, review, verification, summarization, vision, and image tasks to role-specific models.
@@ -128,6 +133,7 @@ Linghun addresses these pain points as follows:
 | Cache suddenly gets worse and the cause is unclear | CacheFreshness, changedKeys, `/break-cache status`, cache break marker | Users can identify whether the source is system prompt, tool schema, MCP list, model, memory, rules, or cache control. |
 | Partial tests are described as full completion | Verification level, readiness, `/review`, final answer downgrade | Prevents focused/mock/synthetic PASS from being presented as overall readiness. |
 | Git operations and worktrees can get out of control | Git stable point, managed worktree, dirty/force/path escape guard | Users can create a stable point before the next stage, making rollback and parallel development more controllable. |
+| Complex goals must be manually decomposed by the user | Workflow Plan, Workflow Matrix, phase/slice/role decomposition, architecture slices, Git stable point suggestions, memory and failure-risk hints, job/fork/agent/verification proposals, Evidence Merge | Users do not need to turn a large goal into a dozen commands by hand. The system first creates an executable, verifiable, controllable, rollback-aware engineering plan, then proceeds through controlled execution. |
 | Multiple agents can burn tokens and resources | Role route, independent transcripts, background surface, resource cap, job budget | Parallel exploration becomes controllable without allowing background tasks to overwhelm the main session. |
 | Long-running tasks are unattended when the user leaves the computer | WeCom, Feishu/Lark, and DingTalk remote channels send task status, verification results, failure summaries, and approval requests to the phone as summary-first messages; after official app, event callback, Stream, or bridge daemon setup, mobile natural language and approval can return to the local mainline. | Users can monitor progress, approve pending actions, or continue a task from their phone without staying at the terminal. Execution still happens locally, so remote channels do not become uncontrolled execution entries. |
 | The system has to re-learn user habits every round | Controlled memory, memory review, accepted-only injection | The user's phrasing, command habits, verification preferences, and project rules gradually accumulate, making later collaboration smoother. |
@@ -136,11 +142,12 @@ Linghun addresses these pain points as follows:
 
 Overall, Linghun aims to provide fewer hallucinations, fewer repeated tokens, higher cache reuse, less rework, more controllable local execution, and better support for long-running projects.
 
-For individual and beginner developers, these problems are amplified. Teams may rely on senior reviewers, CI, architecture conventions, and DevOps processes as guardrails. Personal projects often leave one person facing model output, dependency upgrades, failed tests, Git rollback, and environment setup alone. Beginners are especially likely to be misled by answers that look complete: the model says it fixed the code, but they do not know whether it read the right files; the model says tests passed, but they do not know the verification scope; the model suggests a refactor, but they do not know whether it violates project boundaries.
+For individual and beginner developers, these problems are amplified. Teams may rely on senior reviewers, CI, architecture conventions, and DevOps processes as guardrails. Personal projects often leave one person facing model output, dependency upgrades, failed tests, Git rollback, and environment setup alone. Beginners are especially likely to be misled by answers that look complete: the model says it fixed the code, but they do not know whether it read the right files; the model says tests passed, but they do not know the verification scope; the model suggests a refactor, but they do not know whether it violates project boundaries; the model gives a plan, but the user does not know how to turn it into executable, verifiable, rollback-aware steps.
 
 Linghun brings these implicit engineering habits into the tool:
 
 - "Read facts before concluding" becomes a default constraint.
+- "Decompose complex goals into executable workflows first" becomes a default orchestration capability.
 - "Create a stable point before major changes" becomes a natural workflow.
 - "Test results must state scope" becomes a final answer requirement.
 - "Failures should be reflected on and warned about next time" becomes a system capability.
@@ -168,6 +175,7 @@ This means Linghun does not merely save time for experts. It also embeds some se
 | Cache and cost reduction | Prompt cache usage parsing, hit rate, cache history, CacheFreshness, break-cache, stable tool ordering, deferred tools, summary-first prompt control. |
 | Project rules | Detects `LINGHUN.md` on startup; when missing, shows only a light hint; creates a base template only when the user explicitly runs `/memory init`; rule summaries feed `/memory`, `/resume`, readiness, and CacheFreshness without dumping the full file to the main screen. |
 | Long-term context | JSONL transcript, session store, handoff packet, project rules, controlled memory, candidate-first long-term memory, failure learning. memory/session/job/log/cache support project-level, user-level, and custom storage boundaries. The goal is not rote memorization, but making later tasks feel more like working with the same experienced collaborator. |
+| Local intelligent orchestration / Workflow Matrix | Natural-language complex goals enter Workflow Plan. Goals are decomposed into phases, slices, roles, risk hints, runtime proposals, and evidence requirements. The execution layer reuses `/job`, `/fork`, `/agents`, verification, details, architecture checks, Git stable point suggestions, memory summaries, failure risks, and remote summaries. Task Surface summarizes progress, while Evidence Merge evaluates evidence strength. |
 | Multi-agent and long tasks | `/agents`, `/fork`, `/job`; explorer/planner/verifier/worker; independent transcripts; background tasks; durable jobs; budgets, steps, runtime, and concurrency caps. |
 | Permission system | Four modes: default, auto-review, plan, full-access. Command semantic classification, path safety classification, persistent allow rules, denial records, and remote approval routed back into local permission pipeline. |
 | Model runtime | OpenAI-compatible, DeepSeek, and Anthropic Messages-style endpoints; streaming output; tool calls; usage; reasoning; timeout and idle timeout; provider diagnostics and failure summaries. |
@@ -748,11 +756,44 @@ This mechanism lets Linghun become steadier from real runtime failures. Similar 
 
 ---
 
-## 17. Multi-agent and Long-task Hosting
+## 17. Local Intelligent Orchestration, Workflow Matrix, and Long-task Hosting
 
-Linghun supports local multi-agent work and long-task hosting. Its goal is not to let models "run infinitely", but to split complex tasks into hosted workflows with goals, plans, budgets, state, logs, handoff, and verification boundaries.
+Linghun supports local intelligent orchestration, Workflow Matrix, multi-agent work, and long-task hosting. Its goal is not to let models "run infinitely", but to split complex tasks into hosted workflows with goals, plans, roles, risk hints, budgets, state, logs, handoff, and verification boundaries.
 
-This is especially important for beginners and individual developers. Many AI projects do not fail because the first code snippet cannot be written; they fail because later work requires continuous requirement clarification, file location, dependency setup, feature completion, error fixing, verification, rollback, and handoff. Linghun brings these steps into one observable chain, so users do not need to constantly watch model output while still knowing where the task is, how much budget it spent, whether it is stuck, and what the next step is.
+This is especially important for beginners and individual developers. Many AI projects do not fail because the first code snippet cannot be written; they fail because later work requires continuous requirement clarification, file location, architecture judgment, dependency setup, feature completion, error fixing, verification, rollback, and handoff. Without an orchestration layer, users either keep asking the model "what next?" or manually turn a complex goal into a sequence of commands. Once the model forgets context, misjudges completion, ignores historical failures, or presents partial verification as full completion, the user has to take over again.
+
+Linghun brings these steps into one observable chain. Users can describe a complex goal in natural language; the system first generates a Workflow Plan, decomposing the goal into phases, slices, roles, risk hints, runtime proposals, and evidence requirements. Executable parts then map back to the existing architecture system, permission system, `/job`, `/fork`, `/agents`, verification, details, Git stable point suggestions, memory summaries, failure learning, and remote-summary mainline. Users do not need to learn an "advanced orchestration language" first, nor copy model output into a pile of commands. Complex work becomes organized more like an engineering project.
+
+### 17.1 Workflow Matrix: Turning Complex Goals into Engineering Units
+
+Workflow Matrix answers the practical questions: how should a complex task be decomposed, who should do what, and what proves that it is complete? It is not a separate executor, and it is not a fifth permission mode. It is a planning layer above the existing mainline:
+
+- Phase: decomposes the goal into stages such as exploration, architecture confirmation, implementation, verification, cleanup, and handoff.
+- Slice: splits each phase into smaller work units so the model does not compress a large goal into one vague answer.
+- Role: assigns explorer, planner, worker, verifier, and similar responsibilities to slices, reducing the risk that all work is done from one model perspective.
+- Risk hint: turns project rules, controlled memory, accepted learning preferences, and failure learning into planning risk hints.
+- Runtime proposal: maps slices to existing job, fork, agents, verification, or details paths instead of creating a second execution system.
+- Evidence requirement: states in advance which evidence can support PASS and which information is only context or status.
+
+The user gets a more effortless complex-task experience: state the goal, review a structured plan, then decide whether to proceed. Once it proceeds, the task can be hosted, parallelized, verified, and handed off. For beginners, this puts senior engineering habits into the tool: decompose first, check architecture, define verification, keep rollback points, and look at historical risks. For professional developers, it reduces manual orchestration, repeated explanation, and cross-session cleanup.
+
+### 17.2 Core-system Wiring: The Plan Is Not Isolated Text
+
+The key value of Workflow Matrix is not "making a task list." It is that the plan is generated around Linghun's existing core systems:
+
+- **Architecture system**: architecture boundaries, impacted modules, frontend/TUI constraints, AntiCodeBlob, and code hygiene risks enter the plan by default, preventing complex tasks from drifting structurally from the start.
+- **Permission system**: default, auto-review, plan, and full-access remain the only permission modes. Mutating slices only produce Start Gate and permission proposals; they do not bypass local permission checks.
+- **Evidence and anti-hallucination**: critical slices carry evidence requirements. Agent summaries, job completion, remote events, and failure learning remain context/status only and cannot masquerade as PASS.
+- **Verification system**: verification slices are part of the plan. Without verification evidence, the final delivery must remain PARTIAL or conservative.
+- **Git stable points**: pre- and post-execution stable point/checkpoint suggestions help users keep rollback boundaries, but Linghun does not auto-commit.
+- **Cache and budget**: the plan surfaces token, duration, cost, and multi-agent resource pressure. It does not turn an unset budget into a forced limit, nor invent cache hit rates.
+- **Controlled memory and self-learning**: only project rules, memory summaries, and accepted preferences are read to make the plan better aligned with the project and user. They do not write memory automatically and are not current-fact evidence.
+- **Reflection and failure learning**: historical provider, tool, verification, Git, index, and final-gate failures become risk hints so the model repeats fewer known mistakes.
+- **Remote summary**: long tasks can project summary-first status to a phone, making it easier to monitor progress or approve pending actions away from the computer. The remote side is not a new executor.
+
+This is also the difference between Linghun and pure prompt/skill orchestration. A prompt can tell the model to plan carefully; Workflow Matrix places the plan inside permission, evidence, verification, architecture, memory, failure learning, and cost boundaries. It turns prompt engineering further into system engineering.
+
+### 17.3 Multi-agent Execution Layer: Different Roles Do Different Work
 
 Multi-agent entries include:
 
@@ -769,6 +810,12 @@ Agent types include:
 - worker: subtask execution.
 
 Each agent has an independent transcript, role route, permission mode, cost record, and background task surface. The main session is not flooded by child-agent output; users can view, cancel, or expand details.
+
+This agent capability is one execution foundation for Workflow Matrix. Workflow Plan does not bypass the mainline. Instead, it hands slices that benefit from parallel or role-specific handling to the existing agent/job system: exploration to explorer, plan decomposition to planner, concrete implementation to worker, verification and review to verifier. Each agent output enters aggregation first as context or status; it cannot directly become final PASS.
+
+This is different from letting a model open several conversations and run freely. Linghun agents have concurrency limits, independent transcripts, permission modes, failure learning, resource boundaries, and result summaries. Users see controlled background work, not several streams of long text flooding the main session.
+
+### 17.4 Durable Job: Task Hosting from Goal to Handoff
 
 Durable job entries include:
 
@@ -802,7 +849,36 @@ Long-task hosting covers the engineering state chain from beginning to end:
 - Handoff organization: produces handoff packets that carry goal, state, evidence, risk, and next steps into later sessions.
 - Verification boundary: records verification state, but does not automatically upgrade job completed to PASS.
 
+### 17.5 Task Surface and Evidence Merge: Users See State, Not Noise
+
+If multi-agent work and long tasks only increase parallelism, they can become more expensive, noisier, and harder to judge. Linghun's Task Surface compresses complex background work into a state users can scan:
+
+- Current phase.
+- Done/running/blocked/queued counts.
+- Runnable, readonly, start-gate, and blocked request counts.
+- Token, cost, and duration budget state.
+- Architecture, Git, memory, failure-risk, and remote-summary hints.
+- Next action.
+- Mobile summary.
+- Full request and evidence rows in details.
+
+Evidence Merge separates "evidence that can support a completion claim" from "information that is only context or status." File reads, grep results, index queries, command output, test results, verification, provider observations, and architecture evidence can support PASS when they satisfy the rules. Agent summaries, job completion, remote events, failure learning, memory, and self-learning are context/status only; they cannot masquerade as verified completion.
+
 Therefore, Linghun supports long-task hosting from goal to handoff. Real deliverable conclusions still depend on verification evidence, architecture boundaries, and final answer gates. This lets AI take on more continuous engineering work without mistaking background task completion for verified product completion.
+
+### 17.6 User Experience
+
+The mature experience is not that users learn more commands. It is that they do less orchestration work:
+
+- The user says, "Help me build a cache hit-rate report feature, split the work, and run verification." Linghun first generates a workflow plan.
+- The system decomposes the task into exploration, architecture confirmation, implementation, verification, stable point suggestion, and handoff organization.
+- The plan references project rules, memory summaries, accepted preferences, and historical failure risks so it does not start from zero every time.
+- After user confirmation, exploration, implementation, verification, and cleanup can be assigned to the corresponding agent/job/verification paths.
+- The user can continue the main session or leave the computer and monitor summary-first progress or approve pending actions through a remote channel.
+- When the task ends, Linghun summarizes evidence, failures, verification scope, Git state, and next steps.
+- The final answer claims completion only when evidence is sufficient; otherwise it downgrades conservatively.
+
+The core advantage of this route is clear: strong models handle understanding and generation, while the strong foundation handles orchestration, permissions, evidence, verification, cost, memory, reflection, and recovery. Models can be replaced; the engineering runtime continues to provide the same controllable capabilities.
 
 ---
 
@@ -1144,6 +1220,7 @@ Linghun is suitable for the following workflows:
 
 - Let models read code, change code, run verification, and produce evidence-bounded summaries in real projects.
 - Use different models for planning, execution, review, verification, and summarization.
+- Decompose complex requirements into Workflow Plans, multi-agent subtasks, architecture confirmation, verification slices, stable point suggestions, risk hints, and final delivery evidence, reducing the cost of manual task breakdown and progress monitoring.
 - Keep stable context, stable tool calls, and high cache reuse in the same long-running project, reducing repeated explanation and repeated cost.
 - Locate code in large repositories through index, grep, and workspace snapshot.
 - Create Git stable points and worktrees in staged development to reduce rollback cost.
@@ -1167,6 +1244,7 @@ Linghun's capability boundaries are:
 - Failure learning is only historical risk hinting, not current-task evidence.
 - Long-term memory requires user confirmation and is not written automatically.
 - Remote channel is an approval/notification adapter, not a remote execution platform that bypasses local permissions.
+- Workflow Plan, Workflow Matrix, multi-agent work, and durable jobs are not automatic execution systems that bypass permission. They reuse the existing four permission modes, tool runtime, Evidence Merge, verification, architecture gate, and final answer gate. Background task completion does not mean delivery has been verified.
 - Native Runner has controlled supervisor boundaries and Node fallback. It does not mean every platform has fully verified low-level supervision.
 - Windows Job Object is the commercial-grade supervision contract for Native Runner. Node fallback, ordinary unit tests, and no-real-runner smoke must not be presented as complete proof of native process-tree supervision.
 - Index is a location aid, not the only source of truth.
