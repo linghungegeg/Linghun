@@ -30,6 +30,7 @@ export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
   TUI /skills enable|disable <id>                   持久化启停 skill
   TUI /workflows                                    列出 workflow 模板、风险和验证建议
   TUI /workflows <name>                             进入 workflow Start Gate
+  TUI /workflows plan <goal>                        生成 Workflow Plan 预览
   TUI /plugins                                      列出本地 plugin manifest 与贡献项
   TUI /plugins doctor                               诊断 plugin 信任、权限和加载错误
   TUI /plugins enable|disable <id>                  持久化启停 plugin

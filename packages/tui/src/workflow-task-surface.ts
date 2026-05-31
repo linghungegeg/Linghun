@@ -1,13 +1,13 @@
 import type {
-  NormalizedWorkflowPlan,
-  WorkflowEvidenceKind,
-  WorkflowPlanProjection,
-} from "./workflow-plan-schema.js";
-import type {
   WorkflowAgentRuntimeBridgeResult,
   WorkflowBridgeRequestProposal,
   WorkflowBridgeRequestStatus,
 } from "./workflow-agent-runtime-bridge.js";
+import type {
+  NormalizedWorkflowPlan,
+  WorkflowEvidenceKind,
+  WorkflowPlanProjection,
+} from "./workflow-plan-schema.js";
 
 export type EvidenceMergeVerdict = "PASS" | "PARTIAL" | "BLOCKED";
 
@@ -62,12 +62,15 @@ export function projectWorkflowTaskSurface(
   plan: NormalizedWorkflowPlan,
   bridgeResult: WorkflowAgentRuntimeBridgeResult,
 ): WorkflowTaskSurfaceResult {
-  const currentPhase = plan.phases.find((p) => p.id === bridgeResult.currentPhaseId) ?? plan.phases[0];
+  const currentPhase =
+    plan.phases.find((p) => p.id === bridgeResult.currentPhaseId) ?? plan.phases[0];
   const allSlices = plan.phases.flatMap((p) => p.slices);
   const done = allSlices.filter((s) => s.status === "completed").length;
   const running = allSlices.filter((s) => s.status === "running").length;
   const blocked = allSlices.filter((s) => s.status === "blocked" || s.status === "failed").length;
-  const queued = allSlices.filter((s) => s.status === "queued" || s.status === "created" || s.status === "sleeping").length;
+  const queued = allSlices.filter(
+    (s) => s.status === "queued" || s.status === "created" || s.status === "sleeping",
+  ).length;
 
   const evidenceRefs = deduplicateEvidenceRefs(
     bridgeResult.requests.flatMap((r) => r.handoffProposal.evidenceRefs),
@@ -96,9 +99,19 @@ export function projectWorkflowTaskSurface(
     nextAction,
   };
 
-  const summaryText = buildSummaryText(plan.title, meta, evidenceMergeSummary, bridgeResult.summary);
+  const summaryText = buildSummaryText(
+    plan.title,
+    meta,
+    evidenceMergeSummary,
+    bridgeResult.summary,
+  );
   const detailsText = buildDetailsText(plan.title, bridgeResult, evidenceMergeRows);
-  const mobileSummary = buildMobileSummary(plan.title, meta, evidenceMergeSummary, bridgeResult.summary);
+  const mobileSummary = buildMobileSummary(
+    plan.title,
+    meta,
+    evidenceMergeSummary,
+    bridgeResult.summary,
+  );
 
   return {
     summaryText,
@@ -111,7 +124,12 @@ export function projectWorkflowTaskSurface(
 }
 
 function buildEvidenceMergeRows(
-  evidenceRefs: Array<{ ref: string; kind: WorkflowEvidenceKind; claim: string; passEvidenceAllowed: boolean }>,
+  evidenceRefs: Array<{
+    ref: string;
+    kind: WorkflowEvidenceKind;
+    claim: string;
+    passEvidenceAllowed: boolean;
+  }>,
 ): EvidenceMergeRow[] {
   return evidenceRefs.map((ev) => {
     if (PASS_BANNED_KINDS.has(ev.kind)) {
@@ -162,7 +180,12 @@ function computeOverallVerdict(
 }
 
 function deduplicateEvidenceRefs(
-  refs: Array<{ ref: string; kind: WorkflowEvidenceKind; claim: string; passEvidenceAllowed: boolean }>,
+  refs: Array<{
+    ref: string;
+    kind: WorkflowEvidenceKind;
+    claim: string;
+    passEvidenceAllowed: boolean;
+  }>,
 ): Array<{ ref: string; kind: WorkflowEvidenceKind; claim: string; passEvidenceAllowed: boolean }> {
   const seen = new Set<string>();
   const result: typeof refs = [];
@@ -242,8 +265,8 @@ function buildDetailsText(
 ): string {
   const header = `Workflow Task Surface details: ${title}`;
   const requestLines = bridgeResult.requests.map((r) => formatRequestRow(r));
-  const evidenceLines = evidenceRows.map((row) =>
-    `  evidence: ${row.ref} | ${row.kind} | ${row.verdict} | ${row.reason}`,
+  const evidenceLines = evidenceRows.map(
+    (row) => `  evidence: ${row.ref} | ${row.kind} | ${row.verdict} | ${row.reason}`,
   );
   return [
     header,

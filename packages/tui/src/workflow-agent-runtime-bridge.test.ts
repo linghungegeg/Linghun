@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  bridgeWorkflowPlanToMainChainRequests,
   type WorkflowBridgeRequestProposal,
+  bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
 import {
   DEFAULT_WORKFLOW_RUNNING_CAP,
@@ -313,13 +313,16 @@ describe("D.14H-C workflow agent runtime bridge", () => {
 
   it("rejects raw command strings even if they are forced into a normalized plan", () => {
     const plan = normalize(createPlan());
-    plan.phases[0]!.slices[0]!.targetRuntime = {
-      kind: "slash",
-      slash: "/job",
-      action: "run",
-      mutating: true,
-      rawCommand: "/job run do-not-execute",
-    } as never;
+    const slice0 = plan.phases[0]?.slices[0];
+    if (slice0) {
+      slice0.targetRuntime = {
+        kind: "slash",
+        slash: "/job",
+        action: "run",
+        mutating: true,
+        rawCommand: "/job run do-not-execute",
+      } as never;
+    }
 
     const result = bridgeWorkflowPlanToMainChainRequests(plan, {
       confirmedPhaseStopPoints: ["phase-c"],
@@ -421,7 +424,9 @@ describe("D.14H-C workflow agent runtime bridge", () => {
 
   it("does not expose provider env key or model route mutation fields", () => {
     const serialized = JSON.stringify(bridge(createPlan()));
-    expect(serialized).not.toMatch(/providerEnv|apiKey|baseUrl|modelRoute|modelRoutes|routeChange/iu);
+    expect(serialized).not.toMatch(
+      /providerEnv|apiKey|baseUrl|modelRoute|modelRoutes|routeChange/iu,
+    );
     expect(serialized).toContain("provider/env/key/model route changes");
   });
 });

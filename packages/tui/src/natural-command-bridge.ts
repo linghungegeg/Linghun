@@ -281,7 +281,16 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "workflows",
     "/workflows",
-    ["workflow", "workflows", "工作流", "bug-fix", "bug fix", "plan workflow", "workflow plan", "工作流计划"],
+    [
+      "workflow",
+      "workflows",
+      "工作流",
+      "bug-fix",
+      "bug fix",
+      "plan workflow",
+      "workflow plan",
+      "工作流计划",
+    ],
     "工作流",
     "Workflows",
     "列出工作流模板；/workflows plan <目标> 生成计划预览。启动模板只展示 Start Gate。",
@@ -1858,6 +1867,7 @@ function isNaturalControlPlaneIntent(
   if (id === "index") return classification.indexAction === "safe";
   if (id === "mode" && extractPermissionMode(text)) return true;
   if (id === "trust") return true;
+  if (id === "workflows" && /plan|计划|规划/u.test(text)) return true;
   if (["autopilot", "job", "background"].includes(id)) {
     return /持续推进|继续做|不用每步都问|autopilot|本地任务|长期任务|任务报告|durable job|job report|后台|background|长任务|long task/u.test(
       text,
@@ -1922,8 +1932,17 @@ function scoreCapability(
   )
     score += 6;
   if (capability.id === "hooks" && /hook|钩子/u.test(normalized)) score += 3;
-  if (capability.id === "workflows" && /bug-fix|bug fix|工作流|workflow/u.test(normalized))
+  if (
+    capability.id === "workflows" &&
+    /bug-fix|bug fix|工作流|workflow|workflow plan|工作流计划/u.test(normalized)
+  )
     score += 3;
+  if (
+    capability.id === "workflows" &&
+    /plan|计划|规划/u.test(normalized) &&
+    /workflow|工作流/u.test(normalized)
+  )
+    score += 5;
   if (capability.id === "cache" && /缓存|命中|hit rate|cache/u.test(normalized)) score += 3;
   if (capability.id === "memory" && /记忆|memory/u.test(normalized)) score += 3;
   if (

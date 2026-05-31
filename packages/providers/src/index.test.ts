@@ -745,6 +745,62 @@ describe("OpenAI stream parser", () => {
     ]);
   });
 
+  it("DeepSeek reasoning_content multi-chunk thinking-only yields assistant_thinking_delta, not text", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"id":"chatcmpl-ds","choices":[{"delta":{"reasoning_content":"Let me think about this..."}}]}\n\n',
+      'data: {"id":"chatcmpl-ds","choices":[{"delta":{"reasoning_content":" The answer involves..."}}]}\n\n',
+      'data: {"id":"chatcmpl-ds","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    const thinkingEvents = events.filter((e) => e.type === "assistant_thinking_delta");
+    const textEvents = events.filter((e) => e.type === "assistant_text_delta");
+    expect(thinkingEvents).toHaveLength(2);
+    expect(thinkingEvents[0]).toEqual({
+      type: "assistant_thinking_delta",
+      id: "chatcmpl-ds",
+      text: "Let me think about this...",
+    });
+    expect(thinkingEvents[1]).toEqual({
+      type: "assistant_thinking_delta",
+      id: "chatcmpl-ds",
+      text: " The answer involves...",
+    });
+    expect(textEvents).toHaveLength(0);
+    const stop = events.find((e) => e.type === "message_stop");
+    expect(stop).toEqual({
+      type: "message_stop",
+      id: "chatcmpl-ds",
+      finishReason: "stop",
+      chunkCount: 3,
+      hadUsage: false,
+    });
+  });
+
+  it("DeepSeek reasoning_content followed by content yields both thinking and text events", async () => {
+    const events = await collectOpenAiEvents([
+      'data: {"id":"chatcmpl-ds2","choices":[{"delta":{"reasoning_content":"thinking first"}}]}\n\n',
+      'data: {"id":"chatcmpl-ds2","choices":[{"delta":{"content":"final answer"}}]}\n\n',
+      'data: {"id":"chatcmpl-ds2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+
+    const thinkingEvents = events.filter((e) => e.type === "assistant_thinking_delta");
+    const textEvents = events.filter((e) => e.type === "assistant_text_delta");
+    expect(thinkingEvents).toHaveLength(1);
+    expect(thinkingEvents[0]).toEqual({
+      type: "assistant_thinking_delta",
+      id: "chatcmpl-ds2",
+      text: "thinking first",
+    });
+    expect(textEvents).toHaveLength(1);
+    expect(textEvents[0]).toEqual({
+      type: "assistant_text_delta",
+      id: "chatcmpl-ds2",
+      text: "final answer",
+    });
+  });
+
   it("converts responses endpoint text, tool, usage, and error events", async () => {
     const events = await collectOpenAiEvents(
       [

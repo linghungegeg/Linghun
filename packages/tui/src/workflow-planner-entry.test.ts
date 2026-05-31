@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  type WorkflowPlannerGoal,
   formatWorkflowPlanPreview,
   generateWorkflowPlanPreview,
-  type WorkflowPlannerGoal,
 } from "./workflow-planner-entry.js";
 
 function goal(overrides: Partial<WorkflowPlannerGoal> = {}): WorkflowPlannerGoal {
@@ -76,9 +76,7 @@ describe("D.14H-E workflow planner entry", () => {
   });
 
   it("natural language capability maps to workflow plan without keyword interception", () => {
-    const result = generateWorkflowPlanPreview(
-      goal({ goal: "帮我修复 bug 并跑测试" }),
-    );
+    const result = generateWorkflowPlanPreview(goal({ goal: "帮我修复 bug 并跑测试" }));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.plan.title).toContain("修复");
@@ -108,7 +106,9 @@ describe("D.14H-E workflow planner entry", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.summaryText.split("\n").length).toBeLessThan(15);
-    expect(result.detailsText.split("\n").length).toBeGreaterThan(result.summaryText.split("\n").length);
+    expect(result.detailsText.split("\n").length).toBeGreaterThan(
+      result.summaryText.split("\n").length,
+    );
     expect(result.detailsText).toContain("Evidence Merge:");
   });
 
@@ -117,7 +117,9 @@ describe("D.14H-E workflow planner entry", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     for (const row of result.surface.evidenceMergeRows) {
-      if (["agent_summary", "job_completed", "remote_event", "failure_learning"].includes(row.kind)) {
+      if (
+        ["agent_summary", "job_completed", "remote_event", "failure_learning"].includes(row.kind)
+      ) {
         expect(row.verdict).not.toBe("PASS");
       }
     }

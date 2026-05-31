@@ -1,4 +1,5 @@
 import { DEFAULT_JOB_RUNNING_AGENT_CAP } from "./job-runtime.js";
+import type { AgentType, BackgroundTaskState, DurableJobAgentStatus } from "./tui-data-types.js";
 import type {
   NormalizedWorkflowPlan,
   WorkflowEvidenceKind,
@@ -10,7 +11,6 @@ import type {
   WorkflowSliceStatus,
   WorkflowToolClass,
 } from "./workflow-plan-schema.js";
-import type { AgentType, BackgroundTaskState, DurableJobAgentStatus } from "./tui-data-types.js";
 
 export type WorkflowBridgePermissionAction = "Write" | "Bash" | "Git" | "network" | "none";
 
@@ -329,7 +329,8 @@ export function bridgeWorkflowPlanToMainChainRequests(
         safety,
         phase: currentPhase.title,
         sliceTitle: slice.title,
-        nextAction: "Use /job create|run|status|report, /fork, /agents list|show, verification, or details.",
+        nextAction:
+          "Use /job create|run|status|report, /fork, /agents list|show, verification, or details.",
         contextRefs,
       });
     }
@@ -455,7 +456,12 @@ function createBackgroundProjection(input: {
   sliceTitle: string;
   nextAction: string;
 }): WorkflowBridgeBackgroundProjection {
-  const kind = input.request?.mainChain === "job" ? "job" : input.request?.mainChain === "fork" ? "agent" : "verification";
+  const kind =
+    input.request?.mainChain === "job"
+      ? "job"
+      : input.request?.mainChain === "fork"
+        ? "agent"
+        : "verification";
   return {
     source: "background-task-projection",
     kind,
@@ -482,8 +488,9 @@ function createMainChainRequest(
       workflowId: plan.id,
       phaseId,
       sliceId: slice.id,
-      goal: action === "create" || action === "run" ? slice.nextAction ?? slice.title : undefined,
-      jobRef: action === "status" || action === "report" ? slice.nextAction ?? "latest" : undefined,
+      goal: action === "create" || action === "run" ? (slice.nextAction ?? slice.title) : undefined,
+      jobRef:
+        action === "status" || action === "report" ? (slice.nextAction ?? "latest") : undefined,
       phase: phaseTitle,
       target: "workflow-agent-runtime-bridge",
       requestedAgents: slice.budget?.maxRunningAgents,
@@ -536,7 +543,10 @@ function createMainChainRequest(
   return null;
 }
 
-function createSafety(role: AgentType, target: WorkflowRuntimeTarget | undefined): WorkflowBridgeSafety {
+function createSafety(
+  role: AgentType,
+  target: WorkflowRuntimeTarget | undefined,
+): WorkflowBridgeSafety {
   const mutating = Boolean(target?.mutating);
   return {
     readonly: !mutating,
@@ -585,8 +595,7 @@ function createContextRefs(
       ref: truncateText(item.ref, 240),
       kind: item.kind,
       claim: truncateText(item.claim, 300),
-      passEvidenceAllowed:
-        item.passEvidence === true && !PASS_BANNED_EVIDENCE_KINDS.has(item.kind),
+      passEvidenceAllowed: item.passEvidence === true && !PASS_BANNED_EVIDENCE_KINDS.has(item.kind),
     }))
     .slice(0, 20);
   return {

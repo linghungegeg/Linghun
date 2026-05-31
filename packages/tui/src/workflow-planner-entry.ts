@@ -1,7 +1,7 @@
 import type { PermissionMode } from "@linghun/shared";
 import {
-  bridgeWorkflowPlanToMainChainRequests,
   type WorkflowAgentRuntimeBridgeResult,
+  bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
 import {
   type NormalizedWorkflowPlan,
@@ -35,7 +35,9 @@ export type WorkflowPlannerGoal = {
   confirmedPhaseStopPoints?: string[];
 };
 
-export function generateWorkflowPlanPreview(input: WorkflowPlannerGoal): WorkflowPlannerEntryResult {
+export function generateWorkflowPlanPreview(
+  input: WorkflowPlannerGoal,
+): WorkflowPlannerEntryResult {
   const rawPlan = buildConservativePlan(input.goal, input.permissionMode);
   const validation = normalizeWorkflowPlan(rawPlan, { permissionMode: input.permissionMode });
   if (!validation.ok) {

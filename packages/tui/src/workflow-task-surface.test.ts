@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  bridgeWorkflowPlanToMainChainRequests,
   type WorkflowAgentRuntimeBridgeResult,
+  bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
 import {
   type NormalizedWorkflowPlan,
@@ -127,7 +127,9 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
     expect(result.summaryText).toContain("Evidence:");
     expect(result.summaryText).toContain("Next:");
     expect(result.detailsText).toContain("Workflow Task Surface details");
-    expect(result.detailsText).toContain("phase | slice | role | status | permission | evidence | nextAction");
+    expect(result.detailsText).toContain(
+      "phase | slice | role | status | permission | evidence | nextAction",
+    );
   });
 
   it("main-screen summary does not contain full matrix/log/source/transcript", () => {
@@ -157,7 +159,16 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
     expect(passRows.length).toBeGreaterThan(0);
     for (const row of passRows) {
       expect(row.passEvidenceAllowed).toBe(true);
-      expect(["file_read", "grep_result", "index_query", "command_output", "test_result", "verification", "provider", "architecture"]).toContain(row.kind);
+      expect([
+        "file_read",
+        "grep_result",
+        "index_query",
+        "command_output",
+        "test_result",
+        "verification",
+        "provider",
+        "architecture",
+      ]).toContain(row.kind);
     }
   });
 

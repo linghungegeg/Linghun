@@ -279,10 +279,13 @@ describe("D.14H-B workflow plan schema", () => {
       ],
     }) as WorkflowPlan & { rawFullTranscript?: string };
     plan.rawFullTranscript = "full transcript should never enter a workflow plan";
-    plan.phases[0]!.slices[0] = {
-      ...plan.phases[0]!.slices[0]!,
-      rawSource: "export const huge = true",
-    } as never;
+    const slice0 = plan.phases[0]?.slices[0];
+    if (slice0) {
+      plan.phases[0]?.slices.splice(0, 1, {
+        ...slice0,
+        rawSource: "export const huge = true",
+      } as never);
+    }
 
     const errors = expectInvalid(plan);
     expect(errors).toContain("raw transcript/source/log injection is forbidden");
@@ -311,17 +314,20 @@ describe("D.14H-B workflow plan schema", () => {
 
   it("rejects unknown tool classes and untrusted or undiscovered execution proposals", () => {
     const plan = createValidPlan();
-    plan.phases[0]!.slices[0]!.allowedToolClasses = ["shell" as never];
-    plan.phases[0]!.slices[0]!.toolProposals = [
-      {
-        toolClass: "mcp-local-stdio",
-        toolName: "mcp:server:tool",
-        execution: "execute",
-        discovered: true,
-        trusted: false,
-        executable: true,
-      },
-    ];
+    const slice0 = plan.phases[0]?.slices[0];
+    if (slice0) {
+      slice0.allowedToolClasses = ["shell" as never];
+      slice0.toolProposals = [
+        {
+          toolClass: "mcp-local-stdio",
+          toolName: "mcp:server:tool",
+          execution: "execute",
+          discovered: true,
+          trusted: false,
+          executable: true,
+        },
+      ];
+    }
 
     const errors = expectInvalid(plan);
     expect(errors).toContain("unknown tool class: shell");
@@ -360,19 +366,22 @@ describe("D.14H-B workflow plan schema", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const statuses = result.plan.phases[0]!.slices.map((slice) => slice.status);
+    const statuses = result.plan.phases[0]?.slices.map((slice) => slice.status);
     expect(statuses.filter((status) => status === "running")).toHaveLength(3);
     expect(statuses.slice(3)).toEqual(["queued", "queued"]);
   });
 
   it("rejects mutating proposals in plan mode", () => {
     const plan = createValidPlan({ permissionMode: "plan" });
-    plan.phases[0]!.slices[0]!.targetRuntime = {
-      kind: "slash",
-      slash: "/fork",
-      role: "worker",
-      mutating: true,
-    };
+    const slice0 = plan.phases[0]?.slices[0];
+    if (slice0) {
+      slice0.targetRuntime = {
+        kind: "slash",
+        slash: "/fork",
+        role: "worker",
+        mutating: true,
+      };
+    }
 
     const errors = expectInvalid(plan);
     expect(errors).toContain("plan mode cannot contain mutating execution proposals");
@@ -457,13 +466,16 @@ describe("D.14H-B workflow plan schema", () => {
 
   it("rejects raw command strings in runtime mapping proposals", () => {
     const plan = createValidPlan();
-    plan.phases[0]!.slices[0]!.targetRuntime = {
-      kind: "slash",
-      slash: "/job",
-      action: "run",
-      mutating: true,
-      rawCommand: "/job run something",
-    } as never;
+    const slice0 = plan.phases[0]?.slices[0];
+    if (slice0) {
+      slice0.targetRuntime = {
+        kind: "slash",
+        slash: "/job",
+        action: "run",
+        mutating: true,
+        rawCommand: "/job run something",
+      } as never;
+    }
 
     const errors = expectInvalid(plan);
     expect(errors).toContain("not a raw command string");
