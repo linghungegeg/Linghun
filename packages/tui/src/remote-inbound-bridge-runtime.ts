@@ -109,6 +109,34 @@ export type FeishuReceiveMessageEvent = {
   };
 };
 
+export type DingTalkStreamFrame = {
+  specVersion?: string;
+  type?: "SYSTEM" | "EVENT" | "CALLBACK" | string;
+  headers?: {
+    topic?: string;
+    messageId?: string;
+    time?: string;
+    eventType?: string;
+    contentType?: string;
+    appId?: string;
+  };
+  data?: string | Record<string, unknown>;
+};
+
+export type DingTalkBotMessageData = {
+  msgId?: string;
+  senderId?: string;
+  senderStaffId?: string;
+  senderNick?: string;
+  conversationId?: string;
+  conversationType?: string;
+  robotCode?: string;
+  msgtype?: string;
+  text?: { content?: string };
+  createAt?: number | string;
+  createA?: number | string;
+};
+
 export function getRemoteBridgeDoctor(
   remote: RemoteState,
   channelId: string,
@@ -252,6 +280,7 @@ export function processRemoteBindCommand(
   if (!channel.config.trustedSources.includes(message.source)) {
     channel.config.trustedSources.push(message.source);
   }
+  channel.runtimeStatus = "ready";
   channel.bindingStatus = "bound";
   channel.lastError = undefined;
   channel.nextAction = `/remote bridge test-inbound ${channel.id}`;
@@ -398,6 +427,40 @@ export function feishuReceiveMessageToBridgeEvent(
 
 export function dingtalkBridgeAdapter(event: RemoteAdapterInboundEvent): RemoteInboundMessage {
   return adaptBridgeEvent(event, "dingtalk");
+}
+
+export function dingtalkStreamFrameToBridgeEvent(
+  frame: DingTalkStreamFrame,
+  nowMs = Date.now(),
+): RemoteAdapterInboundEvent {
+  const topic = frame.headers?.topic;
+  if (topic !== "/v1.0/im/bot/messages/get") {
+    throw new Error("DingTalk Stream frame topic is not a bot message");
+  }
+  const data = parseDingTalkStreamData(frame.data);
+  const messageId = stringValue(data.msgId) ?? frame.headers?.messageId;
+  const source = stringValue(data.senderId) ?? stringValue(data.senderStaffId);
+  if (!messageId) {
+    throw new Error("DingTalk Stream bot message missing msgId");
+  }
+  if (!source) {
+    throw new Error("DingTalk Stream bot message missing sender id");
+  }
+  const text = typeof data.text?.content === "string" ? data.text.content.trim() : "";
+  return {
+    platform: "dingtalk",
+    source,
+    userId: source,
+    kind: classifyPlainTextInboundKind(text),
+    text,
+    approve: classifyPlainTextApprove(text),
+    eventId: parsePlainTextApprovalEventId(text),
+    messageId,
+    nonce: frame.headers?.messageId ?? messageId,
+    signature: "ref:dingtalk-stream",
+    expiresAt: new Date(nowMs + 60_000).toISOString(),
+    receivedAt: new Date(nowMs).toISOString(),
+  };
 }
 
 export function wecomBridgeAdapter(event: RemoteAdapterInboundEvent): RemoteInboundMessage {
@@ -594,6 +657,10 @@ function parseFeishuTextContent(content: string | undefined): string {
 }
 
 function classifyFeishuInboundKind(text: string): RemoteInboundKind {
+  return classifyPlainTextInboundKind(text);
+}
+
+function classifyPlainTextInboundKind(text: string): RemoteInboundKind {
   const normalized = text.trim().toLowerCase();
   if (normalized === "状态" || normalized === "status" || normalized === "/status") {
     return "status_query";
@@ -605,14 +672,35 @@ function classifyFeishuInboundKind(text: string): RemoteInboundKind {
 }
 
 function classifyFeishuApprove(text: string): boolean | undefined {
+  return classifyPlainTextApprove(text);
+}
+
+function classifyPlainTextApprove(text: string): boolean | undefined {
   if (/^approve\b/i.test(text.trim())) return true;
   if (/^deny\b/i.test(text.trim())) return false;
   return undefined;
 }
 
 function parseFeishuApprovalEventId(text: string): string | undefined {
+  return parsePlainTextApprovalEventId(text);
+}
+
+function parsePlainTextApprovalEventId(text: string): string | undefined {
   const match = text.trim().match(/(?:event|eventId|approval)[:=]\s*([A-Za-z0-9_-]+)/i);
   return match?.[1];
+}
+
+function parseDingTalkStreamData(data: DingTalkStreamFrame["data"]): DingTalkBotMessageData {
+  if (!data) return {};
+  if (typeof data === "string") {
+    const parsed = JSON.parse(data) as DingTalkBotMessageData;
+    return parsed;
+  }
+  return data as DingTalkBotMessageData;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function createPairingCode(): string {

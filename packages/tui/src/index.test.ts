@@ -44,6 +44,7 @@ import {
   createWorkflowState,
   deferredToolListHashInput,
   dingtalkBridgeAdapter,
+  dingtalkStreamFrameToBridgeEvent,
   executeExtraTool,
   executeSearchExtraTools,
   feishuBridgeAdapter,
@@ -74,11 +75,14 @@ import {
   sanitizeDiscoveredDeferredToolName,
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
+  validateRemoteInboundEnvelope,
+  validateRemotePairingEnvelope,
   wecomBridgeAdapter,
   writeLightHintsForTest,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
 } from "./index.js";
+import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import {
   formatSolutionCompletenessReportBlock,
   needsSolutionCompletenessReportClosure,
@@ -11261,6 +11265,344 @@ describe("Phase 06 TUI slash commands", () => {
         origin: "adapter",
       }),
     ).toMatchObject({ status: "bad_signature" });
+  });
+
+  it("D.14F-Bot routes low-learning bot commands and keeps details redacted", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "callback",
+            appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+            appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+            callbackEndpoint: "feishu-long-connection",
+            bindingUserId: "feishu-user",
+            trustedSources: ["feishu-mobile-1"],
+          },
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            appIdRef: "LINGHUN_REMOTE_DINGTALK_CLIENT_ID",
+            appSecretRef: "LINGHUN_REMOTE_DINGTALK_CLIENT_SECRET",
+            bindingUserId: "ding-user",
+            trustedSources: ["ding-mobile-1"],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/remote bot doctor", context, output);
+    await handleSlashCommand("/remote bot setup feishu", context, output);
+    await handleSlashCommand("/remote bot setup dingtalk", context, output);
+    await handleSlashCommand("/remote bot setup wechat", context, output);
+    await handleSlashCommand("/remote bot pair feishu", context, output);
+    await handleSlashCommand("/remote setup feishu", context, output);
+
+    expect(output.text).toContain("Feishu Bot");
+    expect(output.text).toContain("DingTalk Bot");
+    expect(output.text).toContain("Personal WeChat Bot setup: experimental");
+    expect(output.text).toContain("Bot pairing code");
+    expect(output.text).toContain("/bind");
+    expect(output.text).toContain("Feishu Bot setup");
+    expect(output.text).not.toMatch(/appSecret=.*|Bearer|sk-|sessionWebhook=.*|trustedSources:\s*\[/i);
+  });
+
+  it("D.14F-Bot start feishu reuses long connection and routes messages into main inbound glue", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "callback",
+            appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+            appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+            signingSecretRef: "LINGHUN_REMOTE_FEISHU_INBOUND_PROOF",
+            callbackEndpoint: "feishu-long-connection",
+            bindingUserId: "feishu-user",
+            trustedSources: ["feishu-mobile-1"],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const inboundMessages: string[] = [];
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => session.id,
+      handleRemoteInboundMessage: async (message) => {
+        inboundMessages.push(message.messageId);
+        return {
+          kind: message.kind,
+          status: "accepted",
+          summary: "routed",
+          evidenceCreated: false,
+        };
+      },
+      startFeishuLongConnection: async (options) => {
+        await options.onMessage({
+          kind: "status_query",
+          channel: "feishu",
+          messageId: "bot-feishu-simulated",
+          nonce: "evt-bot",
+          source: "feishu-mobile-1",
+          bindingUserId: "feishu-user",
+          signature: "ref:feishu-long-connection",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          origin: "adapter",
+        });
+        return { close: () => undefined };
+      },
+    });
+
+    await handleSlashCommand("/remote bot start feishu", context, output);
+    await handleSlashCommand("/remote bot stop feishu", context, output);
+
+    expect(output.text).toContain("Feishu Bot started");
+    expect(output.text).toContain("Remote Bot feishu stopped");
+    expect(inboundMessages).toEqual(["bot-feishu-simulated"]);
+    expect(output.text).not.toContain("test-app-secret");
+  });
+
+  it("D.14F-Bot start feishu allows first-time unbound bot to wait for /bind", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "callback",
+            appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+            appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+            signingSecretRef: "LINGHUN_REMOTE_FEISHU_INBOUND_PROOF",
+            callbackEndpoint: "feishu-long-connection",
+            trustedSources: [],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    let started = false;
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => session.id,
+      handleRemoteInboundMessage: async (message) => ({
+        kind: message.kind,
+        status: "accepted",
+        summary: "routed",
+        evidenceCreated: false,
+      }),
+      startFeishuLongConnection: async () => {
+        started = true;
+        return { close: () => undefined };
+      },
+    });
+
+    await handleSlashCommand("/remote bot start feishu", context, output);
+    await handleSlashCommand("/remote bot stop feishu", context, output);
+
+    expect(started).toBe(true);
+    expect(output.text).toContain("Feishu Bot started");
+    expect(output.text).toContain("ready-to-start");
+    expect(output.text).not.toContain("test-app-secret");
+  });
+
+  it("D.14F-Bot keeps ordinary unbound inbound behind trusted source and binding checks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "callback",
+            appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+            appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+            signingSecretRef: "LINGHUN_REMOTE_FEISHU_INBOUND_PROOF",
+            callbackEndpoint: "feishu-long-connection",
+            trustedSources: [],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const base = {
+      kind: "natural_language_message" as const,
+      channel: "feishu",
+      messageId: "unbound-nl",
+      nonce: "n",
+      source: "new-phone",
+      bindingUserId: "new-user",
+      signature: "ref:feishu-platform-proof",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      text: "看看状态",
+      origin: "adapter" as const,
+    };
+
+    expect(validateRemoteInboundEnvelope(context, base)).toMatchObject({ status: "unknown_source" });
+
+    const feishu = context.remote.channels.find((item) => item.id === "feishu");
+    if (!feishu) throw new Error("missing feishu");
+    feishu.config.trustedSources.push("new-phone");
+    expect(validateRemoteInboundEnvelope(context, base)).toMatchObject({ status: "wrong_binding" });
+  });
+
+  it("D.14F-Bot allows unbound /bind CODE after pairing proof and code checks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "callback",
+            appIdRef: "LINGHUN_REMOTE_FEISHU_APP_ID",
+            appSecretRef: "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+            signingSecretRef: "LINGHUN_REMOTE_FEISHU_INBOUND_PROOF",
+            callbackEndpoint: "feishu-long-connection",
+            trustedSources: [],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const feishu = context.remote.channels.find((item) => item.id === "feishu");
+    if (!feishu) throw new Error("missing feishu");
+    createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "ABC123");
+    const message = {
+      kind: "natural_language_message" as const,
+      channel: "feishu",
+      messageId: "bind-first-time",
+      nonce: "n",
+      source: "new-phone",
+      bindingUserId: "new-user",
+      signature: "ref:feishu-platform-proof",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      text: "/bind ABC123",
+      origin: "adapter" as const,
+    };
+
+    expect(validateRemotePairingEnvelope(context, message)).toMatchObject({ status: "envelope_accepted" });
+    const directBind = processRemoteBindCommand(context.remote, feishu, message);
+    expect(directBind).toMatchObject({ status: "bound" });
+    expect(feishu.config.bindingUserId).toBe("new-user");
+    expect(feishu.config.trustedSources).toContain("new-phone");
+
+    createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "DEF456");
+    const handled = await handleRemoteInboundMessage(
+      { ...message, messageId: "bind-first-time-glue", text: "/bind DEF456" },
+      context,
+      undefined,
+      output,
+    );
+    expect(handled.status).toBe("accepted");
+    expect(output.text).not.toContain("test-app-secret");
+  });
+
+  it("D.14F-Bot keeps DingTalk Stream and WeChat experimental honest when real credentials are absent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, defaultConfig);
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/remote bot start dingtalk", context, output);
+    await handleSlashCommand("/remote bot start wechat", context, output);
+
+    expect(output.text).toContain("DingTalk Bot start blocked");
+    expect(output.text).toContain("Personal WeChat Bot start blocked");
+    expect(output.text).toContain("No fake WeChat inbound PASS is allowed");
+    expect(output.text).not.toContain("real mobile inbound: PASS");
+  });
+
+  it("D.14F-Bot DingTalk Stream fixture normalizes bot text to RemoteInboundMessage only", () => {
+    const event = dingtalkStreamFrameToBridgeEvent(
+      {
+        type: "CALLBACK",
+        headers: {
+          topic: "/v1.0/im/bot/messages/get",
+          messageId: "ding-frame-1",
+          time: "1700000000000",
+          contentType: "application/json",
+        },
+        data: JSON.stringify({
+          msgId: "ding-msg-1",
+          senderId: "ding-mobile-1",
+          senderNick: "redacted-user",
+          msgtype: "text",
+          text: { content: "approve event=remote-abc" },
+          sessionWebhook: "https://oapi.dingtalk.com/robot/send?access_token=SECRET",
+        }),
+      },
+      1_700_000_000_000,
+    );
+    const message = dingtalkBridgeAdapter(event);
+
+    expect(message).toMatchObject({
+      channel: "dingtalk",
+      kind: "approval_response",
+      messageId: "ding-msg-1",
+      nonce: "ding-frame-1",
+      source: "ding-mobile-1",
+      bindingUserId: "ding-mobile-1",
+      signature: "ref:dingtalk-stream",
+      eventId: "remote-abc",
+      approve: true,
+      origin: "adapter",
+    });
+    expect(JSON.stringify(message)).not.toContain("access_token=SECRET");
   });
 
   it("handles Phase 15.5D MCP Connect Lite lifecycle without running servers", async () => {

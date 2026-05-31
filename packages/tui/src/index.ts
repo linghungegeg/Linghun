@@ -386,6 +386,7 @@ export {
   createSignedRemoteInboundFixture,
   decideRemoteInbox,
   dingtalkBridgeAdapter,
+  dingtalkStreamFrameToBridgeEvent,
   feishuBridgeAdapter,
   feishuReceiveMessageToBridgeEvent,
   formatRemoteBridgeDoctor,

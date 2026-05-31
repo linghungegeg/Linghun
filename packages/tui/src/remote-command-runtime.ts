@@ -149,10 +149,15 @@ export async function handleRemoteCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Remote setup guidance — Ctrl+O for details."
-          : "远程接入引导 — Ctrl+O 查看详情。",
+          ? "Remote setup now recommends /remote bot setup <channel> — Ctrl+O for details."
+          : "远程接入现在推荐 /remote bot setup <channel> — Ctrl+O 查看详情。",
       ],
-      detailsText: formatRemoteSetup(args[1], context),
+      detailsText: [
+        formatRemoteBotSetupDetails(context, args[1]),
+        "",
+        "Legacy /remote setup details（compatibility）",
+        formatRemoteSetup(args[1], context),
+      ].join("\n"),
     });
     return;
   }
@@ -236,9 +241,137 @@ export async function handleRemoteCommand(
     await handleRemoteBridgeCommand(args.slice(1), context, output);
     return;
   }
+  if (action === "bot") {
+    await handleRemoteBotCommand(args.slice(1), context, output);
+    return;
+  }
   writeLine(
     output,
-    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote inbox | /remote bridge doctor|pair|start|test-inbound|test-approval|test-status <channel> | /remote disable <channel>",
+    "用法：/remote bot doctor|setup|start|stop|pair|inbox <channel> | /remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote inbox | /remote bridge doctor|pair|start|test-inbound|test-approval|test-status <channel> | /remote disable <channel>",
+  );
+}
+
+async function handleRemoteBotCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0] ?? "doctor";
+  if (action === "inbox") {
+    await handleRemoteInboxCommand(args.slice(1), context, output);
+    return;
+  }
+  if (action === "doctor") {
+    const channelArg = args[1];
+    showCommandPanel(context, output, {
+      title: "/remote bot doctor",
+      tone: "neutral",
+      summary: [formatRemoteBotDoctorSummary(context, channelArg)],
+      detailsText: formatRemoteBotDoctorDetails(context, channelArg),
+    });
+    return;
+  }
+  if (action === "setup") {
+    const channelArg = args[1];
+    showCommandPanel(context, output, {
+      title: "/remote bot setup",
+      tone: "neutral",
+      summary: [formatRemoteBotSetupSummary(context, channelArg)],
+      detailsText: formatRemoteBotSetupDetails(context, channelArg),
+    });
+    return;
+  }
+  if (action === "start") {
+    const channelArg = normalizeRemoteChannelId(args[1] ?? "");
+    if (channelArg === "feishu") {
+      const channel = findRemoteChannel(context, channelArg);
+      if (!channel) {
+        writeLine(output, "Remote bot start：未识别 Feishu Bot 配置。");
+        return;
+      }
+      const result = await startRemoteFeishuBridge(context, output, channel, "bot");
+      showCommandPanel(context, output, {
+        title: "/remote bot start feishu",
+        tone: result.status === "started" || result.status === "already_running" ? "neutral" : "warning",
+        summary: [toRemoteBotStartSummary("feishu", result.status)],
+        detailsText: [
+          toRemoteBotStartSummary("feishu", result.status),
+          result.detail,
+          "Bot path: Feishu messages enter RemoteInboundMessage -> handleRemoteInboundMessage; no second executor.",
+        ].join("\n"),
+      });
+      return;
+    }
+    showCommandPanel(context, output, {
+      title: `/remote bot start ${channelArg || "<channel>"}`,
+      tone: "warning",
+      summary: [formatRemoteBotStartBlockedSummary(channelArg)],
+      detailsText: [formatRemoteBotStartBlockedSummary(channelArg), formatRemoteBotSetupDetails(context, channelArg)].join("\n"),
+    });
+    return;
+  }
+  if (action === "stop") {
+    const channelArg = normalizeRemoteChannelId(args[1] ?? "");
+    const stopped = stopRemoteBotChannel(channelArg);
+    showCommandPanel(context, output, {
+      title: `/remote bot stop ${channelArg || "<channel>"}`,
+      tone: "neutral",
+      summary: [stopped ? `Remote Bot ${channelArg} stopped.` : `Remote Bot ${channelArg || "channel"} is not running.`],
+      detailsText: stopped
+        ? `Remote Bot ${channelArg} stopped.\nLong connection handle was closed in this process. Secrets were not printed.`
+        : "No active long connection handle exists in this process.",
+    });
+    return;
+  }
+  if (action === "pair") {
+    const channelArg = normalizeRemoteChannelId(args[1] ?? "");
+    if (channelArg === "wechat") {
+      showCommandPanel(context, output, {
+        title: "/remote bot pair wechat",
+        tone: "warning",
+        summary: ["Personal WeChat Bot pairing is experimental and blocked until an opt-in plugin bridge exists."],
+        detailsText: formatWechatBotExperimentalDetails(),
+      });
+      return;
+    }
+    const channel = findRemoteChannel(context, channelArg);
+    if (!channel) {
+      writeLine(output, "Remote bot pair：未识别通道。用法：/remote bot pair feishu|dingtalk|wechat");
+      return;
+    }
+    const pairing = createRemotePairing(
+      context.remote,
+      channel,
+      context.projectPath,
+      await deps().ensureSession(context),
+    );
+    await appendRemoteSystemEvent(
+      context,
+      `remote_bot_pair channel=${channel.id} status=${pairing.status} expiresAt=${
+        pairing.status === "created" ? pairing.pairing.expiresAt : "none"
+      }`,
+      "info",
+    );
+    showCommandPanel(context, output, {
+      title: `/remote bot pair ${channel.id}`,
+      tone: pairing.status === "created" ? "neutral" : "warning",
+      summary: [
+        pairing.status === "created"
+          ? `Bot pairing code ${pairing.pairing.code} — send /bind CODE from your Bot chat.`
+          : pairing.summary,
+      ],
+      detailsText: [
+        pairing.status === "created"
+          ? `Bot pairing code ${pairing.pairing.code} — send /bind CODE from your Bot chat.`
+          : pairing.summary,
+        formatRemotePairing(pairing),
+      ].join("\n"),
+    });
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/remote bot doctor [channel] | /remote bot setup feishu|dingtalk|wechat | /remote bot start feishu|dingtalk|wechat | /remote bot stop <channel> | /remote bot pair <channel> | /remote bot inbox",
   );
 }
 
@@ -451,20 +584,30 @@ async function startRemoteFeishuBridge(
   context: TuiContext,
   output: Writable,
   channel: RemoteChannelState,
+  readinessMode: "bridge" | "bot" = "bridge",
 ): Promise<{ status: "started" | "already_running" | "blocked" | "failed"; summary: string; detail: string }> {
-  const report = getRemoteBridgeDoctor(context.remote, channel.id);
-  if (report.readiness === "notification-only") {
+  const report = readinessMode === "bridge" ? getRemoteBridgeDoctor(context.remote, channel.id) : undefined;
+  const botReadiness = readinessMode === "bot" ? getFeishuBotStartReadiness(channel) : undefined;
+  const blockedDetail = botReadiness ? formatFeishuBotStartReadiness(botReadiness) : report ? formatRemoteBridgeDoctor(report) : "";
+  if (botReadiness?.readiness === "notification-only" || report?.readiness === "notification-only") {
     return {
       status: "blocked",
       summary: "Feishu bridge start blocked: webhook is notification-only.",
-      detail: formatRemoteBridgeDoctor(report),
+      detail: blockedDetail,
     };
   }
-  if (report.readiness !== "ready-to-start" && report.readiness !== "fixture-ready") {
+  if (botReadiness && !botReadiness.canStart) {
+    return {
+      status: "blocked",
+      summary: `Feishu bridge start blocked: ${botReadiness.readiness}.`,
+      detail: blockedDetail,
+    };
+  }
+  if (report && report.readiness !== "ready-to-start" && report.readiness !== "fixture-ready") {
     return {
       status: "blocked",
       summary: `Feishu bridge start blocked: ${report.readiness}.`,
-      detail: formatRemoteBridgeDoctor(report),
+      detail: blockedDetail,
     };
   }
   const appId = resolveEnvRef(channel.config.appIdRef);
@@ -478,7 +621,7 @@ async function startRemoteFeishuBridge(
       status: "blocked",
       summary: "Feishu bridge start blocked: app env missing.",
       detail: [
-        formatRemoteBridgeDoctor(report),
+        blockedDetail,
         `missing env: ${missing.join(", ")}`,
         "Secret values are not printed.",
       ].join("\n"),
@@ -507,7 +650,10 @@ async function startRemoteFeishuBridge(
     return {
       status: "started",
       summary: "Feishu bridge started: waiting for mobile messages.",
-      detail: "Long connection started with official SDK; secrets are not printed.",
+      detail: [
+        "Long connection started with official SDK; secrets are not printed.",
+        botReadiness ? formatFeishuBotStartReadiness(botReadiness) : undefined,
+      ].filter((item): item is string => Boolean(item)).join("\n"),
     };
   } catch {
     await appendRemoteSystemEvent(context, `remote_bridge_start channel=${channel.id} status=failed`, "warning");
@@ -515,11 +661,74 @@ async function startRemoteFeishuBridge(
       status: "failed",
       summary: "Feishu bridge start failed: platform connection rejected or unavailable.",
       detail: [
-        formatRemoteBridgeDoctor(report),
+        blockedDetail,
         "Check Feishu app credentials, long connection event subscription, bot ability, and message permissions.",
       ].join("\n"),
     };
   }
+}
+
+type FeishuBotStartReadiness = {
+  readiness:
+    | "ready-to-start"
+    | "bound-ready"
+    | "needs-app-id"
+    | "needs-app-secret"
+    | "needs-env"
+    | "needs-event-subscription"
+    | "notification-only";
+  canStart: boolean;
+  missingEnv: string[];
+};
+
+function getFeishuBotStartReadiness(channel: RemoteChannelState): FeishuBotStartReadiness {
+  if (channel.config.transport === "webhook" || channel.config.transport === "webhook_mock") {
+    return { readiness: "notification-only", canStart: false, missingEnv: [] };
+  }
+  if (channel.config.transport !== "official_cli") {
+    return { readiness: "needs-event-subscription", canStart: false, missingEnv: [] };
+  }
+  if (channel.config.inboundMode !== "callback" || channel.config.callbackEndpoint !== "feishu-long-connection") {
+    return { readiness: "needs-event-subscription", canStart: false, missingEnv: [] };
+  }
+  if (!channel.config.appIdRef) {
+    return { readiness: "needs-app-id", canStart: false, missingEnv: [] };
+  }
+  if (!channel.config.appSecretRef) {
+    return { readiness: "needs-app-secret", canStart: false, missingEnv: [] };
+  }
+  const missingEnv = [channel.config.appIdRef, channel.config.appSecretRef].filter((ref) => !resolveEnvRef(ref));
+  if (missingEnv.length) {
+    return { readiness: "needs-env", canStart: false, missingEnv };
+  }
+  if (channel.config.bindingUserId && channel.config.trustedSources.length > 0) {
+    return { readiness: "bound-ready", canStart: true, missingEnv: [] };
+  }
+  return { readiness: "ready-to-start", canStart: true, missingEnv: [] };
+}
+
+function formatFeishuBotStartReadiness(readiness: FeishuBotStartReadiness): string {
+  const lines = [
+    "Feishu Bot start readiness",
+    `- readiness: ${readiness.readiness}`,
+    `- can start: ${readiness.canStart ? "yes" : "no"}`,
+  ];
+  if (readiness.missingEnv.length) {
+    lines.push(`- missing env: ${readiness.missingEnv.join(", ")}`);
+  }
+  lines.push("- secret values are not printed.");
+  lines.push("- ready-to-start means Bot can run and wait for /bind CODE.");
+  lines.push("- bound/ready means ordinary mobile messages can pass binding/trusted-source checks.");
+  lines.push("- webhook path remains notification-only.");
+  return lines.join("\n");
+}
+
+function stopRemoteBotChannel(channelId: string): boolean {
+  const handle = feishuLongConnectionHandles.get(channelId);
+  if (!handle) return false;
+  handle.close();
+  feishuLongConnectionHandles.delete(channelId);
+  return true;
 }
 
 function resolveEnvRef(ref: string | undefined): string | undefined {
@@ -544,6 +753,7 @@ export function formatRemoteEvents(context: TuiContext): string {
 export function formatRemoteDoctor(context: TuiContext): string {
   const lines = [
     `Remote Doctor：${context.remote.enabled ? "enabled" : "disabled"}；失败会降级为 disabled/blocked，不阻塞主 TUI。`,
+    "推荐入口：/remote bot doctor；旧 /remote bridge 命令保留兼容。",
   ];
   for (const channel of context.remote.channels) {
     const grade = getRemoteCapabilityGrade(channel);
@@ -561,6 +771,162 @@ export function formatRemoteDoctor(context: TuiContext): string {
     "Secrets/endpoints are redacted. webhook/webhook_mock 仅单向通知；审批/自然语言回传需官方 CLI/应用入站能力。",
   );
   return lines.join("\n");
+}
+
+function formatRemoteBotDoctorSummary(context: TuiContext, channelArg: string | undefined): string {
+  const channels = selectBotChannels(context, channelArg);
+  if (channels.length === 0 && normalizeRemoteChannelId(channelArg ?? "") === "wechat") {
+    return "Personal WeChat Bot: experimental blocked.";
+  }
+  if (channels.length === 0) return "Remote Bot doctor: choose feishu, dingtalk, or wechat.";
+  return channels
+    .map((channel) => `${formatBotChannelName(channel.id)}: ${getRemoteBotUserStatus(channel)}`)
+    .join("；");
+}
+
+function formatRemoteBotDoctorDetails(context: TuiContext, channelArg: string | undefined): string {
+  const normalized = normalizeRemoteChannelId(channelArg ?? "");
+  if (normalized === "wechat") return formatWechatBotExperimentalDetails();
+  const channels = selectBotChannels(context, channelArg);
+  if (channels.length === 0) {
+    return "Remote Bot doctor：请选择 feishu、dingtalk 或 wechat。";
+  }
+  const lines = ["Remote Bot doctor（普通视图只显示 Bot 状态；底层 bridge 诊断请用 /remote bridge doctor）"];
+  for (const channel of channels) {
+    const status = getRemoteBotUserStatus(channel);
+    lines.push(`- ${formatBotChannelName(channel.id)}: ${status}`);
+    lines.push(`  setup: /remote bot setup ${channel.id}`);
+    lines.push(`  start: /remote bot start ${channel.id}`);
+    lines.push(`  pair: /remote bot pair ${channel.id}`);
+    if (channel.id === "feishu") {
+      lines.push("  needs: App ID, App Secret, Bot enabled, long connection, message receive event.");
+      lines.push(`  readiness: ${formatFeishuBotStartReadiness(getFeishuBotStartReadiness(channel)).replace(/\n/g, "\n  ")}`);
+    } else if (channel.id === "dingtalk") {
+      lines.push("  needs: Client ID, Client Secret, robot Stream mode, published app.");
+      lines.push("  real Stream smoke: NOT RUN without credentials and a published DingTalk bot.");
+    }
+    lines.push(`  pairing: ${channel.config.bindingUserId && channel.config.trustedSources.length > 0 ? "complete" : "needed"}`);
+  }
+  lines.push("Secrets, endpoints, trusted source lists, binding ids, callback refs, QR/session tokens, and raw payloads are redacted.");
+  lines.push("Webhook notification remains notification-only; Bot inbound must enter the existing RemoteInboundMessage main chain.");
+  return lines.join("\n");
+}
+
+function formatRemoteBotSetupSummary(context: TuiContext, channelArg: string | undefined): string {
+  const normalized = normalizeRemoteChannelId(channelArg ?? "");
+  if (normalized === "wechat") return "Personal WeChat Bot setup: experimental opt-in only.";
+  const channel = findRemoteChannel(context, normalized);
+  if (!channel) return "Remote Bot setup: choose feishu, dingtalk, or wechat.";
+  return `${formatBotChannelName(channel.id)} setup: ${getRemoteBotUserStatus(channel)}.`;
+}
+
+function formatRemoteBotSetupDetails(context: TuiContext, channelArg: string | undefined): string {
+  const normalized = normalizeRemoteChannelId(channelArg ?? "");
+  if (normalized === "wechat") return formatWechatBotExperimentalDetails();
+  const channel = findRemoteChannel(context, normalized);
+  if (!channel) {
+    return "Remote Bot setup：请选择 feishu、dingtalk 或 wechat。示例：/remote bot setup feishu";
+  }
+  if (channel.id === "feishu") return formatFeishuBotSetupDetails(channel);
+  if (channel.id === "dingtalk") return formatDingTalkBotSetupDetails(channel);
+  return "Enterprise WeChat is future/not implemented in this Bot productization stage.";
+}
+
+function formatFeishuBotSetupDetails(channel: RemoteChannelState): string {
+  return [
+    "Feishu Bot setup",
+    "- Prepare a Feishu/Lark app with Bot enabled.",
+    "- Enable long connection and subscribe to im.message.receive_v1.",
+    "- Set env refs: LINGHUN_REMOTE_FEISHU_APP_ID and LINGHUN_REMOTE_FEISHU_APP_SECRET.",
+    "- Webhook notification is optional and not required for mobile control.",
+    "- Start: /remote bot start feishu.",
+    "- Pair from the Bot chat: /remote bot pair feishu, then send /bind CODE.",
+    `- Current Bot status: ${getRemoteBotUserStatus(channel)}.`,
+    "- Secret values are never printed or stored in reports.",
+  ].join("\n");
+}
+
+function formatDingTalkBotSetupDetails(channel: RemoteChannelState): string {
+  return [
+    "DingTalk Bot setup",
+    "- Official Stream path uses the dingtalk-stream SDK and Client ID / Client Secret.",
+    "- In DingTalk developer console, enable robot message receiving, choose Stream mode, and publish the app.",
+    "- Robot message topic: /v1.0/im/bot/messages/get.",
+    "- Card callback topic: /v1.0/card/instances/callback; advanced cards must set callbackType=STREAM.",
+    "- Configure env refs as LINGHUN_REMOTE_DINGTALK_CLIENT_ID and LINGHUN_REMOTE_DINGTALK_CLIENT_SECRET.",
+    "- Current build has offline adapter normalization only; real DingTalk Stream start is NOT RUN without SDK wiring and credentials.",
+    `- Current Bot status: ${getRemoteBotUserStatus(channel)}.`,
+    "- sessionWebhook and Client Secret are treated as secrets and never persisted in summaries.",
+  ].join("\n");
+}
+
+function formatWechatBotExperimentalDetails(): string {
+  return [
+    "Personal WeChat Bot setup: experimental",
+    "- Default: blocked. Set LINGHUN_REMOTE_WECHAT_EXPERIMENTAL=1 only after accepting QR-login, third-party puppet/provider, account restriction, token, and session risks.",
+    "- No Wechaty/PadLocal dependency is bundled in Linghun core in this stage.",
+    "- A real plugin bridge must provide proof before messages can become RemoteInboundMessage.",
+    "- QR payloads, QR images, session files, wxid/openid/unionid, puppet tokens, cookies, and device data must be redacted.",
+    "- No fake WeChat inbound PASS is allowed; without a real opted-in bridge, /remote bot start wechat remains blocked.",
+  ].join("\n");
+}
+
+function formatRemoteBotStartBlockedSummary(channelId: string): string {
+  if (channelId === "dingtalk") return "DingTalk Bot start blocked: Stream SDK wiring and real credentials are not configured.";
+  if (channelId === "wechat") {
+    return process.env.LINGHUN_REMOTE_WECHAT_EXPERIMENTAL === "1"
+      ? "Personal WeChat Bot start blocked: experimental plugin bridge is not installed."
+      : "Personal WeChat Bot start blocked: experimental opt-in is disabled.";
+  }
+  return "Remote Bot start blocked: choose feishu, dingtalk, or wechat.";
+}
+
+function toRemoteBotStartSummary(
+  channelId: string,
+  status: "started" | "already_running" | "blocked" | "failed",
+): string {
+  if (status === "started") return `${formatBotChannelName(channelId)} started; waiting for mobile messages.`;
+  if (status === "already_running") return `${formatBotChannelName(channelId)} Bot is already running.`;
+  if (status === "failed") return `${formatBotChannelName(channelId)} Bot start failed; check app settings.`;
+  return `${formatBotChannelName(channelId)} Bot start blocked; finish setup first.`;
+}
+
+function selectBotChannels(context: TuiContext, channelArg: string | undefined): RemoteChannelState[] {
+  const normalized = normalizeRemoteChannelId(channelArg ?? "");
+  if (normalized) {
+    const channel = findRemoteChannel(context, normalized);
+    return channel ? [channel] : [];
+  }
+  return context.remote.channels.filter((channel) => channel.id === "feishu" || channel.id === "dingtalk");
+}
+
+function getRemoteBotUserStatus(channel: RemoteChannelState): string {
+  const report = getRemoteBridgeDoctor({ enabled: true, channels: [channel], events: [], processedMessageIds: [], sessionDisabledChannelIds: [], pairings: [], inbox: [] }, channel.id);
+  if (channel.id === "feishu") {
+    const readiness = getFeishuBotStartReadiness(channel);
+    if (feishuLongConnectionHandles.has(channel.id)) return "running";
+    if (readiness.readiness === "needs-app-id") return "needs app id";
+    if (readiness.readiness === "needs-app-secret") return "needs app secret";
+    if (readiness.readiness === "needs-env") return "needs app env";
+    if (readiness.readiness === "notification-only") return "notification-only";
+    if (readiness.readiness === "ready-to-start") return "ready-to-start";
+    if (readiness.readiness === "bound-ready") return "bound/ready";
+    return "needs event subscription";
+  }
+  if (channel.id === "dingtalk") {
+    if (!channel.config.appIdRef) return "needs client id";
+    if (!channel.config.appSecretRef && !channel.config.tokenRef) return "needs client secret";
+    if (report.readiness === "needs-daemon") return "needs stream permission";
+    return "stream adapter not connected";
+  }
+  return "future/not implemented";
+}
+
+function formatBotChannelName(channelId: string): string {
+  if (channelId === "feishu") return "Feishu Bot";
+  if (channelId === "dingtalk") return "DingTalk Bot";
+  if (channelId === "wechat") return "Personal WeChat Bot";
+  return `${channelId} Bot`;
 }
 
 export type RemoteCapabilityGrade =
@@ -1064,7 +1430,7 @@ export function validateRemoteInboundEnvelope(
     status: RemoteInboundDecision["status"],
     summary: string,
   ): RemoteInboundDecision => ({ kind: message.kind, status, summary, evidenceCreated: false });
-  if (!channel || channel.runtimeStatus !== "ready") {
+  if (!channel || !canValidateRemoteInboundEnvelope(channel)) {
     return reject("channel_not_ready", "remote channel is not ready");
   }
   // 入站能力分级：webhook / webhook_mock 恒为 notification-only；只有官方 CLI poll
@@ -1106,7 +1472,7 @@ export function validateRemotePairingEnvelope(
     status: RemoteInboundDecision["status"],
     summary: string,
   ): RemoteInboundDecision => ({ kind: message.kind, status, summary, evidenceCreated: false });
-  if (!channel || channel.runtimeStatus !== "ready") {
+  if (!channel || !canValidateRemoteInboundEnvelope(channel)) {
     return reject("channel_not_ready", "remote channel is not ready");
   }
   if (
@@ -1126,6 +1492,16 @@ export function validateRemotePairingEnvelope(
     return reject("bad_signature", "remote pairing signature check failed");
   }
   return { status: "envelope_accepted", channel };
+}
+
+function canValidateRemoteInboundEnvelope(channel: RemoteChannelState): boolean {
+  if (channel.runtimeStatus === "ready") return true;
+  if (channel.runtimeStatus !== "blocked") return false;
+  if (channel.lastError !== "not_bound" && channel.lastError !== "source_not_trusted") return false;
+  return (
+    channel.config.transport === "official_cli" &&
+    Boolean(channel.config.inboundMode && channel.config.inboundMode !== "none")
+  );
 }
 
 export function consumeRemoteInboundMessage(context: TuiContext, messageId: string): void {
