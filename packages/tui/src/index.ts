@@ -5512,6 +5512,15 @@ export async function handleNaturalInput(
   //   - 已移除 composite local status NL 应答（"索引和记忆 MCP 打开了吗"等）。
   // 这些产品能力仍可通过精确 slash command 使用（/trust、/index、/doctor、/status），
   // 普通自然语言不再被中文/英文关键词表转成本地命令意图。
+
+  // D.14H-F — Workflow Plan 自然语言 dispatch：仅拦截明确的 workflow plan intent，
+  // 路由到 /workflows plan <goal>。不扩大拦截范围，普通开发请求仍进模型主链。
+  const workflowPlanGoal = extractWorkflowPlanNaturalGoal(text);
+  if (workflowPlanGoal) {
+    const result = await handleSlashCommand(`/workflows plan ${workflowPlanGoal}`, context, output);
+    return result === "message" ? "message" : "handled";
+  }
+
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
@@ -5524,6 +5533,22 @@ export async function handleNaturalInput(
     await runAutoLearningOnTurnEnd(context, text);
   }
   return "message";
+}
+
+// D.14H-F — 窄范围 workflow plan 自然语言提取。只匹配明确的 workflow plan intent，
+// 不拦截普通开发请求（"帮我写功能/修 bug/实现报告"等）。
+function extractWorkflowPlanNaturalGoal(text: string): string | null {
+  const normalized = text.trim();
+  // 中文：以"工作流计划"/"生成工作流计划"开头，后跟目标
+  const zhMatch =
+    /^(?:请)?(?:生成|创建)?工作流计划[：:\s]*(.+)$/u.exec(normalized) ??
+    /^(?:请)?(?:生成|创建)工作流[：:\s]*(.+)$/u.exec(normalized);
+  if (zhMatch?.[1]?.trim()) return zhMatch[1].trim();
+  // 英文：以 "workflow plan" / "create a workflow plan" 开头，后跟目标
+  const enMatch =
+    /^(?:please\s+)?(?:create\s+(?:a\s+)?)?workflow\s+plan[:\s]*(.+)$/iu.exec(normalized);
+  if (enMatch?.[1]?.trim()) return enMatch[1].trim();
+  return null;
 }
 
 async function runIndexSafetyRepair(context: TuiContext, output: Writable): Promise<void> {
@@ -6040,7 +6065,7 @@ async function sendMessage(
 
       if (!roundAssistantText && toolCalls.length === 0) {
         clearRequestActivity(context);
-        const message = await recordProviderEmptyResponse(
+        const result = await recordProviderEmptyResponse(
           context,
           sessionId,
           roundChunkCount,
@@ -6048,7 +6073,11 @@ async function sendMessage(
           roundFinishReason,
           roundHadThinking,
         );
-        writeErrorLine(output, message);
+        if (result.isError) {
+          writeErrorLine(output, result.message);
+        } else {
+          writeLine(output, result.message);
+        }
         return;
       }
 
@@ -6567,7 +6596,7 @@ async function streamFinalModelAnswerWithoutTools(
   }
   if (!assistantText) {
     clearRequestActivity(context);
-    const message = await recordProviderEmptyResponse(
+    const result = await recordProviderEmptyResponse(
       context,
       sessionId,
       chunkCount,
@@ -6575,7 +6604,11 @@ async function streamFinalModelAnswerWithoutTools(
       finishReason,
       hadThinking,
     );
-    writeErrorLine(output, message);
+    if (result.isError) {
+      writeErrorLine(output, result.message);
+    } else {
+      writeLine(output, result.message);
+    }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
@@ -6873,7 +6906,7 @@ async function recordProviderEmptyResponse(
   hadUsage: boolean,
   finishReason: string | undefined,
   hadThinking: boolean,
-): Promise<string> {
+): Promise<{ message: string; isError: boolean }> {
   const provider = getRuntimeStatusProvider(context);
   const model = context.model;
   const metadata = [
@@ -6884,6 +6917,20 @@ async function recordProviderEmptyResponse(
     `hadThinking=${hadThinking ? "yes" : "no"}`,
     `finishReason=${finishReason ?? "unknown"}`,
   ].join("; ");
+  // D.14H-F — reasoning-only stream（DeepSeek v4 pro 等 reasoning-first 模型）不再被
+  // 视为 provider empty/FAIL。evidence 标记为 provider_reasoning_only，级别为 info。
+  if (hadThinking) {
+    const evidence = createEvidenceRecord(
+      "command_output",
+      `provider_reasoning_only: ${metadata}`,
+      `provider:${provider}:model:${model}`,
+      ["provider_reasoning_only", "reasoning_stream_observed", provider, model],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+    await appendSystemEvent(context, sessionId, `provider_reasoning_only: ${metadata}`, "info");
+    return { message: formatProviderThinkingOnlyResponsePrimary(context.language), isError: false };
+  }
   const evidence = createEvidenceRecord(
     "command_output",
     `provider_empty_response: ${metadata}`,
@@ -6896,11 +6943,7 @@ async function recordProviderEmptyResponse(
     ...evidence,
   });
   await appendSystemEvent(context, sessionId, `provider_empty_response: ${metadata}`, "warning");
-  // D.13M：本轮只有 thinking 没有 text/tool_use 时，给用户区分性提示，不再用通用 empty response 文案。
-  if (hadThinking) {
-    return formatProviderThinkingOnlyResponsePrimary(context.language);
-  }
-  return formatProviderEmptyResponsePrimary(context.language);
+  return { message: formatProviderEmptyResponsePrimary(context.language), isError: true };
 }
 
 function currentModelSupportsTools(

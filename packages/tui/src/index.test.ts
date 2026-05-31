@@ -4649,6 +4649,56 @@ describe("Phase 06 TUI slash commands", () => {
     }
   });
 
+  it("D.14H-F: natural language workflow plan intent dispatches to /workflows plan, not model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    // 中文：明确 workflow plan intent 应被拦截
+    const zhPhrases = [
+      "工作流计划：实现用户登录功能",
+      "请生成工作流计划：重构数据库模块",
+      "生成工作流计划 优化缓存策略",
+      "创建工作流计划：添加单元测试",
+    ];
+    for (const phrase of zhPhrases) {
+      const out = new MemoryOutput();
+      const result = await handleNaturalInput(phrase, context, out);
+      expect(result).toBe("handled");
+      // /workflows plan 输出包含 workflow plan 相关内容
+      expect(out.text).not.toContain("正在思考…");
+    }
+
+    // 英文：明确 workflow plan intent 应被拦截
+    const enPhrases = [
+      "workflow plan implement user authentication",
+      "please create a workflow plan: refactor the database module",
+      "create a workflow plan optimize caching strategy",
+    ];
+    for (const phrase of enPhrases) {
+      const out = new MemoryOutput();
+      const result = await handleNaturalInput(phrase, context, out);
+      expect(result).toBe("handled");
+      expect(out.text).not.toContain("正在思考…");
+    }
+
+    // 普通开发请求不应被拦截
+    const ordinaryPhrases = [
+      "帮我写一个排序算法",
+      "修复这个 bug",
+      "帮我实现导出报表功能",
+      "分析这个项目并输出部署报告",
+      "implement a sorting algorithm",
+      "fix this bug",
+    ];
+    for (const phrase of ordinaryPhrases) {
+      const out = new MemoryOutput();
+      const result = await handleNaturalInput(phrase, context, out);
+      expect(result).toBe("message");
+    }
+  });
+
   it("keeps ordinary report deploy feature and bug-fix requests on provider path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -14707,7 +14757,7 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
     return requests;
   }
 
-  it("thinking-only stream → TUI shows thinking-only message; transcript records hadThinking=yes via provider_empty_response", async () => {
+  it("thinking-only stream → TUI shows thinking-only message; transcript records hadThinking=yes via provider_reasoning_only", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-think-only-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await setupClaudeAnthropicEnv(project);
@@ -14744,10 +14794,11 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const sessions = await store.list();
     const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    // D.14H-F: reasoning-only 不再标记为 provider_empty_response，而是 provider_reasoning_only
     expect(
       transcript.some(
         (event) =>
-          event.type === "system_event" && event.message.includes("provider_empty_response"),
+          event.type === "system_event" && event.message.includes("provider_reasoning_only"),
       ),
     ).toBe(true);
     expect(
@@ -14755,6 +14806,77 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
         (event) => event.type === "system_event" && event.message.includes("hadThinking=yes"),
       ),
     ).toBe(true);
+    // 不应再出现 provider_empty_response
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("provider_empty_response"),
+      ),
+    ).toBe(false);
+  });
+
+  it("D.14H-F: DeepSeek reasoning_content-only stream is not treated as error/FAIL", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-ds-reason-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "deepseek-v4-pro",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://api.deepseek.test/v1",
+            apiKey: "sk-test",
+            model: "deepseek-v4-pro",
+          },
+        },
+      }),
+      "utf8",
+    );
+    // Simulate DeepSeek v4 pro: reasoning_content only, no delta.content
+    const requests = mockOpenAiEmptyFetch(
+      [
+        'data: {"id":"chatcmpl-ds-reason","choices":[{"delta":{"reasoning_content":"Let me analyze this step by step..."}}]}',
+        'data: {"id":"chatcmpl-ds-reason","choices":[{"delta":{"reasoning_content":" The project structure shows..."}}]}',
+        'data: {"id":"chatcmpl-ds-reason","choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: {"id":"chatcmpl-ds-reason","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}',
+        "data: [DONE]",
+      ]
+        .map((l) => l + "\n\n")
+        .join(""),
+    );
+
+    const output = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["烟测通过\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    // 应显示 thinking-only 提示，不是通用 empty response 错误
+    expect(output.text).toContain("模型已返回思考流但没有最终文本");
+    expect(output.text).not.toContain("模型没有返回有效回答");
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    // evidence 标记为 provider_reasoning_only，不是 provider_empty_response
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("provider_reasoning_only"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("provider_empty_response"),
+      ),
+    ).toBe(false);
   });
 
   it("thinking_delta then text_delta → main screen shows only the final text, not the thinking content", async () => {
