@@ -281,13 +281,13 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "workflows",
     "/workflows",
-    ["workflow", "workflows", "工作流", "bug-fix", "bug fix"],
+    ["workflow", "workflows", "工作流", "bug-fix", "bug fix", "plan workflow", "workflow plan", "工作流计划"],
     "工作流",
     "Workflows",
-    "列出工作流模板；启动模板只展示 Start Gate。",
-    "Lists workflow templates; starting one only shows a Start Gate.",
-    "想知道有哪些工作流或启动 bug-fix/review 模板。",
-    "Use to discover or start bug-fix/review workflows.",
+    "列出工作流模板；/workflows plan <目标> 生成计划预览。启动模板只展示 Start Gate。",
+    "Lists workflow templates; /workflows plan <goal> generates a plan preview. Starting one only shows a Start Gate.",
+    "想知道有哪些工作流或启动 bug-fix/review 模板，或用 /workflows plan 生成计划预览。",
+    "Use to discover or start bug-fix/review workflows, or /workflows plan to generate a plan preview.",
     "start_gate",
   ),
   cap(
@@ -2048,6 +2048,10 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
     return "/index status";
   }
   if (capability.id === "workflows") {
+    if (/plan|计划|规划/u.test(normalized)) {
+      const planGoal = normalized.replace(/.*(?:plan|计划|规划)\s*/u, "").trim();
+      return planGoal ? `/workflows plan ${planGoal}` : "/workflows plan";
+    }
     const workflow = extractWorkflowName(normalized);
     return workflow ? `/workflows ${workflow}` : "/workflows";
   }

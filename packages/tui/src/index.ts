@@ -2508,6 +2508,30 @@ async function handleWorkflowsCommand(
     writeLine(output, formatWorkflows(context));
     return;
   }
+  if (name === "plan") {
+    const goal = args.slice(1).join(" ").trim();
+    if (!goal) {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Usage: /workflows plan <goal>"
+          : "用法：/workflows plan <目标描述>",
+      );
+      return;
+    }
+    const { generateWorkflowPlanPreview, formatWorkflowPlanPreview } = await import(
+      "./workflow-planner-entry.js"
+    );
+    const result = generateWorkflowPlanPreview({
+      goal,
+      permissionMode: context.permissionMode,
+    });
+    writeLine(output, formatWorkflowPlanPreview(result, context.language));
+    if (result.ok) {
+      context.lastFullOutput = result.detailsText;
+    }
+    return;
+  }
   const template = context.workflows.templates.find((item) => item.id === name);
   if (!template) {
     writeLine(output, `未知 workflow：${name}。可运行 /workflows 查看可用模板。`);
