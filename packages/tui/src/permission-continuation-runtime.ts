@@ -132,11 +132,7 @@ export function getHardDenyReason(
     // D.13O — UNC / WebDAV / `@SSL@` 风格远程路径必须直接拒绝；resolve()
     // 在某些 Node 版本会把它们规范化成本地路径，会绕过下面的 startsWith("..")
     // 检查。为保守起见，单独 hard-deny。
-    if (
-      file.startsWith("\\\\") ||
-      file.startsWith("//") ||
-      /@SSL@\d+|@\d+@SSL/iu.test(file)
-    ) {
+    if (file.startsWith("\\\\") || file.startsWith("//") || /@SSL@\d+|@\d+@SSL/iu.test(file)) {
       return `安全保护：UNC / WebDAV / 远程路径不允许走工作区工具：${file}。`;
     }
     const target = resolve(workspaceRoot, file);
@@ -409,16 +405,25 @@ export function normalizeToolName(name: string): ToolName | null {
 
 export function redactRemoteSummary(value: string): string {
   const bounded = truncateDisplay(value.replace(/\s+/g, " "), 500);
-  return bounded
-    .replace(
-      /(api[_-]?key|token|secret|authorization|provider raw request)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu,
-      "$1=[REDACTED]",
-    )
-    .replace(/\bbearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]+/gu, "sk-[REDACTED]")
-    .replace(/transcript\s*[:=]\s*[^\s,;]+/giu, "transcript=[REDACTED]")
-    .replace(/(source|log|index result|evidence)\s*[:=]\s*\{[^}]*\}/giu, "$1=[REDACTED]")
-    .replace(/https?:\/\/[^\s]+/giu, "[REDACTED_ENDPOINT]");
+  return (
+    bounded
+      .replace(
+        /(api[_-]?key|token|secret|authorization|provider raw request)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu,
+        "$1=[REDACTED]",
+      )
+      .replace(/\bbearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
+      .replace(/\bsk-[A-Za-z0-9_-]+/gu, "sk-[REDACTED]")
+      .replace(/transcript\s*[:=]\s*[^\s,;]+/giu, "transcript=[REDACTED]")
+      .replace(/(source|log|index result|evidence)\s*[:=]\s*\{[^}]*\}/giu, "$1=[REDACTED]")
+      .replace(/https?:\/\/[^\s]+/giu, "[REDACTED_ENDPOINT]")
+      // D.14E — 绝对路径不得出站。Windows 盘符路径与常见 Unix 根路径都脱敏，避免
+      // 泄漏本地工作区位置；只匹配真实文件系统根，避免误伤 approve/reject 之类文本。
+      .replace(/\b[A-Za-z]:[\\/][^\s,;]+/gu, "[REDACTED_PATH]")
+      .replace(
+        /(?:^|(?<=[\s,;=(]))\/(?:home|Users|usr|var|opt|etc|tmp|root|mnt|srv|private|Volumes)\/[^\s,;]+/gu,
+        "[REDACTED_PATH]",
+      )
+  );
 }
 
 export function remoteTranscriptSummary(value: string): string {

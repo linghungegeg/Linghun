@@ -19,13 +19,27 @@ export function formatRemoteStatus(remote: RemoteState): string {
 
 export function formatRemoteTestResult(channel: RemoteChannelState, event: RemoteEvent): string {
   const ok = event.status === "sent";
-  return [
-    `Remote test ${ok ? "已发送" : "未发送"}：${channel.id}`,
+  const headline =
+    event.status === "sent"
+      ? "已发送"
+      : event.status === "mock"
+        ? "mock 演练（非真实投递）"
+        : event.status === "blocked"
+          ? "已阻断"
+          : "未发送";
+  const lines = [
+    `Remote test ${headline}：${channel.id}`,
     `- status: ${event.status}`,
     `- summary: ${event.redactedSummary}`,
+  ];
+  if (event.deliveryDetail) {
+    lines.push(`- detail: ${event.deliveryDetail}`);
+  }
+  lines.push(
     `- next: ${ok ? "/remote status" : channel.nextAction}`,
-    "- 本测试只使用脱敏摘要；不代表真实外网回调服务器已接入。",
-  ].join("\n");
+    "- 本测试只使用脱敏摘要；webhook_mock 仅为诊断演练，不代表真实外网回调服务器已接入。",
+  );
+  return lines.join("\n");
 }
 
 export function formatMcpTools(mcp: McpState): string {

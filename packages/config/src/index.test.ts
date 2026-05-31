@@ -481,6 +481,9 @@ describe("config directories", () => {
       "job_status",
       "job_report",
       "verification_result",
+      "failure_summary",
+      "stable_point_result",
+      "index_result",
     ]);
     expect(config.remote.channels.wecom?.enabled).toBe(false);
     expect(config.remote.channels.dingtalk?.cliPath).toBe("dws");

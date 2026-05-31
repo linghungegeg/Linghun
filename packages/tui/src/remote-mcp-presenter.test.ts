@@ -63,9 +63,32 @@ describe("remote MCP presenters", () => {
         "- status: sent",
         "- summary: safe summary",
         "- next: /remote status",
-        "- 本测试只使用脱敏摘要；不代表真实外网回调服务器已接入。",
+        "- 本测试只使用脱敏摘要；webhook_mock 仅为诊断演练，不代表真实外网回调服务器已接入。",
       ].join("\n"),
     );
+  });
+
+  it("formats webhook_mock test result as a diagnostic dry run, not a real PASS", () => {
+    const event: RemoteEvent = {
+      id: "event-mock",
+      channel: "feishu",
+      eventType: "job_status",
+      createdAt: "2026-05-23T00:00:00.000Z",
+      expiresAt: "2026-05-23T00:05:00.000Z",
+      nonce: "nonce-mock",
+      messageId: "message-mock",
+      source: "linghun-local",
+      redactedSummary: "safe summary",
+      refs: [],
+      status: "mock",
+      deliveryDetail: "webhook_mock diagnostic dry run — not a real remote delivery",
+    };
+
+    const text = formatRemoteTestResult(feishuChannel, event);
+    expect(text).toContain("Remote test mock 演练（非真实投递）：feishu");
+    expect(text).toContain("- status: mock");
+    expect(text).toContain("webhook_mock diagnostic dry run");
+    expect(text).not.toContain("已发送");
   });
 
   it("formats MCP tool placeholder summary", () => {

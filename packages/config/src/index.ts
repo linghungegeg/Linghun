@@ -142,11 +142,15 @@ export type PluginConfig = {
 
 export type RemoteChannelType = "wecom" | "enterprise-wechat" | "feishu" | "lark" | "dingtalk";
 export type RemoteTransport = "official_cli" | "webhook_mock" | "webhook";
+export type RemoteInboundMode = "none" | "poll" | "callback";
 export type RemoteEventType =
   | "approval_request"
   | "job_status"
   | "job_report"
-  | "verification_result";
+  | "verification_result"
+  | "failure_summary"
+  | "stable_point_result"
+  | "index_result";
 
 export type RemoteChannelConfig = {
   enabled: boolean;
@@ -161,6 +165,11 @@ export type RemoteChannelConfig = {
   redactionPolicy: "summary_only";
   allowedEventTypes: RemoteEventType[];
   trustedSources: string[];
+  // D.14E — 入站能力分级：none=notification-only（默认）；poll=官方 CLI 拉取消息；
+  // callback=已部署回调端点接收手机回传。webhook/webhook_mock 通道恒为 none。
+  inboundMode?: RemoteInboundMode;
+  // callback 模式下用户已部署的回调端点引用（脱敏，仅 doctor 内部判断 ready）。
+  callbackEndpoint?: string;
 };
 
 export type RemoteConfig = {
@@ -501,8 +510,17 @@ export const defaultConfig: LinghunConfig = {
         transport: "official_cli",
         cliPath: "feishu-cli",
         redactionPolicy: "summary_only",
-        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        allowedEventTypes: [
+          "approval_request",
+          "job_status",
+          "job_report",
+          "verification_result",
+          "failure_summary",
+          "stable_point_result",
+          "index_result",
+        ],
         trustedSources: [],
+        inboundMode: "none",
       },
       wecom: {
         enabled: false,
@@ -510,8 +528,17 @@ export const defaultConfig: LinghunConfig = {
         transport: "official_cli",
         cliPath: "wecom-cli",
         redactionPolicy: "summary_only",
-        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        allowedEventTypes: [
+          "approval_request",
+          "job_status",
+          "job_report",
+          "verification_result",
+          "failure_summary",
+          "stable_point_result",
+          "index_result",
+        ],
         trustedSources: [],
+        inboundMode: "none",
       },
       dingtalk: {
         enabled: false,
@@ -519,8 +546,17 @@ export const defaultConfig: LinghunConfig = {
         transport: "official_cli",
         cliPath: "dws",
         redactionPolicy: "summary_only",
-        allowedEventTypes: ["approval_request", "job_status", "job_report", "verification_result"],
+        allowedEventTypes: [
+          "approval_request",
+          "job_status",
+          "job_report",
+          "verification_result",
+          "failure_summary",
+          "stable_point_result",
+          "index_result",
+        ],
         trustedSources: [],
+        inboundMode: "none",
       },
     },
   },
@@ -1451,12 +1487,26 @@ function validateRemote(remote: RemoteConfig): void {
     assertStringArray(channel.allowedEventTypes, `${path}.allowedEventTypes`);
     for (const [index, eventType] of channel.allowedEventTypes.entries()) {
       if (
-        !["approval_request", "job_status", "job_report", "verification_result"].includes(eventType)
+        ![
+          "approval_request",
+          "job_status",
+          "job_report",
+          "verification_result",
+          "failure_summary",
+          "stable_point_result",
+          "index_result",
+        ].includes(eventType)
       ) {
         throw new Error(`${path}.allowedEventTypes.${index} is invalid`);
       }
     }
     assertStringArray(channel.trustedSources, `${path}.trustedSources`);
+    if (channel.inboundMode !== undefined) {
+      if (!["none", "poll", "callback"].includes(channel.inboundMode)) {
+        throw new Error(`${path}.inboundMode is invalid`);
+      }
+    }
+    assertOptionalString(channel.callbackEndpoint, `${path}.callbackEndpoint`);
   }
 }
 

@@ -47,18 +47,21 @@ import {
   formatDeferredToolsSystemReminder,
   getCodebaseMemoryToolRisk,
   handleNaturalInput,
+  handleRemoteInboundMessage,
   handleSlashCommand,
   handleTuiKeypress,
   isPotentiallyMutatingMcpTool,
   listDeferredTools,
   parseMcpDeferredToolName,
   processRemoteApprovalForTest,
+  processRemoteInbound,
   recordModelUsage,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
   runTui,
   runVerificationCommandForTest,
   searchDeferredTools,
+  sendRemoteEventReal,
   snapshotDeferredTools,
   snapshotDeferredToolsSummary,
   snapshotDiscoveredDeferredToolsSummary,
@@ -9770,7 +9773,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("cli_missing");
     expect(output.text).toContain("dingtalk: blocked");
     expect(output.text).toContain("webhook_missing");
-    expect(output.text).toContain("Remote test 已发送：feishu");
+    // feishu 使用 webhook_mock：诚实标注为诊断演练，不伪装真实投递 PASS。
+    expect(output.text).toContain("Remote test mock 演练（非真实投递）：feishu");
+    expect(output.text).toContain("webhook_mock diagnostic dry run");
     expect(output.text).toContain("Remote Channels：已开启");
     expect(output.text).toContain("Secrets/endpoints are redacted");
     expect(output.text).not.toContain("secret-value");
@@ -9856,6 +9861,567 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.evidence).toEqual([]);
     expect(output.text).not.toContain("Native Runner");
     expect(output.text).not.toContain("17C");
+  });
+
+  it("D.14E sendRemoteEventReal distinguishes mock / sent / auth-fail / platform-fail / cli-missing / blocked", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "webhook_mock",
+            bindingUserId: "user-1",
+            trustedSources: ["feishu-user-1"],
+          },
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "webhook",
+            endpoint: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=KEY",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-user"],
+          },
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            bindingUserId: "ding-user",
+            trustedSources: ["ding-user"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+
+    const findChan = (id: string) => {
+      const channel = context.remote.channels.find((item) => item.id === id);
+      if (!channel) throw new Error(`missing channel ${id}`);
+      return channel;
+    };
+
+    const stubDeps = (
+      fetchStatus: number,
+      cliError?: Error,
+    ) => ({
+      fetch: async () => ({ status: fetchStatus, text: async () => "{}" }),
+      runCli: async () => {
+        if (cliError) throw cliError;
+        return { stdout: "", stderr: "" };
+      },
+      resolveSecret: () => undefined,
+      nowMs: () => 1_700_000_000_000,
+    });
+
+    // webhook_mock → mock, never a real PASS.
+    const mockEvent = createRemoteEvent(findChan("feishu"), "job_status", "redacted summary", []);
+    const mockResult = await sendRemoteEventReal(context, mockEvent, stubDeps(200));
+    expect(mockResult.status).toBe("mock");
+    expect(mockResult.deliveryDetail).toContain("not a real remote delivery");
+
+    // webhook 200 → sent.
+    const wecomChan = findChan("wecom");
+    const sentResult = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(wecomChan, "job_status", "redacted", []),
+      stubDeps(200),
+    );
+    expect(sentResult.status).toBe("sent");
+
+    // webhook 401 → failed (auth).
+    const authResult = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(wecomChan, "job_status", "redacted", []),
+      stubDeps(401),
+    );
+    expect(authResult.status).toBe("failed");
+    expect(authResult.deliveryDetail).toContain("auth");
+
+    // webhook 500 → failed (platform).
+    const platformResult = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(wecomChan, "job_status", "redacted", []),
+      stubDeps(500),
+    );
+    expect(platformResult.status).toBe("failed");
+
+    // official_cli runner success → sent.
+    const dingChan = findChan("dingtalk");
+    const cliSent = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(dingChan, "job_status", "redacted", []),
+      stubDeps(200),
+    );
+    expect(cliSent.status).toBe("sent");
+
+    // official_cli ENOENT → blocked, not a fake failure.
+    const cliMissing = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(dingChan, "job_status", "redacted", []),
+      stubDeps(200, Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })),
+    );
+    expect(cliMissing.status).toBe("blocked");
+
+    // disallowed event type → rejected (does not reach transport).
+    const restricted = findChan("wecom");
+    restricted.config.allowedEventTypes = ["job_status"];
+    const rejected = await sendRemoteEventReal(
+      context,
+      createRemoteEvent(restricted, "approval_request", "redacted", []),
+      stubDeps(200),
+    );
+    expect(rejected.status).toBe("rejected");
+  });
+
+  it("D.14E inbound validation rejects expired/replay/bad-nonce/bad-sig/source/binding and only resumes existing pending approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "ding-user",
+            bindingDeviceId: "ding-device",
+            trustedSources: ["ding-mobile-1"],
+          },
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "webhook_mock",
+            bindingUserId: "user-1",
+            trustedSources: ["feishu-user-1"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const dingChan = context.remote.channels.find((item) => item.id === "dingtalk");
+    if (!dingChan) throw new Error("missing dingtalk");
+    const approvalEvent = createRemoteEvent(dingChan, "approval_request", "approve redacted op", []);
+    context.remote.events.unshift(approvalEvent);
+
+    const base = {
+      kind: "approval_response" as const,
+      channel: "dingtalk",
+      messageId: "inbound-msg-1",
+      nonce: approvalEvent.nonce,
+      eventId: approvalEvent.id,
+      source: "ding-mobile-1",
+      bindingUserId: "ding-user",
+      bindingDeviceId: "ding-device",
+      signature: "mock:inbound:inbound-msg-1:" + approvalEvent.nonce,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      approve: true,
+    };
+
+    // notification-only channel (webhook_mock) → inbound disabled.
+    expect(
+      processRemoteInbound(context, { ...base, channel: "feishu", source: "feishu-user-1" }),
+    ).toMatchObject({ status: "inbound_disabled" });
+
+    // expired
+    expect(
+      processRemoteInbound(context, { ...base, expiresAt: new Date(Date.now() - 1).toISOString() }),
+    ).toMatchObject({ status: "expired" });
+    // unknown source
+    expect(processRemoteInbound(context, { ...base, source: "stranger" })).toMatchObject({
+      status: "unknown_source",
+    });
+    // wrong binding
+    expect(processRemoteInbound(context, { ...base, bindingDeviceId: "other" })).toMatchObject({
+      status: "wrong_binding",
+    });
+    // bad signature
+    expect(processRemoteInbound(context, { ...base, signature: "nope" })).toMatchObject({
+      status: "bad_signature",
+    });
+    // no pending approval → cannot approve anything
+    expect(processRemoteInbound(context, base)).toMatchObject({ status: "no_pending_approval" });
+
+    // with a pending approval, approve succeeds but does NOT clear pending (resolver does that).
+    (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolCall: { id: "c1", name: "Write", input: { filePath: "x", content: "y" } },
+      toolName: "Write",
+      sessionId: session.id,
+    };
+    expect(processRemoteInbound(context, base)).toMatchObject({ status: "approved" });
+    expect(
+      (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval,
+    ).toBeTruthy();
+    // replay of the same messageId is rejected.
+    expect(processRemoteInbound(context, base)).toMatchObject({ status: "replayed" });
+    // bad nonce on a fresh messageId is rejected as bad signature path.
+    expect(
+      processRemoteInbound(context, { ...base, messageId: "inbound-msg-2", nonce: "wrong", signature: "mock:inbound:inbound-msg-2:wrong" }),
+    ).toMatchObject({ status: "bad_signature" });
+    expect(context.evidence).toEqual([]);
+  });
+
+  it("D.14E 小返修: expired approval_request is rejected even when the inbound message itself is fresh", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "ding-user",
+            bindingDeviceId: "ding-device",
+            trustedSources: ["ding-mobile-1"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const dingChan = context.remote.channels.find((item) => item.id === "dingtalk");
+    if (!dingChan) throw new Error("missing dingtalk");
+    // The approval_request itself is already expired (TTL in the past).
+    const expiredEvent = createRemoteEvent(dingChan, "approval_request", "approve redacted op", [], -1);
+    expect(Date.parse(expiredEvent.expiresAt)).toBeLessThanOrEqual(Date.now());
+    context.remote.events.unshift(expiredEvent);
+
+    // A real pending approval exists; everything else (nonce/source/binding/signature/inbound expiry) is valid.
+    (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolCall: { id: "c1", name: "Write", input: { filePath: "x", content: "y" } },
+      toolName: "Write",
+      sessionId: session.id,
+    };
+    const message = {
+      kind: "approval_response" as const,
+      channel: "dingtalk",
+      messageId: "fresh-inbound-1",
+      nonce: expiredEvent.nonce,
+      eventId: expiredEvent.id,
+      source: "ding-mobile-1",
+      bindingUserId: "ding-user",
+      bindingDeviceId: "ding-device",
+      signature: "mock:inbound:fresh-inbound-1:" + expiredEvent.nonce,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      approve: true,
+    };
+
+    const decision = processRemoteInbound(context, message);
+    expect(decision.status).toBe("expired");
+    expect(decision.evidenceCreated).toBe(false);
+    // Must NOT consume the messageId, mutate the event, clear pending approval, or create evidence.
+    expect(context.remote.processedMessageIds).not.toContain("fresh-inbound-1");
+    expect(expiredEvent.status).toBe("pending");
+    expect(
+      (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval,
+    ).toBeTruthy();
+    expect(context.evidence).toEqual([]);
+  });
+
+  it("D.14E plan mode remote approve cannot execute mutating operations", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "ding-user",
+            trustedSources: ["ding-mobile-1"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "plan";
+    const dingChan = context.remote.channels.find((item) => item.id === "dingtalk");
+    if (!dingChan) throw new Error("missing dingtalk");
+    const approvalEvent = createRemoteEvent(dingChan, "approval_request", "approve write", []);
+    context.remote.events.unshift(approvalEvent);
+    (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolCall: { id: "c1", name: "Write", input: { filePath: "x", content: "y" } },
+      toolName: "Write",
+      sessionId: session.id,
+    };
+
+    const decision = processRemoteInbound(context, {
+      kind: "approval_response",
+      channel: "dingtalk",
+      messageId: "plan-inbound-1",
+      nonce: approvalEvent.nonce,
+      eventId: approvalEvent.id,
+      source: "ding-mobile-1",
+      bindingUserId: "ding-user",
+      signature: "mock:inbound:plan-inbound-1:" + approvalEvent.nonce,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      approve: true,
+    });
+
+    expect(decision.status).toBe("blocked");
+    // pending approval remains; plan mode never executes a write via remote approval.
+    expect(
+      (context as unknown as { pendingLocalApproval: unknown }).pendingLocalApproval,
+    ).toBeTruthy();
+  });
+
+  it("D.14E remote natural-language message routes verbatim into the local main chain (no keyword interception)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-mobile-1"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+
+    // Inputs that an action-keyword interceptor might wrongly try to execute locally.
+    for (const text of ["继续修复", "跑测试", "建立稳定点", "现在进展怎么样"]) {
+      const decision = processRemoteInbound(context, {
+        kind: "natural_language_message",
+        channel: "wecom",
+        messageId: `nl-${text}`,
+        nonce: "n",
+        source: "wecom-mobile-1",
+        bindingUserId: "wecom-user",
+        signature: `mock:inbound:nl-${text}:n`,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        text,
+      });
+      expect(decision.status).toBe("accepted");
+      // Text passes through verbatim — proving no keyword matching/execution.
+      expect(decision.routedText).toBe(text);
+      expect(decision.evidenceCreated).toBe(false);
+    }
+  });
+
+  it("D.14E remote summary payloads never leak secrets, endpoints, absolute paths, or transcripts", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "webhook_mock",
+            bindingUserId: "user-1",
+            trustedSources: ["feishu-user-1"],
+          },
+        },
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const feishu = context.remote.channels.find((item) => item.id === "feishu");
+    if (!feishu) throw new Error("missing feishu");
+    const dirty =
+      "job done token=sk-live-leak Bearer leak-bearer api_key=raw-key Authorization: Bearer auth-x " +
+      "transcript=full https://open.feishu.cn/hook/secret-token C:/Users/Admin/.linghun/secret.env /home/user/.ssh/id_rsa";
+    const event = createRemoteEvent(feishu, "failure_summary", dirty, [dirty]);
+    for (const probe of [
+      "sk-live-leak",
+      "leak-bearer",
+      "raw-key",
+      "auth-x",
+      "transcript=full",
+      "open.feishu.cn/hook/secret-token",
+      "C:/Users/Admin/.linghun/secret.env",
+      "/home/user/.ssh/id_rsa",
+    ]) {
+      expect(event.redactedSummary).not.toContain(probe);
+      for (const ref of event.refs) {
+        expect(ref).not.toContain(probe);
+      }
+    }
+  });
+
+  it("D.14E doctor shows per-platform capability grade; webhook paths are notification-only", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          feishu: {
+            ...defaultConfig.remote.channels.feishu,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "user-1",
+            trustedSources: ["feishu-user-1"],
+          },
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-user"],
+          },
+          dingtalk: {
+            ...defaultConfig.remote.channels.dingtalk,
+            enabled: true,
+            transport: "webhook",
+            endpoint: "https://oapi.dingtalk.com/robot/send?access_token=tok",
+            bindingUserId: "ding-user",
+            trustedSources: ["ding-user"],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/remote doctor", context, output);
+    await handleSlashCommand("/remote setup feishu", context, output);
+    await handleSlashCommand("/remote events", context, output);
+
+    // feishu official CLI + inbound poll → full mobile control.
+    expect(output.text).toContain("full-mobile-control-capable");
+    // wecom official CLI + inbound poll → NL inbound.
+    expect(output.text).toContain("natural-language-inbound-capable");
+    // dingtalk webhook → notification-only.
+    expect(output.text).toContain("notification-only");
+    // setup wizard surfaces the field checklist without printing secrets.
+    expect(output.text).toContain("Remote setup：feishu");
+    expect(output.text).toMatch(/\[(已填|待填)\]/u);
+  });
+
+  it("D.14E source invariant: remote inbound business logic lives in remote-command-runtime; index.ts only glues", async () => {
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    // index.ts wires the inbound glue and reuses the existing local resolvers / model chain.
+    expect(indexSrc).toContain("export async function handleRemoteInboundMessage");
+    expect(indexSrc).toContain("processRemoteInbound(context, message)");
+    expect(indexSrc).toContain("await sendMessage(decision.routedText, context, gateway, output)");
+    expect(indexSrc).toContain("executePermissionApprove(approval, context, gateway, output)");
+    // No second executor / keyword interception for remote natural language in index.ts.
+    expect(indexSrc).not.toContain("routedText.includes(");
+
+    const runtimeSrc = await readFile("src/remote-command-runtime.ts", "utf8");
+    expect(runtimeSrc).toContain("export function processRemoteInbound");
+    expect(runtimeSrc).toContain("export async function sendRemoteEventReal");
+    expect(runtimeSrc).toContain("export function verifyRemoteInboundSignature");
+    // The transport never shell-concatenates; it builds an arg array.
+    const transportSrc = await readFile("src/remote-transport.ts", "utf8");
+    expect(transportSrc).toContain("execFile as nodeExecFile");
+    expect(transportSrc).not.toContain("exec(`");
+  });
+
+  it("D.14E handleRemoteInboundMessage glue: status_query accepted, NL accepted, no tool execution", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      remote: {
+        enabled: true,
+        channels: {
+          ...defaultConfig.remote.channels,
+          wecom: {
+            ...defaultConfig.remote.channels.wecom,
+            enabled: true,
+            transport: "official_cli",
+            cliPath: "node",
+            inboundMode: "poll",
+            bindingUserId: "wecom-user",
+            trustedSources: ["wecom-mobile-1"],
+          },
+        },
+      },
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    // status_query goes through the glue without touching a gateway.
+    const statusDecision = await handleRemoteInboundMessage(
+      {
+        kind: "status_query",
+        channel: "wecom",
+        messageId: "sq-1",
+        nonce: "n",
+        source: "wecom-mobile-1",
+        bindingUserId: "wecom-user",
+        signature: "mock:inbound:sq-1:n",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      context,
+      undefined,
+      output,
+    );
+    expect(statusDecision.status).toBe("accepted");
+    expect(statusDecision.kind).toBe("status_query");
+
+    // natural language with no gateway: still accepted + routedText, but nothing executes.
+    const nlDecision = await handleRemoteInboundMessage(
+      {
+        kind: "natural_language_message",
+        channel: "wecom",
+        messageId: "nl-1",
+        nonce: "n",
+        source: "wecom-mobile-1",
+        bindingUserId: "wecom-user",
+        signature: "mock:inbound:nl-1:n",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        text: "现在进展怎么样",
+      },
+      context,
+      undefined,
+      output,
+    );
+    expect(nlDecision.status).toBe("accepted");
+    expect(nlDecision.routedText).toBe("现在进展怎么样");
+    expect(context.evidence).toEqual([]);
   });
 
   it("handles Phase 15.5D MCP Connect Lite lifecycle without running servers", async () => {

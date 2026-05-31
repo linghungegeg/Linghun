@@ -364,8 +364,15 @@ import {
   createRemoteEvent,
   handleRemoteCommand,
   processRemoteApprovalForTest,
+  processRemoteInbound,
+  sendRemoteEventReal,
 } from "./remote-command-runtime.js";
-export { createRemoteEvent, processRemoteApprovalForTest } from "./remote-command-runtime.js";
+export {
+  createRemoteEvent,
+  processRemoteApprovalForTest,
+  processRemoteInbound,
+  sendRemoteEventReal,
+} from "./remote-command-runtime.js";
 import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
@@ -703,6 +710,8 @@ import type {
   RemoteChannelState,
   RemoteEvent,
   RemoteEventStatus,
+  RemoteInboundDecision,
+  RemoteInboundMessage,
   RemoteState,
   ResolvedRoleRoute,
   RoleHandoff,
@@ -773,6 +782,8 @@ export type {
   RemoteChannelState,
   RemoteEvent,
   RemoteEventStatus,
+  RemoteInboundDecision,
+  RemoteInboundMessage,
   RemoteState,
   ResolvedRoleRoute,
   RoleHandoff,
@@ -2880,7 +2891,8 @@ function isWorkspaceTrustRestrictedCommand(command: string, args: string[]): boo
   if (["/write", "/edit", "/multiedit", "/bash"].includes(command)) return true;
   if (command === "/job") return ["run", "create", "new", "resume"].includes(args[0] ?? "list");
   if (command === "/autopilot") return !["status", "details", "cancel"].includes(args[0] ?? "");
-  if (command === "/remote") return !["", "status", "doctor", "list"].includes(args[0] ?? "");
+  if (command === "/remote")
+    return !["", "status", "doctor", "list", "events", "inbox"].includes(args[0] ?? "");
   if (command === "/index") return ["init", "refresh", "repair"].includes(args[0] ?? "");
   if (command === "/mcp")
     return ["add", "enable", "disable", "remove", "update"].includes(args[0] ?? "");
@@ -6171,6 +6183,52 @@ async function sendMessage(
   }
   writeLightHints(output, context);
   writeStatus(output, context);
+}
+
+// D.14E — 远程入站消息进入本地主链的唯一 glue。校验交给 processRemoteInbound（纯
+// 逻辑），执行交回既有本地管道：approval_response 复用 executePermissionApprove/
+// executePermissionDeny；natural_language_message 原样进 sendMessage（本地模型主链，
+// 无关键词截获、无第二套执行器）；status_query 只回脱敏状态。本函数不直接执行任何
+// 工具/Bash/写文件/Git。
+export async function handleRemoteInboundMessage(
+  message: RemoteInboundMessage,
+  context: TuiContext,
+  gateway: ModelGateway | undefined,
+  output: Writable,
+): Promise<RemoteInboundDecision> {
+  const decision = processRemoteInbound(context, message);
+  const sessionId = await ensureSession(context);
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `remote_inbound kind=${decision.kind} channel=${message.channel} status=${decision.status} summary=${decision.summary}`,
+    decision.status === "accepted" ||
+      decision.status === "approved" ||
+      decision.status === "rejected"
+      ? "info"
+      : "warning",
+  );
+  if (
+    decision.status === "approved" ||
+    (decision.kind === "approval_response" && decision.status === "rejected")
+  ) {
+    const approval = context.pendingLocalApproval;
+    if (approval) {
+      context.pendingLocalApproval = undefined;
+      if (decision.status === "approved") {
+        await executePermissionApprove(approval, context, gateway, output);
+      } else {
+        await executePermissionDeny(approval, context, gateway, output, false);
+      }
+    }
+    return decision;
+  }
+  if (decision.kind === "natural_language_message" && decision.routedText) {
+    if (gateway) {
+      await sendMessage(decision.routedText, context, gateway, output);
+    }
+  }
+  return decision;
 }
 
 async function buildModelMessagesWithRecentContext(

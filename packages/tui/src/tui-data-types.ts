@@ -5,7 +5,6 @@
 // All types here are re-exported from index.ts so existing consumers keep
 // working unchanged.
 
-import type { CacheFreshness, CacheTurnStats } from "@linghun/core";
 import type {
   ModelCapability,
   ModelRole,
@@ -13,6 +12,7 @@ import type {
   RemoteEventType,
   RoleModelRoute,
 } from "@linghun/config";
+import type { CacheFreshness, CacheTurnStats } from "@linghun/core";
 import type { PermissionMode } from "@linghun/shared";
 import type { DiffSummary, TodoItem } from "@linghun/tools";
 import type { ArchitectureCardSummary } from "./architecture-runtime.js";
@@ -502,7 +502,15 @@ export type DurableJobState = {
   rejectedConclusions: string[];
 };
 
-export type RemoteEventStatus = "pending" | "sent" | "failed" | "expired" | "rejected" | "approved";
+export type RemoteEventStatus =
+  | "pending"
+  | "sent"
+  | "failed"
+  | "expired"
+  | "rejected"
+  | "approved"
+  | "blocked"
+  | "mock";
 export type RemoteChannelRuntimeStatus = "disabled" | "blocked" | "ready";
 
 export type RemoteChannelState = {
@@ -527,6 +535,9 @@ export type RemoteEvent = {
   redactedSummary: string;
   refs: string[];
   status: RemoteEventStatus;
+  // D.14E — 脱敏后的投递结果说明（不含 endpoint/secret/payload）；webhook_mock
+  // 恒标注为 diagnostic mock，不代表真实 delivery PASS。
+  deliveryDetail?: string;
 };
 
 export type RemoteApprovalMessage = {
@@ -553,6 +564,52 @@ export type RemoteApprovalDecision = {
     | "replayed"
     | "blocked";
   summary: string;
+  evidenceCreated: false;
+};
+
+// D.14E — 远程入站消息模型。手机端只能回传以下三类，全部先进入本地校验，再交回
+// 本地主链/权限管道；远程端永不直接执行工具/Bash/写文件/Git。
+export type RemoteInboundKind = "approval_response" | "natural_language_message" | "status_query";
+
+export type RemoteInboundMessage = {
+  kind: RemoteInboundKind;
+  channel: string;
+  messageId: string;
+  nonce: string;
+  source: string;
+  bindingUserId: string;
+  bindingDeviceId?: string;
+  signature?: string;
+  // 入站消息自带过期时间（手机端发起，无对应出站 nonce 时用它做时效校验）。
+  expiresAt: string;
+  receivedAt?: string;
+  // approval_response：引用此前发出的 approval_request event id 并回显 nonce。
+  eventId?: string;
+  approve?: boolean;
+  // natural_language_message：手机端自然语言原文，原样进入本地模型主链。
+  text?: string;
+};
+
+export type RemoteInboundStatus =
+  | "accepted"
+  | "approved"
+  | "rejected"
+  | "expired"
+  | "unknown_source"
+  | "wrong_binding"
+  | "bad_signature"
+  | "replayed"
+  | "channel_not_ready"
+  | "inbound_disabled"
+  | "no_pending_approval"
+  | "blocked";
+
+export type RemoteInboundDecision = {
+  kind: RemoteInboundKind;
+  status: RemoteInboundStatus;
+  summary: string;
+  // natural_language_message accepted 时携带原文，由 index.ts glue 交给本地主链。
+  routedText?: string;
   evidenceCreated: false;
 };
 
