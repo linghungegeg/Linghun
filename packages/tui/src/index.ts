@@ -360,6 +360,7 @@ import {
 } from "./provider-circuit-breaker.js";
 import { formatMcpTools } from "./remote-mcp-presenter.js";
 import { decideRemoteInbox, processRemoteBindCommand } from "./remote-inbound-bridge-runtime.js";
+import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
 import {
   configureRemoteCommandRuntime,
   createRemoteEvent,
@@ -386,11 +387,17 @@ export {
   decideRemoteInbox,
   dingtalkBridgeAdapter,
   feishuBridgeAdapter,
+  feishuReceiveMessageToBridgeEvent,
   formatRemoteBridgeDoctor,
   getRemoteBridgeDoctor,
   processRemoteBindCommand,
   wecomBridgeAdapter,
 } from "./remote-inbound-bridge-runtime.js";
+export {
+  startFeishuLongConnection,
+  type FeishuLongConnectionHandle,
+  type FeishuLongConnectionOptions,
+} from "./feishu-long-connection-runtime.js";
 import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
@@ -4830,6 +4837,8 @@ configureMcpIndexRuntime({
 configureRemoteCommandRuntime({
   appendSystemEvent,
   ensureSession,
+  handleRemoteInboundMessage,
+  startFeishuLongConnection,
 });
 
 configureMemoryCommandRuntime({

@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.59.0",
     "@linghun/config": "workspace:*",
     "@linghun/core": "workspace:*",
     "@linghun/providers": "workspace:*",

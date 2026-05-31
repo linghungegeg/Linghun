@@ -13,6 +13,7 @@ import {
 export type RemoteBridgeReadiness =
   | "notification-only"
   | "fixture-ready"
+  | "ready-to-start"
   | "needs-app-setup"
   | "needs-dingtalk-app"
   | "needs-wecom-app"
@@ -87,6 +88,25 @@ export type RemoteAdapterInboundEvent = {
   signature?: string;
   expiresAt: string;
   receivedAt: string;
+};
+
+export type FeishuReceiveMessageEvent = {
+  event_id?: string;
+  sender?: {
+    sender_id?: {
+      union_id?: string;
+      user_id?: string;
+      open_id?: string;
+    };
+  };
+  message?: {
+    message_id?: string;
+    create_time?: string;
+    chat_id?: string;
+    chat_type?: string;
+    message_type?: string;
+    content?: string;
+  };
 };
 
 export function getRemoteBridgeDoctor(
@@ -346,6 +366,36 @@ export function feishuBridgeAdapter(event: RemoteAdapterInboundEvent): RemoteInb
   return adaptBridgeEvent(event, "feishu");
 }
 
+export function feishuReceiveMessageToBridgeEvent(
+  event: FeishuReceiveMessageEvent,
+  nowMs = Date.now(),
+): RemoteAdapterInboundEvent {
+  const messageId = event.message?.message_id;
+  const senderId = event.sender?.sender_id;
+  const source = senderId?.open_id ?? senderId?.user_id ?? senderId?.union_id;
+  if (!messageId) {
+    throw new Error("Feishu receive message event missing message_id");
+  }
+  if (!source) {
+    throw new Error("Feishu receive message event missing sender id");
+  }
+  const text = parseFeishuTextContent(event.message?.content);
+  return {
+    platform: "feishu",
+    source,
+    userId: source,
+    kind: classifyFeishuInboundKind(text),
+    text,
+    approve: classifyFeishuApprove(text),
+    eventId: parseFeishuApprovalEventId(text),
+    messageId,
+    nonce: event.event_id ?? messageId,
+    signature: "ref:feishu-long-connection",
+    expiresAt: new Date(nowMs + 60_000).toISOString(),
+    receivedAt: new Date(nowMs).toISOString(),
+  };
+}
+
 export function dingtalkBridgeAdapter(event: RemoteAdapterInboundEvent): RemoteInboundMessage {
   return adaptBridgeEvent(event, "dingtalk");
 }
@@ -400,14 +450,18 @@ function describeBridgeChannel(
   const capabilities = platformBridgeCapabilities(channel.config.type);
   const needsApp = missing.some((item) => item.includes("credentials")) || missing.includes("trusted source");
   const needsDaemon =
-    channel.config.inboundMode === "poll"
+    isFeishuLongConnection(channel)
+      ? false
+      : channel.config.inboundMode === "poll"
       ? !channel.config.cliPath
       : channel.config.inboundMode === "callback" && !channel.config.callbackEndpoint;
   const readiness: RemoteBridgeReadiness = needsApp
     ? platformNeedsAppReadiness(channel.config.type)
     : needsDaemon
       ? "needs-daemon"
-      : "fixture-ready";
+      : isFeishuLongConnection(channel)
+        ? "ready-to-start"
+        : "fixture-ready";
   return baseReport(channel, now, {
     readiness,
     capabilities,
@@ -443,7 +497,11 @@ function bridgeMissingFields(channel: RemoteChannelState): string[] {
   if (config.inboundMode === "callback" && !config.callbackEndpoint) missing.push("callback endpoint");
   if (config.type === "feishu" || config.type === "lark") {
     if (!config.appIdRef || !config.appSecretRef) missing.push("app credentials");
-    if (config.inboundMode === "callback" && (!config.encryptKeyRef || !config.verificationTokenRef)) {
+    if (
+      config.inboundMode === "callback" &&
+      config.callbackEndpoint !== "feishu-long-connection" &&
+      (!config.encryptKeyRef || !config.verificationTokenRef)
+    ) {
       missing.push("callback verification refs");
     }
   }
@@ -485,11 +543,14 @@ function bridgeNextAction(
   if (readiness === "fixture-ready") {
     return `/remote bridge test-inbound ${channel.id}; real mobile inbound still needs platform credentials and callback/daemon.`;
   }
+  if (readiness === "ready-to-start") {
+    return `/remote bridge start ${channel.id}`;
+  }
   if (readiness === "needs-daemon") {
     return "Start/configure the official CLI poll/stream daemon or provide a callback endpoint.";
   }
   if (readiness === "needs-app-setup") {
-    return "Configure Feishu/Lark app refs and callback verification refs before full mobile control is ready.";
+    return "Configure Feishu/Lark app refs and an inbound path before full mobile control is ready.";
   }
   if (readiness === "needs-dingtalk-app") {
     return "Configure a DingTalk app/Stream callback before approval inbound is ready.";
@@ -498,6 +559,15 @@ function bridgeNextAction(
     return "Configure a WeCom app callback before natural-language inbound is ready.";
   }
   return "Keep webhook as notification-only.";
+}
+
+function isFeishuLongConnection(channel: RemoteChannelState): boolean {
+  return (
+    (channel.config.type === "feishu" || channel.config.type === "lark") &&
+    channel.config.transport === "official_cli" &&
+    channel.config.inboundMode === "callback" &&
+    channel.config.callbackEndpoint === "feishu-long-connection"
+  );
 }
 
 function platformNeedsAppReadiness(type: RemoteChannelType): RemoteBridgeReadiness {
@@ -511,6 +581,38 @@ function normalizeBridgeChannelId(value: string): string {
   if (normalized === "lark") return "feishu";
   if (normalized === "enterprise-wechat") return "wecom";
   return normalized;
+}
+
+function parseFeishuTextContent(content: string | undefined): string {
+  if (!content) return "";
+  try {
+    const parsed = JSON.parse(content) as { text?: unknown };
+    return typeof parsed.text === "string" ? parsed.text.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function classifyFeishuInboundKind(text: string): RemoteInboundKind {
+  const normalized = text.trim().toLowerCase();
+  if (normalized === "状态" || normalized === "status" || normalized === "/status") {
+    return "status_query";
+  }
+  if (/^(approve|deny)\b/i.test(normalized)) {
+    return "approval_response";
+  }
+  return "natural_language_message";
+}
+
+function classifyFeishuApprove(text: string): boolean | undefined {
+  if (/^approve\b/i.test(text.trim())) return true;
+  if (/^deny\b/i.test(text.trim())) return false;
+  return undefined;
+}
+
+function parseFeishuApprovalEventId(text: string): string | undefined {
+  const match = text.trim().match(/(?:event|eventId|approval)[:=]\s*([A-Za-z0-9_-]+)/i);
+  return match?.[1];
 }
 
 function createPairingCode(): string {

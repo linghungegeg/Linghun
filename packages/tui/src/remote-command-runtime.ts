@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { RemoteChannelType, RemoteEventType } from "@linghun/config";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import {
+  type FeishuLongConnectionHandle,
+  startFeishuLongConnection,
+} from "./feishu-long-connection-runtime.js";
 import type { TuiContext } from "./index.js";
 import { redactRemoteSummary, remoteTranscriptSummary } from "./permission-continuation-runtime.js";
 import { formatRemoteStatus, formatRemoteTestResult } from "./remote-mcp-presenter.js";
@@ -46,6 +50,13 @@ export type RemoteCommandRuntimeDeps = {
     level: "info" | "warning",
   ) => Promise<void>;
   ensureSession: (context: TuiContext) => Promise<string>;
+  handleRemoteInboundMessage?: (
+    message: RemoteInboundMessage,
+    context: TuiContext,
+    gateway: undefined,
+    output: Writable,
+  ) => Promise<RemoteInboundDecision>;
+  startFeishuLongConnection?: typeof startFeishuLongConnection;
 };
 
 let runtimeDeps: RemoteCommandRuntimeDeps | undefined;
@@ -53,6 +64,7 @@ let runtimeDeps: RemoteCommandRuntimeDeps | undefined;
 // D.14E — 可注入的真实发送 transport deps；未配置时回退到真实网络/进程实现。
 // 测试通过 sendRemoteEventReal 的 depsOverride 注入 stub，永不触网/触进程。
 let remoteTransportDeps: RemoteTransportDeps | undefined;
+const feishuLongConnectionHandles = new Map<string, FeishuLongConnectionHandle>();
 
 export function configureRemoteCommandRuntime(deps: RemoteCommandRuntimeDeps): void {
   runtimeDeps = deps;
@@ -226,7 +238,7 @@ export async function handleRemoteCommand(
   }
   writeLine(
     output,
-    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote inbox | /remote bridge doctor|pair|test-inbound|test-approval|test-status <channel> | /remote disable <channel>",
+    "用法：/remote setup <channel> | /remote test <channel> | /remote status | /remote doctor | /remote events | /remote inbox | /remote bridge doctor|pair|start|test-inbound|test-approval|test-status <channel> | /remote disable <channel>",
   );
 }
 
@@ -290,11 +302,30 @@ async function handleRemoteBridgeCommand(
     });
     return;
   }
+  if (action === "start") {
+    const channel = findRemoteChannel(context, args[1]);
+    if (!channel) {
+      writeLine(output, "Remote bridge start：未识别通道。用法：/remote bridge start feishu");
+      return;
+    }
+    if (channel.id !== "feishu" && channel.config.type !== "lark") {
+      writeLine(output, "Remote bridge start：当前只支持 feishu/lark 长连接。");
+      return;
+    }
+    const result = await startRemoteFeishuBridge(context, output, channel);
+    showCommandPanel(context, output, {
+      title: "/remote bridge start",
+      tone: result.status === "started" || result.status === "already_running" ? "neutral" : "warning",
+      summary: [result.summary],
+      detailsText: result.detail,
+    });
+    return;
+  }
   const channel = findRemoteChannel(context, args[1]);
   if (!channel) {
     writeLine(
       output,
-      "Remote bridge：未识别通道。用法：/remote bridge doctor|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
+      "Remote bridge：未识别通道。用法：/remote bridge doctor|pair|start|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
     );
     return;
   }
@@ -412,8 +443,88 @@ async function handleRemoteBridgeCommand(
   }
   writeLine(
     output,
-    "用法：/remote bridge doctor|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
+    "用法：/remote bridge doctor|pair|start|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
   );
+}
+
+async function startRemoteFeishuBridge(
+  context: TuiContext,
+  output: Writable,
+  channel: RemoteChannelState,
+): Promise<{ status: "started" | "already_running" | "blocked" | "failed"; summary: string; detail: string }> {
+  const report = getRemoteBridgeDoctor(context.remote, channel.id);
+  if (report.readiness === "notification-only") {
+    return {
+      status: "blocked",
+      summary: "Feishu bridge start blocked: webhook is notification-only.",
+      detail: formatRemoteBridgeDoctor(report),
+    };
+  }
+  if (report.readiness !== "ready-to-start" && report.readiness !== "fixture-ready") {
+    return {
+      status: "blocked",
+      summary: `Feishu bridge start blocked: ${report.readiness}.`,
+      detail: formatRemoteBridgeDoctor(report),
+    };
+  }
+  const appId = resolveEnvRef(channel.config.appIdRef);
+  const appSecret = resolveEnvRef(channel.config.appSecretRef);
+  if (!appId || !appSecret) {
+    const missing = [
+      appId ? undefined : "LINGHUN_REMOTE_FEISHU_APP_ID",
+      appSecret ? undefined : "LINGHUN_REMOTE_FEISHU_APP_SECRET",
+    ].filter((item): item is string => Boolean(item));
+    return {
+      status: "blocked",
+      summary: "Feishu bridge start blocked: app env missing.",
+      detail: [
+        formatRemoteBridgeDoctor(report),
+        `missing env: ${missing.join(", ")}`,
+        "Secret values are not printed.",
+      ].join("\n"),
+    };
+  }
+  if (feishuLongConnectionHandles.has(channel.id)) {
+    return {
+      status: "already_running",
+      summary: "Feishu bridge already running.",
+      detail: "Long connection handle is active in this process; secrets are not printed.",
+    };
+  }
+  try {
+    const start = deps().startFeishuLongConnection ?? startFeishuLongConnection;
+    const handle = await start({
+      appId,
+      appSecret,
+      onMessage: async (message) => {
+        const inbound = deps().handleRemoteInboundMessage;
+        if (!inbound) return;
+        await inbound(message, context, undefined, output);
+      },
+    });
+    feishuLongConnectionHandles.set(channel.id, handle);
+    await appendRemoteSystemEvent(context, `remote_bridge_start channel=${channel.id} status=started`, "info");
+    return {
+      status: "started",
+      summary: "Feishu bridge started: waiting for mobile messages.",
+      detail: "Long connection started with official SDK; secrets are not printed.",
+    };
+  } catch {
+    await appendRemoteSystemEvent(context, `remote_bridge_start channel=${channel.id} status=failed`, "warning");
+    return {
+      status: "failed",
+      summary: "Feishu bridge start failed: platform connection rejected or unavailable.",
+      detail: [
+        formatRemoteBridgeDoctor(report),
+        "Check Feishu app credentials, long connection event subscription, bot ability, and message permissions.",
+      ].join("\n"),
+    };
+  }
+}
+
+function resolveEnvRef(ref: string | undefined): string | undefined {
+  if (!ref) return undefined;
+  return process.env[ref];
 }
 
 export function formatRemoteEvents(context: TuiContext): string {
@@ -604,9 +715,10 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
       field(
         "encryptKeyRef / verificationTokenRef",
         config.type === "feishu" || config.type === "lark"
-          ? Boolean(config.encryptKeyRef && config.verificationTokenRef)
+          ? config.callbackEndpoint === "feishu-long-connection" ||
+            Boolean(config.encryptKeyRef && config.verificationTokenRef)
           : true,
-        "Feishu/Lark callback 模式需要事件回调校验引用",
+        "Feishu/Lark 公网 callback 需要事件回调校验引用；长连接不需要",
       ),
     );
   }
