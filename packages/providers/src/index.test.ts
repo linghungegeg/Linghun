@@ -304,7 +304,10 @@ describe("OpenAI compatible provider", () => {
             controller.close();
           },
         });
-        return new Response(body, { status: 200 });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       });
       vi.stubGlobal("fetch", fetchMock);
       const provider = new OpenAiCompatibleProvider({
@@ -435,7 +438,10 @@ describe("OpenAI compatible provider", () => {
           controller.close();
         },
       });
-      return new Response(body, { status: 200 });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
     const provider = new OpenAiCompatibleProvider({
@@ -484,7 +490,10 @@ describe("OpenAI compatible provider", () => {
           controller.close();
         },
       });
-      return new Response(body, { status: 200 });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
     const provider = new DeepSeekProvider({

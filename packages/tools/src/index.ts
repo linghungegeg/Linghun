@@ -1063,6 +1063,8 @@ function runShell(
     let output = "";
     let settled = false;
     let forcedKillTimer: NodeJS.Timeout | undefined;
+    let stoppingOutcome: "timeout" | "cancelled" | undefined;
+    let childClosed = false;
     const finish = (
       exitCode: number,
       nextOutput = output,
@@ -1079,37 +1081,72 @@ function runShell(
       signal?.removeEventListener("abort", onAbort);
       resolvePromise({ exitCode, output: nextOutput, outcome });
     };
-    const requestStop = (force: boolean) => {
-      if (process.platform === "win32" && child.pid) {
-        const args = ["/pid", String(child.pid), "/t"];
-        if (force) {
-          args.push("/f");
+    const waitForChildClose = (): Promise<void> =>
+      new Promise((resolveClose) => {
+        if (childClosed || child.exitCode !== null || child.signalCode !== null) {
+          resolveClose();
+          return;
         }
-        const killer = spawn("taskkill", args, { windowsHide: true });
-        killer.on("error", () => child.kill(force ? "SIGKILL" : "SIGTERM"));
+        child.once("close", () => resolveClose());
+      });
+    const requestStop = async (force: boolean): Promise<void> => {
+      if (process.platform === "win32" && child.pid) {
+        await new Promise<void>((resolveStop) => {
+          const args = ["/pid", String(child.pid), "/t", "/f"];
+          const killer = spawn("taskkill", args, { windowsHide: true });
+          const stopTimeout = setTimeout(() => {
+            killer.kill("SIGKILL");
+            child.kill("SIGKILL");
+            resolveStop();
+          }, 750);
+          const finishStop = () => {
+            clearTimeout(stopTimeout);
+            resolveStop();
+          };
+          killer.on("error", finishStop);
+          killer.on("close", finishStop);
+        });
         return;
       }
       child.kill(force ? "SIGKILL" : "SIGTERM");
+      if (force) {
+        await waitForChildClose();
+      }
     };
     const scheduleForceStop = () => {
-      forcedKillTimer = setTimeout(() => requestStop(true), 1_000);
+      forcedKillTimer = setTimeout(() => {
+        void requestStop(true);
+      }, 1_000);
     };
-    const onAbort = () => {
+    const onAbort = async () => {
       const message = "\n工具调用已取消，正在终止子进程。";
       output += message;
       onProgress?.("system", `${message}\n`);
-      requestStop(false);
-      scheduleForceStop();
+      stoppingOutcome = "cancelled";
+      if (process.platform === "win32") {
+        await requestStop(true);
+      } else {
+        void requestStop(false);
+        scheduleForceStop();
+      }
       finish(1, output, "cancelled");
     };
     const timer = setTimeout(() => {
+      void handleTimeout();
+    }, timeoutMs);
+    const handleTimeout = async () => {
       const message = `\n命令超时：超过 ${timeoutMs}ms，已尝试终止子进程。`;
       output += message;
       onProgress?.("system", `${message}\n`);
-      requestStop(false);
-      scheduleForceStop();
+      stoppingOutcome = "timeout";
+      if (process.platform === "win32") {
+        await requestStop(true);
+      } else {
+        void requestStop(false);
+        scheduleForceStop();
+      }
       finish(1, output, "timeout");
-    }, timeoutMs);
+    };
     if (signal?.aborted) {
       onAbort();
       return;
@@ -1127,6 +1164,10 @@ function runShell(
       onProgress?.("stderr", text);
     });
     child.on("close", (code) => {
+      childClosed = true;
+      if (stoppingOutcome) {
+        return;
+      }
       finish(code ?? 1);
     });
     child.on("error", (error) => {
