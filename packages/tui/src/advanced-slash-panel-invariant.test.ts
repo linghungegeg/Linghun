@@ -11,8 +11,8 @@
 // regression that reverts a migrated body back to `writeLine(output, formatXxx)`.
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,14 +26,8 @@ function readSrc(file: string): string {
 //   - it is passed into a showCommandPanel detailsText (`detailsText: <call>`)
 //   - it is NOT passed straight into a bare writeLine (`writeLine(output, <call>`)
 const MIGRATIONS: Record<string, string[]> = {
-  "model-command-runtime.ts": [
-    "await formatModelRouteDoctor",
-    "formatModelRoutes(context.config)",
-  ],
-  "mcp-index-runtime.ts": [
-    "formatMcpStatus(context)",
-    "validateMcpServers(context, args[1])",
-  ],
+  "model-command-runtime.ts": ["await formatModelRouteDoctor", "formatModelRoutes(context.config)"],
+  "mcp-index-runtime.ts": ["formatMcpStatus(context)", "validateMcpServers(context, args[1])"],
   "memory-command-runtime.ts": [
     "formatMemoryStorage(context)",
     "formatMemoryReview(context)",
@@ -53,10 +47,7 @@ const MIGRATIONS: Record<string, string[]> = {
     "formatPluginsDoctor(context)",
     'validateExtensionItems("plugins", context, args[1])',
   ],
-  "remote-command-runtime.ts": [
-    "formatRemoteSetup(args[1], context)",
-    "formatRemoteTestResult(channel, result)",
-  ],
+  "remote-command-runtime.ts": ["formatRemoteTestResult(channel, result)"],
 };
 
 describe("D.14D-E advanced slash CommandPanel invariant", () => {
@@ -85,10 +76,22 @@ describe("D.14D-E advanced slash CommandPanel invariant", () => {
     expect(src).not.toContain("writeLine(output, report)");
   });
 
+  it("keeps /remote setup in CommandPanel with legacy details compatibility", () => {
+    const src = readSrc("remote-command-runtime.ts");
+    expect(src).toContain('title: "/remote setup"');
+    expect(src).toContain("detailsText: [");
+    expect(src).toContain("formatRemoteBotSetupDetails(context, args[1])");
+    expect(src).toContain("Legacy /remote setup details（compatibility）");
+    expect(src).toContain("formatRemoteSetup(args[1], context)");
+    expect(src).not.toContain("writeLine(output, formatRemoteSetup(args[1], context)");
+  });
+
   it("does not reroute /index streaming progress through a panel", () => {
     // runIndexRepository streams progress lines; these must stay on writeLine
     // and never be wrapped in a showCommandPanel call.
     const src = readSrc("mcp-index-runtime.ts");
-    expect(src).toMatch(/writeLine\(\s*\n?\s*output,\s*\n?\s*context\.language === "en-US"\s*\n?\s*\? `Index \$\{actionLabel\}: running\.\.\.`/);
+    expect(src).toMatch(
+      /writeLine\(\s*\n?\s*output,\s*\n?\s*context\.language === "en-US"\s*\n?\s*\? `Index \$\{actionLabel\}: running\.\.\.`/,
+    );
   });
 });

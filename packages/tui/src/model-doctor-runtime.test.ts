@@ -1,9 +1,9 @@
-import { defaultConfig } from "@linghun/config";
-import type { LinghunConfig, RoleModelRoute } from "@linghun/config";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultConfig } from "@linghun/config";
+import type { LinghunConfig, RoleModelRoute } from "@linghun/config";
 import { afterEach, describe, expect, it } from "vitest";
 import { breakCacheTestHooks } from "./index.js";
 import {
@@ -94,7 +94,6 @@ describe("model-doctor-runtime", () => {
 
     afterEach(() => {
       if (originalValue === undefined) {
-        // biome-ignore lint/performance/noDelete: test cleanup requires actual deletion from process.env
         delete (process.env as Record<string, string | undefined>)[envKey];
       } else {
         process.env[envKey] = originalValue;
@@ -669,6 +668,28 @@ describe("model-doctor-runtime", () => {
       expect(output).toContain("anthropic_messages profile 已原生支持 tools");
     });
 
+    it("Run 3 closure: openai-compatible doctor gives root/baseUrl endpoint guidance", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com",
+            apiKey: "sk-test-openai-1234567890",
+            model: "gpt-4o-mini",
+            endpointProfile: "chat_completions",
+          },
+        },
+      };
+      const output = await formatModelRouteDoctor(makeContext(config));
+      expect(output).toContain("root baseUrl + responses 可能可用");
+      expect(output).toContain("chat_completions 通常需要 /v1 root");
+      expect(output).toContain("content-type=text/html");
+      expect(output).toContain("少了 /v1");
+      expect(output).not.toContain("sk-test-openai-1234567890");
+    });
+
     it("D.13K: anthropic_messages provider + reasoningLevel=High → reasoning=effective/sent level=High", async () => {
       const config: LinghunConfig = {
         ...baseConfig,
@@ -1084,9 +1105,9 @@ describe("model-doctor-runtime", () => {
         const text = await doctorModule.formatModelRouteDoctor(ctx);
         expect(text).toContain("provider.env merge: applied=no");
       } finally {
-        if (originalHome === undefined) delete process.env.HOME;
+        if (originalHome === undefined) process.env.HOME = undefined;
         else process.env.HOME = originalHome;
-        if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+        if (originalUserProfile === undefined) process.env.USERPROFILE = undefined;
         else process.env.USERPROFILE = originalUserProfile;
         await rm(projectPath, { recursive: true, force: true });
         await rm(homePath, { recursive: true, force: true });

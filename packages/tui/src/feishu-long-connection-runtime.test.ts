@@ -1,25 +1,33 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfig, getSessionRootDir, type LinghunConfig } from "@linghun/config";
+import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
+import { createToolContext } from "@linghun/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createFailureLearningState } from "./failure-learning-runtime.js";
+import { createIndexState } from "./index-runtime.js";
 import {
+  type TuiContext,
   createRemotePairing,
   feishuReceiveMessageToBridgeEvent,
   getRemoteBridgeDoctor,
   handleRemoteInboundMessage,
   processRemoteInbound,
-  type TuiContext,
 } from "./index.js";
+import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
+import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { handleRemoteCommand } from "./remote-command-runtime.js";
-import { createCacheState, createHookState, createMcpState, createPluginState, createRemoteState, createSkillState, createWorkflowState } from "./tui-state-runtime.js";
-import { createIndexState } from "./index-runtime.js";
-import { createFailureLearningState } from "./failure-learning-runtime.js";
-import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
-import { createSolutionCompletenessStatus } from "./model-loop-runtime.js";
-import { createToolContext } from "@linghun/tools";
+import {
+  createCacheState,
+  createHookState,
+  createMcpState,
+  createPluginState,
+  createRemoteState,
+  createSkillState,
+  createWorkflowState,
+} from "./tui-state-runtime.js";
 
 class MemoryOutput {
   text = "";
@@ -44,7 +52,7 @@ describe("Feishu real inbound adapter", () => {
           chat_id: "oc_chat",
           chat_type: "group",
           message_type: "text",
-          content: "{\"text\":\"状态\"}",
+          content: '{"text":"状态"}',
         },
       },
       1_700_000_000_000,
@@ -66,14 +74,21 @@ describe("Feishu real inbound adapter", () => {
     const feishu = context.remote.channels.find((item) => item.id === "feishu");
     if (!feishu) throw new Error("missing feishu");
     const sessionId = context.sessionId ?? "test-session";
-    const pairing = createRemotePairing(context.remote, feishu, context.projectPath, sessionId, Date.now(), "MOB123");
+    const pairing = createRemotePairing(
+      context.remote,
+      feishu,
+      context.projectPath,
+      sessionId,
+      Date.now(),
+      "MOB123",
+    );
     if (pairing.status !== "created") throw new Error("pairing not created");
 
     const bindEvent = feishuReceiveMessageToBridgeEvent(
       {
         event_id: "evt-bind",
         sender: { sender_id: { open_id: "new-mobile-source" } },
-        message: { message_id: "om-bind", content: "{\"text\":\"/bind MOB123\"}" },
+        message: { message_id: "om-bind", content: '{"text":"/bind MOB123"}' },
       },
       Date.now(),
     );
@@ -133,8 +148,8 @@ describe("Feishu real inbound adapter", () => {
     const bridgeSrc = await import("node:fs/promises").then((fs) =>
       fs.readFile("src/remote-inbound-bridge-runtime.ts", "utf8"),
     );
-    expect(bridgeSrc).toContain("origin: \"fixture\"");
-    expect(bridgeSrc).toContain("origin: \"adapter\"");
+    expect(bridgeSrc).toContain('origin: "fixture"');
+    expect(bridgeSrc).toContain('origin: "adapter"');
     expect(bridgeSrc).not.toContain("real mobile inbound: PASS");
   });
 
@@ -168,6 +183,7 @@ describe("Feishu real inbound adapter", () => {
     vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
     const { context, output } = await createRemoteTestContext();
     const inboundMessages: string[] = [];
+    const closeCalls: string[] = [];
     configureRemoteCommandRuntime({
       appendSystemEvent: async () => undefined,
       ensureSession: async () => context.sessionId ?? "test-session",
@@ -192,7 +208,7 @@ describe("Feishu real inbound adapter", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
           origin: "adapter",
         });
-        return { close: () => undefined };
+        return { close: () => closeCalls.push("closed") };
       },
     });
 
@@ -201,6 +217,37 @@ describe("Feishu real inbound adapter", () => {
     expect(inboundMessages).toEqual(["om-simulated"]);
     expect(output.text).toContain("Long connection started");
     expect(output.text).not.toContain("test-app-secret");
+
+    await handleRemoteCommand(["bot", "stop", "feishu"], context, output as never);
+    expect(closeCalls).toEqual(["closed"]);
+    expect(output.text).toContain("Remote Bot feishu stopped");
+  });
+
+  it("Run 3 closure: start smoke passes on start/ready/close without claiming real inbound", async () => {
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_ID", "test-app-id");
+    vi.stubEnv("LINGHUN_REMOTE_FEISHU_APP_SECRET", "test-app-secret");
+    const { context, output } = await createRemoteTestContext();
+    const closeCalls: string[] = [];
+    configureRemoteCommandRuntime({
+      appendSystemEvent: async () => undefined,
+      ensureSession: async () => context.sessionId ?? "test-session",
+      handleRemoteInboundMessage: async (message) => ({
+        kind: message.kind,
+        status: "accepted",
+        summary: "routed",
+        evidenceCreated: false,
+      }),
+      startFeishuLongConnection: async () => ({ close: () => closeCalls.push("closed") }),
+    });
+
+    await handleRemoteCommand(["bot", "start", "feishu"], context, output as never);
+    expect(output.text).toContain("Feishu Bot start readiness");
+    expect(output.text).toContain("Long connection started");
+    expect(output.text).not.toMatch(/REAL_INBOUND_PASS|real mobile inbound: PASS/i);
+
+    await handleRemoteCommand(["bot", "stop", "feishu"], context, output as never);
+    expect(closeCalls).toEqual(["closed"]);
+    expect(output.text).toContain("Remote Bot feishu stopped");
   });
 
   it("doctor treats Feishu long connection as ready-to-start without callback verification refs", async () => {

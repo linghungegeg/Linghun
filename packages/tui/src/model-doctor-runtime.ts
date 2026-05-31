@@ -257,7 +257,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   // 之前没有任何 doctor 输出能告诉用户"被覆盖了"——sm​oke 第一次请求 404 才发现。
   // 现在 doctor 摘要明确给出 applied 状态、是否覆盖了 modelRoutes/defaultModel、引入了哪些 provider id。
   // 仅记录布尔与 provider id 列表，**不**输出任何 apiKey/baseUrl/model 值。
-  if (lastProviderEnvMerge && lastProviderEnvMerge.applied) {
+  if (lastProviderEnvMerge?.applied) {
     const ids = lastProviderEnvMerge.providerIds;
     lines.push(
       `- provider.env merge: applied=yes overrodeModelRoutes=${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"} overrodeDefaultModel=${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"} providers=${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请先 cat 确认或临时改名该文件)`,
@@ -377,6 +377,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
     );
     lines.push(`    endpointProfile decision: source=${decision.source} reason=${decision.reason}`);
+    if (provider.type === "openai-compatible") {
+      lines.push(
+        "    openai-compatible endpoint hint: root baseUrl + responses 可能可用；chat_completions 通常需要 /v1 root；如果返回 content-type=text/html，baseUrl 可能填到了网页登录页或少了 /v1。",
+      );
+    }
     // D.13G：tools=disabled 时显式标注原因；anthropic_messages profile 现已原生支持 tools，
     // 仅在 contract.supportsTools=false（用户显式禁用）时才印 reason。
     if (!contract.supportsTools) {
@@ -399,7 +404,9 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       const ttl = context.config.promptCache.systemTtl;
       lines.push(
         `    anthropic prompt cache: cache_control=${
-          promptCacheEnabled ? `injected ttl=${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}` : "off"
+          promptCacheEnabled
+            ? `injected ttl=${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}`
+            : "off"
         } usage_fields=cache_creation.ephemeral_5m_input_tokens/ephemeral_1h_input_tokens (read-only when emitted by upstream)`,
       );
       // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。

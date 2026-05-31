@@ -1000,7 +1000,9 @@ describe("ModelGateway", () => {
         if (Date.now() < 0) {
           yield { type: "assistant_text_delta", id: "unused", text: "" };
         }
-        throw new Error("Anthropic Messages stream decode failed: eventstream prelude CRC mismatch sk-secret123");
+        throw new Error(
+          "Anthropic Messages stream decode failed: eventstream prelude CRC mismatch sk-secret123",
+        );
       },
     };
     const gateway = new ModelGateway([provider]);
@@ -1239,7 +1241,7 @@ describe("resolveEffectiveEndpointProfile", () => {
     const result = resolveEffectiveEndpointProfile({
       requestEndpointProfile: "chat_completions",
       configEndpointProfile: "anthropic_messages",
-      configBaseUrl: "https://hk.geek2api.com",
+      configBaseUrl: "https://relay.example.com",
       configModel: "claude-opus-4-7",
       requestModel: "claude-opus-4-7",
     });
@@ -1297,8 +1299,8 @@ describe("joinBaseUrlAndEndpoint", () => {
   });
 
   it("joins relay root baseUrl with /v1/messages without dedupe", () => {
-    expect(joinBaseUrlAndEndpoint("https://hk.geek2api.com", "/v1/messages")).toBe(
-      "https://hk.geek2api.com/v1/messages",
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com", "/v1/messages")).toBe(
+      "https://relay.example.com/v1/messages",
     );
   });
 
@@ -1321,11 +1323,11 @@ describe("joinBaseUrlAndEndpoint", () => {
     // 用户把完整 endpoint 写进 baseUrl：先经 resolveProviderBaseUrlDiagnostic 剥掉 /v1/messages，
     // 再用 joinBaseUrlAndEndpoint 拼回去，确保不会变成 /v1/v1/messages 或丢路径。
     const diagnostic = resolveProviderBaseUrlDiagnostic(
-      "https://hk.geek2api.com/v1/messages",
+      "https://relay.example.com/v1/messages",
       "anthropic_messages",
     );
     const url = joinBaseUrlAndEndpoint(diagnostic.normalizedBaseUrl, "/v1/messages");
-    expect(url).toBe("https://hk.geek2api.com/v1/messages");
+    expect(url).toBe("https://relay.example.com/v1/messages");
   });
 });
 
@@ -1684,9 +1686,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(
-            encoder.encode(
-              'data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\n',
-            ),
+            encoder.encode('data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\n'),
           );
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
@@ -1743,7 +1743,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -1792,7 +1792,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -1838,7 +1838,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -1880,9 +1880,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
           // 网关返回 SSE 包裹但 payload 不是合法 Anthropic JSON：模拟网关
           // 把非 Anthropic message events（含 apiKey 的脏数据）回灌成事件流。
           controller.enqueue(
-            encoder.encode(
-              'event: message_start\ndata: {not-json sk-test-secret leak}\n\n',
-            ),
+            encoder.encode("event: message_start\ndata: {not-json sk-test-secret leak}\n\n"),
           );
           controller.close();
         },
@@ -1896,7 +1894,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -1921,12 +1919,12 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
   });
 
   it("Fix C: anthropic_messages 200 + content-type=text/html → PROVIDER_NON_SSE_STREAM with content-type and endpoint, no apiKey leak", async () => {
-    // 复现 hk.geek2api.com 网关在 /v1/messages 返回 200 + SPA HTML 的真实场景：
+    // 复现某些 OpenAI-compatible 网关在 /v1/messages 返回 200 + SPA HTML 的真实场景：
     // response.ok=true 但 content-type 不是 SSE，必须立即抛 PROVIDER_NON_SSE_STREAM，
     // 不能让 parser silent 出 message_stop 把 TUI 弄成"连不上"。
     const fetchMock = vi.fn(async () => {
       return new Response(
-        '<!doctype html><html><head><title>Geek2API</title></head><body>Bearer sk-leak-should-be-redacted</body></html>',
+        "<!doctype html><html><head><title>Provider Login</title></head><body>Bearer provider-token-should-be-redacted</body></html>",
         {
           status: 200,
           headers: { "content-type": "text/html; charset=utf-8" },
@@ -1937,7 +1935,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -1960,7 +1958,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(error.message).toContain("/v1/messages");
     expect(error.message).toContain("anthropic_messages");
     expect(error.message).not.toMatch(/sk-test-secret/);
-    expect(error.message).not.toMatch(/sk-leak-should-be-redacted/);
+    expect(error.message).not.toMatch(/provider-token-should-be-redacted/);
     expect(error.suggestion ?? "").not.toMatch(/sk-test-secret/);
   });
 
@@ -1969,7 +1967,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     // 在 HTML 响应里找不到 data: 行 silent 收尾。
     const fetchMock = vi.fn(async () => {
       return new Response(
-        '<!doctype html><html><body>Authorization: Bearer sk-relay-leak</body></html>',
+        "<!doctype html><html><body>Authorization: Bearer provider-token-should-be-redacted</body></html>",
         {
           status: 200,
           headers: { "content-type": "text/html" },
@@ -2003,7 +2001,11 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     expect(error.message).toContain("/chat/completions");
     expect(error.message).toContain("chat_completions");
     expect(error.message).not.toMatch(/sk-test-secret/);
-    expect(error.message).not.toMatch(/sk-relay-leak/);
+    expect(error.message).not.toMatch(/provider-token-should-be-redacted/);
+    expect(error.suggestion).toContain("root baseUrl + responses 可能可用");
+    expect(error.suggestion).toContain("chat_completions 通常需要 /v1 root");
+    expect(error.suggestion).toContain("text/html");
+    expect(error.suggestion).toContain("少了 /v1");
   });
 
   it("Fix C: 200 + content-type=application/json (non-SSE) also rejected so partial JSON gateways do not silent-fail", async () => {
@@ -2017,7 +2019,7 @@ describe("OpenAiCompatibleProvider anthropic_messages dispatch", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
-      baseUrl: "https://hk.geek2api.com",
+      baseUrl: "https://relay.example.com",
       apiKey: "sk-test-secret",
       model: "claude-opus-4-7",
       endpointProfile: "anthropic_messages",
@@ -2135,7 +2137,7 @@ describe("D.13F Anthropic prompt cache cache_control injection", () => {
     expect(JSON.stringify(blocks[1])).not.toContain('"5m"');
   });
 
-  it("sets ttl: \"1h\" only when promptCacheTtl is explicitly 1h", () => {
+  it('sets ttl: "1h" only when promptCacheTtl is explicitly 1h', () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
       messages: [
@@ -2424,6 +2426,41 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
     expect(body.tool_choice).toEqual({ type: "none" });
   });
 
+  it("Run 3 closure: pure text request with supportsTools=false omits tools/tool_choice", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      supportsTools: false,
+    });
+    const body = provider.createAnthropicMessagesRequest({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body).not.toHaveProperty("tools");
+    expect(body).not.toHaveProperty("tool_choice");
+  });
+
+  it("Run 3 closure: toolChoice-only request still fails when supportsTools=false", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-3-5-sonnet-latest",
+      endpointProfile: "anthropic_messages",
+      supportsTools: false,
+    });
+    expect(() =>
+      provider.createAnthropicMessagesRequest({
+        messages: [{ role: "user", content: "hi" }],
+        toolChoice: "none",
+      }),
+    ).toThrow(expect.objectContaining({ code: "MODEL_TOOLS_UNSUPPORTED" }));
+  });
+
   it("builder: assistant.toolCalls converts to user|assistant tool_use blocks; tool role converts to user tool_result block", () => {
     const provider = buildAnthropicProvider();
     const body = provider.createAnthropicMessagesRequest({
@@ -2432,9 +2469,7 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
         {
           role: "assistant",
           content: "let me read it",
-          toolCalls: [
-            { id: "call-1", name: "Read", input: { path: "README.md" } },
-          ],
+          toolCalls: [{ id: "call-1", name: "Read", input: { path: "README.md" } }],
         },
         { role: "tool", tool_call_id: "call-1", content: '{"ok":true}' },
         { role: "assistant", content: "done" },
@@ -2445,7 +2480,12 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
     const assistantTurn = body.messages[1];
     expect(assistantTurn.role).toBe("assistant");
     expect(Array.isArray(assistantTurn.content)).toBe(true);
-    const assistantBlocks = assistantTurn.content as Array<{ type: string; id?: string; name?: string; input?: unknown }>;
+    const assistantBlocks = assistantTurn.content as Array<{
+      type: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
+    }>;
     expect(assistantBlocks).toEqual([
       { type: "text", text: "let me read it" },
       { type: "tool_use", id: "call-1", name: "Read", input: { path: "README.md" } },
@@ -2453,7 +2493,11 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
     // tool 消息：必须折叠到下一个 user 消息的 tool_result block
     const toolResultTurn = body.messages[2];
     expect(toolResultTurn.role).toBe("user");
-    const userBlocks = toolResultTurn.content as Array<{ type: string; tool_use_id?: string; content?: string }>;
+    const userBlocks = toolResultTurn.content as Array<{
+      type: string;
+      tool_use_id?: string;
+      content?: string;
+    }>;
     expect(userBlocks).toEqual([
       { type: "tool_result", tool_use_id: "call-1", content: '{"ok":true}' },
     ]);
@@ -2475,7 +2519,12 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
     // 末尾合成 user 消息 + tool_result is_error=true
     const last = body.messages.at(-1);
     expect(last?.role).toBe("user");
-    const blocks = last?.content as Array<{ type: string; tool_use_id?: string; is_error?: boolean; content?: string }>;
+    const blocks = last?.content as Array<{
+      type: string;
+      tool_use_id?: string;
+      is_error?: boolean;
+      content?: string;
+    }>;
     expect(blocks).toEqual([
       expect.objectContaining({
         type: "tool_result",
@@ -2617,9 +2666,7 @@ describe("D.13H Anthropic context editing hard-disabled closure", () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(
-          encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
-        );
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
@@ -2877,7 +2924,11 @@ describe("D.13H Anthropic context editing hard-disabled closure", () => {
 // strict chat 永远不出现 Anthropic `thinking` 字段。
 // ---------------------------------------------------------------------------
 describe("D.13K Anthropic Messages extended thinking", () => {
-  function buildClaudeProvider(overrides: Partial<Parameters<typeof OpenAiCompatibleProvider.prototype.createAnthropicMessagesRequest>[0]> = {}) {
+  function buildClaudeProvider(
+    overrides: Partial<
+      Parameters<typeof OpenAiCompatibleProvider.prototype.createAnthropicMessagesRequest>[0]
+    > = {},
+  ) {
     return new OpenAiCompatibleProvider({
       id: "claude-relay",
       type: "openai-compatible",
@@ -2890,17 +2941,15 @@ describe("D.13K Anthropic Messages extended thinking", () => {
   }
 
   it("contract: anthropic_messages + reasoningLevel=High → sendReasoning=true", () => {
-    const contract = resolveProviderRuntimeContract(
-      {
-        id: "claude-relay",
-        type: "openai-compatible",
-        baseUrl: "https://relay.example.com/v1",
-        apiKey: "test-key",
-        model: "claude-opus-4-7",
-        endpointProfile: "anthropic_messages",
-        reasoningLevel: "High",
-      },
-    );
+    const contract = resolveProviderRuntimeContract({
+      id: "claude-relay",
+      type: "openai-compatible",
+      baseUrl: "https://relay.example.com/v1",
+      apiKey: "test-key",
+      model: "claude-opus-4-7",
+      endpointProfile: "anthropic_messages",
+      reasoningLevel: "High",
+    });
     expect(contract.endpointProfile).toBe("anthropic_messages");
     expect(contract.sendReasoning).toBe(true);
   });

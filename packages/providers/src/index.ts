@@ -1190,6 +1190,8 @@ async function assertSseContentType(
       `网关返回 200 但 content-type=${contentTypeLabel}，不是 SSE 流。响应体预览：${preview}`,
     suggestion:
       "请检查 base_url 是否指向了正确的流式端点（Anthropic Messages 应为 /v1/messages，OpenAI Chat 为 /chat/completions），" +
+      "OpenAI-compatible root baseUrl + responses 可能可用；chat_completions 通常需要 /v1 root。" +
+      "如果返回 text/html，baseUrl 可能填到了网页登录页或少了 /v1。" +
       "或运行 /model doctor 复查 provider 路由。",
     recoverable: true,
   });
@@ -1349,7 +1351,10 @@ function createAnthropicMessagesProfileRequest(
         blocks.push({ type: "text", text: message.content });
       }
       if (blocks.length > 0) {
-        conversation.push({ role: "user", content: blocks.length === 1 && blocks[0].type === "text" ? message.content : blocks });
+        conversation.push({
+          role: "user",
+          content: blocks.length === 1 && blocks[0].type === "text" ? message.content : blocks,
+        });
       }
       continue;
     }
@@ -1398,7 +1403,6 @@ function createAnthropicMessagesProfileRequest(
       } else {
         conversation.push({ role: "user", content: [toolResultBlock] });
       }
-      continue;
     }
   }
   // D.13G：assistant 已经发起 tool_use 但流尾没有配对 tool_result → 注入合成 is_error
@@ -1470,7 +1474,9 @@ function createAnthropicMessagesProfileRequest(
           return { type: "text", text };
         }
         const cacheControl: AnthropicCacheControl =
-          request.promptCacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+          request.promptCacheTtl === "1h"
+            ? { type: "ephemeral", ttl: "1h" }
+            : { type: "ephemeral" };
         return { type: "text", text, cache_control: cacheControl };
       });
       body.system = blocks;
@@ -1916,8 +1922,7 @@ function parseAnthropicMessagesEventBlock(
             type: "error",
             error: new LinghunError({
               code: "PROVIDER_MALFORMED_STREAM",
-              message:
-                "模型请求失败：Anthropic 流式 input_json_delta 落在非 tool_use 内容块上。",
+              message: "模型请求失败：Anthropic 流式 input_json_delta 落在非 tool_use 内容块上。",
               suggestion:
                 "请运行 /model doctor 检查 provider 的 Anthropic Messages 流式实现是否完整；如持续出现请切换 provider/model。",
               recoverable: true,
@@ -2379,7 +2384,8 @@ export function normalizeProviderError(error: unknown): LinghunError {
       return new LinghunError({
         code: streamFailureCode,
         message: `模型响应流传输失败：${maskSensitiveFragments(error.message)}`,
-        suggestion: "这通常是 provider 或网络传输层的临时问题。请稍后重试；反复出现时运行 /model doctor 查看配置摘要。",
+        suggestion:
+          "这通常是 provider 或网络传输层的临时问题。请稍后重试；反复出现时运行 /model doctor 查看配置摘要。",
         cause: error,
         recoverable: true,
       });
@@ -2401,7 +2407,9 @@ export function normalizeProviderError(error: unknown): LinghunError {
   });
 }
 
-function classifyProviderStreamFailure(message: string): "PROVIDER_STREAM_DECODE_ERROR" | "PROVIDER_RETRY_EXHAUSTED" | null {
+function classifyProviderStreamFailure(
+  message: string,
+): "PROVIDER_STREAM_DECODE_ERROR" | "PROVIDER_RETRY_EXHAUSTED" | null {
   if (/retry\s*exhausted|重试.*耗尽/iu.test(message)) {
     return "PROVIDER_RETRY_EXHAUSTED";
   }
@@ -2444,7 +2452,7 @@ function createApiKeyError(
   const suffix = formatErrorContextSuffix(context);
   return new LinghunError({
     code: "PROVIDER_API_KEY_ERROR",
-    message: `模型请求失败：API Key 无效或没有权限（HTTP ${status}${suffix ? "，" + suffix.slice(1, -1) : ""}）。`,
+    message: `模型请求失败：API Key 无效或没有权限（HTTP ${status}${suffix ? `，${suffix.slice(1, -1)}` : ""}）。`,
     suggestion:
       context && context.endpointProfile === "anthropic_messages"
         ? "请检查当前 provider 的 api_key 是否对该网关有效；anthropic_messages 同时使用 x-api-key 和 Authorization Bearer，确认两个都被网关接受，再运行 /model doctor 复查配置。"
@@ -2458,9 +2466,7 @@ function sanitizeProviderBadRequestHint(responseText?: string): string | undefin
   if (!responseText) {
     return undefined;
   }
-  const compact = maskSensitiveFragments(responseText)
-    .replace(/\s+/g, " ")
-    .trim();
+  const compact = maskSensitiveFragments(responseText).replace(/\s+/g, " ").trim();
   if (!compact) {
     return undefined;
   }
