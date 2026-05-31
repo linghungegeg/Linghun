@@ -76,7 +76,7 @@ Low learning cost does not mean removing advanced capabilities. It means placing
 - `/model setup`, provider.env, and doctor source diagnostics lower the configuration barrier.
 - `/memory review`, `/failures`, `/cache`, and `/problems` are user-facing management surfaces rather than hidden internal state.
 
-As a result, new users can first treat Linghun as an executable AI coding terminal. Chinese developers can use their everyday language to describe tasks, verification, indexing, Git stable points, and troubleshooting. As tasks become more complex, they can gradually open memory, agents, jobs, runner, and remote channels.
+As a result, new users can first treat Linghun as an executable AI coding terminal. Chinese developers can use their everyday language to describe tasks, verification, indexing, Git stable points, and troubleshooting. When a task needs to continue while the user is away from the computer, WeCom, Feishu/Lark, and DingTalk channels can deliver summary-first mobile updates and, once official app/event/daemon inbound is configured, return mobile control input back into the local Linghun mainline. As tasks become more complex, users can gradually open memory, agents, jobs, runner, and remote channels.
 
 ---
 
@@ -94,7 +94,7 @@ Linghun is positioned as a local developer workbench:
 - It uses permission strategy, path safety, command semantic classification, and user confirmation to protect the local workspace.
 - It uses evidence and final answer gates to suppress "said without reading", "said without running", and "said complete without completion."
 - It uses sessions, handoff, controlled memory, and failure learning to support long-term engineering context.
-- It integrates external capabilities through MCP, skills, plugins, hooks, remote adapters, and native runner boundaries without allowing them to bypass local permissions.
+- It integrates external capabilities through MCP, skills, plugins, hooks, remote adapters, and native runner boundaries without allowing them to bypass local permissions. WeCom, Feishu/Lark, and DingTalk can act as mobile notification, approval, and natural-language entry points, but they still return to local permission and evidence boundaries.
 
 Linghun's target users include:
 
@@ -129,6 +129,7 @@ Linghun addresses these pain points as follows:
 | Partial tests are described as full completion | Verification level, readiness, `/review`, final answer downgrade | Prevents focused/mock/synthetic PASS from being presented as overall readiness. |
 | Git operations and worktrees can get out of control | Git stable point, managed worktree, dirty/force/path escape guard | Users can create a stable point before the next stage, making rollback and parallel development more controllable. |
 | Multiple agents can burn tokens and resources | Role route, independent transcripts, background surface, resource cap, job budget | Parallel exploration becomes controllable without allowing background tasks to overwhelm the main session. |
+| Long-running tasks are unattended when the user leaves the computer | WeCom, Feishu/Lark, and DingTalk remote channels send task status, verification results, failure summaries, and approval requests to the phone as summary-first messages; after official app, event callback, Stream, or bridge daemon setup, mobile natural language and approval can return to the local mainline. | Users can monitor progress, approve pending actions, or continue a task from their phone without staying at the terminal. Execution still happens locally, so remote channels do not become uncontrolled execution entries. |
 | The system has to re-learn user habits every round | Controlled memory, memory review, accepted-only injection | The user's phrasing, command habits, verification preferences, and project rules gradually accumulate, making later collaboration smoother. |
 | The same failure happens again later | Failure learning, reflection records, resolve/ignore | Real failures become risk hints instead of disappearing in logs. Later similar tasks are less likely to repeat the same mistake. |
 | Windows long tasks leave residue | Process Guard, Windows process tree stop, Native Runner Job Object contract | Cancellation, timeout, and exit cleanup are more reliable in everyday Windows development environments. |
@@ -173,7 +174,7 @@ This means Linghun does not merely save time for experts. It also embeds some se
 | Windows supervision and compatibility | Windows process tree stop, exit cleanup, Native Runner Job Object contract, ConPTY/terminal capability detection, lowercase/uppercase CLI entries, Chinese/space paths, and private provider.env configuration path. |
 | Self-learning and reflection | Controlled memory auto-learning, candidate-first confirmation flow, secret filtering, failure learning, real failure reflection, lesson projection, resolve/ignore lifecycle. Stable preferences and real lessons become hints for next time, making the model better aligned with the user and less likely to repeat mistakes. |
 | Extension ecosystem | MCP metadata, deferred tools, skills, plugins, workflows, hooks, manifest/trust/enable/disable/status/doctor. |
-| Remote boundary | WeCom, Feishu/Lark, DingTalk remote channel configuration model; summary-only redaction; approval/job/verification event types; replay/signature/binding/source checks. |
+| Remote connection | WeCom, Feishu/Lark, and DingTalk remote channels; real webhook/official-CLI outbound paths; low-learning `/remote setup` and `/remote bridge` guidance; notification-only, approval-capable, natural-language-inbound-capable, and full-mobile-control-capable grading; mobile natural language returns to the local model mainline; remote approval reuses local pending approval and permission pipeline; summary-only redaction, nonce/messageId/expiry/replay/signature/binding/source checks; remote inbox and active-turn guard prevent mobile messages from interrupting the main task. |
 | Output and interaction | Summary-first main screen, details expansion, command panel, status footer, slash suggestions, background task surface, bounded log artifact slices. |
 
 ---
@@ -536,7 +537,7 @@ Linghun's local-first stance is not a slogan. It is made of several source-level
 - **Private provider configuration**: `provider.env` is user-private configuration and its template clearly says not to commit it. Shell env has higher priority. When project settings are written back, apiKey is stripped. The provider.env merge summary records only whether overrides occurred and provider ids, not apiKey, baseUrl, or model route plaintext.
 - **Data location control**: storage supports project, user, and custom scopes; memory is split into project/user/session. `LINGHUN_DATA_DIR` can change the user data root. Memory, sessions, logs, jobs, cache, and index metadata are not forced into a hardcoded system drive path.
 - **Long-term memory control**: memory is candidate-first, not auto-accepted or auto-injected. Accepted memory is still constrained by topK and character budgets. Auto-learning filters secrets, tokens, private keys, long base64 values, and similar inputs. Long-term writes require user review/accept.
-- **Minimal remote exposure**: WeCom, Feishu, and DingTalk channels are disabled by default. The configured redactionPolicy is fixed to summary_only, allowed event types are limited to approval_request, job_status, job_report, and verification_result, with trustedSources boundaries.
+- **Minimal remote exposure**: WeCom, Feishu, and DingTalk channels are disabled by default. The configured redactionPolicy is fixed to summary_only. Allowed event types are bounded to approval_request, job_status, job_report, verification_result, failure_summary, stable_point_result, and index_result. Inbound messages still require trusted source, binding, nonce/messageId, expiry, signature or equivalent proof, and replay protection before they can return to the local permission pipeline.
 - **Workspace and permission boundaries**: workspace trust, four permission modes, path safety, command semantic classification, resource cap, and process guard jointly determine whether actions may execute. Natural language, remote approval, agents, and extension tools cannot bypass the local permission pipeline.
 
 Together, these designs point to developer sovereignty: users retain control over model choice, key location, data storage, remote exposure, long-term memory, permission actions, Git state, and final delivery wording. Safety and privacy are not extra constraints that sacrifice efficiency; they are prerequisites for individual developers and teams to confidently connect AI to real projects.
@@ -915,9 +916,40 @@ These capabilities provide entries for later ecosystem expansion without bypassi
 
 ---
 
-## 21. Remote Channel Boundary
+## 21. Runtime Capabilities vs. Skills
 
-Linghun's remote layer is designed to safely send important local-session events to external channels. It is not designed to turn remote channels into uncontrolled execution entries.
+Linghun supports Skills, but it does not build core engineering reliability on Skills alone. This boundary matters.
+
+A Skill is closer to an experience pack, an operating manual, or a prompt template. It can tell the model how to think about a certain class of tasks, which tools to consider, and which pitfalls to avoid. That is valuable, especially for team conventions, domain knowledge, repeated workflows, and personal preferences. But a Skill alone usually cannot guarantee that the following actually happens:
+
+- File writes go through permission checks.
+- Bash commands are classified, constrained, and recorded correctly.
+- Claims such as "done" or "verified" are backed by real evidence.
+- Focused or synthetic tests are not inflated into full readiness.
+- Git stable points, worktrees, index refresh, and remote approval enter controlled paths.
+- Long tasks can be paused, cancelled, resumed, and audited.
+- Failures are reflected on and projected as future risk hints.
+- Secrets, full paths, full logs, and endpoints are not sent outside.
+- Windows child processes, timeouts, exit cleanup, and path compatibility are handled reliably.
+
+These are not problems that a prompt layer can reliably solve. They are runtime-level foundation problems. What determines whether AI coding can enter real repositories is whether permissions, evidence, verification, Git, indexing, cache, process supervision, remote inbound, failure learning, transcript, and storage are connected to the mainline.
+
+Too many Skills can also create another kind of cost: longer prompts, noisier tool choice, conflicting instructions, and more prompt-cache churn. Linghun's choice is not to encode every capability as an ever-thicker prompt. Instead, it moves executable, verifiable, and auditable engineering actions into the system layer:
+
+- Skills extend experience.
+- MCP, plugins, and hooks integrate external capabilities.
+- Runtime owns execution boundaries, evidence closure, permissions, logs, failure handling, and recovery.
+- Doctor, details, and summary-first output make system state understandable to users.
+
+This is the difference between Linghun and a system that merely accumulates prompts or Skills. Prompts can guide the model, but runtime capabilities can constrain the model, record facts, recover context, prevent overreach, and turn success or failure into traceable engineering state. Linghun supports a Skill ecosystem, but it does not place safety, verification, cost control, remote control, or long-term reliability on Skills alone.
+
+---
+
+## 22. Remote Channel Boundary
+
+Real development does not always happen in front of the computer. A long-running task may need approval to write files, a verification run may fail and need the user's next decision, or a background agent may finish exploration while the user is away from the terminal.
+
+Linghun's remote layer is designed for this pain point: it safely sends important local-session events to the mobile IM channels developers already use, and, once official app/event callback/Stream/bridge daemon inbound is configured, lets mobile approval or natural-language input return to the local Linghun mainline. It is not designed to turn remote channels into uncontrolled execution entries, nor to send full code, full logs, or full transcripts to external platforms.
 
 The configuration model covers:
 
@@ -926,28 +958,58 @@ The configuration model covers:
 - DingTalk.
 - official CLI, webhook mock, webhook transport.
 
+After D.14E/D.14F, remote channels are split into two layers:
+
+- **Notification layer**: webhooks send task status, verification results, failure summaries, stable point results, and index results to the phone as redacted summaries. The Feishu webhook outbound path has been verified with a real mobile smoke test. DingTalk and WeCom can be verified through the same model once real webhooks are provided.
+- **Mobile control layer**: official CLI, platform apps, event callbacks, Stream, or a bridge daemon turn mobile approval, status queries, and natural-language messages into `RemoteInboundMessage`, then route them through local `processRemoteInbound` and `handleRemoteInboundMessage`. Without a real platform app or daemon, this layer must be reported as fixture-ready / NOT RUN, never as real mobile control.
+
+Remote channel capabilities include:
+
+- **Real outbound delivery**: webhooks use HTTP POST; official CLI uses `execFile` argument arrays, not shell concatenation. `webhook_mock` is diagnostic only and cannot be reported as real delivery.
+- **Low-learning setup**: `/remote setup <channel>` shows only necessary fields with filled/missing status and human next actions. Users do not need to understand nonce, evidence, provider, or transcript internals.
+- **Mobile bridge guidance**: `/remote bridge doctor|test-inbound|test-approval|test-status <channel>` reports real platform capability as notification-only, needs-app-setup, needs-daemon, fixture-ready, or inbound-ready. A pairing layer can use `/remote bridge pair <channel>` to generate a one-time binding code and QR fallback so the user can bind from the mobile bot.
+- **Mobile natural-language inbound**: after validation, mobile messages enter the local `sendMessage` mainline unchanged. There is no local keyword interception and no second remote agent.
+- **Remote approval closure**: mobile approve/reject can only resume an existing local `pendingLocalApproval`. Actual execution is still completed by the local permission resolver. Plan mode remote approval cannot execute writes.
+- **Remote inbox and active-turn guard**: status queries are read-only. When a model turn, job, or tool is active, mobile natural-language input goes to a remote inbox queue by default instead of interrupting the main task. Explicit interrupt/priority intent must go through a controlled scheduling path and be recorded in the transcript.
+- **Remote event surfaces**: `/remote events` and `/remote inbox` show recent redacted summaries instead of flooding the main screen.
+
 Event types include:
 
 - approval_request.
 - job_status.
 - job_report.
 - verification_result.
+- failure_summary.
+- stable_point_result.
+- index_result.
+
+Linghun grades each platform by real capability instead of treating a successful webhook as full mobile control:
+
+| Platform | Webhook path | Official CLI / app path |
+| --- | --- | --- |
+| Feishu / Lark | notification-only, outbound summaries only; Feishu webhook has passed a real mobile smoke test | full-mobile-control-capable: official app, event subscription, long-connection/callback, or CLI daemon can carry natural language and approval inbound |
+| DingTalk | notification-only, outbound summaries only | approval-capable / stream-callback-capable: approval inbound can be supported through app/Stream; real-time natural-language inbound requires Stream or callback app |
+| WeCom | notification-only, outbound summaries only | natural-language-inbound-capable / app-callback-capable: custom app message receiving or equivalent daemon can return natural-language input; interactive approval requires app callback |
 
 Safety boundaries include:
 
 - summary_only redaction.
 - trusted source.
 - bound user/device.
-- nonce and messageId.
-- signature checks.
+- nonce, messageId, and expiry.
+- signature or equivalent source proof.
 - replay protection.
+- expired approval_request events cannot be approved by a fresh mobile message.
 - After remote approval, control still returns to local pending approval and permission pipeline.
+- remote inbox and active-turn guard prevent mobile messages from preempting or polluting the active local task.
 
-Therefore, remote channels can serve as approval and notification adapters, but they do not replace the local permission system.
+For users, this means they can leave the computer and still see long-task progress, verification results, failure summaries, and approval requests. Once the corresponding platform app or bridge daemon is configured, they can also continue a task or approve/deny a pending action from the phone. The phone remains summary-first by default: it does not mirror the full transcript, full logs, full diff, or full commands. From a safety perspective, the remote endpoint is only an input, query, and approval interface. Code changes, Bash, Git, index refresh, stable points, and final-answer gates still happen in the local Linghun mainline.
+
+Therefore, remote channels can serve as notification, approval, and mobile-control adapters, but they do not replace the local permission system.
 
 ---
 
-## 22. TUI Output and Interaction Layers
+## 23. TUI Output and Interaction Layers
 
 Linghun's interaction goal is: focus the main screen on results, keep details traceable, and make complex capabilities discoverable.
 
@@ -976,7 +1038,7 @@ This lets Linghun serve both new and advanced users: defaults are not interrupte
 
 ---
 
-## 23. Cost and Performance Control
+## 24. Cost and Performance Control
 
 Linghun's cost reduction and productivity gains are not a single optimization, but multiple coordinated layers:
 
@@ -998,7 +1060,7 @@ Real cost depends on model, repository size, task complexity, and user workflow.
 
 ---
 
-## 24. Self-developed Runtime and Open-source Value
+## 25. Self-developed Runtime and Open-source Value
 
 Linghun's core value is organizing a set of scattered capabilities into one unified runtime:
 
@@ -1023,7 +1085,7 @@ Together, these capabilities give Linghun properties that open-source projects e
 
 ---
 
-## 25. Engineering Exoskeleton for All Large Models
+## 26. Engineering Exoskeleton for All Large Models
 
 Linghun exists because large-model capability has advanced rapidly. Whether in code understanding, natural-language reasoning, tool use, long context, visual input, or complex task planning, today's model providers have pushed AI coding to the threshold of real usability. Behind every strong model are enormous training cost, data engineering, inference optimization, and infrastructure investment. Linghun respects and benefits from these achievements. The stronger the models become, the more complex the engineering tasks Linghun can carry.
 
@@ -1049,7 +1111,7 @@ Therefore, Linghun can evolve with model capability. Today it can connect models
 
 ---
 
-## 26. Basic View on the AI Coding Wave
+## 27. Basic View on the AI Coding Wave
 
 Every major productivity tool has produced similar debates: will it replace people, destroy existing work patterns, or turn out to be a short-lived bubble? Steam engines, electricity, automated production lines, and the internet all shocked traditional industries and forced changes in labor, organization, and skill structures. When steam power entered textiles, traditional hand weaving was heavily affected, but the longer-term result was not the end of production. Production scale, collaboration patterns, job structures, and skill requirements were redefined.
 
@@ -1076,7 +1138,7 @@ So Linghun does not stand at either extreme of "AI replaces humans" or "AI has n
 
 ---
 
-## 27. Applicable Scenarios
+## 28. Applicable Scenarios
 
 Linghun is suitable for the following workflows:
 
@@ -1095,7 +1157,7 @@ Linghun is suitable for the following workflows:
 
 ---
 
-## 28. Explicit Boundaries
+## 29. Explicit Boundaries
 
 Linghun's capability boundaries are:
 
