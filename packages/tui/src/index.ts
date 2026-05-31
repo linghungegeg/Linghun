@@ -497,6 +497,8 @@ import {
   executeGitToolUse,
   resolveWorktreeRemoveApprove,
   resolveWorktreeRemoveDeny,
+  resolveStablePointApprove,
+  resolveStablePointDeny,
 } from "./git-tool-dispatch-runtime.js";
 import type { GitSlashDeps } from "./git-slash-runtime.js";
 import {
@@ -900,6 +902,18 @@ type PendingLocalApproval =
       strong: boolean;
       continuation?: PendingModelContinuation;
       toolCall?: ModelToolCall;
+    }
+  | {
+      // D.14D-R2 P1-1 — 模型工具 GitStablePointCreate 的确认。自然语言触发的稳定点
+      // （创建 commit/snapshot）仅 default / auto-review 进入确认；plan 模式在工具派发
+      // 层直接只读拒绝。复用 pendingLocalApproval / yes-no glue / PermissionPanel，不新增第五种权限模式。
+      // 仅模型工具路径用此 kind；slash /git stable create 是显式用户动作，不走此确认。
+      kind: "git_stable_point";
+      sessionId: string;
+      message?: string;
+      includeUntracked?: boolean;
+      continuation?: PendingModelContinuation;
+      toolCall: ModelToolCall;
     }
   | {
       // D.14D-R P0-2 — 结构化索引工具（IndexRefresh / IndexRepair）的 mutating
@@ -3469,6 +3483,16 @@ async function executePermissionApprove(
     );
     return;
   }
+  if (approval.kind === "git_stable_point") {
+    // D.14D-R2 P1-1 — 用户确认后真实创建稳定点，并把工具结果回灌模型续轮。
+    await resolveStablePointApprove(
+      approval,
+      context,
+      output,
+      createWorktreeRemoveResolveDeps(gateway),
+    );
+    return;
+  }
   if (approval.kind === "index_tool") {
     // D.14D-R P0-2 — 用户确认后真实刷新/修复索引，并把工具结果回灌模型续轮。
     const result = await executeApprovedIndexToolUse(
@@ -3598,6 +3622,17 @@ async function executePermissionDeny(
   }
   if (approval.kind === "git_worktree_remove") {
     await resolveWorktreeRemoveDeny(
+      approval,
+      context,
+      output,
+      cancelled,
+      createWorktreeRemoveResolveDeps(gateway),
+    );
+    return;
+  }
+  if (approval.kind === "git_stable_point") {
+    // D.14D-R2 P1-1 — 拒绝稳定点：不创建 commit/snapshot，回灌"NOT created"给模型。
+    await resolveStablePointDeny(
       approval,
       context,
       output,
@@ -8072,7 +8107,8 @@ async function recordProviderFailureEvidence(
       ? error.code
       : "PROVIDER_ERROR";
   const message = error instanceof Error ? error.message : String(error);
-  const summary = `provider_failure code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
+  const transitFailure = isProviderTransitFailure(code, message);
+  const summary = `${transitFailure ? "provider/transit failure" : "provider_failure"} code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
   const evidence = createEvidenceRecord(
     "command_output",
     summary,
@@ -8098,10 +8134,14 @@ async function recordProviderFailureEvidence(
   // failureSummary 只含错误码与脱敏 message，relatedTarget 用错误码。
   await captureFailureLearning(context, sessionId, {
     category: "provider_failure",
-    failureSummary: `provider request failed code=${code} message=${sanitizeProviderFailureText(message)}`,
-    rootCauseGuess: `model/provider request failed with ${code}`,
+    failureSummary: `${transitFailure ? "provider/transit failure" : "provider request failed"} code=${code} message=${sanitizeProviderFailureText(message)}`,
+    rootCauseGuess: transitFailure
+      ? `provider/network transit failure with ${code}`
+      : `model/provider request failed with ${code}`,
     avoidNextTime:
-      code === "PROVIDER_RATE_LIMITED"
+      transitFailure
+        ? "Retry later; if it repeats, check provider transit/gateway stability with /model doctor. Do not change provider route/env/key/model unless diagnostics point there."
+        : code === "PROVIDER_RATE_LIMITED"
         ? "Back off / reduce request rate before retrying provider calls"
         : `Check provider config and request shape for ${code} before retrying; do not assume the request succeeded`,
     sourceRef: `evidence:${evidence.id}`,
@@ -8109,6 +8149,17 @@ async function recordProviderFailureEvidence(
     severity: "high",
   });
   return evidence;
+}
+
+function isProviderTransitFailure(code: string, message: string): boolean {
+  return (
+    code === "PROVIDER_STREAM_ERROR" ||
+    code === "PROVIDER_STREAM_DECODE_ERROR" ||
+    code === "PROVIDER_RETRY_EXHAUSTED" ||
+    /crc|checksum|eventstream|event[-\s]?stream|stream\s*decode|decode\s*(?:error|failed|mismatch)|malformed\s*(?:sse|stream|chunk)|retry\s*exhausted|重试.*耗尽|流.*解码|解码.*失败|校验.*不一致/iu.test(
+      message,
+    )
+  );
 }
 
 function sanitizeProviderFailureError(error: unknown): unknown {

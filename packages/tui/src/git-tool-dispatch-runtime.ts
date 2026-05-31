@@ -256,6 +256,7 @@ export async function executeGitToolUse(
         output,
         deps,
         parseStablePointInput(toolCall.input),
+        continuation,
       );
     }
     if (toolCall.name === MANAGED_WORKTREE_CREATE) {
@@ -345,7 +346,82 @@ async function runStablePointTool(
   output: Writable,
   deps: GitToolDispatchDeps,
   input: { message?: string; includeUntracked?: boolean },
+  continuation?: PendingModelContinuation,
 ): Promise<GitToolResult> {
+  // D.14D-R2 P1-1/R2 fix — 模型工具创建 stable point 是写仓库状态：
+  // default/auto-review 先确认，plan 直接拒绝，full-access 直接执行。slash
+  // /git stable create 是显式用户动作，不经此模型工具路径，确认语义不受影响。
+  if (context.permissionMode === "plan") {
+    deps.clearRequestActivity(context);
+    const text =
+      context.language === "en-US"
+        ? "stable point was NOT created because Plan mode is read-only."
+        : "stable point was NOT created because Plan mode is read-only. 稳定点未创建：计划模式只读。";
+    const evidence = await deps.recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Read",
+      `GitStablePointCreate denied: ${text}`,
+    );
+    await appendGitOperationEvent(
+      deps,
+      context,
+      sessionId,
+      {
+        operation: "stable_point_denied",
+        createdAt: new Date().toISOString(),
+        project: context.projectPath,
+        includeUntracked: Boolean(input.includeUntracked),
+        result: "plan_read_only",
+      },
+      "warning",
+    );
+    await deps.appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      toolCall.name,
+      { text, ok: false, outcome: "plan_read_only" },
+      true,
+      evidence.id,
+    );
+    deps.writeLine(output, text);
+    return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
+  }
+  if (context.permissionMode !== "full-access") {
+    deps.clearRequestActivity(context);
+    context.pendingLocalApproval = {
+      kind: "git_stable_point",
+      sessionId,
+      message: input.message,
+      includeUntracked: input.includeUntracked,
+      continuation: continuation
+        ? deps.createSingleToolCallContinuation(continuation, toolCall)
+        : undefined,
+      toolCall,
+    };
+    const summaryText =
+      context.language === "en-US"
+        ? "Confirm creating a stable point (git commit / snapshot) for the current workspace."
+        : "确认为当前工作区创建稳定点（git commit / snapshot）。";
+    await appendGitOperationEvent(
+      deps,
+      context,
+      sessionId,
+      {
+        operation: "stable_point_requested",
+        createdAt: new Date().toISOString(),
+        project: context.projectPath,
+        includeUntracked: Boolean(input.includeUntracked),
+        result: "pending_confirmation",
+      },
+      "info",
+    );
+    if (!context.isInkSession) {
+      deps.writeLine(output, summaryText);
+    }
+    return { ok: false, tool: toolCall.name, text: summaryText, pendingApproval: true };
+  }
   const result = await performStablePoint(context, sessionId, input, deps);
   deps.clearRequestActivity(context);
   await deps.appendDeferredToolResultEvent(
@@ -749,6 +825,15 @@ export type GitWorktreeRemoveApproval = {
   toolCall?: ModelToolCall;
 };
 
+// D.14D-R2 P1-1 — 模型工具 GitStablePointCreate 的确认载体。
+export type GitStablePointApproval = {
+  sessionId: string;
+  message?: string;
+  includeUntracked?: boolean;
+  continuation?: PendingModelContinuation;
+  toolCall: ModelToolCall;
+};
+
 export type WorktreeRemoveResolveDeps = GitToolDispatchDeps & {
   writeLightHints: (output: Writable, context: TuiContext) => void;
   writeStatus: (output: Writable, context: TuiContext) => void;
@@ -833,6 +918,97 @@ export async function resolveWorktreeRemoveDeny(
       content: JSON.stringify({
         ok: false,
         tool: MANAGED_WORKTREE_REMOVE_TOOL,
+        text: deniedText,
+        outcome: cancelled ? "cancelled" : "denied",
+        evidenceId: evidence.id,
+      }),
+    });
+    await deps.continueAfterToolResults(approval.continuation, context, output);
+  }
+  deps.writeLightHints(output, context);
+  deps.writeStatus(output, context);
+}
+
+// D.14D-R2 P1-1 — 用户确认后真实创建稳定点，并把工具结果回灌模型续轮。
+export async function resolveStablePointApprove(
+  approval: GitStablePointApproval,
+  context: TuiContext,
+  output: Writable,
+  deps: WorktreeRemoveResolveDeps,
+): Promise<void> {
+  const result = await performStablePoint(
+    context,
+    approval.sessionId,
+    { message: approval.message, includeUntracked: approval.includeUntracked },
+    deps,
+  );
+  await deps.appendDeferredToolResultEvent(
+    context,
+    approval.sessionId,
+    approval.toolCall.id,
+    GIT_STABLE_POINT_CREATE,
+    { text: result.text, ok: result.ok },
+    !result.ok,
+    result.evidenceId,
+  );
+  deps.writeLine(output, result.text);
+  if (approval.continuation) {
+    approval.continuation.messages.push({
+      role: "tool",
+      tool_call_id: approval.toolCall.id,
+      content: JSON.stringify({
+        ok: result.ok,
+        tool: GIT_STABLE_POINT_CREATE,
+        text: result.text,
+        evidenceId: result.evidenceId,
+      }),
+    });
+    await deps.continueAfterToolResults(approval.continuation, context, output);
+  }
+  deps.writeLightHints(output, context);
+  deps.writeStatus(output, context);
+}
+
+// D.14D-R2 P1-1 — 拒绝稳定点：不创建 commit/snapshot，回灌"NOT created"给模型，
+// 让 final answer 无法声称已建立稳定点。
+export async function resolveStablePointDeny(
+  approval: GitStablePointApproval,
+  context: TuiContext,
+  output: Writable,
+  cancelled: boolean,
+  deps: WorktreeRemoveResolveDeps,
+): Promise<void> {
+  const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
+  const evidence = await deps.recordToolFailureEvidence(
+    context,
+    approval.sessionId,
+    "Read",
+    `${outcomeText}: GitStablePointCreate`,
+  );
+  await appendGitOperationEvent(
+    deps,
+    context,
+    approval.sessionId,
+    {
+      operation: "stable_point_denied",
+      createdAt: new Date().toISOString(),
+      project: context.projectPath,
+      result: cancelled ? "cancelled" : "denied",
+    },
+    "warning",
+  );
+  const deniedText =
+    context.language === "en-US"
+      ? `Stable point ${cancelled ? "cancelled" : "denied"}; no commit or snapshot was created. The stable point was NOT created.`
+      : `已${cancelled ? "取消" : "拒绝"}创建稳定点；未创建任何 commit 或 snapshot。稳定点未创建。`;
+  deps.writeLine(output, deniedText);
+  if (approval.continuation) {
+    approval.continuation.messages.push({
+      role: "tool",
+      tool_call_id: approval.toolCall.id,
+      content: JSON.stringify({
+        ok: false,
+        tool: GIT_STABLE_POINT_CREATE,
         text: deniedText,
         outcome: cancelled ? "cancelled" : "denied",
         evidenceId: evidence.id,

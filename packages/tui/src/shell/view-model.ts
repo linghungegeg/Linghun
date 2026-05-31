@@ -814,6 +814,23 @@ export function mapPendingApprovalToPermission(
     };
   }
 
+  // D.14D-R2 P1-1 — 模型工具 GitStablePointCreate 的提权，ink 主屏走同一 PermissionPanel。
+  if (approval.kind === "git_stable_point") {
+    const isEn = context.language === "en-US";
+    return {
+      toolName: "GitStablePointCreate",
+      reason: "",
+      risk: "medium",
+      scope: [],
+      hint: "",
+      actionSummary: isEn
+        ? "Create a stable point (git commit / snapshot) for the workspace"
+        : "为工作区创建稳定点（git commit / snapshot）",
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
+
   if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
     const toolName = approval.toolName ?? "unknown";
     // D.13Q-UX Closure: 优先用 engine 真实 verdict（semantic / pathSafety /

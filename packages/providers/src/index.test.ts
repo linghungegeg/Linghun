@@ -979,6 +979,39 @@ describe("ModelGateway", () => {
     });
   });
 
+  it("normalizes eventstream CRC mismatch as provider stream decode error", async () => {
+    const provider: Provider = {
+      id: "mock",
+      displayName: "Mock",
+      supports: { streaming: true, usage: true },
+      async listModels() {
+        return [];
+      },
+      async *stream(): AsyncGenerator<LinghunEvent> {
+        if (Date.now() < 0) {
+          yield { type: "assistant_text_delta", id: "unused", text: "" };
+        }
+        throw new Error("Anthropic Messages stream decode failed: eventstream prelude CRC mismatch sk-secret123");
+      },
+    };
+    const gateway = new ModelGateway([provider]);
+    const events: LinghunEvent[] = [];
+
+    for await (const event of gateway.stream(
+      "mock",
+      { messages: [{ role: "user", content: "hi" }] },
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: { code: "PROVIDER_STREAM_DECODE_ERROR", recoverable: true },
+    });
+    expect(JSON.stringify(events[0])).not.toContain("sk-secret123");
+  });
+
   it("keeps LinghunError provider failures readable", () => {
     const error = normalizeProviderError(
       new LinghunError({

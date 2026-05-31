@@ -25,6 +25,7 @@ function readSrc(file: string): string {
 
 describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
   const src = readSrc("index.ts");
+  const gitDispatchSrc = readSrc("git-tool-dispatch-runtime.ts");
 
   it("model-tool permission prompt writeLine is gated behind !isInkSession", () => {
     // The formatModelToolPermissionPrompt writeLine must be reachable only when
@@ -48,5 +49,29 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
   it("ask paths set pendingLocalApproval as the panel render source", () => {
     expect(src).toContain('kind: "model_tool_use"');
     expect(src).toContain("pendingApproval: true");
+  });
+
+  it("D.14D-R2: model GitStablePointCreate default/auto-review ask path sets pendingLocalApproval before performStablePoint", () => {
+    const pendingIdx = gitDispatchSrc.indexOf('kind: "git_stable_point"');
+    const performIdx = gitDispatchSrc.indexOf("const result = await performStablePoint(context");
+    expect(pendingIdx).toBeGreaterThan(0);
+    expect(performIdx).toBeGreaterThan(pendingIdx);
+    expect(gitDispatchSrc).toContain('context.permissionMode === "plan"');
+    expect(gitDispatchSrc).toContain('context.permissionMode !== "full-access"');
+  });
+
+  it("D.14D-R2 fix: GitStablePointCreate pending writeLine is not duplicated in ink", () => {
+    expect(gitDispatchSrc).toMatch(
+      /if \(!context\.isInkSession\) \{\s*deps\.writeLine\(output, summaryText\);/s,
+    );
+  });
+
+  it("D.14D-R2 fix: GitStablePointCreate refuses plan mode without setting git_stable_point pending approval", () => {
+    const planIdx = gitDispatchSrc.indexOf('context.permissionMode === "plan"');
+    const pendingIdx = gitDispatchSrc.indexOf('kind: "git_stable_point"');
+    const notCreatedIdx = gitDispatchSrc.indexOf("stable point was NOT created because Plan mode is read-only.");
+    expect(planIdx).toBeGreaterThan(0);
+    expect(notCreatedIdx).toBeGreaterThan(planIdx);
+    expect(pendingIdx).toBeGreaterThan(planIdx);
   });
 });

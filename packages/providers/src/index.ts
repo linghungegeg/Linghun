@@ -2374,6 +2374,16 @@ export function normalizeProviderError(error: unknown): LinghunError {
     });
   }
   if (error instanceof Error) {
+    const streamFailureCode = classifyProviderStreamFailure(error.message);
+    if (streamFailureCode) {
+      return new LinghunError({
+        code: streamFailureCode,
+        message: `模型响应流传输失败：${maskSensitiveFragments(error.message)}`,
+        suggestion: "这通常是 provider 或网络传输层的临时问题。请稍后重试；反复出现时运行 /model doctor 查看配置摘要。",
+        cause: error,
+        recoverable: true,
+      });
+    }
     return new LinghunError({
       code: "PROVIDER_ERROR",
       message: `模型请求失败：${error.message}`,
@@ -2389,6 +2399,20 @@ export function normalizeProviderError(error: unknown): LinghunError {
     cause: error,
     recoverable: true,
   });
+}
+
+function classifyProviderStreamFailure(message: string): "PROVIDER_STREAM_DECODE_ERROR" | "PROVIDER_RETRY_EXHAUSTED" | null {
+  if (/retry\s*exhausted|重试.*耗尽/iu.test(message)) {
+    return "PROVIDER_RETRY_EXHAUSTED";
+  }
+  if (
+    /crc|checksum|eventstream|event[-\s]?stream|stream\s*decode|decode\s*(?:error|failed|mismatch)|malformed\s*(?:sse|stream|chunk)|流.*解码|解码.*失败|校验.*不一致/iu.test(
+      message,
+    )
+  ) {
+    return "PROVIDER_STREAM_DECODE_ERROR";
+  }
+  return null;
 }
 
 interface ProviderErrorContext {

@@ -6424,7 +6424,8 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
+    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -6432,7 +6433,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(transcript).toContain("provider_failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain("provider/transit failure code=PROVIDER_STREAM_ERROR");
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
   });
@@ -6471,7 +6472,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
+    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -6480,7 +6482,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(output.text).toContain("last provider failure: code=PROVIDER_STREAM_ERROR");
+    expect(output.text).toContain("last provider failure: kind=provider/transit code=PROVIDER_STREAM_ERROR");
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
     expect(output.text).toContain("details: /details evidence");
@@ -6491,7 +6493,7 @@ describe("Phase 06 TUI slash commands", () => {
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    expect(transcript).toContain("provider_failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain("provider/transit failure code=PROVIDER_STREAM_ERROR");
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
     expect(transcript).not.toContain("sk-provider-secret");
@@ -7852,6 +7854,74 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("未验证 / 待确认");
   });
 
+  it("D.14D-R2 P3-1: from-scratch '写一个 add 函数' reaches the model (no code-fact pre-gate)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "code-hygiene-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "code-hygiene-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("function add(a, b) { return a + b; }");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["写一个 add 函数\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 请求到达模型（gate 未前置拦截）。
+    expect(requests.length).toBeGreaterThanOrEqual(1);
+    // 不应出现"尚未确认，需要先检查"的取证前置文案。
+    expect(output.text).not.toContain("尚未确认，需要先检查");
+    expect(output.text).toContain("function add");
+  });
+
+  it("D.14D-R2 P3-1: current-repo fact claim '这个仓库里 add 函数已经实现了吗' is pre-gated without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "fact-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "fact-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiTextFetch("已实现。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["这个仓库里 add 函数已经实现了吗\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    // 事实声明被前置取证拦截（无本地代码事实证据）；请求不发给模型。
+    expect(output.text).toContain("尚未确认，需要先检查");
+    expect(requests.length).toBe(0);
+  });
+
   it("D.14D: /btw is model-backed but isolated from todo, plan, and checkpoints", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -9140,7 +9210,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型请求未完成。可运行 /model doctor 查看详情后重试。");
+    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("quota exceeded");
     expect(output.text).not.toContain("Evidence:");
@@ -13182,7 +13253,7 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
-  gitIt("model GitStablePointCreate tool_use executes a real commit and the final answer is evidence-backed", async () => {
+  gitIt("model GitStablePointCreate tool_use executes a real commit after confirmation and the final answer is evidence-backed", async () => {
     await isolateModelEnv();
     const { project, context, store } = await makeRepoContext();
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -13211,14 +13282,15 @@ describe("D.14G git stable point / managed worktree product closure", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["帮我建立一个稳定点\n", "/exit\n"]),
+      // D.14D-R2 P1-1：default 模式下模型工具触发的稳定点先进权限确认，yes 后才执行。
+      stdin: Readable.from(["帮我建立一个稳定点\n", "yes\n", "/exit\n"]),
       stdout: new MemoryOutput(),
       stderr: new MemoryOutput(),
     });
 
     // 模型确实发了 tool_call（≥2 轮）。
     expect(requests.length).toBeGreaterThanOrEqual(2);
-    // 真实 commit 落地。
+    // 确认后真实 commit 落地。
     const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
     expect(log.stdout.toString().trim()).toBe("feat: via model");
     // git_operation evidence 写入 transcript。
@@ -13227,6 +13299,137 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     expect(
       transcript.some(
         (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      ),
+    ).toBe(true);
+  });
+
+  gitIt("D.14D-R2 P1-1: model GitStablePointCreate waits for confirmation; deny creates no commit", async () => {
+    await isolateModelEnv();
+    const { project, store } = await makeRepoContext();
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "git-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "git-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "README.md"), "# repo\n\nuncommitted-change\n", "utf8");
+    const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString().trim();
+
+    const requests = mockSseToolSequence(
+      [{ toolName: "GitStablePointCreate", input: { message: "feat: should-not-commit" } }],
+      "我不会声称已建立稳定点。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      // 拒绝确认 → 不创建 commit/snapshot。
+      stdin: Readable.from(["建立一个稳定点\n", "no\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    // HEAD 未变（未创建新 commit）。
+    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
+    expect(log.stdout.toString().trim()).toBe(baselineLog);
+    expect(log.stdout.toString().trim()).not.toBe("feat: should-not-commit");
+    // 回灌给模型的 tool_result 明确未创建；无 stable_point_created evidence。
+    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+    const toolMessage = second?.messages?.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain("稳定点未创建");
+    expect(toolMessage?.content).toContain('"outcome":"denied"');
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      ),
+    ).toBe(false);
+  });
+
+  gitIt("D.14D-R2 fix: model GitStablePointCreate in plan mode is rejected without commit or snapshot", async () => {
+    await isolateModelEnv();
+    const { project, store } = await makeRepoContext();
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "git-model",
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "git-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "README.md"), "# repo\n\nplan-mode-change\n", "utf8");
+    const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString().trim();
+
+    const requests = mockSseToolSequence(
+      [{ toolName: "GitStablePointCreate", input: { message: "feat: forbidden in plan" } }],
+      "Plan 模式下没有创建稳定点。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/mode plan\n", "建立一个稳定点\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(output.text).not.toContain("确认为当前工作区创建稳定点");
+    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
+    expect(log.stdout.toString().trim()).toBe(baselineLog);
+    expect(log.stdout.toString().trim()).not.toBe("feat: forbidden in plan");
+    const snapshots = spawnSync("git", ["stash", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    expect(snapshots).not.toContain("linghun-stable-point");
+
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    const toolResult = transcript.find(
+      (e) => e.type === "tool_result" && e.toolName === "GitStablePointCreate",
+    ) as { content?: unknown; isError?: boolean } | undefined;
+    expect(toolResult?.isError).toBe(true);
+    expect(JSON.stringify(toolResult?.content)).toContain(
+      "stable point was NOT created because Plan mode is read-only",
+    );
+    expect(JSON.stringify(toolResult?.content)).toContain('"outcome":"plan_read_only"');
+    expect(
+      transcript.some(
+        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      ),
+    ).toBe(false);
+    expect(
+      transcript.some(
+        (e) =>
+          e.type === "system_event" &&
+          e.message.includes("operation=stable_point_denied") &&
+          e.message.includes("result=plan_read_only"),
       ),
     ).toBe(true);
   });

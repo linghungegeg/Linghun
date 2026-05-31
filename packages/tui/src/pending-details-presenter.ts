@@ -92,6 +92,23 @@ export function formatPendingApprovalDetails(approval: PendingLocalApproval, con
           "- 下一步：yes/确认 删除一次；no/cancel/Esc 保留。",
         ].join("\n");
   }
+  if (approval.kind === "git_stable_point") {
+    return context.language === "en-US"
+      ? [
+          "Pending confirmation: create stable point",
+          "- action: git commit (tracked changes) or Linghun snapshot (untracked-only/clean)",
+          "- sensitive/ignored files are never committed; dirty/path/secret boundaries still apply.",
+          "- raw paths, tokens, request ids, and internal ids are hidden.",
+          "- next: yes/confirm to create once; no/cancel/Esc to skip (no commit/snapshot).",
+        ].join("\n")
+      : [
+          "待确认：创建稳定点",
+          "- 动作：git commit（已跟踪改动）或 Linghun snapshot（仅未跟踪/干净）",
+          "- 敏感/ignored 文件不会被提交；dirty/path/secret 边界仍生效。",
+          "- raw 路径、token、request id 和内部 id 已隐藏。",
+          "- 下一步：yes/确认 创建一次；no/cancel/Esc 跳过（不创建 commit/snapshot）。",
+        ].join("\n");
+  }
   if (approval.kind === "index_tool") {
     const action = approval.indexAction === "repair" ? "repair" : "refresh";
     return context.language === "en-US"

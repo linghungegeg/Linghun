@@ -461,8 +461,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   }
   if (context.lastProviderFailure) {
     const failure = context.lastProviderFailure;
+    const failureKind = isProviderTransitFailureCode(failure.code)
+      ? "provider/transit"
+      : "provider";
     lines.push(
-      `- last provider failure: code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
+      `- last provider failure: kind=${failureKind} code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
     );
   }
   if (hasOpenAiCompatibleDoctorProblem(context.config)) {
@@ -482,6 +485,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
   );
   return lines.join("\n");
+}
+
+function isProviderTransitFailureCode(code: string): boolean {
+  return (
+    code === "PROVIDER_STREAM_ERROR" ||
+    code === "PROVIDER_STREAM_DECODE_ERROR" ||
+    code === "PROVIDER_RETRY_EXHAUSTED"
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ import {
   mapPendingApprovalToPermission,
   mapRequestActivityToView,
 } from "./view-model.js";
+import { formatToolOutput } from "../tool-output-presenter.js";
 
 // Reset terminal capability cache after every test to prevent cross-test pollution.
 // On Windows without WT_SESSION, detectTerminalCapability() returns legacy unless
@@ -1037,6 +1038,21 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result?.scope).toContain(".linghunignore");
     expect(result?.actionSummary).toContain(".linghunignore");
     expect(result?.actionSummary).toContain("修改文件");
+  });
+
+  it("D.14D-R2 P1-1: maps git_stable_point approval to a GitStablePointCreate PermissionPanel view", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "git_stable_point",
+        sessionId: "session-1",
+        toolCall: { id: "call-1", name: "GitStablePointCreate", input: {} },
+      },
+    } as unknown as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("GitStablePointCreate");
+    expect(result?.risk).toBe("medium");
+    expect(result?.actionSummary).toContain("稳定点");
   });
 
   it("maps en-US language hint correctly", () => {
@@ -4479,6 +4495,24 @@ describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
 });
 
 describe("D.14D Ctrl+O summary-first details viewer", () => {
+  it("D.14D-R2 P3-2: end-to-end presenter→block 同一工具输出块只剩一次 Ctrl+O（回归锁定）", () => {
+    // CLOSED_BY_D14D_R 复核：真实 formatToolOutput 产出（含内嵌折叠提示）经
+    // createOutputBlock 装配后，ink 主屏渲染层（fullText + nextAction）只出现一次 Ctrl+O。
+    const presenterBody = formatToolOutput(
+      "Read",
+      { text: "x\n".repeat(40), data: { lines: 40 }, truncated: true },
+      "zh-CN",
+    );
+    // 源码事实：presenter 自身不再双重打印（同一字符串只出现一次）。
+    expect(presenterBody.match(/Ctrl\+O/g)?.length).toBe(1);
+    const block = createOutputBlock(presenterBody, "zh-CN", "out-e2e");
+    expect(block.fullText).not.toContain("输出已折叠");
+    expect(block.nextAction).toContain("Ctrl+O");
+    const rendered = `${block.fullText ?? ""}\n${block.nextAction ?? ""}`;
+    expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
+  });
+
+
   it("D.14D-R P1-1: tool 输出块同一块只出现一次 Ctrl+O 提示（内嵌折叠行被剥离）", () => {
     // 模拟 tool-output-presenter 产出的正文：摘要 + 内嵌折叠提示行。
     const body = ["工具 Read 已完成", "- 120 行", "- 输出已折叠，按 Ctrl+O 展开。"].join("\n");
