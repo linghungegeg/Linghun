@@ -139,7 +139,7 @@ describe("OpenAI compatible provider", () => {
       messages: [{ role: "user", content: "你好" }],
     });
 
-    expect(request.reasoning).toEqual({ effort: "Medium" });
+    expect(request.reasoning).toEqual({ effort: "medium" });
     expect(request.stream_options).toEqual({ include_usage: true });
   });
 
@@ -174,8 +174,26 @@ describe("OpenAI compatible provider", () => {
         },
       ],
       tool_choice: "auto",
-      reasoning: { effort: "Medium" },
+      reasoning: { effort: "medium" },
     });
+  });
+
+  it("normalizes OpenAI reasoning effort to lowercase for responses gateways", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+      reasoningLevel: "High",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+
+    expect(request.reasoning).toEqual({ effort: "high" });
   });
 
   it("converts responses tool results to function_call_output input items", () => {
@@ -287,6 +305,43 @@ describe("OpenAI compatible provider", () => {
     await expect(collect()).rejects.toMatchObject({ code: "PROVIDER_SERVER_ERROR" });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true);
+  });
+
+  it("uses an internal abort signal when streaming without caller signal", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"id":"resp-1","type":"response.output_text.delta","delta":"OK"}\n\n',
+            ),
+          );
+          controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+
+    const events: LinghunEvent[] = [];
+    for await (const event of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+      events.push(event);
+    }
+
+    expect(events).toContainEqual({ type: "assistant_text_delta", id: "resp-1", text: "OK" });
   });
 
   it.each([
@@ -3064,7 +3119,7 @@ describe("D.13K Anthropic Messages extended thinking", () => {
     expect(request).not.toHaveProperty("reasoning");
   });
 
-  it("OpenAI Responses profile: reasoning.effort 仍按原逻辑发送，且不发 Anthropic thinking", () => {
+  it("OpenAI Responses profile: reasoning.effort uses lowercase API values and does not send Anthropic thinking", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -3077,7 +3132,7 @@ describe("D.13K Anthropic Messages extended thinking", () => {
     const request = provider.createResponsesRequest({
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(request.reasoning).toEqual({ effort: "High" });
+    expect(request.reasoning).toEqual({ effort: "high" });
     expect(JSON.stringify(request)).not.toContain("thinking");
   });
 

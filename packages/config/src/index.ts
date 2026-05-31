@@ -442,7 +442,7 @@ export const defaultConfig: LinghunConfig = {
       endpointProfile: defaultOpenAiEndpointProfile,
       compatibilityProfile: "strict_openai_compatible",
       reasoningLevel: defaultReasoningLevel,
-      includeUsage: process.env.LINGHUN_OPENAI_INCLUDE_USAGE === "true",
+      includeUsage: parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE),
     },
   },
   modelRoutes: defaultModelRoutes,
@@ -904,7 +904,7 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
     ? normalizeEndpointProfile(values.LINGHUN_OPENAI_ENDPOINT_PROFILE)
     : "chat_completions";
   if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
-    openAiProvider.includeUsage = values.LINGHUN_OPENAI_INCLUDE_USAGE === "true";
+    openAiProvider.includeUsage = parseEnvBoolean(values.LINGHUN_OPENAI_INCLUDE_USAGE);
   }
   openAiProvider.reasoningLevel = values.LINGHUN_INFERENCE_LEVEL
     ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
@@ -1240,9 +1240,16 @@ function stableUnique(values: string[]): string[] {
 }
 
 function normalizeEndpointProfile(value: string | undefined): EndpointProfile {
-  if (value === "responses") return "responses";
-  if (value === "anthropic_messages") return "anthropic_messages";
-  return "chat_completions";
+  const normalized = value?.trim().toLowerCase().replace(/-/g, "_");
+  if (!normalized) return "chat_completions";
+  if (normalized === "chat_completions") return "chat_completions";
+  if (normalized === "responses") return "responses";
+  if (normalized === "anthropic_messages") return "anthropic_messages";
+  throw new Error("endpointProfile 可选 chat_completions / responses / anthropic_messages。");
+}
+
+function parseEnvBoolean(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === "true";
 }
 
 async function writeConfig(
@@ -1857,7 +1864,7 @@ function mergeConfig(input: Partial<LinghunConfig>): LinghunConfig {
           defaultConfig.providers["openai-compatible"].reasoningLevel,
         includeUsage:
           process.env.LINGHUN_OPENAI_INCLUDE_USAGE !== undefined
-            ? process.env.LINGHUN_OPENAI_INCLUDE_USAGE === "true"
+            ? parseEnvBoolean(process.env.LINGHUN_OPENAI_INCLUDE_USAGE)
             : (openAiCompatibleProvider?.includeUsage ??
               defaultConfig.providers["openai-compatible"].includeUsage),
       },

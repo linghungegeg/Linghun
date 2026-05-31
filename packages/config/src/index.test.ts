@@ -225,8 +225,9 @@ describe("config directories", () => {
 
   it("loads openai endpoint profile and inference level from env", async () => {
     vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://sub2api.toioto.org/v1");
-    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "responses");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", " Responses ");
     vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Medium");
+    vi.stubEnv("LINGHUN_OPENAI_INCLUDE_USAGE", " True ");
     vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
     vi.resetModules();
     const { loadConfig: envLoadConfig } = await import("./index.js");
@@ -237,6 +238,74 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://sub2api.toioto.org/v1");
     expect(config.providers["openai-compatible"]?.endpointProfile).toBe("responses");
     expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Medium");
+    expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
+  });
+
+  it("keeps empty endpoint profile as the chat_completions default", async () => {
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", " ");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.endpointProfile).toBe("chat_completions");
+  });
+
+  it("normalizes provider.env endpoint profile aliases without falling back to chat", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const { getProviderEnvPath: envGetProviderEnvPath, loadConfig: envLoadConfig } = await import(
+      "./index.js"
+    );
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid",
+        "LINGHUN_OPENAI_API_KEY=test-provider-secret",
+        "LINGHUN_OPENAI_MODEL=claude-opus-4-7",
+        "LINGHUN_OPENAI_ENDPOINT_PROFILE=anthropic-messages",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.endpointProfile).toBe("anthropic_messages");
+  });
+
+  it("warns and falls back when provider.env endpoint profile is invalid", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const { getProviderEnvPath: envGetProviderEnvPath, loadConfig: envLoadConfig } = await import(
+      "./index.js"
+    );
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://provider.invalid",
+        "LINGHUN_OPENAI_API_KEY=test-provider-secret",
+        "LINGHUN_OPENAI_MODEL=gpt-test",
+        "LINGHUN_OPENAI_ENDPOINT_PROFILE=response",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+    const warningModule = await import("./index.js");
+
+    expect(config.providers["openai-compatible"]?.model).toBe("openai-compatible-model");
+    expect(warningModule.lastProviderEnvWarning?.reason).toContain(
+      "endpointProfile 可选 chat_completions / responses / anthropic_messages",
+    );
   });
 
   it("keeps legacy project apiKey readable but strips apiKey on settings writes", async () => {
@@ -314,10 +383,10 @@ describe("config directories", () => {
       [
         "# private provider env",
         "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
-        "LINGHUN_OPENAI_API_KEY=sk-provider-secret",
+        "LINGHUN_OPENAI_API_KEY=test-provider-secret",
         "LINGHUN_OPENAI_MODEL=provider-model",
         "LINGHUN_INFERENCE_LEVEL=High",
-        "LINGHUN_OPENAI_INCLUDE_USAGE=true",
+        "LINGHUN_OPENAI_INCLUDE_USAGE= TRUE ",
         "",
       ].join("\n"),
       "utf8",
@@ -336,7 +405,7 @@ describe("config directories", () => {
       "openai-compatible",
     );
     expect(raw).not.toContain("sk-shell-secret");
-    expect(raw).not.toContain("sk-provider-secret");
+    expect(raw).not.toContain("test-provider-secret");
     expect(raw).not.toContain("sk-project-secret");
   });
 

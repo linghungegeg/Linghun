@@ -135,7 +135,7 @@ export type Provider = {
   displayName: string;
   supports: ProviderCapabilities;
   listModels(): Promise<ModelInfo[]>;
-  stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<LinghunEvent>;
+  stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent>;
 };
 
 export type OpenAiChatRequest = {
@@ -652,8 +652,9 @@ export class OpenAiCompatibleProvider implements Provider {
     return createAnthropicMessagesProfileRequest(request, this.config);
   }
 
-  async *stream(request: ModelRequest, signal: AbortSignal): AsyncGenerator<LinghunEvent> {
+  async *stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent> {
     this.assertReady();
+    const requestSignal = signal ?? new AbortController().signal;
     const contract = resolveProviderRuntimeContract(this.config, request);
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       this.config.baseUrl,
@@ -695,7 +696,7 @@ export class OpenAiCompatibleProvider implements Provider {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal,
+        signal: requestSignal,
       });
 
       if (!response.ok) {
@@ -725,7 +726,7 @@ export class OpenAiCompatibleProvider implements Provider {
       await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
       yield* parseAnthropicMessagesStream(
-        withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
+        withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, requestSignal),
         contract.endpoint,
       );
       return;
@@ -743,7 +744,7 @@ export class OpenAiCompatibleProvider implements Provider {
         authorization: `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal,
+      signal: requestSignal,
     });
 
     if (!response.ok) {
@@ -773,7 +774,7 @@ export class OpenAiCompatibleProvider implements Provider {
     await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
     yield* parseOpenAiStream(
-      withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, signal),
+      withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, requestSignal),
       contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
     );
   }
@@ -1570,7 +1571,15 @@ function createReasoningPayload(level: string | undefined): { reasoning?: { effo
   if (!level) {
     return {};
   }
-  return { reasoning: { effort: level } };
+  return { reasoning: { effort: normalizeOpenAiReasoningEffort(level) } };
+}
+
+function normalizeOpenAiReasoningEffort(level: string): string {
+  const normalized = level.trim().toLowerCase();
+  if (normalized === "low" || normalized === "medium" || normalized === "high") {
+    return normalized;
+  }
+  return level;
 }
 
 // D.13K：Anthropic Messages extended thinking budget 映射。
