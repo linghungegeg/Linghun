@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  type PolicyRequest,
   classifyPathString,
   classifyToolRequest,
-  type PolicyRequest,
   tokenizeShellCommand,
 } from "./permission-policy-engine.js";
 

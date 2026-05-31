@@ -152,10 +152,7 @@ const NETWORK_HEADS = new Set<string>([
 // stays in `unknown` and not `install`.
 const INSTALL_PAIRS: Array<[string, Set<string>]> = [
   ["npm", new Set(["install", "i", "add", "uninstall", "un", "rm", "remove", "ci", "exec"])],
-  [
-    "pnpm",
-    new Set(["install", "i", "add", "remove", "rm", "uninstall", "dlx", "exec", "deploy"]),
-  ],
+  ["pnpm", new Set(["install", "i", "add", "remove", "rm", "uninstall", "dlx", "exec", "deploy"])],
   ["yarn", new Set(["add", "remove", "install", "global"])],
   ["bun", new Set(["add", "remove", "install", "i", "x"])],
   ["pip", new Set(["install", "uninstall", "wheel", "download"])],
@@ -590,8 +587,14 @@ function classifyGitSubcommand(args: string[]): SemanticClass {
   // Refine the subset that has both readonly and write modes.
   if (sub === "config") {
     const setLike = args.some((a) =>
-      ["--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section"]
-        .includes(a),
+      [
+        "--unset",
+        "--unset-all",
+        "--add",
+        "--replace-all",
+        "--rename-section",
+        "--remove-section",
+      ].includes(a),
     );
     return setLike ? "mutating" : "readonly";
   }
@@ -754,10 +757,7 @@ function classifyDeferredRequest(req: PolicyRequest): PolicyVerdict {
 // Path classifier
 // ---------------------------------------------------------------------------
 
-export function classifyPathString(
-  pathArg: string,
-  workspaceRoot: string,
-): PathSafetyClass {
+export function classifyPathString(pathArg: string, workspaceRoot: string): PathSafetyClass {
   if (!pathArg) return "unknown_path";
   // UNC / WebDAV / network paths.
   if (

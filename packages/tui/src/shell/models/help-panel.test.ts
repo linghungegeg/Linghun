@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  HELP_PANEL_GROUPS,
-  buildHelpPanelData,
-  getHelpPanelEntries,
-} from "./help-panel.js";
+import { HELP_PANEL_GROUPS, buildHelpPanelData, getHelpPanelEntries } from "./help-panel.js";
 
 describe("help-panel: 分组 + 内容", () => {
   it("HELP_PANEL_GROUPS 顺序为 core → advanced → details", () => {

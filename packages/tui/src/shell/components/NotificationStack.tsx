@@ -54,7 +54,6 @@ function pickToneColor(theme: ShellTheme, tone: NotificationView["tone"]): strin
       return theme.success ?? theme.status.pass;
     case "default":
       return theme.notification ?? theme.muted;
-    case "dim":
     default:
       return theme.dim ?? theme.muted;
   }

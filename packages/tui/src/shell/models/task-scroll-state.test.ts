@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  clampTaskScroll,
-  createInitialTaskScroll,
-  reduceTaskScroll,
-} from "./task-scroll-state.js";
+import { clampTaskScroll, createInitialTaskScroll, reduceTaskScroll } from "./task-scroll-state.js";
 
 describe("D.13Q-UX Task Surface — reduceTaskScroll", () => {
   it("初始状态：scrollOffset=0 / stickToBottom=true", () => {

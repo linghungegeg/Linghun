@@ -1,8 +1,8 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import {
+  type FeishuReceiveMessageEvent,
   feishuBridgeAdapter,
   feishuReceiveMessageToBridgeEvent,
-  type FeishuReceiveMessageEvent,
 } from "./remote-inbound-bridge-runtime.js";
 import type { RemoteInboundMessage } from "./tui-data-types.js";
 

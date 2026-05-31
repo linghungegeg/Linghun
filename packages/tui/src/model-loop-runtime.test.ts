@@ -527,9 +527,9 @@ describe("model-loop-runtime", () => {
     });
 
     it("flags ccb parity / production-ready", () => {
-      expect(
-        detectHighRiskClaims("现在等于 CCB 了").some((m) => m.kind === "ccb_parity"),
-      ).toBe(true);
+      expect(detectHighRiskClaims("现在等于 CCB 了").some((m) => m.kind === "ccb_parity")).toBe(
+        true,
+      );
       expect(
         detectHighRiskClaims("This is production-ready").some((m) => m.kind === "ccb_parity"),
       ).toBe(true);
@@ -658,7 +658,11 @@ describe("model-loop-runtime", () => {
 
     it("D.14G: ordinary git discussion does not trigger git_operation gate", () => {
       // 普通讨论“稳定点是什么”不应被当成已执行声明。
-      expect(detectHighRiskClaims("稳定点是用来回滚的一个安全垫。").some((m) => m.kind === "git_operation")).toBe(false);
+      expect(
+        detectHighRiskClaims("稳定点是用来回滚的一个安全垫。").some(
+          (m) => m.kind === "git_operation",
+        ),
+      ).toBe(false);
     });
 
     it("Run 2 Closure: denied or cancelled actions do not support final success claims", () => {
@@ -739,11 +743,7 @@ describe("model-loop-runtime", () => {
 
   describe("D.13U deriveToolSupportsClaims", () => {
     it("Read derives local_read + file path", () => {
-      const claims = deriveToolSupportsClaims(
-        "Read",
-        { file_path: "src/index.ts" },
-        { text: "" },
-      );
+      const claims = deriveToolSupportsClaims("Read", { file_path: "src/index.ts" }, { text: "" });
       expect(claims).toContain("Read");
       expect(claims).toContain("local_read");
       expect(claims).toContain("file:src/index.ts");
@@ -843,11 +843,7 @@ describe("model-loop-runtime", () => {
 
     it("buildDowngradedFinalAnswer replaces claim phrases with [未验证] and appends notice", () => {
       const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
-      const downgraded = buildDowngradedFinalAnswer(
-        "已完成，测试通过。",
-        verdict,
-        "zh-CN",
-      );
+      const downgraded = buildDowngradedFinalAnswer("已完成，测试通过。", verdict, "zh-CN");
       expect(downgraded).toContain("[未验证]");
       expect(downgraded).toContain("我不能确认这些声明");
       expect(downgraded).not.toContain("FinalAnswerClaimGate");
@@ -857,10 +853,8 @@ describe("model-loop-runtime", () => {
 
   describe("D.13V-A evaluateFinalAnswerClaims staleness", () => {
     const NOW = new Date("2026-05-30T12:00:00Z");
-    const minutesAgo = (m: number) =>
-      new Date(NOW.getTime() - m * 60 * 1000).toISOString();
-    const hoursAgo = (h: number) =>
-      new Date(NOW.getTime() - h * 60 * 60 * 1000).toISOString();
+    const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60 * 1000).toISOString();
+    const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 60 * 60 * 1000).toISOString();
 
     it("fresh test_passed evidence still allows PASS (baseline)", () => {
       const evidence: EvidenceRecord[] = [
@@ -898,11 +892,7 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(20),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims(
-        "代码里已经实现 X，调用链是 A→B。",
-        evidence,
-        NOW,
-      );
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence, NOW);
       expect(verdict.status).toBe("passed");
     });
 
@@ -914,11 +904,7 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(90),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims(
-        "代码里已经实现 X，调用链是 A→B。",
-        evidence,
-        NOW,
-      );
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence, NOW);
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("code_fact");
       expect(verdict.staleKinds ?? []).toContain("code_fact");
@@ -933,11 +919,7 @@ describe("model-loop-runtime", () => {
           createdAt: hoursAgo(2),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims(
-        "今天 OpenAI 最新价格是 $0.01。",
-        evidence,
-        NOW,
-      );
+      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence, NOW);
       expect(verdict.status).toBe("passed");
     });
 
@@ -950,11 +932,7 @@ describe("model-loop-runtime", () => {
           createdAt: hoursAgo(48),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims(
-        "今天 OpenAI 最新价格是 $0.01。",
-        evidence,
-        NOW,
-      );
+      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence, NOW);
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("external_current_fact");
       expect(verdict.staleKinds ?? []).toContain("external_current_fact");
@@ -980,13 +958,7 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
-          supportsClaims: [
-            "Bash",
-            "command_ran",
-            "bash_exit_0",
-            "git_status",
-            "git_local_fact",
-          ],
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "git_status", "git_local_fact"],
           summary: "Bash: git status -b",
           createdAt: hoursAgo(48),
         }),
@@ -1075,9 +1047,7 @@ describe("model-loop-runtime", () => {
 
   describe("D.13V-B Architecture / Completeness final answer gates", () => {
     it("普通文本不触发", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "你好，今天我们继续修一些 bug。",
         { hasActiveCard: false },
@@ -1088,9 +1058,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("声称符合架构边界但无 active card → needs_disclaimer", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "本次改动符合架构边界，没有架构漂移。",
         { hasActiveCard: false },
@@ -1101,9 +1069,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("声称架构闭合 + 有 card 但 driftWarnings 非空 → needs_disclaimer", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "架构已闭合。",
         {
@@ -1118,9 +1084,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("声称架构闭合 + card + 无 drift + 有 evidence → passed", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "架构已闭合。",
         {
@@ -1134,9 +1098,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("英文 'no architecture drift' 也命中", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "There is no architecture drift in this change.",
         { hasActiveCard: false },
@@ -1147,9 +1109,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("声称没有遗漏 + classificationRequired + 未给分类 → needs_disclaimer", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "所有任务完整完成，没有遗漏。",
         { hasActiveCard: false },
@@ -1164,9 +1124,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("声称没有遗漏 + 已给 classification + textHasClassification → passed", async () => {
-      const { evaluateArchitectureAndCompletenessClaims } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "本次属于 single_issue，没有遗漏。",
         { hasActiveCard: false },
@@ -1180,9 +1138,7 @@ describe("model-loop-runtime", () => {
     });
 
     it("finalAnswerHasCompletenessClassification 识别 single_issue / systemic_gap", async () => {
-      const { finalAnswerHasCompletenessClassification } = await import(
-        "./model-loop-runtime.js"
-      );
+      const { finalAnswerHasCompletenessClassification } = await import("./model-loop-runtime.js");
       expect(finalAnswerHasCompletenessClassification("属于 single_issue")).toBe(true);
       expect(finalAnswerHasCompletenessClassification("It is a systemic_gap")).toBe(true);
       expect(finalAnswerHasCompletenessClassification("已修复")).toBe(false);
@@ -1191,9 +1147,7 @@ describe("model-loop-runtime", () => {
     it("hasArchitectureEvidenceForClaims 识别 architecture_boundary_check 与 architecture-* file_read", async () => {
       const { hasArchitectureEvidenceForClaims } = await import("./model-loop-runtime.js");
       expect(
-        hasArchitectureEvidenceForClaims([
-          { supportsClaims: ["architecture_boundary_check"] },
-        ]),
+        hasArchitectureEvidenceForClaims([{ supportsClaims: ["architecture_boundary_check"] }]),
       ).toBe(true);
       expect(
         hasArchitectureEvidenceForClaims([
@@ -1205,7 +1159,9 @@ describe("model-loop-runtime", () => {
         ]),
       ).toBe(true);
       expect(
-        hasArchitectureEvidenceForClaims([{ supportsClaims: ["local_read"], kind: "file_read", source: "src/index.ts" }]),
+        hasArchitectureEvidenceForClaims([
+          { supportsClaims: ["local_read"], kind: "file_read", source: "src/index.ts" },
+        ]),
       ).toBe(false);
     });
 
@@ -1333,7 +1289,7 @@ describe("model-loop-runtime", () => {
     it("英文也产出本地化文案", async () => {
       const { sanitizeDeferredToolPrimaryText } = await import("./model-loop-runtime.js");
       const out = sanitizeDeferredToolPrimaryText(
-        "SearchExtraTools matched 0/0 deferred tools (query=\"\").",
+        'SearchExtraTools matched 0/0 deferred tools (query="").',
         "en-US",
         { dispatchKind: "SearchExtraTools", ok: true, matchedCount: 0 },
       );

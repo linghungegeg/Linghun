@@ -415,20 +415,30 @@ describe("config directories", () => {
     const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     let renameCalls = 0;
     let copyCalls = 0;
-    const renameMock = vi.fn(async (from: Parameters<typeof actualFs.rename>[0], to: Parameters<typeof actualFs.rename>[1]) => {
-      renameCalls += 1;
-      if (renameCalls === 1) {
-        throw Object.assign(new Error("replace conflict"), { code: "EPERM" });
-      }
-      await actualFs.rename(from, to);
-    });
-    const copyFileMock = vi.fn(async (from: Parameters<typeof actualFs.copyFile>[0], to: Parameters<typeof actualFs.copyFile>[1]) => {
-      copyCalls += 1;
-      if (copyCalls === 2) {
-        throw Object.assign(new Error("new rename failed"), { code: "EIO" });
-      }
-      await actualFs.copyFile(from, to);
-    });
+    const renameMock = vi.fn(
+      async (
+        from: Parameters<typeof actualFs.rename>[0],
+        to: Parameters<typeof actualFs.rename>[1],
+      ) => {
+        renameCalls += 1;
+        if (renameCalls === 1) {
+          throw Object.assign(new Error("replace conflict"), { code: "EPERM" });
+        }
+        await actualFs.rename(from, to);
+      },
+    );
+    const copyFileMock = vi.fn(
+      async (
+        from: Parameters<typeof actualFs.copyFile>[0],
+        to: Parameters<typeof actualFs.copyFile>[1],
+      ) => {
+        copyCalls += 1;
+        if (copyCalls === 2) {
+          throw Object.assign(new Error("new rename failed"), { code: "EIO" });
+        }
+        await actualFs.copyFile(from, to);
+      },
+    );
     vi.doMock("node:fs/promises", async () => ({
       ...(await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")),
       copyFile: copyFileMock,
@@ -460,7 +470,9 @@ describe("config directories", () => {
     expect(raw).toContain("LINGHUN_OPENAI_MODEL=old-model");
     expect(raw).toContain("LINGHUN_OPENAI_API_KEY=sk-old-secret");
     expect(raw).not.toContain("new-model");
-    expect(lingeringFiles.filter((file) => file.includes(".tmp") || file.includes(".bak"))).toEqual([]);
+    expect(lingeringFiles.filter((file) => file.includes(".tmp") || file.includes(".bak"))).toEqual(
+      [],
+    );
   });
 
   it("rejects quote-wrapped or quote-prefixed provider API keys before saving", async () => {

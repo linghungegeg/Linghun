@@ -36,10 +36,7 @@ import {
   isLowRiskWorkspaceEdit,
   isPlanAllowedTool,
 } from "./permission-continuation-runtime.js";
-import {
-  classifyToolRequest,
-  type PolicyVerdict,
-} from "./permission-policy-engine.js";
+import { type PolicyVerdict, classifyToolRequest } from "./permission-policy-engine.js";
 
 export type PermissionCheck = {
   request: {
@@ -177,11 +174,7 @@ export async function decidePermission(
     if (verdict.decision === "auto_allow_readonly") {
       // Honor explicit deny rules even for readonly tools — never override
       // a user-configured deny.
-      const denyRule = findPermissionRule(
-        context.permissions.rules,
-        name,
-        tool.permission.risk,
-      );
+      const denyRule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
       if (!denyRule || denyRule.effect !== "deny") {
         return {
           request,
@@ -293,7 +286,10 @@ export async function loadPermissionState(projectPath: string): Promise<Permissi
   }
 }
 
-export async function savePermissionState(projectPath: string, state: PermissionState): Promise<void> {
+export async function savePermissionState(
+  projectPath: string,
+  state: PermissionState,
+): Promise<void> {
   await mkdir(join(projectPath, ".linghun"), { recursive: true });
   await writeFile(permissionStatePath(projectPath), `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }

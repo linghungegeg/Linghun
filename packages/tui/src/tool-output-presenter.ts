@@ -77,7 +77,10 @@ function formatBashEndSummary(
   language: Language,
 ): string | undefined {
   if (name !== "Bash") return undefined;
-  const data = output.data && typeof output.data === "object" ? (output.data as Record<string, unknown>) : undefined;
+  const data =
+    output.data && typeof output.data === "object"
+      ? (output.data as Record<string, unknown>)
+      : undefined;
   const exitCode = data && typeof data.exitCode === "number" ? data.exitCode : undefined;
   if (exitCode === undefined) return undefined;
   return language === "en-US" ? `Command exited ${exitCode}` : `命令已退出 ${exitCode}`;
@@ -130,7 +133,8 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
     const v = obj[key];
     return typeof v === "string" && v.length > 0 ? v : undefined;
   };
-  const clamp = (value: string): string => (value.length > 120 ? `${value.slice(0, 117)}...` : value);
+  const clamp = (value: string): string =>
+    value.length > 120 ? `${value.slice(0, 117)}...` : value;
   let arg: string | undefined;
   if (name === "Bash") {
     arg = str("command");

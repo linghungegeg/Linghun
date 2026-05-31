@@ -22,7 +22,9 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
     expect(text).toContain("provider/network transport issue");
     expect(text).toContain("not a local Linghun bug");
     // 不退化成通用 runtime 文案。
-    expect(text).not.toBe("The model request did not complete. Run /model doctor for details, then retry.");
+    expect(text).not.toBe(
+      "The model request did not complete. Run /model doctor for details, then retry.",
+    );
   });
 
   it("CRC mismatch 归因 provider/传输，不是 Linghun 缺陷 (zh)", () => {
@@ -36,14 +38,20 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
   });
 
   it("PROVIDER_STREAM_DECODE_ERROR / PROVIDER_RETRY_EXHAUSTED codes classify as transit", () => {
-    const decode = formatProviderFailurePrimary(err("boom", "PROVIDER_STREAM_DECODE_ERROR"), "en-US");
+    const decode = formatProviderFailurePrimary(
+      err("boom", "PROVIDER_STREAM_DECODE_ERROR"),
+      "en-US",
+    );
     const retry = formatProviderFailurePrimary(err("boom", "PROVIDER_RETRY_EXHAUSTED"), "en-US");
     expect(decode).toContain("transport issue");
     expect(retry).toContain("transport issue");
   });
 
   it("PROVIDER_STREAM_ERROR is attributed as provider/transit failure", () => {
-    const text = formatProviderFailurePrimary(err("quota exceeded", "PROVIDER_STREAM_ERROR"), "zh-CN");
+    const text = formatProviderFailurePrimary(
+      err("quota exceeded", "PROVIDER_STREAM_ERROR"),
+      "zh-CN",
+    );
     expect(text).toContain("provider 与网络传输问题");
     expect(text).toContain("不是 Linghun 本地缺陷");
   });

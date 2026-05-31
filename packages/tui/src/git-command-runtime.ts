@@ -1,14 +1,27 @@
 import type { Writable } from "node:stream";
-import type { TuiContext } from "./index.js";
-import { formatGitStatusDetails, isGitRepository, readGitStatus, readWorktreeList, suggestStablePoint, type GitStatus, type StablePointHint, type WorktreeReport } from "./git-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { resolveManagedWorktreeRoot, redactWorktreePath, MANAGED_WORKTREE_DIRNAME } from "./git-operation-runtime.js";
+import {
+  MANAGED_WORKTREE_DIRNAME,
+  redactWorktreePath,
+  resolveManagedWorktreeRoot,
+} from "./git-operation-runtime.js";
+import {
+  type GitStatus,
+  type StablePointHint,
+  type WorktreeReport,
+  formatGitStatusDetails,
+  isGitRepository,
+  readGitStatus,
+  readWorktreeList,
+  suggestStablePoint,
+} from "./git-runtime.js";
 import {
   type GitSlashDeps,
   runStablePointCreateSlash,
   runWorktreeCreateSlash,
   runWorktreeRemoveSlash,
 } from "./git-slash-runtime.js";
+import type { TuiContext } from "./index.js";
 
 /**
  * D.13R/D.14G Git / Worktree / Stable Point slash 入口。
@@ -81,7 +94,6 @@ export async function handleCheckpointCommand(
   await renderCheckpointPanel(context, output);
 }
 
-
 export async function renderGitStatusPanel(
   context: TuiContext,
   output: Writable,
@@ -104,9 +116,7 @@ export async function renderGitStatusPanel(
       title: "/git",
       tone: "warning",
       summary: [
-        isEn
-          ? "git binary unavailable; status cannot be probed."
-          : "git 不可用，无法读取状态。",
+        isEn ? "git binary unavailable; status cannot be probed." : "git 不可用，无法读取状态。",
       ],
       detailsText: status.error,
     });
@@ -142,9 +152,7 @@ export async function renderGitStatusPanel(
   }
   if (stable.recommended) {
     summary.push(
-      isEn
-        ? `Stable point: ${stable.suggestedSubject}`
-        : `稳定点建议：${stable.suggestedSubject}`,
+      isEn ? `Stable point: ${stable.suggestedSubject}` : `稳定点建议：${stable.suggestedSubject}`,
     );
   }
   const actions: string[] = [];
@@ -161,12 +169,7 @@ export async function renderGitStatusPanel(
   });
 }
 
-
-
-export async function renderStablePointPanel(
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
+export async function renderStablePointPanel(context: TuiContext, output: Writable): Promise<void> {
   const isEn = context.language === "en-US";
   const status = await readGitStatus(context.projectPath);
   const stable: StablePointHint = suggestStablePoint(status);
@@ -225,12 +228,7 @@ export async function renderStablePointPanel(
   });
 }
 
-
-
-export async function renderWorktreePanel(
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
+export async function renderWorktreePanel(context: TuiContext, output: Writable): Promise<void> {
   const isEn = context.language === "en-US";
   if (!(await isGitRepository(context.projectPath))) {
     showCommandPanel(context, output, {
@@ -245,9 +243,7 @@ export async function renderWorktreePanel(
     showCommandPanel(context, output, {
       title: "/worktree",
       tone: "warning",
-      summary: [
-        isEn ? "git worktree list unavailable." : "无法读取 git worktree 列表。",
-      ],
+      summary: [isEn ? "git worktree list unavailable." : "无法读取 git worktree 列表。"],
       detailsText: report.kind === "git_unavailable" ? report.error : "",
     });
     return;
@@ -255,8 +251,7 @@ export async function renderWorktreePanel(
   const current = report.entries.find((entry) => entry.isCurrent);
   const managedRoot = resolveManagedWorktreeRoot(context.projectPath);
   const managedPrefix = `${MANAGED_WORKTREE_DIRNAME}/`;
-  const isManaged = (path: string): boolean =>
-    redactWorktreePath(path).startsWith(managedPrefix);
+  const isManaged = (path: string): boolean => redactWorktreePath(path).startsWith(managedPrefix);
   const summary: string[] = [
     isEn
       ? `${report.entries.length} worktree${report.entries.length === 1 ? "" : "s"} · current: ${current?.branch ?? current?.path ?? "(unknown)"}`
@@ -273,7 +268,8 @@ export async function renderWorktreePanel(
       title: isEn ? "Worktrees" : "worktree 列表",
       rows: report.entries.slice(0, 8).map((entry) => {
         const marker = entry.isCurrent ? "*" : " ";
-        const branch = entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
+        const branch =
+          entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
         const head = entry.head ? entry.head.slice(0, 7) : "-";
         const tag = isManaged(entry.path) ? "" : isEn ? "  [external]" : "  [external]";
         return `${marker} ${redactWorktreePath(entry.path)}  ${branch}  ${head}${tag}`;
@@ -290,12 +286,7 @@ export async function renderWorktreePanel(
   });
 }
 
-
-
-export async function renderCheckpointPanel(
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
+export async function renderCheckpointPanel(context: TuiContext, output: Writable): Promise<void> {
   const isEn = context.language === "en-US";
   const checkpoints = context.checkpoints ?? [];
   if (checkpoints.length === 0) {
@@ -344,6 +335,3 @@ export async function renderCheckpointPanel(
     detailsText,
   });
 }
-
-
-

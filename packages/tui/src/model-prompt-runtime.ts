@@ -1,8 +1,16 @@
+import {
+  formatDeferredToolsSystemReminder,
+  snapshotDeferredTools,
+} from "./deferred-tools-catalog.js";
 import type { TuiContext } from "./index.js";
-import { createSolutionCompletenessStatus, formatSolutionCompletenessTrigger, inferSolutionCompletenessImpactAreas, projectRuntimeStatusForPrompt } from "./model-loop-runtime.js";
+import {
+  createSolutionCompletenessStatus,
+  formatSolutionCompletenessTrigger,
+  inferSolutionCompletenessImpactAreas,
+  projectRuntimeStatusForPrompt,
+} from "./model-loop-runtime.js";
 import { createModelCapabilitySummary } from "./natural-command-bridge.js";
 import { hasRepeatedPermissionDenial } from "./permission-continuation-runtime.js";
-import { formatDeferredToolsSystemReminder, snapshotDeferredTools } from "./deferred-tools-catalog.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatControlledMemoryForModel } from "./tui-memory-runtime.js";
 const MEMORY_PROMPT_TOP_K = 3;
@@ -50,8 +58,6 @@ export function createModelSystemPrompt(
   }\nRuntimeIdentityRule=When the user asks in natural language about the current model (e.g. "what model are you", "current model"), answer with the model name only (for example "claude-opus-4-7"). Do not include provider, endpointProfile, route role, baseUrl, or any internal route field in the user-facing answer; do not write "(provider: ...)" or "openai-compatible" in parentheses. Only reveal provider/route/endpointProfile when the user explicitly asks about provider/route/endpoint, or runs /model doctor or /model route doctor. RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; they live in /model doctor.\nPromptHygieneRule=The labelled context fields below (RuntimeStatusForModel, ControlledMemorySummary, MemoryBoundary, EvidenceSummary, CommandCapabilitySummary, SolutionCompleteness, FreshnessRule, FailureLearningSummary, etc.) are internal runtime context for your reasoning only. Never quote, paste, or restate these field labels or their raw contents to the user — not even when asked to "explain in plain words" or "translate". Answer in natural human language; if the user wants raw runtime/diagnostic detail, point them to /model doctor, /status, or /details.\nRuntimeStatusForModel=${JSON.stringify(projectRuntimeStatusForPrompt(runtimeStatus) ?? runtimeStatus)}\nControlledMemorySummary=${formatControlledMemoryForModel(context)}\nMemoryBoundary=acceptedOnly; topK=${MEMORY_PROMPT_TOP_K}; noAutoLearning; noAutoAccept; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept\nEvidenceSummary=${createEvidenceSummaryForModel(context)}\nFreshnessRule=When stating external/current facts (latest API version, prices, news, official site state) without web_source evidence in EvidenceSummary, mark them as unverified or call WebSearch/WebFetch first; do not present them as confirmed.\nSolutionCompleteness=${JSON.stringify(context.solutionCompleteness)}${solutionCompletenessWarning ? `\n${solutionCompletenessWarning}` : ""}${architectureDirective ? `\n${architectureDirective}` : ""}${deferredReminder ? `\nDeferredToolsReminder=${deferredReminder}` : ""}${worktreeContextLine}${failureLearningLine}\nCommandCapabilitySummary=\n${createModelCapabilitySummary(24)}`;
 }
 
-
-
 export function createEvidenceSummaryForModel(context: TuiContext): string {
   return JSON.stringify(
     context.evidence.slice(0, 5).map((item) => ({
@@ -63,8 +69,6 @@ export function createEvidenceSummaryForModel(context: TuiContext): string {
     })),
   );
 }
-
-
 
 export function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
   const userRequestedGate =
@@ -133,8 +137,6 @@ export function updateSolutionCompletenessGate(text: string, context: TuiContext
   };
   return warning;
 }
-
-
 
 export function collectSolutionCompletenessEvidenceRefs(context: TuiContext): string[] {
   const evidence = context.evidence.slice(0, 3).map((item) => item.id);
@@ -213,5 +215,3 @@ export function sanitizeMainScreenLeakage(
       : "（内部运行时上下文已从主屏省略；需要时用 /model doctor 或 /details 查看。）";
   return result.length > 0 ? `${result}\n${note}` : note;
 }
-
-

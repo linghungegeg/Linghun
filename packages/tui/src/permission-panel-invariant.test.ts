@@ -13,8 +13,8 @@
 //   3. ask paths set context.pendingLocalApproval (panel render source).
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -33,7 +33,9 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
     expect(src).toContain("if (!(context.isInkSession && isAskWithPanel)) {");
     // Guard precedes the writeLine(formatModelToolPermissionPrompt) call.
     const guardIdx = src.indexOf("if (!(context.isInkSession && isAskWithPanel)) {");
-    const promptIdx = src.indexOf("formatModelToolPermissionPrompt(toPermissionPromptView(permission)");
+    const promptIdx = src.indexOf(
+      "formatModelToolPermissionPrompt(toPermissionPromptView(permission)",
+    );
     expect(guardIdx).toBeGreaterThan(0);
     expect(promptIdx).toBeGreaterThan(guardIdx);
   });
@@ -70,7 +72,9 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
   it("D.14D-R2 fix: GitStablePointCreate refuses plan mode without setting git_stable_point pending approval", () => {
     const planIdx = gitDispatchSrc.indexOf('context.permissionMode === "plan"');
     const pendingIdx = gitDispatchSrc.indexOf('kind: "git_stable_point"');
-    const notCreatedIdx = gitDispatchSrc.indexOf("stable point was NOT created because Plan mode is read-only.");
+    const notCreatedIdx = gitDispatchSrc.indexOf(
+      "stable point was NOT created because Plan mode is read-only.",
+    );
     expect(planIdx).toBeGreaterThan(0);
     expect(notCreatedIdx).toBeGreaterThan(planIdx);
     expect(pendingIdx).toBeGreaterThan(planIdx);

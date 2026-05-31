@@ -3,16 +3,34 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { resetExtensionTrustForInstall, saveExtensionEnablement } from "@linghun/config";
-import type { TuiContext } from "./index.js";
 import { stableHash } from "./cache-freshness.js";
-import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
+import type { TuiContext } from "./index.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
-import { sanitizeDiagnosticText, formatError, truncateDisplay } from "./startup-runtime.js";
-import { createHookState, createPluginState, createSkillState, stableId } from "./tui-state-runtime.js";
-import type { ExtensionLifecycleRecord, ExtensionScope, ExtensionSource, PluginSummary, SkillEvolutionCandidate, SkillSummary } from "./tui-data-types.js";
+import { formatError, sanitizeDiagnosticText, truncateDisplay } from "./startup-runtime.js";
+import type {
+  ExtensionLifecycleRecord,
+  ExtensionScope,
+  ExtensionSource,
+  PluginSummary,
+  SkillEvolutionCandidate,
+  SkillSummary,
+} from "./tui-data-types.js";
+import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
+import {
+  createHookState,
+  createPluginState,
+  createSkillState,
+  stableId,
+} from "./tui-state-runtime.js";
 export type ExtensionKind = "skills" | "plugins";
 export type ExtensionInstallSource = "local" | "git" | "github";
-export type ExtensionInstallRequest = { source: ExtensionInstallSource; locator: string; scope: ExtensionScope; ref?: string; confirmNetwork: boolean; };
+export type ExtensionInstallRequest = {
+  source: ExtensionInstallSource;
+  locator: string;
+  scope: ExtensionScope;
+  ref?: string;
+  confirmNetwork: boolean;
+};
 
 export function formatConfigOverview(context: TuiContext): string {
   const zh = context.language === "zh-CN";
@@ -82,8 +100,6 @@ export function formatConfigOverview(context: TuiContext): string {
   ].join("\n");
 }
 
-
-
 export function formatFeaturePolicy(context: TuiContext): string {
   return [
     "Feature policy（default CCB-style posture）",
@@ -110,8 +126,6 @@ export function formatFeaturePolicy(context: TuiContext): string {
     "- remote channels, voice, computer-use/browser control, daemon jobs, plugin marketplace, and AI sessions auto injection are not default features.",
   ].join("\n");
 }
-
-
 
 export function formatSkills(context: TuiContext): string {
   const lines = [
@@ -141,9 +155,10 @@ export function formatSkills(context: TuiContext): string {
   return lines.join("\n");
 }
 
-
-
-export function createSkillEvolutionCandidate(summary: string, source: string): SkillEvolutionCandidate {
+export function createSkillEvolutionCandidate(
+  summary: string,
+  source: string,
+): SkillEvolutionCandidate {
   return {
     id: randomUUID(),
     status: "candidate",
@@ -157,8 +172,6 @@ export function createSkillEvolutionCandidate(summary: string, source: string): 
   };
 }
 
-
-
 export function formatWorkflows(context: TuiContext): string {
   return [
     "Workflows（本地模板，启动前必须 Start Gate）",
@@ -169,8 +182,6 @@ export function formatWorkflows(context: TuiContext): string {
     "- run: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
   ].join("\n");
 }
-
-
 
 export function formatPlugins(context: TuiContext): string {
   const lines = [
@@ -196,8 +207,6 @@ export function formatPlugins(context: TuiContext): string {
   return lines.join("\n");
 }
 
-
-
 export function formatPluginsDoctor(context: TuiContext): string {
   return [
     "Plugins doctor",
@@ -212,8 +221,6 @@ export function formatPluginsDoctor(context: TuiContext): string {
     "- boundary: 不执行远程安装/自动更新/完整沙箱；未信任 extension 不得写文件、联网或执行命令。",
   ].join("\n");
 }
-
-
 
 export function formatHooksDoctor(context: TuiContext): string {
   const cacheImpact = stableHash(createExtensionFreshnessSummaryForDoctor(context));
@@ -239,9 +246,10 @@ export function formatHooksDoctor(context: TuiContext): string {
   return lines.join("\n");
 }
 
-
-
-export function formatTrustNotice(kind: "skill" | "plugin", item: SkillSummary | PluginSummary): string {
+export function formatTrustNotice(
+  kind: "skill" | "plugin",
+  item: SkillSummary | PluginSummary,
+): string {
   return [
     `Trust notice：即将启用 ${kind} ${item.id}`,
     `- source: ${item.source}`,
@@ -256,8 +264,6 @@ export function formatTrustNotice(kind: "skill" | "plugin", item: SkillSummary |
     "- 未信任 extension 不得写文件、联网或执行命令；实际工具调用仍走权限管道。",
   ].join("\n");
 }
-
-
 
 export function formatExtensionStatus(kind: ExtensionKind, context: TuiContext): string {
   const items = kind === "skills" ? context.skills.skills : context.plugins.plugins;
@@ -279,8 +285,6 @@ export function formatExtensionStatus(kind: ExtensionKind, context: TuiContext):
     "- boundary: Git/GitHub 安装只做受控 clone/fetch 和 manifest/SKILL.md 读取；不执行 postinstall、hook、仓库脚本或第三方代码。",
   ].join("\n");
 }
-
-
 
 export function parseExtensionInstallRequest(args: string[]): ExtensionInstallRequest | null {
   const [first, second, ...remaining] = args;
@@ -335,13 +339,9 @@ export function parseExtensionInstallRequest(args: string[]): ExtensionInstallRe
   return { source, locator, scope, ref, confirmNetwork };
 }
 
-
-
 export function isGitLocator(value: string): boolean {
   return /^https?:\/\//iu.test(value) || /^git@/iu.test(value) || value.endsWith(".git");
 }
-
-
 
 export function formatExtensionInstallGate(
   kind: ExtensionKind,
@@ -361,8 +361,6 @@ export function formatExtensionInstallGate(
   ].join("\n");
 }
 
-
-
 export function formatExtensionInstallExactCommand(
   command: string,
   request: ExtensionInstallRequest,
@@ -380,8 +378,6 @@ export function formatExtensionInstallExactCommand(
   parts.push("--confirm-network");
   return parts.join(" ");
 }
-
-
 
 export async function installExtensionFromRequest(
   kind: ExtensionKind,
@@ -446,8 +442,6 @@ export async function installExtensionFromRequest(
   }
 }
 
-
-
 export function githubRepoToUrl(locator: string): string | null {
   if (/^https?:\/\//iu.test(locator) || locator.endsWith(".git")) {
     return locator;
@@ -457,8 +451,6 @@ export function githubRepoToUrl(locator: string): string | null {
   }
   return null;
 }
-
-
 
 export function getExtensionTargetDir(
   kind: ExtensionKind,
@@ -470,8 +462,6 @@ export function getExtensionTargetDir(
   }
   return scope === "project" ? context.plugins.projectDir : context.plugins.userDir;
 }
-
-
 
 export async function installExtensionFromDirectory(
   kind: ExtensionKind,
@@ -504,8 +494,6 @@ export async function installExtensionFromDirectory(
     summary: `已安装 ${kind === "skills" ? "skill" : "plugin"} manifest：${id}`,
   };
 }
-
-
 
 export async function readExtensionSourceManifest(
   kind: ExtensionKind,
@@ -567,9 +555,10 @@ export async function readExtensionSourceManifest(
   };
 }
 
-
-
-export async function refreshExtensionState(kind: ExtensionKind, context: TuiContext): Promise<void> {
+export async function refreshExtensionState(
+  kind: ExtensionKind,
+  context: TuiContext,
+): Promise<void> {
   if (kind === "skills") {
     context.skills = await createSkillState(context.config, context.projectPath);
     return;
@@ -577,8 +566,6 @@ export async function refreshExtensionState(kind: ExtensionKind, context: TuiCon
   context.plugins = await createPluginState(context.config, context.projectPath);
   context.hooks = await createHookState(context.config, context.projectPath);
 }
-
-
 
 export async function removeExtension(
   kind: ExtensionKind,
@@ -597,8 +584,6 @@ export async function removeExtension(
   await refreshExtensionState(kind, context);
   return `已移除 ${kind === "skills" ? "skill" : "plugin"}：${id}；若需要恢复，请从原 source 重新 install。`;
 }
-
-
 
 export async function updateExtension(
   kind: ExtensionKind,
@@ -633,9 +618,11 @@ export async function updateExtension(
   return result.summary;
 }
 
-
-
-export function validateExtensionItems(kind: ExtensionKind, context: TuiContext, id?: string): string {
+export function validateExtensionItems(
+  kind: ExtensionKind,
+  context: TuiContext,
+  id?: string,
+): string {
   const items = kind === "skills" ? context.skills.skills : context.plugins.plugins;
   const selected = id ? items.filter((item) => item.id === id) : items;
   if (selected.length === 0) {
@@ -657,8 +644,6 @@ export function validateExtensionItems(kind: ExtensionKind, context: TuiContext,
     }),
   ].join("\n");
 }
-
-
 
 export function validateExtensionContributionExecution(
   kind: ExtensionKind,
@@ -757,5 +742,3 @@ function createExtensionFreshnessSummaryForDoctor(context: TuiContext): Record<s
       .sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
-
-

@@ -1,25 +1,83 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { ModelRole, RoleModelRoute } from "@linghun/config";
+import type { TranscriptEvent } from "@linghun/core";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import { runTool } from "@linghun/tools";
-import type { TranscriptEvent } from "@linghun/core";
-import type { TuiContext } from "./index.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
-import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
-import { decidePermission } from "./tui-permission-runtime.js";
-import { formatAgentDetails } from "./tui-details-runtime.js";
-import { getRoleRoute } from "./model-doctor-runtime.js";
-import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
-import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
-import { appendJobLog, createDurableJobAgents, deriveAgentDisplayName, estimateJobTokens, formatJobAgentLabels, formatJobStatus, getDurableJobMaxSteps, parseJobRunOptions, persistDurableJob, rescheduleDurableJobAgents, writeDurableJobReport, DEFAULT_JOB_RUNNING_AGENT_CAP, JOB_AGENT_HIGH_CONFIG_CANDIDATE, JOB_RECOVERY_HEARTBEAT_STALE_MS, MAX_AGENTS, type ParsedJobRunOptions } from "./job-runtime.js";
-import { formatBackgroundTask, mapDurableJobToBackgroundResult, mapDurableJobToBackgroundStatus, formatJobRunnerInline } from "./job-runner-presenter.js";
-import { markJobRunnerTerminal, refreshRunnerStatusForJob as refreshRunnerStatusForJobImpl, startRunnerForDurableJob as startRunnerForDurableJobImpl, stopRunnerForDurableJob as stopRunnerForDurableJobImpl, type RunnerContext, type RunnerRuntimeDeps } from "./runner-runtime.js";
-import { createAgentBackgroundTask, createAgentContextSummary, createEmptyAgentCost, findAgent, findDurableJob, formatAgentSummary, formatJobList, formatJobLogs, formatJobPrimary, formatJobReport, getAgentPermissionMode, getAgentRole, getDurableJobPaths, isActiveBackgroundStatus, isAgentType, listDurableJobs, mapAgentBackgroundResult, rememberBackgroundTask, toJobContext, upsertJobBackgroundTask } from "./tui-agent-job-runtime.js";
-import { truncateDisplay, writeLine } from "./startup-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
-import type { AgentRun, AgentType, BackgroundTaskState, DurableJobState, DurableJobStatus, RoleHandoff, RoleRouteDecision } from "./tui-data-types.js";
+import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
+import type { TuiContext } from "./index.js";
+import {
+  formatBackgroundTask,
+  formatJobRunnerInline,
+  mapDurableJobToBackgroundResult,
+  mapDurableJobToBackgroundStatus,
+} from "./job-runner-presenter.js";
+import {
+  DEFAULT_JOB_RUNNING_AGENT_CAP,
+  JOB_AGENT_HIGH_CONFIG_CANDIDATE,
+  JOB_RECOVERY_HEARTBEAT_STALE_MS,
+  MAX_AGENTS,
+  type ParsedJobRunOptions,
+  appendJobLog,
+  createDurableJobAgents,
+  deriveAgentDisplayName,
+  estimateJobTokens,
+  formatJobAgentLabels,
+  formatJobStatus,
+  getDurableJobMaxSteps,
+  parseJobRunOptions,
+  persistDurableJob,
+  rescheduleDurableJobAgents,
+  writeDurableJobReport,
+} from "./job-runtime.js";
+import { getRoleRoute } from "./model-doctor-runtime.js";
+import {
+  type RunnerContext,
+  type RunnerRuntimeDeps,
+  markJobRunnerTerminal,
+  refreshRunnerStatusForJob as refreshRunnerStatusForJobImpl,
+  startRunnerForDurableJob as startRunnerForDurableJobImpl,
+  stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
+} from "./runner-runtime.js";
+import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import {
+  createAgentBackgroundTask,
+  createAgentContextSummary,
+  createEmptyAgentCost,
+  findAgent,
+  findDurableJob,
+  formatAgentSummary,
+  formatJobList,
+  formatJobLogs,
+  formatJobPrimary,
+  formatJobReport,
+  getAgentPermissionMode,
+  getAgentRole,
+  getDurableJobPaths,
+  isActiveBackgroundStatus,
+  isAgentType,
+  listDurableJobs,
+  mapAgentBackgroundResult,
+  rememberBackgroundTask,
+  toJobContext,
+  upsertJobBackgroundTask,
+} from "./tui-agent-job-runtime.js";
+import type {
+  AgentRun,
+  AgentType,
+  BackgroundTaskState,
+  DurableJobState,
+  DurableJobStatus,
+  RoleHandoff,
+  RoleRouteDecision,
+} from "./tui-data-types.js";
+import { formatAgentDetails } from "./tui-details-runtime.js";
+import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
+import { decidePermission } from "./tui-permission-runtime.js";
+import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
+import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
 export type JobAgentCommandRuntimeDeps = {
   addRoleUsage: (
@@ -30,11 +88,34 @@ export type JobAgentCommandRuntimeDeps = {
     outputTokens: number,
     note?: string,
   ) => void;
-  appendBackgroundTaskEvent: (context: TuiContext, sessionId: string, task: BackgroundTaskState) => Promise<void>;
-  appendRouteDecisionEvent: (context: TuiContext, sessionId: string, decision: RoleRouteDecision) => Promise<void>;
-  checkBackgroundStartGuard: (context: TuiContext, kind: BackgroundTaskState["kind"], heavy?: boolean, ignoreTaskId?: string) => string | null;
-  checkResourceGuard: (context: TuiContext, kind: BackgroundTaskState["kind"] | "model" | "heavy", ignoreTaskId?: string) => string | null;
-  createRoleHandoff: (from: ModelRole, to: ModelRole, source: string, summary: string, context: TuiContext) => RoleHandoff;
+  appendBackgroundTaskEvent: (
+    context: TuiContext,
+    sessionId: string,
+    task: BackgroundTaskState,
+  ) => Promise<void>;
+  appendRouteDecisionEvent: (
+    context: TuiContext,
+    sessionId: string,
+    decision: RoleRouteDecision,
+  ) => Promise<void>;
+  checkBackgroundStartGuard: (
+    context: TuiContext,
+    kind: BackgroundTaskState["kind"],
+    heavy?: boolean,
+    ignoreTaskId?: string,
+  ) => string | null;
+  checkResourceGuard: (
+    context: TuiContext,
+    kind: BackgroundTaskState["kind"] | "model" | "heavy",
+    ignoreTaskId?: string,
+  ) => string | null;
+  createRoleHandoff: (
+    from: ModelRole,
+    to: ModelRole,
+    source: string,
+    summary: string,
+    context: TuiContext,
+  ) => RoleHandoff;
   ensureSession: (context: TuiContext) => Promise<string>;
   refreshBackgroundLifecycle: (context: TuiContext) => void;
   writeStatus: (output: Writable, context: TuiContext) => void;
@@ -197,7 +278,11 @@ export async function handleJobCommand(
     );
     await writeDurableJobReport(job);
     const background = upsertJobBackgroundTask(context, job);
-    await deps().appendBackgroundTaskEvent(context, await deps().ensureSession(context), background);
+    await deps().appendBackgroundTaskEvent(
+      context,
+      await deps().ensureSession(context),
+      background,
+    );
     if (start && job.status === "running") {
       await runDurableJobLiteTick(context, job);
     }
@@ -291,10 +376,14 @@ export async function createDurableJob(
   const now = new Date().toISOString();
   const id = `job-${randomUUID().slice(0, 8)}`;
   const paths = getDurableJobPaths(context, id);
-  const handoffPacket = await loadOrCreateHandoffPacket(context, await deps().ensureSession(context));
+  const handoffPacket = await loadOrCreateHandoffPacket(
+    context,
+    await deps().ensureSession(context),
+  );
   const missing = validateHandoffPacket(handoffPacket);
   const resourceGuard = start
-    ? (deps().checkResourceGuard(context, "model") ?? deps().checkBackgroundStartGuard(context, "job", true))
+    ? (deps().checkResourceGuard(context, "model") ??
+      deps().checkBackgroundStartGuard(context, "job", true))
     : null;
   const runningCap = DEFAULT_JOB_RUNNING_AGENT_CAP;
   const status: DurableJobStatus = !start
@@ -396,7 +485,8 @@ export async function resumeDurableJob(job: DurableJobState, context: TuiContext
     return;
   }
   const resourceGuard =
-    deps().checkResourceGuard(context, "model") ?? deps().checkBackgroundStartGuard(context, "job", true, job.id);
+    deps().checkResourceGuard(context, "model") ??
+    deps().checkBackgroundStartGuard(context, "job", true, job.id);
   if (resourceGuard) {
     await transitionDurableJob(job, context, "sleeping", `resource_guard:${resourceGuard}`);
     return;
@@ -515,7 +605,10 @@ export async function recoverDurableJobForContext(
   return job;
 }
 
-export async function runDurableJobLiteTick(context: TuiContext, job: DurableJobState): Promise<void> {
+export async function runDurableJobLiteTick(
+  context: TuiContext,
+  job: DurableJobState,
+): Promise<void> {
   if (job.status !== "running") {
     return;
   }
@@ -1098,7 +1191,11 @@ export async function runWorkerAgent(
   return `worker 摘要：已通过权限管道执行低风险写入 ${path}。${result.output.text}`;
 }
 
-export async function cancelAgent(agent: AgentRun, context: TuiContext, output: Writable): Promise<void> {
+export async function cancelAgent(
+  agent: AgentRun,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
   const now = new Date().toISOString();
   agent.status = "cancelled";
   agent.summary = `agent ${agent.id} 已取消；主会话可继续。`;

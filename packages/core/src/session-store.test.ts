@@ -74,9 +74,7 @@ describe("SessionStore", () => {
 // 进入 join() 之前必须先校验，拒绝 `..` / slash / 控制字符 / 绝对路径 / 空。
 describe("SessionStore — D.13O sessionId path validation", () => {
   it("assertValidSessionId 接受 randomUUID 形式", () => {
-    expect(() =>
-      assertValidSessionId("11111111-2222-3333-4444-555555555555"),
-    ).not.toThrow();
+    expect(() => assertValidSessionId("11111111-2222-3333-4444-555555555555")).not.toThrow();
   });
 
   for (const bad of [

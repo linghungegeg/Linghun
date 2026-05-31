@@ -144,8 +144,7 @@ export function buildFooterView(input: FooterViewInput): {
   };
 }
 
-const CJK_WIDE_CHAR_RE =
-  /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦]/u;
+const CJK_WIDE_CHAR_RE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦]/u;
 
 function displayWidth(value: string): number {
   let width = 0;

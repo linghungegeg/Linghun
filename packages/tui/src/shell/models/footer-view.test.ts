@@ -26,12 +26,7 @@ describe("footer-view: model label setup-needed dim", () => {
   });
 
   it("placeholder 'openai-compatible-model' 视为占位，dim '--'", () => {
-    const result = formatFooterModelLabel(
-      "en-US",
-      "openai-compatible-model",
-      false,
-      120,
-    );
+    const result = formatFooterModelLabel("en-US", "openai-compatible-model", false, 120);
     expect(result.dim).toBe(true);
     expect(result.text).toContain("--");
   });

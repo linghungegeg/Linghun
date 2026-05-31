@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { randomBytes } from "node:crypto";
 import type { RemoteChannelType } from "@linghun/config";
-import {
-  type RemoteInboxItem,
-  type RemotePairingState,
-  type RemoteChannelState,
-  type RemoteInboundKind,
-  type RemoteInboundMessage,
-  type RemoteState,
+import type {
+  RemoteChannelState,
+  RemoteInboundKind,
+  RemoteInboundMessage,
+  RemoteInboxItem,
+  RemotePairingState,
+  RemoteState,
 } from "./tui-data-types.js";
 
 export type RemoteBridgeReadiness =
@@ -41,7 +41,13 @@ export type RemoteBridgeDoctorReport = {
 };
 
 export type RemotePairingDecision =
-  | { status: "created"; summary: string; pairing: RemotePairingState; qr: string; fallback: string }
+  | {
+      status: "created";
+      summary: string;
+      pairing: RemotePairingState;
+      qr: string;
+      fallback: string;
+    }
   | { status: "bound"; summary: string; pairing: RemotePairingState }
   | { status: "cancelled"; summary: string }
   | { status: "expired" | "unknown" | "channel_mismatch" | "replayed"; summary: string };
@@ -217,7 +223,10 @@ export function createRemotePairing(
     consumedMessageIds: [],
     status: "pending",
   };
-  remote.pairings = [pairing, ...remote.pairings.filter((item) => item.status === "pending")].slice(0, 5);
+  remote.pairings = [pairing, ...remote.pairings.filter((item) => item.status === "pending")].slice(
+    0,
+    5,
+  );
   return {
     status: "created",
     summary: `remote pairing code created for ${channel.id}`,
@@ -248,12 +257,16 @@ export function formatRemotePairingStatus(remote: RemoteState): string {
   return [
     "Remote pairing status",
     ...active.map(
-      (item) => `- ${item.channel}: ${item.code}; expiresAt=${item.expiresAt}; source=${item.source}`,
+      (item) =>
+        `- ${item.channel}: ${item.code}; expiresAt=${item.expiresAt}; source=${item.source}`,
     ),
   ].join("\n");
 }
 
-export function cancelRemotePairing(remote: RemoteState, channelId?: string): RemotePairingDecision {
+export function cancelRemotePairing(
+  remote: RemoteState,
+  channelId?: string,
+): RemotePairingDecision {
   const normalized = channelId ? normalizeBridgeChannelId(channelId) : undefined;
   const target = remote.pairings.find(
     (item) => item.status === "pending" && (!normalized || item.channel === normalized),
@@ -331,7 +344,9 @@ export function decideRemoteInbox(
     return { status: "approval_only", message };
   }
   const text = (message.text ?? "").trim();
-  const busy = Boolean(turn.activeModelTurn || turn.activeJob || turn.toolRunning || turn.pendingApproval);
+  const busy = Boolean(
+    turn.activeModelTurn || turn.activeJob || turn.toolRunning || turn.pendingApproval,
+  );
   if (!busy) {
     return { status: "route", reason: "idle", message };
   }
@@ -357,10 +372,12 @@ export function formatRemoteInbox(remote: RemoteState): string {
   if (remote.inbox.length === 0) return "Remote inbox：empty.";
   return [
     "Remote inbox（summary-only）",
-    ...remote.inbox.slice(0, 20).map(
-      (item) =>
-        `- ${item.id}: ${item.channel}; priority=${item.priority}; source=${item.source}; text=${redactMobileText(item.text)}`,
-    ),
+    ...remote.inbox
+      .slice(0, 20)
+      .map(
+        (item) =>
+          `- ${item.id}: ${item.channel}; priority=${item.priority}; source=${item.source}; text=${redactMobileText(item.text)}`,
+      ),
   ].join("\n");
 }
 
@@ -492,10 +509,7 @@ function adaptBridgeEvent(
   };
 }
 
-function describeBridgeChannel(
-  channel: RemoteChannelState,
-  now: Date,
-): RemoteBridgeDoctorReport {
+function describeBridgeChannel(channel: RemoteChannelState, now: Date): RemoteBridgeDoctorReport {
   const missing = bridgeMissingFields(channel);
   const webhookOnly =
     channel.config.transport === "webhook" || channel.config.transport === "webhook_mock";
@@ -511,11 +525,11 @@ function describeBridgeChannel(
     });
   }
   const capabilities = platformBridgeCapabilities(channel.config.type);
-  const needsApp = missing.some((item) => item.includes("credentials")) || missing.includes("trusted source");
-  const needsDaemon =
-    isFeishuLongConnection(channel)
-      ? false
-      : channel.config.inboundMode === "poll"
+  const needsApp =
+    missing.some((item) => item.includes("credentials")) || missing.includes("trusted source");
+  const needsDaemon = isFeishuLongConnection(channel)
+    ? false
+    : channel.config.inboundMode === "poll"
       ? !channel.config.cliPath
       : channel.config.inboundMode === "callback" && !channel.config.callbackEndpoint;
   const readiness: RemoteBridgeReadiness = needsApp
@@ -554,10 +568,14 @@ function bridgeMissingFields(channel: RemoteChannelState): string[] {
   if (!config.bindingUserId) missing.push("binding user");
   if (config.trustedSources.length === 0) missing.push("trusted source");
   if (config.transport === "official_cli" && !config.cliPath) missing.push("cli path");
-  if (config.transport === "official_cli" && (!config.inboundMode || config.inboundMode === "none")) {
+  if (
+    config.transport === "official_cli" &&
+    (!config.inboundMode || config.inboundMode === "none")
+  ) {
     missing.push("inbound mode");
   }
-  if (config.inboundMode === "callback" && !config.callbackEndpoint) missing.push("callback endpoint");
+  if (config.inboundMode === "callback" && !config.callbackEndpoint)
+    missing.push("callback endpoint");
   if (config.type === "feishu" || config.type === "lark") {
     if (!config.appIdRef || !config.appSecretRef) missing.push("app credentials");
     if (
@@ -571,7 +589,11 @@ function bridgeMissingFields(channel: RemoteChannelState): string[] {
   if (config.type === "dingtalk" && !config.appIdRef && !config.tokenRef) {
     missing.push("dingtalk app credentials");
   }
-  if ((config.type === "wecom" || config.type === "enterprise-wechat") && !config.appIdRef && !config.tokenRef) {
+  if (
+    (config.type === "wecom" || config.type === "enterprise-wechat") &&
+    !config.appIdRef &&
+    !config.tokenRef
+  ) {
     missing.push("wecom app credentials");
   }
   return [...new Set(missing)];
@@ -589,7 +611,9 @@ function platformBridgeCapabilities(type: RemoteChannelType): RemoteBridgeCapabi
 
 function bridgeInboundPath(channel: RemoteChannelState): string {
   if (channel.config.inboundMode === "callback") {
-    return channel.config.callbackEndpoint ? "app callback endpoint configured" : "app callback endpoint needed";
+    return channel.config.callbackEndpoint
+      ? "app callback endpoint configured"
+      : "app callback endpoint needed";
   }
   if (channel.config.inboundMode === "poll") {
     return channel.config.localBridgePort
@@ -599,10 +623,7 @@ function bridgeInboundPath(channel: RemoteChannelState): string {
   return "inbound disabled";
 }
 
-function bridgeNextAction(
-  channel: RemoteChannelState,
-  readiness: RemoteBridgeReadiness,
-): string {
+function bridgeNextAction(channel: RemoteChannelState, readiness: RemoteBridgeReadiness): string {
   if (readiness === "fixture-ready") {
     return `/remote bridge test-inbound ${channel.id}; real mobile inbound still needs platform credentials and callback/daemon.`;
   }
@@ -723,5 +744,8 @@ function redactMobileText(text: string): string {
 }
 
 function stableFixtureNonce(channelId: string, kind: RemoteInboundKind, messageId: string): string {
-  return createHash("sha256").update(`${channelId}:${kind}:${messageId}`).digest("hex").slice(0, 16);
+  return createHash("sha256")
+    .update(`${channelId}:${kind}:${messageId}`)
+    .digest("hex")
+    .slice(0, 16);
 }

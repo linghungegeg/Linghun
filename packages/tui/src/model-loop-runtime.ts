@@ -30,7 +30,6 @@ import { createIndexToolDefinitions } from "./index-tool-runtime.js";
 import type { ReportWriteGuard } from "./permission-continuation-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -877,7 +876,9 @@ export function createFinalAnswerClaimReminder(
       : "";
     return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}).${stalePart} Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or call a tool first to gather evidence. You have only one rewrite chance.`;
   }
-  const stalePart = hasStale ? "\u90e8\u5206\u65e9\u671f\u8bc1\u636e\u5df2\u8fc7\u671f\u88ab\u5ffd\u7565\u3002" : "";
+  const stalePart = hasStale
+    ? "\u90e8\u5206\u65e9\u671f\u8bc1\u636e\u5df2\u8fc7\u671f\u88ab\u5ffd\u7565\u3002"
+    : "";
   return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002${stalePart}\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
 }
 
@@ -892,7 +893,10 @@ export function buildDowngradedFinalAnswer(
   for (const match of verdict.matchedClaims) {
     if (verdict.unsupportedKinds.includes(match.kind)) {
       const re = new RegExp(escapeRegExp(match.phrase), "giu");
-      safeText = safeText.replace(re, language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]");
+      safeText = safeText.replace(
+        re,
+        language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]",
+      );
     }
   }
   const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
@@ -1056,7 +1060,10 @@ export function buildExtendedDowngradedFinalAnswer(
   for (const match of verdict.matchedClaims) {
     if (verdict.unsupportedKinds.includes(match.kind)) {
       const re = new RegExp(escapeRegExp(match.phrase), "giu");
-      safeText = safeText.replace(re, language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]");
+      safeText = safeText.replace(
+        re,
+        language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]",
+      );
     }
   }
   const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
@@ -1132,7 +1139,7 @@ export function projectRuntimeStatusForPrompt(
   const r = runtimeStatus as Record<string, unknown>;
   const model =
     r.model && typeof r.model === "object"
-      ? (r.model as { name?: string }).name ?? "unknown"
+      ? ((r.model as { name?: string }).name ?? "unknown")
       : "unknown";
   const memory = (r.memory ?? {}) as Record<string, unknown>;
   const index = (r.index ?? {}) as Record<string, unknown>;
@@ -1151,8 +1158,7 @@ export function projectRuntimeStatusForPrompt(
     },
     index: {
       status: typeof index.status === "string" ? index.status : "unknown",
-      changedFiles:
-        typeof index.changedFiles === "number" ? (index.changedFiles as number) : null,
+      changedFiles: typeof index.changedFiles === "number" ? (index.changedFiles as number) : null,
     },
     cache: {
       latestHitRate:
@@ -1220,7 +1226,7 @@ export function sanitizeDeferredToolPrimaryText(
 
 function extractMatchedCount(text: string): number {
   const m = /matched\s+(\d+)/iu.exec(text);
-  return m && m[1] ? Number.parseInt(m[1], 10) : 0;
+  return m?.[1] ? Number.parseInt(m[1], 10) : 0;
 }
 
 function stripDeferredInternalTokens(text: string): string {

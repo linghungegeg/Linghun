@@ -32,9 +32,7 @@ export function buildSessionPanelEntries(
   });
   return sorted.map((s) => ({
     id: s.id,
-    title: (s.summary && s.summary.trim().length > 0
-      ? s.summary.trim()
-      : s.id.slice(0, 12)),
+    title: s.summary && s.summary.trim().length > 0 ? s.summary.trim() : s.id.slice(0, 12),
     updatedAt: s.updatedAt,
     messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
     isCurrent: s.id === currentSessionId,

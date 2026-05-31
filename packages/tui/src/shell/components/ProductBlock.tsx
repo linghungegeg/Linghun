@@ -148,9 +148,9 @@ export function ProductBlock({
   // 普通 alert 一眼可分。
   const borderColor = emphasized
     ? block.kind === "permission"
-      ? theme.permission ?? theme.border
+      ? (theme.permission ?? theme.border)
       : block.messageKind === "tool_result_error"
-        ? theme.error ?? theme.status.fail
+        ? (theme.error ?? theme.status.fail)
         : (theme.status[block.status] ?? theme.border)
     : undefined;
   // P2-2：detail / nextAction 走 fitText 防御截断。
@@ -172,8 +172,7 @@ export function ProductBlock({
           <Text>
             <Text color={theme.error ?? theme.status.fail}>
               {getStatusMarker("fail", theme.mode === "no-color")}
-            </Text>
-            {" "}
+            </Text>{" "}
             <Text color={theme.error ?? theme.status.fail}>{block.title}</Text>
           </Text>
         ) : null}
@@ -207,8 +206,7 @@ export function ProductBlock({
         <Text>
           <Text color={theme.status[block.status]}>
             {getStatusMarker(block.status, theme.mode === "no-color")}
-          </Text>
-          {" "}
+          </Text>{" "}
           {block.title}
         </Text>
       ) : summaryAsMarker ? (
@@ -217,9 +215,7 @@ export function ProductBlock({
         </Text>
       ) : null}
       {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
-      {block.detail ? (
-        <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text>
-      ) : null}
+      {block.detail ? <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text> : null}
       {block.nextAction ? (
         <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, innerWidth)} />
       ) : null}

@@ -130,9 +130,7 @@ function classifyProviderFailure(
   const text = `${code ?? ""} ${name ?? ""} ${message}`;
   // 推理参数不被网关/模型接受 —— 必须在 schema 之前分流，否则会被 schema 吞掉。
   if (
-    /thinking|extended_thinking|reasoning|unsupported_param|不支持.*推理|推理.*不支持/iu.test(
-      text,
-    )
+    /thinking|extended_thinking|reasoning|unsupported_param|不支持.*推理|推理.*不支持/iu.test(text)
   ) {
     return "reasoning_unsupported";
   }

@@ -2,22 +2,60 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
-import { removeMcpServerConfig, resolveStoragePaths, saveMcpServerConfig, type McpServerConfig } from "@linghun/config";
+import {
+  type McpServerConfig,
+  removeMcpServerConfig,
+  resolveStoragePaths,
+  saveMcpServerConfig,
+} from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
-import type { TuiContext } from "./index.js";
 import { diffFreshness } from "./cache-freshness.js";
-import { findDeferredTool, getCodebaseMemoryToolRisk, isCodebaseMemoryToolName, isLocalStdioMcpServer, listDeferredTools, parseMcpDeferredToolName, searchDeferredTools, summarizeDeferredToolMatch, validateCodebaseMemoryToolExecution } from "./deferred-tools-catalog.js";
-import { findCurrentIndexProject, type CodebaseMemoryBinarySource, type CodebaseMemoryBinaryStatus } from "./index-runtime.js";
-import { formatIndexSafetyWarning, scanIndexSafety, summarizeIndexResult } from "./index-result-presenter.js";
-import { buildIndexStatusPanel, buildMcpStatusPanel, formatIndexRefreshSummary, formatIndexStatus, formatMcpStatus } from "./mcp-index-command-runtime.js";
-import { isPotentiallyMutatingMcpTool, runMcpStdioToolCall, runMcpStdioToolList } from "./mcp-stdio-runtime.js";
-import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import {
+  findDeferredTool,
+  getCodebaseMemoryToolRisk,
+  isCodebaseMemoryToolName,
+  isLocalStdioMcpServer,
+  listDeferredTools,
+  parseMcpDeferredToolName,
+  searchDeferredTools,
+  summarizeDeferredToolMatch,
+  validateCodebaseMemoryToolExecution,
+} from "./deferred-tools-catalog.js";
+import {
+  formatIndexSafetyWarning,
+  scanIndexSafety,
+  summarizeIndexResult,
+} from "./index-result-presenter.js";
+import {
+  type CodebaseMemoryBinarySource,
+  type CodebaseMemoryBinaryStatus,
+  findCurrentIndexProject,
+} from "./index-runtime.js";
+import type { TuiContext } from "./index.js";
+import {
+  buildIndexStatusPanel,
+  buildMcpStatusPanel,
+  formatIndexRefreshSummary,
+  formatIndexStatus,
+  formatMcpStatus,
+} from "./mcp-index-command-runtime.js";
+import {
+  isPotentiallyMutatingMcpTool,
+  runMcpStdioToolCall,
+  runMcpStdioToolList,
+} from "./mcp-stdio-runtime.js";
+import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
+import { formatMcpTools } from "./remote-mcp-presenter.js";
+import {
+  formatError,
+  sanitizeDiagnosticText,
+  truncateDisplay,
+  writeLine,
+} from "./startup-runtime.js";
+import type { BackgroundTaskState, EvidenceRecord, McpToolState } from "./tui-data-types.js";
 import { writeDiagnosticLine } from "./tui-output-surface.js";
 import { createMcpState, createMcpToolPlaceholders, pathExists } from "./tui-state-runtime.js";
-import { sanitizeDiagnosticText, formatError, truncateDisplay, writeLine } from "./startup-runtime.js";
-import type { BackgroundTaskState, EvidenceRecord, McpToolState } from "./tui-data-types.js";
-import { formatMcpTools } from "./remote-mcp-presenter.js";
 
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
@@ -104,9 +142,7 @@ export async function handleMcpCommand(
       title: "/mcp doctor",
       tone: "neutral",
       summary: [
-        isEn
-          ? "MCP doctor — Ctrl+O for full diagnostics."
-          : "MCP 诊断 — Ctrl+O 查看完整诊断。",
+        isEn ? "MCP doctor — Ctrl+O for full diagnostics." : "MCP 诊断 — Ctrl+O 查看完整诊断。",
       ],
       detailsText: formatMcpStatus(context),
     });
@@ -118,9 +154,7 @@ export async function handleMcpCommand(
     showCommandPanel(context, output, {
       title: "/mcp validate",
       tone: "neutral",
-      summary: [
-        isEn ? "MCP validate — Ctrl+O for details." : "MCP 校验 — Ctrl+O 查看详情。",
-      ],
+      summary: [isEn ? "MCP validate — Ctrl+O for details." : "MCP 校验 — Ctrl+O 查看详情。"],
       detailsText: validateMcpServers(context, args[1]),
     });
     return;
@@ -259,7 +293,9 @@ export async function handleIndexCommand(
   );
 }
 
-export async function resolveCodebaseMemoryBinary(context: TuiContext): Promise<CodebaseMemoryResolution> {
+export async function resolveCodebaseMemoryBinary(
+  context: TuiContext,
+): Promise<CodebaseMemoryResolution> {
   const configured = context.config.mcp.servers["codebase-memory"];
   const configuredCommand = configured?.command?.trim();
   const configuredArgs = configured?.args ?? [];
@@ -496,7 +532,9 @@ export function rememberCodebaseMemoryResolution(
           : "missing codebase-memory runtime";
 }
 
-export async function getCodebaseMemoryResolution(context: TuiContext): Promise<CodebaseMemoryResolution> {
+export async function getCodebaseMemoryResolution(
+  context: TuiContext,
+): Promise<CodebaseMemoryResolution> {
   const resolution = await resolveCodebaseMemoryBinary(context);
   rememberCodebaseMemoryResolution(context, resolution);
   return resolution;
@@ -770,7 +808,10 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   }
 }
 
-export async function refreshIndexStaleHint(context: TuiContext, projectName: string): Promise<void> {
+export async function refreshIndexStaleHint(
+  context: TuiContext,
+  projectName: string,
+): Promise<void> {
   const changes = await runCodebaseMemoryCli(
     context,
     "detect_changes",
@@ -1050,9 +1091,9 @@ export async function executeExtraTool(
       text: `ExecuteExtraTool: 工具 ${target.name} (${target.kind}) 已发现但当前没有安全执行适配器：${target.reason}`,
     };
   }
-  const params = (args.params && typeof args.params === "object" && !Array.isArray(args.params)
-    ? args.params
-    : {}) as Record<string, unknown>;
+  const params = (
+    args.params && typeof args.params === "object" && !Array.isArray(args.params) ? args.params : {}
+  ) as Record<string, unknown>;
   if (target.kind === "codebase-memory") {
     if (!isCodebaseMemoryToolName(target.name)) {
       return {

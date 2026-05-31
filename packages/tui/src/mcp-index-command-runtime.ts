@@ -5,7 +5,7 @@ import { sanitizeDiagnosticText, truncateDisplay } from "./startup-runtime.js";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 function redactedPath(path: string | undefined): string {
   if (!path) return "-";
-  return "present:" + sanitizeDiagnosticText(basename(path));
+  return `present:${sanitizeDiagnosticText(basename(path))}`;
 }
 
 /**
@@ -14,9 +14,7 @@ function redactedPath(path: string | undefined): string {
  * guard / license / runtime / binary / source / schemaLoaded / endpoint
  * 等内部字段不进 summary / sections，全量原文进 detailsText（Ctrl+O 展开）。
  */
-export function buildMcpStatusPanel(
-  context: TuiContext,
-): CommandPanelView {
+export function buildMcpStatusPanel(context: TuiContext): CommandPanelView {
   const isEn = context.language === "en-US";
   const enabled = context.mcp.enabled;
   const serverCount = context.mcp.servers.length;
@@ -29,9 +27,7 @@ export function buildMcpStatusPanel(
   ];
   if (needsDoctor) {
     summary.push(
-      isEn
-        ? "Not yet diagnosed — run /mcp doctor to check."
-        : "尚未诊断 — 运行 /mcp doctor 检测。",
+      isEn ? "Not yet diagnosed — run /mcp doctor to check." : "尚未诊断 — 运行 /mcp doctor 检测。",
     );
   }
   const failingServers = context.mcp.servers.filter(
@@ -41,15 +37,10 @@ export function buildMcpStatusPanel(
   if (serverCount > 0) {
     sections.push({
       title: isEn ? "Servers" : "服务器",
-      rows: context.mcp.servers
-        .slice(0, 8)
-        .map((s) => `${s.name} · ${s.status}`),
+      rows: context.mcp.servers.slice(0, 8).map((s) => `${s.name} · ${s.status}`),
     });
   }
-  const actions = [
-    "/mcp doctor",
-    "/mcp tools",
-  ];
+  const actions = ["/mcp doctor", "/mcp tools"];
   if (failingServers.length > 0) actions.push("/mcp validate");
   return {
     title: "/mcp",
@@ -60,8 +51,6 @@ export function buildMcpStatusPanel(
     detailsText: formatMcpStatus(context),
   };
 }
-
-
 
 export function formatMcpStatus(context: TuiContext): string {
   // D.13Q-UX Real Smoke Fix v3 — /mcp status 默认是中性 diagnostic：
@@ -105,8 +94,6 @@ export function formatMcpStatus(context: TuiContext): string {
   ].join("\n");
 }
 
-
-
 /**
  * D.13Q-UX Task Surface — /index status 的降噪 CommandPanel 视图。
  * 仅暴露：是否启用 / 当前 status / 是否需要 doctor / 下一步建议。
@@ -114,9 +101,7 @@ export function formatMcpStatus(context: TuiContext): string {
  * nodes/edges / changedFiles / safety 等内部字段不进 summary，全量原文进
  * detailsText（Ctrl+O 展开）。
  */
-export function buildIndexStatusPanel(
-  context: TuiContext,
-): CommandPanelView {
+export function buildIndexStatusPanel(context: TuiContext): CommandPanelView {
   const isEn = context.language === "en-US";
   const status = context.index.status;
   const enabled = context.index.enabled;
@@ -128,10 +113,14 @@ export function buildIndexStatusPanel(
   ];
   const actions: string[] = [];
   if (status === "missing") {
-    summary.push(isEn ? "Not built yet — run /index init fast." : "尚未建立 — 运行 /index init fast。");
+    summary.push(
+      isEn ? "Not built yet — run /index init fast." : "尚未建立 — 运行 /index init fast。",
+    );
     actions.push("/index init fast");
   } else if (status === "stale") {
-    summary.push(isEn ? "Stale — /index refresh recommended." : "已过期 — 建议运行 /index refresh。");
+    summary.push(
+      isEn ? "Stale — /index refresh recommended." : "已过期 — 建议运行 /index refresh。",
+    );
     actions.push("/index refresh");
   } else if (status === "error") {
     summary.push(isEn ? "Error — run /index doctor." : "出错 — 运行 /index doctor。");
@@ -147,8 +136,6 @@ export function buildIndexStatusPanel(
     detailsText: formatIndexStatus(context),
   };
 }
-
-
 
 export function formatIndexStatus(context: TuiContext): string {
   const suggestion =
@@ -186,8 +173,6 @@ export function formatIndexStatus(context: TuiContext): string {
   ].join("\n");
 }
 
-
-
 export function formatIndexRefreshSummary(
   context: TuiContext,
   actionLabel: "init fast" | "refresh" = "refresh",
@@ -207,5 +192,3 @@ export function formatIndexRefreshSummary(
     "- 详情：输入 /index status 查看完整索引状态。",
   ].join("\n");
 }
-
-

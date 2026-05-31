@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatGitStatusDetails,
   type GitRunResult,
   type GitRunner,
+  type GitStatus,
+  type WorktreeReport,
+  formatGitStatusDetails,
   isGitRepository,
   readGitStatus,
   readWorktreeList,
   suggestStablePoint,
-  type GitStatus,
-  type WorktreeReport,
 } from "./git-runtime.js";
 
 /**
@@ -16,9 +16,7 @@ import {
  * argv prefixes. First match wins; missing keys fall back to a generic
  * "unknown command" failure (so tests catch unexpected new git calls).
  */
-function makeRunner(
-  table: Array<{ args: string[]; result: GitRunResult }>,
-): GitRunner {
+function makeRunner(table: Array<{ args: string[]; result: GitRunResult }>): GitRunner {
   return async (_cwd, args) => {
     for (const entry of table) {
       if (args.length < entry.args.length) continue;
@@ -31,7 +29,11 @@ function makeRunner(
       }
       if (match) return entry.result;
     }
-    return { ok: false, stdout: "", stderr: `runner has no scripted entry for: git ${args.join(" ")}` };
+    return {
+      ok: false,
+      stdout: "",
+      stderr: `runner has no scripted entry for: git ${args.join(" ")}`,
+    };
   };
 }
 
@@ -102,10 +104,7 @@ describe("D.13R Git / Worktree / Stable Point — suggestStablePoint", () => {
 
 describe("D.13R Git — formatGitStatusDetails", () => {
   it("not_a_git_repo: 返回明确说明", () => {
-    const out = formatGitStatusDetails(
-      { kind: "not_a_git_repo" },
-      { kind: "not_a_git_repo" },
-    );
+    const out = formatGitStatusDetails({ kind: "not_a_git_repo" }, { kind: "not_a_git_repo" });
     expect(out).toContain("Not a git repository");
   });
 
@@ -150,8 +149,22 @@ describe("D.13R Git — formatGitStatusDetails", () => {
     const wt: WorktreeReport = {
       kind: "ok",
       entries: [
-        { path: "/repo", branch: "main", head: "abc1234", isCurrent: true, bare: false, detached: false },
-        { path: "/repo/.claude/worktrees/feat", branch: "feat", head: "def5678", isCurrent: false, bare: false, detached: false },
+        {
+          path: "/repo",
+          branch: "main",
+          head: "abc1234",
+          isCurrent: true,
+          bare: false,
+          detached: false,
+        },
+        {
+          path: "/repo/.claude/worktrees/feat",
+          branch: "feat",
+          head: "def5678",
+          isCurrent: false,
+          bare: false,
+          detached: false,
+        },
       ],
     };
     const out = formatGitStatusDetails(status, wt);
@@ -371,7 +384,10 @@ describe("D.13R Git — isGitRepository", () => {
   });
   it("rev-parse 失败 → false", async () => {
     const runner = makeRunner([
-      { args: ["rev-parse", "--is-inside-work-tree"], result: failStderr("fatal: not a git repository") },
+      {
+        args: ["rev-parse", "--is-inside-work-tree"],
+        result: failStderr("fatal: not a git repository"),
+      },
     ]);
     expect(await isGitRepository("/tmp", runner)).toBe(false);
   });

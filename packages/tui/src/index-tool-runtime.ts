@@ -35,10 +35,15 @@ export function isIndexToolName(name: string): boolean {
   return INDEX_TOOL_NAMES.includes(name);
 }
 
-export type IndexToolName = typeof INDEX_STATUS_INSPECT | typeof INDEX_REFRESH | typeof INDEX_REPAIR;
+export type IndexToolName =
+  | typeof INDEX_STATUS_INSPECT
+  | typeof INDEX_REFRESH
+  | typeof INDEX_REPAIR;
 
 /** 仅 IndexRefresh / IndexRepair 是 mutating（需要权限确认）；Inspect 只读。 */
-export function isMutatingIndexTool(name: string): name is typeof INDEX_REFRESH | typeof INDEX_REPAIR {
+export function isMutatingIndexTool(
+  name: string,
+): name is typeof INDEX_REFRESH | typeof INDEX_REPAIR {
   return name === INDEX_REFRESH || name === INDEX_REPAIR;
 }
 
@@ -124,7 +129,10 @@ export function summarizeIndexStatusInspect(
 ): string {
   const isEn = language === "en-US";
   const project = projectName ?? (isEn ? "(not selected)" : "（未选中）");
-  const counts = nodes !== undefined || edges !== undefined ? ` nodes=${nodes ?? "-"} edges=${edges ?? "-"}` : "";
+  const counts =
+    nodes !== undefined || edges !== undefined
+      ? ` nodes=${nodes ?? "-"} edges=${edges ?? "-"}`
+      : "";
   return isEn
     ? `Index status inspected (NOT refreshed): status=${status}; project=${project};${counts}`
     : `已检查索引状态（未刷新）：状态=${status}；项目=${project};${counts}`;
@@ -139,8 +147,13 @@ export function summarizeIndexRefreshOutcome(
   language: Language,
 ): string {
   const isEn = language === "en-US";
-  const label = action === "repair" ? (isEn ? "repaired and refreshed" : "已修复并刷新") : isEn ? "refreshed" : "已刷新";
-  return isEn
-    ? `Index ${label}: status=${status}.`
-    : `索引${label}：状态=${status}。`;
+  const label =
+    action === "repair"
+      ? isEn
+        ? "repaired and refreshed"
+        : "已修复并刷新"
+      : isEn
+        ? "refreshed"
+        : "已刷新";
+  return isEn ? `Index ${label}: status=${status}.` : `索引${label}：状态=${status}。`;
 }

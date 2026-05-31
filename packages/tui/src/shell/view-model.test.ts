@@ -2,7 +2,12 @@ import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { __testBuildToggleDetailsCommandPanel, __testCreateShellBlockOutput, type TuiContext } from "../index.js";
+import {
+  type TuiContext,
+  __testBuildToggleDetailsCommandPanel,
+  __testCreateShellBlockOutput,
+} from "../index.js";
+import { formatToolOutput } from "../tool-output-presenter.js";
 import {
   bufferInsert,
   bufferMoveDown,
@@ -22,7 +27,6 @@ import {
   mapPendingApprovalToPermission,
   mapRequestActivityToView,
 } from "./view-model.js";
-import { formatToolOutput } from "../tool-output-presenter.js";
 
 // Reset terminal capability cache after every test to prevent cross-test pollution.
 // On Windows without WT_SESSION, detectTerminalCapability() returns legacy unless
@@ -1989,8 +1993,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       status: "info",
       title: "",
       summary: "checking provider...",
-      fullText:
-        "checking provider...\nendpoint: https://example.com\nreasoning: high\nstatus: ok",
+      fullText: "checking provider...\nendpoint: https://example.com\nreasoning: high\nstatus: ok",
     };
     const view = createShellViewModel(createContext(), {
       width: 80,
@@ -3352,10 +3355,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const { readFile } = await import("node:fs/promises");
     // D.13Q-UX：旧的 ShellApp.TaskFooter 已迁到独立 StatusFooter 组件，
     // permissionMode/cyclePermHint 顺序与配色断言指向新文件。
-    const source = await readFile(
-      join(SRC_ROOT, "shell/components/StatusFooter.tsx"),
-      "utf8",
-    );
+    const source = await readFile(join(SRC_ROOT, "shell/components/StatusFooter.tsx"), "utf8");
     const permIdx = source.indexOf("footer.permissionMode");
     const hintIdx = source.indexOf("footer.cyclePermHint");
     expect(permIdx).toBeGreaterThan(0);
@@ -3538,7 +3538,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
     // 主屏 latestOutput next-action：Ctrl+O 必须出现在 /details 之前，且 /details 仍保留为备用。
-    const zhMatch = source.match(/latestOutputNext:\s*"按 Ctrl\+O 查看完整运行时输出（或 \/details）。"/);
+    const zhMatch = source.match(
+      /latestOutputNext:\s*"按 Ctrl\+O 查看完整运行时输出（或 \/details）。"/,
+    );
     expect(zhMatch).not.toBeNull();
     const enMatch = source.match(
       /latestOutputNext:\s*"Press Ctrl\+O for full runtime output \(or \/details\)\."/,
@@ -3621,10 +3623,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
   it("D.14D-C2: ScrollViewport owns the measured overflow=hidden culling", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(
-      join(SRC_ROOT, "shell/components/ScrollViewport.tsx"),
-      "utf8",
-    );
+    const source = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
     expect(source).toContain('overflow="hidden"');
     expect(source).toContain("clampTaskScroll");
     expect(source).toContain("getComputedHeight");
@@ -3846,9 +3845,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
   it("权限请求附带 explanationLines（不暴露 rule.id）", () => {
     const ctx = createContext();
-    (ctx as unknown as {
-      pendingLocalApproval: { kind: string; toolName: string; toolCall: { input: unknown } };
-    }).pendingLocalApproval = {
+    (
+      ctx as unknown as {
+        pendingLocalApproval: { kind: string; toolName: string; toolCall: { input: unknown } };
+      }
+    ).pendingLocalApproval = {
       kind: "model_tool_use",
       toolName: "Bash",
       toolCall: { input: { command: "git status" } },
@@ -3858,9 +3859,7 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(permission?.explanationLines?.length ?? 0).toBeGreaterThan(0);
     const joined = (permission?.explanationLines ?? []).join("\n");
     // 不应出现 UUID / rule.id 风格字符串
-    expect(joined).not.toMatch(
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
-    );
+    expect(joined).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu);
     // 应包含"如何永久允许"指引
     expect(joined).toContain("/permissions");
   });
@@ -3921,7 +3920,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const transcriptText = view.blocks.map((b) => b.fullText ?? b.summary ?? "").join("\n");
     expect(transcriptText).not.toContain("右对齐轻提示");
     // lastFullOutput 不被替换。
-    expect((ctx as unknown as { lastFullOutput?: string }).lastFullOutput).toBe("已有正文：关键证据 X");
+    expect((ctx as unknown as { lastFullOutput?: string }).lastFullOutput).toBe(
+      "已有正文：关键证据 X",
+    );
     expect(view.notifications?.[0]?.text).toBe("右对齐轻提示");
   });
 });
@@ -3961,10 +3962,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — A. submitted thinking activity fallback
 describe("D.13Q-UX Real Smoke Fix v2 — B. Composer task width", () => {
   it("Composer 源码在 task/pending 模式必须用 taskComposerMaxWidth", async () => {
     const fs = await import("node:fs");
-    const composerSource = fs.readFileSync(
-      join(SRC_ROOT, "shell/components/Composer.tsx"),
-      "utf8",
-    );
+    const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // 锚定源码规则：避免 ShellApp.TaskLayout 的 cw 与 Composer maxWidth 不一致导致 cursor drift。
     expect(composerSource).toContain('view.viewMode === "task" || view.viewMode === "pending"');
     expect(composerSource).toMatch(/taskComposerMaxWidth\(view\.width\)/);
@@ -3983,7 +3981,8 @@ describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
 
   it("activeAbortController 存在时 busy=true，即使 submitted=false", () => {
     const ctx = createContext();
-    (ctx as { activeAbortController?: AbortController }).activeAbortController = new AbortController();
+    (ctx as { activeAbortController?: AbortController }).activeAbortController =
+      new AbortController();
     const view = createShellViewModel(ctx, { width: 80 });
     expect(view.composer.busy).toBe(true);
   });
@@ -3996,10 +3995,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — D. busy guard 不吞草稿", () => {
 
   it("Composer 源码在 busy 时 Enter 不提交不清空，仅 showHintNotice", async () => {
     const fs = await import("node:fs");
-    const composerSource = fs.readFileSync(
-      join(SRC_ROOT, "shell/components/Composer.tsx"),
-      "utf8",
-    );
+    const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     expect(composerSource).toMatch(/view\.composer\.busy && !isSlashSubmit/);
     expect(composerSource).toMatch(/showHintNotice\([\s\S]*?busyHint/);
   });
@@ -4021,10 +4017,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — F. permission 主屏降噪", () => {
 
   it("Composer 源码 PermissionControl 不再 map explanationLines 到主屏", async () => {
     const fs = await import("node:fs");
-    const composerSource = fs.readFileSync(
-      join(SRC_ROOT, "shell/components/Composer.tsx"),
-      "utf8",
-    );
+    const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // 主屏 PermissionControl 不再渲染 explanationLines.map（除了 SlashSuggestions 等不相关 map）
     // 锚定 Enter/Tab/Esc 提示出现在源码中
     expect(composerSource).toMatch(/Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*Esc\s*取消/);
@@ -4055,10 +4048,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — C. user transcript block factory", () =
 describe("D.13Q-UX Real Smoke Fix v2 — E. permission-action 结构化事件", () => {
   it("Composer.submitPermissionAction 不再用 PERMISSION_TEXT_MAP 走 submit 文本", async () => {
     const fs = await import("node:fs");
-    const composerSource = fs.readFileSync(
-      join(SRC_ROOT, "shell/components/Composer.tsx"),
-      "utf8",
-    );
+    const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // PERMISSION_TEXT_MAP 已删除
     expect(composerSource).not.toContain("PERMISSION_TEXT_MAP[id]");
     // submitPermissionAction 派 permission-action 事件
@@ -4074,34 +4064,113 @@ describe("D.13Q-UX Real Smoke Fix v2 — E. permission-action 结构化事件", 
 describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
   it("user → assistant → diagnostic → user → assistant 时间顺序保留", () => {
     const userBlocks: ProductBlockViewModel[] = [
-      { id: "usr:1", kind: "command", status: "info", title: "你好", summary: "", keep: true, messageKind: "user_text" },
-      { id: "ai:1", kind: "details", status: "info", title: "", summary: "你好，需要做什么？", fullText: "你好，需要做什么？", keep: true, messageKind: "assistant_text" },
-      { id: "diag:1", kind: "details", status: "info", title: "", summary: "MCP status", fullText: "MCP status\n- enabled: yes", messageKind: "diagnostic" },
-      { id: "usr:2", kind: "command", status: "info", title: "再帮我跑一下", summary: "", keep: true, messageKind: "user_text" },
-      { id: "ai:2", kind: "details", status: "info", title: "", summary: "好的", fullText: "好的", keep: true, messageKind: "assistant_text" },
+      {
+        id: "usr:1",
+        kind: "command",
+        status: "info",
+        title: "你好",
+        summary: "",
+        keep: true,
+        messageKind: "user_text",
+      },
+      {
+        id: "ai:1",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "你好，需要做什么？",
+        fullText: "你好，需要做什么？",
+        keep: true,
+        messageKind: "assistant_text",
+      },
+      {
+        id: "diag:1",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "MCP status",
+        fullText: "MCP status\n- enabled: yes",
+        messageKind: "diagnostic",
+      },
+      {
+        id: "usr:2",
+        kind: "command",
+        status: "info",
+        title: "再帮我跑一下",
+        summary: "",
+        keep: true,
+        messageKind: "user_text",
+      },
+      {
+        id: "ai:2",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "好的",
+        fullText: "好的",
+        keep: true,
+        messageKind: "assistant_text",
+      },
     ];
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       outputBlocks: userBlocks,
     });
-    const ids = view.blocks.map((b) => b.id).filter((id) => id.startsWith("usr:") || id.startsWith("ai:") || id.startsWith("diag:"));
+    const ids = view.blocks
+      .map((b) => b.id)
+      .filter((id) => id.startsWith("usr:") || id.startsWith("ai:") || id.startsWith("diag:"));
     expect(ids).toEqual(["usr:1", "ai:1", "diag:1", "usr:2", "ai:2"]);
   });
 
   it("失败块不会被推到旧消息上方（按出现顺序保留）", () => {
     const blocks: ProductBlockViewModel[] = [
-      { id: "usr:1", kind: "command", status: "info", title: "old user", summary: "", keep: true, messageKind: "user_text" },
-      { id: "ai:1", kind: "details", status: "info", title: "", summary: "old assistant", fullText: "old assistant", keep: true, messageKind: "assistant_text" },
-      { id: "fail:1", kind: "error", status: "fail", title: "Bash failed", summary: "exit 1\nstderr details", fullText: "exit 1\nstderr details", messageKind: "tool_result_error" },
-      { id: "usr:2", kind: "command", status: "info", title: "new user", summary: "", keep: true, messageKind: "user_text" },
+      {
+        id: "usr:1",
+        kind: "command",
+        status: "info",
+        title: "old user",
+        summary: "",
+        keep: true,
+        messageKind: "user_text",
+      },
+      {
+        id: "ai:1",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "old assistant",
+        fullText: "old assistant",
+        keep: true,
+        messageKind: "assistant_text",
+      },
+      {
+        id: "fail:1",
+        kind: "error",
+        status: "fail",
+        title: "Bash failed",
+        summary: "exit 1\nstderr details",
+        fullText: "exit 1\nstderr details",
+        messageKind: "tool_result_error",
+      },
+      {
+        id: "usr:2",
+        kind: "command",
+        status: "info",
+        title: "new user",
+        summary: "",
+        keep: true,
+        messageKind: "user_text",
+      },
     ];
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       outputBlocks: blocks,
     });
-    const ids = view.blocks.map((b) => b.id).filter((id) => ["usr:1", "ai:1", "fail:1", "usr:2"].includes(id));
+    const ids = view.blocks
+      .map((b) => b.id)
+      .filter((id) => ["usr:1", "ai:1", "fail:1", "usr:2"].includes(id));
     // fail:1 必须出现在 usr:1/ai:1 之后、usr:2 之前
     expect(ids).toEqual(["usr:1", "ai:1", "fail:1", "usr:2"]);
   });
@@ -4109,7 +4178,15 @@ describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
   it("ephemeral 限流只丢最早的 ephemeral，不影响 keep 与 fail 的位置", () => {
     const blocks: ProductBlockViewModel[] = [
       { id: "eph:1", kind: "details", status: "info", title: "", summary: "e1", fullText: "e1" },
-      { id: "usr:1", kind: "command", status: "info", title: "kept user", summary: "", keep: true, messageKind: "user_text" },
+      {
+        id: "usr:1",
+        kind: "command",
+        status: "info",
+        title: "kept user",
+        summary: "",
+        keep: true,
+        messageKind: "user_text",
+      },
       { id: "eph:2", kind: "details", status: "info", title: "", summary: "e2", fullText: "e2" },
       { id: "eph:3", kind: "details", status: "info", title: "", summary: "e3", fullText: "e3" },
       { id: "eph:4", kind: "details", status: "info", title: "", summary: "e4", fullText: "e4" },
@@ -4120,7 +4197,9 @@ describe("D.13Q-UX Real Smoke Fix v3 — transcript 顺序", () => {
       viewMode: "task",
       outputBlocks: blocks,
     });
-    const ids = view.blocks.map((b) => b.id).filter((id) => id.startsWith("eph:") || id.startsWith("usr:"));
+    const ids = view.blocks
+      .map((b) => b.id)
+      .filter((id) => id.startsWith("eph:") || id.startsWith("usr:"));
     // 5 条 ephemeral 超过 cap=3，应丢最早的 2 条；keep 的 usr:1 必须保留且不被推到顶。
     expect(ids).toContain("usr:1");
     expect(ids).toContain("eph:3");
@@ -4241,9 +4320,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — RuntimeIdentityRule provider 隐藏", (
     const fs = await import("node:fs");
     const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
     expect(indexSource).toContain("RuntimeIdentityRule=");
-    expect(indexSource).toMatch(
-      /Do not include provider, endpointProfile, route role, baseUrl/,
-    );
+    expect(indexSource).toMatch(/Do not include provider, endpointProfile, route role, baseUrl/);
     expect(indexSource).toContain("(provider: ...)");
     expect(indexSource).toContain("openai-compatible");
   });
@@ -4368,9 +4445,7 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
       title: "/mcp",
       tone: "neutral",
       summary: ["MCP 已连接：3 / 3"],
-      sections: [
-        { title: "服务器", rows: ["server-a · ready", "server-b · ready"] },
-      ],
+      sections: [{ title: "服务器", rows: ["server-a · ready", "server-b · ready"] }],
       actions: ["/mcp doctor"],
       detailsText: "完整 MCP 状态详细 dump …",
     };
@@ -4512,7 +4587,6 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
     expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
   });
 
-
   it("D.14D-R P1-1: tool 输出块同一块只出现一次 Ctrl+O 提示（内嵌折叠行被剥离）", () => {
     // 模拟 tool-output-presenter 产出的正文：摘要 + 内嵌折叠提示行。
     const body = ["工具 Read 已完成", "- 120 行", "- 输出已折叠，按 Ctrl+O 展开。"].join("\n");
@@ -4527,7 +4601,11 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
   });
 
   it("D.14D-R P1-1: 英文 tool 输出块同样只保留一次 Ctrl+O 提示", () => {
-    const body = ["Tool Read completed", "- 30 line(s)", "- Output folded. Press Ctrl+O to expand."].join("\n");
+    const body = [
+      "Tool Read completed",
+      "- 30 line(s)",
+      "- Output folded. Press Ctrl+O to expand.",
+    ].join("\n");
     const block = createOutputBlock(body, "en-US", "out-fold-en");
     expect(block.fullText).not.toContain("Output folded");
     expect(block.nextAction).toContain("Ctrl+O");

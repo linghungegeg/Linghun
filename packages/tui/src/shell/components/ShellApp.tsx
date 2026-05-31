@@ -9,11 +9,7 @@ import {
   taskComposerMaxWidth,
 } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
-import type {
-  ShellController,
-  ShellViewModel,
-  TaskActivityView,
-} from "../types.js";
+import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CommandPanel } from "./CommandPanel.js";
 import { Composer } from "./Composer.js";
@@ -174,107 +170,107 @@ function TaskLayout({
           clamped translate; this wrapper only supplies padding + flexGrow. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
         <ScrollViewport scroll={view.taskScroll}>
-        {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
+          {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
             - permission 优先级最高（已合并到 Composer 内的 PermissionControl card）；
             - HelpPanel / BtwPanel（D.13Q-UX Closure）次之；
             - ConfigPanel 只在没有 permission / helpPanel / btwPanel 时渲染。
             Composer 在任一面板打开时 useInput { isActive: false }，避免双消费。 */}
-        {!view.permission && view.helpPanel ? (
-          <HelpPanel
-            panel={view.helpPanel}
-            controller={controller}
-            width={view.width - 4}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        {!view.permission && !view.helpPanel && view.btwPanel ? (
-          <BtwPanel
-            panel={view.btwPanel}
-            controller={controller}
-            width={view.width - 4}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        {!view.permission && !view.helpPanel && !view.btwPanel && view.sessionsPanel ? (
-          <SessionsPanel
-            panel={view.sessionsPanel}
-            controller={controller}
-            width={view.width - 4}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        {!view.permission &&
-        !view.helpPanel &&
-        !view.btwPanel &&
-        !view.sessionsPanel &&
-        view.configPanel ? (
-          <ConfigPanel
-            panel={view.configPanel}
-            controller={controller}
-            width={view.width - 4}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
-        {/* D.13Q-UX Task Surface — 通用 CommandPanel：当所有其他面板都关闭时，
+          {!view.permission && view.helpPanel ? (
+            <HelpPanel
+              panel={view.helpPanel}
+              controller={controller}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+          {!view.permission && !view.helpPanel && view.btwPanel ? (
+            <BtwPanel
+              panel={view.btwPanel}
+              controller={controller}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+          {!view.permission && !view.helpPanel && !view.btwPanel && view.sessionsPanel ? (
+            <SessionsPanel
+              panel={view.sessionsPanel}
+              controller={controller}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+          {!view.permission &&
+          !view.helpPanel &&
+          !view.btwPanel &&
+          !view.sessionsPanel &&
+          view.configPanel ? (
+            <ConfigPanel
+              panel={view.configPanel}
+              controller={controller}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
+          {/* D.13Q-UX Task Surface — 通用 CommandPanel：当所有其他面板都关闭时，
             高级 slash 命令的输出走这里。与 transcript 隔离。 */}
-        {!view.permission &&
-        !view.helpPanel &&
-        !view.btwPanel &&
-        !view.sessionsPanel &&
-        !view.configPanel &&
-        view.commandPanel ? (
-          <CommandPanel
-            panel={view.commandPanel}
-            controller={controller}
-            width={view.width - 4}
-            noColor={noColor}
-            language={view.language}
-          />
-        ) : null}
+          {!view.permission &&
+          !view.helpPanel &&
+          !view.btwPanel &&
+          !view.sessionsPanel &&
+          !view.configPanel &&
+          view.commandPanel ? (
+            <CommandPanel
+              panel={view.commandPanel}
+              controller={controller}
+              width={view.width - 4}
+              noColor={noColor}
+              language={view.language}
+            />
+          ) : null}
 
-        {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
+          {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
             ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
             blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
-        {view.blocks.length > 0 ? (
-          <Box flexDirection="column">
-            {view.blocks.map((block) => (
-              <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
-            ))}
-          </Box>
-        ) : null}
+          {view.blocks.length > 0 ? (
+            <Box flexDirection="column">
+              {view.blocks.map((block) => (
+                <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
+              ))}
+            </Box>
+          ) : null}
 
-        {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
+          {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
             用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
             压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
-        {view.activity ? (
-          <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-            <ActivityIndicator activity={view.activity} theme={theme} />
-          </Box>
-        ) : null}
+          {view.activity ? (
+            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
+              <ActivityIndicator activity={view.activity} theme={theme} />
+            </Box>
+          ) : null}
 
-        {/* TaskSuggestionBar — 静态只读 hint 行；不接 useInput；空数组时不渲染。
+          {/* TaskSuggestionBar — 静态只读 hint 行；不接 useInput；空数组时不渲染。
             permission / tool_error / setup / slash 优先级，最多 4 条。 */}
-        {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-          <TaskSuggestionBar
-            suggestions={view.taskSuggestions}
-            width={view.width}
-            noColor={noColor}
-          />
-        ) : null}
+          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+            <TaskSuggestionBar
+              suggestions={view.taskSuggestions}
+              width={view.width}
+              noColor={noColor}
+            />
+          ) : null}
 
-        {view.limitations.length > 0 ? (
-          <Box flexDirection="column" marginTop={1}>
-            {view.limitations.map((item) => (
-              <Text key={item} color={theme.muted}>
-                {item}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
+          {view.limitations.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              {view.limitations.map((item) => (
+                <Text key={item} color={theme.muted}>
+                  {item}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
         </ScrollViewport>
       </Box>
 

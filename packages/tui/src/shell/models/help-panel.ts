@@ -74,7 +74,10 @@ const ADVANCED_ENTRIES_EN: HelpPanelEntry[] = [
   { slash: "/workflows", description: "Inspect workflow status and trigger entries" },
   { slash: "/handoff", description: "Export the session handoff packet" },
   { slash: "/branch", description: "Create a session branch from handoff (not a git branch)" },
-  { slash: "/git", description: "Show git status, stable-point hints, worktree summary (read-only)" },
+  {
+    slash: "/git",
+    description: "Show git status, stable-point hints, worktree summary (read-only)",
+  },
   { slash: "/worktree", description: "List git worktrees (read-only)" },
   { slash: "/checkpoint", description: "Inspect Linghun snapshot checkpoints / stable points" },
   { slash: "/cache", description: "Inspect cache usage and hot / cold distribution" },
@@ -102,13 +105,9 @@ const DETAILS_ENTRIES_EN: HelpPanelEntry[] = [
  * 取本组命令清单。隐藏命令（如 /status）已经在数据层过滤掉，不出现在
  * HelpPanel 主流程；用户仍可通过 /help all 看到完整文本表。
  */
-export function getHelpPanelEntries(
-  group: HelpPanelGroup,
-  language: Language,
-): HelpPanelEntry[] {
+export function getHelpPanelEntries(group: HelpPanelGroup, language: Language): HelpPanelEntry[] {
   if (group === "core") return language === "en-US" ? CORE_ENTRIES_EN : CORE_ENTRIES_ZH;
-  if (group === "advanced")
-    return language === "en-US" ? ADVANCED_ENTRIES_EN : ADVANCED_ENTRIES_ZH;
+  if (group === "advanced") return language === "en-US" ? ADVANCED_ENTRIES_EN : ADVANCED_ENTRIES_ZH;
   return language === "en-US" ? DETAILS_ENTRIES_EN : DETAILS_ENTRIES_ZH;
 }
 

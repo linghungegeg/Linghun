@@ -171,9 +171,7 @@ export async function readGitStatus(
   }
 
   const branch =
-    branchResult.ok && branchResult.stdout.trim().length > 0
-      ? branchResult.stdout.trim()
-      : null;
+    branchResult.ok && branchResult.stdout.trim().length > 0 ? branchResult.stdout.trim() : null;
 
   let headShort: string | null = null;
   let headSubject: string | null = null;
@@ -201,8 +199,8 @@ export async function readGitStatus(
         const tag = match[3] ?? "";
         const aheadMatch = tag.match(/ahead (\d+)/);
         const behindMatch = tag.match(/behind (\d+)/);
-        if (aheadMatch?.[1]) ahead = parseInt(aheadMatch[1], 10);
-        if (behindMatch?.[1]) behind = parseInt(behindMatch[1], 10);
+        if (aheadMatch?.[1]) ahead = Number.parseInt(aheadMatch[1], 10);
+        if (behindMatch?.[1]) behind = Number.parseInt(behindMatch[1], 10);
       }
       continue;
     }
@@ -392,10 +390,7 @@ export function suggestStablePoint(status: GitStatus): StablePointHint {
  * expansion target) covering: branch, upstream, ahead/behind, HEAD, full
  * staged/unstaged/untracked lists, worktree list. Pure formatter — no IO.
  */
-export function formatGitStatusDetails(
-  status: GitStatus,
-  worktrees: WorktreeReport,
-): string {
+export function formatGitStatusDetails(status: GitStatus, worktrees: WorktreeReport): string {
   if (status.kind === "not_a_git_repo") {
     return "Not a git repository.";
   }
@@ -431,7 +426,8 @@ export function formatGitStatusDetails(
     lines.push("worktrees:");
     for (const entry of worktrees.entries) {
       const marker = entry.isCurrent ? "*" : " ";
-      const branchLabel = entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
+      const branchLabel =
+        entry.branch ?? (entry.detached ? "(detached)" : entry.bare ? "(bare)" : "(no branch)");
       const head = entry.head ? entry.head.slice(0, 7) : "-";
       lines.push(`  ${marker} ${entry.path}  ${branchLabel}  ${head}`);
     }

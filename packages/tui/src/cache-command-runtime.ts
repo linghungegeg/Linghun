@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { CacheFreshness } from "@linghun/core";
-import type { TuiContext } from "./index.js";
-import type { LightHint } from "./tui-data-types.js";
-import type { CommandPanelView } from "./shell/types.js";
 import { diffFreshness } from "./cache-freshness.js";
+import type { TuiContext } from "./index.js";
+import type { CommandPanelView } from "./shell/types.js";
+import type { LightHint } from "./tui-data-types.js";
 import { formatPercent } from "./usage-stats-presenter.js";
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
@@ -29,8 +29,7 @@ export function buildCacheStatusPanel(
     const pct = `${Math.round(hitRate * 100)}%`;
     summary.push(isEn ? `Cache hit rate: ${pct}` : `缓存命中率：${pct}`);
   }
-  const isLow =
-    typeof hitRate === "number" && Number.isFinite(hitRate) && hitRate < 0.3;
+  const isLow = typeof hitRate === "number" && Number.isFinite(hitRate) && hitRate < 0.3;
   const tone: "neutral" | "warning" = isLow ? "warning" : "neutral";
   if (isLow) {
     summary.push(
@@ -48,8 +47,6 @@ export function buildCacheStatusPanel(
   };
 }
 
-
-
 export function formatCacheLog(context: TuiContext): string {
   if (context.cache.history.length === 0) {
     return "最近缓存日志为空。真实 usage 需要 provider 返回 token/cache 字段；可用 /cache warmup 尝试预热。";
@@ -62,8 +59,6 @@ export function formatCacheLog(context: TuiContext): string {
     ),
   ].join("\n");
 }
-
-
 
 export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFreshness): string {
   const latest = context.cache.history.at(-1);
@@ -91,8 +86,6 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
   ].join("\n");
 }
 
-
-
 export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
   const snapshot = context.cache.workspaceReference.latest?.workspaceSnapshot;
   if (!snapshot) {
@@ -103,8 +96,6 @@ export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
     : "none";
   return `files=${snapshot.counts.files} dirs=${snapshot.counts.directories} ignored=${snapshot.counts.ignored} stored=${snapshot.counts.storedEntries} partial=${snapshot.partial ? "yes" : "no"} changed=${changed}`;
 }
-
-
 
 export function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
@@ -119,8 +110,6 @@ export function formatCompactStatus(context: TuiContext): string {
     "- boundary: no tools, no file writes, no long-term memory writes, no background task starts, no extra model calls.",
   ].join("\n");
 }
-
-
 
 export function collectLightHints(context: TuiContext): LightHint[] {
   const latest = context.cache.history.at(-1);
@@ -189,8 +178,6 @@ export function collectLightHints(context: TuiContext): LightHint[] {
   return hints;
 }
 
-
-
 export function createLightHint(
   dedupeKey: string,
   severity: "info" | "warning",
@@ -208,8 +195,6 @@ export function createLightHint(
     cooldownMs: DEFAULT_LIGHT_HINT_COOLDOWN_MS,
   };
 }
-
-
 
 export function writeLightHints(_output: Writable, context: TuiContext): void {
   if (context.cache.config.hintsMuted) {
@@ -241,8 +226,6 @@ export function writeLightHints(_output: Writable, context: TuiContext): void {
   }
 }
 
-
-
 export function formatPlainLightHint(hint: LightHint, language: TuiContext["language"]): string {
   const isEn = language === "en-US";
   switch (hint.dedupeKey) {
@@ -267,9 +250,6 @@ export function formatPlainLightHint(hint: LightHint, language: TuiContext["lang
   }
 }
 
-
-
 export function writeLightHintsForTest(output: Writable, context: TuiContext): void {
   writeLightHints(output, context);
 }
-

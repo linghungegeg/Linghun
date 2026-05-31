@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
-import type { TuiContext } from "./index.js";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
-import { createHandoffPendingItems, createHandoffRiskItems, createPhase15BetaVerdictScope } from "./final-answer-gate.js";
+import {
+  createHandoffPendingItems,
+  createHandoffRiskItems,
+  createPhase15BetaVerdictScope,
+} from "./final-answer-gate.js";
+import type { TuiContext } from "./index.js";
 import type { HandoffPacket, VerificationReport } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
@@ -42,8 +46,6 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   }
 }
 
-
-
 export async function loadOrCreateHandoffPacket(
   context: TuiContext,
   parentSessionId?: string,
@@ -64,8 +66,6 @@ export async function loadOrCreateHandoffPacket(
   });
   return packet;
 }
-
-
 
 export function createHandoffPacket(
   context: TuiContext,
@@ -148,8 +148,6 @@ export function createHandoffPacket(
   };
 }
 
-
-
 export function validateHandoffPacket(packet: HandoffPacket): string[] {
   const missing: string[] = [];
   if (!packet.id) missing.push("id");
@@ -162,8 +160,6 @@ export function validateHandoffPacket(packet: HandoffPacket): string[] {
     missing.push("indexStatus");
   return missing;
 }
-
-
 
 export function isHandoffPacket(value: unknown): value is HandoffPacket {
   return (
@@ -178,12 +174,14 @@ export function isHandoffPacket(value: unknown): value is HandoffPacket {
   );
 }
 
-
-
 // Module 7 (tui-memory-runtime): formatProjectRulesContext moved out — see
 // re-export+import block below.
 
-export function formatResumePacket(packet: HandoffPacket, missing: string[], context: TuiContext): string {
+export function formatResumePacket(
+  packet: HandoffPacket,
+  missing: string[],
+  context: TuiContext,
+): string {
   return [
     "Resume context package（摘要，不含完整历史）：",
     `- projectRules: ${formatProjectRulesContext(context)}`,
@@ -205,9 +203,10 @@ export function formatResumePacket(packet: HandoffPacket, missing: string[], con
   ].join("\n");
 }
 
-
-
-export async function writeHandoffPacket(context: TuiContext, packet: HandoffPacket): Promise<void> {
+export async function writeHandoffPacket(
+  context: TuiContext,
+  packet: HandoffPacket,
+): Promise<void> {
   await mkdir(context.memory.sessionDir, { recursive: true });
   await writeFile(
     join(context.memory.sessionDir, "handoff-latest.json"),
@@ -215,5 +214,3 @@ export async function writeHandoffPacket(context: TuiContext, packet: HandoffPac
     "utf8",
   );
 }
-
-

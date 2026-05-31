@@ -125,20 +125,14 @@ export function SessionsPanel({
           // D.13Q-UX Closure: 当前 session 不可恢复（resume 自身没有意义）。
           // 即便 cursor 落在当前 session 上，也用 dim + "不可恢复" 标识，
           // Enter 由 index.ts sessions-resume 拦截，不 dispatch /resume。
-          const currentMark = entry.isCurrent
-            ? ` ${hint.currentDisabled}`
-            : "";
+          const currentMark = entry.isCurrent ? ` ${hint.currentDisabled}` : "";
           const titleLine = `${active ? "▸ " : "  "}${entry.title}${currentMark}`;
           const metaLine = `   ${formatRelativeTime(entry.updatedAt)} · ${entry.messageCount} ${language === "en-US" ? "msgs" : "条"} · ${entry.id.slice(0, 8)}`;
           return (
             <Box key={entry.id} flexDirection="column">
               <Text
                 color={
-                  entry.isCurrent
-                    ? theme.dim ?? theme.muted
-                    : active
-                      ? theme.accent
-                      : undefined
+                  entry.isCurrent ? (theme.dim ?? theme.muted) : active ? theme.accent : undefined
                 }
                 bold={active && !entry.isCurrent}
                 dimColor={entry.isCurrent}

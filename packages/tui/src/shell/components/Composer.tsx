@@ -289,11 +289,7 @@ const PROMPT_MARKER_CONTINUATION = "  ";
 // 顺序 allow_once → allow_always_tool → deny。details / cancel 不再出现在
 // PermissionActionRow / 单字母快捷键表，但 PermissionActionId 类型仍保留这两个值，
 // 兼容已有 controller 路径（Esc 仍由 useInput 直接派发 cancel）。
-const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
-  "allow_once",
-  "allow_always_tool",
-  "deny",
-];
+const PERMISSION_ACTION_ORDER: PermissionActionId[] = ["allow_once", "allow_always_tool", "deny"];
 
 // D.13Q-UX Real Smoke Fix v2 — E. 旧的 PERMISSION_TEXT_MAP 把 PermissionActionId
 // 序列化为 yes / no / allow_once 文本，再通过 submit 文本路径上抛（让用户
@@ -351,11 +347,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // ShellApp 互斥保证）。D.13Q-UX Task Surface：commandPanel 同样独占 Esc，
   // Composer 在 commandPanel 渲染时也应让出输入。
   const configPanelActive = Boolean(
-    view.configPanel ||
-      view.helpPanel ||
-      view.btwPanel ||
-      view.sessionsPanel ||
-      view.commandPanel,
+    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.commandPanel,
   );
 
   const text = bufferToString(buffer);
@@ -1070,12 +1062,7 @@ function PermissionControl({
         {fitText(headline, innerWidth)}
       </Text>
       <Text color={theme.muted}>{fitText(summaryLine, innerWidth)}</Text>
-      <PermissionActionRow
-        actions={actions}
-        focused={focused}
-        theme={theme}
-        width={innerWidth}
-      />
+      <PermissionActionRow actions={actions} focused={focused} theme={theme} width={innerWidth} />
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(
           isEn ? "Enter confirm · Tab switch · Esc cancel" : "Enter 确认 · Tab 切换 · Esc 取消",

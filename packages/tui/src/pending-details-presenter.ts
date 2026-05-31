@@ -1,5 +1,5 @@
 import { relative } from "node:path";
-import { getProjectSettingsPath, type WorkspaceTrustLevel } from "@linghun/config";
+import { type WorkspaceTrustLevel, getProjectSettingsPath } from "@linghun/config";
 import type { TuiContext } from "./index.js";
 import type { PendingNaturalCommand } from "./natural-command-bridge.js";
 import { truncateDisplay } from "./startup-runtime.js";
@@ -35,7 +35,10 @@ export function formatWorkspaceTrustStatus(context: TuiContext): string {
       ].join("\n");
 }
 
-export function formatPendingApprovalDetails(approval: PendingLocalApproval, context: TuiContext): string {
+export function formatPendingApprovalDetails(
+  approval: PendingLocalApproval,
+  context: TuiContext,
+): string {
   if (approval.kind === "index_ignore_write") {
     return context.language === "en-US"
       ? [

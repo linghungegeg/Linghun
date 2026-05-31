@@ -27,9 +27,14 @@
 import type { ModelRole } from "@linghun/config";
 import type { PermissionMode } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
+import {
+  formatJobNextAction,
+  formatJobRunnerInline,
+  mapDurableJobToBackgroundResult,
+  mapDurableJobToBackgroundStatus,
+} from "./job-runner-presenter.js";
 import { deriveAgentDisplayName } from "./job-runtime.js";
 import type { JobContext } from "./job-runtime.js";
-import type { DurableJobState } from "./tui-data-types.js";
 import {
   findDurableJob as findDurableJobFromFs,
   formatJobList as formatJobListImpl,
@@ -41,13 +46,8 @@ import {
   getDurableJobsRoot as getDurableJobsRootImpl,
   listDurableJobs as listDurableJobsFromFs,
 } from "./job-runtime.js";
-import {
-  formatJobNextAction,
-  formatJobRunnerInline,
-  mapDurableJobToBackgroundResult,
-  mapDurableJobToBackgroundStatus,
-} from "./job-runner-presenter.js";
 import { truncateDisplay } from "./startup-runtime.js";
+import type { DurableJobState } from "./tui-data-types.js";
 import type {
   AgentRun,
   AgentType,
@@ -75,7 +75,10 @@ export function getAgentRole(type: AgentType): ModelRole {
   return "executor";
 }
 
-export function getAgentPermissionMode(type: AgentType, parentMode: PermissionMode): PermissionMode {
+export function getAgentPermissionMode(
+  type: AgentType,
+  parentMode: PermissionMode,
+): PermissionMode {
   if (type === "explorer" || type === "planner") {
     return "plan";
   }
@@ -109,7 +112,10 @@ export function createAgentContextSummary(
   ].join(" | ");
 }
 
-export function createAgentBackgroundTask(agent: AgentRun, context: TuiContext): BackgroundTaskState {
+export function createAgentBackgroundTask(
+  agent: AgentRun,
+  context: TuiContext,
+): BackgroundTaskState {
   const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
   return {
     id: agent.id,

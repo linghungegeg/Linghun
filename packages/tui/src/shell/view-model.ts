@@ -12,7 +12,13 @@ import {
 import { buildFooterView } from "./models/footer-view.js";
 import { buildHelpPanelData } from "./models/help-panel.js";
 import { buildElevationOptions } from "./models/permission-elevation.js";
-import { explainHowToUpdate, explainPolicyVerdict, explainSemantic, type PathSafety, type PolicySemantic } from "./models/permission-explanation.js";
+import {
+  type PathSafety,
+  type PolicySemantic,
+  explainHowToUpdate,
+  explainPolicyVerdict,
+  explainSemantic,
+} from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
 import type {
   BackgroundTaskSummary,
@@ -193,9 +199,7 @@ export function createShellViewModel(
   // P1-4 — commandPanelState 也是 task 触发条件：高级 slash 面板（/model、/index
   // doctor、/memory review 等）即使没有 output block，也应进入 TaskLayout 渲染
   // CommandPanel，而不是停留在 Home（CommandPanel 只在 TaskLayout 渲染）。
-  const hasCommandPanel = Boolean(
-    (context as { commandPanelState?: unknown }).commandPanelState,
-  );
+  const hasCommandPanel = Boolean((context as { commandPanelState?: unknown }).commandPanelState);
   const effectiveViewMode: ShellViewMode =
     options.viewMode ??
     (options.submitted
@@ -266,10 +270,7 @@ export function createShellViewModel(
     // delta 之前 fullText 为空。这种空 streaming 占位不应当作可见输出：等待态由
     // ActivityIndicator 接管，正文为空时直接从主屏过滤掉。
     const isEmptyAssistantStreamBlock = (b: ProductBlockViewModel): boolean =>
-      b.keep === true &&
-      b.kind === "details" &&
-      (b.fullText ?? "").trim().length === 0 &&
-      !b.title;
+      b.keep === true && b.kind === "details" && (b.fullText ?? "").trim().length === 0 && !b.title;
     const isEphemeral = (b: ProductBlockViewModel): boolean =>
       !b.keep && b.status !== "fail" && b.status !== "blocked";
     const ephemeralIndices = allOutputBlocks
@@ -351,8 +352,7 @@ export function createShellViewModel(
   // D.13Q-UX: 走 buildFooterView 纯函数，把 model 占位 / cache 低命中渲染成
   // dim/warning 语义；setup-needed 时 model 显示 dim "--"，避免兜底 deepseek-chat
   // 流到主屏。
-  const cyclePermHint =
-    language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
+  const cyclePermHint = language === "en-US" ? "(Shift+Tab switch mode)" : "（Shift+Tab 切换模式）";
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
@@ -444,8 +444,16 @@ export function createShellViewModel(
       masking: context.pendingModelSetup?.step === "apiKey",
       setupActive,
       setupStep: composerSetupStepLabel,
-      busy: computeComposerBusy({ submitted: options.submitted, activity: effectiveActivity, context }),
-      busyHint: computeComposerBusy({ submitted: options.submitted, activity: effectiveActivity, context })
+      busy: computeComposerBusy({
+        submitted: options.submitted,
+        activity: effectiveActivity,
+        context,
+      }),
+      busyHint: computeComposerBusy({
+        submitted: options.submitted,
+        activity: effectiveActivity,
+        context,
+      })
         ? language === "en-US"
           ? "Still working on the previous request. Press Ctrl+C to interrupt, then send again."
           : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"
@@ -459,12 +467,17 @@ export function createShellViewModel(
     commandPanel,
     taskScroll,
     helpPanel: (() => {
-      const state = (context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }).helpPanelState;
+      const state = (
+        context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }
+      ).helpPanelState;
       if (!state) return undefined;
       return buildHelpPanelData(state.group, state.cursor, language);
     })(),
-    btwPanel: (context as { btwPanelState?: NonNullable<ShellViewModel["btwPanel"]> }).btwPanelState,
-    sessionsPanel: (context as { sessionsPanelState?: NonNullable<ShellViewModel["sessionsPanel"]> }).sessionsPanelState,
+    btwPanel: (context as { btwPanelState?: NonNullable<ShellViewModel["btwPanel"]> })
+      .btwPanelState,
+    sessionsPanel: (
+      context as { sessionsPanelState?: NonNullable<ShellViewModel["sessionsPanel"]> }
+    ).sessionsPanelState,
     notifications: (() => {
       const ctxNotifs = (context as { notifications?: NotificationView[] }).notifications;
       if (!ctxNotifs || ctxNotifs.length === 0) return undefined;
@@ -573,11 +586,18 @@ function withPermissionActions(
     .filter((o) => visibleIds.has(o.id as "allow_once" | "allow_always_tool" | "deny"))
     .map((o) => ({
       id: o.id,
-      label: o.id === "allow_once"
-        ? language === "zh-CN" ? "是" : "Yes"
-        : o.id === "allow_always_tool"
-          ? language === "zh-CN" ? "始终允许" : "Always allow"
-          : language === "zh-CN" ? "否" : "No",
+      label:
+        o.id === "allow_once"
+          ? language === "zh-CN"
+            ? "是"
+            : "Yes"
+          : o.id === "allow_always_tool"
+            ? language === "zh-CN"
+              ? "始终允许"
+              : "Always allow"
+            : language === "zh-CN"
+              ? "否"
+              : "No",
       shortcut: o.shortcut,
     }));
   return { ...permission, actions };
@@ -645,8 +665,7 @@ export function createOutputBlock(
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
     explicitFold ||
-    (normalized.length > 0 &&
-      (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16));
+    (normalized.length > 0 && (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16));
   return {
     id,
     kind: "details",
@@ -1028,11 +1047,12 @@ function mapBackgroundSummariesToBlocks(
   if (running.length > 0) {
     const head = running[0];
     if (!head) return blocks;
-    const title = running.length === 1
-      ? meaningfulTitle(head)
-      : zh
-        ? `后台还有 ${running.length} 个任务在运行`
-        : `${running.length} background tasks running`;
+    const title =
+      running.length === 1
+        ? meaningfulTitle(head)
+        : zh
+          ? `后台还有 ${running.length} 个任务在运行`
+          : `${running.length} background tasks running`;
     const summary = zh ? "后台任务正在运行。" : "Background task is still running.";
     blocks.push({
       id: `bg-running-${running.length}`,
@@ -1045,11 +1065,12 @@ function mapBackgroundSummariesToBlocks(
   if (failed.length > 0) {
     const head = failed[0];
     if (!head) return blocks;
-    const title = failed.length === 1
-      ? meaningfulTitle(head)
-      : zh
-        ? `后台还有 ${failed.length} 个任务失败`
-        : `${failed.length} background tasks failed`;
+    const title =
+      failed.length === 1
+        ? meaningfulTitle(head)
+        : zh
+          ? `后台还有 ${failed.length} 个任务失败`
+          : `${failed.length} background tasks failed`;
     const summary = zh ? "后台任务失败，可稍后查看详情或重试。" : "Background task failed.";
     blocks.push({
       id: `bg-failed-${failed.length}`,
@@ -1062,11 +1083,12 @@ function mapBackgroundSummariesToBlocks(
   if (finished.length > 0) {
     const head = finished[0];
     if (!head) return blocks;
-    const title = finished.length === 1
-      ? meaningfulTitle(head)
-      : zh
-        ? `后台还有 ${finished.length} 个任务已结束`
-        : `${finished.length} background tasks finished`;
+    const title =
+      finished.length === 1
+        ? meaningfulTitle(head)
+        : zh
+          ? `后台还有 ${finished.length} 个任务已结束`
+          : `${finished.length} background tasks finished`;
     const summary = zh ? "后台任务已结束。" : "Background task finished.";
     blocks.push({
       id: `bg-finished-${finished.length}`,

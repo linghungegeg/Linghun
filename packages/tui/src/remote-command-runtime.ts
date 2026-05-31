@@ -8,12 +8,11 @@ import {
 } from "./feishu-long-connection-runtime.js";
 import type { TuiContext } from "./index.js";
 import { redactRemoteSummary, remoteTranscriptSummary } from "./permission-continuation-runtime.js";
-import { formatRemoteStatus, formatRemoteTestResult } from "./remote-mcp-presenter.js";
 import {
   cancelRemotePairing,
   clearRemoteInbox,
-  createSignedRemoteInboundFixture,
   createRemotePairing,
+  createSignedRemoteInboundFixture,
   drainRemoteInbox,
   formatRemoteBridgeDoctor,
   formatRemoteInbox,
@@ -22,6 +21,7 @@ import {
   getRemoteBridgeDoctor,
   rejectRemoteInboxItem,
 } from "./remote-inbound-bridge-runtime.js";
+import { formatRemoteStatus, formatRemoteTestResult } from "./remote-mcp-presenter.js";
 import {
   type RemoteTransportDeps,
   buildOfficialCliInvocation,
@@ -292,7 +292,10 @@ async function handleRemoteBotCommand(
       const result = await startRemoteFeishuBridge(context, output, channel, "bot");
       showCommandPanel(context, output, {
         title: "/remote bot start feishu",
-        tone: result.status === "started" || result.status === "already_running" ? "neutral" : "warning",
+        tone:
+          result.status === "started" || result.status === "already_running"
+            ? "neutral"
+            : "warning",
         summary: [toRemoteBotStartSummary("feishu", result.status)],
         detailsText: [
           toRemoteBotStartSummary("feishu", result.status),
@@ -306,7 +309,10 @@ async function handleRemoteBotCommand(
       title: `/remote bot start ${channelArg || "<channel>"}`,
       tone: "warning",
       summary: [formatRemoteBotStartBlockedSummary(channelArg)],
-      detailsText: [formatRemoteBotStartBlockedSummary(channelArg), formatRemoteBotSetupDetails(context, channelArg)].join("\n"),
+      detailsText: [
+        formatRemoteBotStartBlockedSummary(channelArg),
+        formatRemoteBotSetupDetails(context, channelArg),
+      ].join("\n"),
     });
     return;
   }
@@ -316,7 +322,11 @@ async function handleRemoteBotCommand(
     showCommandPanel(context, output, {
       title: `/remote bot stop ${channelArg || "<channel>"}`,
       tone: "neutral",
-      summary: [stopped ? `Remote Bot ${channelArg} stopped.` : `Remote Bot ${channelArg || "channel"} is not running.`],
+      summary: [
+        stopped
+          ? `Remote Bot ${channelArg} stopped.`
+          : `Remote Bot ${channelArg || "channel"} is not running.`,
+      ],
       detailsText: stopped
         ? `Remote Bot ${channelArg} stopped.\nLong connection handle was closed in this process. Secrets were not printed.`
         : "No active long connection handle exists in this process.",
@@ -329,14 +339,19 @@ async function handleRemoteBotCommand(
       showCommandPanel(context, output, {
         title: "/remote bot pair wechat",
         tone: "warning",
-        summary: ["Personal WeChat Bot pairing is experimental and blocked until an opt-in plugin bridge exists."],
+        summary: [
+          "Personal WeChat Bot pairing is experimental and blocked until an opt-in plugin bridge exists.",
+        ],
         detailsText: formatWechatBotExperimentalDetails(),
       });
       return;
     }
     const channel = findRemoteChannel(context, channelArg);
     if (!channel) {
-      writeLine(output, "Remote bot pair：未识别通道。用法：/remote bot pair feishu|dingtalk|wechat");
+      writeLine(
+        output,
+        "Remote bot pair：未识别通道。用法：/remote bot pair feishu|dingtalk|wechat",
+      );
       return;
     }
     const pairing = createRemotePairing(
@@ -394,9 +409,15 @@ async function handleRemoteInboxCommand(
     const drained = drainRemoteInbox(context.remote);
     detail = `Remote inbox drain/export and clear：${drained.length}\n${drained
       .map((item) => `- ${item.id}: ${item.channel}; ${item.text}`)
-      .join("\n")}\nThese messages were exported and cleared only; they were not sent to sendMessage.`;
+      .join(
+        "\n",
+      )}\nThese messages were exported and cleared only; they were not sent to sendMessage.`;
   }
-  await appendRemoteSystemEvent(context, `remote_inbox action=${action} size=${context.remote.inbox.length}`, "info");
+  await appendRemoteSystemEvent(
+    context,
+    `remote_inbox action=${action} size=${context.remote.inbox.length}`,
+    "info",
+  );
   showCommandPanel(context, output, {
     title: "/remote inbox",
     tone: "neutral",
@@ -448,7 +469,8 @@ async function handleRemoteBridgeCommand(
     const result = await startRemoteFeishuBridge(context, output, channel);
     showCommandPanel(context, output, {
       title: "/remote bridge start",
-      tone: result.status === "started" || result.status === "already_running" ? "neutral" : "warning",
+      tone:
+        result.status === "started" || result.status === "already_running" ? "neutral" : "warning",
       summary: [result.summary],
       detailsText: result.detail,
     });
@@ -559,7 +581,8 @@ async function handleRemoteBridgeCommand(
     );
     showCommandPanel(context, output, {
       title: `/remote bridge ${action}`,
-      tone: decision.status === "accepted" || decision.status === "approved" ? "neutral" : "warning",
+      tone:
+        decision.status === "accepted" || decision.status === "approved" ? "neutral" : "warning",
       summary: [
         context.language === "en-US"
           ? `Bridge fixture ${channel.id}: ${decision.status} — Ctrl+O for details.`
@@ -585,11 +608,23 @@ async function startRemoteFeishuBridge(
   output: Writable,
   channel: RemoteChannelState,
   readinessMode: "bridge" | "bot" = "bridge",
-): Promise<{ status: "started" | "already_running" | "blocked" | "failed"; summary: string; detail: string }> {
-  const report = readinessMode === "bridge" ? getRemoteBridgeDoctor(context.remote, channel.id) : undefined;
+): Promise<{
+  status: "started" | "already_running" | "blocked" | "failed";
+  summary: string;
+  detail: string;
+}> {
+  const report =
+    readinessMode === "bridge" ? getRemoteBridgeDoctor(context.remote, channel.id) : undefined;
   const botReadiness = readinessMode === "bot" ? getFeishuBotStartReadiness(channel) : undefined;
-  const blockedDetail = botReadiness ? formatFeishuBotStartReadiness(botReadiness) : report ? formatRemoteBridgeDoctor(report) : "";
-  if (botReadiness?.readiness === "notification-only" || report?.readiness === "notification-only") {
+  const blockedDetail = botReadiness
+    ? formatFeishuBotStartReadiness(botReadiness)
+    : report
+      ? formatRemoteBridgeDoctor(report)
+      : "";
+  if (
+    botReadiness?.readiness === "notification-only" ||
+    report?.readiness === "notification-only"
+  ) {
     return {
       status: "blocked",
       summary: "Feishu bridge start blocked: webhook is notification-only.",
@@ -646,17 +681,27 @@ async function startRemoteFeishuBridge(
       },
     });
     feishuLongConnectionHandles.set(channel.id, handle);
-    await appendRemoteSystemEvent(context, `remote_bridge_start channel=${channel.id} status=started`, "info");
+    await appendRemoteSystemEvent(
+      context,
+      `remote_bridge_start channel=${channel.id} status=started`,
+      "info",
+    );
     return {
       status: "started",
       summary: "Feishu bridge started: waiting for mobile messages.",
       detail: [
         "Long connection started with official SDK; secrets are not printed.",
         botReadiness ? formatFeishuBotStartReadiness(botReadiness) : undefined,
-      ].filter((item): item is string => Boolean(item)).join("\n"),
+      ]
+        .filter((item): item is string => Boolean(item))
+        .join("\n"),
     };
   } catch {
-    await appendRemoteSystemEvent(context, `remote_bridge_start channel=${channel.id} status=failed`, "warning");
+    await appendRemoteSystemEvent(
+      context,
+      `remote_bridge_start channel=${channel.id} status=failed`,
+      "warning",
+    );
     return {
       status: "failed",
       summary: "Feishu bridge start failed: platform connection rejected or unavailable.",
@@ -688,7 +733,10 @@ function getFeishuBotStartReadiness(channel: RemoteChannelState): FeishuBotStart
   if (channel.config.transport !== "official_cli") {
     return { readiness: "needs-event-subscription", canStart: false, missingEnv: [] };
   }
-  if (channel.config.inboundMode !== "callback" || channel.config.callbackEndpoint !== "feishu-long-connection") {
+  if (
+    channel.config.inboundMode !== "callback" ||
+    channel.config.callbackEndpoint !== "feishu-long-connection"
+  ) {
     return { readiness: "needs-event-subscription", canStart: false, missingEnv: [] };
   }
   if (!channel.config.appIdRef) {
@@ -697,7 +745,9 @@ function getFeishuBotStartReadiness(channel: RemoteChannelState): FeishuBotStart
   if (!channel.config.appSecretRef) {
     return { readiness: "needs-app-secret", canStart: false, missingEnv: [] };
   }
-  const missingEnv = [channel.config.appIdRef, channel.config.appSecretRef].filter((ref) => !resolveEnvRef(ref));
+  const missingEnv = [channel.config.appIdRef, channel.config.appSecretRef].filter(
+    (ref) => !resolveEnvRef(ref),
+  );
   if (missingEnv.length) {
     return { readiness: "needs-env", canStart: false, missingEnv };
   }
@@ -718,7 +768,9 @@ function formatFeishuBotStartReadiness(readiness: FeishuBotStartReadiness): stri
   }
   lines.push("- secret values are not printed.");
   lines.push("- ready-to-start means Bot can run and wait for /bind CODE.");
-  lines.push("- bound/ready means ordinary mobile messages can pass binding/trusted-source checks.");
+  lines.push(
+    "- bound/ready means ordinary mobile messages can pass binding/trusted-source checks.",
+  );
   lines.push("- webhook path remains notification-only.");
   return lines.join("\n");
 }
@@ -791,7 +843,9 @@ function formatRemoteBotDoctorDetails(context: TuiContext, channelArg: string | 
   if (channels.length === 0) {
     return "Remote Bot doctor：请选择 feishu、dingtalk 或 wechat。";
   }
-  const lines = ["Remote Bot doctor（普通视图只显示 Bot 状态；底层 bridge 诊断请用 /remote bridge doctor）"];
+  const lines = [
+    "Remote Bot doctor（普通视图只显示 Bot 状态；底层 bridge 诊断请用 /remote bridge doctor）",
+  ];
   for (const channel of channels) {
     const status = getRemoteBotUserStatus(channel);
     lines.push(`- ${formatBotChannelName(channel.id)}: ${status}`);
@@ -799,16 +853,26 @@ function formatRemoteBotDoctorDetails(context: TuiContext, channelArg: string | 
     lines.push(`  start: /remote bot start ${channel.id}`);
     lines.push(`  pair: /remote bot pair ${channel.id}`);
     if (channel.id === "feishu") {
-      lines.push("  needs: App ID, App Secret, Bot enabled, long connection, message receive event.");
-      lines.push(`  readiness: ${formatFeishuBotStartReadiness(getFeishuBotStartReadiness(channel)).replace(/\n/g, "\n  ")}`);
+      lines.push(
+        "  needs: App ID, App Secret, Bot enabled, long connection, message receive event.",
+      );
+      lines.push(
+        `  readiness: ${formatFeishuBotStartReadiness(getFeishuBotStartReadiness(channel)).replace(/\n/g, "\n  ")}`,
+      );
     } else if (channel.id === "dingtalk") {
       lines.push("  needs: Client ID, Client Secret, robot Stream mode, published app.");
       lines.push("  real Stream smoke: NOT RUN without credentials and a published DingTalk bot.");
     }
-    lines.push(`  pairing: ${channel.config.bindingUserId && channel.config.trustedSources.length > 0 ? "complete" : "needed"}`);
+    lines.push(
+      `  pairing: ${channel.config.bindingUserId && channel.config.trustedSources.length > 0 ? "complete" : "needed"}`,
+    );
   }
-  lines.push("Secrets, endpoints, trusted source lists, binding ids, callback refs, QR/session tokens, and raw payloads are redacted.");
-  lines.push("Webhook notification remains notification-only; Bot inbound must enter the existing RemoteInboundMessage main chain.");
+  lines.push(
+    "Secrets, endpoints, trusted source lists, binding ids, callback refs, QR/session tokens, and raw payloads are redacted.",
+  );
+  lines.push(
+    "Webhook notification remains notification-only; Bot inbound must enter the existing RemoteInboundMessage main chain.",
+  );
   return lines.join("\n");
 }
 
@@ -872,7 +936,8 @@ function formatWechatBotExperimentalDetails(): string {
 }
 
 function formatRemoteBotStartBlockedSummary(channelId: string): string {
-  if (channelId === "dingtalk") return "DingTalk Bot start blocked: Stream SDK wiring and real credentials are not configured.";
+  if (channelId === "dingtalk")
+    return "DingTalk Bot start blocked: Stream SDK wiring and real credentials are not configured.";
   if (channelId === "wechat") {
     return process.env.LINGHUN_REMOTE_WECHAT_EXPERIMENTAL === "1"
       ? "Personal WeChat Bot start blocked: experimental plugin bridge is not installed."
@@ -885,23 +950,42 @@ function toRemoteBotStartSummary(
   channelId: string,
   status: "started" | "already_running" | "blocked" | "failed",
 ): string {
-  if (status === "started") return `${formatBotChannelName(channelId)} started; waiting for mobile messages.`;
-  if (status === "already_running") return `${formatBotChannelName(channelId)} Bot is already running.`;
-  if (status === "failed") return `${formatBotChannelName(channelId)} Bot start failed; check app settings.`;
+  if (status === "started")
+    return `${formatBotChannelName(channelId)} started; waiting for mobile messages.`;
+  if (status === "already_running")
+    return `${formatBotChannelName(channelId)} Bot is already running.`;
+  if (status === "failed")
+    return `${formatBotChannelName(channelId)} Bot start failed; check app settings.`;
   return `${formatBotChannelName(channelId)} Bot start blocked; finish setup first.`;
 }
 
-function selectBotChannels(context: TuiContext, channelArg: string | undefined): RemoteChannelState[] {
+function selectBotChannels(
+  context: TuiContext,
+  channelArg: string | undefined,
+): RemoteChannelState[] {
   const normalized = normalizeRemoteChannelId(channelArg ?? "");
   if (normalized) {
     const channel = findRemoteChannel(context, normalized);
     return channel ? [channel] : [];
   }
-  return context.remote.channels.filter((channel) => channel.id === "feishu" || channel.id === "dingtalk");
+  return context.remote.channels.filter(
+    (channel) => channel.id === "feishu" || channel.id === "dingtalk",
+  );
 }
 
 function getRemoteBotUserStatus(channel: RemoteChannelState): string {
-  const report = getRemoteBridgeDoctor({ enabled: true, channels: [channel], events: [], processedMessageIds: [], sessionDisabledChannelIds: [], pairings: [], inbox: [] }, channel.id);
+  const report = getRemoteBridgeDoctor(
+    {
+      enabled: true,
+      channels: [channel],
+      events: [],
+      processedMessageIds: [],
+      sessionDisabledChannelIds: [],
+      pairings: [],
+      inbox: [],
+    },
+    channel.id,
+  );
   if (channel.id === "feishu") {
     const readiness = getFeishuBotStartReadiness(channel);
     if (feishuLongConnectionHandles.has(channel.id)) return "running";
@@ -1042,7 +1126,7 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
       field(
         "appIdRef/appSecretRef 或 tokenRef",
         Boolean(config.appIdRef || config.tokenRef) &&
-          (config.type !== "feishu" && config.type !== "lark" || Boolean(config.appSecretRef)),
+          ((config.type !== "feishu" && config.type !== "lark") || Boolean(config.appSecretRef)),
         "填环境变量引用，不填明文；未配置时 bridge 显示 needs-app-setup",
       ),
     );
@@ -1082,7 +1166,7 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
         "encryptKeyRef / verificationTokenRef",
         config.type === "feishu" || config.type === "lark"
           ? config.callbackEndpoint === "feishu-long-connection" ||
-            Boolean(config.encryptKeyRef && config.verificationTokenRef)
+              Boolean(config.encryptKeyRef && config.verificationTokenRef)
           : true,
         "Feishu/Lark 公网 callback 需要事件回调校验引用；长连接不需要",
       ),
@@ -1339,7 +1423,8 @@ export function processRemoteInbound(
       return {
         kind: message.kind,
         status: "blocked",
-        summary: "plan mode keeps writes read-only; remote approval cannot execute mutating operations",
+        summary:
+          "plan mode keeps writes read-only; remote approval cannot execute mutating operations",
         evidenceCreated: false,
       };
     }

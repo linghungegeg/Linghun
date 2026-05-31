@@ -13,21 +13,15 @@ describe("permission-explanation: sanitize rule UUID", () => {
       "命中 deny 规则：3b2a-1234-5678-9012-abcdef. 后续提示...",
     );
     expect(sanitized).toContain("命中拒绝规则");
-    expect(sanitized).not.toMatch(
-      /[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{6,}/iu,
-    );
+    expect(sanitized).not.toMatch(/[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{6,}/iu);
   });
 
   it("移除 '命中 ask 规则：xxx'", () => {
-    expect(sanitizePermissionReason("命中 ask 规则：rule-id-here")).toContain(
-      "命中需确认规则",
-    );
+    expect(sanitizePermissionReason("命中 ask 规则：rule-id-here")).toContain("命中需确认规则");
   });
 
   it("移除 '命中 allow 规则：xxx'", () => {
-    expect(sanitizePermissionReason("命中 allow 规则：anything")).toContain(
-      "命中允许规则",
-    );
+    expect(sanitizePermissionReason("命中 allow 规则：anything")).toContain("命中允许规则");
   });
 
   it("英文 'Hit deny rule: xxx' 同样剥离 rule id", () => {
@@ -37,9 +31,7 @@ describe("permission-explanation: sanitize rule UUID", () => {
   });
 
   it("非 rule reason 原样保留", () => {
-    expect(sanitizePermissionReason("Plan 模式禁止写入。")).toBe(
-      "Plan 模式禁止写入。",
-    );
+    expect(sanitizePermissionReason("Plan 模式禁止写入。")).toBe("Plan 模式禁止写入。");
   });
 });
 

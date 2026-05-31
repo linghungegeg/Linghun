@@ -1,10 +1,23 @@
 import type { Writable } from "node:stream";
 import { saveExtensionEnablement } from "@linghun/config";
-import type { TuiContext } from "./index.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { createHookState, createPluginState, createSkillState } from "./tui-state-runtime.js";
+import {
+  createSkillEvolutionCandidate,
+  formatExtensionInstallGate,
+  formatExtensionStatus,
+  formatPlugins,
+  formatPluginsDoctor,
+  formatSkills,
+  formatTrustNotice,
+  installExtensionFromRequest,
+  parseExtensionInstallRequest,
+  removeExtension,
+  updateExtension,
+  validateExtensionItems,
+} from "./extension-command-runtime.js";
+import type { TuiContext } from "./index.js";
 import { writeLine } from "./startup-runtime.js";
-import { createSkillEvolutionCandidate, formatExtensionInstallGate, formatExtensionStatus, formatPlugins, formatPluginsDoctor, formatSkills, formatTrustNotice, installExtensionFromRequest, parseExtensionInstallRequest, removeExtension, updateExtension, validateExtensionItems } from "./extension-command-runtime.js";
+import { createHookState, createPluginState, createSkillState } from "./tui-state-runtime.js";
 
 export type ExtensionSlashRuntimeDeps = {
   appendSystemEvent: (
@@ -98,9 +111,19 @@ export async function handleSkillsCommand(
       writeLine(output, formatExtensionInstallGate("skills", request, "/skills install"));
       return;
     }
-    const result = await installExtensionFromRequest("skills", request, context, async (summary) => {
-      await deps().appendSystemEvent(context, await deps().ensureSession(context), summary, "info");
-    });
+    const result = await installExtensionFromRequest(
+      "skills",
+      request,
+      context,
+      async (summary) => {
+        await deps().appendSystemEvent(
+          context,
+          await deps().ensureSession(context),
+          summary,
+          "info",
+        );
+      },
+    );
     context.skills = await createSkillState(context.config, context.projectPath);
     deps().refreshCacheFreshness(context);
     writeLine(output, result.summary);
@@ -208,7 +231,12 @@ export async function handleSkillsCommand(
       output,
       id
         ? await updateExtension("skills", id, context, args.slice(2), async (summary) => {
-            await deps().appendSystemEvent(context, await deps().ensureSession(context), summary, "info");
+            await deps().appendSystemEvent(
+              context,
+              await deps().ensureSession(context),
+              summary,
+              "info",
+            );
           }).then((summary) => {
             deps().refreshCacheFreshness(context);
             return summary;
@@ -322,9 +350,19 @@ export async function handlePluginsCommand(
       writeLine(output, formatExtensionInstallGate("plugins", request, "/plugins install"));
       return;
     }
-    const result = await installExtensionFromRequest("plugins", request, context, async (summary) => {
-      await deps().appendSystemEvent(context, await deps().ensureSession(context), summary, "info");
-    });
+    const result = await installExtensionFromRequest(
+      "plugins",
+      request,
+      context,
+      async (summary) => {
+        await deps().appendSystemEvent(
+          context,
+          await deps().ensureSession(context),
+          summary,
+          "info",
+        );
+      },
+    );
     context.plugins = await createPluginState(context.config, context.projectPath);
     context.hooks = await createHookState(context.config, context.projectPath);
     deps().refreshCacheFreshness(context);
@@ -364,7 +402,12 @@ export async function handlePluginsCommand(
       output,
       id
         ? await updateExtension("plugins", id, context, args.slice(2), async (summary) => {
-            await deps().appendSystemEvent(context, await deps().ensureSession(context), summary, "info");
+            await deps().appendSystemEvent(
+              context,
+              await deps().ensureSession(context),
+              summary,
+              "info",
+            );
           }).then((summary) => {
             deps().refreshCacheFreshness(context);
             return summary;

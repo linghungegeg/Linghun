@@ -1,8 +1,8 @@
 # Real Provider Main Chain Stress Smoke — 2026-05-31 Run 3
 
-本轮包含两层口径：Initial Run 3 是开源前 release-candidate 主链深压，只记录真实结果；Run 3 Closure 只处理报告残留项，不开新阶段、不重构、不 commit。临时 provider / Feishu 凭据仅用于当前进程网络请求；本报告不写入 raw key、raw webhook、raw signing secret、raw App Secret 或完整 endpoint。
+本轮包含三层口径：Initial Run 3 是开源前 release-candidate 主链深压，只记录真实结果；Run 3 Closure 只处理报告残留项；Run 3 Final Hygiene 只做报告口径和 Biome hygiene 收口，不开新阶段、不加功能、不重构业务、不 commit。临时 provider / Feishu 凭据仅用于当前进程网络请求；本报告不写入 raw key、raw webhook、raw signing secret、raw App Secret 或完整 endpoint。
 
-结论先行：Closure 后 full TUI / typecheck / build 已绿；OpenAI-compatible 配置诊断与 `/remote setup` invariant 已收口；唯一剩余红项是 root `corepack pnpm check` 的 `111` 个历史 Biome baseline。Initial Run 3 的 provider、Feishu、缓存与真实入站边界仍保留原始记录：Feishu real mobile inbound 本轮 NOT RUN，DingTalk / WeChat real inbound NOT RUN，cache hit 不用 Run 3 数据宣传。
+结论先行：Final Hygiene 后 `typecheck` / `tsc --noEmit` / full TUI / provider / CLI / TUI build / CLI build / root `corepack pnpm check` 均已通过；root Biome hygiene 已 clean。Initial Run 3 的 provider、Feishu、缓存与真实入站边界仍保留原始记录：Feishu real mobile inbound 本轮 NOT RUN，DingTalk / WeChat real inbound NOT RUN，cache hit 不用 Run 3 数据宣传。
 
 ---
 
@@ -51,6 +51,19 @@
 | CLI build | PASS | `@linghun/cli build` |
 | `git diff --check` | PASS | Closure 复跑 |
 | `corepack pnpm check` | FAIL | 111 historical Biome baseline errors remain |
+
+### 2.3 Final Hygiene 后
+
+| 项 | 结果 | 备注 |
+| --- | --- | --- |
+| `corepack pnpm check` | PASS | root Biome baseline 已 clean |
+| `corepack pnpm exec tsc --noEmit` | PASS | Final Hygiene 复跑 |
+| `corepack pnpm typecheck` | PASS | Final Hygiene 复跑 |
+| `corepack pnpm --filter @linghun/tui exec vitest run` | PASS | final rerun, 52 files / 2042 tests；首次曾遇到已知 `dist-integrity` 5s import timeout，build 后复跑通过 |
+| `corepack pnpm --filter @linghun/providers exec vitest run` | PASS | 120 tests |
+| `corepack pnpm --filter @linghun/cli exec vitest run` | PASS | 8 tests |
+| `corepack pnpm --filter @linghun/tui build` | PASS | Final Hygiene 复跑 |
+| `corepack pnpm --filter @linghun/cli build` | PASS | Final Hygiene 复跑 |
 
 ---
 
@@ -199,20 +212,28 @@ Closure 后结论是 **tests mostly green / check baseline remains**。
 - 唯一剩余红项是 root `corepack pnpm check`：仍有 `111` 个历史 Biome baseline errors。
 - NOT RUN 边界不变：Feishu real mobile inbound 本轮未跑，DingTalk / WeChat real inbound 未跑，cache hit 不用 Run 3 宣传。
 
+### 7.3 Final Hygiene 后
+
+Final Hygiene 后结论是 **verification green / real inbound still NOT RUN**。
+
+- `corepack pnpm check` 已 PASS，root Biome hygiene 已 clean。
+- full TUI、provider vitest、CLI vitest、typecheck、`tsc --noEmit`、TUI build、CLI build 均已 PASS。
+- 本轮只做 formatter / organizeImports / 明确 safe lint 收敛；未改 provider route/env/key/model route，未放松权限，未恢复自然语言关键词截获，未改变 remote 真实能力口径。
+- NOT RUN 边界不变：Feishu real mobile inbound 本轮未跑，DingTalk / WeChat real inbound 未跑，Run 3 cacheRead=0，不宣传缓存命中率。
+
 ---
 
 ## 8. 下一轮修复建议
 
 ### 8.1 Initial Run 3 原始建议
 
-Initial Run 3 曾建议修 P2-1 `/remote setup` invariant、P2-2 OpenAI-compatible 诊断、P2-3 root `pnpm check`、以及 Feishu real inbound harness。Closure 后，P2-1 / P2-2 已完成，不再作为下一轮建议。
+Initial Run 3 曾建议修 P2-1 `/remote setup` invariant、P2-2 OpenAI-compatible 诊断、P2-3 root `pnpm check`、以及 Feishu real inbound harness。Closure 后，P2-1 / P2-2 已完成；Final Hygiene 后 root `pnpm check` 也已 clean。它们不再作为下一轮建议。
 
-### 8.2 Closure 后剩余事项
+### 8.2 Final Hygiene 后剩余事项
 
-1. root Biome hygiene：单独收敛 `corepack pnpm check` 剩余 `111` 个历史 baseline；如果 CI 默认跑 check，开源前必须绿，或明确不作为硬门禁。
-2. Feishu real mobile inbound：用真实手机消息单独跑 `/bind CODE` / `状态` / 普通自然语言；无现场消息时只能 NOT RUN。
-3. DingTalk / WeChat real inbound：后续只在真实凭据和真实平台消息下验证，不用 mock/fixture 冒充 PASS。
-4. 缓存命中专项压测：单独设计 cache hit / read-token 收益测试；Run 3 cacheRead 为 0，不能用于宣传命中率。
+1. Feishu real mobile inbound：用真实手机消息单独跑 `/bind CODE` / `状态` / 普通自然语言；无现场消息时只能 NOT RUN。
+2. DingTalk / WeChat real inbound：后续只在真实凭据和真实平台消息下验证，不用 mock/fixture 冒充 PASS。
+3. 缓存命中专项压测：单独设计 cache hit / read-token 收益测试；Run 3 cacheRead 为 0，不能用于宣传命中率。
 
 ---
 
@@ -246,6 +267,17 @@ Closure 后实际 git status：
 
 Closure 后 secret scan 继续保持 clean：报告不含真实 provider key、Feishu webhook、signing secret、App ID、App Secret；报告也不写完整 baseUrl endpoint。
 
+### 9.3 Final Hygiene 后
+
+Final Hygiene 结束前实际 git status：
+
+- 多个 tracked source/test 文件 modified，来源为 Biome formatter / organizeImports / 明确 safe lint 收敛。
+- `docs/audit/real-provider-main-chain-stress-2026-05-31-run-3.md` modified。
+- `.claude/` untracked，未触碰、未提交。
+- 未 commit。
+
+Final Hygiene secret scan 继续保持 clean：报告和 diff 未命中真实 provider key、Feishu webhook、signing secret、App ID、App Secret。
+
 ---
 
 ## 10. Run 3 Closure Addendum
@@ -269,7 +301,7 @@ Closure 后 secret scan 继续保持 clean：报告不含真实 provider key、F
 - Personal WeChat bot real inbound：NOT RUN。当前仍 experimental blocked。
 - Cache hit 真实收益：NOT CLAIMED。本轮不因 cacheRead 为 0 或 fixture 字段宣传缓存命中率。
 
-### 10.3 `pnpm check` 现状
+### 10.3 Closure-time `pnpm check` 现状
 
 子任务只读盘点显示，Closure 前 root `corepack pnpm check` 为 `124 errors / 1 warning`，主要是既有 Biome `format` 与 `organizeImports` 噪音，夹少量风格 lint，横跨约 69 个历史文件。
 
@@ -282,7 +314,7 @@ Closure 中只对本轮触碰文件做 `biome check --write` 与少量低风险 
 - `packages/tui/src/git-*` 相关 format/import/lint。
 - 多个 TUI extension / handoff / index 工具文件的 format/import。
 
-结论：如果 CI 默认跑 root `corepack pnpm check`，当前仍会失败；开源前必须单独开 hygiene 批次清理 Biome baseline，或明确 CI 暂不把 root check 作为硬门禁。本轮不做大面积格式化，避免把 Run 3 Closure 与 69 文件无语义 diff 混在一起。
+Closure-time 结论：如果 CI 默认跑 root `corepack pnpm check`，当时仍会失败；开源前需要单独 hygiene 批次清理 Biome baseline。Final Hygiene 已完成该清理，当前 root `corepack pnpm check` 已 PASS。
 
 ### 10.4 Closure 验证结果
 
@@ -304,3 +336,34 @@ Closure 中只对本轮触碰文件做 `biome check --write` 与少量低风险 
 ### 10.5 Secret Hygiene
 
 Closure diff 与本报告 addendum 未写入 raw provider key、Feishu webhook、signing secret、App ID、App Secret 或完整 baseUrl endpoint。新增测试只使用 fake `sk-test-*` / `test-*` 哨兵值和公开示例域，不包含用户真实凭据。
+
+---
+
+## 11. Run 3 Final Hygiene Addendum
+
+本次 Final Hygiene 不开新阶段、不加功能、不重构业务、不 commit。只做两类收口：报告口径一致化，以及 root Biome hygiene。
+
+### 11.1 已收口项
+
+| 项 | Final Hygiene 结果 | 说明 |
+| --- | --- | --- |
+| 报告口径 | DONE | 顶部结论、第 2/7/8/9 节已区分 Initial Run 3 / Closure 后 / Final Hygiene 后，避免把已 DONE 项继续写成下一轮建议。 |
+| root Biome hygiene | DONE | `corepack pnpm check` 已 PASS；改动类型为 formatter、organizeImports、明确 safe lint。 |
+| 验证 | DONE | `tsc --noEmit`、`typecheck`、full TUI、providers、CLI、TUI build、CLI build 均已 PASS。 |
+| Secret hygiene | DONE | 报告和 diff 未命中真实 provider key、Feishu webhook、signing secret、App ID、App Secret。 |
+
+### 11.2 边界
+
+- 未改 provider route/env/key/model route。
+- 未放松权限。
+- 未恢复自然语言关键词截获。
+- 未改变 remote 真实能力口径。
+- 未把 mock/fixture 冒充真实平台 PASS。
+- 未触碰 `.claude/`，未 commit。
+
+### 11.3 仍未运行 / 不宣称
+
+- Feishu real mobile inbound：NOT RUN。本轮没有现场手机发送消息。
+- DingTalk bot real inbound：NOT RUN。无真实凭据/现场平台消息。
+- Personal WeChat bot real inbound：NOT RUN。当前仍 experimental blocked。
+- Cache hit 真实收益：NOT CLAIMED。Run 3 cacheRead=0，不宣传缓存命中率。

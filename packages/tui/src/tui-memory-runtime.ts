@@ -48,11 +48,6 @@ import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import { formatDisplayPath, formatError, truncateDisplay } from "./startup-runtime.js";
-import {
-  normalizeMemoryStatus,
-  pathExists,
-  summarizeProjectRules,
-} from "./tui-state-runtime.js";
 import type {
   MemoryCandidate,
   MemoryLearningCategory,
@@ -60,6 +55,7 @@ import type {
   MemoryScope,
   MemoryState,
 } from "./tui-data-types.js";
+import { normalizeMemoryStatus, pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
 
 // Module-private mirrors of MEMORY_PROMPT_* constants; index.ts owns the
 // canonical declarations to avoid drift across modules.

@@ -26,9 +26,8 @@ import {
   type RemoteChannelType,
   resolveStoragePaths,
 } from "@linghun/config";
-import { createCacheFreshness } from "./cache-freshness.js";
 import { builtInTools } from "@linghun/tools";
-import { createWorkspaceReferenceCache } from "./workspace-reference-cache.js";
+import { createCacheFreshness } from "./cache-freshness.js";
 import { formatError, truncateDisplay } from "./startup-runtime.js";
 import type {
   CacheState,
@@ -52,6 +51,7 @@ import type {
   WorkflowState,
   WorkflowTemplate,
 } from "./tui-data-types.js";
+import { createWorkspaceReferenceCache } from "./workspace-reference-cache.js";
 
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;

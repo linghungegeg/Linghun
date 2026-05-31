@@ -88,9 +88,11 @@ export function BtwPanel({
         </Text>
       ) : null}
       {panel.phase === "answered" && panel.answer
-        ? panel.answer.split("\n").map((line, idx) => (
-            <Text key={`${idx}-${line.slice(0, 8)}`}>{fitText(line, innerWidth)}</Text>
-          ))
+        ? panel.answer
+            .split("\n")
+            .map((line, idx) => (
+              <Text key={`${idx}-${line.slice(0, 8)}`}>{fitText(line, innerWidth)}</Text>
+            ))
         : null}
       {panel.phase === "error" ? (
         <Text color={theme.error ?? theme.status.fail}>

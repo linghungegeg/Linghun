@@ -962,9 +962,7 @@ function mergeProviderEnvConfig(
   // D.13J Block 1：记录 provider.env 在本次合并中真正覆盖了哪些字段。
   // doctor 据此对用户说明"~/.linghun/provider.env 已合并/覆盖了 modelRoutes/defaultModel/providers"。
   // 仅记录 provider id 列表，不记录任何 apiKey/baseUrl/model 值。
-  const providerEnvProviderIds = providerEnv.providers
-    ? Object.keys(providerEnv.providers)
-    : [];
+  const providerEnvProviderIds = providerEnv.providers ? Object.keys(providerEnv.providers) : [];
   const applied =
     Boolean(providerEnv.defaultModel) ||
     Boolean(providerEnv.modelRoutes) ||
@@ -972,14 +970,18 @@ function mergeProviderEnvConfig(
   if (applied) {
     lastProviderEnvMerge = {
       applied: true,
-      overrodeModelRoutes:
-        Boolean(providerEnv.modelRoutes) && Boolean(projectSettings.modelRoutes),
+      overrodeModelRoutes: Boolean(providerEnv.modelRoutes) && Boolean(projectSettings.modelRoutes),
       overrodeDefaultModel:
         Boolean(providerEnv.defaultModel) && Boolean(projectSettings.defaultModel),
       providerIds: providerEnvProviderIds,
     };
   } else {
-    lastProviderEnvMerge = { applied: false, overrodeModelRoutes: false, overrodeDefaultModel: false, providerIds: [] };
+    lastProviderEnvMerge = {
+      applied: false,
+      overrodeModelRoutes: false,
+      overrodeDefaultModel: false,
+      providerIds: [],
+    };
   }
   return {
     ...projectSettings,

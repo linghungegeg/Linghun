@@ -1,6 +1,6 @@
+import type { Language } from "@linghun/shared";
 import { Box, Text } from "ink";
 import type React from "react";
-import type { Language } from "@linghun/shared";
 import { fitText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 import type { TaskFooterView } from "../types.js";
@@ -85,9 +85,7 @@ export function StatusFooter({
       <Box flexGrow={1} flexShrink={1}>
         <Text>
           <Text color={theme.muted}>{footer.permissionMode}</Text>
-          <Text color={theme.status.fail}>
-            {fittedLeft.slice(footer.permissionMode.length)}
-          </Text>
+          <Text color={theme.status.fail}>{fittedLeft.slice(footer.permissionMode.length)}</Text>
         </Text>
       </Box>
       <Box flexShrink={0}>

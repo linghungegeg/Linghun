@@ -36,9 +36,7 @@ export function MessageResponseProvider({
 }: {
   children: React.ReactNode;
 }): React.ReactNode {
-  return (
-    <MessageResponseContext.Provider value={true}>{children}</MessageResponseContext.Provider>
-  );
+  return <MessageResponseContext.Provider value={true}>{children}</MessageResponseContext.Provider>;
 }
 
 export type MessageMarkdownProps = {
@@ -122,22 +120,23 @@ function InlineRow({
   const codeColor = theme.diagnostic ?? theme.accent;
   return (
     <Text color={baseColor} dimColor={dim}>
-      {tokens.map((token, idx) => {
+      {tokens.map((token) => {
+        const key = `${token.kind}-${token.value}`;
         if (token.kind === "code") {
           return (
-            <Text key={`tok-${idx}`} color={codeColor} dimColor={dim}>
+            <Text key={key} color={codeColor} dimColor={dim}>
               {token.value}
             </Text>
           );
         }
         if (token.kind === "bold") {
           return (
-            <Text key={`tok-${idx}`} bold color={baseColor} dimColor={dim}>
+            <Text key={key} bold color={baseColor} dimColor={dim}>
               {token.value}
             </Text>
           );
         }
-        return <Text key={`tok-${idx}`}>{token.value}</Text>;
+        return <Text key={key}>{token.value}</Text>;
       })}
     </Text>
   );
@@ -161,8 +160,8 @@ export function MessageMarkdown({
     if (codeBuffer.length === 0) return;
     rendered.push(
       <Box key={`code-${blockIndex++}`} flexDirection="column" marginLeft={2}>
-        {codeBuffer.map((line, idx) => (
-          <Text key={`code-line-${idx}`} color={codeColor} dimColor={dim}>
+        {codeBuffer.map((line) => (
+          <Text key={`code-line-${line}`} color={codeColor} dimColor={dim}>
             {line.length === 0 ? " " : line}
           </Text>
         ))}
@@ -194,8 +193,7 @@ export function MessageMarkdown({
       rendered.push(
         <Box key={`list-${blockIndex++}`} flexDirection="row">
           <Text color={dim ? theme.dim : theme.muted} dimColor={dim}>
-            {cls.bullet}
-            {" "}
+            {cls.bullet}{" "}
           </Text>
           <InlineRow value={cls.rest} theme={theme} dim={dim} tone={tone} />
         </Box>,

@@ -2,12 +2,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TuiContext } from "./index.js";
-import type { TerminalProblemView, TerminalReadinessView } from "./terminal-readiness-presenter.js";
-import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
-import { classifyVerificationLevel } from "./verification-level.js";
 import { formatCooldownDoctorLine } from "./provider-circuit-breaker.js";
-import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
+import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
+import type { TerminalProblemView, TerminalReadinessView } from "./terminal-readiness-presenter.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
+import { classifyVerificationLevel } from "./verification-level.js";
+import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
 export function createTerminalReadinessView(context: TuiContext): TerminalReadinessView {
   const runtime = getSelectedModelRuntime(context);
@@ -106,8 +106,6 @@ export function createTerminalReadinessView(context: TuiContext): TerminalReadin
   };
 }
 
-
-
 function createRuntimePathForReadiness(_context: TuiContext): TerminalReadinessView["runtimePath"] {
   const isTTY = Boolean(process.stdout.isTTY);
   const isCI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS || process.env.GITLAB_CI);
@@ -128,8 +126,6 @@ function createRuntimePathForReadiness(_context: TuiContext): TerminalReadinessV
     degradedReason: marker.degradedReason,
   };
 }
-
-
 
 export function createVerificationLevelForReadiness(
   context: TuiContext,
@@ -202,8 +198,6 @@ export function createVerificationLevelForReadiness(
   };
 }
 
-
-
 function createStartupPathForReadiness(): TerminalReadinessView["startupPath"] {
   const isSourceExecution = Boolean(
     process.argv[1]?.endsWith(".ts") || process.env.LINGHUN_DEV_MODE || process.env.VITEST,
@@ -226,8 +220,6 @@ function createStartupPathForReadiness(): TerminalReadinessView["startupPath"] {
     staleReason: marker.staleReason,
   };
 }
-
-
 
 function createProjectDoctorLite(context: TuiContext): TerminalReadinessView["projectDoctor"] {
   const packageJson = readPackageJsonLite(context.projectPath);
@@ -298,8 +290,6 @@ function createProjectDoctorLite(context: TuiContext): TerminalReadinessView["pr
   };
 }
 
-
-
 function createSourceOfTruthDriftLite(context: TuiContext): TerminalReadinessView["sourceDrift"] {
   const requiredDocs = [
     "docs/delivery/pre-open-source-terminal-product-completion-gate.md",
@@ -360,8 +350,6 @@ function createSourceOfTruthDriftLite(context: TuiContext): TerminalReadinessVie
   };
 }
 
-
-
 function createContextPickerLite(
   context: TuiContext,
   webSourceEvidence: "present" | "missing",
@@ -403,8 +391,6 @@ function createContextPickerLite(
   };
 }
 
-
-
 function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["rollbackCoach"] {
   const gitStatusLines = readGitStatusShortLite(context.projectPath);
   const fallbackChangedFiles = new Set([
@@ -445,8 +431,6 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
   };
 }
 
-
-
 function createTaskCostPreviewLite(context: TuiContext): TerminalReadinessView["costPreview"] {
   const labels = ["local-only", "no-network", "no-real-smoke", "advisory-estimate"];
   if (context.lastVerification) labels.push("may-run-tests");
@@ -461,8 +445,6 @@ function createTaskCostPreviewLite(context: TuiContext): TerminalReadinessView["
   };
 }
 
-
-
 function readPackageJsonLite(projectPath: string): Record<string, unknown> | undefined {
   try {
     return JSON.parse(readFileSync(join(projectPath, "package.json"), "utf8")) as Record<
@@ -474,13 +456,9 @@ function readPackageJsonLite(projectPath: string): Record<string, unknown> | und
   }
 }
 
-
-
 function hasAnyFile(projectPath: string, files: string[]): boolean {
   return files.some((file) => existsSync(join(projectPath, file)));
 }
-
-
 
 function hasPackageDependency(
   packageJson: Record<string, unknown> | undefined,
@@ -491,8 +469,6 @@ function hasPackageDependency(
     (section) => typeof readRecord(packageJson[section])[dependency] === "string",
   );
 }
-
-
 
 function readGitStatusShortLite(projectPath: string): string[] | undefined {
   const result = spawnSync("git", ["status", "--short"], {
@@ -509,8 +485,6 @@ function readGitStatusShortLite(projectPath: string): string[] | undefined {
     .filter(Boolean);
 }
 
-
-
 function readPackageManagerLite(
   packageJson: Record<string, unknown> | undefined,
   projectPath: string,
@@ -522,15 +496,11 @@ function readPackageManagerLite(
   return "unknown";
 }
 
-
-
 function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
 }
-
-
 
 function readTextFileLite(path: string): string | undefined {
   try {
@@ -539,8 +509,6 @@ function readTextFileLite(path: string): string | undefined {
     return undefined;
   }
 }
-
-
 
 function createTerminalProblems(
   context: TuiContext,
@@ -653,4 +621,3 @@ function createTerminalProblems(
   }
   return problems;
 }
-

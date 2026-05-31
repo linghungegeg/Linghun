@@ -1,12 +1,41 @@
 import type { Writable } from "node:stream";
-import { ensureProviderEnvTemplate, getProviderEnvPath, loadConfig, providerEnvExists, saveModelRoute, saveProviderEnvSetup, type ModelRole, type ProviderEnvSetup } from "@linghun/config";
-import type { TuiContext } from "./index.js";
+import {
+  type ModelRole,
+  type ProviderEnvSetup,
+  ensureProviderEnvTemplate,
+  getProviderEnvPath,
+  loadConfig,
+  providerEnvExists,
+  saveModelRoute,
+  saveProviderEnvSetup,
+} from "@linghun/config";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { formatModelRouteDoctor, formatModelRouteSummary, formatModelRoutes, getRoleRoute, isModelRole } from "./model-doctor-runtime.js";
-import { applyModelSetupValues, formatModelSetupFallbackError, formatModelSetupMessage, formatModelSetupSaved, formatModelSetupSummary, getModelSetupPromptMessage, getNextModelSetupStep, normalizeModelSetupReasoningLevel, parseModelSetupPrefill, type ModelSetupPrefill } from "./model-setup-runtime.js";
-import { snapshotDeferredToolsSummary, snapshotDiscoveredDeferredToolsSummary } from "./deferred-tools-catalog.js";
-import { getSelectedModelRuntime, resolveInitialModel } from "./tui-model-runtime.js";
+import {
+  snapshotDeferredToolsSummary,
+  snapshotDiscoveredDeferredToolsSummary,
+} from "./deferred-tools-catalog.js";
+import type { TuiContext } from "./index.js";
+import {
+  formatModelRouteDoctor,
+  formatModelRouteSummary,
+  formatModelRoutes,
+  getRoleRoute,
+  isModelRole,
+} from "./model-doctor-runtime.js";
+import {
+  type ModelSetupPrefill,
+  applyModelSetupValues,
+  formatModelSetupFallbackError,
+  formatModelSetupMessage,
+  formatModelSetupSaved,
+  formatModelSetupSummary,
+  getModelSetupPromptMessage,
+  getNextModelSetupStep,
+  normalizeModelSetupReasoningLevel,
+  parseModelSetupPrefill,
+} from "./model-setup-runtime.js";
 import { writeLine } from "./startup-runtime.js";
+import { getSelectedModelRuntime, resolveInitialModel } from "./tui-model-runtime.js";
 
 export type ModelCommandRuntimeDeps = {
   currentModelText: (context: TuiContext) => string;
@@ -51,7 +80,11 @@ export async function handleModelCommand(
           ? "Model route doctor — Ctrl+O for full diagnostics."
           : "模型路由诊断 — Ctrl+O 查看完整诊断。",
       ],
-      detailsText: await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }),
+      detailsText: await formatModelRouteDoctor({
+        ...context,
+        deferredToolsSummary: snapshotDeferredToolsSummary(context),
+        discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context),
+      }),
     });
     return;
   }
@@ -232,7 +265,11 @@ export async function handleModelRouteCommand(
           ? "Model route doctor — Ctrl+O for full diagnostics."
           : "模型路由诊断 — Ctrl+O 查看完整诊断。",
       ],
-      detailsText: await formatModelRouteDoctor({ ...context, deferredToolsSummary: snapshotDeferredToolsSummary(context), discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context) }),
+      detailsText: await formatModelRouteDoctor({
+        ...context,
+        deferredToolsSummary: snapshotDeferredToolsSummary(context),
+        discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context),
+      }),
     });
     return;
   }

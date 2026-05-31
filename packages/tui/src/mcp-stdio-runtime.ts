@@ -138,37 +138,42 @@ export async function runMcpStdioToolCall(
     stdout.setEncoding("utf8");
     stdout.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
-      let newlineIdx: number;
+      let newlineIdx = stdoutBuffer.indexOf("\n");
       // line-delimited JSON-RPC; each newline is a frame.
-      while ((newlineIdx = stdoutBuffer.indexOf("\n")) >= 0) {
+      while (newlineIdx >= 0) {
         const line = stdoutBuffer.slice(0, newlineIdx).trim();
         stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
-        if (line === "") continue;
-        let frame: unknown;
-        try {
-          frame = JSON.parse(line);
-        } catch {
-          // ignore non-JSON noise (some MCP servers print banners on first line)
-          continue;
+        if (line !== "") {
+          let frame: unknown;
+          try {
+            frame = JSON.parse(line);
+          } catch {
+            // ignore non-JSON noise (some MCP servers print banners on first line)
+            newlineIdx = stdoutBuffer.indexOf("\n");
+            continue;
+          }
+          const obj = frame as {
+            id?: number;
+            result?: unknown;
+            error?: { message?: string; code?: number | string };
+          };
+          if (typeof obj.id === "number") {
+            const handler = pending.get(obj.id);
+            if (handler) {
+              pending.delete(obj.id);
+              if (obj.error) {
+                handler.reject(
+                  new Error(
+                    `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
+                  ),
+                );
+              } else {
+                handler.resolve(obj.result);
+              }
+            }
+          }
         }
-        const obj = frame as {
-          id?: number;
-          result?: unknown;
-          error?: { message?: string; code?: number | string };
-        };
-        if (typeof obj.id !== "number") continue;
-        const handler = pending.get(obj.id);
-        if (!handler) continue;
-        pending.delete(obj.id);
-        if (obj.error) {
-          handler.reject(
-            new Error(
-              `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
-            ),
-          );
-        } else {
-          handler.resolve(obj.result);
-        }
+        newlineIdx = stdoutBuffer.indexOf("\n");
       }
     });
     stderr.on("data", (chunk: Buffer) => {
@@ -341,35 +346,40 @@ export async function runMcpStdioToolList(
     stdout.setEncoding("utf8");
     stdout.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
-      let newlineIdx: number;
-      while ((newlineIdx = stdoutBuffer.indexOf("\n")) >= 0) {
+      let newlineIdx = stdoutBuffer.indexOf("\n");
+      while (newlineIdx >= 0) {
         const line = stdoutBuffer.slice(0, newlineIdx).trim();
         stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
-        if (line === "") continue;
-        let frame: unknown;
-        try {
-          frame = JSON.parse(line);
-        } catch {
-          continue;
+        if (line !== "") {
+          let frame: unknown;
+          try {
+            frame = JSON.parse(line);
+          } catch {
+            newlineIdx = stdoutBuffer.indexOf("\n");
+            continue;
+          }
+          const obj = frame as {
+            id?: number;
+            result?: unknown;
+            error?: { message?: string; code?: number | string };
+          };
+          if (typeof obj.id === "number") {
+            const handler = pending.get(obj.id);
+            if (handler) {
+              pending.delete(obj.id);
+              if (obj.error) {
+                handler.reject(
+                  new Error(
+                    `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
+                  ),
+                );
+              } else {
+                handler.resolve(obj.result);
+              }
+            }
+          }
         }
-        const obj = frame as {
-          id?: number;
-          result?: unknown;
-          error?: { message?: string; code?: number | string };
-        };
-        if (typeof obj.id !== "number") continue;
-        const handler = pending.get(obj.id);
-        if (!handler) continue;
-        pending.delete(obj.id);
-        if (obj.error) {
-          handler.reject(
-            new Error(
-              `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
-            ),
-          );
-        } else {
-          handler.resolve(obj.result);
-        }
+        newlineIdx = stdoutBuffer.indexOf("\n");
       }
     });
     stderr.on("data", () => {

@@ -1,15 +1,22 @@
-import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
-import { createProcessGuard } from "./process-guard.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
-import { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
-import type { BackgroundTaskState, VerificationCommandResult, VerificationReport, VerificationRuntimeStatus, VerificationStep, VerificationStepKind } from "./tui-data-types.js";
+import { createProcessGuard } from "./process-guard.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import { rememberBackgroundTask } from "./tui-agent-job-runtime.js";
+import type {
+  BackgroundTaskState,
+  VerificationCommandResult,
+  VerificationReport,
+  VerificationRuntimeStatus,
+  VerificationStep,
+  VerificationStepKind,
+} from "./tui-data-types.js";
 import { isRecord } from "./tui-state-runtime.js";
 const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -51,8 +58,6 @@ export async function createVerificationPlan(
   ];
 }
 
-
-
 export function addPackageStep(
   steps: VerificationStep[],
   scripts: Record<string, unknown>,
@@ -65,8 +70,6 @@ export function addPackageStep(
   }
   steps.push({ kind, command: `corepack pnpm ${scriptName}`, reason });
 }
-
-
 
 export async function runVerificationPlan(
   plan: VerificationStep[],
@@ -263,8 +266,6 @@ export async function runVerificationPlan(
   }
 }
 
-
-
 export async function runVerificationCommand(
   command: string,
   cwd: string,
@@ -345,8 +346,6 @@ export async function runVerificationCommand(
   });
 }
 
-
-
 export function detectRunnerCompatibilityError(
   output: string,
   exitCode: number,
@@ -374,8 +373,6 @@ export function detectRunnerCompatibilityError(
   }
   return undefined;
 }
-
-
 
 export function createReviewReport(context: TuiContext): string {
   const changedFiles =
@@ -426,8 +423,6 @@ export function createReviewReport(context: TuiContext): string {
   ].join("\n");
 }
 
-
-
 export function formatVerificationPlan(plan: VerificationStep[], language: Language): string {
   const header = language === "en-US" ? "Verification plan:" : "验证计划：";
   return [
@@ -435,8 +430,6 @@ export function formatVerificationPlan(plan: VerificationStep[], language: Langu
     ...plan.map((step, index) => `${index + 1}. [${step.kind}] ${step.command} — ${step.reason}`),
   ].join("\n");
 }
-
-
 
 export function formatVerificationReport(report: VerificationReport, language: Language): string {
   const lines = [
@@ -458,8 +451,6 @@ export function formatVerificationReport(report: VerificationReport, language: L
   return lines.join("\n");
 }
 
-
-
 export function formatVerificationLast(
   report: VerificationReport | undefined,
   language: Language,
@@ -469,8 +460,6 @@ export function formatVerificationLast(
   }
   return formatVerificationReport(report, language);
 }
-
-
 
 export function summarizeVerificationOutput(
   output: string,
@@ -488,8 +477,6 @@ export function summarizeVerificationOutput(
     : `exitCode=${exitCode}; ${summary}`;
 }
 
-
-
 export async function safeReadJson(path: string): Promise<Record<string, unknown> | null> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
@@ -497,5 +484,3 @@ export async function safeReadJson(path: string): Promise<Record<string, unknown
     return null;
   }
 }
-
-

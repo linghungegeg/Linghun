@@ -249,7 +249,12 @@ describe("cache-freshness", () => {
         model: "claude-3-5-sonnet-latest",
         provider: "claude-relay",
         deferredToolList: [
-          { name: "mcp__codebase-memory-mcp__trace_path", kind: "codebase-memory", executable: true, requiredArgs: ["function_name"] },
+          {
+            name: "mcp__codebase-memory-mcp__trace_path",
+            kind: "codebase-memory",
+            executable: true,
+            requiredArgs: ["function_name"],
+          },
         ],
       };
       const fresh = createCacheFreshness(baseInput);
@@ -259,7 +264,12 @@ describe("cache-freshness", () => {
       const after = createCacheFreshness({
         ...baseInput,
         deferredToolList: [
-          { name: "mcp__codebase-memory-mcp__trace_path", kind: "codebase-memory", executable: true, requiredArgs: ["function_name"] },
+          {
+            name: "mcp__codebase-memory-mcp__trace_path",
+            kind: "codebase-memory",
+            executable: true,
+            requiredArgs: ["function_name"],
+          },
           { name: "mcp__some-mcp__tool_x", kind: "mcp", executable: false, requiredArgs: [] },
         ],
       });
@@ -392,9 +402,7 @@ describe("cache-freshness", () => {
     it("derives provider from model prefix (deepseek-* → deepseek)", async () => {
       const { createCacheState } = await import("./tui-state-runtime.js");
       const dsState = createCacheState("/tmp/p", "deepseek-chat");
-      expect(dsState.lastFreshness?.modelProviderHash).toBe(
-        stableHash("deepseek:deepseek-chat"),
-      );
+      expect(dsState.lastFreshness?.modelProviderHash).toBe(stableHash("deepseek:deepseek-chat"));
       const claudeState = createCacheState("/tmp/p", "claude-opus-4-7");
       // 非 deepseek-* 前缀不再被误染成 DeepSeek。
       expect(claudeState.lastFreshness?.modelProviderHash).toBe(

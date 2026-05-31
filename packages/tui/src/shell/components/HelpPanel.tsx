@@ -115,13 +115,22 @@ export function HelpPanel({
         {fitText(hint.title, innerWidth)}
       </Text>
       <Text>
-        <Text color={panel.group === "core" ? theme.help ?? theme.accent : theme.muted} bold={panel.group === "core"}>
+        <Text
+          color={panel.group === "core" ? (theme.help ?? theme.accent) : theme.muted}
+          bold={panel.group === "core"}
+        >
           {groupLabel("core", panel.group === "core")}
         </Text>
-        <Text color={panel.group === "advanced" ? theme.help ?? theme.accent : theme.muted} bold={panel.group === "advanced"}>
+        <Text
+          color={panel.group === "advanced" ? (theme.help ?? theme.accent) : theme.muted}
+          bold={panel.group === "advanced"}
+        >
           {groupLabel("advanced", panel.group === "advanced")}
         </Text>
-        <Text color={panel.group === "details" ? theme.help ?? theme.accent : theme.muted} bold={panel.group === "details"}>
+        <Text
+          color={panel.group === "details" ? (theme.help ?? theme.accent) : theme.muted}
+          bold={panel.group === "details"}
+        >
           {groupLabel("details", panel.group === "details")}
         </Text>
       </Text>
@@ -140,7 +149,7 @@ export function HelpPanel({
           return (
             <Text
               key={entry.slash}
-              color={active ? theme.help ?? theme.accent : undefined}
+              color={active ? (theme.help ?? theme.accent) : undefined}
               bold={active}
             >
               {fitText(line, innerWidth)}

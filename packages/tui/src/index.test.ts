@@ -19,11 +19,22 @@ import { computePromptCacheHitRate } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildFailureLearningSummaryForPrompt,
+  loadFailureRecords,
+  mergeFailureRecord,
+} from "./failure-learning-runtime.js";
+import {
+  formatSolutionCompletenessReportBlock,
+  needsSolutionCompletenessReportClosure,
+} from "./final-answer-gate.js";
+import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
+  __testCreateShellBlockOutput,
+  __testCreateVerificationLevelForReadiness,
   addAllowRuleForTest,
   containsSecret,
   createCacheState,
@@ -36,9 +47,9 @@ import {
   createModelSystemPrompt,
   createPluginState,
   createRemoteEvent,
-  createSignedRemoteInboundFixture,
   createRemotePairing,
   createRemoteState,
+  createSignedRemoteInboundFixture,
   createSkillState,
   createSolutionCompletenessStatus,
   createWorkflowState,
@@ -50,8 +61,8 @@ import {
   feishuBridgeAdapter,
   findDeferredTool,
   formatDeferredToolsSystemReminder,
-  getRemoteBridgeDoctor,
   getCodebaseMemoryToolRisk,
+  getRemoteBridgeDoctor,
   handleNaturalInput,
   handleRemoteInboundMessage,
   handleSlashCommand,
@@ -60,33 +71,26 @@ import {
   listDeferredTools,
   parseMcpDeferredToolName,
   processRemoteApprovalForTest,
-  processRemoteInbound,
   processRemoteBindCommand,
+  processRemoteInbound,
   recordModelUsage,
   runAutoLearningOnTurnEnd,
   runCommandCaptureForTest,
   runTui,
   runVerificationCommandForTest,
+  sanitizeDiscoveredDeferredToolName,
   searchDeferredTools,
   sendRemoteEventReal,
   snapshotDeferredTools,
   snapshotDeferredToolsSummary,
   snapshotDiscoveredDeferredToolsSummary,
-  sanitizeDiscoveredDeferredToolName,
   validateCodebaseMemoryToolExecution,
   validateExtensionContributionExecution,
   validateRemoteInboundEnvelope,
   validateRemotePairingEnvelope,
   wecomBridgeAdapter,
   writeLightHintsForTest,
-  __testCreateShellBlockOutput,
-  __testCreateVerificationLevelForReadiness,
 } from "./index.js";
-import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
-import {
-  formatSolutionCompletenessReportBlock,
-  needsSolutionCompletenessReportClosure,
-} from "./final-answer-gate.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -97,15 +101,11 @@ import {
   formatCooldownMessage,
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
+import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
-import {
-  buildFailureLearningSummaryForPrompt,
-  loadFailureRecords,
-  mergeFailureRecord,
-} from "./failure-learning-runtime.js";
-import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
 import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
+import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
 import {
   type TerminalReadinessView,
   createReadinessItems,
@@ -4000,7 +4000,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
-    expect(output.text).toContain("openai-compatible: type=openai-compatible provider=openai-compatible model=gpt-5.5");
+    expect(output.text).toContain(
+      "openai-compatible: type=openai-compatible provider=openai-compatible model=gpt-5.5",
+    );
     expect(output.text).toContain(
       "角色路由摘要：planner:deepseek/deepseek-v4-pro；executor:deepseek/deepseek-v4-pro",
     );
@@ -5036,7 +5038,10 @@ describe("Phase 06 TUI slash commands", () => {
               "data: [DONE]\n\n",
             ].join("")
           : `data: ${JSON.stringify({ id: "chatcmpl-test-2", choices: [{ delta: { content: "已收到拒绝结果。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     const output = new MemoryOutput();
@@ -5220,7 +5225,10 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(JSON.parse(String(init.body)));
         if (requests.length === 1) {
           const body = `data: ${JSON.stringify({ id: "chatcmpl-test-1", choices: [{ delta: { content: "我先看一下。" } }] })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -5242,7 +5250,10 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         if (requests.length === 3) {
           const body = `data: ${JSON.stringify({
@@ -5267,10 +5278,16 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         const body = `data: ${JSON.stringify({ id: "chatcmpl-test-4", choices: [{ delta: { content: "已生成 requested-report.md。\n结论：报告已保存。\n推断/未确认：部署细节需继续核对。\n下一步：打开报告复核。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     const output = new MemoryOutput();
@@ -5495,7 +5512,10 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -5517,7 +5537,10 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         const body = `data: ${JSON.stringify({
           id: "chatcmpl-test-3",
@@ -5530,7 +5553,10 @@ describe("Phase 06 TUI slash commands", () => {
             },
           ],
         })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     const output = new MemoryOutput();
@@ -5690,9 +5716,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from([
-        "帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\n/exit\n",
-      ]),
+      stdin: Readable.from(["帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -5711,8 +5735,7 @@ describe("Phase 06 TUI slash commands", () => {
       (m) => m.role === "user" && Array.isArray(m.content),
     );
     const allUserBlocks = userToolResultMessages.flatMap(
-      (m) =>
-        (m.content as Array<{ type?: string; tool_use_id?: string; content?: unknown }>) ?? [],
+      (m) => (m.content as Array<{ type?: string; tool_use_id?: string; content?: unknown }>) ?? [],
     );
     const toolResult = allUserBlocks.find(
       (b) => b.type === "tool_result" && b.tool_use_id === "toolu_test_1",
@@ -6005,9 +6028,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index repair", context, output);
 
     // ask 路径已挂起，等待 PermissionPanel 确认。
-    expect((context as { pendingLocalApproval?: { kind?: string } }).pendingLocalApproval?.kind).toBe(
-      "index_ignore_write",
-    );
+    expect(
+      (context as { pendingLocalApproval?: { kind?: string } }).pendingLocalApproval?.kind,
+    ).toBe("index_ignore_write");
     // ink 主屏不再出现文本提权提示（PermissionPanel 是唯一提权 UI）。
     expect(output.text).not.toContain("需要先确认权限");
     // 文件尚未写入（等待确认）。
@@ -6022,9 +6045,14 @@ describe("Phase 06 TUI slash commands", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
-    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
-      status: "ready",
-    });
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      project,
+      mockDir,
+      undefined,
+      {
+        status: "ready",
+      },
+    );
     await writeFile(
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
@@ -6070,9 +6098,14 @@ describe("Phase 06 TUI slash commands", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
-    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
-      status: "ready",
-    });
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(
+      project,
+      mockDir,
+      undefined,
+      {
+        status: "ready",
+      },
+    );
     await writeFile(
       join(project, ".linghun", "settings.json"),
       JSON.stringify({
@@ -6222,9 +6255,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     // D.14D — index safety pause 不再截胡自然语言。"把这些文件加入 ignore 后刷新索引"
     // 这种自然语言也照常进入模型主链；要修复请显式 /index repair。
-    await expect(handleNaturalInput("把这些文件加入 ignore 后刷新索引", context, output)).resolves.toBe(
-      "message",
-    );
+    await expect(
+      handleNaturalInput("把这些文件加入 ignore 后刷新索引", context, output),
+    ).resolves.toBe("message");
     await expect(handleNaturalInput("帮我实现登录功能", context, output)).resolves.toBe("message");
   });
 
@@ -6288,9 +6321,7 @@ describe("Phase 06 TUI slash commands", () => {
         event.message.includes("tool=Bash"),
     );
     expect(
-      autoAllowEvent && autoAllowEvent.type === "system_event"
-        ? autoAllowEvent.message
-        : "",
+      autoAllowEvent && autoAllowEvent.type === "system_event" ? autoAllowEvent.message : "",
     ).toContain("summary=");
   });
 
@@ -6598,7 +6629,10 @@ describe("Phase 06 TUI slash commands", () => {
       "fetch",
       vi.fn(async () => {
         const body = `data: ${JSON.stringify({ error: { message: "quota exceeded sk-provider-secret C:/Users/Admin/Linghun api_key=private" } })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     const output = new MemoryOutput();
@@ -6620,7 +6654,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(output.text).toContain("last provider failure: kind=provider/transit code=PROVIDER_STREAM_ERROR");
+    expect(output.text).toContain(
+      "last provider failure: kind=provider/transit code=PROVIDER_STREAM_ERROR",
+    );
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
     expect(output.text).toContain("details: /details evidence");
@@ -7641,7 +7677,7 @@ describe("Phase 06 TUI slash commands", () => {
       await handleSlashCommand("/tab", context, output);
       expect(context.permissionMode).toBe("default");
     } finally {
-      delete process.env.LINGHUN_ENABLE_FULL_ACCESS;
+      process.env.LINGHUN_ENABLE_FULL_ACCESS = undefined;
     }
     expect(output.text).not.toContain("acceptEdits");
     expect(output.text).not.toContain("dontAsk");
@@ -8211,7 +8247,14 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/sessions", context, output);
 
-    const panel = (context as { sessionsPanelState?: { cursor: number; entries: { id: string; isCurrent: boolean; updatedAt: string }[] } }).sessionsPanelState;
+    const panel = (
+      context as {
+        sessionsPanelState?: {
+          cursor: number;
+          entries: { id: string; isCurrent: boolean; updatedAt: string }[];
+        };
+      }
+    ).sessionsPanelState;
     expect(panel).toBeDefined();
     // ink 路径不逐行 writeLine 主屏。
     expect(output.text).toBe("");
@@ -8243,7 +8286,13 @@ describe("Phase 06 TUI slash commands", () => {
     // 间接验证：返回的 entries 都有 id/title/updatedAt/messageCount/isCurrent 五字段，
     // 且不会 fake worktree / 搜索结果。
     for (const entry of panel?.entries ?? []) {
-      const e = entry as { id?: unknown; title?: unknown; updatedAt?: unknown; messageCount?: unknown; isCurrent?: unknown };
+      const e = entry as {
+        id?: unknown;
+        title?: unknown;
+        updatedAt?: unknown;
+        messageCount?: unknown;
+        isCurrent?: unknown;
+      };
       expect(typeof e.id).toBe("string");
       expect(typeof e.title).toBe("string");
       expect(typeof e.updatedAt).toBe("string");
@@ -8258,8 +8307,8 @@ describe("Phase 06 TUI slash commands", () => {
     const previous = await store.create({ model: "deepseek-v4-flash", summary: "earlier session" });
     // 给 previous 写入很长的 user_message + assistant_text_delta，验证 /resume <id>
     // 不会把整段 transcript 直接 dump 到 output。
-    const longUserText = "用户长消息" + "。".repeat(500);
-    const longAssistantText = "助手长回答" + "！".repeat(500);
+    const longUserText = `用户长消息${"。".repeat(500)}`;
+    const longAssistantText = `助手长回答${"！".repeat(500)}`;
     await store.appendEvent(previous.id, {
       type: "user_message",
       id: "test-user-1",
@@ -9403,7 +9452,10 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(JSON.parse(String(init.body)));
         if (requests.length === 1) {
           const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-1", choices: [{ delta: { content: "已记录 Architecture Card。" } }] })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         if (requests.length === 2) {
           const body = `data: ${JSON.stringify({
@@ -9428,10 +9480,16 @@ describe("Phase 06 TUI slash commands", () => {
               },
             ],
           })}\n\ndata: [DONE]\n\n`;
-          return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+          return new Response(body, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         const body = `data: ${JSON.stringify({ id: "chatcmpl-architecture-3", choices: [{ delta: { content: "小修已完成。" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     const output = new MemoryOutput();
@@ -10063,10 +10121,7 @@ describe("Phase 06 TUI slash commands", () => {
       return channel;
     };
 
-    const stubDeps = (
-      fetchStatus: number,
-      cliError?: Error,
-    ) => ({
+    const stubDeps = (fetchStatus: number, cliError?: Error) => ({
       fetch: async () => ({ status: fetchStatus, text: async () => "{}" }),
       runCli: async () => {
         if (cliError) throw cliError;
@@ -10169,7 +10224,12 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
     const dingChan = context.remote.channels.find((item) => item.id === "dingtalk");
     if (!dingChan) throw new Error("missing dingtalk");
-    const approvalEvent = createRemoteEvent(dingChan, "approval_request", "approve redacted op", []);
+    const approvalEvent = createRemoteEvent(
+      dingChan,
+      "approval_request",
+      "approve redacted op",
+      [],
+    );
     context.remote.events.unshift(approvalEvent);
 
     const base = {
@@ -10181,7 +10241,7 @@ describe("Phase 06 TUI slash commands", () => {
       source: "ding-mobile-1",
       bindingUserId: "ding-user",
       bindingDeviceId: "ding-device",
-      signature: "mock:inbound:inbound-msg-1:" + approvalEvent.nonce,
+      signature: `mock:inbound:inbound-msg-1:${approvalEvent.nonce}`,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       approve: true,
       origin: "fixture" as const,
@@ -10226,7 +10286,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(processRemoteInbound(context, base)).toMatchObject({ status: "replayed" });
     // bad nonce on a fresh messageId is rejected as bad signature path.
     expect(
-      processRemoteInbound(context, { ...base, messageId: "inbound-msg-2", nonce: "wrong", signature: "mock:inbound:inbound-msg-2:wrong" }),
+      processRemoteInbound(context, {
+        ...base,
+        messageId: "inbound-msg-2",
+        nonce: "wrong",
+        signature: "mock:inbound:inbound-msg-2:wrong",
+      }),
     ).toMatchObject({ status: "bad_signature" });
     expect(context.evidence).toEqual([]);
   });
@@ -10258,7 +10323,13 @@ describe("Phase 06 TUI slash commands", () => {
     const dingChan = context.remote.channels.find((item) => item.id === "dingtalk");
     if (!dingChan) throw new Error("missing dingtalk");
     // The approval_request itself is already expired (TTL in the past).
-    const expiredEvent = createRemoteEvent(dingChan, "approval_request", "approve redacted op", [], -1);
+    const expiredEvent = createRemoteEvent(
+      dingChan,
+      "approval_request",
+      "approve redacted op",
+      [],
+      -1,
+    );
     expect(Date.parse(expiredEvent.expiresAt)).toBeLessThanOrEqual(Date.now());
     context.remote.events.unshift(expiredEvent);
 
@@ -10278,7 +10349,7 @@ describe("Phase 06 TUI slash commands", () => {
       source: "ding-mobile-1",
       bindingUserId: "ding-user",
       bindingDeviceId: "ding-device",
-      signature: "mock:inbound:fresh-inbound-1:" + expiredEvent.nonce,
+      signature: `mock:inbound:fresh-inbound-1:${expiredEvent.nonce}`,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       approve: true,
       origin: "fixture" as const,
@@ -10339,7 +10410,7 @@ describe("Phase 06 TUI slash commands", () => {
       eventId: approvalEvent.id,
       source: "ding-mobile-1",
       bindingUserId: "ding-user",
-      signature: "mock:inbound:plan-inbound-1:" + approvalEvent.nonce,
+      signature: `mock:inbound:plan-inbound-1:${approvalEvent.nonce}`,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
       approve: true,
       origin: "fixture",
@@ -10780,7 +10851,7 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("D.14F bridge source invariant: runtime stays outside index.ts and adapters do not import executors", async () => {
     const indexSrc = await readFile("src/index.ts", "utf8");
-    expect(indexSrc).toContain("from \"./remote-inbound-bridge-runtime.js\"");
+    expect(indexSrc).toContain('from "./remote-inbound-bridge-runtime.js"');
     expect(indexSrc).not.toContain("function feishuBridgeAdapter");
     expect(indexSrc).not.toContain("function dingtalkBridgeAdapter");
     expect(indexSrc).not.toContain("function wecomBridgeAdapter");
@@ -10910,7 +10981,14 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
     const feishu = context.remote.channels.find((item) => item.id === "feishu");
     if (!feishu) throw new Error("missing feishu");
-    const created = createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "SEC123");
+    const created = createRemotePairing(
+      context.remote,
+      feishu,
+      project,
+      session.id,
+      Date.now(),
+      "SEC123",
+    );
     if (created.status !== "created") throw new Error("pairing not created");
 
     const badSource = await handleRemoteInboundMessage(
@@ -10939,7 +11017,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.remote.processedMessageIds).toContain("bind-new-source");
     expect(context.evidence).toEqual([]);
 
-    const second = createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "SEC124");
+    const second = createRemotePairing(
+      context.remote,
+      feishu,
+      project,
+      session.id,
+      Date.now(),
+      "SEC124",
+    );
     if (second.status !== "created") throw new Error("second pairing not created");
     const badSignature = await handleRemoteInboundMessage(
       {
@@ -11123,12 +11208,20 @@ describe("Phase 06 TUI slash commands", () => {
 
     createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "REPLAY");
     expect(
-      processRemoteBindCommand(context.remote, feishu, { ...base, messageId: "bind-replay", text: "/bind REPLAY" }),
+      processRemoteBindCommand(context.remote, feishu, {
+        ...base,
+        messageId: "bind-replay",
+        text: "/bind REPLAY",
+      }),
     ).toMatchObject({ status: "bound" });
     const replayPairing = context.remote.pairings.find((item) => item.code === "REPLAY");
     if (replayPairing) replayPairing.status = "pending";
     expect(
-      processRemoteBindCommand(context.remote, feishu, { ...base, messageId: "bind-replay", text: "/bind REPLAY" }),
+      processRemoteBindCommand(context.remote, feishu, {
+        ...base,
+        messageId: "bind-replay",
+        text: "/bind REPLAY",
+      }),
     ).toMatchObject({ status: "replayed" });
 
     createRemotePairing(context.remote, feishu, project, session.id, Date.now(), "WRONG1");
@@ -11195,12 +11288,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(status.kind).toBe("status_query");
     expect(context.remote.inbox).toHaveLength(1);
 
-    const approvalEvent = createRemoteEvent(
-      context.remote.channels.find((item) => item.id === "wecom")!,
-      "approval_request",
-      "approve write",
-      [],
-    );
+    const wecomChannel = context.remote.channels.find((item) => item.id === "wecom");
+    if (!wecomChannel) throw new Error("missing wecom channel");
+    const approvalEvent = createRemoteEvent(wecomChannel, "approval_request", "approve write", []);
     context.remote.events.unshift(approvalEvent);
     context.pendingLocalApproval = {
       kind: "model_tool_use",
@@ -11319,7 +11409,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Bot pairing code");
     expect(output.text).toContain("/bind");
     expect(output.text).toContain("Feishu Bot setup");
-    expect(output.text).not.toMatch(/appSecret=.*|Bearer|sk-|sessionWebhook=.*|trustedSources:\s*\[/i);
+    expect(output.text).not.toMatch(
+      /appSecret=.*|Bearer|sk-|sessionWebhook=.*|trustedSources:\s*\[/i,
+    );
   });
 
   it("D.14F-Bot start feishu reuses long connection and routes messages into main inbound glue", async () => {
@@ -11483,7 +11575,9 @@ describe("Phase 06 TUI slash commands", () => {
       origin: "adapter" as const,
     };
 
-    expect(validateRemoteInboundEnvelope(context, base)).toMatchObject({ status: "unknown_source" });
+    expect(validateRemoteInboundEnvelope(context, base)).toMatchObject({
+      status: "unknown_source",
+    });
 
     const feishu = context.remote.channels.find((item) => item.id === "feishu");
     if (!feishu) throw new Error("missing feishu");
@@ -11534,7 +11628,9 @@ describe("Phase 06 TUI slash commands", () => {
       origin: "adapter" as const,
     };
 
-    expect(validateRemotePairingEnvelope(context, message)).toMatchObject({ status: "envelope_accepted" });
+    expect(validateRemotePairingEnvelope(context, message)).toMatchObject({
+      status: "envelope_accepted",
+    });
     const directBind = processRemoteBindCommand(context.remote, feishu, message);
     expect(directBind).toMatchObject({ status: "bound" });
     expect(feishu.config.bindingUserId).toBe("new-user");
@@ -12506,10 +12602,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     // D.13I tail fix — 必须先 SearchExtraTools 让 Set 记录 list_projects。
     executeSearchExtraTools("list_projects", context);
 
-    const result = await executeExtraTool(
-      { tool_name: "list_projects", params: {} },
-      context,
-    );
+    const result = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
     expect(result.ok).toBe(true);
     expect(result.text).toContain("list_projects");
   });
@@ -12770,9 +12863,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     const output = new MemoryOutput();
     await runTui({
       projectPath: project,
-      stdin: Readable.from([
-        "帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\nyes\n/exit\n",
-      ]),
+      stdin: Readable.from(["帮我分析一下这个项目 看看怎么部署 把分析记在心里\nyes\nyes\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -12910,10 +13001,11 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     ];
     expect(searchDeferredTools("", tools)).toEqual(tools);
     expect(searchDeferredTools("trace", tools).map((t) => t.name)).toEqual(["trace_path"]);
-    expect(searchDeferredTools("memory", tools).map((t) => t.name).sort()).toEqual([
-      "search_code",
-      "trace_path",
-    ]);
+    expect(
+      searchDeferredTools("memory", tools)
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual(["search_code", "trace_path"]);
     expect(findDeferredTool("trace_path", tools)?.name).toBe("trace_path");
     expect(findDeferredTool("nope", tools)).toBeUndefined();
   });
@@ -12949,10 +13041,7 @@ describe("D.13J Block 3 — codebase-memory mutating permission gate", () => {
     // 不授予权限，且 params 缺 repo_path
     expect(context.codebaseMemoryMutatingGranted).toBeFalsy();
 
-    const result = await executeExtraTool(
-      { tool_name: "index_repository", params: {} },
-      context,
-    );
+    const result = await executeExtraTool({ tool_name: "index_repository", params: {} }, context);
     expect(result.ok).toBe(false);
     // required-args 必须在 permission gate 之前出现
     expect(result.text).toContain("缺少 required args");
@@ -12999,10 +13088,7 @@ describe("D.13J Block 3 — codebase-memory mutating permission gate", () => {
     expect(context.codebaseMemoryMutatingGranted).toBeFalsy();
 
     // readonly 工具 list_projects 不需要权限 → 必须放行
-    const result = await executeExtraTool(
-      { tool_name: "list_projects", params: {} },
-      context,
-    );
+    const result = await executeExtraTool({ tool_name: "list_projects", params: {} }, context);
     expect(result.ok).toBe(true);
     expect(result.text).toContain("list_projects");
   });
@@ -13277,8 +13363,14 @@ describe("D.13J Block 4 — local stdio MCP runtime adapter", () => {
         servers: {
           ...defaultConfig.mcp.servers,
           "local-stdio": { command: "node", args: ["mock.cjs"] },
-          "no-command": { command: "", args: [] } as unknown as (typeof defaultConfig.mcp.servers)[string],
-          "disabled-srv": { command: "node", disabled: true } as unknown as (typeof defaultConfig.mcp.servers)[string],
+          "no-command": {
+            command: "",
+            args: [],
+          } as unknown as (typeof defaultConfig.mcp.servers)[string],
+          "disabled-srv": {
+            command: "node",
+            disabled: true,
+          } as unknown as (typeof defaultConfig.mcp.servers)[string],
         },
       },
     };
@@ -13647,7 +13739,8 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
-    const original = "Model route doctor\n- endpointPath=/v1/messages\n- providers: openai-compatible";
+    const original =
+      "Model route doctor\n- endpointPath=/v1/messages\n- providers: openai-compatible";
     context.lastFullOutput = original;
 
     const out1 = new MemoryOutput();
@@ -13664,7 +13757,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     expect(context.lastFullOutput).toBe(original);
   });
 
-  it("P0-B 3: 普通问候 \"你好，只回复：连接成功\" 必须放行到模型 (handleNaturalInput → message)", async () => {
+  it('P0-B 3: 普通问候 "你好，只回复：连接成功" 必须放行到模型 (handleNaturalInput → message)', async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -13679,7 +13772,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     expect(output.text).not.toContain("Handled locally");
   });
 
-  it("P0-B 4: 短句 \"测试一下\" 必须放行到模型 (handleNaturalInput → message)", async () => {
+  it('P0-B 4: 短句 "测试一下" 必须放行到模型 (handleNaturalInput → message)', async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -13692,7 +13785,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     expect(output.text).not.toContain("已本地处理");
   });
 
-  it("P0-B 5: 普通对话短句 \"/help 怎么用是吗\" 不带前导 / → 必须放行到模型", async () => {
+  it('P0-B 5: 普通对话短句 "/help 怎么用是吗" 不带前导 / → 必须放行到模型', async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -14348,9 +14441,7 @@ describe("D.13V-A item 2: createVerificationLevelForReadiness routes through cla
       /createVerificationLevelForReadiness[\s\S]{0,5000}classifyVerificationLevel\(/,
     );
     // 旧 P0-3 假升级表达式不能再出现
-    expect(indexSrc).not.toMatch(
-      /hasRealSmoke\s*\?\s*"real-smoke"\s*:\s*hasBuild\s*\?\s*"build"/,
-    );
+    expect(indexSrc).not.toMatch(/hasRealSmoke\s*\?\s*"real-smoke"\s*:\s*hasBuild\s*\?\s*"build"/);
   });
 
   // D.14A-R-Fix P1-2 — 合成 smoke（synthetic=true）pass 不得升级 real-smoke；
@@ -14508,7 +14599,9 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
     // thinking-only 文案：必须是新提示，不是通用 empty response 文案
     expect(output.text).toContain("模型已返回思考流但没有最终文本");
     expect(output.text).toContain("/model doctor");
-    expect(output.text).not.toContain("模型没有返回有效回答。可运行 /model doctor 查看详情后重试。");
+    expect(output.text).not.toContain(
+      "模型没有返回有效回答。可运行 /model doctor 查看详情后重试。",
+    );
 
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const sessions = await store.list();
@@ -14661,7 +14754,9 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toContain("createExtendedFinalAnswerReminder");
     expect(text).toContain("buildExtendedDowngradedFinalAnswer");
     // 与 D.13U evaluateFinalAnswerClaims 共享一次重试预算（finalAnswerClaimRetried）
-    expect(text).toMatch(/finalAnswerClaimRetried[\s\S]{0,1200}runArchitectureAndCompletenessFinalGate/);
+    expect(text).toMatch(
+      /finalAnswerClaimRetried[\s\S]{0,1200}runArchitectureAndCompletenessFinalGate/,
+    );
   });
 
   it("source: continueModelAfterToolResults 镜像同一 gate", async () => {
@@ -14792,7 +14887,10 @@ describe("D.14G git stable point / managed worktree product closure", () => {
   // 在 throwaway 临时仓库里设置 local-only git identity（-c 形式，不写用户全局 config）。
   function gitInitRepo(dir: string): void {
     spawnSync("git", ["init"], { cwd: dir, windowsHide: true });
-    spawnSync("git", ["config", "user.email", "test@linghun.local"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.email", "test@linghun.local"], {
+      cwd: dir,
+      windowsHide: true,
+    });
     spawnSync("git", ["config", "user.name", "linghun-test"], { cwd: dir, windowsHide: true });
     spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir, windowsHide: true });
   }
@@ -14848,13 +14946,20 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         const body = tc
           ? `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { tool_calls: [{ id: `call-${requests.length}`, type: "function", function: { name: tc.toolName, arguments: JSON.stringify(tc.input) } }] } }] })}\n\ndata: [DONE]\n\n`
           : `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     return requests;
   }
 
-  async function makeRepoContext(): Promise<{ project: string; context: TuiContext; store: SessionStore }> {
+  async function makeRepoContext(): Promise<{
+    project: string;
+    context: TuiContext;
+    store: SessionStore;
+  }> {
     const project = await mkdtemp(join(tmpdir(), "linghun-d14g-"));
     gitInitRepo(project);
     await writeFile(join(project, "README.md"), "# repo\n", "utf8");
@@ -14865,44 +14970,70 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     return { project, context, store };
   }
 
-  gitIt("/git stable create commits tracked changes and records git_operation evidence", async () => {
-    const { project, context } = await makeRepoContext();
-    await writeFile(join(project, "README.md"), "# repo\n\nchanged\n", "utf8");
-    const output = new MemoryOutput();
+  gitIt(
+    "/git stable create commits tracked changes and records git_operation evidence",
+    async () => {
+      const { project, context } = await makeRepoContext();
+      await writeFile(join(project, "README.md"), "# repo\n\nchanged\n", "utf8");
+      const output = new MemoryOutput();
 
-    await handleSlashCommand('/git stable create "feat: d14g stable"', context, output);
+      await handleSlashCommand('/git stable create "feat: d14g stable"', context, output);
 
-    expect(output.text).toContain("已建立稳定点");
-    // 真实 commit 落地：git log 顶部是我们的 subject。
-    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
-    expect(log.stdout.toString().trim()).toBe("feat: d14g stable");
-    // git_operation evidence 记录，可支撑“已建立稳定点”声明。
-    expect(
-      context.evidence.some((e) => e.supportsClaims.includes("stable_point_created")),
-    ).toBe(true);
-  });
+      expect(output.text).toContain("已建立稳定点");
+      // 真实 commit 落地：git log 顶部是我们的 subject。
+      const log = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      });
+      expect(log.stdout.toString().trim()).toBe("feat: d14g stable");
+      // git_operation evidence 记录，可支撑“已建立稳定点”声明。
+      expect(context.evidence.some((e) => e.supportsClaims.includes("stable_point_created"))).toBe(
+        true,
+      );
+    },
+  );
 
   gitIt("/git stable create on clean repo skips (no empty commit)", async () => {
     const { project, context } = await makeRepoContext();
-    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    })
+      .stdout.toString()
+      .trim();
     const output = new MemoryOutput();
 
     await handleSlashCommand('/git stable create "noop"', context, output);
 
     expect(output.text).toContain("干净");
-    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    })
+      .stdout.toString()
+      .trim();
     expect(after).toBe(before);
   });
 
   gitIt("/git stable create with only untracked → snapshot, no commit", async () => {
     const { project, context } = await makeRepoContext();
     await writeFile(join(project, "new-untracked.ts"), "export const x = 1;\n", "utf8");
-    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const before = spawnSync("git", ["rev-list", "--count", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    })
+      .stdout.toString()
+      .trim();
     const output = new MemoryOutput();
 
     await handleSlashCommand('/git stable create "untracked"', context, output);
 
-    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], { cwd: project, windowsHide: true }).stdout.toString().trim();
+    const after = spawnSync("git", ["rev-list", "--count", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    })
+      .stdout.toString()
+      .trim();
     expect(after).toBe(before);
     expect(output.text).toMatch(/snapshot|未跟踪/);
   });
@@ -14913,38 +15044,52 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     await writeFile(join(project, ".env"), "SECRET=should-not-commit\n", "utf8");
     const output = new MemoryOutput();
 
-    await handleSlashCommand('/git stable create "feat: incl" --include-untracked', context, output);
+    await handleSlashCommand(
+      '/git stable create "feat: incl" --include-untracked',
+      context,
+      output,
+    );
 
     // safe.ts committed; .env never tracked.
-    const tracked = spawnSync("git", ["ls-files"], { cwd: project, windowsHide: true }).stdout.toString();
+    const tracked = spawnSync("git", ["ls-files"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString();
     expect(tracked).toContain("safe.ts");
     expect(tracked).not.toContain(".env");
   });
 
-  gitIt("Run 2 P1-1: slash stable/checkpoint in plan mode creates no commit or snapshot", async () => {
-    const { project, context } = await makeRepoContext();
-    context.permissionMode = "plan";
-    await writeFile(join(project, "README.md"), "# repo\n\nplan-slash-change\n", "utf8");
-    const baseline = spawnSync("git", ["rev-parse", "HEAD"], {
-      cwd: project,
-      windowsHide: true,
-    }).stdout.toString().trim();
-    const output = new MemoryOutput();
+  gitIt(
+    "Run 2 P1-1: slash stable/checkpoint in plan mode creates no commit or snapshot",
+    async () => {
+      const { project, context } = await makeRepoContext();
+      context.permissionMode = "plan";
+      await writeFile(join(project, "README.md"), "# repo\n\nplan-slash-change\n", "utf8");
+      const baseline = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: project,
+        windowsHide: true,
+      })
+        .stdout.toString()
+        .trim();
+      const output = new MemoryOutput();
 
-    await handleSlashCommand('/git stable create "feat: forbidden slash"', context, output);
-    await handleSlashCommand('/checkpoint create "feat: forbidden checkpoint"', context, output);
+      await handleSlashCommand('/git stable create "feat: forbidden slash"', context, output);
+      await handleSlashCommand('/checkpoint create "feat: forbidden checkpoint"', context, output);
 
-    const after = spawnSync("git", ["rev-parse", "HEAD"], {
-      cwd: project,
-      windowsHide: true,
-    }).stdout.toString().trim();
-    expect(after).toBe(baseline);
-    expect(output.text).toContain("Plan mode is read-only");
-    expect(context.checkpoints).toHaveLength(0);
-    expect(
-      context.evidence.some((e) => e.supportsClaims.includes("stable_point_created")),
-    ).toBe(false);
-  });
+      const after = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: project,
+        windowsHide: true,
+      })
+        .stdout.toString()
+        .trim();
+      expect(after).toBe(baseline);
+      expect(output.text).toContain("Plan mode is read-only");
+      expect(context.checkpoints).toHaveLength(0);
+      expect(context.evidence.some((e) => e.supportsClaims.includes("stable_point_created"))).toBe(
+        false,
+      );
+    },
+  );
 
   gitIt("/worktree create makes a managed worktree under the controlled root", async () => {
     const { project, context } = await makeRepoContext();
@@ -14953,12 +15098,13 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     await handleSlashCommand("/worktree create d14g-feat", context, output);
 
     expect(output.text).toContain("已创建 worktree");
-    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    const list = spawnSync("git", ["worktree", "list"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString();
     expect(list).toContain(".linghun-worktrees");
     expect(list).toContain("d14g-feat");
-    expect(
-      context.evidence.some((e) => e.supportsClaims.includes("worktree_created")),
-    ).toBe(true);
+    expect(context.evidence.some((e) => e.supportsClaims.includes("worktree_created"))).toBe(true);
   });
 
   gitIt("/worktree create rejects an invalid (escaping) name without touching git", async () => {
@@ -14968,35 +15114,47 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     await handleSlashCommand("/worktree create ../escape", context, output);
 
     expect(output.text).toMatch(/非法|invalid|不能/);
-    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    const list = spawnSync("git", ["worktree", "list"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString();
     expect(list).not.toContain("escape");
   });
 
-  gitIt("/worktree remove on a clean managed worktree asks for confirmation, then removes on yes", async () => {
-    const { project, context } = await makeRepoContext();
-    const createOut = new MemoryOutput();
-    await handleSlashCommand("/worktree create d14g-rm", context, createOut);
-    expect(createOut.text).toContain("已创建 worktree");
+  gitIt(
+    "/worktree remove on a clean managed worktree asks for confirmation, then removes on yes",
+    async () => {
+      const { project, context } = await makeRepoContext();
+      const createOut = new MemoryOutput();
+      await handleSlashCommand("/worktree create d14g-rm", context, createOut);
+      expect(createOut.text).toContain("已创建 worktree");
 
-    const removeOut = new MemoryOutput();
-    await handleSlashCommand("/worktree remove d14g-rm", context, removeOut);
-    // 进入确认，未删除。
-    expect(removeOut.text).toContain("确认删除");
-    expect(context.pendingLocalApproval?.kind).toBe("git_worktree_remove");
-    let list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
-    expect(list).toContain("d14g-rm");
+      const removeOut = new MemoryOutput();
+      await handleSlashCommand("/worktree remove d14g-rm", context, removeOut);
+      // 进入确认，未删除。
+      expect(removeOut.text).toContain("确认删除");
+      expect(context.pendingLocalApproval?.kind).toBe("git_worktree_remove");
+      let list = spawnSync("git", ["worktree", "list"], {
+        cwd: project,
+        windowsHide: true,
+      }).stdout.toString();
+      expect(list).toContain("d14g-rm");
 
-    // 确认 yes → 真正删除。
-    const yesOut = new MemoryOutput();
-    await handleNaturalInput("yes", context, yesOut);
-    expect(yesOut.text).toContain("已删除 worktree");
-    expect(context.pendingLocalApproval).toBeUndefined();
-    list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
-    expect(list).not.toContain("d14g-rm");
-    expect(
-      context.evidence.some((e) => e.supportsClaims.includes("worktree_removed")),
-    ).toBe(true);
-  });
+      // 确认 yes → 真正删除。
+      const yesOut = new MemoryOutput();
+      await handleNaturalInput("yes", context, yesOut);
+      expect(yesOut.text).toContain("已删除 worktree");
+      expect(context.pendingLocalApproval).toBeUndefined();
+      list = spawnSync("git", ["worktree", "list"], {
+        cwd: project,
+        windowsHide: true,
+      }).stdout.toString();
+      expect(list).not.toContain("d14g-rm");
+      expect(context.evidence.some((e) => e.supportsClaims.includes("worktree_removed"))).toBe(
+        true,
+      );
+    },
+  );
 
   gitIt("/worktree remove deny (no) keeps the worktree", async () => {
     const { project, context } = await makeRepoContext();
@@ -15008,7 +15166,10 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     const noOut = new MemoryOutput();
     await handleNaturalInput("no", context, noOut);
     expect(context.pendingLocalApproval).toBeUndefined();
-    const list = spawnSync("git", ["worktree", "list"], { cwd: project, windowsHide: true }).stdout.toString();
+    const list = spawnSync("git", ["worktree", "list"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString();
     expect(list).toContain("d14g-keep");
   });
 
@@ -15016,7 +15177,10 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     const { project, context } = await makeRepoContext();
     // 在受控目录外创建一个 external worktree。
     const external = await mkdtemp(join(tmpdir(), "linghun-ext-"));
-    spawnSync("git", ["worktree", "add", join(external, "ext-wt")], { cwd: project, windowsHide: true });
+    spawnSync("git", ["worktree", "add", join(external, "ext-wt")], {
+      cwd: project,
+      windowsHide: true,
+    });
     const output = new MemoryOutput();
 
     await handleSlashCommand("/worktree remove ext-wt", context, output);
@@ -15025,280 +15189,315 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     expect(context.pendingLocalApproval).toBeUndefined();
   });
 
-  gitIt("model GitStablePointCreate tool_use executes a real commit after confirmation and the final answer is evidence-backed", async () => {
-    await isolateModelEnv();
-    const { project, context, store } = await makeRepoContext();
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "git-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "git-model",
+  gitIt(
+    "model GitStablePointCreate tool_use executes a real commit after confirmation and the final answer is evidence-backed",
+    async () => {
+      await isolateModelEnv();
+      const { project, context, store } = await makeRepoContext();
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          ...defaultConfig,
+          defaultModel: "git-model",
+          providers: {
+            ...defaultConfig.providers,
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "git-model",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    await writeFile(join(project, "README.md"), "# repo\n\nmodel-change\n", "utf8");
+        }),
+        "utf8",
+      );
+      await writeFile(join(project, "README.md"), "# repo\n\nmodel-change\n", "utf8");
 
-    const requests = mockSseToolSequence(
-      [{ toolName: "GitStablePointCreate", input: { message: "feat: via model" } }],
-      "已建立稳定点。",
-    );
+      const requests = mockSseToolSequence(
+        [{ toolName: "GitStablePointCreate", input: { message: "feat: via model" } }],
+        "已建立稳定点。",
+      );
 
-    await runTui({
-      projectPath: project,
-      // D.14D-R2 P1-1：default 模式下模型工具触发的稳定点先进权限确认，yes 后才执行。
-      stdin: Readable.from(["帮我建立一个稳定点\n", "yes\n", "/exit\n"]),
-      stdout: new MemoryOutput(),
-      stderr: new MemoryOutput(),
-    });
+      await runTui({
+        projectPath: project,
+        // D.14D-R2 P1-1：default 模式下模型工具触发的稳定点先进权限确认，yes 后才执行。
+        stdin: Readable.from(["帮我建立一个稳定点\n", "yes\n", "/exit\n"]),
+        stdout: new MemoryOutput(),
+        stderr: new MemoryOutput(),
+      });
 
-    // 模型确实发了 tool_call（≥2 轮）。
-    expect(requests.length).toBeGreaterThanOrEqual(2);
-    // 确认后真实 commit 落地。
-    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
-    expect(log.stdout.toString().trim()).toBe("feat: via model");
-    // git_operation evidence 写入 transcript。
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    expect(
-      transcript.some(
-        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
-      ),
-    ).toBe(true);
-  });
+      // 模型确实发了 tool_call（≥2 轮）。
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      // 确认后真实 commit 落地。
+      const log = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      });
+      expect(log.stdout.toString().trim()).toBe("feat: via model");
+      // git_operation evidence 写入 transcript。
+      const sessions = await store.list();
+      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+      expect(
+        transcript.some(
+          (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+        ),
+      ).toBe(true);
+    },
+  );
 
-  gitIt("D.14D-R2 P1-1: model GitStablePointCreate waits for confirmation; deny creates no commit", async () => {
-    await isolateModelEnv();
-    const { project, store } = await makeRepoContext();
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "git-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "git-model",
+  gitIt(
+    "D.14D-R2 P1-1: model GitStablePointCreate waits for confirmation; deny creates no commit",
+    async () => {
+      await isolateModelEnv();
+      const { project, store } = await makeRepoContext();
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          ...defaultConfig,
+          defaultModel: "git-model",
+          providers: {
+            ...defaultConfig.providers,
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "git-model",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    await writeFile(join(project, "README.md"), "# repo\n\nuncommitted-change\n", "utf8");
-    const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
-      cwd: project,
-      windowsHide: true,
-    }).stdout.toString().trim();
+        }),
+        "utf8",
+      );
+      await writeFile(join(project, "README.md"), "# repo\n\nuncommitted-change\n", "utf8");
+      const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      })
+        .stdout.toString()
+        .trim();
 
-    const requests = mockSseToolSequence(
-      [{ toolName: "GitStablePointCreate", input: { message: "feat: should-not-commit" } }],
-      "我不会声称已建立稳定点。",
-    );
-    const output = new MemoryOutput();
+      const requests = mockSseToolSequence(
+        [{ toolName: "GitStablePointCreate", input: { message: "feat: should-not-commit" } }],
+        "我不会声称已建立稳定点。",
+      );
+      const output = new MemoryOutput();
 
-    await runTui({
-      projectPath: project,
-      // 拒绝确认 → 不创建 commit/snapshot。
-      stdin: Readable.from(["建立一个稳定点\n", "no\n", "/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+      await runTui({
+        projectPath: project,
+        // 拒绝确认 → 不创建 commit/snapshot。
+        stdin: Readable.from(["建立一个稳定点\n", "no\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
 
-    expect(requests.length).toBeGreaterThanOrEqual(2);
-    // HEAD 未变（未创建新 commit）。
-    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
-    expect(log.stdout.toString().trim()).toBe(baselineLog);
-    expect(log.stdout.toString().trim()).not.toBe("feat: should-not-commit");
-    // 回灌给模型的 tool_result 明确未创建；无 stable_point_created evidence。
-    const second = requests[1] as { messages?: { role?: string; content?: string }[] };
-    const toolMessage = second?.messages?.find((message) => message.role === "tool");
-    expect(toolMessage?.content).toContain("稳定点未创建");
-    expect(toolMessage?.content).toContain('"outcome":"denied"');
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    expect(
-      transcript.some(
-        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
-      ),
-    ).toBe(false);
-  });
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      // HEAD 未变（未创建新 commit）。
+      const log = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      });
+      expect(log.stdout.toString().trim()).toBe(baselineLog);
+      expect(log.stdout.toString().trim()).not.toBe("feat: should-not-commit");
+      // 回灌给模型的 tool_result 明确未创建；无 stable_point_created evidence。
+      const second = requests[1] as { messages?: { role?: string; content?: string }[] };
+      const toolMessage = second?.messages?.find((message) => message.role === "tool");
+      expect(toolMessage?.content).toContain("稳定点未创建");
+      expect(toolMessage?.content).toContain('"outcome":"denied"');
+      const sessions = await store.list();
+      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+      expect(
+        transcript.some(
+          (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+        ),
+      ).toBe(false);
+    },
+  );
 
-  gitIt("Run 2 P1-1: model GitStablePointCreate in auto-review creates without confirmation", async () => {
-    await isolateModelEnv();
-    const { project, store } = await makeRepoContext();
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "git-model",
-        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "git-model",
+  gitIt(
+    "Run 2 P1-1: model GitStablePointCreate in auto-review creates without confirmation",
+    async () => {
+      await isolateModelEnv();
+      const { project, store } = await makeRepoContext();
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          ...defaultConfig,
+          defaultModel: "git-model",
+          permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+          providers: {
+            ...defaultConfig.providers,
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "git-model",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    await writeFile(join(project, "README.md"), "# repo\n\nauto-review-change\n", "utf8");
+        }),
+        "utf8",
+      );
+      await writeFile(join(project, "README.md"), "# repo\n\nauto-review-change\n", "utf8");
 
-    const requests = mockSseToolSequence(
-      [{ toolName: "GitStablePointCreate", input: { message: "feat: auto review stable" } }],
-      "已建立稳定点。",
-    );
-    const output = new MemoryOutput();
+      const requests = mockSseToolSequence(
+        [{ toolName: "GitStablePointCreate", input: { message: "feat: auto review stable" } }],
+        "已建立稳定点。",
+      );
+      const output = new MemoryOutput();
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["帮我建立一个稳定点\n", "/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["帮我建立一个稳定点\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
 
-    expect(requests.length).toBeGreaterThanOrEqual(2);
-    expect(output.text).not.toContain("确认为当前工作区创建稳定点");
-    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
-    expect(log.stdout.toString().trim()).toBe("feat: auto review stable");
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    expect(
-      transcript.some(
-        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
-      ),
-    ).toBe(true);
-  });
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(output.text).not.toContain("确认为当前工作区创建稳定点");
+      const log = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      });
+      expect(log.stdout.toString().trim()).toBe("feat: auto review stable");
+      const sessions = await store.list();
+      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+      expect(
+        transcript.some(
+          (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+        ),
+      ).toBe(true);
+    },
+  );
 
-  gitIt("D.14D-R2 fix: model GitStablePointCreate in plan mode is rejected without commit or snapshot", async () => {
-    await isolateModelEnv();
-    const { project, store } = await makeRepoContext();
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "git-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "git-model",
+  gitIt(
+    "D.14D-R2 fix: model GitStablePointCreate in plan mode is rejected without commit or snapshot",
+    async () => {
+      await isolateModelEnv();
+      const { project, store } = await makeRepoContext();
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          ...defaultConfig,
+          defaultModel: "git-model",
+          providers: {
+            ...defaultConfig.providers,
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "git-model",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    await writeFile(join(project, "README.md"), "# repo\n\nplan-mode-change\n", "utf8");
-    const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
-      cwd: project,
-      windowsHide: true,
-    }).stdout.toString().trim();
+        }),
+        "utf8",
+      );
+      await writeFile(join(project, "README.md"), "# repo\n\nplan-mode-change\n", "utf8");
+      const baselineLog = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      })
+        .stdout.toString()
+        .trim();
 
-    const requests = mockSseToolSequence(
-      [{ toolName: "GitStablePointCreate", input: { message: "feat: forbidden in plan" } }],
-      "Plan 模式下没有创建稳定点。",
-    );
-    const output = new MemoryOutput();
+      const requests = mockSseToolSequence(
+        [{ toolName: "GitStablePointCreate", input: { message: "feat: forbidden in plan" } }],
+        "Plan 模式下没有创建稳定点。",
+      );
+      const output = new MemoryOutput();
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["/mode plan\n", "建立一个稳定点\n", "/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["/mode plan\n", "建立一个稳定点\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
 
-    expect(requests.length).toBeGreaterThanOrEqual(2);
-    expect(output.text).not.toContain("确认为当前工作区创建稳定点");
-    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
-    expect(log.stdout.toString().trim()).toBe(baselineLog);
-    expect(log.stdout.toString().trim()).not.toBe("feat: forbidden in plan");
-    const snapshots = spawnSync("git", ["stash", "list"], { cwd: project, windowsHide: true }).stdout.toString();
-    expect(snapshots).not.toContain("linghun-stable-point");
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(output.text).not.toContain("确认为当前工作区创建稳定点");
+      const log = spawnSync("git", ["log", "-1", "--format=%s"], {
+        cwd: project,
+        windowsHide: true,
+      });
+      expect(log.stdout.toString().trim()).toBe(baselineLog);
+      expect(log.stdout.toString().trim()).not.toBe("feat: forbidden in plan");
+      const snapshots = spawnSync("git", ["stash", "list"], {
+        cwd: project,
+        windowsHide: true,
+      }).stdout.toString();
+      expect(snapshots).not.toContain("linghun-stable-point");
 
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    const toolResult = transcript.find(
-      (e) => e.type === "tool_result" && e.toolName === "GitStablePointCreate",
-    ) as { content?: unknown; isError?: boolean } | undefined;
-    expect(toolResult?.isError).toBe(true);
-    expect(JSON.stringify(toolResult?.content)).toContain(
-      "stable point was NOT created because Plan mode is read-only",
-    );
-    expect(JSON.stringify(toolResult?.content)).toContain('"outcome":"plan_read_only"');
-    expect(
-      transcript.some(
+      const sessions = await store.list();
+      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+      const toolResult = transcript.find(
+        (e) => e.type === "tool_result" && e.toolName === "GitStablePointCreate",
+      ) as { content?: unknown; isError?: boolean } | undefined;
+      expect(toolResult?.isError).toBe(true);
+      expect(JSON.stringify(toolResult?.content)).toContain(
+        "stable point was NOT created because Plan mode is read-only",
+      );
+      expect(JSON.stringify(toolResult?.content)).toContain('"outcome":"plan_read_only"');
+      expect(
+        transcript.some(
+          (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+        ),
+      ).toBe(false);
+      expect(
+        transcript.some(
+          (e) =>
+            e.type === "system_event" &&
+            e.message.includes("operation=stable_point_denied") &&
+            e.message.includes("result=plan_read_only"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  gitIt(
+    "model claims a stable point WITHOUT calling the tool → final gate downgrades the claim",
+    async () => {
+      await isolateModelEnv();
+      const { project, store } = await makeRepoContext();
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          ...defaultConfig,
+          defaultModel: "git-model",
+          providers: {
+            ...defaultConfig.providers,
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "git-model",
+            },
+          },
+        }),
+        "utf8",
+      );
+      const output = new MemoryOutput();
+      // 模型不调用工具，两轮都空口声称已建立稳定点。
+      mockSseToolSequence([], "已建立稳定点，当前状态已保存。");
+
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["建立一个稳定点\n", "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
+
+      // 没有 git_operation evidence → final gate 降级，不能让原文“已建立稳定点”原样通过。
+      const sessions = await store.list();
+      const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+      const hasGitEvidence = transcript.some(
         (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
-      ),
-    ).toBe(false);
-    expect(
-      transcript.some(
+      );
+      expect(hasGitEvidence).toBe(false);
+      const downgraded = transcript.some(
         (e) =>
           e.type === "system_event" &&
-          e.message.includes("operation=stable_point_denied") &&
-          e.message.includes("result=plan_read_only"),
-      ),
-    ).toBe(true);
-  });
-
-  gitIt("model claims a stable point WITHOUT calling the tool → final gate downgrades the claim", async () => {
-    await isolateModelEnv();
-    const { project, store } = await makeRepoContext();
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        ...defaultConfig,
-        defaultModel: "git-model",
-        providers: {
-          ...defaultConfig.providers,
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "git-model",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const output = new MemoryOutput();
-    // 模型不调用工具，两轮都空口声称已建立稳定点。
-    mockSseToolSequence([], "已建立稳定点，当前状态已保存。");
-
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["建立一个稳定点\n", "/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
-
-    // 没有 git_operation evidence → final gate 降级，不能让原文“已建立稳定点”原样通过。
-    const sessions = await store.list();
-    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
-    const hasGitEvidence = transcript.some(
-      (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
-    );
-    expect(hasGitEvidence).toBe(false);
-    const downgraded = transcript.some(
-      (e) =>
-        e.type === "system_event" && /final_answer_claim_gate (?:retry|downgrade)/.test(e.message),
-    );
-    expect(downgraded).toBe(true);
-  });
+          /final_answer_claim_gate (?:retry|downgrade)/.test(e.message),
+      );
+      expect(downgraded).toBe(true);
+    },
+  );
 });
 
 describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
@@ -15307,7 +15506,10 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
 
   function gitInitRepo(dir: string): void {
     spawnSync("git", ["init"], { cwd: dir, windowsHide: true });
-    spawnSync("git", ["config", "user.email", "test@linghun.local"], { cwd: dir, windowsHide: true });
+    spawnSync("git", ["config", "user.email", "test@linghun.local"], {
+      cwd: dir,
+      windowsHide: true,
+    });
     spawnSync("git", ["config", "user.name", "linghun-test"], { cwd: dir, windowsHide: true });
     spawnSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir, windowsHide: true });
   }
@@ -15344,7 +15546,10 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
       vi.fn(async (_url: string, init: RequestInit) => {
         requests.push(JSON.parse(String(init.body)));
         const body = `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
     return requests;
@@ -15413,7 +15618,8 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     const context = await createTestContext(project, store, session);
     mergeFailureRecordForTest(context, {
       category: "provider_failure",
-      failureSummary: "provider request failed code=PROVIDER_RATE_LIMITED https://relay.example.com sk-leak123",
+      failureSummary:
+        "provider request failed code=PROVIDER_RATE_LIMITED https://relay.example.com sk-leak123",
       rootCauseGuess: "rate limited",
       avoidNextTime: "back off before retrying provider calls",
       sourceRef: "evidence:abc123",
@@ -15549,7 +15755,7 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     // index.ts 只接线：调用 captureFailureLearning / 投影 summary / dispatch slash。
     expect(indexSrc).toContain("captureFailureLearning(context, sessionId");
     expect(indexSrc).toContain("buildFailureLearningSummaryForPrompt(context.failureLearning)");
-    expect(indexSrc).toContain('handleFailuresCommand(rest, context, output)');
+    expect(indexSrc).toContain("handleFailuresCommand(rest, context, output)");
     // 业务逻辑（脱敏 / 去重 / 投影构建）不在 index.ts 重新实现。
     expect(indexSrc).not.toContain("function sanitizeFailureText");
     expect(indexSrc).not.toContain("function failureDedupeHash");
@@ -15594,9 +15800,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     // 失败事件进父会话 transcript（status=failed），可追溯。
     const parentTranscript = (await store.resume(session.id)).transcript;
     expect(
-      parentTranscript.some(
-        (event) => event.type === "agent_end" && event.status === "failed",
-      ),
+      parentTranscript.some((event) => event.type === "agent_end" && event.status === "failed"),
     ).toBe(true);
   });
 
@@ -15625,7 +15829,13 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
       transcriptSessionId: child.id,
       summary: "agent running",
       contextSummary: "trimmed",
-      cost: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      cost: {
+        inputTokens: 1,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
       startedAt: now,
       updatedAt: now,
     });
@@ -15672,7 +15882,9 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(agentSrc).toContain("captureFailureLearning");
     // cancelAgent 不调用 captureFailureLearning（用户取消不是模型失败）。
     const cancelBody = agentSrc.slice(agentSrc.indexOf("export async function cancelAgent"));
-    expect(cancelBody.slice(0, cancelBody.indexOf("\n}\n"))).not.toContain("captureFailureLearning");
+    expect(cancelBody.slice(0, cancelBody.indexOf("\n}\n"))).not.toContain(
+      "captureFailureLearning",
+    );
 
     // 并发常量单一来源：job-agent-command-runtime 不再本地重复声明。
     expect(agentSrc).not.toContain("const DEFAULT_JOB_RUNNING_AGENT_CAP = 3");

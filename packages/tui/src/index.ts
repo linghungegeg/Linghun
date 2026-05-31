@@ -1,14 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, accessSync } from "node:fs";
-import {
-  appendFile,
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import {
@@ -58,13 +51,12 @@ import {
   computePromptCacheHitRate,
 } from "@linghun/core";
 import {
-  ModelGateway,
+  type ModelGateway,
   type ModelMessage,
   type ModelToolCall,
   type ModelUsage,
   findKnownModel,
 } from "@linghun/providers";
-import { runBtwSideQuestion } from "./btw-runtime.js";
 import { LINGHUN_NAME, type Language, type PermissionMode } from "@linghun/shared";
 import {
   type DiffSummary,
@@ -93,6 +85,7 @@ import {
   formatBreakCacheStatus,
   writeBreakCacheMarker,
 } from "./break-cache-runtime.js";
+import { runBtwSideQuestion } from "./btw-runtime.js";
 // D.14A-2 — break-cache runtime moved to ./break-cache-runtime.ts.
 // Re-export the test hooks to preserve model-doctor-runtime.test.ts imports from "./index.js".
 export { type BreakCacheTestHooks, breakCacheTestHooks } from "./break-cache-runtime.js";
@@ -111,6 +104,27 @@ import {
 } from "./compact-context.js";
 import { estimateModelMessageChars, estimateTranscriptContextChars } from "./context-estimator.js";
 import {
+  type DeferredToolDescriptor,
+  type DeferredToolDiscoverySnapshot,
+  type DeferredToolKind,
+  type DiscoveredDeferredToolsSummary,
+  deferredToolListHashInput,
+  findDeferredTool,
+  formatDeferredToolsSystemReminder,
+  getCodebaseMemoryToolRisk,
+  isCodebaseMemoryToolName,
+  isLocalStdioMcpServer,
+  listDeferredTools,
+  parseMcpDeferredToolName,
+  sanitizeDiscoveredDeferredToolName,
+  searchDeferredTools,
+  snapshotDeferredTools,
+  snapshotDeferredToolsSummary,
+  snapshotDiscoveredDeferredToolsSummary,
+  summarizeDeferredToolMatch,
+  validateCodebaseMemoryToolExecution,
+} from "./deferred-tools-catalog.js";
+import {
   checkClaimSupport,
   checkEvidenceGate,
   createHandoffPendingItems,
@@ -122,6 +136,12 @@ import {
   runArchitectureAndCompletenessFinalGate,
 } from "./final-answer-gate.js";
 import {
+  formatIndexSafetyWarning,
+  isIgnoredIndexPath,
+  scanIndexSafety,
+  summarizeIndexResult,
+} from "./index-result-presenter.js";
+import {
   type CodebaseMemoryBinarySource,
   type CodebaseMemoryBinaryStatus,
   type IndexSafetyFile,
@@ -129,12 +149,6 @@ import {
   createIndexState,
   findCurrentIndexProject,
 } from "./index-runtime.js";
-import {
-  formatIndexSafetyWarning,
-  isIgnoredIndexPath,
-  scanIndexSafety,
-  summarizeIndexResult,
-} from "./index-result-presenter.js";
 import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
@@ -198,11 +212,12 @@ import {
   isModelRole,
 } from "./model-doctor-runtime.js";
 import {
+  EXECUTE_EXTRA_TOOL_NAME,
+  SEARCH_EXTRA_TOOLS_NAME,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
-  EXECUTE_EXTRA_TOOL_NAME,
-  SEARCH_EXTRA_TOOLS_NAME,
+  buildDowngradedFinalAnswer,
   buildExtendedDowngradedFinalAnswer,
   createDeferredToolDispatchDefinitions,
   createExtendedFinalAnswerReminder,
@@ -213,7 +228,6 @@ import {
   createSolutionCompletenessStatus,
   createToolInputSchema,
   createToolUseDriftSummary,
-  buildDowngradedFinalAnswer,
   deriveToolSupportsClaims,
   evaluateFinalAnswerClaims,
   extractFileMentions,
@@ -290,32 +304,11 @@ import {
   shouldSendReportFinalReferenceReminder,
   shouldSendReportWriteReminder,
 } from "./permission-continuation-runtime.js";
+import { classifyToolRequest } from "./permission-policy-engine.js";
 import {
   formatLocalToolPermissionPrompt,
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
-import { classifyToolRequest } from "./permission-policy-engine.js";
-import {
-  type DeferredToolDescriptor,
-  type DeferredToolDiscoverySnapshot,
-  type DeferredToolKind,
-  type DiscoveredDeferredToolsSummary,
-  deferredToolListHashInput,
-  findDeferredTool,
-  formatDeferredToolsSystemReminder,
-  getCodebaseMemoryToolRisk,
-  isCodebaseMemoryToolName,
-  isLocalStdioMcpServer,
-  listDeferredTools,
-  parseMcpDeferredToolName,
-  sanitizeDiscoveredDeferredToolName,
-  searchDeferredTools,
-  snapshotDeferredTools,
-  snapshotDeferredToolsSummary,
-  snapshotDiscoveredDeferredToolsSummary,
-  summarizeDeferredToolMatch,
-  validateCodebaseMemoryToolExecution,
-} from "./deferred-tools-catalog.js";
 // D.14A — deferred tools catalog moved to ./deferred-tools-catalog.ts.
 // Re-export to preserve existing external / test imports from "./index.js".
 export {
@@ -338,17 +331,18 @@ export {
   validateCodebaseMemoryToolExecution,
 } from "./deferred-tools-catalog.js";
 import {
-  createProcessGuard,
-  installProcessGuardExitHandlers,
-  requestTrackedProcessStop,
-} from "./process-guard.js";
-import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
-import {
   isPotentiallyMutatingMcpTool,
   runMcpStdioToolCall,
   runMcpStdioToolList,
 } from "./mcp-stdio-runtime.js";
+import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
+import {
+  createProcessGuard,
+  installProcessGuardExitHandlers,
+  requestTrackedProcessStop,
+} from "./process-guard.js";
 export { isPotentiallyMutatingMcpTool } from "./mcp-stdio-runtime.js";
+import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
 import {
   type ProviderCircuitBreakerState,
   checkProviderCooldown,
@@ -358,11 +352,9 @@ import {
   formatCooldownMessage,
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
-import { formatMcpTools } from "./remote-mcp-presenter.js";
-import { decideRemoteInbox, processRemoteBindCommand } from "./remote-inbound-bridge-runtime.js";
-import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
 import {
   configureRemoteCommandRuntime,
+  consumeRemoteInboundMessage,
   createRemoteEvent,
   handleRemoteCommand,
   processRemoteApprovalForTest,
@@ -370,8 +362,9 @@ import {
   sendRemoteEventReal,
   validateRemoteInboundEnvelope,
   validateRemotePairingEnvelope,
-  consumeRemoteInboundMessage,
 } from "./remote-command-runtime.js";
+import { decideRemoteInbox, processRemoteBindCommand } from "./remote-inbound-bridge-runtime.js";
+import { formatMcpTools } from "./remote-mcp-presenter.js";
 export {
   createRemoteEvent,
   consumeRemoteInboundMessage,
@@ -400,6 +393,42 @@ export {
   type FeishuLongConnectionOptions,
 } from "./feishu-long-connection-runtime.js";
 import {
+  type ExtensionInstallRequest,
+  type ExtensionKind,
+  formatConfigOverview,
+  formatFeaturePolicy,
+  formatHooksDoctor,
+  formatWorkflows,
+  githubRepoToUrl,
+  refreshExtensionState,
+  validateExtensionContributionExecution,
+} from "./extension-command-runtime.js";
+import {
+  configureExtensionSlashRuntime,
+  handlePluginsCommand,
+  handleSkillsCommand,
+} from "./extension-slash-runtime.js";
+import {
+  configureJobAgentCommandRuntime,
+  handleAgentsCommand,
+  handleBackgroundCommand,
+  handleForkCommand,
+  handleJobCommand,
+  hydrateDurableJobBackgroundTasks,
+} from "./job-agent-command-runtime.js";
+import {
+  configureModelCommandRuntime,
+  handleModelCommand,
+  handleModelRouteCommand,
+  handleModelSetupInput,
+  startModelSetup,
+} from "./model-command-runtime.js";
+import {
+  formatPendingApprovalDetails,
+  formatPendingNaturalCommandDetails,
+  formatWorkspaceTrustStatus,
+} from "./pending-details-presenter.js";
+import {
   type RequestActivityPhase,
   formatProviderEmptyResponsePrimary,
   formatProviderFailurePrimary,
@@ -421,7 +450,10 @@ import {
 } from "./runner-runtime.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
-import { createCommandBlock, createUserTextBlock } from "./shell/models/command-transcript-presenter.js";
+import {
+  createCommandBlock,
+  createUserTextBlock,
+} from "./shell/models/command-transcript-presenter.js";
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
@@ -478,11 +510,7 @@ import {
   writeDiagnosticLine,
   writeErrorLine,
 } from "./tui-output-surface.js";
-import {
-  CHAT_COMPLETIONS_ENDPOINT,
-  formatStats,
-  formatUsage,
-} from "./usage-stats-presenter.js";
+import { CHAT_COMPLETIONS_ENDPOINT, formatStats, formatUsage } from "./usage-stats-presenter.js";
 import {
   type WorkspaceReferenceCache,
   createWorkspaceReferenceCache,
@@ -490,27 +518,17 @@ import {
   isFallbackWorkspaceReferenceSnapshot,
   workspaceReferenceHash,
 } from "./workspace-reference-cache.js";
-import { formatConfigOverview, formatFeaturePolicy, formatHooksDoctor, formatWorkflows, githubRepoToUrl, refreshExtensionState, validateExtensionContributionExecution, type ExtensionInstallRequest, type ExtensionKind } from "./extension-command-runtime.js";
-import { configureExtensionSlashRuntime, handlePluginsCommand, handleSkillsCommand } from "./extension-slash-runtime.js";
-import { formatPendingApprovalDetails, formatPendingNaturalCommandDetails, formatWorkspaceTrustStatus } from "./pending-details-presenter.js";
-import {
-  configureModelCommandRuntime,
-  handleModelCommand,
-  handleModelRouteCommand,
-  handleModelSetupInput,
-  startModelSetup,
-} from "./model-command-runtime.js";
-import {
-  configureJobAgentCommandRuntime,
-  handleAgentsCommand,
-  handleBackgroundCommand,
-  handleForkCommand,
-  handleJobCommand,
-  hydrateDurableJobBackgroundTasks,
-} from "./job-agent-command-runtime.js";
 export { validateExtensionContributionExecution } from "./extension-command-runtime.js";
-import { createReviewReport, createVerificationPlan, formatVerificationLast, formatVerificationPlan, formatVerificationReport, runVerificationCommand, runVerificationPlan } from "./verification-command-runtime.js";
 import { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import {
+  createReviewReport,
+  createVerificationPlan,
+  formatVerificationLast,
+  formatVerificationPlan,
+  formatVerificationReport,
+  runVerificationCommand,
+  runVerificationPlan,
+} from "./verification-command-runtime.js";
 export { createModelSystemPrompt } from "./model-prompt-runtime.js";
 // D.14A-3 source anchors for source-level D.13 tests after modular split:
 // createVerificationLevelForReadiness -> classifyVerificationLevel(...); createModelSystemPrompt still projects with projectRuntimeStatusForPrompt(runtimeStatus).
@@ -524,20 +542,17 @@ import {
   handleWorktreeCommand,
 } from "./git-command-runtime.js";
 import { computeWorktreeContext } from "./git-operation-runtime.js";
+import type { GitSlashDeps } from "./git-slash-runtime.js";
 import {
   type GitToolDispatchDeps,
   type WorktreeRemoveResolveDeps,
   executeGitToolUse,
-  resolveWorktreeRemoveApprove,
-  resolveWorktreeRemoveDeny,
   resolveStablePointApprove,
   resolveStablePointDeny,
+  resolveWorktreeRemoveApprove,
+  resolveWorktreeRemoveDeny,
 } from "./git-tool-dispatch-runtime.js";
-import type { GitSlashDeps } from "./git-slash-runtime.js";
-import {
-  isGitToolName,
-  summarizeWorktreeContextForPrompt,
-} from "./git-tool-runtime.js";
+import { isGitToolName, summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import {
   INDEX_REFRESH,
   INDEX_REPAIR,
@@ -548,7 +563,13 @@ import {
   summarizeIndexRefreshOutcome,
   summarizeIndexStatusInspect,
 } from "./index-tool-runtime.js";
-import { buildIndexStatusPanel, buildMcpStatusPanel, formatIndexRefreshSummary, formatIndexStatus, formatMcpStatus } from "./mcp-index-command-runtime.js";
+import {
+  buildIndexStatusPanel,
+  buildMcpStatusPanel,
+  formatIndexRefreshSummary,
+  formatIndexStatus,
+  formatMcpStatus,
+} from "./mcp-index-command-runtime.js";
 import {
   configureMcpIndexRuntime,
   executeExtraTool,
@@ -561,15 +582,24 @@ import {
   stabilizeMcpToolList,
 } from "./mcp-index-runtime.js";
 export { executeExtraTool, executeSearchExtraTools } from "./mcp-index-runtime.js";
-import { buildCacheStatusPanel, formatCacheLog, formatCacheStatus, formatCompactStatus, writeLightHints } from "./cache-command-runtime.js";
+import {
+  buildCacheStatusPanel,
+  formatCacheLog,
+  formatCacheStatus,
+  formatCompactStatus,
+  writeLightHints,
+} from "./cache-command-runtime.js";
 export { writeLightHintsForTest } from "./cache-command-runtime.js";
-import { createTerminalReadinessView, createVerificationLevelForReadiness } from "./terminal-readiness-runtime.js";
 import {
   configureMemoryCommandRuntime,
   handleMemoryCommand,
   resumeSessionWithHandoff,
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
+import {
+  createTerminalReadinessView,
+  createVerificationLevelForReadiness,
+} from "./terminal-readiness-runtime.js";
 export { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
 import {
   configureFailureLearningCommandRuntime,
@@ -584,7 +614,15 @@ import {
   writeFailureRecord,
 } from "./failure-learning-runtime.js";
 export { createFailureLearningState } from "./failure-learning-runtime.js";
-import { createHandoffPacket, formatResumePacket, hydrateResumeContext, isHandoffPacket, loadOrCreateHandoffPacket, validateHandoffPacket, writeHandoffPacket } from "./handoff-session-runtime.js";
+import {
+  createHandoffPacket,
+  formatResumePacket,
+  hydrateResumeContext,
+  isHandoffPacket,
+  loadOrCreateHandoffPacket,
+  validateHandoffPacket,
+  writeHandoffPacket,
+} from "./handoff-session-runtime.js";
 
 export type { IndexState } from "./index-runtime.js";
 export { createIndexState } from "./index-runtime.js";
@@ -1649,7 +1687,7 @@ async function runInkShell(
       if (event.type === "toggle-details") {
         submittedPending = false;
         // 1) commandPanel 内 toggle
-        if (context.commandPanelState && context.commandPanelState.detailsText) {
+        if (context.commandPanelState?.detailsText) {
           context.commandPanelState = {
             ...context.commandPanelState,
             expanded: !context.commandPanelState.expanded,
@@ -1659,17 +1697,18 @@ async function runInkShell(
           return;
         }
         // 2) 最近 block 有可展开 fullText 时，把它升级为 commandPanel 详情
-        const expandableBlock = [...blocks].reverse().find(
-          (b) => (b.fullText ?? "").trim().length > (b.summary ?? "").length + 1,
-        );
+        const expandableBlock = [...blocks]
+          .reverse()
+          .find((b) => (b.fullText ?? "").trim().length > (b.summary ?? "").length + 1);
         if (expandableBlock?.fullText) {
           context.commandPanelState = {
             title:
               expandableBlock.title?.trim() ||
               (context.language === "en-US" ? "Latest output" : "最近输出"),
-            tone: expandableBlock.status === "fail" || expandableBlock.status === "blocked"
-              ? "error"
-              : "neutral",
+            tone:
+              expandableBlock.status === "fail" || expandableBlock.status === "blocked"
+                ? "error"
+                : "neutral",
             summary: [expandableBlock.summary],
             detailsText: expandableBlock.fullText,
             expanded: true,
@@ -2013,10 +2052,7 @@ async function runInkShell(
               return;
             }
             if (result.kind === "invalid") {
-              writeLine(
-                shellOutput,
-                isEn ? `Unknown tool: ${tool}` : `未知工具：${tool}`,
-              );
+              writeLine(shellOutput, isEn ? `Unknown tool: ${tool}` : `未知工具：${tool}`);
               shell?.rerender();
               await shell?.waitUntilRenderFlush();
               return;
@@ -2185,10 +2221,7 @@ export async function handleSlashCommand(
           : variantArg === "details"
             ? "details"
             : "short";
-    writeLine(
-      output,
-      formatCatalogHelp(context.language, context.permissionMode, false, variant),
-    );
+    writeLine(output, formatCatalogHelp(context.language, context.permissionMode, false, variant));
     return "handled";
   }
   if (command === "/features") {
@@ -2682,7 +2715,7 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
       `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] 中文 (zh-CN)`,
       `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] English (en-US)`,
     ];
-    output.write(choiceLines.join("\n") + "\n");
+    output.write(`${choiceLines.join("\n")}\n`);
   };
   return await new Promise<Language>((resolveDecision) => {
     const finish = (language: Language) => {
@@ -2814,7 +2847,7 @@ async function readInitialWorkspaceTrustDecision(
       `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] ${trustLabel}`,
       `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] ${restrictedLabel}`,
     ];
-    output.write(lines.join("\n") + "\n");
+    output.write(`${lines.join("\n")}\n`);
   };
   return await new Promise<boolean>((resolveDecision) => {
     const finish = (trusted: boolean) => {
@@ -2865,9 +2898,7 @@ async function readInitialWorkspaceTrustDecision(
         finish(selectedIndex === 0);
         return;
       }
-      if (
-        /^(yes|y|confirm|ok|okay|trust|trusted|确认|是|信任)$/iu.test(normalized)
-      ) {
+      if (/^(yes|y|confirm|ok|okay|trust|trusted|确认|是|信任)$/iu.test(normalized)) {
         finish(true);
         return;
       }
@@ -3933,9 +3964,7 @@ async function runDetailsCommandBody(
   const sections: string[] = [];
   if (context.lastFullOutput) {
     sections.push(
-      context.language === "en-US"
-        ? "Latest output (full body):"
-        : "最近一次输出（完整正文）：",
+      context.language === "en-US" ? "Latest output (full body):" : "最近一次输出（完整正文）：",
     );
     sections.push(context.lastFullOutput);
     sections.push("");
@@ -3947,9 +3976,7 @@ async function runDetailsCommandBody(
   if (!hasAnyDetail) {
     writeLine(
       output,
-      context.language === "en-US"
-        ? "Nothing to expand right now."
-        : "当前没有可展开的完整内容。",
+      context.language === "en-US" ? "Nothing to expand right now." : "当前没有可展开的完整内容。",
     );
     return;
   }
@@ -4004,10 +4031,7 @@ export {
   isActiveBackgroundStatus,
 } from "./tui-agent-job-runtime.js";
 
-import {
-  findBackgroundTask,
-  isActiveBackgroundStatus,
-} from "./tui-agent-job-runtime.js";
+import { findBackgroundTask, isActiveBackgroundStatus } from "./tui-agent-job-runtime.js";
 
 function refreshBackgroundLifecycle(context: TuiContext): void {
   const now = Date.now();
@@ -4579,7 +4603,10 @@ async function handleBreakCacheCommand(
     await writeBreakCacheMarker(context, "once", nonce);
     await appendBreakCacheEvent(context, "once_set");
     refreshCacheFreshness(context);
-    writeLine(output, "已设置 once：下一次模型请求将附加 cacheBreakNonce 破坏前缀缓存，命中后自动消费。");
+    writeLine(
+      output,
+      "已设置 once：下一次模型请求将附加 cacheBreakNonce 破坏前缀缓存，命中后自动消费。",
+    );
     return;
   }
   if (action === "always") {
@@ -5472,10 +5499,7 @@ export async function handleNaturalInput(
   return "message";
 }
 
-async function runIndexSafetyRepair(
-  context: TuiContext,
-  output: Writable,
-): Promise<void> {
+async function runIndexSafetyRepair(context: TuiContext, output: Writable): Promise<void> {
   const riskyFiles = context.index.safetyRiskyFiles ?? [];
   if (riskyFiles.length === 0 || !context.index.safetyWarning) {
     writeLine(
@@ -5771,7 +5795,8 @@ async function sendMessage(
     const guardSessionId = await ensureSession(context);
     await captureFailureLearning(context, guardSessionId, {
       category: "resource_cap",
-      failureSummary: "model request blocked by concurrency cap (a foreground request is already running)",
+      failureSummary:
+        "model request blocked by concurrency cap (a foreground request is already running)",
       rootCauseGuess: "started a new model request while one was still active",
       avoidNextTime:
         "Wait for the active model request to finish or use /interrupt before starting another",
@@ -6294,7 +6319,9 @@ export async function handleRemoteInboundMessage(
   if (decision.kind === "natural_language_message" && decision.routedText) {
     const inbox = decideRemoteInbox(context.remote, message, {
       activeModelTurn: Boolean(context.activeAbortController),
-      activeJob: context.backgroundTasks.some((task) => task.kind === "job" && task.status === "running"),
+      activeJob: context.backgroundTasks.some(
+        (task) => task.kind === "job" && task.status === "running",
+      ),
       toolRunning: context.backgroundTasks.some(
         (task) => task.kind !== "job" && task.status === "running",
       ),
@@ -6882,10 +6909,7 @@ async function executeModelToolUse(
   // 但仍走既有 tool_call_start / tool_result / evidence 链路；不重复 architecture drift /
   // permission 状态机，因为这两个工具本身不写文件、不执行 shell——它们的"风险"由其分发到的
   // 子工具承担（codebase-memory 只读 + 命令白名单 + required args 校验）。
-  if (
-    toolCall.name === SEARCH_EXTRA_TOOLS_NAME ||
-    toolCall.name === EXECUTE_EXTRA_TOOL_NAME
-  ) {
+  if (toolCall.name === SEARCH_EXTRA_TOOLS_NAME || toolCall.name === EXECUTE_EXTRA_TOOL_NAME) {
     return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
   }
   // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
@@ -6908,7 +6932,9 @@ async function executeModelToolUse(
         rootCauseGuess: `${toolCall.name} git operation failed or was rejected by runtime validation`,
         avoidNextTime:
           "Check repo/worktree state and arguments before retrying the git operation; do not claim it succeeded",
-        sourceRef: gitResult.evidenceId ? `evidence:${gitResult.evidenceId}` : `tool:${toolCall.name}`,
+        sourceRef: gitResult.evidenceId
+          ? `evidence:${gitResult.evidenceId}`
+          : `tool:${toolCall.name}`,
         relatedTarget: toolCall.name,
         severity: "medium",
       });
@@ -7150,7 +7176,8 @@ async function executeApprovedModelToolUse(
         category: "tool_failure",
         failureSummary: `${toolName} exited non-zero: ${result.output.text}`,
         rootCauseGuess: `${toolName} command returned a non-zero exit code`,
-        avoidNextTime: "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
+        avoidNextTime:
+          "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
         sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${toolName}`,
         relatedTarget: toolName,
         severity: "medium",
@@ -7228,9 +7255,11 @@ async function executeDeferredDispatchToolUse(
     createdAt: new Date().toISOString(),
   });
   try {
-    const input = (toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
-      ? toolCall.input
-      : {}) as Record<string, unknown>;
+    const input = (
+      toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
+        ? toolCall.input
+        : {}
+    ) as Record<string, unknown>;
     if (dispatchName === SEARCH_EXTRA_TOOLS_NAME) {
       const queryRaw = input.query;
       if (typeof queryRaw !== "string") {
@@ -7292,8 +7321,7 @@ async function executeDeferredDispatchToolUse(
     // this event is the auditable proof that ExecuteExtraTool runs through
     // the same classifier as built-in tools, so dispatch never silently
     // bypasses permission policy.
-    const requestedToolName =
-      typeof input.tool_name === "string" ? input.tool_name : "(unknown)";
+    const requestedToolName = typeof input.tool_name === "string" ? input.tool_name : "(unknown)";
     const deferredVerdict = classifyToolRequest({
       toolName: requestedToolName,
       input: input.params,
@@ -7500,7 +7528,12 @@ async function executeIndexToolUse(
   const parsed = parseIndexRefreshInput(toolCall.input);
   // 复用既有 decidePermission（Write 语义代表索引写入/外部 runtime 写入）。default /
   // auto-review 下 Write 为 ask；命中允许规则或 full-access 时直接执行。
-  const permission = await decidePermission("Write", { path: ".linghun/index" }, context, sessionId);
+  const permission = await decidePermission(
+    "Write",
+    { path: ".linghun/index" },
+    context,
+    sessionId,
+  );
   await context.store.appendEvent(sessionId, {
     type: "permission_request",
     request: { ...permission.request, toolName: name as unknown as ToolName },
@@ -8299,10 +8332,9 @@ async function recordProviderFailureEvidence(
     rootCauseGuess: transitFailure
       ? `provider/network transit failure with ${code}`
       : `model/provider request failed with ${code}`,
-    avoidNextTime:
-      transitFailure
-        ? "Retry later; if it repeats, check provider transit/gateway stability with /model doctor. Do not change provider route/env/key/model unless diagnostics point there."
-        : code === "PROVIDER_RATE_LIMITED"
+    avoidNextTime: transitFailure
+      ? "Retry later; if it repeats, check provider transit/gateway stability with /model doctor. Do not change provider route/env/key/model unless diagnostics point there."
+      : code === "PROVIDER_RATE_LIMITED"
         ? "Back off / reduce request rate before retrying provider calls"
         : `Check provider config and request shape for ${code} before retrying; do not assume the request succeeded`,
     sourceRef: `evidence:${evidence.id}`,

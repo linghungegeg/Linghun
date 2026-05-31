@@ -1,15 +1,36 @@
-import { basename } from "node:path";
 import { writeFile } from "node:fs/promises";
+import { basename } from "node:path";
 import type { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
-import type { TuiContext } from "./index.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import { createHandoffPacket, formatResumePacket, hydrateResumeContext, validateHandoffPacket } from "./handoff-session-runtime.js";
-import { writeErrorLine } from "./tui-output-surface.js";
-import { pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
+import {
+  createHandoffPacket,
+  formatResumePacket,
+  hydrateResumeContext,
+  validateHandoffPacket,
+} from "./handoff-session-runtime.js";
+import type { TuiContext } from "./index.js";
 import { formatError, writeLine } from "./startup-runtime.js";
 import type { MemoryCandidate, MemoryLearningRun } from "./tui-data-types.js";
-import { createEvidenceBackedMemoryCandidates, createLinghunMdTemplate, createMemoryCandidate, extractLearningCandidatesFromInput, findMemoryRecord, formatMemoryLearningRun, formatMemoryReview, formatMemoryScope, formatMemoryStats, formatMemoryStatus, formatMemoryStorage, parseMemoryCandidateArgs, removeMemoryFromState, removeMemoryRecord, writeMemoryRecord } from "./tui-memory-runtime.js";
+import {
+  createEvidenceBackedMemoryCandidates,
+  createLinghunMdTemplate,
+  createMemoryCandidate,
+  extractLearningCandidatesFromInput,
+  findMemoryRecord,
+  formatMemoryLearningRun,
+  formatMemoryReview,
+  formatMemoryScope,
+  formatMemoryStats,
+  formatMemoryStatus,
+  formatMemoryStorage,
+  parseMemoryCandidateArgs,
+  removeMemoryFromState,
+  removeMemoryRecord,
+  writeMemoryRecord,
+} from "./tui-memory-runtime.js";
+import { writeErrorLine } from "./tui-output-surface.js";
+import { pathExists, summarizeProjectRules } from "./tui-state-runtime.js";
 
 export type MemoryCommandRuntimeDeps = {
   appendSystemEvent: (
@@ -46,9 +67,7 @@ function isSessionEnded(transcript: TranscriptEvent[]): boolean {
  * promptInjection 内部参数（topK / estimatedTokens）、lastHandoff、详细 hint
  * 进 detailsText（Ctrl+O 展开）。
  */
-function buildMemoryStatusPanel(
-  context: TuiContext,
-): import("./shell/types.js").CommandPanelView {
+function buildMemoryStatusPanel(context: TuiContext): import("./shell/types.js").CommandPanelView {
   const isEn = context.language === "en-US";
   const candidates = context.memory.candidates.length;
   const accepted = context.memory.accepted.length;

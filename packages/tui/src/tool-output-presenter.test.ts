@@ -46,40 +46,45 @@ describe("tool-output-presenter", () => {
 
   describe("formatToolStart 密钥脱敏", () => {
     it("Bearer token 被脱敏为 Bearer ***", () => {
-      const out = formatToolStart("Bash", {
-        command: "curl -H 'Authorization: Bearer abc123def456' https://api",
-      }) ?? "";
+      const out =
+        formatToolStart("Bash", {
+          command: "curl -H 'Authorization: Bearer abc123def456' https://api",
+        }) ?? "";
       expect(out).toContain("Bearer ***");
       expect(out).not.toContain("abc123def456");
     });
 
     it("api_key= 值被脱敏", () => {
-      const out = formatToolStart("Bash", {
-        command: "fetch --api_key=supersecretvalue",
-      }) ?? "";
+      const out =
+        formatToolStart("Bash", {
+          command: "fetch --api_key=supersecretvalue",
+        }) ?? "";
       expect(out).toContain("api_key=***");
       expect(out).not.toContain("supersecretvalue");
     });
 
     it("URL 中的 key= 查询参数被脱敏", () => {
-      const out = formatToolStart("Bash", {
-        command: "curl https://host/v1?key=SECRETKEY123",
-      }) ?? "";
+      const out =
+        formatToolStart("Bash", {
+          command: "curl https://host/v1?key=SECRETKEY123",
+        }) ?? "";
       expect(out).not.toContain("SECRETKEY123");
       expect(out).toContain("key=***");
     });
 
     it("Authorization: Bearer 值被脱敏", () => {
-      const out = formatToolStart("Bash", {
-        command: "curl -H 'Authorization: Bearer xyztoken'",
-      }) ?? "";
+      const out =
+        formatToolStart("Bash", {
+          command: "curl -H 'Authorization: Bearer xyztoken'",
+        }) ?? "";
       expect(out).not.toContain("xyztoken");
     });
 
     it("环境变量赋值脱敏值但保留变量名", () => {
-      const out = formatToolStart("Bash", {
-        command: "LINGHUN_OPENAI_API_KEY=sk-livesecret123 linghun run",
-      }) ?? "";
+      const out =
+        formatToolStart("Bash", {
+          command: "LINGHUN_OPENAI_API_KEY=sk-livesecret123 linghun run",
+        }) ?? "";
       expect(out).not.toContain("sk-livesecret123");
       expect(out).toContain("LINGHUN_OPENAI_API_KEY=");
     });
@@ -102,20 +107,12 @@ describe("tool-output-presenter", () => {
     });
 
     it("Bash 有 exitCode 时 formatToolOutput 含 '命令已退出 N'", () => {
-      const text = formatToolOutput(
-        "Bash",
-        { text: "done", data: { exitCode: 0 } },
-        "zh-CN",
-      );
+      const text = formatToolOutput("Bash", { text: "done", data: { exitCode: 0 } }, "zh-CN");
       expect(text).toContain("命令已退出 0");
     });
 
     it("Bash 失败 exit 也写入退出码", () => {
-      const text = formatToolOutput(
-        "Bash",
-        { text: "boom", data: { exitCode: 2 } },
-        "zh-CN",
-      );
+      const text = formatToolOutput("Bash", { text: "boom", data: { exitCode: 2 } }, "zh-CN");
       expect(text).toContain("命令已退出 2");
     });
 

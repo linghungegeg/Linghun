@@ -55,10 +55,10 @@ export function CommandPanel({
   const tone = panel.tone ?? "neutral";
   const borderColor =
     tone === "error"
-      ? theme.error ?? theme.status.fail
+      ? (theme.error ?? theme.status.fail)
       : tone === "warning"
         ? theme.warning
-        : theme.panel ?? theme.border;
+        : (theme.panel ?? theme.border);
 
   return (
     <Box
@@ -83,15 +83,17 @@ export function CommandPanel({
       ) : null}
       {panel.sections && panel.sections.length > 0 ? (
         <Box flexDirection="column" marginTop={1}>
-          {panel.sections.map((section, sIdx) => (
-            <Box key={`section-${sIdx}`} flexDirection="column">
+          {panel.sections.map((section) => (
+            <Box key={`section-${section.title ?? section.rows.join("\n")}`} flexDirection="column">
               {section.title ? (
                 <Text color={theme.muted} bold>
                   {fitText(section.title, innerWidth)}
                 </Text>
               ) : null}
-              {section.rows.map((row, rIdx) => (
-                <Text key={`row-${sIdx}-${rIdx}-${row}`}>{fitText(row, innerWidth)}</Text>
+              {section.rows.map((row) => (
+                <Text key={`row-${section.title ?? "untitled"}-${row}`}>
+                  {fitText(row, innerWidth)}
+                </Text>
               ))}
             </Box>
           ))}

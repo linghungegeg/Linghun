@@ -31,9 +31,7 @@ import { sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
  *
  * 返回 undefined 表示三类内容都为空 —— 调用方走 notifications 轻提示。
  */
-export function buildToggleDetailsCommandPanel(
-  context: TuiContext,
-): CommandPanelView | undefined {
+export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
   const isEn = context.language === "en-US";
   const hasOutput = Boolean(context.lastFullOutput);
   const evidenceCount = context.evidence.length;
@@ -82,7 +80,9 @@ export function buildToggleDetailsCommandPanel(
       );
     }
     if (evidenceCount > 8) {
-      detailsParts.push(isEn ? `… and ${evidenceCount - 8} more` : `… 还有 ${evidenceCount - 8} 条`);
+      detailsParts.push(
+        isEn ? `… and ${evidenceCount - 8} more` : `… 还有 ${evidenceCount - 8} 条`,
+      );
     }
   }
 
@@ -149,8 +149,6 @@ export function buildToggleDetailsCommandPanel(
   };
 }
 
-
-
 export function showCommandPanel(
   context: TuiContext,
   output: Writable,
@@ -186,4 +184,3 @@ export function showCommandPanel(
   }
   writeLine(output, lines.join("\n"));
 }
-

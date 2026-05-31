@@ -14,10 +14,10 @@
  * no tool continuation, no durable job state machine, no TuiContext deep coupling.
  */
 
-import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
-import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import { basename, relative } from "node:path";
+import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
+import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
 
@@ -38,7 +38,9 @@ export function writeLine(output: Writable, text: string): void {
 
 function isBenignWriteError(error: unknown): boolean {
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  return code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END";
+  return (
+    code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END"
+  );
 }
 
 export function readOutputColumns(output: Writable): number {
@@ -127,8 +129,9 @@ export function sanitizeDisplayPaths(text: string, projectPath?: string): string
   output = output.replace(/[A-Za-z]:[\\/][^\r\n\s"'<>{}]+/gu, (match) =>
     formatDisplayPath(match, projectPath),
   );
-  output = output.replace(/(^|[\s([{:=,])((?:\/[^\r\n\s"'<>{}/]+){2,})/gu, (_match, prefix: string, path: string) =>
-    `${prefix}${formatDisplayPath(path, projectPath)}`,
+  output = output.replace(
+    /(^|[\s([{:=,])((?:\/[^\r\n\s"'<>{}/]+){2,})/gu,
+    (_match, prefix: string, path: string) => `${prefix}${formatDisplayPath(path, projectPath)}`,
   );
   return output;
 }
