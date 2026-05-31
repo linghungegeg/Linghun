@@ -6,6 +6,7 @@ import type {
   DurableJobState,
   NativeRunnerResolutionStatus,
 } from "./index.js";
+import { formatDisplayPath, sanitizeDisplayPaths } from "./startup-runtime.js";
 
 export type RunnerDoctorResolutionView = {
   status: NativeRunnerResolutionStatus;
@@ -120,9 +121,9 @@ export function formatBackgroundDetails(task: BackgroundTaskState, language: Lan
     `- progress: ${progress}`,
     `- why stale/blocked: ${formatBackgroundReason(task, language)}`,
     `- resume/cancel: ${truncateLine(task.nextAction ?? "-", 96)}`,
-    `- summary: ${truncateLine(task.userVisibleSummary, 120)}`,
-    `- logPath: ${task.logPath ?? "-"}`,
-    `- outputPath: ${task.outputPath ?? "-"}`,
+    `- summary: ${truncateLine(sanitizeDisplayPaths(task.userVisibleSummary), 120)}`,
+    `- logPath: ${formatDisplayPath(task.logPath)}`,
+    `- outputPath: ${formatDisplayPath(task.outputPath)}`,
     `- hasOutput: ${task.hasOutput}`,
     `- startedAt: ${task.startedAt}`,
     `- updatedAt: ${task.updatedAt}`,
@@ -141,10 +142,10 @@ export function formatBackgroundOutputDetails(
   }
   return [
     `Background output ${task.id}`,
-    `- path: ${location}`,
+    `- path: ${formatDisplayPath(location)}`,
     `- hasOutput: ${task.hasOutput}`,
     `- status: ${task.status}`,
-    `- summary: ${task.userVisibleSummary}`,
+    `- summary: ${sanitizeDisplayPaths(task.userVisibleSummary)}`,
     `- slices: /details output ${task.id} --tail 40 | --grep <pattern> --context 2 | --errors`,
   ].join("\n");
 }
@@ -152,7 +153,7 @@ export function formatBackgroundOutputDetails(
 export function formatBackgroundTask(task: BackgroundTaskState, language: Language): string {
   const progress = task.progress ? ` ${task.progress.completed}/${task.progress.total ?? "?"}` : "";
   const output = task.hasOutput
-    ? (task.logPath ?? "-")
+    ? formatDisplayPath(task.logPath)
     : language === "en-US"
       ? "no valid output yet"
       : "尚未产生有效输出";

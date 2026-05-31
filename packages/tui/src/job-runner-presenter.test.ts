@@ -224,4 +224,23 @@ describe("job runner presenters", () => {
       ].join("\n"),
     );
   });
+
+  it("Run 2 P3-7: background presenters redact absolute user paths", () => {
+    const rawPath = "C:\\Users\\Admin\\AppData\\Local\\Temp\\linghun\\job.log";
+    const task: BackgroundTaskState = {
+      ...baseBackground,
+      logPath: rawPath,
+      outputPath: "C:\\Users\\Admin\\AppData\\Local\\Temp\\linghun\\transcript.jsonl",
+      userVisibleSummary: `outputPath: ${rawPath}`,
+    };
+
+    const details = formatBackgroundDetails(task, "zh-CN");
+    const output = formatBackgroundOutputDetails(task, "zh-CN");
+    const row = formatBackgroundTask(task, "zh-CN");
+
+    expect(details).not.toContain("C:\\Users\\Admin");
+    expect(output).not.toContain("C:\\Users\\Admin");
+    expect(row).not.toContain("C:\\Users\\Admin");
+    expect(details).toContain("[user-home]/.../transcript.jsonl");
+  });
 });

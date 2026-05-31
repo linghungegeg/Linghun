@@ -16,6 +16,8 @@
 
 import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
+import { basename, relative } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
 
@@ -24,7 +26,19 @@ import type { Language } from "@linghun/shared";
 // ---------------------------------------------------------------------------
 
 export function writeLine(output: Writable, text: string): void {
-  output.write(`${text}\n`);
+  try {
+    output.write(`${text}\n`);
+  } catch (error) {
+    if (isBenignWriteError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function isBenignWriteError(error: unknown): boolean {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END";
 }
 
 export function readOutputColumns(output: Writable): number {
@@ -74,6 +88,57 @@ export function sanitizeDiagnosticText(text: string): string {
     .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
+}
+
+export function formatDisplayPath(path: string | undefined, projectPath?: string): string {
+  if (!path) return "-";
+  const normalized = path.replaceAll("\\", "/");
+  if (!isAbsoluteDisplayPath(normalized)) {
+    return normalized;
+  }
+  const project = projectPath?.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (project && (normalized === project || normalized.startsWith(`${project}/`))) {
+    const rel = relative(projectPath ?? "", path).replaceAll("\\", "/");
+    return rel && rel !== "" ? rel : ".";
+  }
+  const home = homedir().replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (home && (normalized === home || normalized.startsWith(`${home}/`))) {
+    return `[user-home]/.../${basename(path)}`;
+  }
+  return `[local-path]/${basename(path)}`;
+}
+
+function isAbsoluteDisplayPath(path: string): boolean {
+  return /^[A-Za-z]:\//u.test(path) || path.startsWith("/");
+}
+
+export function sanitizeDisplayPaths(text: string, projectPath?: string): string {
+  let output = text;
+  if (projectPath) {
+    const normalizedProject = createFlexiblePathPattern(projectPath);
+    output = output.replace(new RegExp(`${normalizedProject}[^\r\n\\s"'<>{}]*`, "giu"), (match) =>
+      formatDisplayPath(match, projectPath),
+    );
+  }
+  const home = createFlexiblePathPattern(homedir());
+  output = output.replace(new RegExp(`${home}[^\r\n\\s"'<>{}]*`, "giu"), (match) =>
+    formatDisplayPath(match, projectPath),
+  );
+  output = output.replace(/[A-Za-z]:[\\/][^\r\n\s"'<>{}]+/gu, (match) =>
+    formatDisplayPath(match, projectPath),
+  );
+  output = output.replace(/(^|[\s([{:=,])((?:\/[^\r\n\s"'<>{}/]+){2,})/gu, (_match, prefix: string, path: string) =>
+    `${prefix}${formatDisplayPath(path, projectPath)}`,
+  );
+  return output;
+}
+
+function createFlexiblePathPattern(path: string): string {
+  return escapeRegExp(path.replaceAll("\\", "/").replace(/\/+$/u, "")).replaceAll("/", "[\\\\/]");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 export function sanitizeUserFacingError(value: string): string {

@@ -1,7 +1,7 @@
 import type { Writable } from "node:stream";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
-import { writeLine } from "./startup-runtime.js";
+import { sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
 
 /**
  * D.13Q-UX Task Surface Maturity Sweep — 通用 CommandPanel 设置器。
@@ -60,7 +60,7 @@ export function buildToggleDetailsCommandPanel(
       ],
     });
     detailsParts.push(isEn ? "## Last output (full body)" : "## 最近输出（完整正文）");
-    detailsParts.push(context.lastFullOutput);
+    detailsParts.push(sanitizeDisplayPaths(context.lastFullOutput, context.projectPath));
   }
 
   // ── 分区 2：证据（主屏只给计数 + kind 分布；id/source 进 detailsText）───────
@@ -77,7 +77,9 @@ export function buildToggleDetailsCommandPanel(
     detailsParts.push("");
     detailsParts.push(isEn ? "## Evidence" : "## 证据");
     for (const e of context.evidence.slice(0, 8)) {
-      detailsParts.push(`- ${e.id} · ${e.kind} · ${e.source}: ${e.summary}`);
+      detailsParts.push(
+        `- ${e.id} · ${e.kind} · ${sanitizeDisplayPaths(e.source, context.projectPath)}: ${sanitizeDisplayPaths(e.summary, context.projectPath)}`,
+      );
     }
     if (evidenceCount > 8) {
       detailsParts.push(isEn ? `… and ${evidenceCount - 8} more` : `… 还有 ${evidenceCount - 8} 条`);
@@ -100,7 +102,9 @@ export function buildToggleDetailsCommandPanel(
     detailsParts.push("");
     detailsParts.push(isEn ? "## Background tasks" : "## 后台任务");
     for (const t of context.backgroundTasks.slice(0, 8)) {
-      detailsParts.push(`- ${t.id} · ${t.kind} · ${t.status}: ${t.userVisibleSummary}`);
+      detailsParts.push(
+        `- ${t.id} · ${t.kind} · ${t.status}: ${sanitizeDisplayPaths(t.userVisibleSummary, context.projectPath)}`,
+      );
     }
     if (backgroundCount > 8) {
       detailsParts.push(
@@ -182,5 +186,4 @@ export function showCommandPanel(
   }
   writeLine(output, lines.join("\n"));
 }
-
 

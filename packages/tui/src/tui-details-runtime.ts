@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { TuiContext } from "./index.js";
 import { deriveAgentDisplayName } from "./job-runtime.js";
 import type { LogArtifactRequest } from "./log-artifact.js";
-import { truncateDisplay } from "./startup-runtime.js";
+import { formatDisplayPath, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
 import type { AgentRun, EvidenceRecord } from "./tui-data-types.js";
 
 export function findEvidence(
@@ -34,12 +34,12 @@ export function findEvidence(
   return context.evidence.find((evidence) => evidence.id === id || evidence.id.endsWith(id));
 }
 
-export function formatEvidenceDetails(evidence: EvidenceRecord): string {
+export function formatEvidenceDetails(evidence: EvidenceRecord, projectPath?: string): string {
   return [
     `Evidence ${evidence.id}`,
     `- kind: ${evidence.kind}`,
-    `- source: ${evidence.source}`,
-    `- summary: ${evidence.summary}`,
+    `- source: ${sanitizeDisplayPaths(evidence.source, projectPath)}`,
+    `- summary: ${sanitizeDisplayPaths(evidence.summary, projectPath)}`,
     `- supportsClaims: ${evidence.supportsClaims.join(", ") || "none"}`,
     `- createdAt: ${evidence.createdAt}`,
   ].join("\n");
@@ -106,12 +106,12 @@ export function formatAgentDetails(agent: AgentRun, context: TuiContext): string
     `- status: ${agent.status}`,
     `- task: ${truncateDisplay(agent.task, 120)}`,
     `- parentSessionId: ${agent.parentSessionId ?? "none"}`,
-    `- transcript: ${agent.transcriptPath}`,
+    `- transcript: ${formatDisplayPath(agent.transcriptPath, context.projectPath)}`,
     `- permissionMode: ${agent.permissionMode}`,
     `- cost: input=${agent.cost.inputTokens}, output=${agent.cost.outputTokens}, cacheRead=${agent.cost.cacheReadTokens}, cacheWrite=${agent.cost.cacheWriteTokens}, estimatedCny=${agent.cost.estimatedCny}`,
     "- boundary: displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
-    `- context: ${agent.contextSummary}`,
-    `- summary: ${agent.summary}`,
+    `- context: ${sanitizeDisplayPaths(agent.contextSummary, context.projectPath)}`,
+    `- summary: ${sanitizeDisplayPaths(agent.summary, context.projectPath)}`,
   ];
   if (agent.status === "running") {
     lines.push(

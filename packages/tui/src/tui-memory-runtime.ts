@@ -47,7 +47,7 @@ import { join } from "node:path";
 import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
-import { formatError, truncateDisplay } from "./startup-runtime.js";
+import { formatDisplayPath, formatError, truncateDisplay } from "./startup-runtime.js";
 import {
   normalizeMemoryStatus,
   pathExists,
@@ -194,16 +194,20 @@ export function formatMemoryStorage(context: TuiContext): string {
   const paths = resolveStoragePaths(context.config, context.projectPath);
   return [
     "Memory storage",
-    `- project rules: ${context.memory.projectRulesPath}`,
-    `- project memory: ${paths.memoryProject}`,
-    `- user memory: ${paths.memoryUser}`,
-    `- session memory/handoff: ${paths.memorySession}`,
-    `- sessions: ${paths.sessions}`,
-    `- logs: ${paths.logs}`,
-    `- jobs: ${paths.jobs}`,
-    `- cache: ${paths.cache}`,
-    `- index metadata: ${paths.index}`,
-    `- LINGHUN_DATA_DIR: ${process.env.LINGHUN_DATA_DIR ?? "not set; default user data is under ~/.linghun/data"}`,
+    `- project rules: ${formatDisplayPath(context.memory.projectRulesPath, context.projectPath)}`,
+    `- project memory: ${formatDisplayPath(paths.memoryProject, context.projectPath)}`,
+    `- user memory: ${formatDisplayPath(paths.memoryUser, context.projectPath)}`,
+    `- session memory/handoff: ${formatDisplayPath(paths.memorySession, context.projectPath)}`,
+    `- sessions: ${formatDisplayPath(paths.sessions, context.projectPath)}`,
+    `- logs: ${formatDisplayPath(paths.logs, context.projectPath)}`,
+    `- jobs: ${formatDisplayPath(paths.jobs, context.projectPath)}`,
+    `- cache: ${formatDisplayPath(paths.cache, context.projectPath)}`,
+    `- index metadata: ${formatDisplayPath(paths.index, context.projectPath)}`,
+    `- LINGHUN_DATA_DIR: ${
+      process.env.LINGHUN_DATA_DIR
+        ? formatDisplayPath(process.env.LINGHUN_DATA_DIR, context.projectPath)
+        : "not set; default user data is under ~/.linghun/data"
+    }`,
   ].join("\n");
 }
 

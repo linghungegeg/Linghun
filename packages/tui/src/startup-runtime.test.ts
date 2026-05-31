@@ -9,6 +9,7 @@ import {
   formatUserScopedSetupNeeded,
   readOutputColumns,
   readOutputRows,
+  sanitizeDisplayPaths,
   sanitizeDiagnosticText,
   sanitizeUserFacingError,
   shouldEnterProductShellCandidate,
@@ -35,6 +36,18 @@ describe("startup-runtime", () => {
       output.on("data", (chunk) => chunks.push(chunk.toString()));
       writeLine(output, "");
       expect(chunks.join("")).toBe("\n");
+    });
+
+    it("Run 2 Closure: ignores broken pipe style output errors", () => {
+      const output = {
+        write() {
+          const error = new Error("broken pipe") as Error & { code: string };
+          error.code = "EPIPE";
+          throw error;
+        },
+      } as unknown as PassThrough;
+
+      expect(() => writeLine(output, "hello")).not.toThrow();
     });
   });
 
@@ -126,6 +139,21 @@ describe("startup-runtime", () => {
 
     it("redacts prompt parameters", () => {
       expect(sanitizeDiagnosticText("prompt=secret_value&other=1")).toBe("prompt=***&other=1");
+    });
+  });
+
+  describe("sanitizeDisplayPaths", () => {
+    it("Run 2 P3-7: redacts absolute paths without mangling project-relative paths", () => {
+      const project = "C:\\Users\\Admin\\AppData\\Local\\Temp\\linghun-project";
+      const raw =
+        "source=C:\\Users\\Admin\\AppData\\Local\\Temp\\linghun-project\\.linghun\\logs\\evidence.log rel=.linghun/logs/evidence.log";
+
+      const sanitized = sanitizeDisplayPaths(raw, project);
+
+      expect(sanitized).not.toContain(project);
+      expect(sanitized).toContain("source=.linghun/logs/evidence.log");
+      expect(sanitized).toContain("rel=.linghun/logs/evidence.log");
+      expect(sanitized).not.toContain(".linghun[local-path]");
     });
   });
 

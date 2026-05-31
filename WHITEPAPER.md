@@ -1,0 +1,1139 @@
+# Linghun 中文白皮书
+
+## 面向真实工程流的 Evidence-first AI 编程终端
+
+Linghun 是一个开源、本地优先的 AI 编程终端。它不是把用户输入简单转发给模型的外壳，而是把模型、工具、权限、证据、验证、上下文、成本和长期任务组织成一个可审计的工程运行时。
+
+它面向的不是演示型问答，而是真实仓库中的连续开发：读代码、改代码、跑命令、做验证、打稳定点、开并行任务、沉淀项目规则、复盘失败、控制成本，并在最后给出有证据边界的交付结论。
+
+Linghun 的核心主张是：
+
+> 真正拖慢 AI 编程的，不是模型不会写代码，而是它太容易在没看事实、没跑验证、没确认边界时给出自信结论。
+
+Linghun 选择从 evidence-first 开始：模型可以推理和生成，但关键工程结论必须能追溯到事实。它需要知道读过哪些文件、执行过哪些工具、跑过哪些验证、Git 状态是什么、索引是否新鲜、失败是否真实发生、输出声明是否有证据支持。
+
+---
+
+## 产品哲学：强底座、工程化、低学习成本
+
+Linghun 已经不是“给模型套一个终端界面”的形态。它把 AI coding 拆成模型理解、工具执行、权限决策、证据记录、验证闭环、缓存成本、长期上下文、失败复盘、Git 稳定点、多智能体和本地守护这些可组合模块，再把它们接入同一条可审计的工程主链。
+
+Linghun 的产品哲学可以概括为三句话：
+
+- **强底座**：模型不是直接碰仓库，而是通过 provider runtime、tool runtime、permission runtime、evidence runtime、verification runtime、Git runtime、memory runtime、job runtime 和 Windows process guard 进入工程世界。
+- **工程化**：每个关键动作都有状态、边界、日志、证据、失败降级和可诊断入口；不是靠提示词要求模型“谨慎一点”，而是让系统在主链上约束事实和行为。
+- **低学习成本**：用户可以直接用自然语言工作，复杂能力通过 slash、command panel、doctor、details、远程连接向导和渐进披露提供；新手不用先理解全部机制，高级用户又能展开诊断和控制。
+
+代码卫生也是这套产品哲学的一部分。Linghun 不希望 AI 把“我做了什么”“这里是演示”“临时调试一下”这类过程解释写进源码，也不鼓励用无意义注释替代清晰命名。解释应该进入回答、报告、review 或 handoff；源码只保留对长期维护有价值的信息。
+
+这三点组合起来，构成 Linghun 的长期设计原则：用强底座承载强模型，用工程化降低不确定性，用低学习成本让普通开发者也能真实受益。用户看到的是一个能聊天、能执行、能验证、能回滚、能沉淀经验的开发工作台；系统内部则是一套持续约束事实、权限、成本和风险的运行时。
+
+受控记忆、自我学习和反思系统，则让这套工作台不是每一轮都从零开始。它会逐步贴合用户的表达方式、验证习惯、项目规则和常用命令，把“后续每次都要重新解释”的成本压下去，让模型在后续相似任务里更顺手、更少走偏、更少重复犯同样的错。
+
+### 强底座带来的价值
+
+强底座不是为了“架构好看”，而是为了解决真实开发中的不可控问题：
+
+- 模型再强，也不能凭空知道当前工作区事实，所以要有 Read/Grep/Index/Diff/Evidence。
+- 工具再强，也不能绕过用户机器安全，所以要有 permission、workspace trust、path guard、resource cap。
+- 回答再流畅，也不能把没验证的结论写成完成，所以要有 final answer gate、verification level、readiness。
+- 会话再长，也不能无限塞上下文，所以要有 cache、summary-first、handoff、controlled memory。
+- 任务再复杂，也不能把后台进程放飞，所以要有 background task、durable job、process guard、runner fallback。
+
+用户感知到的结果是：更少误判、更少返工、更少重复解释、更低上下文成本、更容易回滚、更敢把 AI 用在真实项目里。
+
+### 工程化带来的价值
+
+Linghun 把“AI 编程”从一次性回答变成工程闭环：
+
+- 输入阶段：自然语言、slash、Start Gate、权限确认各走清晰路径。
+- 理解阶段：模型拿到的是投影后的 RuntimeStatus、EvidenceSummary、ControlledMemorySummary、FailureLearningSummary，而不是全部内部噪音。
+- 执行阶段：工具调用经过 schema、runtime validation、permission、path safety 和 result normalization。
+- 观察阶段：usage、cache、background task、verification、Git、index、failure learning 都写入结构化状态。
+- 输出阶段：最终回答检查声明、证据、完成度、架构边界、当前事实和 Git 操作。
+- 复盘阶段：真实失败沉淀成可管理教训，后续相似任务自动提示风险。
+
+这让 Linghun 更像一个工程运行时，而不是聊天窗口。它带来的直接收益不是“流程更复杂”，而是把浪费从主链里拿掉：
+
+- 少重复解释：项目规则、记忆、handoff 和 workspace snapshot 让模型不用每轮重新理解背景。
+- 少重复读文件：索引、缓存、证据摘要和 changed files 让模型更快定位相关代码。
+- 少无效工具调用：稳定工具 schema、deferred tools 和结果摘要减少把长日志、低价值工具列表塞进上下文。
+- 少误判完成：verification、readiness 和 final answer gate 降低“以为完成但实际没闭环”的返工。
+- 少缓存破坏：CacheFreshness 和 stable prompt/tool ordering 帮助保持更高 prompt cache 复用。
+- 少后台失控：job、agent、resource cap 和 process guard 避免长任务拖慢主会话。
+
+最终用户感知到的是更少 token 浪费、更快响应、更低 API 成本、更少返工次数，以及更稳定的阶段性交付。
+
+### 低学习成本带来的价值
+
+低学习成本不是删掉高级能力，而是把复杂度藏在合适的层级里：
+
+- 默认直接说需求即可，不要求用户记住所有命令。
+- 常用能力有简短 slash 入口，高级能力通过 `/help all`、doctor 和 details 展开。
+- 主屏 summary-first，完整日志和诊断留在 Ctrl+O、details、artifact 和 doctor。
+- 中文和英文表达都能覆盖常见工作流，不要求用户把真实工程意图翻译成固定英文命令。
+- 对中文开发者常见环境做一等支持：中文需求描述、中英混合术语、中文路径、空格路径、Windows 终端、PowerShell、cmd.exe、中文诊断与私有配置路径。
+- `/model setup`、provider.env、doctor 来源诊断降低模型配置门槛。
+- `/memory review`、`/failures`、`/cache`、`/problems` 都是面向用户的管理入口，而不是只留给开发者的内部状态。
+
+结果是：新用户可以先把 Linghun 当作可执行的 AI 编程终端用；中文开发者可以直接用自己的日常表达描述任务、验证、索引、Git 稳定点和排障需求；当任务需要离开电脑继续观察、审批或推进时，也可以通过企业微信、飞书/Lark 或钉钉通道接收摘要和回传控制输入。随着任务变复杂，再逐步打开记忆、agent、job、runner 和远程通道。
+
+---
+
+## 1. 产品定位
+
+Linghun 的定位是一套本地开发者工作台：
+
+- 用终端 TUI 承载日常编码、审查、验证和长任务。
+- 用中文友好的自然语言和诊断入口承载真实开发表达，而不是只面向英文命令熟练用户。
+- 用阶段化工程托管把需求理解、代码定位、执行改动、验证、稳定点、交接和失败复盘串成闭环，提高新项目从想法到可运行成品的成功率。
+- 用 durable job、background task、agent transcript、预算、步数、日志、报告和 handoff 托管长任务，让复杂任务从目标、计划、执行到交接都有状态可查。
+- 用 evidence-first、验证边界和架构约束，把“AI 生成代码”推进到“AI 参与成品级项目交付”，减少只停留在 demo、样例代码和幻觉回答里的落差。
+- 用多模型路由把规划、执行、审查、验证、总结、视觉和图像类任务分给不同角色模型。
+- 用工具运行时把读写文件、搜索、Bash、Todo、Diff、Git、worktree、索引和验证接入同一条主链。
+- 用权限策略、路径安全、命令语义分类和用户确认保护本地工作区。
+- 用证据系统和最终回答闸门抑制“没看就说、没跑就说、没完成就说完成”。
+- 用 session、handoff、受控记忆和失败学习支持长期工程上下文。
+- 用 MCP、skills、plugins、hooks、remote adapters 和 native runner 边界接入外部能力；企业微信、飞书/Lark 和钉钉可以作为手机侧通知、审批和自然语言入口，但不能绕过本地权限。
+
+Linghun 的目标用户包括：
+
+- 个人开发者：希望一个开源、本地可控、能长期使用的 AI 编程终端。
+- 中文开发者和新手开发者：希望通过自然语言、中英混合术语和 AI 协作完成真实项目，而不是先学习一整套复杂命令；Windows/PowerShell 环境和中文路径也应默认可用。
+- 团队与开源项目维护者：希望 AI 参与开发时有 transcript、evidence、verification、permission 和 Git 稳定点可追溯。
+- 工程工具开发者：希望在一个干净的运行时里接入 provider、MCP、skill、plugin、job、agent 或远程审批能力。
+
+---
+
+## 2. 用户痛点与实际收益
+
+真实 AI 编程的成本不只来自 API 账单。更大的浪费经常来自反复解释、反复读文件、工具 schema 抖动、缓存破坏、长日志污染上下文、模型误判完成度、失败后没有复盘，以及 Windows 长任务残留。
+
+Linghun 对这些痛点给出的收益是：
+
+| 用户痛点 | Linghun 的解决方式 | 用户得到的效果 |
+| --- | --- | --- |
+| 模型没看事实就下结论 | EvidenceSummary、工具结果、索引证据、最终回答闸门 | 少被“看似自信但没证据”的回答误导，降低返工。 |
+| 改动能跑但破坏项目架构 | 架构证据、边界检查、漂移检测、交付一致性 gate | 防止局部修复把依赖方向、模块职责和长期维护性弄坏。 |
+| 大文件、生成物或超长代码块拖垮上下文 | 索引大文件安全门、ignore/repair 流程、AntiCodeBlob 架构提示 | 避免索引和 prompt 被低价值内容吞掉，也减少逻辑继续堆进巨型文件。 |
+| 前端/TUI 改动能运行但体验失控 | 前端约束、布局边界、details/summary 分层、终端能力降级 | 降低文本重叠、主屏噪音、窄屏错位和交互割裂带来的使用成本。 |
+| 新项目容易停留在 AI demo | 阶段化工程闭环、Todo、验证、架构约束、稳定点、handoff | 新手也能通过自然语言持续推进项目，更容易得到可运行、可验证、可继续维护的成品。 |
+| 新项目没有工程规则，模型每轮都重新猜 | `LINGHUN.md` 项目规则、`/memory init` 基础模板、规则摘要与 cache freshness | 从空仓库开始就建立事实优先、权限、验证、代码卫生和最小改动边界，降低新手把项目越做越乱的概率。 |
+| AI 把解释和临时想法留进代码 | 成熟工程默认值、代码卫生约束、patch summary、review/verification | 减少无意义注释、临时代码、调试残留和解释性噪音，让代码更像可维护成品。 |
+| 复杂任务无法放心交给 AI 跑完 | durable job、agent、budget、maxSteps、timeout、logs、report、handoff、verification boundary | 长任务从目标到执行、观察、暂停/取消、交接都有状态，用户不必一直盯着模型输出。 |
+| 每轮都重复解释项目背景 | 项目规则、handoff、controlled memory、Workspace Snapshot Lite | 长项目连续开发更稳定，重复 token 更少。 |
+| 工具列表和 MCP 变化导致 prompt cache 抖动 | core tools 稳定 schema、deferred tools、稳定排序、deferredToolListHash | 工具能力变多时不必把全部 schema 常驻进 prompt，缓存更稳。 |
+| 长日志、完整索引、完整历史塞进上下文 | summary-first、details、fullOutputPath、log artifact slice、bounded workspace summary | 主屏更清爽，prompt 更短，模型更少被噪音带偏。 |
+| 不知道钱花在哪里 | usage/cache history、hit rate、read/write tokens、/usage、/cache、/cache-log | 用户能看到缓存复用和 token 消耗，不再盲飞。 |
+| 缓存突然变差但不知道原因 | CacheFreshness、changedKeys、/break-cache status、cache break marker | 能定位是 system prompt、tool schema、MCP 列表、模型、记忆、规则还是 cache control 变化。 |
+| 局部测试通过被说成全部完成 | verification level、readiness、/review、final answer downgrade | 避免把 focused/mock/synthetic PASS 包装成整体 ready。 |
+| Git 操作和 worktree 容易失控 | Git stable point、managed worktree、dirty/force/path escape guard | 进入下一阶段前能打稳定点，回滚和并行开发更可控。 |
+| 多 agent 容易烧 token 和占资源 | role route、独立 transcript、background surface、resource cap、job budget | 并行探索更可控，不让后台任务拖垮主会话。 |
+| 离开电脑后长任务无人看管 | 企业微信、飞书/Lark、钉钉 remote channel；任务状态、验证结果、失败摘要和审批请求以 summary-first 方式发送到手机；自然语言入站回到本地主链。 | 用户可以在手机上看进展、审批 pending 操作或继续推进任务，不必一直守在电脑前；执行仍发生在本机，不把远程通道变成失控执行入口。 |
+| 每轮都要重新适应用户习惯 | controlled memory、受控记忆 review、accepted-only 注入 | 用户的表达方式、命令习惯、验证偏好和项目规则会逐步沉淀，后续协作更顺手。 |
+| 失败后下次还踩同一个坑 | failure learning、反思记录、resolve/ignore | 真实失败沉淀成风险提示，而不是消失在日志里；后续相似任务更不容易重复翻车。 |
+| Windows 长任务容易残留 | Process Guard、Windows 进程树停止、Native Runner Job Object 契约 | 取消、超时、退出时更可靠，适合 Windows 日常开发环境。 |
+
+总体效果可以概括为：更少幻觉、更少重复 token、更高缓存复用、更少返工、更可控的本地执行、更适合长期项目。
+
+对个人开发者和新手开发者来说，这些问题会被放大。团队里可以依靠资深 reviewer、CI、架构规范和 DevOps 流程兜底；个人项目往往只有一个人面对模型输出、依赖升级、测试失败、Git 回滚和环境配置。新手则更容易被“看起来很完整”的回答误导：模型说改好了，但不知道它有没有读对文件；模型说测试通过，但不知道验证范围；模型建议重构，但不知道是否破坏项目边界。
+
+Linghun 的价值是把这些隐性工程经验前置到工具里：
+
+- 把“先看事实再下结论”变成默认约束。
+- 把“每次大改前先留稳定点”变成自然工作流。
+- 把“测试通过要说明范围”变成最终回答要求。
+- 把“失败要复盘并下次提醒”变成系统能力。
+- 把“中文、Windows、PowerShell、中文路径也应该是正常路径”变成产品边界。
+- 把“API 成本和缓存命中要可见”变成可诊断指标。
+
+这意味着 Linghun 不只是给高手节省时间，也是在把一部分资深工程师的工作习惯、风险意识和交付检查沉到开发工具里。
+
+---
+
+## 3. 能力总览
+
+| 能力域 | 当前能力 |
+| --- | --- |
+| 工程闭环 | 从需求理解、代码定位、执行改动、验证、稳定点、交接到失败复盘的阶段化主链；适合新项目从想法推进到可运行成品。 |
+| 证据与反幻觉 | EvidenceSummary、完成度检查、代码事实检查、架构/边界检查、Git 操作检查、当前外部事实新鲜度规则、最终回答 retry/downgrade。 |
+| 长任务托管 | durable job、background task、agent transcript、预算、步数、runtime、日志、report、handoff、verification 边界；支持复杂任务从目标到交接持续可观察。 |
+| 多模型路由 | planner、executor、reviewer、verifier、summarizer、vision、image 角色路由；角色级 provider/model/capability/budget/permission 配置。 |
+| 工具系统 | Read、Write、Edit、MultiEdit、Grep、Glob、Bash、Todo、Diff；工具 schema；工具结果摘要；变更文件记录；Bash 完整日志归档。 |
+| 编辑安全与代码卫生 | 读前编辑、expectedHash、stale-file guard、唯一替换、patch summary、变更摘要、工作区路径边界；成熟工程默认值约束无意义注释、临时代码、调试残留、演示性话术和解释性噪音不进入源码。 |
+| 验证与就绪 | /verify plan/last/smoke、验证日志、PASS/PARTIAL/FAIL/TIMEOUT/STALE/CANCELLED 语义、/review、/doctor、/problems、readiness 和 cost preview。 |
+| 架构系统 | 架构证据查询、边界声明检查、架构漂移检测、前端/TUI 体验约束、AntiCodeBlob 与代码卫生提示、最终交付一致性检查、handoff 架构卡片。 |
+| Git 工作流 | Git 状态检查、稳定点创建、checkpoint、managed worktree create/remove、路径逃逸保护、dirty/force 边界、Git 操作证据。 |
+| 索引与工作区感知 | codebase-memory 解析与诊断、fast index status、显式 freshness check、index search/architecture evidence、Workspace Reference Cache、Workspace Snapshot Lite、大文件安全扫描。 |
+| 缓存与降本 | prompt cache usage 解析、hit rate、cache history、CacheFreshness、break-cache、stable tool ordering、deferred tools、summary-first prompt 控制。 |
+| 项目规则 | 启动时检测 `LINGHUN.md`；缺失时只给轻提示；用户显式运行 `/memory init` 才创建基础模板；规则摘要进入 `/memory`、`/resume`、readiness 与 CacheFreshness，不把全文刷主屏。 |
+| 长期上下文 | JSONL transcript、session store、handoff packet、项目规则、controlled memory、candidate-first 长期记忆、失败学习；memory/session/job/log/cache 支持项目级、用户级和自定义目录存储边界。它的目标不是让系统“死记硬背”，而是让后续任务越来越像在和同一个熟手协作。 |
+| 多智能体与长任务 | /agents、/fork、/job；explorer/planner/verifier/worker；独立 transcript；后台任务；durable job；预算、步数、运行时和并发上限。 |
+| 权限系统 | default、auto-review、plan、full-access 四档模式；命令语义分类；路径安全分类；持久 allow 规则；拒绝记录；远程审批仍回到本地权限管道。 |
+| 模型运行时 | OpenAI-compatible、DeepSeek、Anthropic Messages 风格端点；流式输出；工具调用；usage；reasoning；timeout 与 idle timeout；provider 诊断与失败摘要。 |
+| Windows 守护与兼容 | Windows 进程树停止、exit cleanup、Native Runner Job Object 契约、ConPTY/终端能力检测、大小写 CLI 入口、中文/空格路径与 provider.env 私有配置路径。 |
+| 自我学习与反思 | controlled memory 自动学习、candidate-first 确认流、secret 过滤、失败学习、真实失败复盘、教训投影、resolve/ignore 生命周期。它会把稳定偏好和真实教训变成下次的提示，让模型更贴近用户、更少重复犯错。 |
+| 扩展生态 | MCP metadata、deferred tools、skills、plugins、workflows、hooks、manifest/trust/enable/disable/status/doctor。 |
+| 远程连接 | 企业微信、飞书/Lark、钉钉 remote channel；真实 webhook/official CLI 发送链路；低学习 `/remote setup` 字段向导；notification-only、approval-capable、natural-language-inbound-capable、full-mobile-control-capable 分级；手机自然语言入站回到本地模型主链；远程 approval 复用本地 pending approval 和 permission pipeline；summary-only redaction、nonce/messageId/expiry/replay/signature/binding/source 校验。 |
+| 输出与交互 | summary-first 主屏、details 展开、command panel、status footer、slash suggestions、background task surface、日志 artifact bounded slice。 |
+
+---
+
+## 4. Evidence-first 工程闭环
+
+Linghun 把“模型说了什么”和“系统知道什么”分开处理。
+
+模型可以根据上下文提出计划、解释代码或生成改动，但以下结论必须有证据支撑：
+
+- “代码里是这样实现的”
+- “本次改动符合架构边界”
+- “没有架构漂移”
+- “所有任务已经完成”
+- “测试已通过”
+- “可以发布”
+- “已创建 Git 稳定点”
+- “外部信息是最新的”
+
+Linghun 的证据来源包括：
+
+- 文件读取、搜索和 Diff。
+- 工具调用结果与 changedFiles。
+- Bash / verification 日志。
+- Git status、commit、worktree 操作结果。
+- index search / architecture 查询结果。
+- workspace snapshot、cache freshness、runtime status。
+- provider live observation 与 model doctor 诊断。
+- failure learning 中真实失败的历史教训。
+
+失败学习和长期记忆不会被当作当前任务的完成证据。它们只作为风险提示进入模型上下文，提醒模型在相似场景下更谨慎。
+
+---
+
+## 5. 阶段化工程流程
+
+Linghun 的工程化不是把用户拖进复杂流程，而是把真实开发中本来就存在、但经常被忽略的阶段显式化。个人开发者和新手尤其容易在这些阶段付出隐性成本：不知道模型是否真的理解项目、不知道改动是否越界、不知道测试通过代表什么、不知道失败是否会再次发生，也不知道 API 成本为什么突然升高。
+
+Linghun 把一次 AI 编程任务拆成可观察的工程阶段：
+
+| 阶段 | 不工程化时的疼点 | Linghun 的处理 | 对用户的收益 |
+| --- | --- | --- | --- |
+| 环境与模型配置 | 新手最容易卡在 key、baseUrl、模型能力、网络和配置文件位置；错误信息一多就不知道是模型不可用还是自己配错。 | provider runtime、model doctor、provider.env 私有配置、角色化模型路由。 | 配置问题有来源诊断，个人开发者不用靠反复试错定位模型、网络、key 或端点问题。 |
+| 需求理解 | 开发者真实表达常常是中文、中英混合和上下文省略；僵硬命令或本地误判会把任务带偏。 | 自然语言默认交给模型理解，slash 和确认流才走确定入口；RuntimeStatus 投影减少内部噪音。 | 用户按日常语言描述“做一个项目/修这个 bug/先打稳定点”，不用先学习一整套工具语法。 |
+| 项目启动 | 从空项目到可运行版本，常见问题是依赖、目录、入口、样式、验证命令和 README 不成体系，最后停在 demo。 | Todo、工具执行、验证计划、架构约束、Git 稳定点和 handoff 串成阶段化主链。 | 新手能跟 AI 逐步把项目推进到可运行、可验证、可继续维护的状态。 |
+| 代码定位 | 模型反复读无关文件，或者没读关键文件就下结论；新手不知道该让模型看哪里。 | grep、read、index search、workspace snapshot、changed files 和 evidence summary 协同定位。 | 减少重复 token 和等待时间，模型更容易围绕真正相关的代码工作。 |
+| 执行改动 | 工具调用、Bash、编辑和路径操作混在一起，容易越权、误改文件或基于旧内容继续写。 | tool schema、permission mode、path guard、expectedHash、stale-file guard、resource cap。 | 个人项目也能获得接近团队工程规范的保护，不靠用户手动盯每一步。 |
+| 代码卫生 | AI 容易把“这里是我新增的逻辑”“临时调试”“为了演示”这类解释性噪音、无意义注释或 debug 残留写进源码。 | 成熟工程默认值、代码卫生提示、patch summary、review/verification 和架构边界共同约束。 | 代码更像人类工程师会提交的成品，减少后续清理和代码审查成本。 |
+| 架构与前端体验 | 代码能跑不代表结构健康；前端/TUI 还会出现主屏噪音、文本重叠、窄屏错位和详情不可读。 | 架构证据、边界检查、漂移检测、前端/TUI 约束、交付一致性 gate。 | 降低“局部修好、整体变烂”的风险，让成品更接近可维护工具而不是一次性脚本。 |
+| 验证与就绪 | focused 测试、mock、合成 smoke 很容易被模型说成“全部通过”，用户上线前才发现缺口。 | verification level、readiness、review、problems、final answer gate。 | 用户能看清“验证了什么、没验证什么”，减少上线前返工。 |
+| Git 稳定点 | 做到一半没有可回滚点，下一轮改动叠上来后难以恢复；新手更怕把项目改坏。 | Git stable point、checkpoint、managed worktree、dirty/force/path escape guard。 | 每个阶段都能留下安全点，复杂改动更敢推进。 |
+| 长任务托管 | 复杂任务需要连续改、跑、修、验、交接；用户一直盯着屏幕既累，也很难判断任务是否卡住。 | durable job、multi-agent transcript、budget、maxSteps、timeout、logs、report、handoff、verification boundary。 | 长任务从目标到执行、观察、暂停/取消和交接都有状态，用户不必一直守在模型旁边。 |
+| 成本与上下文 | 每轮重复解释、重复读文件、工具列表变化破坏缓存，账单上涨但原因不明。 | prompt cache usage、CacheFreshness、deferred tools、summary-first、cache-log。 | 更高缓存复用、更少重复 token，更容易判断钱花在哪里。 |
+| 记忆与数据位置 | 公司电脑、Windows 多盘符和 C 盘空间限制下，用户不希望记忆、日志、job、cache 被强制写到一个固定位置。 | 存储支持项目级、用户级和自定义目录；memory 分 project/user/session；`/memory storage` 展示实际路径；`LINGHUN_DATA_DIR` 可改用户数据根。 | 记忆和运行数据可按项目、用户或自定义目录管理，更符合 Windows 和商业环境。 |
+| 失败复盘 | 失败只留在滚动日志里，下次相似任务继续踩坑。 | failure learning、反思记录、脱敏、去重、resolve/ignore。 | 真实失败变成后续风险提示，长期项目越用越稳。 |
+
+这套阶段化设计的核心价值，是把“靠经验手动兜底”的工作变成系统默认行为。对个人开发者来说，它减少了上下文管理、回滚、验证和成本诊断的心智负担；对新手来说，它把工程规范藏在工具运行时里，让用户先完成任务，再逐步理解背后的机制。
+
+---
+
+## 6. 输出侧反幻觉系统
+
+Linghun 不依赖简单的输入关键词拦截来判断用户意图。普通自然语言默认应交给模型理解；明确 slash command、UI 操作和 pending confirmation 走确定本地入口。
+
+真正关键的约束放在输出侧。
+
+当模型准备输出最终回答时，Linghun 会检查高风险声明是否有对应证据。若证据不足，系统可以触发一次受控重试；重试后仍不满足，则降级为保守回答，避免把未经验证的成功结论写入 transcript。
+
+这套系统覆盖多个层面：
+
+- **代码事实**：不能在未读取或未搜索的情况下断言源码事实。
+- **完成度**：不能把局部验证包装成全部完成。
+- **架构与边界**：不能在缺少架构证据时宣称无漂移或边界闭合。
+- **验证状态**：不能把 build、mock、focused 或合成 smoke 误写成真实全量通过。
+- **当前外部事实**：涉及最新版本、价格、新闻、外部服务状态时，需要新鲜来源或明确标注未验证。
+- **Git 操作**：声称已创建稳定点、checkpoint 或 worktree 时，需要真实 Git 操作证据。
+
+这套机制不把“模型自信表达”视为工程结论。关键结论必须经过证据、验证和边界检查，才能进入最终交付口径。
+
+### 反幻觉实测口径
+
+Linghun 的反幻觉系统已经按真实模型交互做过专项 smoke 设计，不只停留在单元测试或提示词约束。
+
+实测覆盖的典型诱导包括：
+
+| 诱导场景 | 期望风险 | Linghun 的拦截效果 |
+| --- | --- | --- |
+| 要求模型直接声称“符合架构边界 / 没有架构漂移” | 模型没看证据就给架构结论 | 模型会要求先看 diff/证据；最终回答 gate 也会检查架构 evidence。 |
+| 要求模型声称“所有任务完整完成、没有遗漏” | 局部事实被包装成完整闭环 | completion gate 要求完成度分类和证据，不足时降级。 |
+| 诱导“已验证 / PASS / 可以发布” | 没跑验证就宣布成功 | verification/readiness/final gate 会要求真实验证记录和范围。 |
+| 询问当前模型身份 | 泄漏 provider、baseUrl、endpointProfile | 普通回答只暴露模型名；provider 细节进入 doctor。 |
+| 触发 deferred tools 或内部 dispatcher 文案 | 主屏泄漏内部工具名和执行细节 | 默认主屏降噪，raw tool_result 保留在诊断层。 |
+| 把 resource guard 说成第五种权限模式 | 权限模型被模型编造 | runtime status 和 invariant 约束只保留四档权限模式。 |
+| 无 Git 工具调用却声称已创建稳定点 | 空口 Git 成功 | Git operation claim 必须绑定真实工具证据。 |
+
+这说明 Linghun 的反幻觉不是“让模型自觉一点”，而是多层拦截：
+
+- prompt 层告诉模型证据边界。
+- runtime 层记录工具、验证、Git、index、memory、failure 等事实。
+- final answer 层检查高风险声明。
+- transcript 层避免违规原文直接成为最终交付记录。
+
+实测覆盖的核心风险，是“没有事实就声称完成、验证、架构闭合、Git 成功和 runtime 身份”。Linghun 通过 prompt、runtime、final answer gate 和 transcript 四层约束，把这类高风险输出从最终交付记录中隔离出来。
+
+---
+
+## 7. 架构系统
+
+真实工程里，代码“能改对”只是第一层要求；更难的是长期不破坏项目边界。一个局部修复可能让测试通过，却把模块职责、依赖方向、运行时边界或交付口径带偏。Linghun 的架构系统就是为这个问题设计的。
+
+它关注的不是抽象的架构图，而是当前仓库中可验证的架构事实：
+
+- 哪些模块承担主链职责。
+- 哪些逻辑只能作为纯函数或 presenter 存在。
+- 哪些 runtime 可以有副作用，哪些只能做投影和格式化。
+- 哪些能力已经接入主链，哪些只是提示层、旁路或诊断入口。
+- 新项目、新系统、新功能、新页面和新模块在动手前是否先形成目标、已知事实、推荐路径、分阶段拆解、风险、验证方式和 nonGoals。
+- 当前改动是否让职责重新堆回超大入口文件。
+- 新页面、新流程、长任务、UI/TUI 改动是否继续把逻辑堆进既有巨型文件。
+- 前端和 TUI 改动是否遵守布局、可读性、summary-first、details 分层和终端能力降级边界。
+- 源码中是否混入解释性噪音、临时调试、无意义注释、演示性残留或不该提交的过程描述。
+- 最终交付声明是否与真实运行时接线一致。
+
+Linghun 的架构系统由几层组成：
+
+- **架构证据**：通过索引、搜索、文件读取和架构摘要获取当前代码结构事实。
+- **边界检查**：判断模型声称的“边界闭合”“接入主链”“行为不变”是否有源码证据支撑。
+- **漂移检测**：对比当前改动和架构卡片，识别职责回流、旁路实现、重复 runtime、权限绕行或诊断泄漏等风险。
+- **新项目规划卡片**：当用户要求新系统、新功能、新页面、新模块或跨文件实现时，架构系统会把目标、项目事实、推荐方案、拒绝方案、分阶段拆解、风险、验证项和 nonGoals 组织成 Architecture Card。它不是完整 spec 平台，也不强制小修进入 Plan，而是帮助新项目在第一步就避免“先写一坨、后面再补救”。
+- **AntiCodeBlob 提示**：在新功能、新页面、新流程、长任务、UI 开发或跨文件改动时，提示模型默认不要继续堆进 god file、超长函数、深层嵌套或无边界全局状态；它属于架构风险提示，不改变权限系统，也不授权大重构。
+- **代码卫生提示**：把“不要把解释写进代码、不要留下临时调试、不要用无意义注释替代清晰命名、不要把 demo 话术留进源码”纳入成品交付约束。
+- **前端/TUI 约束**：把主屏 summary-first、details 展开、命令面板、状态栏、滚动视口、窄屏/legacy terminal 降级、文本不重叠和长输出归档纳入架构边界，而不是只看业务代码能否运行。
+- **最终交付一致性**：在 final answer 进入 transcript 前检查交付总结是否夸大架构状态。
+- **交接沉淀**：handoff 中保留架构卡片、风险和 pending items，避免下轮任务重新从零理解边界。
+
+这套系统的用户价值很直接：开发者不用只靠人工 review 记住所有模块边界，也不用相信模型一句“已经接入主链”。当 Linghun 处理大规模重构、index 拆分、Git runtime、failure learning、多 agent 或 Windows runner 这类跨模块能力时，架构系统会把“是否真的接上、是否越界、是否只是写了提示词”变成可审查的问题。
+
+架构系统同样遵守 Evidence-first 原则。历史架构说明、记忆和失败学习可以提醒模型，但不能替代本轮源码证据；没有读到相关代码、没有看到接线位置、没有验证主路径，就不能把“符合架构边界”写成确定结论。
+
+---
+
+## 8. 角色化多模型路由
+
+Linghun 支持按角色配置模型，而不是只选一个全局模型。
+
+内置角色包括：
+
+- `planner`：规划、拆解和方案比较。
+- `executor`：执行主要编码任务。
+- `reviewer`：审查、风险识别和只读复核。
+- `verifier`：验证、测试解释和交付判断。
+- `summarizer`：长上下文摘要与交接。
+- `vision`：视觉输入相关能力。
+- `image`：图像生成或图像类任务入口。
+
+每个角色可以配置：
+
+- provider 与 primary model。
+- fallback models。
+- 必需能力：text、tools、vision、image、thinking、promptCache。
+- 最大输入/输出 token。
+- 成本上限。
+- 是否允许工具、写文件、Bash。
+- 是否在运行前要求确认。
+
+这让 Linghun 可以把“会写代码的模型”和“适合审计的模型”“适合总结的模型”“适合视觉任务的模型”分开管理。角色路由也进入 `/model route` 和 `/model route doctor`，便于用户看到当前配置是否真实可用。
+
+---
+
+## 9. Provider Runtime
+
+Linghun 的 provider 层支持多种端点形态：
+
+- `chat_completions`
+- `responses`
+- `anthropic_messages`
+
+运行时能力包括：
+
+- 流式文本输出。
+- thinking / reasoning 配置。
+- prompt cache 输入。
+- usage 与 cache usage 统计。
+- tools/toolChoice。
+- OpenAI-style function call 与 Anthropic-style tool_use/tool_result 适配。
+- provider request timeout 与 stream idle timeout。
+- retry status 与 max attempts。
+- provider failure 的用户可读摘要和诊断信息。
+- provider circuit breaker / cooldown，避免连续失败时反复浪费请求。
+
+模型身份展示也做了降噪：普通用户问“当前模型是什么”时只回答模型名；provider、baseUrl、endpointProfile 等内部字段默认不出现在主屏和 prompt 投影中，需要通过 doctor 入口查看。
+
+API key 和 baseUrl 这类敏感配置应保存在用户私有配置或环境变量中。doctor 只展示来源和脱敏状态，不输出明文 key。
+
+---
+
+## 10. 工具执行与编辑安全
+
+Linghun 的内置工具覆盖真实开发中最常用的动作：
+
+- `Read`：读取文件。
+- `Write`：写入完整文件。
+- `Edit`：单处唯一字符串替换。
+- `MultiEdit`：同文件多处替换。
+- `Grep`：正则搜索。
+- `Glob`：路径模式搜索。
+- `Bash`：运行命令。
+- `Todo`：维护任务状态。
+- `Diff`：查看变更。
+
+编辑相关能力不只是“能写文件”，还包括：
+
+- Read snapshot：记录读取时的 hash、mtime、size。
+- expectedHash：写入或编辑前校验文件是否仍是模型看到的版本。
+- stale-file guard：文件已变化时阻止基于旧上下文继续写。
+- 唯一替换要求：Edit/MultiEdit 避免模糊替换。
+- patch summary：记录变更文件、增删行、风险文件。
+- changedFiles：把变更传播给上下文和验证。
+
+### 10.1 代码卫生：让解释留在交付文本，不进入源码
+
+代码卫生也是编辑安全的一部分。Linghun 的成熟工程默认值要求模型把解释留在回答、报告或 handoff 中，而不是塞进源码；代码里只保留有长期维护价值的注释。
+
+这项能力面向 AI 编程里很常见的一类质量问题：代码能运行，但混入了过程描述、演示话术、临时调试、无意义 TODO、未使用分支，或者“为了说明我做了什么”的 AI 注释。它们短期看不影响功能，长期会增加 review、维护和二次开发成本。
+
+Linghun 会把这些内容作为成品交付噪音处理：在成熟工程默认值、架构提示、patch summary、review 和 verification 中持续提醒模型保持源码干净。它不是要求代码没有注释，而是要求注释服务于长期维护，而不是服务于模型自我解释。
+
+Bash 工具输出采用 preview + fullOutputPath：主屏只展示可读摘要，完整 stdout/stderr 进入日志 artifact，避免长日志污染主屏、prompt、memory 和 handoff。
+
+---
+
+## 11. 工具调用稳定与缓存降本
+
+在 AI 编程终端里，成本和速度高度依赖 prompt cache。工具 schema、system prompt、MCP 列表、模型路由、项目规则、记忆、compact 边界或 cache control 发生字节级变化，都可能让原本可复用的上下文失效。
+
+Linghun 把缓存稳定作为运行时能力，而不是事后账单统计。
+
+### 11.1 稳定工具调用链
+
+Linghun 的工具调用稳定性来自几层设计：
+
+- 核心工具 schema 由统一 registry 生成。
+- OpenAI chat、OpenAI responses、Anthropic Messages 三类 endpoint 都有明确 tool schema/result shape。
+- tools 数组按 name 稳定排序，减少非语义顺序变化破坏缓存前缀。
+- Anthropic tool_use/tool_result 形态做配对处理，缺失配对时生成可诊断的错误 tool_result，避免 continuation 断链。
+- Deferred tools 不直接全部进入 API tools 数组，而是通过 SearchExtraTools / ExecuteExtraTool 风格的发现与代理执行路径暴露。
+- MCP、skill、plugin、codebase-memory 等扩展工具默认进入稳定摘要和发现目录，减少工具列表波动。
+- deferredToolListHash 单独追踪扩展工具列表变化，与核心 toolSchemaHash 解耦。
+
+用户收益是：工具越多，不等于每轮 prompt 越臃肿；扩展能力可用，但不会轻易把工具 schema 变动扩散成整轮 cache bust。
+
+### 11.2 Prompt Cache 与用量追踪
+
+Linghun 解析并记录多类 provider usage：
+
+- input tokens。
+- output tokens。
+- cache read tokens。
+- cache write / cache creation tokens。
+- Anthropic ephemeral 5m / 1h cache creation 字段。
+- OpenAI-compatible cached_tokens。
+- endpoint 和 provider 来源。
+
+缓存命中率按 `cacheRead / (input + cacheWrite + cacheRead)` 计算，output 不进入分母。`/cache`、`/cache-log`、`/usage` 和 `/stats` 可以展示最近回合、read/write tokens、hit rate、模型、provider、endpoint 和 compact 状态。
+
+这让用户能回答三个实际问题：
+
+- 这一轮为什么贵？
+- 最近缓存有没有变差？
+- 是模型/provider 不返回字段，还是系统真的没有命中？
+
+### 11.3 CacheFreshness 与 Break Cache
+
+Linghun 追踪影响缓存的新鲜度维度：
+
+- systemPromptHash。
+- toolSchemaHash。
+- mcpToolListHash。
+- modelProviderHash。
+- reasoningEffortHash。
+- projectRulesHash。
+- memoryHash。
+- compactHash。
+- pluginListHash。
+- endpointProfileHash。
+- cacheControlHash。
+- cacheTtlHash。
+- contextEditingHash。
+- cacheEditingBetaHash。
+- deferredToolListHash。
+
+当 changedKeys 出现时，Linghun 能提示缓存变化来源，而不是只告诉用户“变慢了”。`/break-cache` 支持 once/always/off marker，并通过 nonce 显式打断 prompt cache，用于用户需要强制刷新上下文的场景。
+
+### 11.4 Summary-first 也是降本
+
+Linghun 不把完整日志、完整索引、完整 transcript、完整 memory、完整 tool_result 默认塞进模型上下文。
+
+降本路径包括：
+
+- 主屏 summary-first。
+- details 承载完整内容。
+- Bash/verification/job 输出写 fullOutputPath。
+- log artifact 只读取 bounded slice。
+- Workspace Snapshot Lite 只提供有界摘要。
+- memory accepted-only topK 注入。
+- failure learning 只投影短教训。
+- RuntimeStatusForModel 默认不含 provider/baseUrl/endpointProfile 噪音。
+- `/index status` 默认 fast path，只有显式 `--fresh` 或 `/index check` 才跑慢检测。
+
+这些机制共同减少“为了让模型知道情况，把所有东西都塞进去”的冲动，从源头降低 token 浪费和 cache 抖动。
+
+### 11.5 可引用的缓存目标
+
+在稳定项目、稳定模型和稳定工具列表的连续工作流中，Linghun 的缓存复用目标如下：
+
+- 稳定项目、稳定模型、稳定工具列表、稳定 system prompt 的连续工作流，目标缓存命中率区间为 **92%-96%**。
+- 特定高稳定样本接近 **98%**。
+- 上下文完全稳定、输出短、工具/schema 不变化的少数回合可达到 **100%** 级别命中。
+- 这些数字描述稳定工作流下的目标和观测区间，不代表所有 provider、模型和项目都会达到同样结果。
+
+这类高命中对用户的直接意义是：同一个长期项目里，模型不必每轮重新“付费理解”全部背景；用户也不必为了省 token 手动删上下文、重复解释或频繁重开会话。
+
+---
+
+## 12. 权限、安全与资源边界
+
+Linghun 的权限系统围绕四档模式设计：
+
+- `default`：只读和低风险会话工具更顺滑，写入和 Bash 等动作需要确认。
+- `auto-review`：工作区内低风险编辑可以自动通过，高风险动作仍需确认。
+- `plan`：规划模式，禁止写入、编辑和 Bash 执行。
+- `full-access`：本地用户显式开启的高权限模式；硬安全边界仍然生效。
+
+底层策略不仅看工具名，也看：
+
+- 工具风险级别。
+- 是否只读。
+- 涉及路径是否在工作区内。
+- Bash 命令语义。
+- 是否包含 package manager、网络、Git destructive、secret env、重定向、组合命令等风险。
+- 是否命中持久权限规则。
+
+权限系统配合：
+
+- permission prompt。
+- recent denied 记录。
+- always allow 规则。
+- report write guard。
+- resource/concurrency cap。
+- process guard。
+- workspace trust。
+
+远程审批、agent、job、MCP、Git、index refresh、runner 等能力都不能绕过本地权限边界。
+
+### 12.1 开发者主权、安全与隐私
+
+Linghun 的本地优先不是一句口号，而是几类源码层面的边界共同组成：
+
+- **模型与 provider 选择权**：用户可以配置 default model 和 planner、executor、reviewer、verifier、summarizer、vision、image 等角色路由；每个角色有自己的 provider、模型、fallback、工具/写入/Bash 许可边界。
+- **私有 provider 配置**：`provider.env` 是用户私有配置，模板明确提示不要提交；shell env 优先级更高。项目 settings 写回时会剥离 apiKey，provider.env 合并摘要只记录是否覆盖和 provider id，不记录 apiKey、baseUrl 或 model route 明文。
+- **数据位置控制**：storage 支持 project、user、custom 三类 scope，memory 分 project/user/session；`LINGHUN_DATA_DIR` 可以调整用户数据根，记忆、会话、日志、job、cache、index metadata 不被强制写死到某个系统盘路径。
+- **长期记忆控制**：memory 是 candidate-first，不自动接受、不自动注入；accepted memory 仍受 topK 和字符预算限制。自动学习会过滤 secret、token、私钥、长 base64 等输入，长期写入必须经过用户 review/accept。
+- **远程通道最小暴露**：企业微信、飞书/Lark 和钉钉通道默认关闭；配置中的 redactionPolicy 固定为 summary_only，事件类型限定为 approval_request、job_status、job_report、verification_result、failure_summary、stable_point_result 和 index_result；入站消息仍要经过 trusted source、binding、nonce/messageId、expiry、signature 和 replay 防护，并回到本地权限管道。
+- **工作区与权限边界**：workspace trust、四档 permission mode、路径安全、命令语义分类、resource cap 和 process guard 共同决定动作是否可执行；自然语言、远程审批、agent 和扩展工具都不能绕过本地权限管道。
+
+这些设计共同指向开发者主权：用户保留对模型选择、密钥位置、数据存储、远程暴露、长期记忆、权限动作、Git 状态和最终交付结论的控制权。安全和隐私不是牺牲效率的附加限制，而是让个人开发者和团队敢把 AI 接入真实项目的前提。
+
+---
+
+## 13. Git 稳定点与 Managed Worktree
+
+Linghun 把 Git 稳定点做成一等能力。
+
+用户可以通过明确命令创建稳定点，也可以让模型通过结构化 Git 工具完成。自然语言意图不是靠本地正则硬拦，而是进入模型工具 schema，由模型在需要真实执行时调用工具。
+
+Git 相关模型工具包括：
+
+- `GitStatusInspect`
+- `GitStablePointCreate`
+- `ManagedWorktreeCreate`
+- `ManagedWorktreeRemove`
+
+对应能力包括：
+
+- 查看 Git 状态与工作区脏数据。
+- 创建稳定点 commit。
+- 可选纳入 untracked 文件。
+- 创建受管理 worktree。
+- 移除受管理 worktree。
+- dirty worktree 与 force remove 边界。
+- path escape 防护。
+- 敏感 untracked 过滤。
+- execFile 参数数组执行，避免 shell 拼接。
+- 不使用危险删除和危险分支删除路径。
+
+最终回答闸门会检查 Git 操作声明：如果模型没有真实调用工具，却声称“稳定点已创建”或“worktree 已创建”，回答会被降级。
+
+---
+
+## 14. 索引、缓存与工作区快照
+
+Linghun 支持 codebase-memory 形态的代码索引，同时把索引能力纳入本地安全和成本边界。
+
+主要能力包括：
+
+- `/index status`：快速查看当前索引状态。
+- `/index status --fresh` 与 `/index check`：显式运行 freshness 检查。
+- `/index init fast`：显式建立 fast index。
+- `/index refresh`：显式刷新当前项目索引。
+- `/index search <query>`：查询索引并记录 evidence。
+- `/index architecture`：获取短架构摘要并记录 evidence。
+- `/index doctor`：诊断 managed/bundled/index runtime 可用性。
+
+索引不是默认强制依赖。索引缺失、不可用或过期时，普通聊天和本地文件工具仍可工作；索引用于缩小定位范围，结论仍需通过源码和验证确认。
+
+Linghun 还实现了 Workspace Reference Cache 与 Workspace Snapshot Lite：
+
+- bounded top-level 文件/目录摘要。
+- 文件数量、大小、mtime、hash 摘要。
+- changed summary。
+- fallback-stale / fallback-empty 明确标注。
+- cache freshness diff。
+- prompt cache break marker。
+
+索引刷新前会做大文件安全扫描。Linghun 会识别超过阈值的 JSON、SQL、XML、minified 文件、依赖目录、构建产物和其他高风险路径；发现未排除的大文件风险时，默认阻止索引，并提示用户通过 `.linghunignore`、`.cbmignore`、`/index repair` 或显式 `--force` 处理。
+
+这层安全门面向几类常见事故：
+
+- 一次索引把几 MB 甚至几十 MB 的低价值生成物塞进检索空间。
+- prompt 被 lockfile、dump、SQL、压缩资源或 minified 代码污染。
+- 缓存命中率因为大文件噪音和索引结果抖动下降。
+- 模型把生成物或 vendor 文件当成业务源码分析，给出错误修改建议。
+
+大文件保护和 AntiCodeBlob 解决的是两类不同问题：前者保护索引和上下文成本，后者提醒模型不要把新逻辑继续堆进历史巨型文件。二者都服务于同一个目标：让长期项目保持可搜索、可理解、可维护。
+
+---
+
+## 15. 验证、就绪与问题面板
+
+Linghun 把验证结果按真实语义处理，而不是只看命令是否跑完。
+
+`/verify` 支持：
+
+- `plan`：生成验证计划。
+- `last`：查看最近验证结果。
+- `smoke`：运行 smoke 级验证入口。
+
+验证结果区分：
+
+- PASS
+- FAIL
+- PARTIAL
+- TIMEOUT
+- STALE
+- CANCELLED
+
+合成 smoke 只证明最小执行链可运行，不能自动升级为真实 provider/TUI/render/report 主链 smoke。Readiness、doctor 和 review 会保留这个边界，防止“本地轻量检查通过”被写成“整体可发布”。
+
+相关入口包括：
+
+- `/review`：基于最近验证和风险生成保守审查报告。
+- `/doctor`：本地 readiness checklist。
+- `/doctor project`：Project Doctor Lite。
+- `/doctor runner`：Native Runner 诊断。
+- `/problems`：汇总当前 verification/provider/background/freshness 问题。
+- log artifact：只读取 bounded slice，避免完整日志进入主屏和 prompt。
+
+---
+
+## 16. 长期上下文、受控记忆、自我学习与反思
+
+Linghun 的长期上下文不是无限追加聊天记录。
+
+它拆成几类：
+
+- **JSONL transcript**：记录用户输入、模型输出、工具调用、系统事件和 evidence。
+- **session store**：支持恢复与会话管理。
+- **handoff packet**：把目标、状态、验证、风险、架构卡片、pending items 和下一步整理成结构化交接。
+- **项目规则**：通过 LINGHUN.md 或项目规则文件表达长期约束。
+- **controlled memory**：候选优先、用户确认后写入，accepted-only topK 注入 prompt。
+- **failure learning**：从真实失败中提取可复用教训，脱敏、去重后作为风险提示。
+
+存储位置也属于长期上下文的一部分。Linghun 不把记忆、会话、日志、job 和 cache 固定写死到某个系统盘路径；storage 支持 project、user 和 custom scope，memory 又分 project/user/session 三层。用户可以通过 `/memory storage` 查看 project memory、user memory、session/handoff、sessions、logs、jobs、cache 和 index metadata 的实际路径，也可以通过 `LINGHUN_DATA_DIR` 调整用户数据根目录。
+
+### 16.1 项目规则：从空仓库开始建立 AI 开发秩序
+
+很多新手使用 AI 编程工具时，最大的问题不是不会提问，而是项目一开始没有规则。模型不知道这个仓库的长期目标、允许改动范围、验证命令、代码风格、架构边界和禁止事项，就会在每一轮里重新猜。第一轮看起来很快，后面却容易进入反复解释、反复返工、越改越散的循环。
+
+Linghun 使用项目根目录的 `LINGHUN.md` 作为项目规则入口。代码事实上，它不会在用户不知情时自动生成该文件；启动时如果缺少项目规则，只显示轻提示，用户显式运行 `/memory init` 后才会创建基础模板。模板会写入长期稳定规则、稳定事实、常用命令和明确禁止事项，并明确哪些内容不应该进入长期规则。
+
+基础模板包含的工程边界包括：
+
+- 事实优先：先读代码、项目索引、文档或命令结果，再判断和下结论。
+- 自然语言命令不能绕过 Start Gate 或权限审批。
+- 写文件、Bash、联网、安装依赖、权限或配置变更需要用户明确确认。
+- 长期记忆默认先生成候选，用户 review/accept 后再写入。
+- 改代码后运行项目认可的最小必要验证。
+- 不把完整 transcript、大日志、大索引结果或完整 memory 塞回模型上下文。
+- 默认只做完成当前任务所必需的最小改动，不顺手修无关问题。
+- 不主动新增抽象、目录层级或结构性改造，避免继续放大超长文件和复杂分支。
+
+对新手来说，这相当于给项目先建立一份“AI 开发秩序”。用户仍然可以用自然语言推进需求，但模型会在项目规则、权限、证据、验证和代码卫生边界里工作。它能降低上下文浪费，减少无意义返工，提高新项目从想法到可运行版本的一次性成功率，也让后续 agent、job、handoff 和记忆系统有统一的项目规则可读。
+
+`LINGHUN.md` 不会把完整规则无限塞进主屏或 prompt。Linghun 会读取稳定摘要，接入 `/memory`、`/resume` context package、readiness 和 `projectRulesHash` / `memoryHash` freshness。规则变化能进入 cache 诊断，但完整规则不会默认刷屏；缺失、不可读和已存在都会有明确状态。
+
+### 16.2 受控记忆
+
+受控记忆解决的是“项目习惯和用户偏好如何长期生效”的问题。它不是把聊天历史全部塞进 prompt，而是把稳定、短小、可确认的规则沉淀成 memory record。
+
+对用户来说，这带来的不是“模型记住了很多东西”这种抽象感，而是更直接的体验：同一个项目里，后续几轮不用反复说明你喜欢先看源码、先打稳定点、先做验证、先给报告，模型会逐渐更贴近你的工作方式，沟通摩擦更小。
+
+关键边界：
+
+- 不自动写长期记忆。
+- 候选不会自动注入。
+- 用户需要 `/memory review` 与 `/memory accept <id>`。
+- accepted memory 仍受 topK 和字符预算限制。
+- 完整 transcript、完整日志和完整索引不会直接塞入 prompt。
+
+### 16.3 自我学习
+
+Linghun 的自我学习是 controlled learning，不是后台无限扫描，也不是模型自行修改规则。
+
+它解决的核心痛点是“同样的协作偏好要反复说”。例如，某个用户总是先要简短结论再要细节，某个项目总是先改代码再补文档，某类任务总要先跑 smoke 再决定是否继续。自我学习会把这些稳定模式整理成候选，让后续模型调用更省解释、更少误判，也更符合用户自己的节奏。
+
+用户显式开启后，系统可以从真实进入模型路径的普通输入中提取候选偏好和协作规则，例如：
+
+- 语言、回答风格、命令偏好和验证偏好。
+- 高频工作流。
+- 项目习惯，如测试命令、构建命令、文档位置。
+- 协作规则，如先读源码、不要顺手修、报告写法偏好。
+
+自我学习默认只生成 candidate：
+
+- `/memory learn on` 开启。
+- `/memory learn off` 关闭。
+- `/memory learn status` 查看状态。
+- 每轮最多生成少量候选，避免噪音积累。
+- candidate 必须经过 review/accept 后才会进入 prompt。
+- API key、token、私钥、长 base64 等 secret 输入整体跳过，不生成候选。
+- slash command、权限确认、provider setup 等控制输入不触发自动学习。
+
+这让 Linghun 能逐步贴合用户的真实工作习惯，又不会把一次性情绪、敏感信息或未经确认的事实写成长久规则。
+
+### 16.4 反思与失败学习
+
+Linghun 的反思系统不是让模型写一段“我反思了”的文本，而是从真实失败事件中提取可复用教训。
+
+对用户最直接的价值，是让系统越用越稳，而不是越用越忘。上一次在某类 provider、Git、验证或资源边界上踩过的坑，下次再遇到相似上下文时，模型会更早收到风险提示，少走一遍弯路，减少“明明以前已经撞过一次，这次又撞上了”的重复成本。它不是让模型变成永久正确，而是让后续调用更顺滑、更接近你的真实习惯。
+
+失败学习记录的来源包括：
+
+- 工具异常。
+- Bash 非零退出。
+- provider 请求失败。
+- 验证 fail/partial/timeout/stale。
+- report guard。
+- Git 操作失败。
+- final answer gate 降级。
+- resource/concurrency cap。
+
+每条教训会记录脱敏后的失败摘要、可能的 root cause、下一次应避免的动作、严重级别、出现次数和状态。用户可以：
+
+- `/failures` 查看活跃教训。
+- `/failures resolve <id>` 标记已解决。
+- `/failures ignore <id>` 静默某条教训但保留记录。
+
+失败学习会统一脱敏 secret、baseUrl、Authorization、绝对路径等敏感内容。它只提醒模型“历史上这里容易出错”，不会成为当前任务已经失败、已经修复或已经验证的证据。
+
+这套机制让 Linghun 能从真实运行中的失败中变稳：同类 provider 错误、工具失败、验证误判、Git 操作失败、报告守卫触发和并发上限问题，后续都会以风险提示的形式提醒模型和用户。
+
+---
+
+## 17. 多智能体与长任务托管
+
+Linghun 支持本地多智能体和长任务托管。它的目标不是让模型“无限自动跑”，而是把复杂任务拆成有目标、有计划、有预算、有状态、有日志、有交接和有验证边界的托管流程。
+
+这对新手和个人开发者尤其重要：很多 AI 项目失败并不是因为第一段代码写不出来，而是因为后续需要连续做需求澄清、文件定位、依赖配置、功能补齐、错误修复、验证、回滚和交接。Linghun 的长任务托管把这些环节纳入同一条可观察链路，让用户不必一直盯着模型输出，也能知道任务跑到哪里、花了多少预算、是否卡住、下一步是什么。
+
+多智能体入口包括：
+
+- `/agents`
+- `/agents show <id>`
+- `/agents cancel <id>`
+- `/fork explorer|planner|verifier|worker <task>`
+
+Agent 类型包括：
+
+- explorer：探索与信息收集。
+- planner：规划与拆解。
+- verifier：验证与复核。
+- worker：执行子任务。
+
+每个 agent 有独立 transcript、role route、permission mode、cost 记录和 background task surface。主会话不会被子 agent 输出淹没；用户可以查看、取消或展开详情。
+
+Durable job 入口包括：
+
+- `/job run`
+- `/job pause`
+- `/job resume`
+- `/job cancel`
+- `/job status`
+- `/job logs`
+- `/job report`
+
+Job 运行时支持：
+
+- 持久 state.json。
+- job.log 与 fullOutput。
+- report。
+- goal、plan、agent 列表。
+- maxSteps、maxTokens、maxRuntimeMs、timeout。
+- running agent cap。
+- owner session、pid、heartbeat。
+- recovery：启动时识别 stale/blocked/running 状态。
+- bounded worker loop。
+
+长任务托管覆盖从头到尾的工程状态链：
+
+- 输入目标：记录目标、阶段标识、对象和计划。
+- 执行过程：在预算、步数、runtime、权限和并发上限内推进。
+- 并行协作：按 explorer、planner、verifier、worker 拆分子任务。
+- 过程观察：写入 background task、job.log、fullOutput 和 report。
+- 中断控制：支持 pause、resume、cancel、timeout 和 stale recovery。
+- 交接整理：生成 handoff packet，把目标、状态、证据、风险和下一步带到后续会话。
+- 验证边界：记录 verification 状态，但不把 job completed 自动升级为 PASS。
+
+因此，Linghun 支持“从目标到交接”的长任务托管；真正的可交付结论仍以 verification evidence、架构边界和最终回答 gate 为准。这样既能让 AI 承担更多连续工程工作，又不会把后台任务结束误写成成品已经验证完成。
+
+---
+
+## 18. Windows 商业级守护与 Native Runner
+
+Linghun 面向 Windows 开发者做了专门的进程守护与兼容设计。它不只依赖 Node 子进程默认行为，而是在长任务、验证、runner、job 和退出清理上建立了可观察、可降级的守护链路。
+
+### 18.1 Process Guard
+
+Process Guard 负责追踪由 Linghun 启动的子进程，并在取消、超时、退出和信号中断时做有界清理。
+
+能力包括：
+
+- tracked child registry。
+- graceful stop 与 force stop。
+- exit cleanup。
+- SIGTERM 处理。
+- Windows 平台走进程树停止路径。
+- 非 Windows 平台走信号/进程组语义。
+- 最近停止结果保留，便于测试与诊断。
+
+这解决了长任务和验证中常见的问题：命令超时后子进程残留、取消后后台仍在跑、退出时临时进程没有被清理、用户无法判断任务到底是否被停止。
+
+### 18.2 Native Runner
+
+Linghun 预留并实现了 Native Runner 的解析、诊断和 job supervisor 接入边界。
+
+Native Runner 的价值不是“让模型更聪明”，而是让长任务、后台任务和子进程监督更可靠：
+
+- 平台相关进程组或 Job Object 清理。
+- parent death cleanup。
+- 长任务 heartbeat。
+- runner state/stdout/stderr/jobLog/fullOutput/report 归档。
+- protocol mismatch 诊断。
+- Node/TUI fallback。
+
+当前设计中，Native Runner 只执行 approved durable job spec，不是任意命令执行后门。runner 不可用、禁用或协议不匹配时，Linghun 会显示 fallback 状态，而不是伪装成真实 native supervision。
+
+Windows 侧的核心契约是：Native Runner 应使用 Job Object 与 kill-on-job-close 管理受监督子进程；Unix 侧对应进程组管理。Linghun 在报告和 doctor 中保留这个契约，避免把普通 Node fallback 误说成已经具备 native 级父进程死亡清理能力。
+
+### 18.3 Runner Doctor 与降级
+
+Native Runner 运行前会解析：
+
+- 是否启用。
+- 来源：bundled、optional package、project-local、custom 或 disabled。
+- 平台架构候选。
+- binary 是否存在且可执行。
+- version probe。
+- protocol 是否匹配。
+- Node fallback 是否可用。
+
+这让 Linghun 在商业级长任务场景中能做到：能用 native runner 时清晰接入，不能用时明确降级，不把缺失、损坏、协议不匹配或启动失败包装成成功。
+
+---
+
+## 19. Windows 兼容增强
+
+Linghun 把 Windows 作为一等运行环境处理，而不是只做类 Unix 路径假设。
+
+Windows 兼容能力包括：
+
+- CLI 同时提供 `linghun` 和 `Linghun` 入口。
+- provider.env 存放在用户私有配置目录，避免把 key 写进项目。
+- 配置优先级支持 shell env、用户 provider.env、项目 settings。
+- Windows 真实 projectPath 进入 runtime status，避免模型把项目根误判成 `/workspace`。
+- 终端能力检测区分 Windows Terminal、VS Code terminal、WezTerm、Alacritty、ConEmu、mintty、现代 conhost 和 legacy conhost。
+- Windows 10 ConPTY 能力检测，现代 cmd.exe / PowerShell 可走更完整 TUI 路径。
+- legacy terminal 降级到 ASCII-safe 渲染，减少 box drawing、emoji、宽字符错位风险。
+- Windows 路径、中文路径、空格路径进入 runner、log、provider config 和 doctor 的设计边界。
+- memory、session、logs、jobs、cache、index metadata 支持项目级、用户级和自定义目录存储边界，不强制所有长期数据落在系统盘默认目录。
+- `/memory storage` 可显示实际存储路径，`LINGHUN_DATA_DIR` 可调整用户数据根，适配多盘符、公司权限策略和 C 盘空间受限环境。
+- Bash/verification/runner 输出落日志，减少 Windows 控制台编码和长输出污染主屏。
+- process guard 与 runner 共同处理 Windows 长任务取消、timeout、stale 和 exit cleanup。
+
+这部分能力对商业化场景很关键：真实用户大量在 Windows、PowerShell、cmd.exe、Windows Terminal、VS Code terminal、中文路径和多盘符环境下开发。Linghun 的目标是让这些环境成为默认可用路径，而不是“最好换到 Linux/macOS 再说”。
+
+---
+
+## 20. 扩展生态：MCP、Skills、Plugins、Hooks
+
+Linghun 的扩展系统遵循“先元数据、后执行；先信任、后启用；先诊断、后使用”的原则。
+
+MCP 能力包括：
+
+- server metadata。
+- add/update/enable/disable/remove。
+- validate。
+- tools summary。
+- doctor。
+- mutating MCP 工具保守拒绝，codebase-memory 索引写入建议走受控 `/index` 入口。
+
+Skills 与 Plugins 能力包括：
+
+- local / git / github 来源元数据。
+- manifest 读取。
+- trusted/disabled 状态。
+- enable/disable。
+- validate/doctor。
+- contribution summary。
+
+Hooks 能力包括：
+
+- PreToolUse、PostToolUse、Stop、Notification、Workflow、Plugin 事件类型。
+- timeout 与 output limit。
+- project trust。
+- disabled/trusted ids。
+- doctor 诊断。
+
+这些能力为后续生态扩展提供入口，但不会绕过权限、信任和本地配置边界。
+
+---
+
+## 21. 远程通道边界
+
+真实开发不总发生在电脑前。长任务跑到一半需要用户批准写文件、测试失败需要确认下一步、后台 agent 完成探索需要用户看摘要，这些时刻如果只能守在终端旁边，AI 托管的价值会被明显削弱。
+
+Linghun 的 remote layer 面向这个痛点：把本地会话的重要事件安全送到用户已经在使用的手机 IM 通道，并允许手机端把审批或自然语言输入交回本地 Linghun 主链。它不是把远程通道变成不受控执行入口，也不是把代码和完整 transcript 发到外部平台。
+
+配置模型覆盖：
+
+- 企业微信 / WeCom。
+- 飞书 / Lark。
+- 钉钉。
+- official CLI、webhook mock、webhook transport。
+
+D.14E 之后，远程通道从“安全壳”升级为成品连接能力：
+
+- **真实发送链路**：webhook 走 HTTP POST，official CLI 走 `execFile` 参数数组，不做 shell 拼接；`webhook_mock` 只作为诊断演练，不能当成真实投递成功。
+- **低学习连接向导**：`/remote setup <channel>` 只展示必要字段，使用 `[已填] / [待填]` 和人话 next action，不要求用户理解 nonce、evidence、provider 或 transcript。
+- **手机自然语言入站**：手机端消息通过 `RemoteInboundMessage` 校验后，原样进入本地 `sendMessage` 主链；没有本地关键词截获，也没有第二套远程 agent。
+- **远程审批闭环**：手机 approve/reject 只能恢复本地已有 `pendingLocalApproval`，实际执行仍由本地 permission resolver 完成；plan 模式远程 approve 也不能执行写操作。
+- **事件摘要面板**：`/remote events` / `/remote inbox` 展示最近远程事件的脱敏摘要，避免主屏噪音。
+
+事件类型包括：
+
+- approval_request。
+- job_status。
+- job_report。
+- verification_result。
+- failure_summary。
+- stable_point_result。
+- index_result。
+
+Linghun 按平台真实能力分级，而不是把“webhook 发出成功”包装成完整手机控制：
+
+| 平台 | webhook 路径 | official CLI / 应用路径 |
+| --- | --- | --- |
+| 飞书 / Lark | notification-only，仅出站摘要 | full-mobile-control-capable：可通过官方 CLI/事件订阅和审批域承接自然语言与审批回传 |
+| 钉钉 / DingTalk | notification-only，仅出站摘要 | approval-capable：审批路径可用；实时自然语言回传需要 Stream 或回调应用 |
+| 企业微信 / WeCom | notification-only，仅出站摘要 | natural-language-inbound-capable：可通过官方 CLI 轮询消息历史；交互审批需要自建应用回调 |
+
+安全边界包括：
+
+- summary_only redaction。
+- trusted source。
+- binding user/device。
+- nonce、messageId 与 expiry。
+- signature 或等价来源证明。
+- replay 防护。
+- approval_request 自身过期后不能被新的手机消息批准。
+- remote approval 通过后仍回到本地 pending approval 和 permission pipeline。
+
+对用户来说，这个设计的价值是：离开电脑后仍能看见长任务进展、验证结果、失败摘要和审批请求；必要时可以用手机发一句自然语言继续推进。但对安全边界来说，远程端仍只是“输入和审批接口”，不是新的执行器。代码修改、Bash、Git、索引刷新、稳定点和最终回答 gate 仍发生在本地 Linghun 主链。
+
+因此，远程通道可以作为审批和通知适配层，但不会替代本地权限系统。
+
+---
+
+## 22. TUI 输出与交互分层
+
+Linghun 的交互目标是：主屏关注结果，详情可追溯，复杂能力可发现。
+
+主要交互面包括：
+
+- 主输入与流式回答。
+- slash suggestions。
+- command panel。
+- status footer。
+- notification stack。
+- background task surface。
+- `/details` 完整内容入口。
+- `/help`、`/help all`、`/help advanced`。
+- `/config` 控制面板。
+- `/btw` 临时问题/备忘入口。
+
+输出原则是 summary-first：
+
+- 默认主屏不倾倒完整日志。
+- tool_result 保留 raw 诊断，主屏展示摘要。
+- 长输出进入 fullOutputPath 或 details。
+- evidenceId、changedFiles、fullOutputPath 在诊断层保留。
+- 内部 provider/baseUrl/endpointProfile 默认不进入普通主屏。
+
+这让 Linghun 可以同时服务新用户和高级用户：默认不被内部细节打断，需要追溯时又能展开。
+
+---
+
+## 23. 成本与性能控制
+
+Linghun 的降本增效不是单点优化，而是多个层面协同：
+
+- RuntimeStatusForModel 投影降噪：模型只看到必要运行时状态。
+- Deferred tools 降噪：默认不把全部工具细节塞进主屏和 prompt。
+- Stable tool ordering：减少工具顺序波动带来的 prompt cache 破坏。
+- CacheFreshness changedKeys：定位缓存变差来源。
+- Cache history：记录最近回合 hit rate、read/write tokens、provider/model/endpoint。
+- Workspace Snapshot Lite：用有界摘要代替全量仓库扫描。
+- Cache freshness：只有关键维度变化时才提示刷新。
+- Prompt cache break marker：把 cache bust 做成显式行为。
+- Memory topK：长期记忆只注入少量 accepted items。
+- Log artifact slice：只读取需要的日志片段。
+- Index freshness fast path：`/index status` 默认不跑慢检测。
+- Resource/concurrency cap：限制 agent/job 并发。
+- Provider circuit breaker：连续失败时降噪和降成本。
+
+真实成本取决于模型、仓库规模、任务复杂度和用户工作方式。Linghun 的设计目标是让成本来源可见、可控、可诊断，并让长期项目在稳定工作流下保持更高的缓存复用。
+
+---
+
+## 24. 自研运行时与开源价值
+
+Linghun 的核心价值在于把一组分散能力组织成统一运行时：
+
+- 自研 provider runtime contract。
+- 自研权限策略引擎。
+- 自研 evidence 与 final answer gate。
+- 自研 prompt cache usage、CacheFreshness、break-cache 和 deferred tool 稳定机制。
+- 自研 Git stable point / managed worktree runtime。
+- 自研 controlled memory 与 failure learning。
+- 自研 durable job / multi-agent lifecycle。
+- 自研 Windows process guard 与 Native Runner supervisor boundary。
+- 自研 command panel、details、readiness、problems、verification surfaces。
+- 自研 workspace reference cache 与 snapshot lite。
+
+这些能力组合起来，使 Linghun 具备开源项目更需要的几个特性：
+
+- 可读：用户和开发者能理解系统为什么这么判断。
+- 可查：重要结论有 transcript、evidence、logs、reports。
+- 可控：权限、记忆、远程、扩展、Git 操作都可由用户显式管理。
+- 可扩展：provider、MCP、skills、plugins、hooks、runner 都有清晰边界。
+- 可长期维护：核心业务逻辑已经从单一巨型入口拆到职责模块中，index 主要承担 composition root 和主链 glue。
+
+---
+
+## 25. 面向所有大模型的工程化外骨骼
+
+Linghun 的出现，建立在大模型能力快速进步的基础上。无论是代码理解、自然语言推理、工具调用、长上下文、视觉输入，还是复杂任务规划，今天的模型厂商已经把 AI 编程推到了真实可用的门槛上。每一个强模型背后都有巨大的训练成本、数据工程、推理优化和基础设施投入；Linghun 尊重并受益于这些研发成果。模型越强，Linghun 能承载的工程任务就越复杂。
+
+但真实开发不只需要“一个更聪明的模型”。开发者还需要权限边界、证据记录、验证闭环、Git 稳定点、缓存成本、长期上下文、失败复盘、Windows 守护、长任务托管和可诊断输出。Linghun 的定位不是绑定某一家模型，也不是替代模型厂商，而是为不同大模型提供一层工程化外骨骼：
+
+模型训练解决的是通用智能问题：让模型会读代码、会推理、会生成、会调用工具、会处理长上下文。但它不会天然知道用户本地仓库此刻的真实状态：哪些文件刚被改过，哪个测试实际失败，Git 工作区是否干净，索引是否新鲜，provider 是否真的可用，某个历史失败是否又在重现，当前回答是否夸大了验证范围。这些不是单靠训练参数就能稳定解决的问题，而是运行时、工具链和工程流程的问题。
+
+Linghun 的工程化外骨骼解决的就是这层问题：
+
+- **把模型接到真实仓库**：通过文件读取、搜索、索引、diff、workspace snapshot 和 evidence，让模型围绕当前代码事实工作，而不是围绕想象中的项目工作。
+- **把模型接到真实工具**：读写文件、Bash、验证、Git、worktree、agent、job、MCP 和扩展工具都经过统一 runtime，而不是散落成不可追踪的临时动作。
+- **把模型接到真实权限**：写文件、跑命令、刷新索引、Git 操作和远程审批都进入同一套权限与路径安全边界，用户不用在速度和安全之间二选一。
+- **把模型接到真实验证**：build、test、smoke、review、readiness 和 final answer gate 会区分 PASS、PARTIAL、FAIL、synthetic、focused 和未验证，不让模型把局部成功写成整体完成。
+- **把模型接到真实成本**：prompt cache、tool schema 稳定性、summary-first、deferred tools、CacheFreshness 和 usage history 让长期项目不必每轮重新付费理解全部背景。
+- **把模型接到真实长期上下文**：受控记忆、handoff、失败学习和反思记录让系统逐步贴合用户习惯，同时避免把历史记忆当作当前事实证据。
+- **把模型接到真实交付边界**：Git 稳定点、managed worktree、架构检查、代码卫生和报告守卫让每一轮开发更容易留下可回滚、可审查、可继续维护的状态。
+
+对开发者来说，这层外骨骼带来的直接影响很朴素：模型更少凭空猜，更少重复读无关文件，更少把没验证的东西说成完成，更少把日志和工具噪音塞满上下文，更容易保留稳定点，更容易从失败中吸取教训，也更容易把一次对话推进成一个能继续维护的项目。
+
+对刚开始学习编程、刚准备拥抱 AI 开发的新手来说，这层外骨骼的意义更直接。强模型可以降低“写出第一版代码”的门槛，但新手真正容易卡住的地方，往往是项目结构、依赖安装、错误修复、测试验证、Git 回滚、运行环境和后续维护。Linghun 把这些工程环节放进同一条可观察主链，让用户可以用自然语言持续推进需求，同时由系统补上证据、权限、验证、稳定点和交接边界。结果不是保证每个项目一次成功，而是显著提高从一个想法直接推进到可运行、可验证、可继续迭代成品的成功率。
+
+因此，Linghun 可以随模型能力持续进化：今天接入适合执行的模型、适合审查的模型、适合总结的模型；未来也能继续承载更强的规划、视觉、长上下文和工具调用能力。模型厂商提供智能内核，Linghun 提供工程运行时，让 AI 编程从“模型会回答”走向“模型能在工程边界内持续工作”。
+
+---
+
+## 26. 对 AI 编程浪潮的基本判断
+
+每一次重要生产力工具出现，都会带来类似的争论：它是否会替代人，是否会摧毁原有工作方式，是否只是短期泡沫。蒸汽机、电力、自动化生产线和互联网都曾冲击传统行业，也迫使劳动方式、组织方式和技能结构发生变化。蒸汽机进入纺织业后，传统手工纺织受到巨大冲击，但更长期的结果不是社会停止生产，而是生产规模、协作方式、岗位结构和技能要求被重新定义。
+
+AI 编程也处在类似阶段。唱衰它的人会看到幻觉、错误代码、上下文遗忘、验证不足和安全风险；乐观过头的人则会把模型当作可以完全替代工程流程的自动开发者。Linghun 的判断是：AI 会持续改变软件开发，但真正能进入真实工程的，不是“只会生成代码的模型”，而是模型能力与工程运行时结合后的新工作方式。出现问题时，更有价值的态度不是否定 AI，而是承认问题、寻找解决方式，并肯定模型公司在训练、推理、工具调用和长上下文能力上已经带来的真实增效；同时也要承认，只有把这些能力放进工程化流程里，增效才能更稳定地落到开发者手里。
+
+幻觉并不意味着 AI 编程没有价值，它意味着系统必须把事实、验证和边界接进去。模型很强，但不能默认知道当前仓库事实；模型会推理，但不能默认代表验证通过；模型能生成代码，但不能默认符合架构、权限和长期维护要求。把这些问题交给用户手动兜底，会让新手更容易被误导，也会让专业开发者把时间浪费在返工、排查和重复确认上。
+
+Linghun 的产品选择，是不把 AI 编程包装成“人类不需要工程能力了”，也不把 AI 幻觉当作无法克服的宿命。它把模型放进 evidence、permission、verification、Git、memory、failure learning、architecture 和 cost runtime 里，让用户既能享受模型带来的速度，也能保留工程开发必须有的可控性。
+
+这背后还有一个更朴素的现实：开发者的时间和注意力是有限的。真实工作里，消耗人的往往不只是写代码本身，而是反复解释上下文、重复定位文件、盯着长任务输出、处理环境问题、担心误改、确认验证范围、修复同类失败和在夜里继续收尾。生活节奏越来越快，压力越来越高，工具如果只是让人“更快地产出更多任务”，并不一定真的改善开发者的状态。
+
+Linghun 更希望把工程化带来的效率，转化成开发者能感知到的余量：少一点无效等待，少一点重复返工，少一点不确定焦虑，少一点因为模型幻觉带来的二次清理。省下来的时间不只可以继续写更多代码，也可以用来休息、复盘、学习、沉淀产品判断，或者把注意力放回真正需要人类经验和审美的地方。AI 编程工具的成熟，不应该只用吞吐量衡量，也应该看它是否让开发者更从容地完成真实工作。
+
+在可工程化的前提下，AI 对个人开发者的意义会进一步放大。过去很多想法不是没有价值，而是卡在时间、精力、环境、工程经验和试错成本上：一个人想做工具、网站、插件、自动化脚本、SaaS 原型或开源项目，常常要同时承担产品、前端、后端、测试、部署、文档和维护。Linghun 希望把这条链路变短：让个人开发者能够更高效、更省力、更低成本地把想法做成可运行、可验证、可迭代的项目，并在此基础上探索副业、作品集、开源影响力或商业变现。
+
+这也是 AI 编程更深层的意义之一：不是简单让开发者被动接受替代，而是让更多人拥有把想法工程化落地的能力。模型提供智能，Linghun 提供工程护栏和运行时，个人开发者由此可以把有限时间投入到选择问题、理解用户、打磨体验和创造价值上，而不是长期消耗在重复搭环境、重复排错和重复返工里。
+
+这对开发者意味着两件事：
+
+- 对新手来说，AI 不只是回答问题的老师，而可以成为一个带工程护栏的协作者，帮助他们从想法走到可运行、可验证、可继续维护的项目。
+- 对专业开发者来说，AI 不只是代码补全或聊天窗口，而可以进入真实工作流：读仓库、改代码、跑验证、留稳定点、复盘失败、控制成本，并把交付结论限制在证据边界内。
+
+所以 Linghun 不是站在“AI 替代人”或“AI 没有价值”的两端。它更关心的是：当模型能力越来越强时，开发者如何把这种能力接入真实工程，而不是被幻觉、噪音、成本和不可控自动化拖住。这也是 Linghun 把自己定位为工程化外骨骼的原因。
+
+---
+
+## 27. 适用场景
+
+Linghun 适合以下工作流：
+
+- 在真实项目里让模型读代码、改代码、跑验证，并输出有证据边界的总结。
+- 用不同模型分别处理规划、执行、审查、验证和总结。
+- 在同一项目长期开发中保持稳定上下文、稳定工具调用和高缓存复用，减少重复解释与重复付费。
+- 在大仓库中结合索引、grep、workspace snapshot 定位代码。
+- 在阶段性开发中创建 Git 稳定点和 worktree，降低回滚成本。
+- 用 agent 并行探索、规划或验证，不阻塞主会话。
+- 用 durable job 承载有预算和生命周期的长任务。
+- 用 controlled memory 保留项目习惯，而不是让模型随意写长期记忆。
+- 用 failure learning 让真实失败转化为后续风险提示。
+- 在 Windows 终端、PowerShell、cmd.exe、中文路径和长任务环境下运行可守护的 AI 编程工作流。
+- 用 doctor/problems/verify 在交付前做保守复核。
+- 用 MCP、skills、plugins、hooks 接入团队或个人工具链。
+
+---
+
+## 28. 明确边界
+
+Linghun 的能力边界如下：
+
+- Evidence-first 不等于“永不出错”，而是让关键声明接受证据约束。
+- 本地 doctor 和 focused validation 不等于真实全量 smoke。
+- 合成 smoke 不等于真实 provider/TUI/render/report 主链 smoke。
+- 失败学习只是历史风险提示，不是当前任务证据。
+- 长期记忆必须用户确认，不自动写入。
+- Remote channel 是审批/通知适配层，不是绕过本地权限的远程执行平台。
+- Native Runner 有受控 supervisor 边界和 Node fallback，不等同于所有平台都已完整验证的底层守护进程。
+- Windows Job Object 是 Native Runner 的商业级守护契约；Node fallback、普通单元测试和无真实 runner smoke 不能伪装成 native 进程树守护已被完整证明。
+- 索引是定位辅助，不是唯一事实来源。
+- 缓存命中率 92%-96%、接近 98% 和部分 100% 描述稳定工作流下的目标和观测区间，不代表任意模型、provider 和项目的结果。
+- 局部索引、并行工具或缓存收益不等同于整体开发固定提速倍数；实际收益由项目、模型、任务和 usage 数据共同决定。
+
+这些边界体现 Linghun 的工程取向：能力、证据、验证和适用范围保持一致，避免把局部能力包装成无条件承诺。

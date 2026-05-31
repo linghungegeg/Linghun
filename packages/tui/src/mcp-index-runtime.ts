@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { delimiter } from "node:path";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { removeMcpServerConfig, resolveStoragePaths, saveMcpServerConfig, type McpServerConfig } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
@@ -265,11 +265,11 @@ export async function resolveCodebaseMemoryBinary(context: TuiContext): Promise<
   const configuredArgs = configured?.args ?? [];
   const envCommand = process.env[CODEBASE_MEMORY_ENV]?.trim();
   if (envCommand) {
-    const spec = codebaseMemoryCommandSpec(envCommand, []);
+    const spec = await codebaseMemoryCommandSpec(envCommand, []);
     return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
   }
   if (configuredCommand && configuredCommand !== CODEBASE_MEMORY_COMMAND) {
-    const spec = codebaseMemoryCommandSpec(configuredCommand, configuredArgs);
+    const spec = await codebaseMemoryCommandSpec(configuredCommand, configuredArgs);
     return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
   }
 
@@ -302,10 +302,10 @@ export async function resolveCodebaseMemoryBinary(context: TuiContext): Promise<
   return pathProbe;
 }
 
-export function codebaseMemoryCommandSpec(
+export async function codebaseMemoryCommandSpec(
   command: string,
   args: string[],
-): { command: string; args: string[]; detailPath: string } {
+): Promise<{ command: string; args: string[]; detailPath: string }> {
   const lowerCommand = command.toLowerCase();
   if (lowerCommand.endsWith(".cjs")) {
     return { command: process.execPath, args: [command, ...args], detailPath: command };
@@ -314,6 +314,14 @@ export function codebaseMemoryCommandSpec(
     process.platform === "win32" &&
     (lowerCommand.endsWith(".cmd") || lowerCommand.endsWith(".bat"))
   ) {
+    const script = await resolveWindowsShimNodeScript(command);
+    if (script) {
+      return {
+        command: process.execPath,
+        args: [script, ...args],
+        detailPath: command,
+      };
+    }
     return {
       command: "cmd.exe",
       args: ["/d", "/c", "call", command, ...args],
@@ -321,6 +329,14 @@ export function codebaseMemoryCommandSpec(
     };
   }
   if (process.platform === "win32" && lowerCommand.endsWith(".ps1")) {
+    const script = await resolveWindowsShimNodeScript(command);
+    if (script) {
+      return {
+        command: process.execPath,
+        args: [script, ...args],
+        detailPath: command,
+      };
+    }
     return {
       command: "powershell.exe",
       args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", command, ...args],
@@ -328,6 +344,37 @@ export function codebaseMemoryCommandSpec(
     };
   }
   return { command, args, detailPath: command };
+}
+
+async function resolveWindowsShimNodeScript(command: string): Promise<string | undefined> {
+  let content: string;
+  try {
+    content = await readFile(command, "utf8");
+  } catch {
+    return undefined;
+  }
+  const dir = dirname(command);
+  const patterns = [
+    /(?:node\.exe|node)["']?\s+"([^"]+\.(?:cjs|mjs|js))"/iu,
+    /(?:node\.exe|node)["']?\s+'([^']+\.(?:cjs|mjs|js))'/iu,
+    /(?:node\.exe|node)["']?\s+([^\s"'`]+\.(?:cjs|mjs|js))/iu,
+  ];
+  for (const pattern of patterns) {
+    const raw = pattern.exec(content)?.[1];
+    if (!raw) continue;
+    return resolveShimTarget(dir, raw);
+  }
+  const ps1Match = /(?:&\s*)?\$basedir[\\/ ]*["']?([^"'\r\n]+?\.(?:cjs|mjs|js))["']?/iu.exec(
+    content,
+  )?.[1];
+  return ps1Match ? resolveShimTarget(dir, ps1Match) : undefined;
+}
+
+function resolveShimTarget(dir: string, rawTarget: string): string {
+  const expanded = rawTarget
+    .replace(/%~dp0/giu, dir.endsWith("\\") || dir.endsWith("/") ? dir : `${dir}\\`)
+    .replace(/\$basedir/giu, dir);
+  return resolve(dir, expanded.replace(/^["']|["']$/g, ""));
 }
 
 export async function findManagedCodebaseMemoryBinary(
@@ -361,7 +408,7 @@ export async function findCodebaseMemoryBinaryCandidate(
       if (!(await pathExists(path))) {
         continue;
       }
-      return codebaseMemoryCommandSpec(path, []);
+      return await codebaseMemoryCommandSpec(path, []);
     }
   }
   return undefined;

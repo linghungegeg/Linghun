@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import type { EndpointProfile } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelInfo } from "@linghun/providers";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
@@ -205,7 +206,10 @@ type DoctorProviderConfig = {
   baseUrl?: string;
   apiKey?: string;
   model: string;
-  endpointProfile?: "chat_completions" | "responses";
+  // Run 2 P1-3 修复 — 复用 config 的 canonical EndpointProfile（含 anthropic_messages），
+  // 否则 LinghunConfig.providers 不能赋给 DoctorConfig。doctor 只读这些字段做诊断，
+  // 不影响 provider/model route 真实选择逻辑。
+  endpointProfile?: EndpointProfile;
 };
 
 type DoctorConfig = {

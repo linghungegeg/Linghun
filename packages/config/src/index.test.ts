@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -371,6 +371,96 @@ describe("config directories", () => {
     expect(raw).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
     expect(raw).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
     expect(values.LINGHUN_OPENAI_API_KEY).toBe("sk-provider-secret");
+  });
+
+  it("Run 2 Closure: concurrent provider.env writes do not collide on temp path", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+
+    try {
+      await Promise.all([
+        indexModule.saveProviderEnvSetup(
+          {
+            baseUrl: "https://provider.invalid/v1",
+            apiKey: "sk-provider-secret-a",
+            model: "provider-model-a",
+          },
+          home,
+        ),
+        indexModule.saveProviderEnvSetup(
+          {
+            baseUrl: "https://provider.invalid/v1",
+            apiKey: "sk-provider-secret-b",
+            model: "provider-model-b",
+          },
+          home,
+        ),
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+    const path = indexModule.getProviderEnvPath(home);
+    const raw = await readFile(path, "utf8");
+
+    expect(raw).toMatch(/LINGHUN_OPENAI_MODEL=provider-model-[ab]/u);
+    expect(await indexModule.providerEnvExists(home)).toBe(true);
+  });
+
+  it("Run 2 Closure addendum: provider.env replace fallback keeps old file if new rename fails", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    let renameCalls = 0;
+    let copyCalls = 0;
+    const renameMock = vi.fn(async (from: Parameters<typeof actualFs.rename>[0], to: Parameters<typeof actualFs.rename>[1]) => {
+      renameCalls += 1;
+      if (renameCalls === 1) {
+        throw Object.assign(new Error("replace conflict"), { code: "EPERM" });
+      }
+      await actualFs.rename(from, to);
+    });
+    const copyFileMock = vi.fn(async (from: Parameters<typeof actualFs.copyFile>[0], to: Parameters<typeof actualFs.copyFile>[1]) => {
+      copyCalls += 1;
+      if (copyCalls === 2) {
+        throw Object.assign(new Error("new rename failed"), { code: "EIO" });
+      }
+      await actualFs.copyFile(from, to);
+    });
+    vi.doMock("node:fs/promises", async () => ({
+      ...(await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises")),
+      copyFile: copyFileMock,
+      rename: renameMock,
+    }));
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+    const providerEnvPath = indexModule.getProviderEnvPath(home);
+    await actualFs.mkdir(join(home, ".linghun"), { recursive: true });
+    await actualFs.writeFile(
+      providerEnvPath,
+      "LINGHUN_OPENAI_MODEL=old-model\nLINGHUN_OPENAI_API_KEY=sk-old-secret\n",
+      "utf8",
+    );
+
+    await expect(
+      indexModule.saveProviderEnvSetup(
+        {
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: "sk-new-secret",
+          model: "new-model",
+        },
+        home,
+      ),
+    ).rejects.toThrow("new rename failed");
+
+    const raw = await readFile(providerEnvPath, "utf8");
+    const lingeringFiles = await readdir(join(home, ".linghun"));
+    expect(raw).toContain("LINGHUN_OPENAI_MODEL=old-model");
+    expect(raw).toContain("LINGHUN_OPENAI_API_KEY=sk-old-secret");
+    expect(raw).not.toContain("new-model");
+    expect(lingeringFiles.filter((file) => file.includes(".tmp") || file.includes(".bak"))).toEqual([]);
   });
 
   it("rejects quote-wrapped or quote-prefixed provider API keys before saving", async () => {

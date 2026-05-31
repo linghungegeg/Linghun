@@ -348,8 +348,8 @@ async function runStablePointTool(
   input: { message?: string; includeUntracked?: boolean },
   continuation?: PendingModelContinuation,
 ): Promise<GitToolResult> {
-  // D.14D-R2 P1-1/R2 fix — 模型工具创建 stable point 是写仓库状态：
-  // default/auto-review 先确认，plan 直接拒绝，full-access 直接执行。slash
+  // D.14D-R2 P1-1/R2 fix — 模型工具创建 stable point 是 safety-gain 写仓库状态：
+  // default 先确认，plan 直接拒绝，auto-review/full-access 直接执行。slash
   // /git stable create 是显式用户动作，不经此模型工具路径，确认语义不受影响。
   if (context.permissionMode === "plan") {
     deps.clearRequestActivity(context);
@@ -388,7 +388,7 @@ async function runStablePointTool(
     deps.writeLine(output, text);
     return { ok: false, tool: toolCall.name, text, evidenceId: evidence.id };
   }
-  if (context.permissionMode !== "full-access") {
+  if (context.permissionMode === "default") {
     deps.clearRequestActivity(context);
     context.pendingLocalApproval = {
       kind: "git_stable_point",

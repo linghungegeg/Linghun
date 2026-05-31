@@ -51,13 +51,14 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
     expect(src).toContain("pendingApproval: true");
   });
 
-  it("D.14D-R2: model GitStablePointCreate default/auto-review ask path sets pendingLocalApproval before performStablePoint", () => {
+  it("D.14D-R2: model GitStablePointCreate default ask path sets pendingLocalApproval before performStablePoint", () => {
     const pendingIdx = gitDispatchSrc.indexOf('kind: "git_stable_point"');
     const performIdx = gitDispatchSrc.indexOf("const result = await performStablePoint(context");
     expect(pendingIdx).toBeGreaterThan(0);
     expect(performIdx).toBeGreaterThan(pendingIdx);
     expect(gitDispatchSrc).toContain('context.permissionMode === "plan"');
-    expect(gitDispatchSrc).toContain('context.permissionMode !== "full-access"');
+    expect(gitDispatchSrc).toContain('context.permissionMode === "default"');
+    expect(gitDispatchSrc).not.toContain('context.permissionMode !== "full-access"');
   });
 
   it("D.14D-R2 fix: GitStablePointCreate pending writeLine is not duplicated in ink", () => {

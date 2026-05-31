@@ -7,7 +7,18 @@ import { isRecord } from "./tui-state-runtime.js";
 
 const LARGE_INDEX_FILE_BYTES = 1_000_000;
 const LARGE_INDEX_FILE_LIMIT = 12;
-const LARGE_INDEX_RISK_EXTENSIONS = new Set([".json", ".sql", ".xml"]);
+// Run 2 P2-6 — 把 log 类大文本/转储/数据文件纳入大文件风险扫描。大 .log / dump /
+// ndjson / csv / tsv 与大 JSON/SQL/XML 一样会放大索引成本和噪声，之前被静默跳过。
+const LARGE_INDEX_RISK_EXTENSIONS = new Set([
+  ".json",
+  ".sql",
+  ".xml",
+  ".log",
+  ".ndjson",
+  ".csv",
+  ".tsv",
+  ".dump",
+]);
 const LARGE_INDEX_RISK_DIRS = new Set([
   ".next",
   ".turbo",
@@ -225,7 +236,7 @@ export function formatIndexSafetyWarning(
   if (layer === "primary") {
     return [
       `索引安全门：/index ${actionLabel} 发现 ${hiddenCount} 项未排除的大文件风险，默认阻止索引。`,
-      "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
+      "阻塞原因：大 JSON/SQL/XML/log/数据转储/min.js/生成物会显著放大索引成本和噪声。",
       "主屏不展开完整风险清单；完整清单已写入 transcript/evidence。",
       "建议 ignore 文件：.linghunignore 或 .cbmignore",
       "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
@@ -241,7 +252,7 @@ export function formatIndexSafetyWarning(
   const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
   return [
     `索引安全门详情：/index ${actionLabel} 发现未排除的大文件风险。`,
-    "阻塞原因：大 JSON/SQL/XML/min.js/生成物会显著放大索引成本和噪声。",
+    "阻塞原因：大 JSON/SQL/XML/log/数据转储/min.js/生成物会显著放大索引成本和噪声。",
     ...files,
     safety.truncated ? `- 仅记录前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
     "建议 ignore 文件：.linghunignore 或 .cbmignore",

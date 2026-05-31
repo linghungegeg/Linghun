@@ -512,7 +512,8 @@ export type FinalAnswerClaimKind =
   | "external_current_fact"
   | "ccb_parity"
   | "beta_readiness"
-  | "git_operation";
+  | "git_operation"
+  | "action_executed";
 
 export type FinalAnswerClaimMatch = {
   kind: FinalAnswerClaimKind;
@@ -544,6 +545,9 @@ const STALE_THRESHOLDS_MS: Record<FinalAnswerClaimKind, number | null> = {
   beta_readiness: null,
   // D.14G：git 稳定点/worktree 操作绑定到本会话真实 git_operation evidence，不按时间过期。
   git_operation: null,
+  // Run 2 P1-2：mutating 动作（install/Bash/Write/Edit/index refresh）的"已执行成功"声明，
+  // 绑定到本会话真实成功 evidence；执行成功通常 30 分钟内有效，超时按需重新验证。
+  action_executed: 30 * 60 * 1000,
 };
 
 export function isEvidenceStaleForClaim(
@@ -636,6 +640,26 @@ const GIT_OPERATION_PATTERNS: RegExp[] = [
   /\bremoved\s+(?:the\s+)?(?:managed\s+)?worktree\b/iu,
 ];
 
+// Run 2 P1-2 — mutating 动作"已执行成功"声明：依赖安装、Bash 命令执行、写文件、
+// 索引刷新。这些必须有对应的真实成功 evidence（command_output/test_result 且非失败、
+// 非 denied/cancelled），否则降级。用户拒绝/取消后只会留下 tool_failure evidence，
+// 因此被拒绝的动作声明会自动降级为未验证。
+const ACTION_EXECUTED_PATTERNS: RegExp[] = [
+  /已(?:成功)?安装/u, // 已安装 / 已成功安装
+  /安装(?:成功|完成)/u, // 安装成功 / 安装完成
+  /依赖(?:已|都已)?安装/u, // 依赖已安装
+  /已(?:成功)?执行/u, // 已执行 / 已成功执行
+  /命令(?:已|都已)?(?:成功)?(?:执行|运行)/u, // 命令已执行/已运行
+  /已(?:成功)?(?:刷新|重建)索引/u, // 已刷新索引 / 已重建索引
+  /索引(?:已|都已)?(?:成功)?(?:刷新|重建|更新)/u, // 索引已刷新
+  /已(?:成功)?写入(?:文件)?/u, // 已写入 / 已写入文件
+  /\bnpm\s+install\b.{0,30}(?:succe|done|complete|成功|完成)/iu,
+  /\b(?:pnpm|yarn|npm|pip|cargo)\s+(?:install|add|i)\b.{0,30}(?:succe|done|complete|ran|executed)/iu,
+  /\b(?:installed|ran|executed)\s+(?:the\s+)?(?:dependenc|package|command|install)/iu,
+  /\bindex(?:\s+has\s+been|\s+was)?\s+(?:refreshed|rebuilt|updated)\b/iu,
+  /\bsuccessfully\s+(?:installed|ran|executed|refreshed)\b/iu,
+];
+
 function detectMatches(
   text: string,
   patterns: RegExp[],
@@ -659,6 +683,7 @@ export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
   matches.push(...detectMatches(text, CODE_FACT_PATTERNS, "code_fact"));
   matches.push(...detectMatches(text, CCB_PARITY_PATTERNS, "ccb_parity"));
   matches.push(...detectMatches(text, GIT_OPERATION_PATTERNS, "git_operation"));
+  matches.push(...detectMatches(text, ACTION_EXECUTED_PATTERNS, "action_executed"));
   // \u5916\u90e8\u5f53\u524d\u4e8b\u5b9e\uff1a\u5148\u53bb\u9664"\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6..."\u7b49\u672c\u5730\u767d\u540d\u5355\uff0c\u518d\u5339\u914d
   const sanitized = text.replace(LOCAL_CURRENT_WHITELIST, "");
   matches.push(...detectMatches(sanitized, EXTERNAL_CURRENT_PATTERNS, "external_current_fact"));
@@ -725,6 +750,40 @@ function evidenceSupportsGitOperation(record: EvidenceRecord): boolean {
   );
 }
 
+// Run 2 P1-2 — mutating 动作"已执行成功"的 evidence 支撑。要求一条 command_output
+// 类 evidence，且它不是 tool_failure / denied / cancelled / 非零退出。被拒绝或取消的
+// 动作只会产生 `tool_failure` evidence（recordToolFailureEvidence，supportsClaims 含
+// tool_failure），因此无法支撑该 claim；真实执行成功的 Bash/Write/Edit/index 才放行。
+function evidenceSupportsActionExecuted(record: EvidenceRecord): boolean {
+  if (record.kind !== "command_output" && record.kind !== "test_result") {
+    return false;
+  }
+  if (record.supportsClaims.includes("tool_failure")) {
+    return false;
+  }
+  // 非零退出的 Bash 命令"执行了但失败"，不能支撑"已成功执行"。
+  if (record.supportsClaims.includes("bash_exit_nonzero")) {
+    return false;
+  }
+  const tokens = evidenceTokens(record);
+  if (/(?:denied|cancelled|canceled|permission denied|failure|未执行|拒绝|取消)/iu.test(tokens)) {
+    return false;
+  }
+  // 真实执行过的 Bash/Write/Edit/MultiEdit/index operation（runtime 成功后写入这些标签）。
+  return record.supportsClaims.some(
+    (claim) =>
+      claim === "Bash" ||
+      claim === "Write" ||
+      claim === "Edit" ||
+      claim === "MultiEdit" ||
+      claim === "command_ran" ||
+      claim === "file_written" ||
+      claim === "index_operation" ||
+      claim === "index_refresh" ||
+      claim === "index_repair",
+  );
+}
+
 const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
   completion_pass: "test/build/typecheck/diff-check/smoke",
   code_fact: "Read/Grep/index",
@@ -732,6 +791,7 @@ const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
   ccb_parity: "ccb-source \u672c\u5730\u8bc1\u636e\u6216 web_source",
   beta_readiness: "Beta readiness verdict (real-tui report-generation PASS)",
   git_operation: "git_operation evidence (real stable point / worktree create / worktree remove)",
+  action_executed: "real successful command_output (install / Bash / Write / index refresh)",
 };
 
 export function evaluateFinalAnswerClaims(
@@ -765,6 +825,8 @@ export function evaluateFinalAnswerClaims(
       supporter = evidenceSupportsCcbParity;
     } else if (kind === "git_operation") {
       supporter = evidenceSupportsGitOperation;
+    } else if (kind === "action_executed") {
+      supporter = evidenceSupportsActionExecuted;
     } else {
       // beta_readiness \u7531 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u6c38\u8fdc\u4e0d\u653e\u884c\u3002
       supporter = () => false;

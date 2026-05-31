@@ -1506,6 +1506,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("禁止事项");
   });
 
+  it("Run 2 P3-7: /memory storage redacts user-home absolute paths", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-user-home-"));
+    vi.stubEnv("LINGHUN_DATA_DIR", join(home, "data"));
+    try {
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session);
+
+      await handleSlashCommand("/memory storage", context, output);
+
+      expect(output.text).not.toContain(home);
+      expect(output.text).toContain("[user-home]");
+      expect(output.text).toContain(".linghun/memory");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("loads LINGHUN.md stable summary into resume and freshness", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(
@@ -2503,8 +2523,8 @@ describe("Phase 06 TUI slash commands", () => {
     context.evidence.unshift({
       id: "evidence-test-1",
       kind: "command_output",
-      source: "test",
-      summary: "details evidence summary",
+      source: join(project, ".linghun", "logs", "evidence.log"),
+      summary: `details evidence summary ${join(project, ".linghun", "logs", "secret.log")}`,
       supportsClaims: ["details full access"],
       createdAt: new Date().toISOString(),
     });
@@ -2537,6 +2557,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("- full output: /details evidence <id>");
     expect(output.text).toContain("Background agent-");
     expect(output.text).toContain("Evidence evidence-test-1");
+    expect(output.text).not.toContain(project);
+    expect(output.text).toContain(".linghun/logs/evidence.log");
     expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(0);
     expect(context.agents.length).toBe(4);
     expect(context.backgroundTasks.filter((task) => task.kind === "agent")).not.toContainEqual(
@@ -4393,6 +4415,43 @@ describe("Phase 06 TUI slash commands", () => {
     },
   );
 
+  windowsIt(
+    "Run 2 P2-5: Windows .cmd codebase-memory shim preserves JSON argv for index refresh",
+    async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project path-"));
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      const pathDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-cmd path-"));
+      const pathMock = await createMockCodebaseMemoryBinary(
+        project,
+        pathDir,
+        { changed_count: 0 },
+        {
+          fileName: "codebase-memory-worker",
+          versionOutput: "codebase-memory-mcp 5.0.1",
+        },
+      );
+      const shimPath = join(pathDir, "codebase-memory-mcp.cmd");
+      await writeFile(
+        shimPath,
+        `@echo off\r\n"%~dp0\\node.exe" "%~dp0\\codebase-memory-worker.cjs" %*\r\n`,
+        "utf8",
+      );
+      vi.stubEnv("PATH", `${pathDir}${delimiter}${process.env.PATH ?? ""}`);
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const output = new MemoryOutput();
+      const context = await createTestContext(project, store, session);
+
+      await handleSlashCommand("/index refresh --force", context, output);
+
+      const calls = await readMockCallRecords(pathMock.callsPath);
+      const refresh = calls.find((call) => call.tool === "index_repository");
+      expect(refresh?.input.repo_path).toBe(project);
+      expect(refresh?.input.mode).toBe(defaultConfig.index.mode);
+      expect(output.text).not.toContain("repo_path is required");
+    },
+  );
+
   it("degrades unsupported and corrupt codebase-memory versions without crashing", async () => {
     for (const [versionOutput, versionExitCode, expected] of [
       ["codebase-memory-mcp dev-build", undefined, "unsupported"],
@@ -5799,6 +5858,41 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("重试命令：/index refresh");
   });
 
+  it("Run 2 P2-6: index safety blocks large unignored log files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "debug.log"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(output.text).toContain("索引安全门");
+    expect(output.text).toContain("log/数据转储");
+    expect(output.text).not.toContain("- debug.log");
+    expect(context.index.safetyRiskyFiles?.some((file) => file.path === "debug.log")).toBe(true);
+    expect(await readMockCalls(callsPath)).not.toContain("index_repository");
+  });
+
+  it("Run 2 P2-6: index safety allows small log files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "debug.log"), "small log\n", "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(output.text).not.toContain("索引安全门");
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+  });
+
   it("D.14D: /index repair continues after an active safety blocker", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
@@ -6187,6 +6281,36 @@ describe("Phase 06 TUI slash commands", () => {
         ? autoAllowEvent.message
         : "",
     ).toContain("summary=");
+  });
+
+  it("Run 2 P2-4: slash Bash non-zero is captured in failure learning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand('/bash node -e "process.exit(7)"', context, output);
+    await handleSlashCommand("/failures", context, output);
+
+    expect(context.failureLearning.records).toHaveLength(1);
+    expect(context.failureLearning.records[0]?.category).toBe("tool_failure");
+    expect(context.failureLearning.records[0]?.relatedTarget).toBe("Bash");
+    expect(output.text).toContain("失败学习");
+    expect(output.text).toContain("Inspect the command output");
+  });
+
+  it("Run 2 P2-4: slash Bash permission denial is not failure learning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/bash rm SHOULD_NOT_RUN.txt", context, output);
+
+    expect(output.text).toContain("default 模式不会静默执行 Bash");
+    expect(context.failureLearning.records).toHaveLength(0);
   });
 
   it("D.13N policy engine: /bash cat .env still prompts (sensitive_path)", async () => {
@@ -8867,6 +8991,27 @@ describe("Phase 06 TUI slash commands", () => {
     const calls = await readMockCalls(callsPath);
     expect(calls.filter((tool) => tool === "index_repository")).toHaveLength(2);
     expect(output.text).not.toContain("索引前发现未排除的大文件风险");
+  });
+
+  it("Run 2 P2-5: /index refresh sends repo_path for the current project", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh --force", context, output);
+
+    const refresh = (await readMockCallRecords(callsPath)).find(
+      (call) => call.tool === "index_repository",
+    );
+    expect(refresh?.input.repo_path).toBe(project);
+    expect(refresh?.input.mode).toBe(defaultConfig.index.mode);
+    expect(refresh?.input.persistence).toBe(true);
+    expect(output.text).not.toContain("repo_path is required");
   });
 
   it("keeps light hints out of the prompt/input area", async () => {
@@ -13740,6 +13885,31 @@ describe("D.14G git stable point / managed worktree product closure", () => {
     expect(tracked).not.toContain(".env");
   });
 
+  gitIt("Run 2 P1-1: slash stable/checkpoint in plan mode creates no commit or snapshot", async () => {
+    const { project, context } = await makeRepoContext();
+    context.permissionMode = "plan";
+    await writeFile(join(project, "README.md"), "# repo\n\nplan-slash-change\n", "utf8");
+    const baseline = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString().trim();
+    const output = new MemoryOutput();
+
+    await handleSlashCommand('/git stable create "feat: forbidden slash"', context, output);
+    await handleSlashCommand('/checkpoint create "feat: forbidden checkpoint"', context, output);
+
+    const after = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+    }).stdout.toString().trim();
+    expect(after).toBe(baseline);
+    expect(output.text).toContain("Plan mode is read-only");
+    expect(context.checkpoints).toHaveLength(0);
+    expect(
+      context.evidence.some((e) => e.supportsClaims.includes("stable_point_created")),
+    ).toBe(false);
+  });
+
   gitIt("/worktree create makes a managed worktree under the controlled root", async () => {
     const { project, context } = await makeRepoContext();
     const output = new MemoryOutput();
@@ -13926,6 +14096,55 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
       ),
     ).toBe(false);
+  });
+
+  gitIt("Run 2 P1-1: model GitStablePointCreate in auto-review creates without confirmation", async () => {
+    await isolateModelEnv();
+    const { project, store } = await makeRepoContext();
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        ...defaultConfig,
+        defaultModel: "git-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          ...defaultConfig.providers,
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "git-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "README.md"), "# repo\n\nauto-review-change\n", "utf8");
+
+    const requests = mockSseToolSequence(
+      [{ toolName: "GitStablePointCreate", input: { message: "feat: auto review stable" } }],
+      "已建立稳定点。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我建立一个稳定点\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(output.text).not.toContain("确认为当前工作区创建稳定点");
+    const log = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: project, windowsHide: true });
+    expect(log.stdout.toString().trim()).toBe("feat: auto review stable");
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (e) => e.type === "evidence_record" && e.supportsClaims.includes("stable_point_created"),
+      ),
+    ).toBe(true);
   });
 
   gitIt("D.14D-R2 fix: model GitStablePointCreate in plan mode is rejected without commit or snapshot", async () => {

@@ -284,6 +284,30 @@ describe("formatJobReport/List/Status", () => {
     expect(result).toContain("running");
   });
 
+  it("Run 2 P3-7: job status/report/logs redact absolute paths for display", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-user-home-like-"));
+    const project = join(root, "project-a");
+    const job = createMinimalJob({
+      projectPath: project,
+      logPath: join(project, ".linghun", "jobs", "job-test1234", "job.log"),
+      reportPath: join(root, "data", "jobs", "job-test1234", "report.md"),
+      fullOutputPath: join(root, "data", "jobs", "job-test1234", "full-output.log"),
+    });
+    await mkdir(join(project, ".linghun", "jobs", "job-test1234"), { recursive: true });
+    await writeFile(job.logPath, "line\n", "utf8");
+
+    const status = formatJobStatus(job);
+    const report = formatJobReport(job);
+    const logs = await formatJobLogs(job);
+
+    expect(status).not.toContain(root);
+    expect(report).not.toContain(root);
+    expect(logs).not.toContain(root);
+    expect(status).toContain(".linghun/jobs/job-test1234/job.log");
+    expect(status).toMatch(/\[(?:local-path|user-home)\]\/.*report\.md/u);
+    expect(logs).toContain(".linghun/jobs/job-test1234/job.log");
+  });
+
   it("formatJobReport includes job id", () => {
     const job = createMinimalJob();
     const result = formatJobReport(job);
@@ -406,6 +430,37 @@ describe("read/write roundtrip", () => {
     });
     const job = await findDurableJob(context, "nonexistent");
     expect(job).toBeUndefined();
+  });
+
+  it("Run 2 P3-7: listDurableJobs filters user-scope history to the current project", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
+    const projectA = join(tempDir, "project-a");
+    const projectB = join(tempDir, "project-b");
+    const jobsRoot = join(tempDir, "user-data", "jobs");
+    const config = structuredClone(defaultConfig) as LinghunConfig;
+    config.storage.jobs = { scope: "custom", path: jobsRoot };
+    const context = createTestJobContext({ config, projectPath: projectA });
+    const jobA = createMinimalJob({
+      id: "job-project-a",
+      projectPath: projectA,
+      logPath: join(jobsRoot, "job-project-a", "job.log"),
+      reportPath: join(jobsRoot, "job-project-a", "report.md"),
+      fullOutputPath: join(jobsRoot, "job-project-a", "full-output.log"),
+    });
+    const jobB = createMinimalJob({
+      id: "job-project-b",
+      projectPath: projectB,
+      logPath: join(jobsRoot, "job-project-b", "job.log"),
+      reportPath: join(jobsRoot, "job-project-b", "report.md"),
+      fullOutputPath: join(jobsRoot, "job-project-b", "full-output.log"),
+    });
+
+    await persistDurableJob(jobA);
+    await persistDurableJob(jobB);
+
+    const jobs = await listDurableJobs(context);
+    expect(jobs.map((job) => job.id)).toEqual(["job-project-a"]);
+    expect((await findDurableJob(context, "project-b"))?.id).toBeUndefined();
   });
 });
 

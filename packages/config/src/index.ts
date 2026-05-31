@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -673,9 +674,18 @@ export async function ensureProviderEnvTemplate(home = homedir()): Promise<strin
     return path;
   }
   await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = createAtomicTempPath(path);
   await writeFile(tempPath, providerEnvTemplate, "utf8");
-  await rename(tempPath, path);
+  try {
+    await rename(tempPath, path);
+  } catch (error) {
+    if (isAtomicReplaceConflict(error) && (await providerEnvExists(home))) {
+      await rm(tempPath, { force: true });
+      return path;
+    }
+    await rm(tempPath, { force: true });
+    throw error;
+  }
   return path;
 }
 
@@ -686,10 +696,48 @@ export async function saveProviderEnvSetup(
   const validated = validateProviderEnvSetup(setup);
   const path = getProviderEnvPath(home);
   await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = createAtomicTempPath(path);
   await writeFile(tempPath, formatProviderEnv(validated), "utf8");
-  await rename(tempPath, path);
+  await replaceProviderEnvFile(tempPath, path);
   return path;
+}
+
+function createAtomicTempPath(path: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+}
+
+async function replaceProviderEnvFile(tempPath: string, path: string): Promise<void> {
+  try {
+    await rename(tempPath, path);
+    return;
+  } catch (error) {
+    if (!isAtomicReplaceConflict(error)) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
+  }
+  const backupPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.bak`;
+  try {
+    await copyFile(path, backupPath);
+    await copyFile(tempPath, path);
+  } catch (error) {
+    try {
+      await copyFile(backupPath, path);
+    } catch {
+      // If the backup was never created or was already restored, keep reporting
+      // the original replace failure; callers need the write to be clearly failed.
+    }
+    await rm(tempPath, { force: true });
+    await rm(backupPath, { force: true });
+    throw error;
+  }
+  await rm(tempPath, { force: true });
+  await rm(backupPath, { force: true });
+}
+
+function isAtomicReplaceConflict(error: unknown): boolean {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return code === "EEXIST" || code === "EPERM";
 }
 
 export async function readProviderEnvValues(home = homedir()): Promise<Record<string, string>> {

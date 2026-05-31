@@ -3838,7 +3838,9 @@ async function runDetailsCommandBody(
     const evidence = findEvidence(context, id);
     writeLine(
       output,
-      evidence ? formatEvidenceDetails(evidence) : "未找到 evidence。用法：/details evidence <id>",
+      evidence
+        ? formatEvidenceDetails(evidence, context.projectPath)
+        : "未找到 evidence。用法：/details evidence <id>",
     );
     return;
   }
@@ -3883,7 +3885,7 @@ async function runDetailsCommandBody(
     writeLine(
       output,
       evidence
-        ? formatEvidenceDetails(evidence)
+        ? formatEvidenceDetails(evidence, context.projectPath)
         : "未找到 output。用法：/details output <backgroundId|evidenceId>",
     );
     return;
@@ -7817,6 +7819,18 @@ async function handleToolCommand(
       isToolOutputFailure(name, result.output),
       evidence?.id,
     );
+    if (isToolOutputFailure(name, result.output)) {
+      await captureFailureLearning(context, sessionId, {
+        category: "tool_failure",
+        failureSummary: `${name} exited non-zero: ${result.output.text}`,
+        rootCauseGuess: `${name} command returned a non-zero exit code`,
+        avoidNextTime:
+          "Inspect the command output and exit code; fix the underlying cause before claiming the command passed",
+        sourceRef: evidence?.id ? `evidence:${evidence.id}` : `tool:${name}`,
+        relatedTarget: name,
+        severity: "medium",
+      });
+    }
     writeLine(output, formatToolOutput(name, result.output, context.language, evidence?.id));
     writeStatus(output, context);
   } catch (error) {

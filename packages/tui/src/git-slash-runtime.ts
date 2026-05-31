@@ -92,6 +92,33 @@ export async function runStablePointCreateSlash(
 ): Promise<void> {
   const parsed = parseStablePointSlashArgs(args);
   const sessionId = await deps.ensureSession(context);
+  // Run 2 P1-1 修复 — slash /git stable create、/checkpoint create 在 plan 模式必须
+  // 直接只读拒绝：不创建 commit，也不创建 Linghun snapshot 安全垫。稳定点是安全增益
+  // 动作，default/auto-review/full-access 下 slash 是显式用户动作，直接执行；唯独 plan
+  // 守住只读边界。与模型工具 runStablePointTool 的 plan 拒绝语义一致。
+  if (context.permissionMode === "plan") {
+    const text =
+      context.language === "en-US"
+        ? "stable point was NOT created because Plan mode is read-only."
+        : "stable point was NOT created because Plan mode is read-only. 稳定点未创建：计划模式只读。";
+    await appendGitOperationEvent(
+      deps.dispatch,
+      context,
+      sessionId,
+      {
+        operation: "stable_point_denied",
+        createdAt: new Date().toISOString(),
+        project: context.projectPath,
+        includeUntracked: parsed.includeUntracked,
+        result: "plan_read_only",
+        source: "slash",
+      },
+      "warning",
+    );
+    deps.writeLine(output, text);
+    deps.writeStatus(output, context);
+    return;
+  }
   const result = await performStablePoint(
     context,
     sessionId,

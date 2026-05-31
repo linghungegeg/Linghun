@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { appendFile as fsAppendFile } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LinghunConfig } from "@linghun/config";
 import { resolveStoragePaths } from "@linghun/config";
@@ -25,6 +25,7 @@ import {
   mapDurableJobToBackgroundStatus,
 } from "./job-runner-presenter.js";
 import { formatApprovedRunnerSpecLine } from "./runner-runtime.js";
+import { formatDisplayPath } from "./startup-runtime.js";
 
 const appendFileAsync = promisify(fsAppendFile);
 
@@ -419,9 +420,13 @@ export async function listDurableJobs(context: JobContext): Promise<DurableJobSt
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const job = await readDurableJobState(join(root, entry.name, "state.json"));
-    if (job) jobs.push(job);
+    if (job && isCurrentProjectJob(job, context.projectPath)) jobs.push(job);
   }
   return jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function isCurrentProjectJob(job: DurableJobState, projectPath: string): boolean {
+  return resolve(job.projectPath).toLowerCase() === resolve(projectPath).toLowerCase();
 }
 
 export async function findDurableJob(
@@ -443,7 +448,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     "",
     `- status: ${job.status}`,
     `- goal: ${job.goal}`,
-    `- projectPath: ${job.projectPath}`,
+    `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
     `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
@@ -456,8 +461,8 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     formatApprovedRunnerSpecLine(job),
     `- handoff: ${job.handoffPacket?.id ?? "missing"}`,
     `- evidenceRefs: ${job.evidenceRefs.map((item) => item.id).join(", ") || "none"}`,
-    `- logs: ${job.logPath}`,
-    `- fullOutput: ${job.fullOutputPath}`,
+    `- logs: ${formatDisplayPath(job.logPath, job.projectPath)}`,
+    `- fullOutput: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
     "",
     "## Task graph",
     ...job.plan.map((step, index) => `${index + 1}. ${step}`),
@@ -550,7 +555,7 @@ export function formatJobStatus(job: DurableJobState): string {
     `- pauseReason: ${job.pauseReason ?? "-"}`,
     "- resumeCheck: handoff/evidence/index/resource guard before any worker step",
     `- goal: ${truncateDisplay(job.goal, 120)}`,
-    `- projectPath: ${job.projectPath}`,
+    `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
     `- agent labels: ${formatJobAgentLabels(job.agents)}`,
@@ -558,9 +563,9 @@ export function formatJobStatus(job: DurableJobState): string {
     `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
-    `- logPath: ${job.logPath}`,
-    `- fullOutputPath: ${job.fullOutputPath}`,
-    `- reportPath: ${job.reportPath}`,
+    `- logPath: ${formatDisplayPath(job.logPath, job.projectPath)}`,
+    `- fullOutputPath: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
+    `- reportPath: ${formatDisplayPath(job.reportPath, job.projectPath)}`,
   ].join("\n");
 }
 
@@ -578,9 +583,9 @@ export function formatJobReport(job: DurableJobState): string {
     `- runner: ${formatJobRunnerInline(job)}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
     `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
-    `- logPath: ${job.logPath}`,
-    `- fullOutputPath: ${job.fullOutputPath}`,
-    `- reportPath: ${job.reportPath}`,
+    `- logPath: ${formatDisplayPath(job.logPath, job.projectPath)}`,
+    `- fullOutputPath: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
+    `- reportPath: ${formatDisplayPath(job.reportPath, job.projectPath)}`,
   ].join("\n");
 }
 
@@ -614,8 +619,8 @@ export async function formatJobLogs(job: DurableJobState): Promise<string> {
   const tail = content.split(/\r?\n/u).filter(Boolean).slice(-JOB_LOG_TAIL_LINES);
   return [
     `Job logs ${job.id}`,
-    `- path: ${job.logPath}`,
-    `- fullOutputPath: ${job.fullOutputPath}`,
+    `- path: ${formatDisplayPath(job.logPath, job.projectPath)}`,
+    `- fullOutputPath: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
     `- tailLines: ${tail.length}/${JOB_LOG_TAIL_LINES}`,
     tail.length > 0
       ? tail.join("\n")

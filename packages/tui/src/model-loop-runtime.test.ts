@@ -660,6 +660,81 @@ describe("model-loop-runtime", () => {
       // 普通讨论“稳定点是什么”不应被当成已执行声明。
       expect(detectHighRiskClaims("稳定点是用来回滚的一个安全垫。").some((m) => m.kind === "git_operation")).toBe(false);
     });
+
+    it("Run 2 Closure: denied or cancelled actions do not support final success claims", () => {
+      const denied = evaluateFinalAnswerClaims("已安装依赖，命令已成功执行。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "permission denied; command was not executed",
+          supportsClaims: ["tool_failure", "permission_denied"],
+        }),
+      ]);
+      expect(denied.status).toBe("needs_disclaimer");
+      expect(denied.unsupportedKinds).toContain("action_executed");
+
+      const cancelled = evaluateFinalAnswerClaims("索引已刷新。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "cancelled by user",
+          supportsClaims: ["tool_failure", "user_cancelled"],
+        }),
+      ]);
+      expect(cancelled.status).toBe("needs_disclaimer");
+      expect(cancelled.unsupportedKinds).toContain("action_executed");
+
+      const ok = evaluateFinalAnswerClaims("命令已成功执行。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "Bash: npm install exited 0",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+        }),
+      ]);
+      expect(ok.status).toBe("passed");
+    });
+
+    it("Run 2 Closure addendum: successful index evidence supports refresh/rebuild claims", () => {
+      const refreshed = evaluateFinalAnswerClaims("索引已刷新。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "IndexRefresh completed",
+          source: "index:refresh",
+          supportsClaims: ["index_operation", "index_refresh"],
+        }),
+      ]);
+      expect(refreshed.status).toBe("passed");
+
+      const repaired = evaluateFinalAnswerClaims("索引已重建。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "IndexRepair completed",
+          source: "index:repair",
+          supportsClaims: ["index_operation", "index_repair"],
+        }),
+      ]);
+      expect(repaired.status).toBe("passed");
+    });
+
+    it("Run 2 Closure addendum: denied or cancelled index evidence still cannot support refresh claims", () => {
+      const denied = evaluateFinalAnswerClaims("索引已刷新。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "permission denied; IndexRefresh was not executed",
+          supportsClaims: ["tool_failure", "index_refresh", "permission_denied"],
+        }),
+      ]);
+      expect(denied.status).toBe("needs_disclaimer");
+      expect(denied.unsupportedKinds).toContain("action_executed");
+
+      const cancelled = evaluateFinalAnswerClaims("索引已刷新。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "cancelled by user; IndexRefresh was not executed",
+          supportsClaims: ["tool_failure", "index_refresh", "user_cancelled"],
+        }),
+      ]);
+      expect(cancelled.status).toBe("needs_disclaimer");
+      expect(cancelled.unsupportedKinds).toContain("action_executed");
+    });
   });
 
   describe("D.13U deriveToolSupportsClaims", () => {
