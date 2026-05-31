@@ -33,12 +33,16 @@ export type WorkflowPlannerGoal = {
   goal: string;
   permissionMode: PermissionMode;
   confirmedPhaseStopPoints?: string[];
+  controlledMemoryRef?: { rulesFound: boolean; summary?: string };
+  selfLearningHints?: string[];
+  failureLearningRefs?: Array<{ lesson: string; source: string }>;
+  cacheFreshnessHint?: string;
 };
 
 export function generateWorkflowPlanPreview(
   input: WorkflowPlannerGoal,
 ): WorkflowPlannerEntryResult {
-  const rawPlan = buildConservativePlan(input.goal, input.permissionMode);
+  const rawPlan = buildConservativePlan(input);
   const validation = normalizeWorkflowPlan(rawPlan, { permissionMode: input.permissionMode });
   if (!validation.ok) {
     return {
@@ -63,10 +67,58 @@ export function generateWorkflowPlanPreview(
   };
 }
 
-function buildConservativePlan(goal: string, permissionMode: PermissionMode): WorkflowPlan {
+function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
+  const {
+    goal,
+    permissionMode,
+    controlledMemoryRef,
+    selfLearningHints,
+    failureLearningRefs,
+    cacheFreshnessHint,
+  } = input;
   const sanitizedGoal = sanitizeGoalText(goal);
   const planId = `wf-plan-${Date.now()}`;
   const phaseId = "phase-1";
+
+  const references: WorkflowPlan["references"] = [];
+  const evidence: WorkflowPlan["evidence"] = [];
+
+  if (controlledMemoryRef?.rulesFound && controlledMemoryRef.summary) {
+    references.push({
+      kind: "workspace_cache",
+      ref: "controlled-memory-context",
+      summary: sanitizeRefText(controlledMemoryRef.summary).slice(0, 500),
+    });
+  }
+
+  if (selfLearningHints && selfLearningHints.length > 0) {
+    for (const hint of selfLearningHints.slice(0, 5)) {
+      references.push({
+        kind: "workspace_cache",
+        ref: "self-learning-hint",
+        summary: sanitizeRefText(hint).slice(0, 200),
+      });
+    }
+  }
+
+  if (failureLearningRefs && failureLearningRefs.length > 0) {
+    for (const ref of failureLearningRefs.slice(0, 5)) {
+      evidence.push({
+        ref: `failure-learning:${sanitizeRefText(ref.source).slice(0, 80)}`,
+        kind: "failure_learning",
+        claim: sanitizeRefText(ref.lesson).slice(0, 300),
+        passEvidence: false,
+      });
+    }
+  }
+
+  if (cacheFreshnessHint) {
+    references.push({
+      kind: "workspace_cache",
+      ref: "cache-freshness-hint",
+      summary: sanitizeRefText(cacheFreshnessHint).slice(0, 200),
+    });
+  }
 
   return {
     id: planId,
@@ -90,8 +142,8 @@ function buildConservativePlan(goal: string, permissionMode: PermissionMode): Wo
       },
     ],
     budget: { maxRunningAgents: 3 },
-    evidence: [],
-    references: [],
+    evidence,
+    references,
     stopConditions: ["stop after each phase and wait for explicit user confirmation"],
   };
 }
@@ -107,6 +159,29 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
       acceptanceCriteria: ["locate relevant code"],
       nextAction: "Read relevant files and gather evidence.",
     },
+    {
+      id: "slice-architecture-review",
+      title: "Architecture review",
+      role: "planner",
+      status: "queued",
+      dependsOnSliceIds: ["slice-explore"],
+      targetRuntime: { kind: "details", view: "evidence", mutating: false },
+      acceptanceCriteria: [
+        "confirm architecture boundaries respected",
+        "identify impacted modules",
+        "check frontend/TUI constraints",
+        "assess AntiCodeBlob risk",
+      ],
+      evidence: [
+        {
+          ref: "architecture-boundary-check",
+          kind: "architecture",
+          claim: "Architecture boundaries and impacted modules reviewed",
+          passEvidence: false,
+        },
+      ],
+      nextAction: "Review architecture boundaries, impacted modules, and AntiCodeBlob risk.",
+    },
   ];
 
   if (permissionMode !== "plan") {
@@ -115,7 +190,7 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
       title: "Implement changes",
       role: "worker",
       status: "queued",
-      dependsOnSliceIds: ["slice-explore"],
+      dependsOnSliceIds: ["slice-architecture-review"],
       targetRuntime: { kind: "slash", slash: "/fork", role: "worker", mutating: true },
       budget: { maxTokens: 5000, maxDurationMs: 120_000 },
       acceptanceCriteria: ["apply changes after approval"],
@@ -123,12 +198,29 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     });
   }
 
+  const lastExecutionSlice =
+    permissionMode === "plan" ? "slice-architecture-review" : "slice-implement";
+
+  slices.push({
+    id: "slice-stable-point",
+    title: "Suggest git stable point",
+    role: "verifier",
+    status: "queued",
+    dependsOnSliceIds: [lastExecutionSlice],
+    targetRuntime: { kind: "details", view: "evidence", mutating: false },
+    acceptanceCriteria: [
+      "suggest git stable point check (proposal only, no auto-commit or snapshot)",
+    ],
+    nextAction:
+      "Suggest creating a git stable point before/after execution. This is a proposal only — do not auto-commit or snapshot.",
+  });
+
   slices.push({
     id: "slice-verify",
     title: "Verify result",
     role: "verifier",
     status: "queued",
-    dependsOnSliceIds: permissionMode === "plan" ? ["slice-explore"] : ["slice-implement"],
+    dependsOnSliceIds: ["slice-stable-point"],
     targetRuntime: { kind: "verification", level: "typecheck", mutating: false },
     acceptanceCriteria: ["run typecheck/tests after execution"],
     nextAction: "Run typecheck and tests after execution.",
@@ -138,14 +230,20 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
 }
 
 function sanitizeGoalText(goal: string): string {
-  return goal
+  return sanitizeRefText(goal).slice(0, 500).trim();
+}
+
+function sanitizeRefText(text: string): string {
+  return text
     .replace(/[A-Za-z]:\\[^\s]+/gu, "[path]")
     .replace(/\/(?:Users|home|var|tmp|private|mnt)\/[^\s]+/gu, "[path]")
     .replace(/sk-[A-Za-z0-9_-]{8,}/gu, "[key]")
     .replace(/(api[_-]?key\s*[=:]\s*)\S+/giu, "$1[key]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/giu, "Bearer [key]")
-    .slice(0, 500)
-    .trim();
+    .replace(
+      /\b(?:full transcript|raw transcript|full source|raw source|full log|raw log)\b/giu,
+      "[redacted]",
+    );
 }
 
 export function formatWorkflowPlanPreview(

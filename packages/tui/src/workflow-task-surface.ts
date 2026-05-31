@@ -20,6 +20,12 @@ export type EvidenceMergeRow = {
   reason: string;
 };
 
+export type CacheBudgetHint = {
+  budgetSet: boolean;
+  multiAgentPressure: boolean;
+  cacheFreshnessRef: string | null;
+};
+
 export type WorkflowTaskSurfaceResult = {
   summaryText: string;
   detailsText: string;
@@ -37,6 +43,8 @@ export type WorkflowTaskSurfaceResult = {
     costEstimate: string;
     durationEstimate: string;
     nextAction: string;
+    cacheBudgetHint: CacheBudgetHint;
+    riskHintCount: number;
   };
 };
 
@@ -86,7 +94,16 @@ export function projectWorkflowTaskSurface(
 
   const nextAction = deriveNextAction(bridgeResult, currentPhase?.stopPoint.reason);
 
-  const meta = {
+  const riskHintCount = evidenceRefs.filter((ev) => ev.kind === "failure_learning").length;
+  const failureLearningRefs = evidenceRefs.filter((ev) => ev.kind === "failure_learning");
+
+  const budgetSet = plan.budget.maxCostCny !== undefined || plan.budget.maxTokens !== undefined;
+  const multiAgentPressure = allSlices.length > 2;
+  const cacheFreshnessRef =
+    (plan.references ?? []).find((r) => r.ref === "cache-freshness-hint")?.ref ?? null;
+  const cacheBudgetHint: CacheBudgetHint = { budgetSet, multiAgentPressure, cacheFreshnessRef };
+
+  const meta: WorkflowTaskSurfaceResult["meta"] = {
     currentPhase: currentPhase?.title ?? "unknown",
     slicesDone: done,
     slicesRunning: running,
@@ -97,6 +114,8 @@ export function projectWorkflowTaskSurface(
     costEstimate: costEst ? `<=${costEst} CNY` : "unset",
     durationEstimate: durationEst ? `<=${durationEst}ms` : "unset",
     nextAction,
+    cacheBudgetHint,
+    riskHintCount,
   };
 
   const summaryText = buildSummaryText(
@@ -105,12 +124,18 @@ export function projectWorkflowTaskSurface(
     evidenceMergeSummary,
     bridgeResult.summary,
   );
-  const detailsText = buildDetailsText(plan.title, bridgeResult, evidenceMergeRows);
+  const detailsText = buildDetailsText(
+    plan.title,
+    bridgeResult,
+    evidenceMergeRows,
+    failureLearningRefs,
+  );
   const mobileSummary = buildMobileSummary(
     plan.title,
     meta,
     evidenceMergeSummary,
     bridgeResult.summary,
+    riskHintCount,
   );
 
   return {
@@ -262,12 +287,17 @@ function buildDetailsText(
   title: string,
   bridgeResult: WorkflowAgentRuntimeBridgeResult,
   evidenceRows: EvidenceMergeRow[],
+  failureLearningRefs: Array<{ ref: string; kind: WorkflowEvidenceKind; claim: string }>,
 ): string {
   const header = `Workflow Task Surface details: ${title}`;
   const requestLines = bridgeResult.requests.map((r) => formatRequestRow(r));
   const evidenceLines = evidenceRows.map(
     (row) => `  evidence: ${row.ref} | ${row.kind} | ${row.verdict} | ${row.reason}`,
   );
+  const riskHintLines =
+    failureLearningRefs.length > 0
+      ? ["", "Risk Hints:", ...failureLearningRefs.map((r) => `  risk: ${r.ref} | ${r.claim}`)]
+      : [];
   return [
     header,
     "",
@@ -277,6 +307,7 @@ function buildDetailsText(
     "",
     "Evidence Merge:",
     ...evidenceLines,
+    ...riskHintLines,
   ].join("\n");
 }
 
@@ -301,15 +332,20 @@ function buildMobileSummary(
   meta: WorkflowTaskSurfaceResult["meta"],
   evidenceVerdict: EvidenceMergeVerdict,
   summary: WorkflowAgentRuntimeBridgeResult["summary"],
+  riskHintCount: number,
 ): string {
-  const raw = [
+  const lines = [
     `Workflow: ${title}`,
     `Phase: ${meta.currentPhase}`,
-    `Blocked: ${meta.slicesBlocked}`,
+    `Slices: done=${meta.slicesDone} running=${meta.slicesRunning} blocked=${meta.slicesBlocked} queued=${meta.slicesQueued}`,
     `Approval needed: ${summary.startGateNeeded > 0 ? "yes" : "no"}`,
     `Evidence: ${meta.evidenceCount} (${evidenceVerdict})`,
     `Next: ${meta.nextAction}`,
-  ].join("\n");
+  ];
+  if (riskHintCount > 0) {
+    lines.push(`Risk hints: ${riskHintCount}`);
+  }
+  const raw = lines.join("\n");
   return sanitizeMobileSummary(raw);
 }
 

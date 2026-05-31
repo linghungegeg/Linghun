@@ -211,3 +211,295 @@ describe("D.14H-E workflow planner entry", () => {
     }
   });
 });
+
+describe("D.14H-F workflow planner core-system wiring", () => {
+  function goal(overrides: Partial<WorkflowPlannerGoal> = {}): WorkflowPlannerGoal {
+    return {
+      goal: "Implement a cache hit rate report feature",
+      permissionMode: "default",
+      ...overrides,
+    };
+  }
+
+  it("generates architecture-review slice after explore, before implement", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const slices = result.plan.phases[0].slices;
+    const exploreIdx = slices.findIndex((s) => s.id === "slice-explore");
+    const archIdx = slices.findIndex((s) => s.id === "slice-architecture-review");
+    const implIdx = slices.findIndex((s) => s.id === "slice-implement");
+    expect(archIdx).toBeGreaterThan(exploreIdx);
+    expect(archIdx).toBeLessThan(implIdx);
+  });
+
+  it("architecture-review slice exists in all permission modes", () => {
+    for (const mode of ["plan", "default", "auto-review", "full-access"] as const) {
+      const result = generateWorkflowPlanPreview(goal({ permissionMode: mode }));
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      const archSlice = result.plan.phases[0].slices.find(
+        (s) => s.id === "slice-architecture-review",
+      );
+      expect(archSlice).toBeDefined();
+      expect(archSlice?.role).toBe("planner");
+      expect(archSlice?.targetRuntime?.mutating).toBe(false);
+    }
+  });
+
+  it("architecture-review has correct acceptance criteria and evidence with passEvidence=false", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const archSlice = result.plan.phases[0].slices.find(
+      (s) => s.id === "slice-architecture-review",
+    );
+    expect(archSlice?.acceptanceCriteria).toContain("confirm architecture boundaries respected");
+    expect(archSlice?.acceptanceCriteria).toContain("identify impacted modules");
+    expect(archSlice?.acceptanceCriteria).toContain("assess AntiCodeBlob risk");
+    const archEvidence = archSlice?.evidence?.find((e) => e.kind === "architecture");
+    expect(archEvidence).toBeDefined();
+    expect(archEvidence?.passEvidence).toBe(false);
+  });
+
+  it("generates stable-point suggestion slice as proposal-only readonly", () => {
+    for (const mode of ["plan", "default", "auto-review", "full-access"] as const) {
+      const result = generateWorkflowPlanPreview(goal({ permissionMode: mode }));
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      const stableSlice = result.plan.phases[0].slices.find((s) => s.id === "slice-stable-point");
+      expect(stableSlice).toBeDefined();
+      expect(stableSlice?.targetRuntime?.mutating).toBe(false);
+      expect(stableSlice?.nextAction).toContain("proposal only");
+    }
+  });
+
+  it("stable-point does not auto-commit or auto-snapshot", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('"autoCommit"');
+    expect(json).not.toContain('"autoSnapshot"');
+    const stableSlice = result.plan.phases[0].slices.find((s) => s.id === "slice-stable-point");
+    expect(stableSlice?.acceptanceCriteria?.[0]).toContain("proposal only");
+  });
+
+  it("controlled memory ref injects workspace_cache reference without writing memory", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        controlledMemoryRef: { rulesFound: true, summary: "Project uses pnpm monorepo" },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const memRef = result.plan.references?.find((r) => r.ref === "controlled-memory-context");
+    expect(memRef).toBeDefined();
+    expect(memRef?.kind).toBe("workspace_cache");
+    expect(memRef?.summary).toContain("pnpm monorepo");
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('"writeMemory"');
+    expect(json).not.toContain('"autoAccept"');
+  });
+
+  it("controlled memory ref is not injected when rulesFound=false", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({ controlledMemoryRef: { rulesFound: false } }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const memRef = result.plan.references?.find((r) => r.ref === "controlled-memory-context");
+    expect(memRef).toBeUndefined();
+  });
+
+  it("self-learning hints inject as references, never write new learning", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({ selfLearningHints: ["prefer vitest over jest", "use pnpm not npm"] }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const hints = result.plan.references?.filter((r) => r.ref === "self-learning-hint");
+    expect(hints?.length).toBe(2);
+    expect(hints?.[0]?.summary).toContain("vitest");
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('"writeLearning"');
+    expect(json).not.toContain('"autoLearn"');
+  });
+
+  it("failure-learning refs inject as evidence with passEvidence=false", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        failureLearningRefs: [
+          { lesson: "Provider timeout on large files", source: "provider-timeout-2026" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const flEvidence = result.plan.evidence?.filter((e) => e.kind === "failure_learning");
+    expect(flEvidence?.length).toBe(1);
+    expect(flEvidence?.[0]?.passEvidence).toBe(false);
+    expect(flEvidence?.[0]?.claim).toContain("Provider timeout");
+  });
+
+  it("failure_learning risk hints appear in detailsText but not summaryText", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        failureLearningRefs: [{ lesson: "Git lock file race condition", source: "git-lock-2026" }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.detailsText).toContain("Risk Hints:");
+    expect(result.detailsText).toContain("Git lock file race condition");
+    expect(result.summaryText).not.toContain("Risk Hints:");
+    expect(result.summaryText).not.toContain("Git lock file race condition");
+  });
+
+  it("cache/budget unset is not defaulted to a fake budget value", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.budget.maxCostCny).toBeUndefined();
+    expect(result.surface.meta.costEstimate).toBe("unset");
+    expect(result.surface.meta.cacheBudgetHint.budgetSet).toBe(false);
+  });
+
+  it("cacheFreshnessHint injects as workspace_cache reference", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({ cacheFreshnessHint: "modelProviderHash changed" }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const cacheRef = result.plan.references?.find((r) => r.ref === "cache-freshness-hint");
+    expect(cacheRef).toBeDefined();
+    expect(cacheRef?.summary).toContain("modelProviderHash");
+  });
+
+  it("memory/self-learning/failure_learning do not enter PASS evidence", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        controlledMemoryRef: { rulesFound: true, summary: "rules" },
+        selfLearningHints: ["hint"],
+        failureLearningRefs: [{ lesson: "lesson", source: "src" }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const row of result.surface.evidenceMergeRows) {
+      if (row.kind === "failure_learning") {
+        expect(row.verdict).not.toBe("PASS");
+      }
+    }
+    expect(result.surface.evidenceMergeSummary).not.toBe("PASS");
+  });
+
+  it("mobileSummary includes riskHintCount when failure_learning refs present", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        failureLearningRefs: [
+          { lesson: "lesson1", source: "src1" },
+          { lesson: "lesson2", source: "src2" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.mobileSummary).toContain("Risk hints: 2");
+  });
+
+  it("mobileSummary is redacted and does not contain raw memory/log/key/path", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        controlledMemoryRef: { rulesFound: true, summary: "C:\\Users\\Admin\\secret" },
+        failureLearningRefs: [{ lesson: "sk-abcdefghijklmnop leaked", source: "key-leak" }],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.mobileSummary).not.toContain("C:\\Users\\Admin");
+    expect(result.mobileSummary).not.toContain("sk-abcdefghijklmnop");
+  });
+
+  it("proposal-only/start_gate/blocked request prevents Evidence Merge PASS", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.surface.evidenceMergeSummary).not.toBe("PASS");
+    const hasStartGate = result.bridgeResult.summary.startGateNeeded > 0;
+    const hasBlocked = result.bridgeResult.summary.blocked > 0;
+    const hasQueued = result.bridgeResult.summary.queued > 0;
+    expect(hasStartGate || hasBlocked || hasQueued).toBe(true);
+  });
+
+  it("natural language workflow plan routes still pass", () => {
+    const phrases = [
+      "工作流计划 帮我拆分实现一个缓存命中率报告功能",
+      "请生成工作流计划：实现缓存命中率报告",
+      "workflow plan add a cache hit rate report",
+    ];
+    for (const phrase of phrases) {
+      const result = generateWorkflowPlanPreview(goal({ goal: phrase }));
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("does not create a second runtime, fifth permission mode, or auto-execute", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('"executor"');
+    expect(json).not.toContain('"scheduler"');
+    expect(json).not.toContain('"jobStore"');
+    expect(json).not.toContain('"workflowRuntime"');
+    expect(json).not.toContain('"autoExecute"');
+    expect(["default", "auto-review", "plan", "full-access"]).toContain(result.plan.permissionMode);
+    for (const req of result.bridgeResult.requests) {
+      expect(req.proposalOnly).toBe(true);
+    }
+  });
+
+  it("cacheBudgetHint.cacheFreshnessRef only matches cache-freshness-hint, not other workspace_cache refs", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        controlledMemoryRef: { rulesFound: true, summary: "pnpm monorepo" },
+        cacheFreshnessHint: "modelProviderHash changed",
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.surface.meta.cacheBudgetHint.cacheFreshnessRef).toBe("cache-freshness-hint");
+  });
+
+  it("mobileSummary includes done/running/blocked/queued slice counts", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.mobileSummary).toContain("done=");
+    expect(result.mobileSummary).toContain("running=");
+    expect(result.mobileSummary).toContain("blocked=");
+    expect(result.mobileSummary).toContain("queued=");
+  });
+
+  it("failureLearningRefs with secrets are sanitized in detailsText and mobileSummary", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        failureLearningRefs: [
+          {
+            lesson: "sk-abcdefghijklmnop was exposed in C:\\Users\\Admin\\logs",
+            source: "key-leak-path",
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.detailsText).not.toContain("sk-abcdefghijklmnop");
+    expect(result.detailsText).not.toContain("C:\\Users\\Admin");
+    expect(result.mobileSummary).not.toContain("sk-abcdefghijklmnop");
+    expect(result.mobileSummary).not.toContain("C:\\Users\\Admin");
+    expect(result.detailsText).toContain("[key]");
+    expect(result.detailsText).toContain("[path]");
+  });
+});
