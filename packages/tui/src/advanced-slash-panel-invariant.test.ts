@@ -86,12 +86,14 @@ describe("D.14D-E advanced slash CommandPanel invariant", () => {
     expect(src).not.toContain("writeLine(output, formatRemoteSetup(args[1], context)");
   });
 
-  it("does not reroute /index streaming progress through a panel", () => {
-    // runIndexRepository streams progress lines; these must stay on writeLine
-    // and never be wrapped in a showCommandPanel call.
+  it("keeps /index progress out of ordinary output blocks", () => {
+    // runIndexRepository progress is an activity/background state, not a
+    // long-lived ordinary output block.
     const src = readSrc("mcp-index-runtime.ts");
-    expect(src).toMatch(
-      /writeLine\(\s*\n?\s*output,\s*\n?\s*context\.language === "en-US"\s*\n?\s*\? `Index \$\{actionLabel\}: running\.\.\.`/,
+    expect(src).not.toContain('writeLine(output, "Index: scanning safety risks...');
+    expect(src).not.toContain("`Index ${actionLabel}: running...`");
+    expect(src).not.toContain(
+      '`索引${actionLabel === "refresh" ? "刷新" : "初始化"}：正在执行...`',
     );
   });
 });

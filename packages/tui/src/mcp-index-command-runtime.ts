@@ -144,9 +144,9 @@ export function formatIndexStatus(context: TuiContext): string {
       : context.index.status === "missing"
         ? context.index.error
           ? "建议：确认 codebase-memory artifact 是否存在；可显式运行 /index init fast。普通聊天不受影响。"
-          : "建议：运行 /index init fast 建立索引；如仓库很大，先用 .linghunignore 排除大 JSON、SQL、XML、min.js 和生成物。"
+          : "建议：运行 /index init fast 建立索引；仓库很大时会自动跳过高风险大文件/生成物。"
         : context.index.status === "stale"
-          ? "建议：运行 /index refresh 刷新索引；不会自动重建。"
+          ? "建议：按需刷新索引；大文件/生成物会在默认刷新中临时跳过。"
           : context.index.status === "error"
             ? "建议：修复 codebase-memory runtime/artifact 后重试 /index doctor 或 /index status。"
             : "建议：可用 /index search <query> 或 /index architecture 获取短结果；新鲜度检查用 /index status --fresh 或 /index check。";

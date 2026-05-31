@@ -81,7 +81,7 @@ export function createIndexToolDefinitions(): ModelToolDefinition[] {
     {
       name: INDEX_REPAIR,
       description:
-        "Repair the index when large/risky files block a refresh: append the missing ignore entries (.linghunignore/.cbmignore) and then refresh, reusing the controlled /index repair path. Mutating action requiring user permission confirmation. Only meaningful when an index safety blocker is active. Call this tool to actually repair-and-refresh; do NOT claim it succeeded without a success result.",
+        "Persist index skip suggestions after a refresh automatically skipped large/generated files: append the missing ignore entries (.linghunignore/.cbmignore) and then refresh, reusing the controlled /index repair path. Mutating action requiring user permission confirmation. Only meaningful when skip suggestions exist. Call this tool to actually repair-and-refresh; do NOT claim it succeeded without a success result.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -147,6 +147,16 @@ export function summarizeIndexRefreshOutcome(
   language: Language,
 ): string {
   const isEn = language === "en-US";
+  if (status === "stale") {
+    if (action === "repair") {
+      return isEn
+        ? "Index repair ran and refresh was attempted; current status is still stale."
+        : "索引修复已执行并尝试刷新；当前状态仍为 stale。";
+    }
+    return isEn
+      ? "Index refresh ran; current status is still stale."
+      : "索引刷新已执行；当前状态仍为 stale。";
+  }
   const label =
     action === "repair"
       ? isEn

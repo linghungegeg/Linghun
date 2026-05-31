@@ -4105,7 +4105,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests[0]).toMatchObject({
       model: "gpt-5.5",
       max_output_tokens: 4_096,
-      reasoning: { effort: "Medium" },
+      reasoning: { effort: "medium" },
     });
     const modelRequestJson = JSON.stringify(requests[0]);
     expect(modelRequestJson).toContain('{"type":"function","name":"Read"');
@@ -5858,7 +5858,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolMessage?.content).toContain('"evidenceId"');
   });
 
-  it("shows index safety repair loop for large files", async () => {
+  it("Run 3: /index refresh auto-skips large files and keeps repair details out of main output", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(
       join(project, "large.json"),
@@ -5880,19 +5880,15 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("索引安全门");
-    expect(output.text).toContain("阻塞原因");
-    expect(output.text).toContain("主屏不展开完整风险清单");
-    expect(output.text).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
-    expect(output.text).not.toContain("- large.json");
-    // D.14D — 修复路径改为显式 /index repair slash，不再指向自然语言。
-    expect(output.text).toContain(
-      "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
-    );
-    expect(output.text).toContain("重试命令：/index refresh");
+    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("large.json");
+    expect(output.text).not.toContain("索引安全门");
+    expect(output.text).not.toContain("阻塞原因");
+    await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
   });
 
-  it("Run 2 P2-6: index safety blocks large unignored log files", async () => {
+  it("Run 3: index refresh passes transient excludes and records full skipped details", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "debug.log"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -5904,11 +5900,88 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("索引安全门");
-    expect(output.text).toContain("log/数据转储");
-    expect(output.text).not.toContain("- debug.log");
+    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).not.toContain("索引安全门");
     expect(context.index.safetyRiskyFiles?.some((file) => file.path === "debug.log")).toBe(true);
-    expect(await readMockCalls(callsPath)).not.toContain("index_repository");
+    const refresh = (await readMockCallRecords(callsPath)).find(
+      (call) => call.tool === "index_repository",
+    );
+    expect(refresh?.input.transient_exclude_paths).toEqual(["debug.log"]);
+    expect(refresh?.input.skip_paths).toEqual(["debug.log"]);
+    expect(
+      context.evidence.some(
+        (item) =>
+          item.supportsClaims.includes("skipped_file:debug.log") &&
+          item.summary.includes("debug.log"),
+      ),
+    ).toBe(true);
+  });
+
+  it("Run 3: Ink auto-skip summary hides commands while detailsText keeps skipped list", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    (context as { isInkSession?: boolean }).isInkSession = true;
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    const panel = context.commandPanelState;
+    const summary = panel?.summary?.join("\n") ?? "";
+    expect(output.text).toBe("");
+    expect(summary).toContain("已自动跳过 1 项大文件/生成物");
+    expect(summary).not.toContain(".linghunignore");
+    expect(summary).not.toContain(".cbmignore");
+    expect(summary).not.toContain("/index repair");
+    expect(summary).not.toContain("/index refresh");
+    expect(summary).not.toContain("--force");
+    expect(panel?.detailsText).toContain("large.json");
+    expect(panel?.detailsText).toContain("1.1 MB");
+    expect(panel?.detailsText).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
+  });
+
+  it("Run 3: stale refresh does not claim completion", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir, undefined, {
+      status: "stale",
+    });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(context.index.safetyWarning).toContain("索引刷新已执行");
+    expect(context.index.safetyWarning).toContain("当前状态仍为 stale");
+    expect(output.text).not.toContain("索引刷新完成");
+    expect(output.text).not.toContain("索引已刷新，已自动跳过");
+  });
+
+  it("Run 3: scanning progress is not persisted as an ordinary output block", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const outputBlocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(context, outputBlocks);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    const allText = outputBlocks
+      .map((block) => `${block.summary}\n${block.fullText ?? ""}`)
+      .join("\n");
+    expect(allText).not.toContain("Index: scanning safety risks");
+    expect(allText).not.toContain("正在执行");
   });
 
   it("Run 2 P2-6: index safety allows small log files", async () => {
@@ -5942,7 +6015,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleNaturalInput("确认", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
-    expect(output.text).toContain("索引安全门");
+    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
     expect(output.text).toContain("索引安全修复续跑");
     expect(output.text).toContain("需要先确认权限");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
@@ -5966,8 +6039,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("索引安全修复续跑");
     expect(output.text).toContain("ignore 文件：.linghunignore");
     expect(output.text).toContain("ignore 写入完成：.linghunignore；条目数量=1");
-    expect(output.text).toContain("索引刷新：正在执行...");
-    expect(output.text.match(/索引安全门/g)).toHaveLength(1);
+    expect(output.text).toContain("索引刷新完成");
+    expect(output.text).not.toContain("索引刷新：正在执行...");
+    expect(output.text).not.toContain("索引安全门");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
@@ -6094,6 +6168,42 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain("index_operation");
   });
 
+  it("Run 3: Ink model IndexRefresh approval does not write its tool summary as ordinary output", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "index-refresh-ink-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "index-refresh-ink-model",
+          },
+        },
+        mcp: config.mcp,
+      }),
+      "utf8",
+    );
+    mockOpenAiToolFetch("IndexRefresh", {}, "final answer");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["更新一下索引\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    expect(output.text).not.toContain("索引刷新已执行");
+    expect(output.text.match(/索引已刷新：状态=ready。/g)).toHaveLength(1);
+  });
+
   it("D.14D-R P0-2: model IndexRefresh denied → no index_repository, model told NOT refreshed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -6195,13 +6305,14 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session, config);
 
     await handleSlashCommand("/index refresh", context, output);
+    const callsBeforeDeny = await readMockCalls(callsPath);
     await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("no", context, output);
 
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     expect(output.text).toContain("需要先确认权限");
     expect(output.text).toContain("已拒绝权限。本轮未写入文件，也未刷新索引。");
-    expect(await readMockCalls(callsPath)).toEqual([]);
+    expect(await readMockCalls(callsPath)).toEqual(callsBeforeDeny);
   });
 
   it("D.14D: /index repair continues after default Write approval", async () => {
@@ -6225,7 +6336,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readMockCalls(callsPath)).toContain("index_repository");
   });
 
-  it("D.14D: /index repair with no active blocker explains how to trigger it", async () => {
+  it("D.14D: /index repair with no persisted skip suggestions explains how to trigger it", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
     const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
@@ -6236,7 +6347,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index repair", context, output);
 
-    expect(output.text).toContain("当前没有待处理的索引安全门");
+    expect(output.text).toContain(
+      "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时自动跳过了大文件/生成物，可再运行索引修复把规则写入 ignore。",
+    );
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     expect(await readMockCalls(callsPath)).toEqual([]);
   });
@@ -9004,7 +9117,7 @@ describe("Phase 06 TUI slash commands", () => {
     }
   });
 
-  it("blocks index commands on unignored generated directories by default", async () => {
+  it("Run 3: default index commands auto-skip generated directories", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, "node_modules", "large-package"), { recursive: true });
     await writeFile(
@@ -9022,16 +9135,19 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index init fast", context, output);
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("索引安全门：/index init fast");
-    expect(output.text).toContain("索引安全门：/index refresh");
-    expect(output.text).toContain("主屏不展开完整风险清单");
-    expect(output.text).not.toContain("- node_modules/");
-    expect(output.text).not.toContain("generated/dependency directory");
-    expect(output.text).toContain(".linghunignore 或 .cbmignore");
+    expect(output.text).toContain("本次 /index init fast 使用 transient exclude");
+    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).not.toContain("索引安全门");
     expect(
-      context.evidence.some((item) => item.supportsClaims.includes("risky_file:node_modules/")),
+      context.evidence.some((item) => item.supportsClaims.includes("skipped_file:node_modules/")),
     ).toBe(true);
-    expect(await readMockCalls(callsPath)).toEqual([]);
+    const refreshCalls = (await readMockCallRecords(callsPath)).filter(
+      (call) => call.tool === "index_repository",
+    );
+    expect(refreshCalls).toHaveLength(2);
+    expect(refreshCalls.every((call) => Array.isArray(call.input.transient_exclude_paths))).toBe(
+      true,
+    );
   });
 
   it("allows forced index commands to reach the index_repository path", async () => {
@@ -9051,6 +9167,28 @@ describe("Phase 06 TUI slash commands", () => {
     const calls = await readMockCalls(callsPath);
     expect(calls.filter((tool) => tool === "index_repository")).toHaveLength(2);
     expect(output.text).not.toContain("索引前发现未排除的大文件风险");
+    const records = await readMockCallRecords(callsPath);
+    expect(records.some((call) => call.input.transient_exclude_paths !== undefined)).toBe(false);
+  });
+
+  it("Run 3: forced index refresh does not use transient excludes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh --force", context, output);
+
+    const refresh = (await readMockCallRecords(callsPath)).find(
+      (call) => call.tool === "index_repository",
+    );
+    expect(refresh?.input.repo_path).toBe(project);
+    expect(refresh?.input.transient_exclude_paths).toBeUndefined();
+    expect(refresh?.input.skip_paths).toBeUndefined();
   });
 
   it("Run 2 P2-5: /index refresh sends repo_path for the current project", async () => {

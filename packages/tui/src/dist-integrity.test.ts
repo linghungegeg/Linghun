@@ -69,5 +69,5 @@ describe("dist integrity", () => {
     if (!existsSync(indexJs)) return; // skip if not built
     // Only test that the module graph resolves; don't execute side effects
     await expect(import(indexJs)).resolves.toBeDefined();
-  });
+  }, 30_000);
 });

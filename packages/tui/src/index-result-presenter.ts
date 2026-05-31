@@ -227,40 +227,75 @@ function getIndexFileRisk(relativePath: string): string | null {
   return null;
 }
 
-export function formatIndexSafetyWarning(
+export function createIndexTransientExcludes(safety: IndexSafetyResult): string[] {
+  return uniqueStrings(safety.riskyFiles.map((file) => file.path));
+}
+
+export function formatIndexAutoSkipPrimary(
+  safety: IndexSafetyResult,
+  status: string,
+  actionLabel: "init fast" | "refresh",
+  language: "zh-CN" | "en-US",
+): string {
+  const count = safety.riskyFiles.length;
+  const isRefresh = actionLabel === "refresh";
+  if (language === "en-US") {
+    if (status === "stale") {
+      return `Index ${isRefresh ? "refresh" : "init"} ran and skipped ${count} large/generated item${count === 1 ? "" : "s"}; current status is still stale.`;
+    }
+    return `Index ${isRefresh ? "refreshed" : "initialized"}; automatically skipped ${count} large/generated item${count === 1 ? "" : "s"}.`;
+  }
+  if (status === "stale") {
+    return `索引${isRefresh ? "刷新" : "初始化"}已执行，已跳过 ${count} 项大文件/生成物；当前状态仍为 stale。`;
+  }
+  return isRefresh
+    ? `索引已刷新，已自动跳过 ${count} 项大文件/生成物。`
+    : `索引已初始化，已自动跳过 ${count} 项大文件/生成物。`;
+}
+
+export function formatIndexAutoSkipNextAction(language: "zh-CN" | "en-US"): string {
+  return language === "en-US"
+    ? "To persist ignore rules, run index repair."
+    : "如需持久化忽略规则，可运行索引修复。";
+}
+
+export function formatIndexAutoSkipDetails(
   safety: IndexSafetyResult,
   actionLabel: "init fast" | "refresh",
-  layer: "primary" | "details" = "primary",
+  language: "zh-CN" | "en-US",
 ): string {
-  const hiddenCount = safety.riskyFiles.length;
-  if (layer === "primary") {
-    return [
-      `索引安全门：/index ${actionLabel} 发现 ${hiddenCount} 项未排除的大文件风险，默认阻止索引。`,
-      "阻塞原因：大 JSON/SQL/XML/log/数据转储/min.js/生成物会显著放大索引成本和噪声。",
-      "主屏不展开完整风险清单；完整清单已写入 transcript/evidence。",
-      "建议 ignore 文件：.linghunignore 或 .cbmignore",
-      "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
-      "重试命令：/index refresh",
-      "如确认要继续，可显式追加 --force。",
-    ].join("\n");
-  }
-
   const files = safety.riskyFiles.map((file) => {
     const size = file.size > 0 ? `${formatBytes(file.size)}, ` : "";
     return `- ${file.path} (${size}${file.reason})`;
   });
   const ignoreEntries = safety.riskyFiles.map((file) => `  ${file.path}`);
+  if (language === "en-US") {
+    return [
+      `Index ${actionLabel} used transient excludes for this run only.`,
+      "Skipped files/directories:",
+      ...files,
+      safety.truncated
+        ? `- Only the first ${LARGE_INDEX_FILE_LIMIT} risky items were recorded.`
+        : "",
+      "Persistent ignore suggestions:",
+      "- Write these entries only via /index repair; normal refresh does not edit repository files.",
+      "- Suggested ignore files: .linghunignore or .cbmignore",
+      "Suggested entries:",
+      ...ignoreEntries,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
   return [
-    `索引安全门详情：/index ${actionLabel} 发现未排除的大文件风险。`,
-    "阻塞原因：大 JSON/SQL/XML/log/数据转储/min.js/生成物会显著放大索引成本和噪声。",
+    `本次 /index ${actionLabel} 使用 transient exclude，仅对本次刷新生效。`,
+    "已跳过清单：",
     ...files,
     safety.truncated ? `- 仅记录前 ${LARGE_INDEX_FILE_LIMIT} 项风险文件。` : "",
-    "建议 ignore 文件：.linghunignore 或 .cbmignore",
+    "持久化忽略建议：",
+    "- 只有 /index repair 会写入这些条目；普通 refresh 不修改仓库文件。",
+    "- 建议 ignore 文件：.linghunignore 或 .cbmignore",
     "建议加入条目：",
     ...ignoreEntries,
-    "修复路径：运行 /index repair 自动追加缺失 ignore 条目并刷新索引；写入 ignore 文件仍会进入权限管道。",
-    "重试命令：/index refresh",
-    "如确认要继续，可显式追加 --force。",
   ]
     .filter(Boolean)
     .join("\n");
@@ -271,4 +306,8 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1_000_000).toFixed(1)} MB`;
   }
   return `${Math.round(bytes / 1_000)} KB`;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }

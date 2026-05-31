@@ -136,7 +136,6 @@ import {
   runArchitectureAndCompletenessFinalGate,
 } from "./final-answer-gate.js";
 import {
-  formatIndexSafetyWarning,
   isIgnoredIndexPath,
   scanIndexSafety,
   summarizeIndexResult,
@@ -3487,9 +3486,11 @@ async function executePermissionApprove(
     const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
     if (written) {
       await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-      writeLine(output, formatIndexRefreshSummary(context));
+      if (!context.index.safetyWarning) {
+        writeLine(output, formatIndexRefreshSummary(context));
+      }
     }
-    writeStatus(output, context);
+    if (!context.isInkSession) writeStatus(output, context);
     return;
   }
   if (approval.kind === "architecture_drift") {
@@ -3580,8 +3581,10 @@ async function executePermissionApprove(
       });
       await continueModelAfterToolResults(approval.continuation, context, gateway, output);
     }
-    writeLightHints(output, context);
-    writeStatus(output, context);
+    if (!context.isInkSession) {
+      writeLightHints(output, context);
+      writeStatus(output, context);
+    }
     return;
   }
 }
@@ -5505,8 +5508,8 @@ async function runIndexSafetyRepair(context: TuiContext, output: Writable): Prom
     writeLine(
       output,
       context.language === "en-US"
-        ? "No active index safety blocker. Run /index refresh first; if large/risky files block it, /index repair will then add ignore entries and refresh."
-        : "当前没有待处理的索引安全门。请先运行 /index refresh；若有大文件/风险文件阻塞，再用 /index repair 追加 ignore 条目并刷新。",
+        ? "No index skip suggestions can be persisted right now. Run index refresh first; if refresh automatically skipped large/generated files, run index repair to write the rules to ignore."
+        : "当前没有可持久化的索引跳过建议。先运行索引刷新；如刷新时自动跳过了大文件/生成物，可再运行索引修复把规则写入 ignore。",
     );
     writeStatus(output, context);
     return;
@@ -5546,8 +5549,10 @@ async function runIndexSafetyRepair(context: TuiContext, output: Writable): Prom
   }
 
   await runIndexRepository(context, context.config.index.mode, "refresh", false, output);
-  writeLine(output, formatIndexRefreshSummary(context));
-  writeStatus(output, context);
+  if (!context.index.safetyWarning) {
+    writeLine(output, formatIndexRefreshSummary(context));
+  }
+  if (!context.isInkSession) writeStatus(output, context);
 }
 
 type IndexSafetyRepairPlan = {
@@ -7618,6 +7623,7 @@ async function executeApprovedIndexToolUse(
       ? `Index ${action} did not complete: status=${context.index.status}. ${context.index.error ?? ""}`.trim()
       : `索引${action === "repair" ? "修复" : "刷新"}未完成：状态=${context.index.status}。${context.index.error ?? ""}`.trim();
   if (ok) {
+    const panelAlreadyShown = Boolean(context.isInkSession && context.commandPanelState);
     const evidence = createEvidenceRecord(
       "command_output",
       `index_operation ${action}: ${text}`,
@@ -7627,7 +7633,27 @@ async function executeApprovedIndexToolUse(
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, false, evidence.id);
-    writeLine(output, text);
+    if (!context.isInkSession) {
+      writeLine(output, text);
+    } else if (!panelAlreadyShown) {
+      showCommandPanel(context, output, {
+        title:
+          action === "repair"
+            ? context.language === "en-US"
+              ? "Index repair"
+              : "索引修复"
+            : context.language === "en-US"
+              ? "Index refresh"
+              : "索引刷新",
+        tone: context.index.status === "stale" ? "warning" : "neutral",
+        summary: [text],
+        actions: [
+          context.language === "en-US"
+            ? "Use index status for details."
+            : "可查看索引状态获取详情。",
+        ],
+      });
+    }
     return { ok: true, tool: name, text, evidenceId: evidence.id };
   }
   const evidence = await recordToolFailureEvidence(
@@ -7637,7 +7663,25 @@ async function executeApprovedIndexToolUse(
     `index ${action}: ${text}`,
   );
   await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
-  writeLine(output, text);
+  if (!context.isInkSession) {
+    writeLine(output, text);
+  } else {
+    showCommandPanel(context, output, {
+      title:
+        action === "repair"
+          ? context.language === "en-US"
+            ? "Index repair"
+            : "索引修复"
+          : context.language === "en-US"
+            ? "Index refresh"
+            : "索引刷新",
+      tone: "error",
+      summary: [text],
+      actions: [
+        context.language === "en-US" ? "Use index status for details." : "可查看索引状态获取详情。",
+      ],
+    });
+  }
   return { ok: false, tool: name, text, evidenceId: evidence.id };
 }
 

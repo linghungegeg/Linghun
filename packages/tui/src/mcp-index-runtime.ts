@@ -23,7 +23,10 @@ import {
   validateCodebaseMemoryToolExecution,
 } from "./deferred-tools-catalog.js";
 import {
-  formatIndexSafetyWarning,
+  createIndexTransientExcludes,
+  formatIndexAutoSkipDetails,
+  formatIndexAutoSkipNextAction,
+  formatIndexAutoSkipPrimary,
   scanIndexSafety,
   summarizeIndexResult,
 } from "./index-result-presenter.js";
@@ -224,9 +227,11 @@ export async function handleIndexCommand(
     }
     await runIndexRepository(context, "fast", "init fast", args.includes("--force"), output);
     if (context.index.status === "ready") {
-      writeLine(output, formatIndexRefreshSummary(context, "init fast"));
+      if (!context.index.safetyWarning) {
+        writeLine(output, formatIndexRefreshSummary(context, "init fast"));
+      }
     }
-    deps().writeStatus(output, context);
+    if (!context.isInkSession) deps().writeStatus(output, context);
     return;
   }
   if (action === "refresh") {
@@ -243,9 +248,11 @@ export async function handleIndexCommand(
       output,
     );
     if (context.index.status === "ready") {
-      writeLine(output, formatIndexRefreshSummary(context, "refresh"));
+      if (!context.index.safetyWarning) {
+        writeLine(output, formatIndexRefreshSummary(context, "refresh"));
+      }
     }
-    deps().writeStatus(output, context);
+    if (!context.isInkSession) deps().writeStatus(output, context);
     return;
   }
   if (action === "search") {
@@ -847,32 +854,22 @@ export async function runIndexRepository(
   force: boolean,
   output: Writable,
 ): Promise<void> {
-  writeLine(output, "Index: scanning safety risks...");
   const safety = await scanIndexSafety(context.projectPath);
-  if (!force && safety.riskyFiles.length > 0) {
-    context.index.status = "stale";
-    context.index.safetyWarning = formatIndexSafetyWarning(safety, actionLabel, "primary");
-    context.index.safetyRiskyFiles = safety.riskyFiles;
-    context.index.safetyAction = actionLabel;
-    context.index.error =
-      "索引前发现未排除的大文件风险；请更新 .linghunignore/.cbmignore，或显式追加 --force。";
-    await recordIndexEvidence(
-      context,
-      `safety:${actionLabel}`,
-      formatIndexSafetyWarning(safety, actionLabel, "details"),
-      safety.riskyFiles.map((file) => `risky_file:${file.path}`),
-    );
-    writeLine(output, context.index.safetyWarning);
-    return;
-  }
-  context.index.safetyWarning =
-    safety.riskyFiles.length > 0
-      ? formatIndexSafetyWarning(safety, actionLabel, "primary")
-      : undefined;
+  const transientExcludes =
+    !force && safety.riskyFiles.length > 0 ? createIndexTransientExcludes(safety) : [];
+  context.index.safetyWarning = undefined;
   context.index.safetyRiskyFiles = safety.riskyFiles.length > 0 ? safety.riskyFiles : undefined;
   context.index.safetyAction = safety.riskyFiles.length > 0 ? actionLabel : undefined;
   context.index.error = undefined;
   context.index.status = "indexing";
+  if (transientExcludes.length > 0) {
+    await recordIndexEvidence(
+      context,
+      `auto-skip:${actionLabel}`,
+      formatIndexAutoSkipDetails(safety, actionLabel, context.language),
+      transientExcludes.map((file) => `skipped_file:${file}`),
+    );
+  }
   const now = new Date().toISOString();
   const task: BackgroundTaskState = {
     id: `index-${randomUUID().slice(0, 8)}`,
@@ -892,16 +889,20 @@ export async function runIndexRepository(
   const sessionId = await deps().ensureSession(context);
   deps().rememberBackgroundTask(context, task);
   await deps().appendBackgroundTaskEvent(context, sessionId, task);
-  writeLine(
-    output,
-    context.language === "en-US"
-      ? `Index ${actionLabel}: running...`
-      : `索引${actionLabel === "refresh" ? "刷新" : "初始化"}：正在执行...`,
-  );
   const result = await runCodebaseMemoryCli(
     context,
     "index_repository",
-    { repo_path: context.projectPath, mode, persistence: true },
+    {
+      repo_path: context.projectPath,
+      mode,
+      persistence: true,
+      ...(transientExcludes.length > 0
+        ? {
+            transient_exclude_paths: transientExcludes,
+            skip_paths: transientExcludes,
+          }
+        : {}),
+    },
     context.projectPath,
     120_000,
   );
@@ -911,7 +912,7 @@ export async function runIndexRepository(
   task.hasOutput = Boolean(result.ok || result.summary);
   if (!result.ok) {
     context.index.status = result.errorCode === "ENOENT" ? "missing" : "error";
-    context.index.error = `${result.summary}。请确认已安装 codebase-memory-mcp，或检查 .linghunignore 排除大 JSON/SQL/XML/min.js/生成物后重试。`;
+    context.index.error = `${result.summary}。请确认索引运行时可用，修复后重试。`;
     task.status = result.summary.includes("命令超时") ? "timeout" : "failed";
     task.result = task.status === "timeout" ? "timeout" : "fail";
     task.currentStep = task.status === "timeout" ? "timeout" : "index failed";
@@ -951,6 +952,38 @@ export async function runIndexRepository(
   task.userVisibleSummary = `Index ${actionLabel} completed: ${context.index.status}`;
   task.nextAction = "用 /index status 查看详情；需要新鲜度检查时用 /index status --fresh。";
   await deps().appendBackgroundTaskEvent(context, sessionId, task);
+  if (transientExcludes.length > 0) {
+    context.index.safetyWarning = formatIndexAutoSkipPrimary(
+      safety,
+      context.index.status,
+      actionLabel,
+      context.language,
+    );
+    context.index.safetyRiskyFiles = safety.riskyFiles;
+    context.index.safetyAction = actionLabel;
+    await recordIndexEvidence(
+      context,
+      `auto-skip-result:${actionLabel}`,
+      formatIndexAutoSkipDetails(safety, actionLabel, context.language),
+      transientExcludes.map((file) => `skipped_file:${file}`),
+    );
+    const nextAction = formatIndexAutoSkipNextAction(context.language);
+    const panelTitle =
+      context.language === "en-US"
+        ? actionLabel === "refresh"
+          ? "Index refreshed"
+          : "Index initialized"
+        : actionLabel === "refresh"
+          ? "索引刷新"
+          : "索引初始化";
+    showCommandPanel(context, output, {
+      title: panelTitle,
+      tone: context.index.status === "stale" ? "warning" : "neutral",
+      summary: [context.index.safetyWarning],
+      actions: [nextAction],
+      detailsText: formatIndexAutoSkipDetails(safety, actionLabel, context.language),
+    });
+  }
 }
 
 export async function runIndexQuery(
