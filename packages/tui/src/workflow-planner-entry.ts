@@ -284,9 +284,11 @@ export function formatWorkflowPlanPreview(
       : `工作流计划生成失败：${result.reason}`;
   }
   const header = language === "en-US" ? "Workflow Plan Preview" : "工作流计划预览";
+  const surface =
+    language === "en-US" ? result.surface : projectWorkflowTaskSurface(result.plan, result.bridgeResult, language);
   const note =
     language === "en-US"
       ? "This is a preview only. No execution has started. Confirm the phase stop point to proceed."
       : "这只是预览。尚未开始执行。确认阶段停止点后才能继续。";
-  return [header, "", result.summaryText, "", note].join("\n");
+  return [header, "", surface.summaryText, "", note].join("\n");
 }

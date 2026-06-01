@@ -150,6 +150,7 @@ describe("Ink TTY interaction smoke", () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     await shell.waitUntilRenderFlush();
     expect(events).toContainEqual({ type: "command-panel-close" });
+    expect(events).not.toContainEqual({ type: "escape" });
 
     const beforePermissionTyping = events.length;
     view = {

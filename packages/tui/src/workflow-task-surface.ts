@@ -69,6 +69,7 @@ const PASS_BANNED_KINDS = new Set<WorkflowEvidenceKind>([
 export function projectWorkflowTaskSurface(
   plan: NormalizedWorkflowPlan,
   bridgeResult: WorkflowAgentRuntimeBridgeResult,
+  language: "zh-CN" | "en-US" = "en-US",
 ): WorkflowTaskSurfaceResult {
   const currentPhase =
     plan.phases.find((p) => p.id === bridgeResult.currentPhaseId) ?? plan.phases[0];
@@ -92,7 +93,7 @@ export function projectWorkflowTaskSurface(
   const costEst = plan.budget.maxCostCny;
   const durationEst = sumDurationEstimates(bridgeResult.requests);
 
-  const nextAction = deriveNextAction(bridgeResult, currentPhase?.stopPoint.reason);
+  const nextAction = deriveNextAction(bridgeResult, currentPhase?.stopPoint.reason, language);
 
   const riskHintCount = evidenceRefs.filter((ev) => ev.kind === "failure_learning").length;
   const failureLearningRefs = evidenceRefs.filter((ev) => ev.kind === "failure_learning");
@@ -123,6 +124,7 @@ export function projectWorkflowTaskSurface(
     meta,
     evidenceMergeSummary,
     bridgeResult.summary,
+    language,
   );
   const detailsText = buildDetailsText(
     plan.title,
@@ -136,6 +138,7 @@ export function projectWorkflowTaskSurface(
     evidenceMergeSummary,
     bridgeResult.summary,
     riskHintCount,
+    language,
   );
 
   return {
@@ -250,20 +253,24 @@ function sumDurationEstimates(requests: WorkflowBridgeRequestProposal[]): number
 function deriveNextAction(
   bridgeResult: WorkflowAgentRuntimeBridgeResult,
   phaseStopReason: string | undefined,
+  language: "zh-CN" | "en-US",
 ): string {
+  const isZh = language === "zh-CN";
   if (bridgeResult.summary.blocked > 0) {
-    return "Resolve blocked slices before proceeding.";
+    return isZh ? "先处理受阻任务，再继续推进。" : "Resolve blocked slices before proceeding.";
   }
   if (bridgeResult.summary.startGateNeeded > 0) {
-    return phaseStopReason ?? "Confirm phase stop point before execution.";
+    return isZh ? "确认阶段检查点后再开始执行。" : (phaseStopReason ?? "Confirm phase stop point before execution.");
   }
   if (bridgeResult.summary.runnable > 0) {
-    return "Runnable proposals ready; hand to main-chain dispatcher.";
+    return isZh
+      ? "已有可执行提案，交给主流程继续处理。"
+      : "Runnable proposals ready; hand to main-chain dispatcher.";
   }
   if (bridgeResult.summary.queued > 0) {
-    return "Queued slices waiting for running slots.";
+    return isZh ? "部分任务在排队等待执行窗口。" : "Queued slices waiting for running slots.";
   }
-  return phaseStopReason ?? "Review workflow plan before execution.";
+  return isZh ? "先检查工作流计划，再决定是否执行。" : (phaseStopReason ?? "Review workflow plan before execution.");
 }
 
 function buildSummaryText(
@@ -271,24 +278,45 @@ function buildSummaryText(
   meta: WorkflowTaskSurfaceResult["meta"],
   evidenceVerdict: EvidenceMergeVerdict,
   summary: WorkflowAgentRuntimeBridgeResult["summary"],
+  language: "zh-CN" | "en-US",
 ): string {
+  const isZh = language === "zh-CN";
   const status =
     meta.slicesBlocked > 0 || evidenceVerdict === "BLOCKED"
-      ? "Needs attention"
+      ? isZh
+        ? "需要关注"
+        : "Needs attention"
       : meta.slicesRunning > 0 || summary.queued > 0 || summary.runnable > 0
-        ? "In progress"
-        : "Ready for review";
+        ? isZh
+          ? "推进中"
+          : "In progress"
+        : isZh
+          ? "可审核"
+          : "Ready for review";
   const impact = [
-    `${meta.slicesDone} done`,
-    `${meta.slicesRunning} running`,
-    `${meta.slicesBlocked} blocked`,
+    isZh ? `已完成 ${meta.slicesDone}` : `${meta.slicesDone} done`,
+    isZh ? `运行中 ${meta.slicesRunning}` : `${meta.slicesRunning} running`,
+    isZh ? `受阻 ${meta.slicesBlocked}` : `${meta.slicesBlocked} blocked`,
   ].join(", ");
   const waiting =
     summary.startGateNeeded > 0
-      ? "user confirmation needed"
+      ? isZh
+        ? "需要用户确认"
+        : "user confirmation needed"
       : summary.queued > 0
-        ? "some work is waiting"
-        : "no confirmation needed";
+        ? isZh
+          ? "有任务正在等待"
+          : "some work is waiting"
+        : isZh
+          ? "无需额外确认"
+          : "no confirmation needed";
+  if (isZh) {
+    return [
+      `结果：${title} 当前${status}。`,
+      `影响：${meta.currentPhase}；${impact}；${waiting}。`,
+      `下一步：${meta.nextAction}`,
+    ].join("\n");
+  }
   return [
     `Result: ${title} is ${status.toLowerCase()}.`,
     `Impact: ${meta.currentPhase}; ${impact}; ${waiting}.`,
@@ -346,7 +374,22 @@ function buildMobileSummary(
   evidenceVerdict: EvidenceMergeVerdict,
   summary: WorkflowAgentRuntimeBridgeResult["summary"],
   riskHintCount: number,
+  language: "zh-CN" | "en-US",
 ): string {
+  if (language === "zh-CN") {
+    const lines = [
+      `工作流：${title}`,
+      `阶段：${meta.currentPhase}`,
+      `切片：已完成=${meta.slicesDone} 运行中=${meta.slicesRunning} 受阻=${meta.slicesBlocked} 排队=${meta.slicesQueued}`,
+      `需要确认：${summary.startGateNeeded > 0 ? "是" : "否"}`,
+      `证据：${meta.evidenceCount}（${evidenceVerdict}）`,
+      `下一步：${meta.nextAction}`,
+    ];
+    if (riskHintCount > 0) {
+      lines.push(`风险提示：${riskHintCount}`);
+    }
+    return sanitizeMobileSummary(lines.join("\n"));
+  }
   const lines = [
     `Workflow: ${title}`,
     `Phase: ${meta.currentPhase}`,

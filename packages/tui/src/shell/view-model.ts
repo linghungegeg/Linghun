@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import type { Language } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import type { TuiContext } from "../index.js";
+import { formatElapsedSince } from "../job-runner-presenter.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import {
   findConfigPanel,
@@ -776,13 +777,7 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
   const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
   let elapsed: string | undefined;
   if (startedAt && mapped !== "completed" && mapped !== "error") {
-    const seconds = Math.round((Date.now() - startedAt) / 1000);
-    if (seconds >= 1) {
-      elapsed =
-        seconds < 60
-          ? `${seconds}s`
-          : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
-    }
+    elapsed = formatElapsedSince(new Date(startedAt).toISOString());
   }
   return {
     phase: mapped,

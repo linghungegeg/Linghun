@@ -37,6 +37,15 @@ describe("D.14H-E workflow planner entry", () => {
     expect(result.surface.detailsText).toContain("Evidence Merge:");
   });
 
+  it("keeps en-US surface labels in the default planner result", () => {
+    const result = generateWorkflowPlanPreview(goal());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.summaryText).toContain("Result:");
+    expect(result.summaryText).toContain("Impact:");
+    expect(result.summaryText).toContain("Next:");
+  });
+
   it("plan mode only outputs preview, no executable mutating proposals", () => {
     const result = generateWorkflowPlanPreview(goal({ permissionMode: "plan" }));
     expect(result.ok).toBe(true);
@@ -162,10 +171,18 @@ describe("D.14H-E workflow planner entry", () => {
     const result = generateWorkflowPlanPreview(goal());
     const text = formatWorkflowPlanPreview(result, "zh-CN");
     expect(text).toContain("工作流计划预览");
+    expect(text).toContain("结果：");
+    expect(text).toContain("影响：");
+    expect(text).toContain("下一步：");
+    expect(text).not.toMatch(/\bResult:|\bImpact:|\bNext:/u);
+    expect(text).not.toMatch(/start_gate|passEvidence|raw evidence|sourceRef|merge/iu);
     expect(text).toContain("尚未开始执行");
 
     const textEn = formatWorkflowPlanPreview(result, "en-US");
     expect(textEn).toContain("Workflow Plan Preview");
+    expect(textEn).toContain("Result:");
+    expect(textEn).toContain("Impact:");
+    expect(textEn).toContain("Next:");
     expect(textEn).toContain("No execution has started");
   });
 

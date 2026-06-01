@@ -1019,6 +1019,7 @@ export async function runIndexRepository(
   task.nextAction = "用 /index status 查看详情；需要新鲜度检查时用 /index status --fresh。";
   await deps().appendBackgroundTaskEvent(context, sessionId, task);
   if (transientExcludes.length > 0) {
+    const detailsText = formatIndexAutoSkipDetails(safety, actionLabel, context.language);
     context.index.safetyWarning = formatIndexAutoSkipPrimary(
       safety,
       context.index.status,
@@ -1030,25 +1031,12 @@ export async function runIndexRepository(
     await recordIndexEvidence(
       context,
       `auto-skip-result:${actionLabel}`,
-      formatIndexAutoSkipDetails(safety, actionLabel, context.language),
+      detailsText,
       transientExcludes.map((file) => `skipped_file:${file}`),
     );
-    const nextAction = formatIndexAutoSkipNextAction(context.language);
-    const panelTitle =
-      context.language === "en-US"
-        ? actionLabel === "refresh"
-          ? "Index refreshed"
-          : "Index initialized"
-        : actionLabel === "refresh"
-          ? "索引刷新"
-          : "索引初始化";
-    showCommandPanel(context, output, {
-      title: panelTitle,
-      tone: context.index.status === "stale" ? "warning" : "neutral",
-      summary: [context.index.safetyWarning],
-      actions: [nextAction],
-      detailsText: formatIndexAutoSkipDetails(safety, actionLabel, context.language),
-    });
+    context.lastFullOutput = detailsText;
+    writeLine(output, context.index.safetyWarning);
+    writeLine(output, formatIndexAutoSkipNextAction(context.language));
   }
 }
 

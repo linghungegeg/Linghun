@@ -33,6 +33,7 @@ import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
+  __testBuildToggleDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
   addAllowRuleForTest,
@@ -6779,8 +6780,10 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
-    expect(output.text).toContain("large.json");
+    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
+    expect(output.text).toContain("如需持久化忽略规则，可运行索引修复。");
+    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).not.toContain("large.json");
     expect(output.text).not.toContain("索引安全门");
     expect(output.text).not.toContain("阻塞原因");
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
@@ -6840,9 +6843,12 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
+    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
     expect(output.text).not.toContain("索引安全门");
     expect(context.index.safetyRiskyFiles?.some((file) => file.path === "debug.log")).toBe(true);
+    expect(context.lastFullOutput).toContain("本次 /index refresh 使用 transient exclude");
+    expect(context.lastFullOutput).toContain("debug.log");
     const refresh = (await readMockCallRecords(callsPath)).find(
       (call) => call.tool === "index_repository",
     );
@@ -6910,7 +6916,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
-  it("Run 3: Ink auto-skip summary hides commands while detailsText keeps skipped list", async () => {
+  it("Run 3: Ink auto-skip success keeps details for Ctrl+O without opening CommandPanel", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -6924,18 +6930,18 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    const panel = context.commandPanelState;
-    const summary = panel?.summary?.join("\n") ?? "";
-    expect(output.text).toBe("");
+    const detailsPanel = __testBuildToggleDetailsCommandPanel(context);
+    const summary = output.text;
+    expect(context.commandPanelState).toBeUndefined();
     expect(summary).toContain("已自动跳过 1 项大文件/生成物");
     expect(summary).not.toContain(".linghunignore");
     expect(summary).not.toContain(".cbmignore");
     expect(summary).not.toContain("/index repair");
     expect(summary).not.toContain("/index refresh");
     expect(summary).not.toContain("--force");
-    expect(panel?.detailsText).toContain("large.json");
-    expect(panel?.detailsText).toContain("1.1 MB");
-    expect(panel?.detailsText).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
+    expect(detailsPanel?.detailsText).toContain("large.json");
+    expect(detailsPanel?.detailsText).toContain("1.1 MB");
+    expect(detailsPanel?.detailsText).toContain("建议 ignore 文件：.linghunignore 或 .cbmignore");
   });
 
   it("Run 3: stale refresh does not claim completion", async () => {
@@ -7013,7 +7019,8 @@ describe("Phase 06 TUI slash commands", () => {
     await handleNaturalInput("确认", context, output);
 
     expect(await readFile(join(project, ".linghunignore"), "utf8")).toContain("large.json");
-    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
+    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
     expect(output.text).toContain("索引安全修复续跑");
     expect(output.text).toContain("需要先确认权限");
     expect(await readMockCalls(callsPath)).toContain("index_repository");
@@ -10338,8 +10345,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index init fast", context, output);
     await handleSlashCommand("/index refresh", context, output);
 
-    expect(output.text).toContain("本次 /index init fast 使用 transient exclude");
-    expect(output.text).toContain("本次 /index refresh 使用 transient exclude");
+    expect(output.text).toContain("索引已初始化，已自动跳过 1 项大文件/生成物。");
+    expect(output.text).toContain("索引已刷新，已自动跳过 1 项大文件/生成物。");
+    expect(output.text).not.toContain("本次 /index init fast 使用 transient exclude");
+    expect(output.text).not.toContain("本次 /index refresh 使用 transient exclude");
     expect(output.text).not.toContain("索引安全门");
     expect(
       context.evidence.some((item) => item.supportsClaims.includes("skipped_file:node_modules/")),

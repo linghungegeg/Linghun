@@ -920,16 +920,47 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.toolName).toBeUndefined();
   });
 
+  it("shows elapsed immediately for thinking activity", () => {
+    const ctx = createContext({
+      requestActivityPhase: "request_started",
+      requestActivityStartedAt: Date.now(),
+    } as Partial<TuiContext>);
+    const result = mapRequestActivityToView(ctx);
+    expect(result?.phase).toBe("thinking");
+    expect(result?.elapsed).toBe("0s");
+  });
+
   it("maps tool_running with toolName to tool_running phase", () => {
+    const startedAt = Date.now() - 65_000;
     const ctx = createContext({
       requestActivityPhase: "tool_running",
       requestActivityToolName: "Write",
+      requestActivityStartedAt: startedAt,
     } as Partial<TuiContext>);
     const result = mapRequestActivityToView(ctx);
     expect(result).toBeDefined();
     expect(result?.phase).toBe("tool_running");
     expect(result?.text).toBe("正在运行 Write…");
     expect(result?.toolName).toBe("Write");
+    expect(result?.elapsed).toBe("1m05s");
+  });
+
+  it("does not show elapsed for completed/error activity", () => {
+    const startedAt = Date.now() - 65_000;
+    const completed = mapRequestActivityToView(
+      createContext({
+        requestActivityPhase: "completed",
+        requestActivityStartedAt: startedAt,
+      } as unknown as Partial<TuiContext>),
+    );
+    const failed = mapRequestActivityToView(
+      createContext({
+        requestActivityPhase: "request_failed",
+        requestActivityStartedAt: startedAt,
+      } as unknown as Partial<TuiContext>),
+    );
+    expect(completed?.elapsed).toBeUndefined();
+    expect(failed?.elapsed).toBeUndefined();
   });
 
   it("maps continuing_after_tool to continuing phase", () => {
@@ -2147,16 +2178,13 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
   it("D13E-P3 #6: Composer keeps cursor ownership split explicit", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    // Home keeps the native anchored cursor; task/pending use the inline
-    // reverse-video cursor because their parent-chain y coordinate can drift.
-    expect(source).toContain(
-      'const useInlineCursor = view.viewMode === "task" || view.viewMode === "pending";',
-    );
+    // Home/task/pending all declare the native anchored cursor; capability
+    // fallback hides it instead of drawing a reverse-video fake cursor.
     expect(source).toMatch(
-      /useAnchoredCursor\(\s*permissionActive\s*\|\|\s*useInlineCursor\s*\?\s*null\s*:\s*\{\s*row:\s*declaredRow,\s*col:\s*cursorCol\s*\}/,
+      /useAnchoredCursor\(\s*permissionActive\s*\?\s*null\s*:\s*\{\s*row:\s*declaredRow,\s*col:\s*cursorCol\s*\}/,
     );
-    expect(source).toContain("if (useInlineCursor && !permissionActive && index === cursorRow)");
-    expect(source).toContain("<Text inverse>{cursorChar}</Text>");
+    expect(source).not.toContain("useInlineCursor");
+    expect(source).not.toContain("<Text inverse>{cursorChar}</Text>");
     // anchorRef attaches to the outer Box synchronously in the same render —
     // not via a deferred effect — so the parent-chain origin resolves on the
     // very first commit.
@@ -3636,11 +3664,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // The render path passes null to useAnchoredCursor when permissionActive,
     // so the cursor is hidden while the permission selector owns focus.
-    // A 改动后还多了 useInlineCursor 分支（Task 模式 inline 反白光标 fallback），
-    // 任意一个为真时都必须把 anchored cursor 切到 null。
-    expect(source).toMatch(
-      /permissionActive\s*(?:\|\|\s*useInlineCursor\s*)?\?\s*null\s*:\s*\{\s*row/,
-    );
+    expect(source).toMatch(/permissionActive\s*\?\s*null\s*:\s*\{\s*row/);
+    expect(source).not.toContain("useInlineCursor");
   });
 
   it("Composer Shift+Tab emits cycle-permission-mode (not raw escape sequences)", async () => {

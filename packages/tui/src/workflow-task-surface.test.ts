@@ -131,6 +131,22 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
     );
   });
 
+  it("renders zh-CN summary and mobile summary with human labels", () => {
+    const normalized = normalize(createPlan());
+    const bridgeResult = bridgeWorkflowPlanToMainChainRequests(normalized, {
+      confirmedPhaseStopPoints: ["phase-d"],
+    });
+    const result = projectWorkflowTaskSurface(normalized, bridgeResult, "zh-CN");
+    expect(result.summaryText).toContain("结果：");
+    expect(result.summaryText).toContain("影响：");
+    expect(result.summaryText).toContain("下一步：");
+    expect(result.summaryText).not.toMatch(/\bResult:|\bImpact:|\bNext:/u);
+    expect(result.summaryText).not.toMatch(/start_gate|passEvidence|raw evidence|sourceRef|merge/iu);
+    expect(result.mobileSummary).toContain("工作流：");
+    expect(result.mobileSummary).toContain("下一步：");
+    expect(result.mobileSummary).not.toMatch(/\bResult:|\bImpact:|\bNext:/u);
+  });
+
   it("main-screen summary does not contain full matrix/log/source/transcript", () => {
     const result = surface(createPlan());
     expect(result.summaryText).not.toMatch(/full transcript/i);

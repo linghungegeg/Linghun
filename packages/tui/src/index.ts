@@ -1693,6 +1693,22 @@ async function runInkShell(
       process.once("SIGINT", sigintHandler);
       if (event.type === "escape") {
         submittedPending = false;
+        if (
+          context.commandPanelState ||
+          context.helpPanelState ||
+          context.configPanelState ||
+          context.btwPanelState ||
+          context.sessionsPanelState
+        ) {
+          context.commandPanelState = undefined;
+          context.helpPanelState = undefined;
+          context.configPanelState = undefined;
+          context.btwPanelState = undefined;
+          context.sessionsPanelState = undefined;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         await handleTuiKeypress("escape", context, shellOutput);
         shell?.rerender();
         await shell?.waitUntilRenderFlush();

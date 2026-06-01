@@ -754,6 +754,16 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           showHintNotice(view.language === "en-US" ? "Esc again to clear" : "再按 Esc 清空输入");
           return;
         }
+        if (
+          view.commandPanel ||
+          view.helpPanel ||
+          view.configPanel ||
+          view.btwPanel ||
+          view.sessionsPanel
+        ) {
+          clearHintNotice();
+          return;
+        }
         // 空 buffer → 走上层 escape 链路（既有交互行为）。
         clearHintNotice();
         void onInput({ type: "escape" });
@@ -963,20 +973,13 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   // selector row owns the visible focus. The native cursor MUST NOT also be
   // positioned over the buffer line; otherwise the user sees two competing
   // focus owners. We pass null so useAnchoredCursor hides the cursor instead.
-  // D.13Q-UX Task Surface — 光标分层（用户实测在 task / pending 模式下出现
-  // 1-2 行错位，且任务区滚动后 yoga marginTop 不进 getComputedLayout，使
-  // parent-chain accumulation 给出的 y 坐标不再可靠）：
-  //   - home: useAnchoredCursor 原生光标（Yoga parent-chain 在居中容器下稳定）。
-  //   - task / pending: 让出 native cursor（declared=null），改用 inline
-  //     reverse-video cursor（splitLineAtDisplayCol 在 cursorRow 行做拆分），
-  //     不依赖父链坐标。
-  //   - permissionActive: 永远隐藏 native cursor，让 PermissionControl 独占焦点。
+  // Task/pending now use the same native cursor declaration as home. If the
+  // terminal cannot position it, useAnchoredCursor hides it via capability.
   void truncatedAbove;
   void truncatedBelow;
-  const useInlineCursor = view.viewMode === "task" || view.viewMode === "pending";
   const declaredRow = cursorRow;
   useAnchoredCursor(
-    permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },
+    permissionActive ? null : { row: declaredRow, col: cursorCol },
     anchorRef,
     capability,
   );
@@ -1019,19 +1022,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       ) : null}
       <Box ref={anchorRef} width="100%" flexDirection="column">
         {lines.map((line, index) => {
-          // D.13Q-UX Task Surface — task / pending 模式 + 非 permission 时，
-          // 在 cursorRow 这一行渲染 inline reverse-video cursor；其他行原样渲染。
-          // home 模式仍用 useAnchoredCursor 的 native cursor，这里直接原样渲染。
-          if (useInlineCursor && !permissionActive && index === cursorRow) {
-            const { before, cursorChar, after } = splitLineAtDisplayCol(line, cursorCol);
-            return (
-              <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-                {fitText(before, maxWidth)}
-                <Text inverse>{cursorChar}</Text>
-                {fitText(after, Math.max(0, maxWidth - before.length - 1))}
-              </Text>
-            );
-          }
           return (
             <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
               {fitText(line, maxWidth)}
