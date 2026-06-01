@@ -255,9 +255,13 @@ function mockOpenAiReportReadThenWriteFlow(report: string, finalText: string): u
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
-      const request = JSON.parse(String(init.body)) as { messages?: Array<{ tool_call_id?: string }> };
+      const request = JSON.parse(String(init.body)) as {
+        messages?: Array<{ tool_call_id?: string }>;
+      };
       requests.push(request);
-      const hasReadResult = request.messages?.some((message) => message.tool_call_id === "call-read");
+      const hasReadResult = request.messages?.some(
+        (message) => message.tool_call_id === "call-read",
+      );
       const hasWriteResult = request.messages?.some(
         (message) => message.tool_call_id === "call-write",
       );
@@ -305,7 +309,10 @@ function mockOpenAiToolSequenceWithFinalCalls(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
       requests.push(JSON.parse(String(init.body)));
-      const request = JSON.parse(String(init.body)) as { tool_choice?: string; toolChoice?: string };
+      const request = JSON.parse(String(init.body)) as {
+        tool_choice?: string;
+        toolChoice?: string;
+      };
       const finalOnly = request.tool_choice === "none" || request.toolChoice === "none";
       const toolIndex = requests.filter((item) => {
         const req = item as { tool_choice?: string; toolChoice?: string };
@@ -5063,9 +5070,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests.length).toBeGreaterThanOrEqual(2);
     const first = requests[0] as { tools?: Array<{ function?: { name?: string }; name?: string }> };
-    expect(first.tools?.some((tool) => (tool.function?.name ?? tool.name) === "CommandProposal")).toBe(
-      true,
-    );
+    expect(
+      first.tools?.some((tool) => (tool.function?.name ?? tool.name) === "CommandProposal"),
+    ).toBe(true);
     expect(output.text).toContain("建议命令：/workflows plan 修复 TUI 噪音");
     expect(output.text).not.toContain("工作流计划预览");
   });
@@ -6864,6 +6871,23 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text.match(/索引已刷新：状态=ready。/g)).toHaveLength(1);
   });
 
+  it("Pre-open-source restraint: Ink IndexRefresh success does not open CommandPanel", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.isInkSession = true;
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    expect(context.commandPanelState).toBeUndefined();
+    expect(output.text).toContain("索引刷新完成");
+  });
+
   it("D.14D-R P0-2: model IndexRefresh denied → no index_repository, model told NOT refreshed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -8501,9 +8525,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("已创建 checkpoint");
     expect(output.text).toContain("工具 Edit 已完成");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
-    await expect(readFile(join(project, "medium.txt"), "utf8")).resolves.toBe(
-      "should-not-write",
-    );
+    await expect(readFile(join(project, "medium.txt"), "utf8")).resolves.toBe("should-not-write");
   });
 
   it("keeps full-access behind hard denies", async () => {
@@ -10088,9 +10110,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "plugins: discover manifests=yes; autoExecute=no; trustedIds=none",
     );
-    expect(output.text).toContain(
-      "mode switching: direct /mode and Shift+Tab cycling",
-    );
+    expect(output.text).toContain("mode switching: direct /mode and Shift+Tab cycling");
     expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
     expect(output.text).toContain("continuous phase progression=no");
     expect(output.text).not.toContain("EvidenceSummary");

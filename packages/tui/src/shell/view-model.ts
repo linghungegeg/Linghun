@@ -365,8 +365,6 @@ export function createShellViewModel(
           setupNeeded,
           cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
           indexStatus: context.index.status,
-          currentTaskStep: getCurrentTaskStep(context, effectiveActivity),
-          elapsed: getCurrentTaskElapsed(context),
           reasoningLevel: options.reasoningLevel,
           reasoningSent: options.reasoningSent,
         }).view;
@@ -403,24 +401,15 @@ export function createShellViewModel(
   // D.13Q-UX Task Surface — TaskScroll view 装配。home 模式下不暴露 taskScroll；
   // task/pending 模式默认 stickToBottom=true / scrollOffset=0；上层 controller
   // 通过 context.taskScrollState 写入用户的滚动位置。
-  // Run 3 B — 面板打开时强制 stickToBottom=true，保证面板作为最新 surface 可见。
-  const hasActivePanel = Boolean(
-    commandPanel || configPanel ||
-    (context as { helpPanelState?: unknown }).helpPanelState ||
-    (context as { btwPanelState?: unknown }).btwPanelState ||
-    (context as { sessionsPanelState?: unknown }).sessionsPanelState,
-  );
-  const rawTaskScroll: TaskScrollView | undefined =
+  // Pre-open-source parity: 面板打开时不再强制 stickToBottom，用户 PageUp/PageDown/
+  // 滚轮仍能回看上下文。只有交互型 picker 面板（Permission）独占上下箭头。
+  const taskScroll: TaskScrollView | undefined =
     effectiveViewMode === "home"
       ? undefined
       : ((context as { taskScrollState?: TaskScrollView }).taskScrollState ?? {
           scrollOffset: 0,
           stickToBottom: true,
         });
-  const taskScroll: TaskScrollView | undefined =
-    rawTaskScroll && hasActivePanel
-      ? { ...rawTaskScroll, scrollOffset: 0, stickToBottom: true }
-      : rawTaskScroll;
 
   return {
     language,
@@ -771,10 +760,22 @@ export function mapRequestActivityToView(context: TuiContext): TaskActivityView 
     },
   };
   const texts = textMap[context.language] ?? textMap["en-US"];
+  const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+  let elapsed: string | undefined;
+  if (startedAt && mapped !== "completed" && mapped !== "error") {
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    if (seconds >= 1) {
+      elapsed =
+        seconds < 60
+          ? `${seconds}s`
+          : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+    }
+  }
   return {
     phase: mapped,
     text: texts[mapped] ?? "",
     toolName: toolName ?? undefined,
+    elapsed,
   };
 }
 
@@ -1140,28 +1141,6 @@ function formatBackground(count: number, language: Language, width: number): str
     return shellText[language].backgroundShort(count);
   }
   return shellText[language].background(count);
-}
-
-function getCurrentTaskStep(
-  context: TuiContext,
-  activity: TaskActivityView | undefined,
-): string | undefined {
-  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
-  return runningTask?.currentStep ?? activity?.text;
-}
-
-function getCurrentTaskElapsed(context: TuiContext): string | undefined {
-  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
-  if (!runningTask) return undefined;
-  const startedAt = Date.parse(runningTask.startedAt);
-  if (!Number.isFinite(startedAt)) return undefined;
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes < 60) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h${(minutes % 60).toString().padStart(2, "0")}m`;
 }
 
 // D.13Q-UX: footer 字段计算迁移到 packages/tui/src/shell/models/footer-view.ts。

@@ -695,15 +695,65 @@ function detectMatches(
   return out;
 }
 
+// 元讨论检测：文本在解释/讨论系统机制本身（反幻觉、gate、evidence、验证系统等），
+// 而非对当前任务做事实声明时，不应触发 completion_pass / code_fact 类 claim。
+const META_DISCUSSION_PATTERNS: RegExp[] = [
+  /反幻觉系统/u,
+  /(?:final.?answer|claim).?gate/iu,
+  /(?:evidence|证据).{0,20}(?:机制|系统|检测|触发|约束|拦截|降级)/u,
+  /(?:gate|闸门|验证系统).{0,30}(?:是什么|怎么|如何|为什么|触发|工作|机制|原理)/u,
+  /(?:不能说|不让你说|约束你|限制你).{0,30}(?:通过|完成|验证|修复|写入|执行|运行|刷新|安装)/u,
+  /(?:会被|被).{0,20}(?:拦截|降级|触发|约束|检测)/u,
+];
+
+function isMetaDiscussion(text: string): boolean {
+  return META_DISCUSSION_PATTERNS.some((re) => re.test(text));
+}
+
+function isQuotedExample(text: string, index: number, phrase: string): boolean {
+  const before = text[index - 1];
+  const after = text[index + phrase.length];
+  return (
+    (before === "'" && after === "'") ||
+    (before === '"' && after === '"') ||
+    (before === "\u201c" && after === "\u201d") ||
+    (before === "\u2018" && after === "\u2019")
+  );
+}
+
+function isMetaDiscussionExampleMatch(text: string, match: FinalAnswerClaimMatch): boolean {
+  if (!isMetaDiscussion(text)) return false;
+  const index = text.indexOf(match.phrase);
+  if (index < 0) return false;
+  const window = text.slice(Math.max(0, index - 60), index + match.phrase.length + 60);
+  if (isQuotedExample(text, index, match.phrase)) return true;
+  const before = text.slice(Math.max(0, index - 60), index);
+  return /(?:会检测|检测|识别|命中|拦截|降级|不能说|不让你说|phrases?\s+like|detects?\s+phrases?|requires?\s+evidence)/iu.test(
+    before,
+  );
+}
+
 export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
   if (!text) return [];
   const matches: FinalAnswerClaimMatch[] = [];
   matches.push(...detectMatches(text, BETA_READINESS_PATTERNS, "beta_readiness"));
-  matches.push(...detectMatches(text, COMPLETION_PASS_PATTERNS, "completion_pass"));
-  matches.push(...detectMatches(text, CODE_FACT_PATTERNS, "code_fact"));
+  matches.push(
+    ...detectMatches(text, COMPLETION_PASS_PATTERNS, "completion_pass").filter(
+      (match) => !isMetaDiscussionExampleMatch(text, match),
+    ),
+  );
+  matches.push(
+    ...detectMatches(text, CODE_FACT_PATTERNS, "code_fact").filter(
+      (match) => !isMetaDiscussionExampleMatch(text, match),
+    ),
+  );
   matches.push(...detectMatches(text, CCB_PARITY_PATTERNS, "ccb_parity"));
   matches.push(...detectMatches(text, GIT_OPERATION_PATTERNS, "git_operation"));
-  matches.push(...detectMatches(text, ACTION_EXECUTED_PATTERNS, "action_executed"));
+  matches.push(
+    ...detectMatches(text, ACTION_EXECUTED_PATTERNS, "action_executed").filter(
+      (match) => !isMetaDiscussionExampleMatch(text, match),
+    ),
+  );
   // \u5916\u90e8\u5f53\u524d\u4e8b\u5b9e\uff1a\u5148\u53bb\u9664"\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6..."\u7b49\u672c\u5730\u767d\u540d\u5355\uff0c\u518d\u5339\u914d
   const sanitized = text.replace(LOCAL_CURRENT_WHITELIST, "");
   matches.push(...detectMatches(sanitized, EXTERNAL_CURRENT_PATTERNS, "external_current_fact"));

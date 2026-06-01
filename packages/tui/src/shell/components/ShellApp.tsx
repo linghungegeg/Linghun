@@ -343,6 +343,12 @@ function ActivityIndicator({
       <Text color={color}>
         {marker} {activity.text}
       </Text>
+      {activity.elapsed ? (
+        <Text color={theme.muted} dimColor>
+          {" "}
+          {activity.elapsed}
+        </Text>
+      ) : null}
     </Box>
   );
 }

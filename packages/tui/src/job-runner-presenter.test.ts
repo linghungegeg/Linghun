@@ -199,9 +199,9 @@ describe("job runner presenters", () => {
     const task: BackgroundTaskState = {
       ...baseBackground,
       title:
-        "powershell -NoProfile -Command \"git status --porcelain; Get-Content C:\\secret\\runner.log\"",
+        'powershell -NoProfile -Command "git status --porcelain; Get-Content C:\\secret\\runner.log"',
       currentStep:
-        "checkpoint id chk_abcdef1234567890 payload {\"schema\":{\"debug\":true},\"raw\":\"value\"}",
+        'checkpoint id chk_abcdef1234567890 payload {"schema":{"debug":true},"raw":"value"}',
       logPath: "C:\\secret\\runner.log",
       outputPath: "C:\\secret\\full-output.log",
       userVisibleSummary:
@@ -221,15 +221,15 @@ describe("job runner presenters", () => {
   });
 
   it("formats bounded elapsed duration for task surfaces", () => {
-    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:00:42.000Z"))).toBe(
-      "42s",
-    );
-    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:03:05.000Z"))).toBe(
-      "3m05s",
-    );
-    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T02:04:00.000Z"))).toBe(
-      "2h04m",
-    );
+    expect(
+      formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:00:42.000Z")),
+    ).toBe("42s");
+    expect(
+      formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:03:05.000Z")),
+    ).toBe("3m05s");
+    expect(
+      formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T02:04:00.000Z")),
+    ).toBe("2h04m");
   });
 
   it("formats failed, timeout, and cancelled summaries without secrets when state is already bounded", () => {

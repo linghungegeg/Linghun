@@ -73,7 +73,7 @@ export function computeScrollViewportOffset(
   scroll: TaskScrollView | undefined,
 ): { topOffset: number; marginTop: number; bottomOffset: number } {
   const clamped = clampTaskScroll(scroll, maxOffset);
-  const bottomOffset = scroll?.stickToBottom ?? true ? 0 : clamped.scrollOffset;
+  const bottomOffset = (scroll?.stickToBottom ?? true) ? 0 : clamped.scrollOffset;
   const topOffset = Math.max(0, Math.floor(maxOffset > 0 ? maxOffset : 0) - bottomOffset);
   return {
     topOffset,

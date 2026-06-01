@@ -98,8 +98,8 @@ import {
 } from "./cache-freshness.js";
 import {
   type CompactBoundary,
-  compactMessagesToFit,
   compactBoundaryHash,
+  compactMessagesToFit,
   createManualCompactBoundary,
   microCompactMessages,
 } from "./compact-context.js";
@@ -213,9 +213,9 @@ import {
   isModelRole,
 } from "./model-doctor-runtime.js";
 import {
+  COMMAND_PROPOSAL_TOOL_NAME,
   EXECUTE_EXTRA_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
-  COMMAND_PROPOSAL_TOOL_NAME,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
@@ -4683,12 +4683,12 @@ async function handleCompactCommand(
     const sessionId = await ensureSession(context);
     const resumed = await context.store.resume(sessionId);
     const preChars = estimateTranscriptContextChars(resumed.transcript);
-  const boundary = createManualCompactBoundary({
-    preCompactChars: preChars,
-    postCompactChars: Math.min(preChars, getProviderContextMaxChars(context)),
-    preservedEvidenceRefs: context.evidence.map((item) => item.id),
-    preservedFiles: context.recentlyMentionedFiles,
-    handoffPacketId: context.memory.lastHandoff?.id,
+    const boundary = createManualCompactBoundary({
+      preCompactChars: preChars,
+      postCompactChars: Math.min(preChars, getProviderContextMaxChars(context)),
+      preservedEvidenceRefs: context.evidence.map((item) => item.id),
+      preservedFiles: context.recentlyMentionedFiles,
+      handoffPacketId: context.memory.lastHandoff?.id,
     });
     recordCompactBoundary(context, boundary);
     refreshCacheFreshness(context);
@@ -5859,6 +5859,7 @@ function clearRequestActivity(context: TuiContext): void {
   context.requestActivity = undefined;
   context.requestActivityPhase = undefined;
   context.requestActivityToolName = undefined;
+  (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = undefined;
 }
 
 function startRequestActivity(
@@ -5870,6 +5871,7 @@ function startRequestActivity(
   clearRequestActivity(context);
   context.requestActivityPhase = phase;
   context.requestActivityToolName = values.toolName;
+  (context as { requestActivityStartedAt?: number }).requestActivityStartedAt = Date.now();
   // D13E-P3 single-thinking display: in Ink/Task mode the ActivityIndicator
   // (driven by context.requestActivityPhase via mapRequestActivityToView) is
   // the sole visible "thinking…" surface. Writing the same line into the
@@ -7238,7 +7240,10 @@ function currentModelSupportsTools(
   return known?.supportsTools !== false;
 }
 
-function getProviderContextMaxChars(context: TuiContext, runtime = getSelectedModelRuntime(context)): number {
+function getProviderContextMaxChars(
+  context: TuiContext,
+  runtime = getSelectedModelRuntime(context),
+): number {
   const route = getRoleRoute(context.config, runtime.role);
   const known = findKnownModel(runtime.model);
   const maxInputTokens =
@@ -7246,7 +7251,9 @@ function getProviderContextMaxChars(context: TuiContext, runtime = getSelectedMo
     Math.max(
       1,
       (known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS) -
-        (route.maxOutputTokens ?? context.config.providers[runtime.provider]?.maxOutputTokens ?? CONTEXT_INPUT_HEADROOM_TOKENS),
+        (route.maxOutputTokens ??
+          context.config.providers[runtime.provider]?.maxOutputTokens ??
+          CONTEXT_INPUT_HEADROOM_TOKENS),
     );
   return Math.max(1, maxInputTokens * CONTEXT_CHARS_PER_TOKEN_ESTIMATE);
 }
@@ -7707,7 +7714,14 @@ async function executeDeferredDispatchToolUse(
           context.language === "en-US"
             ? "Command proposal must be an explicit slash command."
             : "命令提案必须是明确的 slash command。";
-        await appendDeferredToolResultEvent(context, sessionId, toolCall.id, dispatchName, text, true);
+        await appendDeferredToolResultEvent(
+          context,
+          sessionId,
+          toolCall.id,
+          dispatchName,
+          text,
+          true,
+        );
         clearRequestActivity(context);
         return { ok: false, tool: dispatchName, text };
       }
@@ -8052,23 +8066,7 @@ async function executeApprovedIndexToolUse(
     if (!context.isInkSession) {
       writeLine(output, text);
     } else if (!panelAlreadyShown) {
-      showCommandPanel(context, output, {
-        title:
-          action === "repair"
-            ? context.language === "en-US"
-              ? "Index repair"
-              : "索引修复"
-            : context.language === "en-US"
-              ? "Index refresh"
-              : "索引刷新",
-        tone: context.index.status === "stale" ? "warning" : "neutral",
-        summary: [text],
-        actions: [
-          context.language === "en-US"
-            ? "Use index status for details."
-            : "可查看索引状态获取详情。",
-        ],
-      });
+      writeLine(output, text);
     }
     return { ok: true, tool: name, text, evidenceId: evidence.id };
   }

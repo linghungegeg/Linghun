@@ -97,7 +97,11 @@ function configureCliBundledRoot(): void {
   if (process.env.LINGHUN_CLI_BUNDLED_ROOT) {
     return;
   }
-  process.env.LINGHUN_CLI_BUNDLED_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "bundled");
+  process.env.LINGHUN_CLI_BUNDLED_ROOT = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "bundled",
+  );
 }
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {

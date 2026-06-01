@@ -187,10 +187,7 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
   }
   if (!removed) return { text, removedRawToolProtocol: false };
   const compact = sanitized.replace(/\n{3,}/gu, "\n\n");
-  const note =
-    language === "en-US"
-      ? "[Tool call details hidden.]\n"
-      : "[工具调用细节已隐藏。]\n";
+  const note = language === "en-US" ? "[Tool call details hidden.]\n" : "[工具调用细节已隐藏。]\n";
   return {
     text: compact.trim().length > 0 ? `${note}${compact}` : note,
     removedRawToolProtocol: true,

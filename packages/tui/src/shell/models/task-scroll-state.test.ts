@@ -64,13 +64,13 @@ describe("D.13Q-UX Task Surface — reduceTaskScroll", () => {
 
 describe("Run 3 small repair — computeScrollViewportOffset", () => {
   it("stickToBottom=true / scrollOffset=0 显示底部", () => {
-    expect(
-      computeScrollViewportOffset(20, { scrollOffset: 0, stickToBottom: true }),
-    ).toMatchObject({
-      topOffset: 20,
-      marginTop: -20,
-      bottomOffset: 0,
-    });
+    expect(computeScrollViewportOffset(20, { scrollOffset: 0, stickToBottom: true })).toMatchObject(
+      {
+        topOffset: 20,
+        marginTop: -20,
+        bottomOffset: 0,
+      },
+    );
   });
 
   it("scrollOffset=5 显示距离底部 5 行", () => {

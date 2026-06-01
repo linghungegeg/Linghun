@@ -341,13 +341,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     [view.language, view.permission],
   );
 
-  // D.13E Step 2 修正 #1：ConfigPanel 渲染时 Composer.useInput 必须 isActive=false，
-  // 让 ConfigPanel/HelpPanel/BtwPanel/SessionsPanel 等独立面板自己的 useInput 成为 ↑↓/Enter/Esc
-  // 的唯一消费者，避免双消费窗口。permission 优先级最高（permission 渲染时其它面板不渲染，
-  // ShellApp 互斥保证）。D.13Q-UX Task Surface：commandPanel 同样独占 Esc，
-  // Composer 在 commandPanel 渲染时也应让出输入。
+  // D.13E Step 2 修正 #1：交互型 picker 面板渲染时 Composer.useInput 必须
+  // isActive=false，让 ConfigPanel/HelpPanel/BtwPanel/SessionsPanel 自己成为
+  // ↑↓/Enter/Esc 的唯一消费者。普通 CommandPanel 只处理 Esc；Composer
+  // 保持活跃，让 PageUp/PageDown/滚轮继续滚动 task viewport。
   const configPanelActive = Boolean(
-    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel || view.commandPanel,
+    view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
   );
 
   const text = bufferToString(buffer);
@@ -899,8 +898,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         }
       }
     },
-    // D.13E Step 2 修正 #1：ConfigPanel 渲染时 isActive=false，让 ConfigPanel
-    // 自己的 useInput 独占 ↑↓/Enter/Esc，避免双消费。
+    // D.13E Step 2 修正 #1：交互型 picker 面板渲染时 isActive=false，让面板
+    // 自己独占 ↑↓/Enter/Esc。普通 CommandPanel 不停用 Composer，以便
+    // PageUp/PageDown/滚轮继续回看 transcript；Esc 仍由 CommandPanel 关闭。
     { isActive: !configPanelActive },
   );
 
@@ -940,9 +940,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   //   - permissionActive: 永远隐藏 native cursor，让 PermissionControl 独占焦点。
   void truncatedAbove;
   void truncatedBelow;
-  // Pre-open-source parity cutback: task / pending mode uses the same anchored
-  // native cursor as home mode. Permission cards still own focus exclusively.
-  const useInlineCursor = false;
+  const useInlineCursor = view.viewMode === "task" || view.viewMode === "pending";
   const declaredRow = cursorRow;
   useAnchoredCursor(
     permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },

@@ -550,12 +550,80 @@ describe("model-loop-runtime", () => {
         detectHighRiskClaims("This is production-ready").some((m) => m.kind === "ccb_parity"),
       ).toBe(true);
     });
+
+    it("does NOT flag meta discussion about the anti-hallucination system", () => {
+      expect(
+        detectHighRiskClaims(
+          "反幻觉系统会检测'已完成'、'测试通过'、'已验证'等高风险声明，如果缺少证据就会触发降级。",
+        ).some((m) => m.kind === "completion_pass"),
+      ).toBe(false);
+      expect(
+        detectHighRiskClaims(
+          "是的，反幻觉系统在约束我，不让我说'已完成'或'测试通过'这类话，除非有证据支撑。",
+        ).some((m) => m.kind === "completion_pass"),
+      ).toBe(false);
+      expect(
+        detectHighRiskClaims(
+          "反幻觉系统会识别'代码里已经实现 X'、'调用链是 A→B'这类源码事实声明。",
+        ).some((m) => m.kind === "code_fact"),
+      ).toBe(false);
+      expect(
+        detectHighRiskClaims(
+          "The final answer gate detects phrases like 'completed', 'tests passed', 'verified' and requires evidence.",
+        ).some((m) => m.kind === "completion_pass"),
+      ).toBe(false);
+      expect(
+        detectHighRiskClaims("不能说'索引已刷新'，除非本轮有真实刷新证据。").some(
+          (m) => m.kind === "action_executed",
+        ),
+      ).toBe(false);
+      expect(
+        detectHighRiskClaims(
+          "反幻觉系统会检测'已写入文件、索引已刷新、命令已执行'这类动作声明。",
+        ).some((m) => m.kind === "action_executed"),
+      ).toBe(false);
+    });
+
+    it("still flags real completion claims even when mentioning the system", () => {
+      expect(
+        detectHighRiskClaims("我已完成了所有修改，测试通过。").some(
+          (m) => m.kind === "completion_pass",
+        ),
+      ).toBe(true);
+      expect(
+        detectHighRiskClaims("All tests passed, the fix is verified.").some(
+          (m) => m.kind === "completion_pass",
+        ),
+      ).toBe(true);
+      expect(
+        detectHighRiskClaims("反幻觉系统前面触发了吗？另外我已完成了所有修改，测试通过。").some(
+          (m) => m.kind === "completion_pass",
+        ),
+      ).toBe(true);
+      expect(
+        detectHighRiskClaims("反幻觉系统会约束成功声明；索引已刷新。").some(
+          (m) => m.kind === "action_executed",
+        ),
+      ).toBe(true);
+      expect(detectHighRiskClaims("索引已刷新。").some((m) => m.kind === "action_executed")).toBe(
+        true,
+      );
+    });
   });
 
   describe("D.13U evaluateFinalAnswerClaims", () => {
     it("passes when there is no high-risk claim", () => {
       const verdict = evaluateFinalAnswerClaims("可以，我来解释这个概念", []);
       expect(verdict.status).toBe("passed");
+    });
+
+    it("passes meta explanation examples without evidence", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        "反幻觉系统会检测'已完成'、'测试通过'、'代码里已经实现 X'、'索引已刷新'等高风险声明。",
+        [],
+      );
+      expect(verdict.status).toBe("passed");
+      expect(verdict.matchedClaims).toEqual([]);
     });
 
     it("blocks completion/PASS without test/build evidence even if Read evidence exists", () => {

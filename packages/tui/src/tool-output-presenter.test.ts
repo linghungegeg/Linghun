@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  createLayeredToolOutput,
   createAssistantPrimaryTextSanitizer,
+  createLayeredToolOutput,
   formatToolOutput,
   formatToolStart,
   sanitizeAssistantPrimaryText,

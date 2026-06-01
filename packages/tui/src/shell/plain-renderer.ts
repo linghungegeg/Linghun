@@ -88,10 +88,7 @@ function colorRisk(riskLabel: string, noColor: boolean): string {
   }
 }
 
-function hasHiddenContent(
-  block: ShellViewModel["blocks"][number],
-  renderedBody?: string,
-): boolean {
+function hasHiddenContent(block: ShellViewModel["blocks"][number], renderedBody?: string): boolean {
   const fullText = (block.fullText ?? "").trim();
   const summary = (block.summary ?? "").trim();
   if (!fullText) return false;

@@ -1,15 +1,30 @@
 import { describe, expect, it } from "vitest";
 import {
+  type OwnerContext,
+  type OwnerKeyShape,
+  selectInputOwner,
+} from "./input-owner-controller.js";
+import {
   clampTaskScroll,
   computeScrollViewportOffset,
   createInitialTaskScroll,
   reduceTaskScroll,
 } from "./task-scroll-state.js";
-import {
-  type OwnerContext,
-  type OwnerKeyShape,
-  selectInputOwner,
-} from "./input-owner-controller.js";
+
+type ShellViewModelContext = Parameters<typeof import("../view-model.js").createShellViewModel>[0];
+
+type MinimalTuiContext = {
+  language: "zh-CN";
+  projectPath: string;
+  model: string;
+  permissionMode: "default";
+  index: { status: "ready" };
+  backgroundTasks: [];
+  cache: Record<string, never>;
+  config: { workspaceTrust: { recorded: true; level: "trusted" } };
+  commandPanelState?: import("../types.js").CommandPanelView;
+  taskScrollState?: import("../types.js").TaskScrollView;
+};
 
 /**
  * Run 3 D — TUI Interaction Contract 集中 invariant 测试。
@@ -69,19 +84,21 @@ describe("TUI Interaction Contract — 滚动语义", () => {
         marginTop: -20,
       },
     );
-    expect(computeScrollViewportOffset(20, { scrollOffset: 5, stickToBottom: false })).toMatchObject(
-      {
-        topOffset: 15,
-        marginTop: -15,
-      },
-    );
+    expect(
+      computeScrollViewportOffset(20, { scrollOffset: 5, stickToBottom: false }),
+    ).toMatchObject({
+      topOffset: 15,
+      marginTop: -15,
+    });
     expect(
       computeScrollViewportOffset(20, { scrollOffset: 20, stickToBottom: false }),
     ).toMatchObject({ topOffset: 0, marginTop: 0 });
-    expect(computeScrollViewportOffset(0, { scrollOffset: 5, stickToBottom: false })).toMatchObject({
-      topOffset: 0,
-      marginTop: 0,
-    });
+    expect(computeScrollViewportOffset(0, { scrollOffset: 5, stickToBottom: false })).toMatchObject(
+      {
+        topOffset: 0,
+        marginTop: 0,
+      },
+    );
   });
 });
 
@@ -205,9 +222,9 @@ describe("TUI Interaction Contract — Todo 预算分类", () => {
 });
 
 describe("TUI Interaction Contract — 面板可见性（view-model 层）", () => {
-  it("commandPanel 打开时 taskScroll 强制 stickToBottom=true", async () => {
+  it("commandPanel 打开时 taskScroll 保留用户滚动位置（不强制 stickToBottom）", async () => {
     const { createShellViewModel } = await import("../view-model.js");
-    const context = {
+    const context: MinimalTuiContext = {
       language: "zh-CN" as const,
       projectPath: "/test",
       model: "test-model",
@@ -219,21 +236,17 @@ describe("TUI Interaction Contract — 面板可见性（view-model 层）", () 
       commandPanelState: { title: "Test", summary: ["line"] },
       taskScrollState: { scrollOffset: 10, stickToBottom: false },
     };
-    const vm = createShellViewModel(context as any, {
+    const vm = createShellViewModel(context as unknown as ShellViewModelContext, {
       viewMode: "task",
       outputBlocks: [{ id: "b1", kind: "details", status: "info", title: "old", summary: "old" }],
     });
-    expect(vm.taskScroll?.stickToBottom).toBe(true);
-    expect(vm.taskScroll?.scrollOffset).toBe(0);
-    expect(computeScrollViewportOffset(20, vm.taskScroll)).toMatchObject({
-      topOffset: 20,
-      marginTop: -20,
-    });
+    expect(vm.taskScroll?.stickToBottom).toBe(false);
+    expect(vm.taskScroll?.scrollOffset).toBe(10);
   });
 
   it("面板关闭后 taskScroll 恢复用户滚动位置", async () => {
     const { createShellViewModel } = await import("../view-model.js");
-    const context = {
+    const context: MinimalTuiContext = {
       language: "zh-CN" as const,
       projectPath: "/test",
       model: "test-model",
@@ -244,7 +257,7 @@ describe("TUI Interaction Contract — 面板可见性（view-model 层）", () 
       config: { workspaceTrust: { recorded: true, level: "trusted" } },
       taskScrollState: { scrollOffset: 7, stickToBottom: false },
     };
-    const vm = createShellViewModel(context as any, {
+    const vm = createShellViewModel(context as unknown as ShellViewModelContext, {
       viewMode: "task",
       outputBlocks: [{ id: "b1", kind: "details", status: "info", title: "old", summary: "old" }],
     });

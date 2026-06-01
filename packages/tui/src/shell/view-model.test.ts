@@ -2110,15 +2110,19 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(source).toMatch(/declared\s*&&\s*capability\.cursorPositioning/);
   });
 
-  it("D13E-P3 #6: Composer renders anchored cursor on first frame (declared row/col passed)", async () => {
+  it("D13E-P3 #6: Composer keeps cursor ownership split explicit", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
-    // The Composer must call useAnchoredCursor unconditionally on every render
-    // (no isFirstFrame / mount-effect short-circuit). Permission is the only
-    // null branch.
-    expect(source).toMatch(
-      /useAnchoredCursor\(\s*permissionActive\s*(?:\|\|\s*useInlineCursor\s*)?\?\s*null\s*:\s*\{\s*row/,
+    // Home keeps the native anchored cursor; task/pending use the inline
+    // reverse-video cursor because their parent-chain y coordinate can drift.
+    expect(source).toContain(
+      'const useInlineCursor = view.viewMode === "task" || view.viewMode === "pending";',
     );
+    expect(source).toMatch(
+      /useAnchoredCursor\(\s*permissionActive\s*\|\|\s*useInlineCursor\s*\?\s*null\s*:\s*\{\s*row:\s*declaredRow,\s*col:\s*cursorCol\s*\}/,
+    );
+    expect(source).toContain("if (useInlineCursor && !permissionActive && index === cursorRow)");
+    expect(source).toContain("<Text inverse>{cursorChar}</Text>");
     // anchorRef attaches to the outer Box synchronously in the same render —
     // not via a deferred effect — so the parent-chain origin resolves on the
     // very first commit.
@@ -3334,6 +3338,30 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.permissionMode ?? "").not.toContain("会话");
   });
 
+  it("task footer does not carry running task progress or elapsed time", () => {
+    const view = createShellViewModel(
+      createContext({
+        backgroundTasks: [
+          {
+            status: "running",
+            currentStep: "workflow agent running step",
+            startedAt: new Date(Date.now() - 12_000).toISOString(),
+          },
+        ],
+      } as Partial<TuiContext>),
+      {
+        width: 120,
+        viewMode: "task",
+        activity: { phase: "tool_running", text: "正在运行 Bash…", toolName: "Bash" },
+      },
+    );
+    const footer = view.taskFooter as unknown as Record<string, unknown>;
+    expect(footer.task).toBeUndefined();
+    expect(footer.elapsed).toBeUndefined();
+    expect(Object.values(footer).join(" ")).not.toContain("workflow agent running step");
+    expect(Object.values(footer).join(" ")).not.toContain("正在运行 Bash");
+  });
+
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
     // 显式注入 index.status="unknown"，确保 footer 走 unknown 分支。
     const zhView = createShellViewModel(
@@ -3364,6 +3392,8 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(source).toMatch(/theme\.status\.fail/);
     // 右栏（model · cache · index · reasoning · hint）按顺序作为 segments 渲染。
     expect(source).toContain("rightSegments");
+    expect(source).not.toContain("footer.task");
+    expect(source).not.toContain("footer.elapsed");
   });
 
   it("D13E-P3: reasoningLevel + reasoningSent surface as 'Reasoning X' / '推理 X' in footer", () => {
@@ -4685,6 +4715,19 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
 
     expect(output.text).toContain("模型诊断XZX");
     expect(output.text).toContain("❯");
+  });
+
+  it("普通 CommandPanel 不停用 Composer，保留 PageUp/PageDown task-scroll 路径", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    const activeConfig = source.slice(
+      source.indexOf("const configPanelActive"),
+      source.indexOf("const text = bufferToString"),
+    );
+    expect(activeConfig).not.toContain("view.commandPanel");
+    expect(source).toContain("{ isActive: !configPanelActive }");
+    expect(source).toContain('void onInput({ type: "task-scroll", delta: 5 })');
+    expect(source).toContain('void onInput({ type: "task-scroll", delta: -5 })');
   });
 });
 

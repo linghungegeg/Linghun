@@ -3,18 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createIndexState } from "./index-runtime.js";
 import {
   findBundledCodebaseMemoryBinary,
   getBundledCodebaseMemoryRoots,
   getCodebaseMemoryPlatformArch,
 } from "./index.js";
 import type { TuiContext } from "./index.js";
-import { createIndexState } from "./index-runtime.js";
+import { formatIndexStatus } from "./mcp-index-command-runtime.js";
 import {
   rememberCodebaseMemoryResolution,
   resolveCodebaseMemoryBinary,
 } from "./mcp-index-runtime.js";
-import { formatIndexStatus } from "./mcp-index-command-runtime.js";
 import { resolveNativeRunner } from "./runner-runtime.js";
 
 afterEach(() => {
@@ -112,7 +112,7 @@ describe("bundled codebase-memory resolution", () => {
     vi.stubEnv("LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR", tmpDir);
     const result = await findBundledCodebaseMemoryBinary();
     expect(result).toBeDefined();
-    expect(result!.detailPath).toBe(binaryPath);
+    expect(result?.detailPath).toBe(binaryPath);
   });
 
   it("findBundledCodebaseMemoryBinary finds .exe binary on win32", async () => {
@@ -127,7 +127,7 @@ describe("bundled codebase-memory resolution", () => {
     vi.stubEnv("LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR", tmpDir);
     const result = await findBundledCodebaseMemoryBinary();
     expect(result).toBeDefined();
-    expect(result!.detailPath).toBe(binaryPath);
+    expect(result?.detailPath).toBe(binaryPath);
   });
 
   it("bundled source does not leak private path in display", async () => {
@@ -143,7 +143,7 @@ describe("bundled codebase-memory resolution", () => {
     expect(result).toBeDefined();
     // The detailPath is the raw path, but rememberCodebaseMemoryResolution
     // uses redactedPath which only shows basename
-    expect(result!.detailPath).toContain("codebase-memory-mcp.cjs");
+    expect(result?.detailPath).toContain("codebase-memory-mcp.cjs");
   });
 
   it("bundled candidate is skipped for unsupported platform-arch", async () => {
@@ -209,7 +209,11 @@ describe("bundled codebase-memory priority", () => {
     await writeMockCodebaseMemoryBinary(envBinary);
 
     const cliBundledRoot = join(tmpDir, "cli-bundled");
-    const binaryDir = join(cliBundledRoot, "codebase-memory", `${process.platform}-${process.arch}`);
+    const binaryDir = join(
+      cliBundledRoot,
+      "codebase-memory",
+      `${process.platform}-${process.arch}`,
+    );
     await mkdir(binaryDir, { recursive: true });
     await writeMockCodebaseMemoryBinary(join(binaryDir, "codebase-memory-mcp.cjs"));
 
@@ -251,7 +255,11 @@ describe("bundled codebase-memory priority", () => {
     await writeMockCodebaseMemoryBinary(configBinary);
 
     const cliBundledRoot = join(tmpDir, "cli-bundled");
-    const binaryDir = join(cliBundledRoot, "codebase-memory", `${process.platform}-${process.arch}`);
+    const binaryDir = join(
+      cliBundledRoot,
+      "codebase-memory",
+      `${process.platform}-${process.arch}`,
+    );
     await mkdir(binaryDir, { recursive: true });
     await writeMockCodebaseMemoryBinary(join(binaryDir, "codebase-memory-mcp.cjs"));
 
@@ -271,7 +279,11 @@ describe("bundled codebase-memory priority", () => {
   it("CLI bundled root takes priority over PATH fallback", async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), "linghun-cm-cli-path-priority-"));
     const cliBundledRoot = join(tmpDir, "cli-bundled");
-    const bundledDir = join(cliBundledRoot, "codebase-memory", `${process.platform}-${process.arch}`);
+    const bundledDir = join(
+      cliBundledRoot,
+      "codebase-memory",
+      `${process.platform}-${process.arch}`,
+    );
     await mkdir(bundledDir, { recursive: true });
     const bundledBinary = join(bundledDir, "codebase-memory-mcp.cjs");
     await writeMockCodebaseMemoryBinary(bundledBinary);
@@ -313,7 +325,11 @@ describe("bundled codebase-memory priority", () => {
     const tmpDir = await mkdtemp(join(tmpdir(), "linghun-cm-cli-notice-resolution-"));
     const cliBundledRoot = join(tmpDir, "cli-bundled");
     await mkdir(join(cliBundledRoot, "codebase-memory"), { recursive: true });
-    await writeFile(join(cliBundledRoot, "codebase-memory", "NOTICE.md"), "placeholder only", "utf8");
+    await writeFile(
+      join(cliBundledRoot, "codebase-memory", "NOTICE.md"),
+      "placeholder only",
+      "utf8",
+    );
 
     vi.stubEnv("LINGHUN_CLI_BUNDLED_ROOT", cliBundledRoot);
     vi.stubEnv("PATH", "");
@@ -581,7 +597,10 @@ process.exit(0);
 describe("CLI package files include bundled dirs", () => {
   it("apps/cli/package.json files field includes bundled", async () => {
     const pkg = await import("../../../apps/cli/package.json", { with: { type: "json" } });
-    const files: string[] = (pkg.default as Record<string, unknown>).files as string[] ?? (pkg as unknown as Record<string, unknown>).files as string[] ?? [];
+    const files: string[] =
+      ((pkg.default as Record<string, unknown>).files as string[]) ??
+      ((pkg as unknown as Record<string, unknown>).files as string[]) ??
+      [];
     expect(files).toContain("bundled");
   });
 });

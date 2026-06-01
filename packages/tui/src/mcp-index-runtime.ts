@@ -460,10 +460,9 @@ export async function findBundledCodebaseMemoryBinary(): Promise<
   if (!CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES.has(platformArch)) {
     return undefined;
   }
-  const names =
-    platformArch.startsWith("win32")
-      ? [`${CODEBASE_MEMORY_COMMAND}.exe`, `${CODEBASE_MEMORY_COMMAND}.cjs`]
-      : [CODEBASE_MEMORY_COMMAND, `${CODEBASE_MEMORY_COMMAND}.cjs`];
+  const names = platformArch.startsWith("win32")
+    ? [`${CODEBASE_MEMORY_COMMAND}.exe`, `${CODEBASE_MEMORY_COMMAND}.cjs`]
+    : [CODEBASE_MEMORY_COMMAND, `${CODEBASE_MEMORY_COMMAND}.cjs`];
   for (const root of roots) {
     for (const name of names) {
       const candidate = join(root, platformArch, name);

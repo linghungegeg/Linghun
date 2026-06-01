@@ -134,6 +134,7 @@ export type TaskActivityView = {
   phase: "thinking" | "tool_running" | "permission_waiting" | "continuing" | "completed" | "error";
   text: string;
   toolName?: string;
+  elapsed?: string;
 };
 
 /**
@@ -205,8 +206,6 @@ export type TaskFooterView = {
   model: string;
   cache: string;
   index: string;
-  task?: string;
-  elapsed?: string;
   /** Red-colored Shift+Tab hint, e.g. "（Shift+Tab 切换模式）" / "(Shift+Tab switch mode)". */
   cyclePermHint: string;
   /**

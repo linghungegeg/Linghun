@@ -193,9 +193,7 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? <MessageMarkdown text={body} theme={theme} tone="error" /> : null}
-        {nextAction ? (
-          <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} />
-        ) : null}
+        {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
       </Box>
     );
   }
@@ -235,9 +233,7 @@ export function ProductBlock({
       ) : null}
       {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
       {block.detail ? <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text> : null}
-      {nextAction ? (
-        <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} />
-      ) : null}
+      {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
     </Box>
   );
 }

@@ -40,8 +40,6 @@ export function StatusFooter({
   void language;
   // 右栏（model · cache · index · reasoning · hint）按 flexShrink=0 右对齐。
   const rightSegments: { key: string; text: string; tone?: "warning" | "dim" | "default" }[] = [
-    ...(footer.task ? [{ key: "task", text: footer.task, tone: "default" as const }] : []),
-    ...(footer.elapsed ? [{ key: "elapsed", text: footer.elapsed, tone: "dim" as const }] : []),
     { key: "model", text: footer.model, tone: modelDim ? "dim" : "default" },
     {
       key: "cache",
