@@ -9078,6 +9078,67 @@ describe("Phase 06 TUI slash commands", () => {
     expect(bashTask?.logPath).toBeTruthy();
   });
 
+  it("shows grouped background task panel in Ink without mechanism words on the main surface", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("verification", {
+        id: "verify-panel",
+        title: "typecheck",
+        status: "running",
+        currentStep: "checking types",
+        progress: { completed: 1, total: 2, label: "checks" },
+        nextAction: "wait or open /details background verify-panel",
+      }),
+      createBackgroundTaskFixture("agent", {
+        id: "agent-panel",
+        title: "agent review",
+        status: "failed",
+        currentStep: "sourceRef schema debug runner=abc endpoint raw evidence",
+      }),
+      createBackgroundTaskFixture("index", {
+        id: "index-panel",
+        title: "index refresh",
+        status: "paused",
+      }),
+    ];
+
+    await handleSlashCommand("/background", context, output);
+
+    const panel = context.commandPanelState;
+    expect(panel?.summary?.join("\n")).toContain("运行中 1");
+    expect(panel?.summary?.join("\n")).toContain("待确认 1");
+    expect(panel?.summary?.join("\n")).toContain("失败/阻塞 1");
+    const mainSurface = [
+      ...(panel?.summary ?? []),
+      ...(panel?.sections ?? []).flatMap((section) => [section.title ?? "", ...section.rows]),
+    ].join("\n");
+    expect(mainSurface).toContain("Verification");
+    expect(mainSurface).toContain("Agent");
+    expect(mainSurface).toContain("Index");
+    expect(mainSurface).toContain("typecheck");
+    expect(mainSurface).toContain("1/2 checks");
+    for (const banned of [
+      "sourceRef",
+      "schema",
+      "debug",
+      "gate retry",
+      "passEvidence",
+      "raw evidence",
+      "tool_result raw",
+      "endpoint",
+      "runner=",
+    ]) {
+      expect(mainSurface).not.toContain(banned);
+    }
+    expect(panel?.detailsText).toContain("/details background verify-panel");
+    expect(output.text).toBe("");
+  });
+
   it("guards foreground model requests and background resource caps", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

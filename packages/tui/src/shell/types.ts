@@ -441,7 +441,11 @@ export type ShellRenderOptions = {
 
 export type BackgroundTaskSummary = {
   id: string;
+  kind?: string;
   title: string;
   status: string;
+  currentStep?: string;
+  progress?: { completed: number; total?: number; label?: string };
   result?: string;
+  nextAction?: string;
 };

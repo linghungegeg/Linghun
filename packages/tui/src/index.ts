@@ -1587,14 +1587,19 @@ async function runPlainTui(
               task.status === "running" ||
               task.status === "completed" ||
               task.status === "failed" ||
-              task.status === "timeout",
+              task.status === "timeout" ||
+              task.status === "paused" ||
+              task.status === "stale",
           )
-          .slice(-2)
           .map((task) => ({
             id: task.id,
+            kind: task.kind,
             title: task.title,
             status: task.status,
+            currentStep: task.currentStep,
+            progress: task.progress,
             result: task.result,
+            nextAction: task.nextAction,
           })),
         limitations: createShellLimitations({
           language: context.language,
@@ -1662,10 +1667,20 @@ async function runInkShell(
               t.status === "running" ||
               t.status === "completed" ||
               t.status === "failed" ||
-              t.status === "timeout",
+              t.status === "timeout" ||
+              t.status === "paused" ||
+              t.status === "stale",
           )
-          .slice(-2)
-          .map((t) => ({ id: t.id, title: t.title, status: t.status, result: t.result })),
+          .map((t) => ({
+            id: t.id,
+            kind: t.kind,
+            title: t.title,
+            status: t.status,
+            currentStep: t.currentStep,
+            progress: t.progress,
+            result: t.result,
+            nextAction: t.nextAction,
+          })),
         limitations: createShellLimitations({
           language: context.language,
           providerEnvWarning: startup.providerEnvWarning,

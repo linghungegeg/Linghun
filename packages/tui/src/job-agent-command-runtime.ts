@@ -10,6 +10,8 @@ import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-sess
 import type { TuiContext } from "./index.js";
 import {
   formatBackgroundTask,
+  formatBackgroundTaskPanelDetails,
+  formatBackgroundTaskPanelRow,
   formatJobRunnerInline,
   mapDurableJobToBackgroundResult,
   mapDurableJobToBackgroundStatus,
@@ -186,28 +188,29 @@ export async function handleBackgroundCommand(
       return;
     }
     const running = context.backgroundTasks.filter((t) => t.status === "running").length;
-    const failed = context.backgroundTasks.filter((t) => t.status === "failed").length;
+    const needConfirm = context.backgroundTasks.filter((t) => t.status === "paused").length;
+    const failedOrBlocked = context.backgroundTasks.filter(
+      (t) => t.status === "failed" || t.status === "timeout" || t.status === "stale",
+    ).length;
     const completed = context.backgroundTasks.filter((t) => t.status === "completed").length;
     const summary: string[] = [
       isEn
-        ? `Background · ${total} total · ${running} running · ${failed} failed · ${completed} done`
-        : `后台 · 共 ${total} · 运行中 ${running} · 失败 ${failed} · 已完成 ${completed}`,
+        ? `Tasks · ${running} running · ${needConfirm} need attention · ${failedOrBlocked} failed/blocked · ${completed} done`
+        : `任务 · 运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${failedOrBlocked} · 已完成 ${completed}`,
     ];
-    const sections = [
-      {
-        title: isEn ? "Tasks" : "任务",
-        rows: context.backgroundTasks.slice(0, 8).map((t) => `${t.title} · ${t.status}`),
-      },
-    ];
+    const sections = buildBackgroundPanelSections(context.backgroundTasks, context.language);
     const detailsText = context.backgroundTasks
-      .map((task) => formatBackgroundTask(task, context.language))
+      .map((task) => formatBackgroundTaskPanelDetails(task, context.language, context.projectPath))
       .join("\n\n");
     showCommandPanel(context, output, {
       title: "/background",
-      tone: failed > 0 ? "warning" : "neutral",
+      tone: failedOrBlocked > 0 ? "warning" : "neutral",
       summary,
       sections,
-      actions: failed > 0 ? ["/job logs <id>"] : [],
+      actions:
+        failedOrBlocked > 0
+          ? ["/details background <id>", "/details output <id>"]
+          : ["/details background <id>"],
       detailsText,
     });
     return;
@@ -219,6 +222,45 @@ export async function handleBackgroundCommand(
   for (const task of context.backgroundTasks) {
     writeLine(output, formatBackgroundTask(task, context.language));
   }
+}
+
+function buildBackgroundPanelSections(
+  tasks: TuiContext["backgroundTasks"],
+  language: TuiContext["language"],
+): { title?: string; rows: string[] }[] {
+  const isEn = language === "en-US";
+  const groups: Array<{ kind: TuiContext["backgroundTasks"][number]["kind"]; title: string }> = [
+    { kind: "agent", title: isEn ? "Agent" : "Agent" },
+    { kind: "verification", title: isEn ? "Verification" : "Verification" },
+    { kind: "bash", title: isEn ? "Bash / job" : "Bash / job" },
+    { kind: "job", title: isEn ? "Bash / job" : "Bash / job" },
+    { kind: "index", title: isEn ? "Index" : "Index" },
+    { kind: "mcp", title: isEn ? "MCP" : "MCP" },
+    { kind: "compact", title: isEn ? "Other" : "其他" },
+  ];
+  const sections: { title?: string; rows: string[] }[] = [];
+  const used = new Set<string>();
+  for (const group of groups) {
+    const grouped = tasks.filter((task) => task.kind === group.kind && !used.has(task.id));
+    if (grouped.length === 0) continue;
+    for (const task of grouped) used.add(task.id);
+    sections.push({
+      title: group.title,
+      rows: grouped.slice(0, 4).map((task) => formatBackgroundTaskPanelRow(task, language)),
+    });
+    const hidden = grouped.length - 4;
+    if (hidden > 0) {
+      sections[sections.length - 1]?.rows.push(isEn ? `+${hidden} folded` : `另有 ${hidden} 项已折叠`);
+    }
+  }
+  const other = tasks.filter((task) => !used.has(task.id));
+  if (other.length > 0) {
+    sections.push({
+      title: isEn ? "Other" : "其他",
+      rows: other.slice(0, 4).map((task) => formatBackgroundTaskPanelRow(task, language)),
+    });
+  }
+  return sections;
 }
 
 export async function handleJobCommand(

@@ -243,11 +243,13 @@ export function createShellViewModel(
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
   if (effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length) {
-    // Only surface backgrounds the user must act on: running / failed.
-    // timeout / stale / cancelled / completed are demoted to /details so the
-    // task region keeps focus on the active flow.
     const focusBackgrounds = options.backgroundSummaries.filter(
-      (s) => s.status === "running" || s.status === "failed",
+      (s) =>
+        s.status === "running" ||
+        s.status === "paused" ||
+        s.status === "failed" ||
+        s.status === "timeout" ||
+        s.status === "stale",
     );
     if (focusBackgrounds.length > 0) {
       blocks.push(...mapBackgroundSummariesToBlocks(focusBackgrounds, language));
@@ -1095,91 +1097,64 @@ function mapBackgroundSummariesToBlocks(
   summaries: BackgroundTaskSummary[],
   language: Language,
 ): ProductBlockViewModel[] {
-  // D.13L Block D — 主屏后台任务说人话：
-  // - 不再泄漏 raw status (running/stale/cancelled/timeout) / raw result / job id；
-  // - 不再用 "后台：${unknown}" 当 title，回落到中性 "后台任务"；
-  // - 多个后台任务聚合为单条 "后台还有 N 个任务在运行 / 已结束 / 失败"，
-  //   细节（job id、raw status、log path、raw result）仍保留在 BackgroundTaskSummary
-  //   里，由 /details background 路径渲染。
   if (summaries.length === 0) return [];
-  const statusMap: Record<string, ProductBlockViewModel["status"]> = {
-    running: "running",
-    completed: "partial",
-    failed: "fail",
-    cancelled: "partial",
-    timeout: "blocked",
-    stale: "blocked",
-    paused: "info",
-  };
-  const isFail = (s: BackgroundTaskSummary): boolean =>
-    s.status === "failed" || s.status === "timeout";
-  const isRunning = (s: BackgroundTaskSummary): boolean =>
-    s.status === "running" || s.status === "paused" || s.status === "stale";
-  const failed = summaries.filter(isFail);
-  const running = summaries.filter(isRunning);
-  const finished = summaries.filter((s) => !isFail(s) && !isRunning(s));
   const zh = language === "zh-CN";
-  const blocks: ProductBlockViewModel[] = [];
-  const meaningfulTitle = (s: BackgroundTaskSummary): string => {
-    const t = (s.title ?? "").trim();
-    const base = !t || t.toLowerCase() === "unknown" ? (zh ? "后台任务" : "Background task") : t;
-    return zh ? `后台：${base}` : `Background: ${base}`;
-  };
-  if (running.length > 0) {
-    const head = running[0];
-    if (!head) return blocks;
-    const title =
-      running.length === 1
-        ? meaningfulTitle(head)
-        : zh
-          ? `后台还有 ${running.length} 个任务在运行`
-          : `${running.length} background tasks running`;
-    const summary = zh ? "后台任务正在运行。" : "Background task is still running.";
-    blocks.push({
-      id: `bg-running-${running.length}`,
+  const running = summaries.filter((s) => s.status === "running").length;
+  const needConfirm = summaries.filter((s) => s.status === "paused").length;
+  const blocked = summaries.filter(
+    (s) => s.status === "failed" || s.status === "timeout" || s.status === "stale",
+  ).length;
+  const current = summaries.find((s) => s.status === "running") ?? summaries[0];
+  const nextAction =
+    current?.nextAction ??
+    (zh
+      ? "用 /background 查看任务面板；Ctrl+O 或 /details 展开详情。"
+      : "Use /background for the task panel; Ctrl+O or /details for details.");
+  return [
+    {
+      id: "bg-summary",
       kind: "run",
-      status: statusMap[head.status] ?? "running",
-      title,
-      summary,
-    });
-  }
-  if (failed.length > 0) {
-    const head = failed[0];
-    if (!head) return blocks;
-    const title =
-      failed.length === 1
-        ? meaningfulTitle(head)
+      status: blocked > 0 ? "blocked" : running > 0 ? "running" : "partial",
+      title: zh
+        ? `任务：运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${blocked}`
+        : `Tasks: ${running} running · ${needConfirm} need attention · ${blocked} failed/blocked`,
+      summary: current
+        ? summarizeBackgroundStep(current, language)
         : zh
-          ? `后台还有 ${failed.length} 个任务失败`
-          : `${failed.length} background tasks failed`;
-    const summary = zh ? "后台任务失败，可稍后查看详情或重试。" : "Background task failed.";
-    blocks.push({
-      id: `bg-failed-${failed.length}`,
-      kind: "run",
-      status: statusMap[head.status] ?? "fail",
-      title,
-      summary,
-    });
-  }
-  if (finished.length > 0) {
-    const head = finished[0];
-    if (!head) return blocks;
-    const title =
-      finished.length === 1
-        ? meaningfulTitle(head)
-        : zh
-          ? `后台还有 ${finished.length} 个任务已结束`
-          : `${finished.length} background tasks finished`;
-    const summary = zh ? "后台任务已结束。" : "Background task finished.";
-    blocks.push({
-      id: `bg-finished-${finished.length}`,
-      kind: "run",
-      status: statusMap[head.status] ?? "partial",
-      title,
-      summary,
-    });
-  }
-  return blocks;
+          ? "后台任务摘要已折叠。"
+          : "Background task summary is folded.",
+      nextAction,
+    },
+  ];
+}
+
+function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language): string {
+  const zh = language === "zh-CN";
+  const title = cleanBackgroundDisplayText(task.title, zh ? "后台任务" : "Background task");
+  const step = cleanBackgroundDisplayText(
+    task.currentStep ?? (zh ? "等待下一步" : "Waiting for next step"),
+    zh ? "等待下一步" : "Waiting for next step",
+  );
+  const progress = formatBackgroundProgress(task.progress);
+  return progress ? `${title} · ${step} · ${progress}` : `${title} · ${step}`;
+}
+
+function formatBackgroundProgress(
+  progress: BackgroundTaskSummary["progress"] | undefined,
+): string | undefined {
+  if (!progress) return undefined;
+  const total = typeof progress.total === "number" ? progress.total : undefined;
+  const ratio = total ? `${progress.completed}/${total}` : `${progress.completed}`;
+  return progress.label ? `${ratio} ${progress.label}` : ratio;
+}
+
+function cleanBackgroundDisplayText(value: string, fallback: string): string {
+  const cleaned = String(value || "")
+    .replace(/\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;
+  return cleaned;
 }
 
 function formatTrust(context: TuiContext, language: Language): string {

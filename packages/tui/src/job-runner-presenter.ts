@@ -165,6 +165,43 @@ export function formatBackgroundTask(task: BackgroundTaskState, language: Langua
     : `[后台] ${title} · ${task.status} · ${step}${progress} · 耗时 ${elapsed}`;
 }
 
+export function formatBackgroundTaskPanelRow(
+  task: BackgroundTaskState,
+  language: Language,
+): string {
+  const progress = formatPanelProgress(task);
+  const step = cleanPanelText(task.currentStep ?? "-", "-");
+  const nextAction = cleanPanelText(task.nextAction ?? "-", "-");
+  const title = cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务");
+  return [
+    truncateLine(title, 28),
+    normalizePanelStatus(task.status, language),
+    progress,
+    truncateLine(step, 28),
+    truncateLine(nextAction, 42),
+  ].join(" · ");
+}
+
+export function formatBackgroundTaskPanelDetails(
+  task: BackgroundTaskState,
+  language: Language,
+  projectPath?: string,
+): string {
+  const progress = formatPanelProgress(task);
+  return [
+    cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务"),
+    `- status: ${normalizePanelStatus(task.status, language)}`,
+    `- progress: ${progress}`,
+    `- current step: ${cleanPanelText(task.currentStep ?? "-", "-")}`,
+    `- next action: ${cleanPanelText(task.nextAction ?? "-", "-")}`,
+    `- details: /details background ${task.id}`,
+    task.hasOutput ? `- output: /details output ${task.id}` : undefined,
+    task.logPath ? `- log: ${formatDisplayPath(task.logPath, projectPath)}` : undefined,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
 export function formatElapsedSince(startedAt: string, nowMs = Date.now()): string {
   const start = Date.parse(startedAt);
   if (!Number.isFinite(start)) return "0s";
@@ -201,4 +238,31 @@ function truncateLine(value: string, max: number): string {
   if (normalized.length <= max) return normalized;
   if (max <= 1) return "…";
   return `${normalized.slice(0, max - 1)}…`;
+}
+
+function formatPanelProgress(task: BackgroundTaskState): string {
+  if (!task.progress) return "-";
+  const total = typeof task.progress.total === "number" ? task.progress.total : undefined;
+  const ratio = total ? `${task.progress.completed}/${total}` : `${task.progress.completed}`;
+  return task.progress.label ? `${ratio} ${task.progress.label}` : ratio;
+}
+
+function normalizePanelStatus(status: BackgroundTaskState["status"], language: Language): string {
+  const isEn = language === "en-US";
+  if (status === "paused") return isEn ? "needs attention" : "待确认";
+  if (status === "stale") return isEn ? "blocked" : "阻塞";
+  if (status === "timeout") return isEn ? "blocked" : "阻塞";
+  if (status === "failed") return isEn ? "failed" : "失败";
+  if (status === "completed") return isEn ? "completed" : "已完成";
+  if (status === "cancelled") return isEn ? "cancelled" : "已取消";
+  return isEn ? "running" : "运行中";
+}
+
+function cleanPanelText(value: string, fallback: string): string {
+  const cleaned = value
+    .replace(/\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;
+  return cleaned;
 }

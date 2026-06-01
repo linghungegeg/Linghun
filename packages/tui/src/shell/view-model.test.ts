@@ -1097,41 +1097,59 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
 });
 
 describe("backgroundSummaries → blocks mapping", () => {
-  it("filters out completed background, keeps running", () => {
+  it("folds active background tasks into one summary pill", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [
-        { id: "t1", title: "lint check", status: "running" },
+        {
+          id: "t1",
+          title: "lint check",
+          status: "running",
+          currentStep: "checking files",
+          progress: { completed: 1, total: 3, label: "steps" },
+          nextAction: "等待完成，或用 /interrupt 中断。",
+        },
         { id: "t2", title: "test suite", status: "completed", result: "pass" },
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    // completed is filtered out — only running shows
     expect(bgBlocks).toHaveLength(1);
-    // D.13L Block 0-D — 单条 running 聚合 ID = "bg-running-1"，
-    // 标题统一加 "后台：" 前缀，不再泄漏 job-id。
-    expect(bgBlocks[0]?.id).toBe("bg-running-1");
+    expect(bgBlocks[0]?.id).toBe("bg-summary");
     expect(bgBlocks[0]?.kind).toBe("run");
     expect(bgBlocks[0]?.status).toBe("running");
-    expect(bgBlocks[0]?.title).toContain("后台：lint check");
+    expect(bgBlocks[0]?.title).toContain("运行中 1");
+    expect(bgBlocks[0]?.title).toContain("失败/阻塞 0");
+    expect(bgBlocks[0]?.summary).toContain("lint check");
+    expect(bgBlocks[0]?.summary).toContain("checking files");
+    expect(bgBlocks[0]?.summary).toContain("1/3 steps");
+    expect(bgBlocks[0]?.nextAction).toContain("/interrupt");
   });
 
-  it("maps failed status to fail; timeout/stale/cancelled/completed are demoted (D.13D)", () => {
-    // D.13D rework: only running/failed surface in the task region. Other
-    // background statuses (timeout/stale/cancelled/completed) are demoted to
-    // /details to keep the active task flow uncluttered.
+  it("counts blocked background statuses without exposing mechanism words", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [
-        { id: "t3", title: "deploy", status: "failed", result: "fail" },
+        {
+          id: "t3",
+          title: "deploy",
+          status: "failed",
+          result: "fail",
+          currentStep: "sourceRef schema debug runner=abc endpoint raw evidence",
+        },
         { id: "t4", title: "health check", status: "timeout" },
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
     expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.status).toBe("fail");
+    expect(bgBlocks[0]?.status).toBe("blocked");
+    expect(bgBlocks[0]?.title).toContain("失败/阻塞 2");
+    const visible = `${bgBlocks[0]?.title}\n${bgBlocks[0]?.summary}\n${bgBlocks[0]?.nextAction}`;
+    expect(visible).not.toContain("sourceRef");
+    expect(visible).not.toContain("schema");
+    expect(visible).not.toContain("endpoint");
+    expect(visible).not.toContain("runner=");
   });
 
   it("uses en-US prefix for background blocks", () => {
@@ -1140,20 +1158,18 @@ describe("backgroundSummaries → blocks mapping", () => {
       viewMode: "task",
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
-    // D.13L Block 0-D — 单条 running 聚合 ID = "bg-running-1"，job-id 不再泄漏。
-    const bgBlock = view.blocks.find((b) => b.id === "bg-running-1");
-    expect(bgBlock?.title).toContain("Background: build");
+    const bgBlock = view.blocks.find((b) => b.id === "bg-summary");
+    expect(bgBlock?.title).toContain("Tasks: 1 running");
+    expect(bgBlock?.summary).toContain("build");
   });
 
-  it("completed tasks are hidden from task output (no historical noise)", () => {
+  it("completed-only background tasks stay out of the task output", () => {
     const view = createShellViewModel(createContext({ language: "en-US" }), {
       width: 80,
       viewMode: "task",
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
-    const bgBlock = view.blocks.find((b) => b.id === "bg-t6");
-    // D.13: completed historical background is filtered out
-    expect(bgBlock).toBeUndefined();
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
   });
 
   it("home mode does not show background blocks", () => {
@@ -1467,10 +1483,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/failed jobs still show; stale demoted to /details (D.13D)", () => {
-    // D.13D rework: only running/failed surface in the task region. stale and
-    // cancelled are demoted to /details. This keeps the active task region
-    // focused on what the user must act on now.
+  it("running/failed/stale jobs fold into one task summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1481,9 +1494,10 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(2);
-    expect(bgBlocks[0]?.status).toBe("running");
-    expect(bgBlocks[1]?.status).toBe("fail");
+    expect(bgBlocks).toHaveLength(1);
+    expect(bgBlocks[0]?.status).toBe("blocked");
+    expect(bgBlocks[0]?.title).toContain("运行中 1");
+    expect(bgBlocks[0]?.title).toContain("失败/阻塞 2");
   });
 });
 
@@ -1554,7 +1568,7 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "failed" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("[FAIL]");
+    expect(rendered).toContain("[BLOCKED]");
     expect(rendered).toContain("LingHun");
   });
 });
@@ -1867,9 +1881,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task shows running/failed background; timeout/stale demoted (D.13D)", () => {
-    // D.13D rework: only running/failed surface in the task region. timeout
-    // and stale are demoted to /details to keep the active flow focused.
+  it("Task folds running/failed/timeout/stale background into one summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1881,9 +1893,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       ],
     });
     const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(2);
-    expect(bgBlocks[0]?.status).toBe("running");
-    expect(bgBlocks[1]?.status).toBe("fail");
+    expect(bgBlocks).toHaveLength(1);
+    expect(bgBlocks[0]?.status).toBe("blocked");
+    expect(bgBlocks[0]?.title).toContain("运行中 1");
+    expect(bgBlocks[0]?.title).toContain("失败/阻塞 3");
   });
 
   it("fail/blocking output prioritized over normal output", () => {

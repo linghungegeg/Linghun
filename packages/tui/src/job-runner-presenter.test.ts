@@ -4,6 +4,8 @@ import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
   formatBackgroundTask,
+  formatBackgroundTaskPanelDetails,
+  formatBackgroundTaskPanelRow,
   formatElapsedSince,
   formatJobNextAction,
   formatJobRunnerInline,
@@ -193,6 +195,33 @@ describe("job runner presenters", () => {
     );
     expect(narrow.length).toBeLessThanOrEqual(120);
     expect(narrow).toContain("…");
+  });
+
+  it("formats task panel rows with title, status, progress, current step, and next action only", () => {
+    const task: BackgroundTaskState = {
+      ...baseBackground,
+      kind: "verification",
+      title: "Verification gate",
+      status: "stale",
+      currentStep: "sourceRef schema debug runner=abc endpoint raw evidence",
+      nextAction: "Open /details background job-test instead of raw logs",
+      progress: { completed: 2, total: 5, label: "checks" },
+    };
+
+    const row = formatBackgroundTaskPanelRow(task, "en-US");
+    const details = formatBackgroundTaskPanelDetails(task, "en-US", "C:\\redacted\\project");
+
+    expect(row).toContain("Verification gate");
+    expect(row).toContain("blocked");
+    expect(row).toContain("2/5 checks");
+    expect(row).toContain("/details background job-test");
+    expect(row).not.toContain("sourceRef");
+    expect(row).not.toContain("schema");
+    expect(row).not.toContain("endpoint");
+    expect(row).not.toContain("runner=");
+    expect(details).toContain("- current step:");
+    expect(details).toContain("- next action:");
+    expect(details).toContain("- details: /details background job-test");
   });
 
   it("shell/git/process primary background row omits long command, log path, checkpoint id, and raw JSON", () => {
