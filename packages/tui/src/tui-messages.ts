@@ -51,7 +51,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "当前权限模式：{mode}",
     modeOptions: "可选：default / auto-review / plan / full-access",
     modeBoundary:
-      "边界：切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。Plan 仍只读，auto-review 写入需按风险确认。",
+      "边界：切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。Plan 仍只读，auto-review 会自动放行低风险工作区编辑。",
     modeUnknown: "未知模式。可选：default / auto-review / plan / full-access",
     modeSwitched: "已切换权限模式：{mode}",
     modePlanBoundary:
@@ -96,7 +96,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "Current permission mode: {mode}",
     modeOptions: "Options: default / auto-review / plan / full-access",
     modeBoundary:
-      "Boundary: switching modes does not bypass hard denies; dangerous actions still go through the permission pipeline. Plan remains readonly; auto-review confirms writes by risk.",
+      "Boundary: switching modes does not bypass hard denies; dangerous actions still go through the permission pipeline. Plan remains readonly; auto-review automatically allows low-risk workspace edits.",
     modeUnknown: "Unknown mode. Options: default / auto-review / plan / full-access",
     modeSwitched: "Permission mode switched: {mode}",
     modePlanBoundary:

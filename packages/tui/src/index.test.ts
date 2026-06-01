@@ -220,6 +220,36 @@ function mockOpenAiToolSequence(
   return requests;
 }
 
+function mockOpenAiRawToolProtocolThenFinal(
+  rawText: string,
+  finalText = "已改用普通正文回答。",
+): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const text = requests.length === 1 ? rawText : finalText;
+      const body = `data: ${JSON.stringify({ id: `chatcmpl-raw-${requests.length}`, choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiRepeatedRawToolProtocol(rawText: string): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const body = `data: ${JSON.stringify({ id: `chatcmpl-raw-${requests.length}`, choices: [{ delta: { content: rawText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
 function mockOpenAiReportReadThenWriteFlow(report: string, finalText: string): unknown[] {
   const requests: unknown[] = [];
   vi.stubGlobal(
@@ -4742,57 +4772,39 @@ describe("Phase 06 TUI slash commands", () => {
     }
   });
 
-  it("D.14H-F: natural language workflow plan intent dispatches to /workflows plan, not model", async () => {
+  it("Mature UX Cutback: workflow/agent/index/memory/job natural language stays on the model path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
 
-    // 中文：明确 workflow plan intent 应被拦截
-    const zhPhrases = [
-      "工作流计划：实现用户登录功能",
-      "请生成工作流计划：重构数据库模块",
-      "生成工作流计划 优化缓存策略",
-      "创建工作流计划：添加单元测试",
-    ];
-    for (const phrase of zhPhrases) {
-      const out = new MemoryOutput();
-      const result = await handleNaturalInput(phrase, context, out);
-      expect(result).toBe("handled");
-      // /workflows plan 输出包含 workflow plan 相关内容
-      expect(out.text).not.toContain("正在思考…");
-    }
-
-    // 英文：明确 workflow plan intent 应被拦截
-    const enPhrases = [
+    const phrases = [
+      "工作流计划 修复 TUI 噪音",
+      "拆成工作流继续做",
+      "多开智能体审计代码",
+      "刷新索引并继续修复",
+      "帮我修 bug/写报告/继续开发",
       "workflow plan implement user authentication",
       "please create a workflow plan: refactor the database module",
-      "create a workflow plan optimize caching strategy",
+      "启动任务并记住这个规则",
     ];
-    for (const phrase of enPhrases) {
-      const out = new MemoryOutput();
-      const result = await handleNaturalInput(phrase, context, out);
-      expect(result).toBe("handled");
-      expect(out.text).not.toContain("正在思考…");
-    }
-
-    // 普通开发请求不应被拦截
-    const ordinaryPhrases = [
-      "帮我写一个排序算法",
-      "修复这个 bug",
-      "帮我实现导出报表功能",
-      "分析这个项目并输出部署报告",
-      "implement a sorting algorithm",
-      "fix this bug",
-    ];
-    for (const phrase of ordinaryPhrases) {
+    for (const phrase of phrases) {
       const out = new MemoryOutput();
       const result = await handleNaturalInput(phrase, context, out);
       expect(result).toBe("message");
+      expect(out.text).not.toContain("Workflow plan preview");
+      expect(out.text).not.toContain("/workflows plan");
+      expect(out.text).not.toContain("/fork");
+      expect(out.text).not.toContain("/index refresh");
     }
+
+    const slash = new MemoryOutput();
+    const slashResult = await handleSlashCommand("/workflows plan 修复 TUI 噪音", context, slash);
+    expect(slashResult).toBe("handled");
+    expect(slash.text).toMatch(/Workflow plan preview|工作流计划预览/u);
   });
 
-  it("D.14H-F: workflow plan injects core-system summaries into details without main-screen noise", async () => {
+  it("Mature UX Cutback: workflow plan details are only produced by explicit slash", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -4838,9 +4850,19 @@ describe("Phase 06 TUI slash commands", () => {
       changedKeys: ["memoryHash", "modelProviderHash"],
     };
 
-    const out = new MemoryOutput();
-    const result = await handleNaturalInput(
+    const naturalOut = new MemoryOutput();
+    const naturalResult = await handleNaturalInput(
       "工作流计划：实现缓存命中率报告，接入架构、记忆、失败反思、缓存预算和稳定点",
+      context,
+      naturalOut,
+    );
+
+    expect(naturalResult).toBe("message");
+    expect(naturalOut.text).not.toContain("工作流计划预览");
+
+    const out = new MemoryOutput();
+    const result = await handleSlashCommand(
+      "/workflows plan 实现缓存命中率报告，接入架构、记忆、失败反思、缓存预算和稳定点",
       context,
       out,
     );
@@ -5005,6 +5027,190 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("- mode:");
     expect(output.text).not.toContain("工具 Bash 结果");
     expect(requests).toHaveLength(1);
+  });
+
+  it("workflow/agent/job/memory capabilities are model-tool proposals, not natural-language routers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "command-proposal-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "command-proposal-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "CommandProposal",
+      { command: "/workflows plan 修复 TUI 噪音", reason: "用户要求工作流计划" },
+      "建议先查看这个命令提案。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["拆成工作流继续做\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    const first = requests[0] as { tools?: Array<{ function?: { name?: string }; name?: string }> };
+    expect(first.tools?.some((tool) => (tool.function?.name ?? tool.name) === "CommandProposal")).toBe(
+      true,
+    );
+    expect(output.text).toContain("建议命令：/workflows plan 修复 TUI 噪音");
+    expect(output.text).not.toContain("工作流计划预览");
+  });
+
+  it("raw tool_use text is retried as a structured-tool reminder and never fake-executes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "raw-tool-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "raw-tool-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiRawToolProtocolThenFinal(
+      '<tool_use id="toolu_1" name="Write"><input>{"path":"report.md","content":"fake"}</input></tool_use>',
+      "我会使用结构化工具调用，而不是把工具协议写成正文。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请写 report.md\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const second = requests[1] as { messages?: Array<{ role?: string; content?: string }> };
+    expect(second.messages?.some((m) => m.content?.includes("结构化工具调用"))).toBe(true);
+    expect(output.text).not.toContain("<tool_use");
+    expect(output.text).not.toContain("工具 Write 已完成");
+    await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
+  });
+
+  it("repeated raw tool_use text stops with a short message and no tool_result evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "raw-tool-repeat-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "raw-tool-repeat-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiRepeatedRawToolProtocol(
+      '{"type":"tool_use","id":"toolu_1","name":"Write","input":{"path":"report.md","content":"fake"}}',
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请写 report.md\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(output.text).toContain("没有执行任何非结构化工具请求");
+    expect(output.text).not.toContain("tool_use");
+    expect(output.text).not.toContain("工具 Write 已完成");
+    await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
+    const sessions = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).list();
+    const transcript = await readFile(sessions[0]?.transcriptPath ?? "", "utf8");
+    expect(transcript).not.toContain('"type":"tool_result"');
+    expect(transcript).not.toContain('"name":"Write"');
+  });
+
+  it("long context is auto-compacted without exposing fixed character limits on the main screen", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "small-context-model",
+      providers: {
+        ...defaultConfig.providers,
+        deepseek: { ...defaultConfig.providers.deepseek, model: "different-model" },
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "small-context-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "small-context-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "small-context-model",
+                maxInputTokens: 1500,
+                maxOutputTokens: 64,
+              }
+            : route,
+        ),
+      },
+    };
+    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "small-context-model" });
+    await store.appendEvent(session.id, {
+      type: "assistant_text_delta",
+      id: "old-assistant",
+      text: "旧输出\n".repeat(1800),
+      createdAt: new Date().toISOString(),
+    });
+    const requests = mockOpenAiTextFetch("压缩后继续。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请继续处理这个问题\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("压缩后继续");
+    expect(output.text).not.toContain("48000");
+    expect(output.text).not.toContain("48_000");
+    expect(output.text).not.toContain("chars");
+    expect(output.text).not.toContain("字符上限");
+    expect(output.text).not.toContain("context safety limit");
   });
 
   it("D.14D-R P1-3: tool round exhaustion shows a mature summary, not a scary failure box", async () => {
@@ -5803,7 +6009,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"evidenceId"');
   });
 
-  it("auto-review report Write requests approval instead of direct deny", async () => {
+  it("auto-review report Write is allowed through the normal workspace edit path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -5816,51 +6022,46 @@ describe("Phase 06 TUI slash commands", () => {
       session.id,
     );
 
-    expect(permission.decision).toBe("ask");
-    expect(permission.reason).toContain("auto-review 不会静默执行本次动作");
+    expect(permission.decision).toBe("allow");
     expect(context.permissions.recentDenied).toHaveLength(0);
     await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
   });
 
-  it("auto-review report Write denial and cancellation do not create report.md", async () => {
-    for (const answer of ["no", "deny", "cancel"] as const) {
-      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-      await mkdir(join(project, ".linghun"), { recursive: true });
-      await writeFile(
-        join(project, ".linghun", "settings.json"),
-        JSON.stringify({
-          defaultModel: "tool-report-model",
-          permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
-          providers: {
-            deepseek: { model: "different-model" },
-            "openai-compatible": {
-              baseUrl: "https://example.test/v1",
-              apiKey: "sk-test",
-              model: "tool-report-model",
-            },
+  it("auto-review report Write completes without an extra foreground approval prompt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-report-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-report-model",
           },
-        }),
-        "utf8",
-      );
-      await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
-      const requests = mockOpenAiReportReadThenWriteFlow(
-        "# Report",
-        "报告未保存，因为写入被拒绝。",
-      );
-      const output = new MemoryOutput();
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    const requests = mockOpenAiReportReadThenWriteFlow("# Report", "报告已保存：report.md");
+    const output = new MemoryOutput();
 
-      await runTui({
-        projectPath: project,
-        stdin: Readable.from(["请生成 report.md\n", `${answer}\n`, "/exit\n"]),
-        stdout: output,
-        stderr: new MemoryOutput(),
-      });
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成 report.md\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
 
-      expect(requests.length).toBeGreaterThanOrEqual(3);
-      expect(output.text).toContain("NOT written / NOT created");
-      expect(output.text).not.toContain("报告已保存：report.md");
-      await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
-    }
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(output.text).toContain("报告已保存：report.md");
+    expect(output.text).not.toContain("NOT written / NOT created");
+    expect(output.text).not.toContain("auto-review 不会静默执行本次动作");
+    await expect(readFile(join(project, "report.md"), "utf8")).resolves.toBe("# Report");
   });
 
   it("plain yes without pending write approval is not sent to the model", async () => {
@@ -8281,7 +8482,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("full-access");
   });
 
-  it("allows auto-review low-risk edits but asks for bash and medium writes", async () => {
+  it("allows auto-review workspace edits while keeping dangerous actions behind hard denies", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -8296,13 +8497,13 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
 
     expect(output.text).toContain("已切换权限模式：auto-review");
-    expect(output.text).toContain("写入前摘要");
+    expect(output.text).not.toContain("写入前摘要");
+    expect(output.text).not.toContain("已创建 checkpoint");
     expect(output.text).toContain("工具 Edit 已完成");
-    expect(output.text).toContain("auto-review 不会静默执行本次动作");
-    expect(output.text).toContain("需要用户确认后才会执行");
-    expect(output.text).toContain("风险：low");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
-    await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, "medium.txt"), "utf8")).resolves.toBe(
+      "should-not-write",
+    );
   });
 
   it("keeps full-access behind hard denies", async () => {
@@ -9160,7 +9361,8 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = (await store.resume(session.id)).transcript;
     expect(output.text).toContain("验证计划");
     expect(output.text).toContain("PASS");
-    expect(output.text).toContain("日志：");
+    expect(output.text).toContain("log:");
+    expect(output.text).not.toContain("日志：");
     expect(context.lastVerification?.status).toBe("pass");
     expect(context.backgroundTasks[0]?.kind).toBe("verification");
     expect(context.backgroundTasks[0]?.result).toBe("pass");
@@ -13674,12 +13876,11 @@ describe("D.13J Block 3 — codebase-memory mutating permission gate", () => {
       context,
     );
     expect(result.ok).toBe(false);
-    expect(result.text).toContain("写操作");
-    expect(result.text).toContain("detect_changes");
-    expect(result.text).toContain("mutating");
-    // D.14D-R P0-2：codebase-memory mutating 死路改人话，重定向到结构化工具
-    // IndexRefresh / IndexRepair；不写不存在的 /mcp permission / /codebase-memory permission。
-    expect(result.text).toContain("IndexRefresh");
+    expect(result.text).toContain("索引写入动作");
+    expect(result.text).toContain("代码索引刷新工具");
+    expect(result.text).not.toContain("detect_changes");
+    expect(result.text).not.toContain("mutating");
+    expect(result.text).not.toContain("IndexRefresh");
     expect(result.text).not.toContain("/mcp permission");
     expect(result.text).not.toContain("/codebase-memory permission");
     expect(result.text).toContain("/index refresh");
@@ -14169,10 +14370,10 @@ describe("D.13J Block 4 — local stdio MCP runtime adapter", () => {
       context,
     );
     expect(result.ok).toBe(false);
-    expect(result.text).toContain("写操作");
-    expect(result.text).toContain("不通过本入口执行");
-    // D.14D-R P0-2：mutating 死路文案改人话，指向结构化工具 IndexRefresh / IndexRepair。
-    expect(result.text).toContain("IndexRefresh");
+    expect(result.text).toContain("会修改工作区");
+    expect(result.text).toContain("不能通过通用工具入口直接执行");
+    expect(result.text).not.toContain("mutating");
+    expect(result.text).not.toContain("IndexRefresh");
     // D.13J tail fix（Block B）：mutating 死路文案禁止再出现 /mcp permission 这种不存在的 slash 入口。
     expect(result.text).not.toContain("/mcp permission");
     expect(result.text).not.toContain("/codebase-memory permission");
@@ -14466,6 +14667,11 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     "这个配置怎么写",
     "诊断一下这个 bug",
     "本地控制是不是太强",
+    "帮我看看为什么登录失败",
+    "这个报错怎么修",
+    "解释一下这段代码，不要执行",
+    "帮我规划一下修 bug 的步骤",
+    "给我一个实现计划",
   ];
 
   for (const prompt of ordinaryPromptsZh) {
@@ -14489,6 +14695,8 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     "explain how the local control plane works in plain words",
     "tell me what is going wrong here right now",
     "describe the runtime behaviour for me",
+    "help me debug this failure",
+    "plan how to fix this bug",
   ];
 
   for (const prompt of ordinaryPromptsEn) {
@@ -14535,6 +14743,36 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     // 让 processTuiLine 继续走 sendMessage → gateway.stream。
     expect(result).toBe("handled");
     expect(output.text).toContain("Model route doctor");
+  });
+
+  it("/btw 当前在做什么只返回短状态，不调用模型插问或刷内部细节", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks.push({
+      id: "task-status",
+      kind: "bash",
+      title: "Bash",
+      status: "running",
+      currentStep: "running command",
+      startedAt: new Date(Date.now() - 65_000).toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 60_000,
+      hasOutput: false,
+      userVisibleSummary: "running command",
+    });
+
+    const result = await handleSlashCommand("/btw 当前在做什么", context, output);
+
+    expect(result).toBe("handled");
+    expect(output.text).toContain("当前：Bash · running command");
+    expect(output.text).toContain("耗时");
+    expect(output.text).not.toContain("tool_use");
+    expect(output.text).not.toContain("RuntimeStatus");
+    expect(output.text).not.toContain("gateId");
   });
 
   it("/model doctor 之后 /details 必须展开完整 doctor 正文（含 endpointPath=/v1/messages）", async () => {
@@ -15540,6 +15778,38 @@ describe("D.13V-B/C source invariants", () => {
     expect(text).toMatch(/"auto-review":\s*"auto mode"/);
     expect(text).toMatch(/plan:\s*"plan mode"/);
     expect(text).toMatch(/"full-access":\s*"bypass approvals"/);
+  });
+
+  it("auto-review 允许普通 report.md 写入，但危险动作仍走 ask/deny", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "auto-review";
+
+    const write = await decidePermission(
+      "Write",
+      { file_path: "report.md", content: "ok" },
+      context,
+      session.id,
+    );
+    expect(write.decision).toBe("allow");
+
+    const secretWrite = await decidePermission(
+      "Write",
+      { file_path: ".env", content: "TOKEN=raw" },
+      context,
+      session.id,
+    );
+    expect(secretWrite.decision).toBe("deny");
+
+    const dangerousBash = await decidePermission(
+      "Bash",
+      { command: "rm -rf tmp" },
+      context,
+      session.id,
+    );
+    expect(dangerousBash.decision).toBe("deny");
   });
 
   // D.14A-R-Fix P1-7 — AntiCodeBlob 锁定为 prompt-only：它只出现在 prompt/directive，

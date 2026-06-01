@@ -98,6 +98,22 @@ export function microCompactMessages(
   return { messages: finalMessages, boundary, changed: true };
 }
 
+export function compactMessagesToFit(
+  messages: ModelMessage[],
+  options: MicroCompactOptions,
+): CompactResult {
+  const first = microCompactMessages(messages, options);
+  if (estimateModelMessagesChars(first.messages) <= Math.max(0, options.maxChars)) {
+    return first;
+  }
+
+  return microCompactMessages(first.messages, {
+    ...options,
+    preserveRecentMessages: 1,
+    kind: options.kind ?? "micro",
+  });
+}
+
 export function createManualCompactBoundary(input: {
   preCompactChars: number;
   postCompactChars: number;

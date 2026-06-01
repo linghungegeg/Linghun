@@ -205,6 +205,8 @@ export type TaskFooterView = {
   model: string;
   cache: string;
   index: string;
+  task?: string;
+  elapsed?: string;
   /** Red-colored Shift+Tab hint, e.g. "（Shift+Tab 切换模式）" / "(Shift+Tab switch mode)". */
   cyclePermHint: string;
   /**

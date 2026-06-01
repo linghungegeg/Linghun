@@ -185,12 +185,16 @@ export function createToolInputSchema(name: ToolName): unknown {
 // 动态发现的 MCP/skill/plugin 列表不进 toolSchemaHash，进 deferredToolListHash。
 export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
 export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
+export const COMMAND_PROPOSAL_TOOL_NAME = "CommandProposal" as const;
 
 export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
   "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
 
 export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
   "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
+
+export const COMMAND_PROPOSAL_DESCRIPTION =
+  "Propose an explicit Linghun slash command for workflow, agent, job, memory, index, or status capabilities when the user asks for those capabilities in natural language. This tool does not execute the command; it returns a concise proposal so the assistant can explain or ask before using the explicit slash command path.";
 
 export function createSearchExtraToolsInputSchema(): unknown {
   return {
@@ -215,6 +219,18 @@ export function createExecuteExtraToolInputSchema(): unknown {
   };
 }
 
+export function createCommandProposalInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      command: { type: "string" },
+      reason: { type: "string" },
+    },
+    required: ["command", "reason"],
+  };
+}
+
 export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
   return [
     {
@@ -226,6 +242,11 @@ export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
       name: EXECUTE_EXTRA_TOOL_NAME,
       description: EXECUTE_EXTRA_TOOL_DESCRIPTION,
       inputSchema: createExecuteExtraToolInputSchema(),
+    },
+    {
+      name: COMMAND_PROPOSAL_TOOL_NAME,
+      description: COMMAND_PROPOSAL_DESCRIPTION,
+      inputSchema: createCommandProposalInputSchema(),
     },
   ];
 }

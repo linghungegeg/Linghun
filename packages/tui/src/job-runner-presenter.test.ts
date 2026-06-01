@@ -4,6 +4,7 @@ import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
   formatBackgroundTask,
+  formatElapsedSince,
   formatJobNextAction,
   formatJobRunnerInline,
   formatJobRunnerReportLine,
@@ -173,8 +174,9 @@ describe("job runner presenters", () => {
 
     const rendered = formatBackgroundTask(baseBackground, "en-US");
     expect(rendered).toContain("[background] Job: safe · timeout · timeout 1/4");
-    expect(rendered).toContain("log: job.log");
-    expect(rendered).toContain("next: Inspect /job report job-test");
+    expect(rendered).toContain("elapsed ");
+    expect(rendered).not.toContain("log:");
+    expect(rendered).not.toContain("next:");
     expect(rendered).not.toContain("complete raw log line");
 
     const narrow = formatBackgroundTask(
@@ -189,8 +191,45 @@ describe("job runner presenters", () => {
       },
       "en-US",
     );
-    expect(narrow.length).toBeLessThanOrEqual(190);
+    expect(narrow.length).toBeLessThanOrEqual(120);
     expect(narrow).toContain("…");
+  });
+
+  it("shell/git/process primary background row omits long command, log path, checkpoint id, and raw JSON", () => {
+    const task: BackgroundTaskState = {
+      ...baseBackground,
+      title:
+        "powershell -NoProfile -Command \"git status --porcelain; Get-Content C:\\secret\\runner.log\"",
+      currentStep:
+        "checkpoint id chk_abcdef1234567890 payload {\"schema\":{\"debug\":true},\"raw\":\"value\"}",
+      logPath: "C:\\secret\\runner.log",
+      outputPath: "C:\\secret\\full-output.log",
+      userVisibleSummary:
+        "full command and raw JSON are available only in details, not the primary row",
+    };
+
+    const row = formatBackgroundTask(task, "en-US");
+
+    expect(row).toContain("[background]");
+    expect(row).toContain("elapsed ");
+    expect(row).not.toContain("C:\\secret");
+    expect(row).not.toContain("runner.log");
+    expect(row).not.toContain("full-output.log");
+    expect(row).not.toContain("chk_abcdef1234567890");
+    expect(row).not.toContain('"schema"');
+    expect(row).not.toContain('"raw"');
+  });
+
+  it("formats bounded elapsed duration for task surfaces", () => {
+    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:00:42.000Z"))).toBe(
+      "42s",
+    );
+    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T00:03:05.000Z"))).toBe(
+      "3m05s",
+    );
+    expect(formatElapsedSince("2026-05-23T00:00:00.000Z", Date.parse("2026-05-23T02:04:00.000Z"))).toBe(
+      "2h04m",
+    );
   });
 
   it("formats failed, timeout, and cancelled summaries without secrets when state is already bounded", () => {

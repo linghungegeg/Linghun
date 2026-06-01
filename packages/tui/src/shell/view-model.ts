@@ -365,6 +365,8 @@ export function createShellViewModel(
           setupNeeded,
           cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
           indexStatus: context.index.status,
+          currentTaskStep: getCurrentTaskStep(context, effectiveActivity),
+          elapsed: getCurrentTaskElapsed(context),
           reasoningLevel: options.reasoningLevel,
           reasoningSent: options.reasoningSent,
         }).view;
@@ -676,7 +678,7 @@ export function createOutputBlock(
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
     explicitFold ||
-    (normalized.length > 0 && (nonEmptyLineCount >= 2 || normalized.length > summary.length + 16));
+    (normalized.length > 0 && (nonEmptyLineCount >= 3 || normalized.length > summary.length + 16));
   return {
     id,
     kind: "details",
@@ -719,7 +721,7 @@ function addDetailsHint(block: ProductBlockViewModel, language: Language): Produ
   const summary = block.summary ?? "";
   const nonEmptyLines = fullText.split("\n").filter((line) => line.trim().length > 0).length;
   const hasMore =
-    fullText.length > 0 && (nonEmptyLines >= 2 || fullText.length > summary.length + 16);
+    fullText.length > 0 && (nonEmptyLines >= 3 || fullText.length > summary.length + 16);
   if (!hasMore) return block;
   const isFailLike = block.status === "fail" || block.status === "blocked";
   return { ...block, nextAction: isFailLike ? copy.errorDetailsHint : copy.detailsHint };
@@ -833,7 +835,7 @@ export function mapPendingApprovalToPermission(
         ? "修复并刷新代码索引"
         : "刷新（重建）代码索引";
     return {
-      toolName: "IndexRefresh",
+      toolName: action === "repair" ? "修复代码索引" : "刷新代码索引",
       reason: "",
       risk: "medium",
       scope: [],
@@ -1138,6 +1140,28 @@ function formatBackground(count: number, language: Language, width: number): str
     return shellText[language].backgroundShort(count);
   }
   return shellText[language].background(count);
+}
+
+function getCurrentTaskStep(
+  context: TuiContext,
+  activity: TaskActivityView | undefined,
+): string | undefined {
+  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
+  return runningTask?.currentStep ?? activity?.text;
+}
+
+function getCurrentTaskElapsed(context: TuiContext): string | undefined {
+  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
+  if (!runningTask) return undefined;
+  const startedAt = Date.parse(runningTask.startedAt);
+  if (!Number.isFinite(startedAt)) return undefined;
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${(minutes % 60).toString().padStart(2, "0")}m`;
 }
 
 // D.13Q-UX: footer 字段计算迁移到 packages/tui/src/shell/models/footer-view.ts。

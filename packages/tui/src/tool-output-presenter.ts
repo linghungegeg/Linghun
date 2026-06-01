@@ -15,6 +15,15 @@ export type LayeredToolOutput = {
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
+const RAW_TOOL_USE_PATTERNS = [
+  /<tool_use\b[\s\S]*?<\/tool_use>/giu,
+  /<tool_use\b[^>]*\/>/giu,
+  /<tool_uses\b[\s\S]*?<\/tool_uses>/giu,
+  /```(?:json|xml)?\s*[\s\S]*?\btool_use(?:_id)?\b[\s\S]*?```/giu,
+  /\{[\s\S]{0,400}?"type"\s*:\s*"tool_use"[\s\S]{0,1600}?\}/giu,
+];
+const RAW_TOOL_XML_START = /<tool_uses?\b/iu;
+const RAW_TOOL_PREFIXES = ["<", "<t", "<to", "<too", "<tool", "<tool_", "<tool_u", "<tool_us"];
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -113,6 +122,14 @@ function redactBannerArg(value: string): string {
       .replace(/\b(key)=[^\s&"']+/gi, "$1=***")
       // sk-style long secret tokens.
       .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-***")
+      // Product banner noise: keep execution details out of the primary row.
+      .replace(
+        /\b(--?(?:log|log-path|output|output-path|checkpoint-id|checkpoint)\s+)(?:"[^"]*"|'[^']*'|\S+)/giu,
+        "$1***",
+      )
+      .replace(/\bchk_[A-Za-z0-9_-]+\b/gu, "checkpoint-id")
+      .replace(/[A-Za-z]:[\\/][^\s"']*(?:log|full-output)[^\s"']*/giu, "[output-log]")
+      .replace(/\{[^{}]*(?:"schema"|"raw"|"debug")[\s\S]*\}/giu, "{...}")
   );
 }
 
@@ -149,6 +166,95 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
   }
   if (!arg) return undefined;
   return `${name}(${clamp(redactBannerArg(arg))})`;
+}
+
+export function sanitizeAssistantPrimaryText(text: string, language: Language): string {
+  const result = sanitizeAssistantPrimaryTextWithMetadata(text, language);
+  return result.text;
+}
+
+export function sanitizeAssistantPrimaryTextWithMetadata(
+  text: string,
+  language: Language,
+): { text: string; removedRawToolProtocol: boolean } {
+  let sanitized = text;
+  let removed = false;
+  for (const pattern of RAW_TOOL_USE_PATTERNS) {
+    sanitized = sanitized.replace(pattern, () => {
+      removed = true;
+      return "";
+    });
+  }
+  if (!removed) return { text, removedRawToolProtocol: false };
+  const compact = sanitized.replace(/\n{3,}/gu, "\n\n");
+  const note =
+    language === "en-US"
+      ? "[Tool call details hidden.]\n"
+      : "[工具调用细节已隐藏。]\n";
+  return {
+    text: compact.trim().length > 0 ? `${note}${compact}` : note,
+    removedRawToolProtocol: true,
+  };
+}
+
+export function createAssistantPrimaryTextSanitizer(language: Language): {
+  push(text: string): string;
+  flush(): string;
+  hadRawToolProtocol(): boolean;
+} {
+  let pending = "";
+  let removedRawToolProtocol = false;
+
+  function sanitizeBuffered(text: string): string {
+    if (!text) return "";
+    const combined = pending + text;
+    const holdAt = findPendingRawToolStart(combined) ?? findRawToolPrefixAtEnd(combined);
+    if (holdAt !== undefined) {
+      pending = combined.slice(holdAt);
+      const result = sanitizeAssistantPrimaryTextWithMetadata(combined.slice(0, holdAt), language);
+      removedRawToolProtocol ||= result.removedRawToolProtocol;
+      return result.text;
+    }
+    pending = "";
+    const result = sanitizeAssistantPrimaryTextWithMetadata(combined, language);
+    removedRawToolProtocol ||= result.removedRawToolProtocol;
+    return result.text;
+  }
+
+  return {
+    push: sanitizeBuffered,
+    flush() {
+      const result = pending
+        ? sanitizeAssistantPrimaryTextWithMetadata(pending, language)
+        : { text: "", removedRawToolProtocol: false };
+      removedRawToolProtocol ||= result.removedRawToolProtocol;
+      pending = "";
+      return result.text;
+    },
+    hadRawToolProtocol() {
+      return removedRawToolProtocol;
+    },
+  };
+}
+
+function findPendingRawToolStart(text: string): number | undefined {
+  const match = RAW_TOOL_XML_START.exec(text);
+  if (!match || match.index < 0) return undefined;
+  const start = match.index;
+  const tail = text.slice(start).toLowerCase();
+  if (tail.startsWith("<tool_uses")) {
+    return tail.includes("</tool_uses>") ? undefined : start;
+  }
+  if (tail.includes("/>")) return undefined;
+  return tail.includes("</tool_use>") ? undefined : start;
+}
+
+function findRawToolPrefixAtEnd(text: string): number | undefined {
+  const lower = text.toLowerCase();
+  for (const prefix of RAW_TOOL_PREFIXES) {
+    if (lower.endsWith(prefix)) return text.length - prefix.length;
+  }
+  return undefined;
 }
 
 function formatDetailsHint(language: Language): string {

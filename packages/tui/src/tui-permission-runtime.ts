@@ -215,6 +215,15 @@ export async function decidePermission(
   }
 
   if (context.permissionMode === "auto-review") {
+    if (verdict.decision === "auto_allow_readonly") {
+      return {
+        request,
+        decision: "allow",
+        reason: `auto-review 允许安全只读动作：${verdict.reason}`,
+        autoAllowReadonly: verdict,
+        verdict,
+      };
+    }
     if (isLowRiskWorkspaceEdit(name, tool.permission.risk, files)) {
       return {
         request,
@@ -228,7 +237,7 @@ export async function decidePermission(
       return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
     }
     const reason =
-      "auto-review 不会静默执行本次动作；需要用户确认后才会执行，硬拒绝和路径安全仍由权限底座处理。";
+      "auto-review 仅自动放行低风险工作区编辑；当前动作需要确认，硬拒绝和路径安全仍由权限底座处理。";
     return { request, decision: "ask", reason, verdict };
   }
 

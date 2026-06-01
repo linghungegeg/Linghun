@@ -1,6 +1,10 @@
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
-import { estimateModelMessagesChars, microCompactMessages } from "./compact-context.js";
+import {
+  compactMessagesToFit,
+  estimateModelMessagesChars,
+  microCompactMessages,
+} from "./compact-context.js";
 
 function assertNoSplitToolPairs(messages: ModelMessage[]): void {
   const required = new Set<string>();
@@ -99,6 +103,42 @@ describe("Compact Lite context boundaries", () => {
     expect(result.messages).not.toContain(incompleteAssistant);
     expect(result.messages).not.toContain(orphanTool);
     expect(result.messages).toContain(recent);
+    assertNoSplitToolPairs(result.messages);
+  });
+
+  it("provider preflight can compact again before exposing a hard context stop", () => {
+    const recentPair: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: "need recent tool",
+        toolCalls: [{ id: "call-recent", name: "Read", input: { path: "src/index.ts" } }],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-recent",
+        content: '{"evidenceId":"ev-recent","path":"src/index.ts"}',
+      },
+    ];
+    const messages: ModelMessage[] = [
+      { role: "system", content: "stable system prompt" },
+      { role: "user", content: "old noisy context ".repeat(900) },
+      { role: "assistant", content: "old raw assistant ".repeat(900) },
+      ...recentPair,
+      { role: "user", content: "current request" },
+    ];
+
+    const result = compactMessagesToFit(messages, {
+      maxChars: 800,
+      preserveRecentMessages: 6,
+      kind: "micro",
+    });
+
+    expect(result.changed).toBe(true);
+    expect(estimateModelMessagesChars(result.messages)).toBeLessThanOrEqual(800);
+    expect(result.messages[0]).toBe(messages[0]);
+    expect(result.messages).toContain(recentPair[0]);
+    expect(result.messages).toContain(recentPair[1]);
+    expect(result.messages.at(-1)?.content).toBe("current request");
     assertNoSplitToolPairs(result.messages);
   });
 });

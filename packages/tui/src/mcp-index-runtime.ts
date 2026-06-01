@@ -1211,7 +1211,7 @@ export async function executeExtraTool(
     if (risk === "mutating" && !context.codebaseMemoryMutatingGranted) {
       return {
         ok: false,
-        text: `ExecuteExtraTool: codebase-memory 工具 ${target.name} 是写操作（mutating），不通过本入口执行。要刷新/重建索引，请直接调用结构化工具 IndexRefresh（或 IndexRepair），它会走 Linghun 受控权限确认路径；也可使用 /index refresh 命令。`,
+        text: "该索引写入动作不能通过通用工具入口执行。请使用 /index refresh 或让模型发起结构化的代码索引刷新工具；执行时仍会走 Linghun 权限边界。",
       };
     }
     const cliResult = await runCodebaseMemoryCli(context, target.name, params, context.projectPath);
@@ -1250,7 +1250,7 @@ export async function executeExtraTool(
     if (!context.mcpStdioMutatingGranted && isPotentiallyMutatingMcpTool(parsed.tool)) {
       return {
         ok: false,
-        text: `ExecuteExtraTool: MCP 工具 ${target.name} 看起来是写操作（write/delete/update/index/create 类），不通过本入口执行。若是 codebase-memory 索引写入，请改用结构化工具 IndexRefresh / IndexRepair（走 Linghun 受控权限确认）或 /index refresh；否则请在 server 自身或 .linghun/settings.json 中关闭对应写工具。`,
+        text: "该 MCP 工具看起来会修改工作区，不能通过通用工具入口直接执行。请改用明确的受控命令或让模型发起对应结构化工具；执行时仍会走 Linghun 权限边界。",
       };
     }
     const stdio = await runMcpStdioToolCall(

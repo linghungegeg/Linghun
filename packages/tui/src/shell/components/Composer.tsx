@@ -940,11 +940,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   //   - permissionActive: 永远隐藏 native cursor，让 PermissionControl 独占焦点。
   void truncatedAbove;
   void truncatedBelow;
-  const isTaskMode = view.viewMode === "task" || view.viewMode === "pending";
-  // D.13Q-UX Task Surface — task / pending 模式下让出 native cursor，改用 inline
-  // reverse-video cursor。useInlineCursor 与 permissionActive 任一为真都要把
-  // useAnchoredCursor 切到 null（permission 卡独占焦点 / inline cursor 自己画）。
-  const useInlineCursor = isTaskMode;
+  // Pre-open-source parity cutback: task / pending mode uses the same anchored
+  // native cursor as home mode. Permission cards still own focus exclusively.
+  const useInlineCursor = false;
   const declaredRow = cursorRow;
   useAnchoredCursor(
     permissionActive || useInlineCursor ? null : { row: declaredRow, col: cursorCol },

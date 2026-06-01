@@ -45,4 +45,15 @@ describe("help-panel: 分组 + 内容", () => {
     expect(slashes).toContain("/details");
     expect(slashes).toContain("/model doctor");
   });
+
+  it("core help panel is short and does not surface debug/schema/gate internals", () => {
+    for (const lang of ["zh-CN", "en-US"] as const) {
+      const data = buildHelpPanelData("core", 0, lang);
+      const main = data.entries.map((entry) => `${entry.slash} ${entry.description}`).join("\n");
+
+      expect(data.entries.length).toBeLessThanOrEqual(8);
+      expect(main).not.toMatch(/schema|debug|sourceRef|gate retry|checkpoint id|log path/iu);
+      expect(data.entries.some((entry) => entry.slash === "/details")).toBe(true);
+    }
+  });
 });

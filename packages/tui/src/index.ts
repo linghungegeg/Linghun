@@ -98,6 +98,7 @@ import {
 } from "./cache-freshness.js";
 import {
   type CompactBoundary,
+  compactMessagesToFit,
   compactBoundaryHash,
   createManualCompactBoundary,
   microCompactMessages,
@@ -152,6 +153,7 @@ import {
   formatBackgroundDetails,
   formatBackgroundOutputDetails,
   formatBackgroundTask,
+  formatElapsedSince,
   formatJobNextAction,
   formatJobRunnerInline,
   formatJobRunnerReportLine,
@@ -213,6 +215,7 @@ import {
 import {
   EXECUTE_EXTRA_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
+  COMMAND_PROPOSAL_TOOL_NAME,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
@@ -496,7 +499,11 @@ import {
   formatTerminalReadinessDoctor,
   formatTerminalReadinessStatus,
 } from "./terminal-readiness-presenter.js";
-import { formatToolOutput, formatToolStart } from "./tool-output-presenter.js";
+import {
+  createAssistantPrimaryTextSanitizer,
+  formatToolOutput,
+  formatToolStart,
+} from "./tool-output-presenter.js";
 import { type MessageKey, messages } from "./tui-messages.js";
 import {
   ShellBlockOutput,
@@ -1220,6 +1227,7 @@ const MAX_LIGHT_HINTS_PER_TURN = 1;
 const MAX_MODEL_TOOL_ROUNDS = 4;
 const MAX_TODO_ONLY_CONSECUTIVE_ROUNDS = 1;
 const MAX_MODEL_TOTAL_TOOL_ROUNDS = 8;
+const MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES = 1;
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_STATUS_WIDTH = 160;
@@ -1227,7 +1235,9 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const MAX_CONTEXT_MESSAGES = 12;
-const MAX_CONTEXT_CHARS = 48_000;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
+const CONTEXT_INPUT_HEADROOM_TOKENS = 8_192;
+const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
 const REQUEST_SLOW_HINT_MS = 20_000;
 const MAX_EVIDENCE_RECORDS = 50;
 const MAX_BACKGROUND_TASKS = 50;
@@ -4377,6 +4387,15 @@ async function handleBtwCommand(
     );
     return;
   }
+  const statusAnswer = formatBtwStatusAnswer(question, context);
+  if (statusAnswer) {
+    if (context.isInkSession) {
+      context.btwPanelState = { question, phase: "answered", answer: statusAnswer };
+    } else {
+      writeLine(output, statusAnswer);
+    }
+    return;
+  }
   // D.14D — /btw 现在是 model-backed side question（参考 CCB sideQuestion.ts 行为）：
   // 隔离单轮、无工具、不污染 main conversation / Todo / Plan / checkpoint / git stable
   // point / evidence / D.13U/D.13V completion gate。只把临时问题与答案写进 session
@@ -4434,6 +4453,42 @@ async function handleBtwCommand(
   } else {
     writeLine(output, result.status === "answered" ? result.answer : result.error);
   }
+}
+
+function formatBtwStatusAnswer(question: string, context: TuiContext): string | undefined {
+  const normalized = question.toLowerCase().replace(/\s+/gu, "");
+  const asksCurrentWork =
+    /(当前|现在|目前).*(做什么|在做|状态|进展)/u.test(question) ||
+    /what(?:areyou|islinghun)?doing|current(?:status|task)|whatisgoingon/u.test(normalized);
+  if (!asksCurrentWork) return undefined;
+  const activePhase = context.requestActivityPhase;
+  const activeToolName = context.requestActivityToolName;
+  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
+  const elapsed = runningTask
+    ? context.language === "en-US"
+      ? ` · elapsed ${formatElapsedSince(runningTask.startedAt)}`
+      : ` · 耗时 ${formatElapsedSince(runningTask.startedAt)}`
+    : "";
+  if (activePhase) {
+    const phase =
+      activePhase === "tool_running"
+        ? context.language === "en-US"
+          ? `running ${activeToolName ?? "tool"}`
+          : `正在运行 ${activeToolName ?? "工具"}`
+        : context.language === "en-US"
+          ? activePhase.replaceAll("_", " ")
+          : activePhase;
+    return context.language === "en-US"
+      ? `Current: ${phase}${elapsed}. Details stay in Ctrl+O or /details.`
+      : `当前：${phase}${elapsed}。详细输出在 Ctrl+O 或 /details。`;
+  }
+  if (runningTask) {
+    const step = runningTask.currentStep ?? runningTask.userVisibleSummary;
+    return context.language === "en-US"
+      ? `Current: ${runningTask.title} · ${step}${elapsed}.`
+      : `当前：${runningTask.title} · ${step}${elapsed}。`;
+  }
+  return context.language === "en-US" ? "Current: idle." : "当前：空闲。";
 }
 
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
@@ -4628,12 +4683,12 @@ async function handleCompactCommand(
     const sessionId = await ensureSession(context);
     const resumed = await context.store.resume(sessionId);
     const preChars = estimateTranscriptContextChars(resumed.transcript);
-    const boundary = createManualCompactBoundary({
-      preCompactChars: preChars,
-      postCompactChars: Math.min(preChars, MAX_CONTEXT_CHARS),
-      preservedEvidenceRefs: context.evidence.map((item) => item.id),
-      preservedFiles: context.recentlyMentionedFiles,
-      handoffPacketId: context.memory.lastHandoff?.id,
+  const boundary = createManualCompactBoundary({
+    preCompactChars: preChars,
+    postCompactChars: Math.min(preChars, getProviderContextMaxChars(context)),
+    preservedEvidenceRefs: context.evidence.map((item) => item.id),
+    preservedFiles: context.recentlyMentionedFiles,
+    handoffPacketId: context.memory.lastHandoff?.id,
     });
     recordCompactBoundary(context, boundary);
     refreshCacheFreshness(context);
@@ -4647,7 +4702,7 @@ async function handleCompactCommand(
   if (action === "auto") {
     writeLine(
       output,
-      "Compact Lite auto：受控最小实现仅在 provider 请求前、本地上下文超过预算时执行 MicroCompact；有阈值、无工具、无文件写入、无额外模型调用。",
+      "Compact Lite auto：受控最小实现仅在 provider 请求前自动瘦身历史上下文；无工具、无文件写入、无额外模型调用。",
     );
     return;
   }
@@ -5564,14 +5619,6 @@ export async function handleNaturalInput(
   // 这些产品能力仍可通过精确 slash command 使用（/trust、/index、/doctor、/status），
   // 普通自然语言不再被中文/英文关键词表转成本地命令意图。
 
-  // D.14H-F — Workflow Plan 自然语言 dispatch：仅拦截明确的 workflow plan intent，
-  // 路由到 /workflows plan <goal>。不扩大拦截范围，普通开发请求仍进模型主链。
-  const workflowPlanGoal = extractWorkflowPlanNaturalGoal(text);
-  if (workflowPlanGoal) {
-    const result = await handleSlashCommand(`/workflows plan ${workflowPlanGoal}`, context, output);
-    return result === "message" ? "message" : "handled";
-  }
-
   if (!shouldTriggerArchitectureRuntime(text, context)) {
     context.currentArchitectureCard = undefined;
   }
@@ -5584,23 +5631,6 @@ export async function handleNaturalInput(
     await runAutoLearningOnTurnEnd(context, text);
   }
   return "message";
-}
-
-// D.14H-F — 窄范围 workflow plan 自然语言提取。只匹配明确的 workflow plan intent，
-// 不拦截普通开发请求（"帮我写功能/修 bug/实现报告"等）。
-function extractWorkflowPlanNaturalGoal(text: string): string | null {
-  const normalized = text.trim();
-  // 中文：以"工作流计划"/"生成工作流计划"开头，后跟目标
-  const zhMatch =
-    /^(?:请)?(?:生成|创建)?工作流计划[：:\s]*(.+)$/u.exec(normalized) ??
-    /^(?:请)?(?:生成|创建)工作流[：:\s]*(.+)$/u.exec(normalized);
-  if (zhMatch?.[1]?.trim()) return zhMatch[1].trim();
-  // 英文：以 "workflow plan" / "create a workflow plan" 开头，后跟目标
-  const enMatch = /^(?:please\s+)?(?:create\s+(?:a\s+)?)?workflow\s+plan[:\s]*(.+)$/iu.exec(
-    normalized,
-  );
-  if (enMatch?.[1]?.trim()) return enMatch[1].trim();
-  return null;
 }
 
 async function runIndexSafetyRepair(context: TuiContext, output: Writable): Promise<void> {
@@ -6007,16 +6037,41 @@ async function sendMessage(
     sessionId,
     systemPrompt,
     text,
+    selectedRuntime,
   );
-  const contextChars = estimateModelMessageChars(messages);
-  if (contextChars > MAX_CONTEXT_CHARS) {
-    // P1-5 — 这是上下文长度安全保护（context safety limit），不是用户预算。
-    // 文案不得使用"预算"字样，避免让没设过预算的用户误以为系统强加了预算。
+  let messagesForProvider = messages;
+  const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
+  let contextChars = estimateModelMessageChars(messagesForProvider);
+  if (contextChars > contextMaxChars) {
+    const compacted = compactMessagesToFit(messagesForProvider, {
+      maxChars: contextMaxChars,
+      preserveRecentMessages: MAX_CONTEXT_MESSAGES,
+      kind: "micro",
+    });
+    if (compacted.changed && compacted.boundary) {
+      recordCompactBoundary(context, compacted.boundary);
+      refreshCacheFreshness(context);
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `context_auto_compacted_before_provider: model=${selectedRuntime.model} boundary=${compacted.boundary.id}`,
+        "info",
+      );
+    }
+    messagesForProvider = compacted.messages;
+    contextChars = estimateModelMessageChars(messagesForProvider);
+  }
+  if (contextChars > contextMaxChars) {
     const warning =
       context.language === "en-US"
-        ? `Context length exceeds the current model/provider input limit before provider call: ${contextChars}/${MAX_CONTEXT_CHARS} chars. Run /sessions summary or reduce recent context before retrying.`
-        : `当前上下文长度超过此模型/provider 可承载范围，已在请求 provider 前停止：${contextChars}/${MAX_CONTEXT_CHARS} 字符。请运行 /sessions summary 或减少最近上下文后重试。`;
-    await appendSystemEvent(context, sessionId, warning, "warning");
+        ? "This request is still too large after automatic compaction. Please shorten the latest input or summarize older context, then retry."
+        : "自动压缩后这次请求仍过长。请缩短最新输入或先摘要较早上下文后重试。";
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `context_still_too_large_after_compaction: model=${selectedRuntime.model} inputTooLarge=${text.length > contextMaxChars ? "yes" : "no"}`,
+      "warning",
+    );
     clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
@@ -6026,7 +6081,7 @@ async function sendMessage(
     return;
   }
   if (reportWriteGuard) {
-    messages.push({
+    messagesForProvider.push({
       role: "user",
       content: createReportTaskGuard(reportWriteGuard, context.language),
     });
@@ -6036,9 +6091,11 @@ async function sendMessage(
     let consecutiveTodoOnlyRounds = 0;
     let totalPlanningOnlyRounds = 0;
     let todoOnlyHintSent = false;
+    let rawToolProtocolTextRetries = 0;
     for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       let roundChunkCount = 0;
       let roundHadUsage = false;
       let roundFinishReason: string | undefined;
@@ -6056,7 +6113,7 @@ async function sendMessage(
       for await (const event of gateway.stream(
         selectedRuntime.provider,
         {
-          messages,
+          messages: messagesForProvider,
           model: selectedRuntime.model,
           endpointProfile: selectedRuntime.endpointProfile,
           ...(selectedRuntime.reasoningSent
@@ -6079,12 +6136,21 @@ async function sendMessage(
         }
         if (event.type === "assistant_text_delta") {
           clearRequestActivity(context);
-          assistantText += event.text;
-          roundAssistantText += event.text;
-          writeAssistantDelta(output, assistantStreamBlockId, event.text);
+          const visibleText = textSanitizer.push(event.text);
+          assistantText += visibleText;
+          roundAssistantText += visibleText;
+          if (visibleText) {
+            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+          }
           continue;
         }
         if (event.type === "tool_use") {
+          const visibleText = textSanitizer.flush();
+          assistantText += visibleText;
+          roundAssistantText += visibleText;
+          if (visibleText) {
+            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+          }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
@@ -6118,6 +6184,34 @@ async function sendMessage(
           return;
         }
       }
+      const finalVisibleText = textSanitizer.flush();
+      assistantText += finalVisibleText;
+      roundAssistantText += finalVisibleText;
+      if (finalVisibleText) {
+        writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
+      }
+
+      if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          "assistant_raw_tool_protocol_as_text",
+          "warning",
+        );
+        discardAssistantBlock(output, assistantStreamBlockId);
+        assistantText = "";
+        roundAssistantText = "";
+        if (rawToolProtocolTextRetries < MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES) {
+          messagesForProvider.push({
+            role: "user",
+            content: createRawToolProtocolReminder(context.language),
+          });
+          rawToolProtocolTextRetries += 1;
+          continue;
+        }
+        writeLine(output, formatRawToolProtocolRetryFailure(context.language));
+        break;
+      }
 
       if (!roundAssistantText && toolCalls.length === 0) {
         clearRequestActivity(context);
@@ -6138,11 +6232,11 @@ async function sendMessage(
       }
 
       if (roundAssistantText || toolCalls.length > 0) {
-        messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
+        messagesForProvider.push({ role: "assistant", content: roundAssistantText, toolCalls });
       }
       if (toolCalls.length === 0) {
         if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
-          messages.push({
+          messagesForProvider.push({
             role: "user",
             content: formatReportEvidenceRequired(context.language),
           });
@@ -6150,7 +6244,7 @@ async function sendMessage(
           continue;
         }
         if (reportWriteGuard && shouldSendReportWriteReminder(reportWriteGuard)) {
-          messages.push({
+          messagesForProvider.push({
             role: "user",
             content: createReportWriteReminder(reportWriteGuard, context.language),
           });
@@ -6161,7 +6255,7 @@ async function sendMessage(
           reportWriteGuard &&
           shouldSendReportFinalReferenceReminder(reportWriteGuard, assistantText)
         ) {
-          messages.push({
+          messagesForProvider.push({
             role: "user",
             content: createReportFinalReferenceReminder(reportWriteGuard, context.language),
           });
@@ -6178,7 +6272,7 @@ async function sendMessage(
               `final_answer_claim_gate retry kinds=${verdict.unsupportedKinds.join(",")}`,
               "warning",
             );
-            messages.push({
+            messagesForProvider.push({
               role: "user",
               content: createFinalAnswerClaimReminder(verdict, context.language),
             });
@@ -6200,7 +6294,7 @@ async function sendMessage(
               `final_answer_extended_gate retry kinds=${extended.verdict.unsupportedKinds.join(",")}`,
               "warning",
             );
-            messages.push({
+            messagesForProvider.push({
               role: "user",
               content: createExtendedFinalAnswerReminder(extended.verdict, context.language),
             });
@@ -6227,7 +6321,7 @@ async function sendMessage(
       }
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output, {
-          messages,
+          messages: messagesForProvider,
           provider: selectedRuntime.provider,
           model: selectedRuntime.model,
           endpointProfile: selectedRuntime.endpointProfile,
@@ -6241,7 +6335,7 @@ async function sendMessage(
         if (doesWriteSatisfyReportGuard(reportWriteGuard, toolCall, result)) {
           reportWriteGuard.completed = true;
         }
-        messages.push({
+        messagesForProvider.push({
           role: "tool",
           tool_call_id: toolCall.id,
           content: JSON.stringify(result),
@@ -6254,7 +6348,7 @@ async function sendMessage(
             context.language === "en-US"
               ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
               : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
-          messages.push({ role: "user", content: todoHint });
+          messagesForProvider.push({ role: "user", content: todoHint });
           todoOnlyHintSent = true;
           continue;
         }
@@ -6273,7 +6367,7 @@ async function sendMessage(
         writeLine(output, limitMsg);
         const finalText = await streamFinalModelAnswerWithoutTools(
           {
-            messages,
+            messages: messagesForProvider,
             provider: selectedRuntime.provider,
             model: selectedRuntime.model,
             endpointProfile: selectedRuntime.endpointProfile,
@@ -6493,6 +6587,7 @@ async function buildModelMessagesWithRecentContext(
   sessionId: string,
   systemPrompt: string,
   currentUserText: string,
+  runtime = getSelectedModelRuntime(context),
 ): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [{ role: "system", content: systemPrompt }];
   try {
@@ -6572,8 +6667,9 @@ async function buildModelMessagesWithRecentContext(
     );
   }
   messages.push({ role: "user", content: currentUserText });
+  const maxChars = getProviderContextMaxChars(context, runtime);
   const compacted = microCompactMessages(messages, {
-    maxChars: MAX_CONTEXT_CHARS,
+    maxChars,
     preserveRecentMessages: MAX_CONTEXT_MESSAGES,
     kind: "micro",
   });
@@ -6597,6 +6693,7 @@ async function streamFinalModelAnswerWithoutTools(
   reuseAssistantStreamBlockId?: string,
 ): Promise<string> {
   let assistantText = "";
+  const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
   // 与 sendMessage 一致的 assistant streaming block：避免最后一轮 assistant 文本
   // 被 _write 的 ephemeral splice 淘汰，保证完整正文落到 keep:true block。
   const assistantStreamBlockId =
@@ -6608,6 +6705,7 @@ async function streamFinalModelAnswerWithoutTools(
   let hadUsage = false;
   let finishReason: string | undefined;
   let hadThinking = false;
+  let ignoredRawToolProtocolText = false;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
   for await (const event of gateway.stream(
     continuation.provider,
@@ -6628,8 +6726,11 @@ async function streamFinalModelAnswerWithoutTools(
     }
     if (event.type === "assistant_text_delta") {
       clearRequestActivity(context);
-      assistantText += event.text;
-      writeAssistantDelta(output, assistantStreamBlockId, event.text);
+      const visibleText = textSanitizer.push(event.text);
+      assistantText += visibleText;
+      if (visibleText) {
+        writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+      }
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -6649,6 +6750,11 @@ async function streamFinalModelAnswerWithoutTools(
       continue;
     }
     if (event.type === "tool_use") {
+      const visibleText = textSanitizer.flush();
+      assistantText += visibleText;
+      if (visibleText) {
+        writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+      }
       await appendSystemEvent(
         context,
         sessionId,
@@ -6675,20 +6781,40 @@ async function streamFinalModelAnswerWithoutTools(
       return assistantText;
     }
   }
-  if (!assistantText) {
-    clearRequestActivity(context);
-    const result = await recordProviderEmptyResponse(
+  const finalVisibleText = textSanitizer.flush();
+  assistantText += finalVisibleText;
+  if (finalVisibleText) {
+    writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
+  }
+  if (textSanitizer.hadRawToolProtocol()) {
+    ignoredRawToolProtocolText = true;
+    assistantText = "";
+    discardAssistantBlock(output, assistantStreamBlockId);
+    await appendSystemEvent(
       context,
       sessionId,
-      chunkCount,
-      hadUsage,
-      finishReason,
-      hadThinking,
+      "final_no_tools_raw_tool_protocol_as_text",
+      "warning",
     );
-    if (result.isError) {
-      writeErrorLine(output, result.message);
+  }
+  if (!assistantText) {
+    clearRequestActivity(context);
+    if (ignoredRawToolProtocolText) {
+      writeLine(output, formatRawToolProtocolRetryFailure(context.language));
     } else {
-      writeLine(output, result.message);
+      const result = await recordProviderEmptyResponse(
+        context,
+        sessionId,
+        chunkCount,
+        hadUsage,
+        finishReason,
+        hadThinking,
+      );
+      if (result.isError) {
+        writeErrorLine(output, result.message);
+      } else {
+        writeLine(output, result.message);
+      }
     }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
@@ -6721,6 +6847,7 @@ async function continueModelAfterToolResults(
     let consecutiveTodoOnlyRounds = 0;
     let totalPlanningOnlyRounds = 0;
     let todoOnlyHintSent = false;
+    let rawToolProtocolTextRetries = 0;
     for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
@@ -6728,6 +6855,7 @@ async function continueModelAfterToolResults(
       }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
+      const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         continuation.provider,
@@ -6752,12 +6880,21 @@ async function continueModelAfterToolResults(
         }
         if (event.type === "assistant_text_delta") {
           clearRequestActivity(context);
-          assistantText += event.text;
-          roundAssistantText += event.text;
-          writeAssistantDelta(output, assistantStreamBlockId, event.text);
+          const visibleText = textSanitizer.push(event.text);
+          assistantText += visibleText;
+          roundAssistantText += visibleText;
+          if (visibleText) {
+            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+          }
           continue;
         }
         if (event.type === "tool_use") {
+          const visibleText = textSanitizer.flush();
+          assistantText += visibleText;
+          roundAssistantText += visibleText;
+          if (visibleText) {
+            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+          }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
           continue;
@@ -6784,6 +6921,33 @@ async function continueModelAfterToolResults(
           writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
+      }
+      const finalVisibleText = textSanitizer.flush();
+      assistantText += finalVisibleText;
+      roundAssistantText += finalVisibleText;
+      if (finalVisibleText) {
+        writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
+      }
+      if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          "assistant_raw_tool_protocol_as_text",
+          "warning",
+        );
+        discardAssistantBlock(output, assistantStreamBlockId);
+        assistantText = "";
+        roundAssistantText = "";
+        if (rawToolProtocolTextRetries < MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES) {
+          continuation.messages.push({
+            role: "user",
+            content: createRawToolProtocolReminder(context.language),
+          });
+          rawToolProtocolTextRetries += 1;
+          continue;
+        }
+        writeLine(output, formatRawToolProtocolRetryFailure(context.language));
+        break;
       }
       if (roundAssistantText || toolCalls.length > 0) {
         continuation.messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
@@ -7074,6 +7238,31 @@ function currentModelSupportsTools(
   return known?.supportsTools !== false;
 }
 
+function getProviderContextMaxChars(context: TuiContext, runtime = getSelectedModelRuntime(context)): number {
+  const route = getRoleRoute(context.config, runtime.role);
+  const known = findKnownModel(runtime.model);
+  const maxInputTokens =
+    route.maxInputTokens ??
+    Math.max(
+      1,
+      (known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS) -
+        (route.maxOutputTokens ?? context.config.providers[runtime.provider]?.maxOutputTokens ?? CONTEXT_INPUT_HEADROOM_TOKENS),
+    );
+  return Math.max(1, maxInputTokens * CONTEXT_CHARS_PER_TOKEN_ESTIMATE);
+}
+
+function createRawToolProtocolReminder(language: Language): string {
+  return language === "en-US"
+    ? "Use structured tool calls when you need a tool. Do not write raw tool protocol, XML, JSON tool_use blocks, or tool schemas as assistant text. Retry the answer using real tool calls or concise plain text."
+    : "需要使用工具时请发起结构化工具调用。不要把 raw tool protocol、XML、JSON tool_use 块或工具 schema 写成 assistant 正文。请用真实工具调用或简短正文重试。";
+}
+
+function formatRawToolProtocolRetryFailure(language: Language): string {
+  return language === "en-US"
+    ? "The model returned tool protocol as plain text again. I did not run any unstructured tool request; please retry or use an explicit slash command."
+    : "模型再次把工具协议写成了正文。Linghun 没有执行任何非结构化工具请求；请重试或使用明确的 slash 命令。";
+}
+
 function isTodoOnlyRound(toolCalls: ModelToolCall[]): boolean {
   if (toolCalls.length === 0) return false;
   return toolCalls.every((tc) => tc.name === "Todo");
@@ -7098,7 +7287,11 @@ async function executeModelToolUse(
   // 但仍走既有 tool_call_start / tool_result / evidence 链路；不重复 architecture drift /
   // permission 状态机，因为这两个工具本身不写文件、不执行 shell——它们的"风险"由其分发到的
   // 子工具承担（codebase-memory 只读 + 命令白名单 + required args 校验）。
-  if (toolCall.name === SEARCH_EXTRA_TOOLS_NAME || toolCall.name === EXECUTE_EXTRA_TOOL_NAME) {
+  if (
+    toolCall.name === SEARCH_EXTRA_TOOLS_NAME ||
+    toolCall.name === EXECUTE_EXTRA_TOOL_NAME ||
+    toolCall.name === COMMAND_PROPOSAL_TOOL_NAME
+  ) {
     return executeDeferredDispatchToolUse(toolCall, context, sessionId, output);
   }
   // D.14G — 结构化 Git 能力不走 builtInTools / runTool / 四档 permission；由
@@ -7504,6 +7697,36 @@ async function executeDeferredDispatchToolUse(
         evidenceId: evidence?.id,
       };
     }
+    if (dispatchName === COMMAND_PROPOSAL_TOOL_NAME) {
+      const commandRaw = input.command;
+      const reasonRaw = input.reason;
+      const command = typeof commandRaw === "string" ? commandRaw.trim() : "";
+      const reason = typeof reasonRaw === "string" ? reasonRaw.trim() : "";
+      if (!command.startsWith("/")) {
+        const text =
+          context.language === "en-US"
+            ? "Command proposal must be an explicit slash command."
+            : "命令提案必须是明确的 slash command。";
+        await appendDeferredToolResultEvent(context, sessionId, toolCall.id, dispatchName, text, true);
+        clearRequestActivity(context);
+        return { ok: false, tool: dispatchName, text };
+      }
+      const text =
+        context.language === "en-US"
+          ? `Suggested command: ${command}${reason ? ` (${reason})` : ""}`
+          : `建议命令：${command}${reason ? `（${reason}）` : ""}`;
+      await appendDeferredToolResultEvent(
+        context,
+        sessionId,
+        toolCall.id,
+        dispatchName,
+        { command, reason },
+        false,
+      );
+      clearRequestActivity(context);
+      writeLine(output, text);
+      return { ok: true, tool: dispatchName, text, data: { command, reason } };
+    }
     // ExecuteExtraTool
     // D.13N — record a policy engine verdict for transparency. The actual
     // gate (whitelist + mutating flags inside executeExtraTool) is unchanged;
@@ -7735,6 +7958,15 @@ async function executeIndexToolUse(
     reason: permission.reason,
     createdAt: new Date().toISOString(),
   });
+  if (context.permissionMode === "auto-review" && permission.decision === "ask") {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `index_${action}_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated`,
+      "info",
+    );
+    return executeApprovedIndexToolUse(toolCall, action, parsed.force, context, sessionId, output);
+  }
   if (permission.decision === "deny") {
     clearRequestActivity(context);
     const text = `deny: ${permission.reason}`;
@@ -8094,7 +8326,13 @@ async function handleToolCommand(
       return;
     }
 
-    if (permission.preflight) {
+    const shouldKeepAutoReviewWorkspaceEditQuiet =
+      context.permissionMode === "auto-review" &&
+      permission.request.files.length > 0 &&
+      permission.request.risk !== "high" &&
+      (name === "Write" || name === "Edit" || name === "MultiEdit");
+
+    if (permission.preflight && !shouldKeepAutoReviewWorkspaceEditQuiet) {
       writeLine(output, permission.preflight);
     }
 
@@ -8108,7 +8346,7 @@ async function handleToolCommand(
     }
 
     const checkpoint = await maybeCreateCheckpoint(name, input, context, sessionId);
-    if (checkpoint) {
+    if (checkpoint && !shouldKeepAutoReviewWorkspaceEditQuiet) {
       writeLine(output, `${t(context, "checkpointCreated")}：${checkpoint.id}`);
     }
     const task = name === "Bash" ? createBackgroundTask(name, input, context) : undefined;

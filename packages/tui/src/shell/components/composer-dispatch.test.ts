@@ -308,6 +308,22 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.cursorCol).toBeLessThanOrEqual(80);
       expect(r.cursorCol).toBe(62);
     });
+
+    it("narrow long content keeps cursor inside the rendered viewport", () => {
+      const buf = bufferInsert(createEditBuffer(""), "abcdefghij".repeat(4));
+      const r = formatComposerRenderLines({
+        buffer: buf,
+        placeholder: "",
+        masking: false,
+        noColor: true,
+        maxWidth: 18,
+      });
+
+      expect(r.cursorRow).toBeGreaterThanOrEqual(0);
+      expect(r.cursorRow).toBeLessThan(r.lines.length);
+      expect(r.cursorCol).toBeGreaterThanOrEqual(0);
+      expect(r.cursorCol).toBeLessThanOrEqual(18);
+    });
   });
 
   describe("D.13Q-UX Task Surface — splitLineAtDisplayCol inline cursor", () => {

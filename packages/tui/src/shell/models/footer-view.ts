@@ -34,6 +34,8 @@ export type FooterViewInput = {
   cacheHitRate: number | null;
   /** index 状态字符串。 */
   indexStatus: string;
+  currentTaskStep?: string;
+  elapsed?: string;
   /** reasoning level 文本（"High" 等）；空表示不显示 reasoning 段。 */
   reasoningLevel?: string;
   /** reasoning 是否真的发送给 provider；false 时不在 footer 露出。 */
@@ -133,6 +135,8 @@ export function buildFooterView(input: FooterViewInput): {
       model: modelInfo.text,
       cache: cacheInfo.text,
       index: indexLabel,
+      task: formatFooterTaskLabel(input.language, input.currentTaskStep),
+      elapsed: formatFooterElapsedLabel(input.language, input.elapsed),
       cyclePermHint: input.cyclePermHint,
       reasoning: reasoningLabel,
       hint: input.hint,
@@ -142,6 +146,20 @@ export function buildFooterView(input: FooterViewInput): {
     modelDim: modelInfo.dim,
     cacheTone: cacheInfo.tone,
   };
+}
+
+function formatFooterTaskLabel(language: Language, step: string | undefined): string | undefined {
+  const trimmed = (step ?? "").replace(/\s+/gu, " ").trim();
+  if (!trimmed) return undefined;
+  const label = language === "en-US" ? "step" : "步骤";
+  return `${label} ${truncateMiddle(trimmed, 22)}`;
+}
+
+function formatFooterElapsedLabel(language: Language, elapsed: string | undefined): string | undefined {
+  const trimmed = (elapsed ?? "").trim();
+  if (!trimmed) return undefined;
+  const label = language === "en-US" ? "elapsed" : "耗时";
+  return `${label} ${trimmed}`;
 }
 
 const CJK_WIDE_CHAR_RE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦]/u;

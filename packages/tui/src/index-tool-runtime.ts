@@ -5,8 +5,8 @@
  * 这些是 Linghun 自研的结构化索引工具（与 git-tool-runtime.ts 同款范式，不是
  * Anthropic defer_loading，也不是 codebase-memory deferred dispatch）：
  *   - IndexStatusInspect  （只读：刷新并返回当前索引状态，不重建）
- *   - IndexRefresh        （刷新/重建项目索引，走权限确认）
- *   - IndexRepair         （追加 ignore 条目后刷新索引，走权限确认）
+ *   - IndexRefresh        （刷新/重建项目索引：default 确认，auto-review 普通刷新直行）
+ *   - IndexRepair         （追加 ignore 条目后刷新索引：经权限管道按风险裁决）
  *
  * 设计原则：
  * - 工具进入模型 tool schema（与 built-in / Git 工具同级）。模型需要"看索引 / 更新
@@ -40,7 +40,7 @@ export type IndexToolName =
   | typeof INDEX_REFRESH
   | typeof INDEX_REPAIR;
 
-/** 仅 IndexRefresh / IndexRepair 是 mutating（需要权限确认）；Inspect 只读。 */
+/** 仅 IndexRefresh / IndexRepair 是 mutating；Inspect 只读。权限由执行管道按模式/风险裁决。 */
 export function isMutatingIndexTool(
   name: string,
 ): name is typeof INDEX_REFRESH | typeof INDEX_REPAIR {
@@ -68,7 +68,7 @@ export function createIndexToolDefinitions(): ModelToolDefinition[] {
     {
       name: INDEX_REFRESH,
       description:
-        "Refresh (rebuild) the codebase-memory index for this project, reusing the controlled /index refresh path. This is a mutating action: it writes the index artifact and runs the external index runtime, so it requires user permission confirmation in default/auto-review modes. Call this tool to actually refresh the index when the user asks to update/refresh/rebuild the index. Do NOT claim the index was refreshed unless this tool returns success.",
+        "Refresh (rebuild) the codebase-memory index for this project, reusing the controlled /index refresh path. This writes workspace-local index artifacts and runs the index runtime. Permission behavior: default asks for confirmation; auto-review may directly run an ordinary workspace refresh; plan refuses mutating execution; dangerous repair, persistent ignore changes, path-boundary, shell/network/install/delete risks still go through the permission pipeline. Call this tool to actually refresh the index when the user asks to update/refresh/rebuild the index. Do NOT claim the index was refreshed unless this tool returns success.",
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -81,7 +81,7 @@ export function createIndexToolDefinitions(): ModelToolDefinition[] {
     {
       name: INDEX_REPAIR,
       description:
-        "Persist index skip suggestions after a refresh automatically skipped large/generated files: append the missing ignore entries (.linghunignore/.cbmignore) and then refresh, reusing the controlled /index repair path. Mutating action requiring user permission confirmation. Only meaningful when skip suggestions exist. Call this tool to actually repair-and-refresh; do NOT claim it succeeded without a success result.",
+        "Persist index skip suggestions after a refresh automatically skipped large/generated files: append the missing ignore entries (.linghunignore/.cbmignore) and then refresh, reusing the controlled /index repair path. Permission behavior: default asks before writing; auto-review can proceed only when the workspace-local ignore/index write is low risk; plan refuses mutating execution; dangerous or path-boundary changes still ask/deny through the permission pipeline. Only meaningful when skip suggestions exist. Call this tool to actually repair-and-refresh; do NOT claim it succeeded without a success result.",
       inputSchema: {
         type: "object",
         additionalProperties: false,

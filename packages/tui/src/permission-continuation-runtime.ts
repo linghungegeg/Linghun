@@ -109,16 +109,17 @@ export function isLowRiskWorkspaceEdit(
 ): boolean {
   return (
     (name === "Write" || name === "Edit" || name === "MultiEdit") &&
-    risk === "low" &&
+    risk !== "high" &&
     files.length > 0
   );
 }
 
 export function collectInputFiles(input: unknown): string[] {
-  if (typeof input !== "object" || input === null || !("path" in input)) {
+  if (typeof input !== "object" || input === null) {
     return [];
   }
-  const path = (input as { path?: unknown }).path;
+  const path = (input as { path?: unknown; file_path?: unknown }).path
+    ?? (input as { file_path?: unknown }).file_path;
   return typeof path === "string" ? [path.replaceAll("\\", "/")] : [];
 }
 

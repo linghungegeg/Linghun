@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   createLayeredToolOutput,
+  createAssistantPrimaryTextSanitizer,
   formatToolOutput,
   formatToolStart,
+  sanitizeAssistantPrimaryText,
 } from "./tool-output-presenter.js";
 
 describe("tool-output-presenter", () => {
@@ -36,6 +38,18 @@ describe("tool-output-presenter", () => {
       const out = formatToolStart("Bash", { command: long }) ?? "";
       expect(out.length).toBeLessThanOrEqual(127);
       expect(out).toContain("...");
+    });
+
+    it("Bash 主屏 banner 不泄漏长命令、log path、checkpoint id 或 raw JSON", () => {
+      const command = `node run.js --log-path C:\\Users\\Admin\\secret\\full-output.log --checkpoint-id chk_1234567890 --payload ${JSON.stringify({ debug: true, schema: { raw: "x".repeat(160) } })}`;
+      const out = formatToolStart("Bash", { command }) ?? "";
+
+      expect(out.length).toBeLessThanOrEqual(127);
+      expect(out).toContain("...");
+      expect(out).not.toContain("full-output.log");
+      expect(out).not.toContain("chk_1234567890");
+      expect(out).not.toContain('"schema"');
+      expect(out).not.toContain('"raw"');
     });
 
     it("缺参数返回 undefined", () => {
@@ -178,6 +192,50 @@ describe("tool-output-presenter", () => {
       );
       expect(layered.preview).toContain("补丁 +3 -1");
       expect(layered.preview).toContain("changedFiles 1");
+    });
+  });
+
+  describe("sanitizeAssistantPrimaryText", () => {
+    it("hides raw XML tool_use blocks from the main assistant stream", () => {
+      const raw =
+        '先看文件\n<tool_use id="toolu_1" name="Read"><input>{"path":"secret.ts"}</input></tool_use>\n继续';
+      const cleaned = sanitizeAssistantPrimaryText(raw, "zh-CN");
+
+      expect(cleaned).toContain("工具调用细节已隐藏");
+      expect(cleaned).toContain("先看文件");
+      expect(cleaned).toContain("继续");
+      expect(cleaned).not.toContain("<tool_use");
+      expect(cleaned).not.toContain("toolu_1");
+      expect(cleaned).not.toContain("secret.ts");
+    });
+
+    it("hides raw JSON tool_use blocks from the main assistant stream", () => {
+      const cleaned = sanitizeAssistantPrimaryText(
+        '{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"secret.ts"}}',
+        "en-US",
+      );
+
+      expect(cleaned).toContain("Tool call details hidden");
+      expect(cleaned).not.toContain("tool_use");
+      expect(cleaned).not.toContain("toolu_1");
+      expect(cleaned).not.toContain("secret.ts");
+    });
+
+    it("hides raw XML tool_use blocks split across stream deltas", () => {
+      const sanitizer = createAssistantPrimaryTextSanitizer("zh-CN");
+      const visible = [
+        sanitizer.push("先看文件\n<to"),
+        sanitizer.push('ol_use id="toolu_1" name="Read">'),
+        sanitizer.push('<input>{"path":"secret.ts"}</input></tool_use>\n继续'),
+        sanitizer.flush(),
+      ].join("");
+
+      expect(visible).toContain("工具调用细节已隐藏");
+      expect(visible).toContain("先看文件");
+      expect(visible).toContain("继续");
+      expect(visible).not.toContain("<tool_use");
+      expect(visible).not.toContain("toolu_1");
+      expect(visible).not.toContain("secret.ts");
     });
   });
 });

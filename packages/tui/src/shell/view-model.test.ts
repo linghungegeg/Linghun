@@ -4755,6 +4755,12 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
     expect(rendered.match(/Ctrl\+O/g)?.length).toBe(1);
   });
 
+  it("短的两行输出不生成虚假的 Ctrl+O 提示", () => {
+    const block = createOutputBlock("状态正常\n没有隐藏内容", "zh-CN", "short-two-lines");
+    expect(block.fullText).toBe("状态正常\n没有隐藏内容");
+    expect(block.nextAction).toBeUndefined();
+  });
+
   it("有 lastFullOutput 时返回 panel：summary-first，正文只进 detailsText，默认折叠", () => {
     const ctx = createContext() as TuiContext & { lastFullOutput?: string };
     ctx.lastFullOutput = "完整 /model doctor 多行输出\n provider.env merge=...\nproviders=...";

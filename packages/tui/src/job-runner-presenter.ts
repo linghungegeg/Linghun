@@ -152,17 +152,24 @@ export function formatBackgroundOutputDetails(
 
 export function formatBackgroundTask(task: BackgroundTaskState, language: Language): string {
   const progress = task.progress ? ` ${task.progress.completed}/${task.progress.total ?? "?"}` : "";
-  const output = task.hasOutput
-    ? formatDisplayPath(task.logPath)
-    : language === "en-US"
-      ? "no valid output yet"
-      : "尚未产生有效输出";
-  const title = truncateLine(task.title, 42);
-  const step = truncateLine(task.currentStep ?? "-", 44);
-  const next = truncateLine(task.nextAction ?? "-", 48);
+  const elapsed = formatElapsedSince(task.startedAt);
+  const title = truncateLine(task.title, 32);
+  const step = truncateLine(task.currentStep ?? "-", 34);
   return language === "en-US"
-    ? `[background] ${title} · ${task.status} · ${step}${progress} · log: ${output} · next: ${next}`
-    : `[后台] ${title} · ${task.status} · ${step}${progress} · 日志：${output} · 下一步：${next}`;
+    ? `[background] ${title} · ${task.status} · ${step}${progress} · elapsed ${elapsed}`
+    : `[后台] ${title} · ${task.status} · ${step}${progress} · 耗时 ${elapsed}`;
+}
+
+export function formatElapsedSince(startedAt: string, nowMs = Date.now()): string {
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return "0s";
+  const seconds = Math.max(0, Math.floor((nowMs - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${(minutes % 60).toString().padStart(2, "0")}m`;
 }
 
 function formatBackgroundReason(task: BackgroundTaskState, language: Language): string {

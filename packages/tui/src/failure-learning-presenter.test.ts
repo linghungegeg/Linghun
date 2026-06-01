@@ -46,6 +46,28 @@ describe("D.14B Failure Learning — presenter (summary-first)", () => {
     expect(panel.actions).toContain("/failures ignore <id>");
   });
 
+  it("main panel summary does not expose sourceRef, gate retry, or debug internals", () => {
+    const state = createFailureLearningState("C:\\proj\\Demo");
+    mergeFailureRecord(
+      state,
+      seed({
+        category: "final_gate_downgrade",
+        failureSummary: "final_answer_claim_gate retry kinds=action_executed debug=true",
+        rootCauseGuess: "gate retry lacked evidence",
+        avoidNextTime: "state the pending verification plainly",
+        sourceRef: "event:final_answer_claim_gate",
+      }),
+    );
+    const panel = buildFailureLearningPanel(state, "zh-CN");
+    const main = [panel.title, ...(panel.summary ?? []), ...(panel.actions ?? [])].join("\n");
+
+    expect(main).toContain("最终回答降级");
+    expect(main).not.toContain("sourceRef");
+    expect(main).not.toContain("event:final_answer_claim_gate");
+    expect(main).not.toContain("gate retry");
+    expect(main).not.toContain("debug=");
+  });
+
   it("details list marks root cause as inferred and includes the resolve/ignore note", () => {
     const state = createFailureLearningState("C:\\proj\\Demo");
     mergeFailureRecord(state, seed());

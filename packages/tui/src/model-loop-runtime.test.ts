@@ -127,6 +127,22 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("IndexRefresh");
       expect(names).toContain("IndexRepair");
     });
+
+    it("Mature UX Cutback: index tool descriptions match auto-review permission behavior", () => {
+      const defs = createModelToolDefinitions();
+      const refresh = defs.find((d) => d.name === "IndexRefresh")?.description ?? "";
+      const repair = defs.find((d) => d.name === "IndexRepair")?.description ?? "";
+
+      expect(refresh).toContain("default asks for confirmation");
+      expect(refresh).toContain("auto-review may directly run an ordinary workspace refresh");
+      expect(refresh).toContain("plan refuses mutating execution");
+      expect(repair).toContain("default asks before writing");
+      expect(repair).toContain("auto-review can proceed");
+      expect(repair).toContain("permission pipeline");
+      expect(`${refresh}\n${repair}`).not.toContain("default/auto-review modes");
+      expect(`${refresh}\n${repair}`).not.toContain("requires user permission confirmation");
+      expect(`${refresh}\n${repair}`).not.toContain("Mutating action requiring");
+    });
   });
 
   describe("createModelToolDefinitionsForReportGuard", () => {
