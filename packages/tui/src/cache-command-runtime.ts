@@ -55,9 +55,16 @@ export function formatCacheLog(context: TuiContext): string {
     `Cache log 最近 ${context.cache.history.length}/${context.cache.config.maxTurns} 轮：`,
     ...context.cache.history.map(
       (item) =>
-        `#${item.turn} hit=${formatPercent(item.hitRate)} input=${item.inputTokens} output=${item.outputTokens} cache_read=${item.cacheReadTokens} cache_write=${item.cacheWriteTokens} write_source=${item.cacheWriteTokensSource} model=${item.model} provider=${item.provider} endpoint=${item.endpoint ?? "-"} compact=${item.compacted ? "yes" : "no"}`,
+        `#${item.turn} 命中率=${formatPercent(item.hitRate)} 输入=${item.inputTokens} 输出=${item.outputTokens} 缓存读取=${item.cacheReadTokens} 缓存写入=${item.cacheWriteTokens} 来源=${formatCacheWriteSource(item.cacheWriteTokensSource)} 模型=${item.model} provider=${item.provider}`,
     ),
   ].join("\n");
+}
+
+function formatCacheWriteSource(source: string): string {
+  if (source === "reported") return "provider reported";
+  if (source === "zero_reported") return "provider reported zero";
+  if (source === "estimated") return "estimated";
+  return "not reported";
 }
 
 export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFreshness): string {

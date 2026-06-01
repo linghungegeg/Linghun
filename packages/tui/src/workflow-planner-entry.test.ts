@@ -31,7 +31,9 @@ describe("D.14H-E workflow planner entry", () => {
     for (const req of result.bridgeResult.requests) {
       expect(req.proposalOnly).toBe(true);
     }
-    expect(result.surface.summaryText).toContain("Workflow:");
+    expect(result.surface.summaryText).toContain("Result:");
+    expect(result.surface.summaryText).toContain("Impact:");
+    expect(result.surface.summaryText).toContain("Next:");
     expect(result.surface.detailsText).toContain("Evidence Merge:");
   });
 

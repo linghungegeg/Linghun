@@ -121,10 +121,9 @@ function surface(
 describe("D.14H-D workflow task surface + evidence merge", () => {
   it("generates main-screen summary and detailsText from legal plan + bridge result", () => {
     const result = surface(createPlan());
-    expect(result.summaryText).toContain("Workflow: Task Surface Test");
-    expect(result.summaryText).toContain("Phase: Task Surface phase");
-    expect(result.summaryText).toContain("blocked=1");
-    expect(result.summaryText).toContain("Evidence:");
+    expect(result.summaryText).toContain("Result:");
+    expect(result.summaryText).toContain("Impact: Task Surface phase");
+    expect(result.summaryText).toContain("blocked");
     expect(result.summaryText).toContain("Next:");
     expect(result.detailsText).toContain("Workflow Task Surface details");
     expect(result.detailsText).toContain(
@@ -141,6 +140,14 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
     expect(result.summaryText).not.toMatch(/full log/i);
     expect(result.summaryText).not.toMatch(/raw log/i);
     expect(result.summaryText.split("\n").length).toBeLessThan(15);
+  });
+
+  it("main-screen summary keeps mechanism words out of the default surface", () => {
+    const result = surface(createPlan());
+    expect(result.summaryText).not.toMatch(
+      /sourceRef|schema|debug|gate retry|retry\/downgrade|retry downgrade|passEvidence|raw evidence|tool_result raw|runtime internals|start_gate|kinds/iu,
+    );
+    expect(result.detailsText).toContain("Evidence Merge:");
   });
 
   it("detailsText contains phase/slice/role/status/permission/evidence/nextAction", () => {
@@ -190,7 +197,8 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
   it("blocked/start_gate_needed/queued slices show as PARTIAL/BLOCKED, not faking completion", () => {
     const plan = createPlan();
     const resultNoGate = surface(plan, {});
-    expect(resultNoGate.summaryText).toContain("start_gate=");
+    expect(resultNoGate.summaryText).toContain("user confirmation needed");
+    expect(resultNoGate.summaryText).not.toContain("start_gate");
     expect(resultNoGate.meta.nextAction).toContain("Confirm");
   });
 

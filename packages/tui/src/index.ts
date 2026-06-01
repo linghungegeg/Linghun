@@ -6417,10 +6417,10 @@ async function executeImageGeneration(
   rememberBackgroundTask(context, task);
   await context.store.appendEvent(approval.sessionId, { type: "evidence_record", ...evidence });
   await appendBackgroundTaskEvent(context, approval.sessionId, task);
-  writeLine(output, `ImageGenerationResult: ${approval.id}`);
-  writeLine(output, `- provider/model: ${approval.provider}/${approval.model}`);
-  writeLine(output, `- asset path: ${approval.assetPath}`);
-  writeLine(output, "- request: 未固定 size/quality/format；只有用户明确指定才传。 ");
+  const displayPath = relative(context.projectPath, approval.assetPath);
+  writeLine(output, `Image result saved: ${displayPath}`);
+  writeLine(output, "- impact: metadata was recorded; no source image or code was changed.");
+  writeLine(output, "- next: use the saved path when you want to inspect or reuse the result.");
 }
 
 export async function runVerificationCommandForTest(

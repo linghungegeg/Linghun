@@ -3659,7 +3659,7 @@ describe("Phase 06 TUI slash commands", () => {
         id: jobId,
         kind: "job",
         result: "partial",
-        currentStep: expect.stringContaining("runner=native/running"),
+        currentStep: expect.not.stringContaining("runner="),
       }),
     );
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
@@ -3687,6 +3687,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(doctorOutput.text).toContain("Node fallback=available");
     expect(doctorOutput.text).toContain("present:linghun-native-runner-mock.cjs");
     expect(doctorOutput.text).not.toContain(project);
+    expect(output.text).not.toContain("[后台] Job: native runner tes · completed · worker step 1/1; agents 0/0; runner=");
     expect(output.text).toContain("runner=native/running");
     expect(output.text).toContain("heartbeat=");
     expect(output.text).toContain(
@@ -3992,7 +3993,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("vision role 未就绪");
     expect(output.text).toContain("VisionObservation:");
     expect(output.text).toContain("image role 未就绪");
-    expect(output.text).toContain("ImageGenerationResult:");
+    expect(output.text).toContain("Image result saved:");
+    const imagePrimary = output.text.slice(output.text.indexOf("Image result saved:"));
+    expect(imagePrimary).not.toContain("provider/model:");
+    expect(imagePrimary).not.toMatch(
+      /sourceRef|schema|debug|gate retry|retry\/downgrade|passEvidence|raw evidence|tool_result raw|runtime internals/iu,
+    );
     expect(output.text).toContain("role usage (estimated)");
     expect(output.text).toContain("role/model/provider usage (estimated)");
     expect(context.roleHandoffs.some((handoff) => handoff.to === "reviewer")).toBe(true);
@@ -10020,7 +10026,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.history).toHaveLength(2);
     expect(context.cache.history[0]?.turn).toBe(3);
     expect(output.text).toContain("Cache log 最近");
-    expect(output.text).toContain("write_source=zero_reported");
+    expect(output.text).toContain("来源=provider reported zero");
+    expect(output.text).not.toMatch(/cache_read|cache_write|write_source|endpoint=|compact=/u);
     expect(output.text).toContain("cache history size：2");
     expect(await readFile(join(project, "cache-history.json"), "utf8")).toContain(
       '"cacheWriteTokensSource"',
@@ -15123,8 +15130,15 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
 describe("natural control routing — ordinary prompts must reach gateway.stream", () => {
   const ordinaryPromptsZh = [
     "你好，只回复：连接成功",
+    "刷新索引",
+    "看看工作流",
+    "模型是不是坏了",
+    "cache warmup 有什么风险",
+    "memory learn 是什么意思",
+    "说一下 /index refresh 是什么",
     "模型这里是不是有问题",
     "帮我看看模型为什么连不上",
+    "帮我修这个 bug",
     "这个配置怎么写",
     "诊断一下这个 bug",
     "本地控制是不是太强",
@@ -15152,6 +15166,8 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
   }
 
   const ordinaryPromptsEn = [
+    "refresh the index",
+    "is the model broken",
     "is the model okay or not",
     "explain how the local control plane works in plain words",
     "tell me what is going wrong here right now",
@@ -15204,6 +15220,35 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     // 让 processTuiLine 继续走 sendMessage → gateway.stream。
     expect(result).toBe("handled");
     expect(output.text).toContain("Model route doctor");
+  });
+
+  it("explicit slash and pending approval stay local instead of entering the model path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    expect(await handleSlashCommand("/help", context, output)).toBe("handled");
+    context.pendingLocalApproval = {
+      kind: "index_ignore_write",
+      plan: {
+        path: ".linghunignore",
+        content: "dist\n",
+        expectedHash: "hash",
+        missingEntries: ["dist"],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    expect(await handleNaturalInput("details", context, output)).toBe("handled");
+    expect(await handleNaturalInput("no", context, output)).toBe("handled");
+    expect(output.text).toContain("待确认权限详情");
+    expect(output.text).not.toContain("Handled locally");
+  });
+
+  it("source invariant: handleNaturalInput main path does not call Natural Command Bridge", async () => {
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    expect(indexSrc).not.toContain("routeNaturalIntent(");
   });
 
   it("/btw 当前在做什么只返回短状态，不调用模型插问或刷内部细节", async () => {

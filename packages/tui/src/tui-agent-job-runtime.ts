@@ -29,7 +29,6 @@ import type { PermissionMode } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import {
   formatJobNextAction,
-  formatJobRunnerInline,
   mapDurableJobToBackgroundResult,
   mapDurableJobToBackgroundStatus,
 } from "./job-runner-presenter.js";
@@ -277,7 +276,6 @@ export function createJobBackgroundTask(
   context: TuiContext,
 ): BackgroundTaskState {
   const runningAgents = job.agents.filter((agent) => agent.status === "running").length;
-  const runnerInline = formatJobRunnerInline(job);
   return {
     id: job.id,
     kind: "job",
@@ -285,7 +283,7 @@ export function createJobBackgroundTask(
     status: mapDurableJobToBackgroundStatus(job.status),
     currentStep:
       job.pauseReason ??
-      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}; ${runnerInline}`,
+      `worker step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; agents ${runningAgents}/${job.agents.length}`,
     progress: {
       completed: job.budget.usedSteps ?? 0,
       total: getDurableJobMaxSteps(job),
@@ -301,8 +299,8 @@ export function createJobBackgroundTask(
     result: mapDurableJobToBackgroundResult(job.status),
     userVisibleSummary:
       job.status === "running"
-        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; ${runnerInline}; raw output stays in logs.`
-        : `Job ${job.status}; ${runnerInline}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
+        ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; output stays in logs.`
+        : `Job ${job.status}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
     nextAction: formatJobNextAction(job, context.language),
   };
 }

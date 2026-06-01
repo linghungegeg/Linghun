@@ -272,13 +272,26 @@ function buildSummaryText(
   evidenceVerdict: EvidenceMergeVerdict,
   summary: WorkflowAgentRuntimeBridgeResult["summary"],
 ): string {
+  const status =
+    meta.slicesBlocked > 0 || evidenceVerdict === "BLOCKED"
+      ? "Needs attention"
+      : meta.slicesRunning > 0 || summary.queued > 0 || summary.runnable > 0
+        ? "In progress"
+        : "Ready for review";
+  const impact = [
+    `${meta.slicesDone} done`,
+    `${meta.slicesRunning} running`,
+    `${meta.slicesBlocked} blocked`,
+  ].join(", ");
+  const waiting =
+    summary.startGateNeeded > 0
+      ? "user confirmation needed"
+      : summary.queued > 0
+        ? "some work is waiting"
+        : "no confirmation needed";
   return [
-    `Workflow: ${title}`,
-    `Phase: ${meta.currentPhase}`,
-    `Slices: done=${meta.slicesDone} running=${meta.slicesRunning} blocked=${meta.slicesBlocked} queued=${meta.slicesQueued}`,
-    `Evidence: ${meta.evidenceCount} refs, merge=${evidenceVerdict}`,
-    `Budget: tokens=${meta.tokenEstimate}, cost=${meta.costEstimate}, duration=${meta.durationEstimate}`,
-    `Requests: runnable=${summary.runnable} readonly=${summary.readonly} start_gate=${summary.startGateNeeded} blocked=${summary.blocked} queued=${summary.queued}`,
+    `Result: ${title} is ${status.toLowerCase()}.`,
+    `Impact: ${meta.currentPhase}; ${impact}; ${waiting}.`,
     `Next: ${meta.nextAction}`,
   ].join("\n");
 }
