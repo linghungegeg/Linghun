@@ -200,6 +200,7 @@ const SAFE_CONTEXT_REF_KINDS = new Set<WorkflowReference["kind"]>([
   "evidence",
   "workspace_cache",
   "file",
+  "architecture",
 ]);
 
 export function bridgeWorkflowPlanToMainChainRequests(

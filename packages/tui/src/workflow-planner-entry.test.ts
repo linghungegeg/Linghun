@@ -376,6 +376,38 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     expect(cacheRef?.summary).toContain("modelProviderHash");
   });
 
+  it("workflow worker context carries bounded index, memory, cache, failure, and architecture summaries", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        controlledMemoryRef: { rulesFound: true, summary: "Use pnpm and vitest" },
+        cacheFreshnessHint: "changed=none; memoryHash=abc",
+        failureLearningRefs: [{ lesson: "Re-run typecheck before claiming pass", source: "ev-1" }],
+        indexStatusRef: {
+          status: "ready",
+          projectName: "F-Linghun",
+          freshness: "staleHint=none",
+        },
+        architectureRef: {
+          target: "workflow worker context",
+          summary: "reuse existing bridge and handoff only",
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const refs = result.plan.references ?? [];
+    expect(refs.find((r) => r.ref === "controlled-memory-context")?.summary).toContain("pnpm");
+    expect(refs.find((r) => r.ref === "cache-freshness-hint")?.summary).toContain("memoryHash");
+    expect(refs.find((r) => r.ref === "index-status-context")?.summary).toContain("F-Linghun");
+    expect(refs.find((r) => r.ref === "architecture-runtime-context")).toMatchObject({
+      kind: "architecture",
+    });
+    expect(result.plan.evidence?.find((e) => e.kind === "failure_learning")).toMatchObject({
+      passEvidence: false,
+    });
+    expect(JSON.stringify(result)).not.toMatch(/sourceRef|raw context/iu);
+  });
+
   it("memory/self-learning/failure_learning do not enter PASS evidence", () => {
     const result = generateWorkflowPlanPreview(
       goal({

@@ -977,11 +977,10 @@ export function buildDowngradedFinalAnswer(
       );
     }
   }
-  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
   const notice =
     language === "en-US"
-      ? `\nI can't confirm these claims due to missing ${kinds} evidence; the reply above has been rephrased as unverified.`
-      : `\n\u6211\u4e0d\u80fd\u786e\u8ba4\u8fd9\u4e9b\u58f0\u660e\uff0c\u56e0\u4e3a\u7f3a\u5c11 ${kinds} \u8bc1\u636e\uff1b\u4ee5\u4e0a\u56de\u7b54\u5df2\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002`;
+      ? "\nI can only state this as unverified because matching evidence is missing."
+      : "\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u8bc1\u636e\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309\"\u672a\u9a8c\u8bc1\"\u8868\u8ff0\u3002";
   return safeText + notice;
 }
 
@@ -1144,11 +1143,10 @@ export function buildExtendedDowngradedFinalAnswer(
       );
     }
   }
-  const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
   const notice =
     language === "en-US"
-      ? `\nI can't confirm these claims due to missing ${kinds} support; the reply above has been rephrased as unverified.`
-      : `\n\u6211\u4e0d\u80fd\u786e\u8ba4\u8fd9\u4e9b\u58f0\u660e\uff0c\u56e0\u4e3a\u7f3a\u5c11 ${kinds}\uff1b\u4ee5\u4e0a\u56de\u7b54\u5df2\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002`;
+      ? "\nI can only state this as unverified because matching support is missing."
+      : "\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u652f\u6491\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309\"\u672a\u9a8c\u8bc1\"\u8868\u8ff0\u3002";
   return safeText + notice;
 }
 

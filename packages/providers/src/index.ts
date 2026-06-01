@@ -142,7 +142,7 @@ export type OpenAiChatRequest = {
   model: string;
   messages: OpenAiChatMessage[];
   stream: true;
-  max_tokens: number;
+  max_tokens?: number;
   tools?: OpenAiToolDefinition[];
   tool_choice?: "auto" | "none";
   reasoning?: { effort: string };
@@ -153,7 +153,7 @@ export type OpenAiResponsesRequest = {
   model: string;
   input: OpenAiResponsesInputItem[];
   stream: true;
-  max_output_tokens: number;
+  max_output_tokens?: number;
   tools?: OpenAiResponsesToolDefinition[];
   tool_choice?: "auto" | "none";
   reasoning?: { effort: string };
@@ -1260,7 +1260,7 @@ function createChatProfileRequest(
     model,
     messages: request.messages.map(toOpenAiMessage),
     stream: true,
-    max_tokens: resolveMaxOutputTokens(model, request, config),
+    ...createOptionalMaxTokens("max_tokens", request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
     ...(contract.sendReasoning
       ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
@@ -1288,7 +1288,7 @@ function createResponsesProfileRequest(
     model,
     input: request.messages.flatMap(toOpenAiResponsesInputItem),
     stream: true,
-    max_output_tokens: resolveMaxOutputTokens(model, request, config),
+    ...createOptionalMaxTokens("max_output_tokens", request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
     ...(contract.sendReasoning
       ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
@@ -1512,6 +1512,15 @@ function resolveMaxOutputTokens(
   const maxAllowed = known?.maxOutputTokens ?? config.maxOutputTokens ?? 4_096;
   const requested = request.maxOutputTokens ?? config.maxOutputTokens ?? maxAllowed;
   return Math.min(requested, maxAllowed);
+}
+
+function createOptionalMaxTokens<K extends "max_tokens" | "max_output_tokens">(
+  key: K,
+  request: ModelRequest,
+  config: ProviderConfig,
+): Partial<Record<K, number>> {
+  const configured = request.maxOutputTokens ?? config.maxOutputTokens;
+  return configured === undefined ? {} : ({ [key]: configured } as Record<K, number>);
 }
 
 function createOpenAiChatTools(

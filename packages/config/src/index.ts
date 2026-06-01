@@ -341,7 +341,6 @@ export const defaultModelRoutes: ModelRouteConfig = {
       primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
-      maxOutputTokens: 8_192,
       maxCostCny: 0,
       allowTools: false,
       allowWrite: false,
@@ -354,7 +353,6 @@ export const defaultModelRoutes: ModelRouteConfig = {
       primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
-      maxOutputTokens: 8_192,
       allowTools: true,
       allowWrite: true,
       allowBash: true,
@@ -366,7 +364,6 @@ export const defaultModelRoutes: ModelRouteConfig = {
       primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
-      maxOutputTokens: 8_192,
       allowTools: true,
       allowWrite: false,
       allowBash: false,
@@ -378,7 +375,6 @@ export const defaultModelRoutes: ModelRouteConfig = {
       primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
-      maxOutputTokens: 8_192,
       allowTools: true,
       allowWrite: false,
       allowBash: true,
@@ -390,7 +386,6 @@ export const defaultModelRoutes: ModelRouteConfig = {
       primaryModel: defaultDeepSeekModel,
       fallbackModels: [],
       requiredCapabilities: ["text"],
-      maxOutputTokens: 2_048,
       maxCostCny: 0,
       allowTools: false,
       allowWrite: false,
@@ -431,14 +426,12 @@ export const defaultConfig: LinghunConfig = {
       baseUrl: process.env.LINGHUN_DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1",
       apiKey: process.env.LINGHUN_DEEPSEEK_API_KEY,
       model: defaultDeepSeekModel,
-      maxOutputTokens: 8_192,
     },
     "openai-compatible": {
       type: "openai-compatible",
       baseUrl: process.env.LINGHUN_OPENAI_BASE_URL,
       apiKey: process.env.LINGHUN_OPENAI_API_KEY,
       model: process.env.LINGHUN_OPENAI_MODEL ?? openAiCompatibleModelPlaceholder,
-      maxOutputTokens: 4_096,
       endpointProfile: defaultOpenAiEndpointProfile,
       compatibilityProfile: "strict_openai_compatible",
       reasoningLevel: defaultReasoningLevel,
@@ -1051,7 +1044,6 @@ export async function loadConfig(projectPath = process.cwd()): Promise<LinghunCo
 export async function saveDefaultModel(
   model: string,
   projectPath = process.cwd(),
-  maxOutputTokens?: number,
 ): Promise<LinghunConfig> {
   const current = await loadConfig(projectPath);
   const next: LinghunConfig = {
@@ -1062,7 +1054,6 @@ export async function saveDefaultModel(
       deepseek: {
         ...current.providers.deepseek,
         model,
-        maxOutputTokens: maxOutputTokens ?? current.providers.deepseek.maxOutputTokens,
       },
     },
   };

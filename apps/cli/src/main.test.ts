@@ -107,7 +107,8 @@ describe("CLI", () => {
       expect(shown.stdout).not.toContain("https://api.deepseek.com");
       expect(switched.stdout).toContain("deepseek-v4-pro");
       expect(switched.stdout).toContain("上下文窗口：1048576");
-      expect(switched.stdout).toContain("最大输出：16384");
+      expect(switched.stdout).toContain("厂商最大输出：16384");
+      expect(switched.stdout).toContain("请求输出上限：未设置");
       expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-pro");
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");

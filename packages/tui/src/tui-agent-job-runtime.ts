@@ -100,13 +100,28 @@ export function createAgentContextSummary(
 ): string {
   const evidence = packet.evidenceRefs.map((item) => `${item.kind}:${item.source}`).slice(0, 5);
   const files = packet.keyFiles.slice(0, 8);
+  const activeFailures = context.failureLearning.records.filter(
+    (item) =>
+      item.status === "active" && item.projectScope === context.failureLearning.projectScope,
+  );
+  const freshness = context.cache.lastFreshness
+    ? `changed=${context.cache.lastFreshness.changedKeys.slice(0, 5).join(",") || "none"}`
+    : "not_checked";
+  const architecture = packet.currentArchitectureCard
+    ? truncateDisplay(packet.currentArchitectureCard.recommendedApproach, 120)
+    : "none";
   return [
     "Agent context package (trimmed)",
     `handoff=${packet.id}`,
     `task=${truncateDisplay(task, 200)}`,
+    `language=${context.language}`,
     `todos=${packet.todos.length}`,
     `evidence=${evidence.length > 0 ? evidence.join("; ") : "none"}`,
     `keyFiles=${files.length > 0 ? files.join(", ") : "none"}`,
+    `index=${packet.indexStatus.projectName}:${packet.indexStatus.status}`,
+    `cacheFreshness=${freshness}`,
+    `architecture=${architecture}`,
+    `failureLearning=${activeFailures.length}`,
     `permission=${context.permissionMode}`,
     "notIncluded=full transcript/full memory/full index/large logs",
   ].join(" | ");

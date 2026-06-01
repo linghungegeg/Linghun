@@ -85,7 +85,7 @@ export type WorkflowRuntimeTarget =
     };
 
 export type WorkflowReference = {
-  kind: "evidence" | "workspace_cache" | "file" | "log" | "transcript" | "index";
+  kind: "evidence" | "workspace_cache" | "file" | "log" | "transcript" | "index" | "architecture";
   ref: string;
   summary?: string;
 };

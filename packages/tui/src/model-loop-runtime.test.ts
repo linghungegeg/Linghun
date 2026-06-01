@@ -965,9 +965,24 @@ describe("model-loop-runtime", () => {
       const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
       const downgraded = buildDowngradedFinalAnswer("已完成，测试通过。", verdict, "zh-CN");
       expect(downgraded).toContain("[未验证]");
-      expect(downgraded).toContain("我不能确认这些声明");
+      expect(downgraded).toContain("缺少匹配证据");
       expect(downgraded).not.toContain("FinalAnswerClaimGate");
       expect(downgraded).not.toContain("evidence_id");
+      expect(downgraded).not.toContain("test_passed");
+      expect(downgraded).not.toContain("action_executed");
+      expect(downgraded).not.toContain("sourceRef");
+      expect(downgraded).not.toMatch(/retry|downgrade|kinds|修正版回答如下/iu);
+    });
+
+    it("buildDowngradedFinalAnswer English surface hides internal gate fields", () => {
+      const verdict = evaluateFinalAnswerClaims("Done, tests passed.", []);
+      const downgraded = buildDowngradedFinalAnswer("Done, tests passed.", verdict, "en-US");
+      expect(downgraded).toContain("[unverified]");
+      expect(downgraded).toContain("matching evidence is missing");
+      expect(downgraded).not.toContain("test_passed");
+      expect(downgraded).not.toContain("action_executed");
+      expect(downgraded).not.toContain("sourceRef");
+      expect(downgraded).not.toMatch(/retry|downgrade|kinds|corrected answer/iu);
     });
   });
 
@@ -1321,6 +1336,8 @@ describe("model-loop-runtime", () => {
       expect(out).not.toContain("符合架构边界");
       expect(out).not.toContain("没有架构漂移");
       expect(out).toContain("未验证");
+      expect(out).not.toContain("Architecture Card 与 drift check");
+      expect(out).not.toMatch(/retry|downgrade|kinds|sourceRef|修正版回答如下/iu);
     });
   });
 

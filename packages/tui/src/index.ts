@@ -2627,6 +2627,8 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;
   cacheFreshnessHint?: string;
+  indexStatusRef?: { status: string; projectName?: string; freshness?: string };
+  architectureRef?: { target: string; summary: string };
 } {
   const controlledMemoryRef =
     context.memory.projectRulesExists && context.memory.projectRulesSummary
@@ -2653,6 +2655,19 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
     ...(activeFailures.length > 0 ? { failureLearningRefs: activeFailures } : {}),
     ...(context.cache.lastFreshness
       ? { cacheFreshnessHint: summarizeWorkflowCacheFreshness(context.cache.lastFreshness) }
+      : {}),
+    indexStatusRef: {
+      status: context.index.status,
+      projectName: context.index.projectName,
+      freshness: context.index.staleHint ? `staleHint=${context.index.staleHint}` : "freshness=not_checked",
+    },
+    ...(context.currentArchitectureCard
+      ? {
+          architectureRef: {
+            target: context.currentArchitectureCard.target,
+            summary: summarizeArchitectureCard(context.currentArchitectureCard).recommendedApproach,
+          },
+        }
       : {}),
   };
 }

@@ -9,6 +9,8 @@ import {
   type WorkflowPlan,
   normalizeWorkflowPlan,
 } from "./workflow-plan-schema.js";
+import { createAgentContextSummary } from "./tui-agent-job-runtime.js";
+import type { HandoffPacket, TuiContext } from "./index.js";
 
 function createPlan(overrides: Partial<WorkflowPlan> = {}): WorkflowPlan {
   return {
@@ -357,6 +359,7 @@ describe("D.14H-C workflow agent runtime bridge", () => {
         references: [
           { kind: "workspace_cache", ref: "cache:workspace", summary: "x".repeat(500) },
           { kind: "file", ref: "packages/tui/src/index.ts", summary: "key file" },
+          { kind: "architecture", ref: "architecture-runtime-context", summary: "reuse bridge" },
           { kind: "transcript", ref: "transcript:full", summary: "should be dropped" },
           { kind: "log", ref: "log:full", summary: "should be dropped" },
           { kind: "index", ref: "index:full", summary: "should be dropped" },
@@ -367,6 +370,9 @@ describe("D.14H-C workflow agent runtime bridge", () => {
 
     expect(refs.workspaceCacheRefs).toEqual(["cache:workspace"]);
     expect(refs.keyFilesSummary).toEqual(["key file"]);
+    expect(refs.boundedRefs.find((ref) => ref.kind === "architecture")).toMatchObject({
+      ref: "architecture-runtime-context",
+    });
     expect(refs.droppedRefKinds).toEqual(["transcript", "log", "index"]);
     expect(refs.notIncluded.join(" ")).toContain("full transcript");
     expect(JSON.stringify(refs)).not.toContain("should be dropped");
@@ -428,5 +434,79 @@ describe("D.14H-C workflow agent runtime bridge", () => {
       /providerEnv|apiKey|baseUrl|modelRoute|modelRoutes|routeChange/iu,
     );
     expect(serialized).toContain("provider/env/key/model route changes");
+  });
+
+  it("agent context summary inherits bounded index, cache, architecture, failure, permission, and language", () => {
+    const packet = {
+      id: "handoff-1",
+      sessionId: "session-1",
+      projectPath: "F:/Linghun",
+      currentPhase: "Final Gate UX",
+      nextPhase: "smoke",
+      phaseStatus: "blocked",
+      goal: "verify worker context sharing",
+      completed: [],
+      pending: [],
+      mustNotDo: [],
+      todos: [{ id: "todo-1", content: "check context", status: "pending" }],
+      changedFiles: [],
+      evidenceRefs: [{ id: "ev-1", kind: "file_read", source: "src/index.ts", summary: "read" }],
+      verdictEvidence: {
+        scope: "focused",
+        status: "PARTIAL",
+        evidenceRefs: [],
+        validationCommands: [],
+        uncoveredItems: [],
+        residualRisks: [],
+        nextAction: "run focused tests",
+      },
+      verification: null,
+      risks: [],
+      keyFiles: ["packages/tui/src/index.ts"],
+      indexStatus: {
+        projectName: "F-Linghun",
+        status: "ready",
+        nodes: 10,
+        edges: 9,
+        changedFiles: 0,
+      },
+      currentArchitectureCard: {
+        target: "worker context",
+        projectFacts: ["index ready"],
+        recommendedApproach: "reuse handoff and bridge summaries",
+        risks: [],
+        verification: ["focused tests"],
+        nonGoals: ["new cache system"],
+      },
+      permissionMode: "default",
+      modelProvider: { provider: "deepseek", model: "deepseek-v4-pro" },
+      recentCommit: "unknown",
+      budgetUsage: "local validation only",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      generatedBy: "test",
+    } as HandoffPacket;
+    const context = {
+      language: "en-US",
+      permissionMode: "default",
+      cache: { lastFreshness: { changedKeys: ["memoryHash", "pluginListHash"] } },
+      failureLearning: {
+        projectScope: "F-Linghun",
+        records: [
+          { status: "active", projectScope: "F-Linghun" },
+          { status: "ignored", projectScope: "F-Linghun" },
+        ],
+      },
+    } as TuiContext;
+
+    const summary = createAgentContextSummary(packet, "verify worker context", context);
+
+    expect(summary).toContain("language=en-US");
+    expect(summary).toContain("index=F-Linghun:ready");
+    expect(summary).toContain("cacheFreshness=changed=memoryHash,pluginListHash");
+    expect(summary).toContain("architecture=reuse handoff and bridge summaries");
+    expect(summary).toContain("failureLearning=1");
+    expect(summary).toContain("permission=default");
+    expect(summary).toContain("notIncluded=full transcript/full memory/full index/large logs");
+    expect(summary).not.toMatch(/sourceRef|raw context|providerEnv|apiKey|baseUrl/iu);
   });
 });

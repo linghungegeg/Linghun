@@ -4458,9 +4458,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(requests[0]).toMatchObject({
       model: "gpt-5.5",
-      max_output_tokens: 4_096,
       reasoning: { effort: "medium" },
     });
+    expect(requests[0]).not.toHaveProperty("max_output_tokens");
     const modelRequestJson = JSON.stringify(requests[0]);
     expect(modelRequestJson).toContain('{"type":"function","name":"Read"');
     expect(modelRequestJson).toContain('"name":"Write"');

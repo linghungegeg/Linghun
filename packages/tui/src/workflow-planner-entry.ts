@@ -37,6 +37,8 @@ export type WorkflowPlannerGoal = {
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;
   cacheFreshnessHint?: string;
+  indexStatusRef?: { status: string; projectName?: string; freshness?: string };
+  architectureRef?: { target: string; summary: string };
 };
 
 export function generateWorkflowPlanPreview(
@@ -75,6 +77,8 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
     selfLearningHints,
     failureLearningRefs,
     cacheFreshnessHint,
+    indexStatusRef,
+    architectureRef,
   } = input;
   const sanitizedGoal = sanitizeGoalText(goal);
   const planId = `wf-plan-${Date.now()}`;
@@ -117,6 +121,30 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
       kind: "workspace_cache",
       ref: "cache-freshness-hint",
       summary: sanitizeRefText(cacheFreshnessHint).slice(0, 200),
+    });
+  }
+
+  if (indexStatusRef) {
+    const project = indexStatusRef.projectName ? ` project=${indexStatusRef.projectName}` : "";
+    const freshness = indexStatusRef.freshness ? ` ${indexStatusRef.freshness}` : "";
+    references.push({
+      kind: "workspace_cache",
+      ref: "index-status-context",
+      summary: sanitizeRefText(`status=${indexStatusRef.status}${project}${freshness}`).slice(
+        0,
+        200,
+      ),
+    });
+  }
+
+  if (architectureRef?.summary) {
+    references.push({
+      kind: "architecture",
+      ref: "architecture-runtime-context",
+      summary: sanitizeRefText(`${architectureRef.target}: ${architectureRef.summary}`).slice(
+        0,
+        300,
+      ),
     });
   }
 

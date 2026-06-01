@@ -119,7 +119,7 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
 
   if (!subcommand) {
     return {
-      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl, provider.maxOutputTokens),
+      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl),
       stderr: "",
       exitCode: 0,
     };
@@ -131,14 +131,13 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     if (!target) {
       return usageError(`未知模型：${nextModel ?? "（空）"}`);
     }
-    const nextConfig = await saveDefaultModel(target.id, process.cwd(), target.maxOutputTokens);
+    const nextConfig = await saveDefaultModel(target.id, process.cwd());
     const nextProvider = nextConfig.providers.deepseek;
     return {
       stdout: `当前 headless 模型已切换为：${target.id}\n${formatModelInfo(
         deepSeekModels,
         target.id,
         nextProvider.baseUrl,
-        nextProvider.maxOutputTokens,
       )}`,
       stderr: "",
       exitCode: 0,
@@ -210,10 +209,9 @@ function formatModelInfo(
   models: ModelInfo[],
   modelId: string,
   baseUrl: string | undefined,
-  maxOutputTokens: number | undefined,
 ): string {
   const model = models.find((item) => item.id === modelId) ?? models[0];
-  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n最大输出：${maxOutputTokens ?? model.maxOutputTokens}\n`;
+  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n厂商最大输出：${model.maxOutputTokens}\n请求输出上限：未设置\n`;
 }
 
 type DoctorProviderConfig = {
