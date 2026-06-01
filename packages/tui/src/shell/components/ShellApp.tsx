@@ -170,11 +170,30 @@ function TaskLayout({
           clamped translate; this wrapper only supplies padding + flexGrow. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
         <ScrollViewport scroll={view.taskScroll}>
-          {/* Permission > HelpPanel > BtwPanel > ConfigPanel 互斥渲染：
-            - permission 优先级最高（已合并到 Composer 内的 PermissionControl card）；
-            - HelpPanel / BtwPanel（D.13Q-UX Closure）次之；
-            - ConfigPanel 只在没有 permission / helpPanel / btwPanel 时渲染。
-            Composer 在任一面板打开时 useInput { isActive: false }，避免双消费。 */}
+          {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
+            ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
+            blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
+          {view.blocks.length > 0 ? (
+            <Box flexDirection="column">
+              {view.blocks.map((block) => (
+                <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
+              ))}
+            </Box>
+          ) : null}
+
+          {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
+            用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
+            压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
+          {view.activity ? (
+            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
+              <ActivityIndicator activity={view.activity} theme={theme} />
+            </Box>
+          ) : null}
+
+          {/* Run 3 B — 高级面板移到 blocks/activity 之后渲染，作为最新 surface。
+            stickToBottom=true 时面板在底部可见，不会被历史 transcript 裁掉。
+            面板打开时 Composer isActive=false，避免双消费。
+            Permission > HelpPanel > BtwPanel > SessionsPanel > ConfigPanel > CommandPanel 互斥。 */}
           {!view.permission && view.helpPanel ? (
             <HelpPanel
               panel={view.helpPanel}
@@ -215,8 +234,6 @@ function TaskLayout({
               language={view.language}
             />
           ) : null}
-          {/* D.13Q-UX Task Surface — 通用 CommandPanel：当所有其他面板都关闭时，
-            高级 slash 命令的输出走这里。与 transcript 隔离。 */}
           {!view.permission &&
           !view.helpPanel &&
           !view.btwPanel &&
@@ -230,26 +247,6 @@ function TaskLayout({
               noColor={noColor}
               language={view.language}
             />
-          ) : null}
-
-          {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
-            ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
-            blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
-          {view.blocks.length > 0 ? (
-            <Box flexDirection="column">
-              {view.blocks.map((block) => (
-                <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
-              ))}
-            </Box>
-          ) : null}
-
-          {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
-            用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
-            压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
-          {view.activity ? (
-            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-              <ActivityIndicator activity={view.activity} theme={theme} />
-            </Box>
           ) : null}
 
           {/* TaskSuggestionBar — 静态只读 hint 行；不接 useInput；空数组时不渲染。

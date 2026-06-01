@@ -1,7 +1,7 @@
 import { Box, type DOMElement } from "ink";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { clampTaskScroll } from "../models/task-scroll-state.js";
+import { computeScrollViewportOffset } from "../models/task-scroll-state.js";
 import type { TaskScrollView } from "../types.js";
 
 /**
@@ -68,10 +68,7 @@ export function ScrollViewport({
     }
   });
 
-  const clamped = clampTaskScroll(scroll, maxOffset);
-  const stick = scroll?.stickToBottom ?? true;
-  const effectiveOffset = stick ? 0 : clamped.scrollOffset;
-  const marginTop = effectiveOffset > 0 ? -effectiveOffset : 0;
+  const { marginTop } = computeScrollViewportOffset(maxOffset, scroll);
 
   return (
     <Box ref={viewportRef} flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">

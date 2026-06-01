@@ -67,3 +67,17 @@ export function clampTaskScroll(
     hasOverflow: ceiling > 0,
   };
 }
+
+export function computeScrollViewportOffset(
+  maxOffset: number,
+  scroll: TaskScrollView | undefined,
+): { topOffset: number; marginTop: number; bottomOffset: number } {
+  const clamped = clampTaskScroll(scroll, maxOffset);
+  const bottomOffset = scroll?.stickToBottom ?? true ? 0 : clamped.scrollOffset;
+  const topOffset = Math.max(0, Math.floor(maxOffset > 0 ? maxOffset : 0) - bottomOffset);
+  return {
+    topOffset,
+    marginTop: topOffset > 0 ? -topOffset : 0,
+    bottomOffset,
+  };
+}

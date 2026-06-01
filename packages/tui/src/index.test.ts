@@ -219,6 +219,52 @@ function mockOpenAiToolSequence(
   return requests;
 }
 
+function mockOpenAiToolSequenceWithFinalCalls(
+  toolCalls: Array<{ toolName: string; input: unknown }>,
+  finalText = "done",
+): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      const request = JSON.parse(String(init.body)) as { tool_choice?: string; toolChoice?: string };
+      const finalOnly = request.tool_choice === "none" || request.toolChoice === "none";
+      const toolIndex = requests.filter((item) => {
+        const req = item as { tool_choice?: string; toolChoice?: string };
+        return req.tool_choice !== "none" && req.toolChoice !== "none";
+      }).length;
+      const toolCall = finalOnly ? undefined : toolCalls[toolIndex - 1];
+      const body = toolCall
+        ? [
+            `data: ${JSON.stringify({
+              id: `chatcmpl-test-${requests.length}`,
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: `call-${requests.length}`,
+                        type: "function",
+                        function: {
+                          name: toolCall.toolName,
+                          arguments: JSON.stringify(toolCall.input),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ].join("")
+        : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
 async function createMockCodebaseMemoryBinary(
   project: string,
   mockDir: string,
@@ -4935,7 +4981,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     // 4 个只读 Read 工具调用（MAX_MODEL_TOOL_ROUNDS=4），最后一轮触发轮次上限。
     // Read 走 auto-allow（readonly），不会被 permission 打断。
-    const requests = mockOpenAiToolSequence(
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
       [
         { toolName: "Read", input: { path: "a.txt" } },
         { toolName: "Read", input: { path: "a.txt" } },
@@ -4958,7 +5004,132 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/index refresh");
     // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
     expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
-    expect(requests.length).toBeGreaterThanOrEqual(4);
+    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
+    expect(requests.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("Todo-only round does not reduce the four evidence tool rounds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "todo-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "todo-budget-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      [
+        { toolName: "Todo", input: { action: "add", content: "先整理计划" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+      ],
+      "已综合现有信息回答。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["先整理计划再读取四次\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
+    expect(output.text).toContain("本轮工具调用已达上限");
+    expect(requests.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("repeated Todo-only rounds stop at the total hard cap with unverified wording", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "todo-only-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "todo-only-budget-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      Array.from({ length: 8 }, (_, index) => ({
+        toolName: "Todo",
+        input: { action: "add", content: `计划 ${index + 1}` },
+      })),
+      "只完成计划整理，尚未执行仓库验证。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["只整理计划\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("仅完成计划整理");
+    expect(output.text).toContain("尚未执行仓库验证");
+    expect(output.text).not.toContain("将基于目前已收集的信息");
+    expect(requests.length).toBeGreaterThanOrEqual(9);
+    expect(requests.length).toBeLessThanOrEqual(10);
+  });
+
+  it("Todo-only followed by GitStatusInspect and Read continues executing evidence tools", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "todo-git-read-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "todo-git-read-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiToolSequenceWithFinalCalls(
+      [
+        { toolName: "Todo", input: { action: "add", content: "检查状态" } },
+        { toolName: "GitStatusInspect", input: { includeDetails: false } },
+        { toolName: "Read", input: { path: "a.txt" } },
+      ],
+      "已检查状态并读取文件。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["先计划，再检查 git 状态并读取文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("Git 状态：");
+    expect(output.text).toContain("工具 Read 已完成");
   });
 
   it("continues after denied model tool permission as a tool_result", async () => {
@@ -15090,7 +15261,7 @@ describe("D.13V-B/C source invariants", () => {
     const text = await readFile("src/index.ts", "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
-    const body = text.slice(start, start + 12000);
+    const body = text.slice(start, start + 15000);
     expect(body).toContain("runArchitectureAndCompletenessFinalGate");
     expect(body).toContain("buildExtendedDowngradedFinalAnswer");
   });
@@ -15102,7 +15273,7 @@ describe("D.13V-B/C source invariants", () => {
     const text = await readFile("src/index.ts", "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
-    const body = text.slice(start, start + 12000);
+    const body = text.slice(start, start + 15000);
     expect(body).toContain("needsSolutionCompletenessReportClosure");
     expect(body).toContain("formatSolutionCompletenessReportBlock");
     // closure 必须在 assistant_text_delta append 之后（安全文本入 transcript 后才追加）

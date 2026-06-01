@@ -116,7 +116,17 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("命令已退出 2");
     });
 
-    it("Read 主屏走 summary-first：默认折叠，提示 Ctrl+O 展开（默认降噪）", () => {
+    it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
+      const layered = createLayeredToolOutput(
+        "Read",
+        { text: "line1\nline2", data: { lines: 2 } },
+        "zh-CN",
+      );
+      expect(layered.preview).not.toContain("Ctrl+O");
+      expect(layered.truncated).toBe(false);
+    });
+
+    it("Read 主屏走 summary-first：长输出才折叠，提示 Ctrl+O 展开", () => {
       const layered = createLayeredToolOutput(
         "Read",
         { text: "long\nfile\ncontent\n".repeat(20), data: { lines: 60 } },
@@ -143,6 +153,8 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
       expect(layered.fullOutputPath).toBe("/tmp/full.log");
+      expect(layered.preview).toContain("Ctrl+O");
+      expect(layered.truncated).toBe(true);
     });
 
     it("英文也产出折叠提示（Press Ctrl+O to expand）", () => {

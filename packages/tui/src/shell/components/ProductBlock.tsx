@@ -39,6 +39,21 @@ function isMessageKind(kind: MessageBlockKind | undefined): boolean {
   );
 }
 
+function hasHiddenContent(block: ProductBlockViewModel): boolean {
+  const fullText = (block.fullText ?? "").trim();
+  const summary = (block.summary ?? "").trim();
+  if (!fullText) return false;
+  if (!summary) return fullText.length > 0;
+  const nonEmptyLines = fullText.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+  return nonEmptyLines >= 2 || fullText.length > summary.length + 16;
+}
+
+function visibleNextAction(block: ProductBlockViewModel): string | undefined {
+  if (!block.nextAction) return undefined;
+  if (!/Ctrl\+O/i.test(block.nextAction)) return block.nextAction;
+  return hasHiddenContent(block) ? block.nextAction : undefined;
+}
+
 export function ProductBlock({
   block,
   theme,
@@ -49,6 +64,7 @@ export function ProductBlock({
   width: number;
 }): React.ReactNode {
   const compact = width < 60;
+  const nextAction = visibleNextAction(block);
   // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
   // task transcript，与下方 tool/output 块视觉分层。U+276F + accent 颜色，
   // 不带 status marker、不带 detail/nextAction，只显示一行命令。
@@ -105,8 +121,8 @@ export function ProductBlock({
         ) : (
           <MessageMarkdown text={body} theme={theme} dim={dim} tone={tone} />
         )}
-        {block.nextAction ? (
-          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, Math.max(8, width - 2))} />
+        {nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
       </Box>
     );
@@ -122,8 +138,8 @@ export function ProductBlock({
           {"∴ "}
         </Text>
         <MessageMarkdown text={body} theme={theme} dim />
-        {block.nextAction ? (
-          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, Math.max(8, width - 2))} />
+        {nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
       </Box>
     );
@@ -177,8 +193,8 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? <MessageMarkdown text={body} theme={theme} tone="error" /> : null}
-        {block.nextAction ? (
-          <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, innerWidth)} />
+        {nextAction ? (
+          <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} />
         ) : null}
       </Box>
     );
@@ -191,6 +207,9 @@ export function ProductBlock({
   const titleVisible = isMeaningfulTitle(block.title);
   const summaryTrimmed = (block.summary ?? "").trim();
   if (!titleVisible && !summaryTrimmed && !block.detail && !block.nextAction) {
+    return null;
+  }
+  if (!titleVisible && !summaryTrimmed && !block.detail && !nextAction) {
     return null;
   }
   const summaryAsMarker = !titleVisible && summaryTrimmed.length > 0;
@@ -216,8 +235,8 @@ export function ProductBlock({
       ) : null}
       {!summaryAsMarker && summaryTrimmed ? <Text>{block.summary}</Text> : null}
       {block.detail ? <Text color={theme.muted}>{fitText(block.detail, innerWidth)}</Text> : null}
-      {block.nextAction ? (
-        <CtrlOToExpand theme={theme} hint={fitText(block.nextAction, innerWidth)} />
+      {nextAction ? (
+        <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} />
       ) : null}
     </Box>
   );

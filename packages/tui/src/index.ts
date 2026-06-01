@@ -1213,6 +1213,8 @@ const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
 const MAX_MODEL_TOOL_ROUNDS = 4;
+const MAX_TODO_ONLY_CONSECUTIVE_ROUNDS = 1;
+const MAX_MODEL_TOTAL_TOOL_ROUNDS = 8;
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_STATUS_WIDTH = 160;
@@ -6025,7 +6027,11 @@ async function sendMessage(
     });
   }
   try {
-    for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
+    let evidenceRounds = 0;
+    let consecutiveTodoOnlyRounds = 0;
+    let totalPlanningOnlyRounds = 0;
+    let todoOnlyHintSent = false;
+    for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       let roundChunkCount = 0;
@@ -6207,6 +6213,13 @@ async function sendMessage(
       if (reportWriteGuard && !hasReportWriteToolCall(reportWriteGuard, toolCalls)) {
         reportWriteGuard.nonWriteToolRounds += 1;
       }
+      const todoOnly = isTodoOnlyRound(toolCalls);
+      if (todoOnly) {
+        consecutiveTodoOnlyRounds += 1;
+      } else {
+        consecutiveTodoOnlyRounds = 0;
+        evidenceRounds += 1;
+      }
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(toolCall, context, sessionId, output, {
           messages,
@@ -6229,13 +6242,30 @@ async function sendMessage(
           content: JSON.stringify(result),
         });
       }
-      if (round === MAX_MODEL_TOOL_ROUNDS - 1) {
-        writeLine(
-          output,
-          context.language === "en-US"
+      if (todoOnly) {
+        totalPlanningOnlyRounds += 1;
+        if (consecutiveTodoOnlyRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS && !todoOnlyHintSent) {
+          const todoHint =
+            context.language === "en-US"
+              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
+              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
+          messages.push({ role: "user", content: todoHint });
+          todoOnlyHintSent = true;
+          continue;
+        }
+      }
+      const reachedEvidenceLimit = evidenceRounds >= MAX_MODEL_TOOL_ROUNDS;
+      const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
+      if (reachedEvidenceLimit || reachedTotalLimit) {
+        const onlyPlanning = evidenceRounds === 0;
+        const limitMsg = onlyPlanning
+          ? context.language === "en-US"
+            ? "Reached the tool-call limit for this turn. Only planning/Todo was executed; no repository verification was performed. If verification is needed, run the matching command or send the request again."
+            : "本轮工具调用已达上限，仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。"
+          : context.language === "en-US"
             ? "Reached the tool-call limit for this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
-            : "本轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。",
-        );
+            : "本轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。";
+        writeLine(output, limitMsg);
         const finalText = await streamFinalModelAnswerWithoutTools(
           {
             messages,
@@ -6253,6 +6283,7 @@ async function sendMessage(
           assistantStreamBlockId,
         );
         assistantText += finalText;
+        break;
       }
     }
   } finally {
@@ -6681,7 +6712,11 @@ async function continueModelAfterToolResults(
   beginAssistantStream(output, assistantStreamBlockId);
   const sessionId = await ensureSession(context);
   try {
-    for (let round = 0; round < MAX_MODEL_TOOL_ROUNDS; round += 1) {
+    let evidenceRounds = 0;
+    let consecutiveTodoOnlyRounds = 0;
+    let totalPlanningOnlyRounds = 0;
+    let todoOnlyHintSent = false;
+    for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId);
@@ -6827,6 +6862,13 @@ async function continueModelAfterToolResults(
       if (reportWriteGuard && !hasReportWriteToolCall(reportWriteGuard, toolCalls)) {
         reportWriteGuard.nonWriteToolRounds += 1;
       }
+      const todoOnly = isTodoOnlyRound(toolCalls);
+      if (todoOnly) {
+        consecutiveTodoOnlyRounds += 1;
+      } else {
+        consecutiveTodoOnlyRounds = 0;
+        evidenceRounds += 1;
+      }
       for (const toolCall of toolCalls) {
         const result = await executeModelToolUse(
           toolCall,
@@ -6847,13 +6889,32 @@ async function continueModelAfterToolResults(
           content: JSON.stringify(result),
         });
       }
-      if (round === MAX_MODEL_TOOL_ROUNDS - 1) {
-        writeLine(
-          output,
-          context.language === "en-US"
+      if (todoOnly) {
+        totalPlanningOnlyRounds += 1;
+      }
+      if (todoOnly && consecutiveTodoOnlyRounds > MAX_TODO_ONLY_CONSECUTIVE_ROUNDS) {
+        if (!todoOnlyHintSent) {
+          const todoHint =
+            context.language === "en-US"
+              ? "Planning recorded. Please proceed with verification tools (Read/Grep/Bash/GitStatusInspect) or provide an unverified conclusion."
+              : "计划已记录。请继续执行验证工具（Read/Grep/Bash/GitStatusInspect）或给出尚未验证结论。";
+          continuation.messages.push({ role: "user", content: todoHint });
+          todoOnlyHintSent = true;
+          continue;
+        }
+      }
+      const reachedEvidenceLimit = evidenceRounds >= MAX_MODEL_TOOL_ROUNDS;
+      const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
+      if (reachedEvidenceLimit || reachedTotalLimit) {
+        const onlyPlanning = evidenceRounds === 0;
+        const limitMsg = onlyPlanning
+          ? context.language === "en-US"
+            ? "Reached the tool-call limit while continuing this turn. Only planning/Todo was executed; no repository verification was performed."
+            : "续轮工具调用已达上限，仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。"
+          : context.language === "en-US"
             ? "Reached the tool-call limit while continuing this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
-            : "续轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。",
-        );
+            : "续轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。";
+        writeLine(output, limitMsg);
         const finalText = await streamFinalModelAnswerWithoutTools(
           continuation,
           context,
@@ -6864,6 +6925,7 @@ async function continueModelAfterToolResults(
           assistantStreamBlockId,
         );
         assistantText += finalText;
+        break;
       }
     }
     if (assistantText) {
@@ -7005,6 +7067,11 @@ function currentModelSupportsTools(
   }
   const known = findKnownModel(runtime.model);
   return known?.supportsTools !== false;
+}
+
+function isTodoOnlyRound(toolCalls: ModelToolCall[]): boolean {
+  if (toolCalls.length === 0) return false;
+  return toolCalls.every((tc) => tc.name === "Todo");
 }
 
 async function executeModelToolUse(

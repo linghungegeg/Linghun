@@ -401,13 +401,24 @@ export function createShellViewModel(
   // D.13Q-UX Task Surface — TaskScroll view 装配。home 模式下不暴露 taskScroll；
   // task/pending 模式默认 stickToBottom=true / scrollOffset=0；上层 controller
   // 通过 context.taskScrollState 写入用户的滚动位置。
-  const taskScroll: TaskScrollView | undefined =
+  // Run 3 B — 面板打开时强制 stickToBottom=true，保证面板作为最新 surface 可见。
+  const hasActivePanel = Boolean(
+    commandPanel || configPanel ||
+    (context as { helpPanelState?: unknown }).helpPanelState ||
+    (context as { btwPanelState?: unknown }).btwPanelState ||
+    (context as { sessionsPanelState?: unknown }).sessionsPanelState,
+  );
+  const rawTaskScroll: TaskScrollView | undefined =
     effectiveViewMode === "home"
       ? undefined
       : ((context as { taskScrollState?: TaskScrollView }).taskScrollState ?? {
           scrollOffset: 0,
           stickToBottom: true,
         });
+  const taskScroll: TaskScrollView | undefined =
+    rawTaskScroll && hasActivePanel
+      ? { ...rawTaskScroll, scrollOffset: 0, stickToBottom: true }
+      : rawTaskScroll;
 
   return {
     language,

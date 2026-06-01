@@ -231,9 +231,6 @@ function createSummaryFirstPreview(
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
   }
   if (name === "Bash" && exitCode !== undefined) {
-    // D.13L Section 4 — Bash 终态行：把退出码升级成一句人类可读的
-    // "Command exited 0" / "命令已退出 0"，与 CCB AssistantToolUseMessage
-    // 的"end summary"对齐。原 "exit code N" 标签保留在 stats 行作为内部标记。
     stats.push(language === "en-US" ? `exit code ${exitCode}` : `退出码 ${exitCode}`);
     if (looksLikeMojibake(text)) {
       stats.push(language === "en-US" ? "possible encoding issue" : "疑似编码问题");
@@ -260,8 +257,19 @@ function createSummaryFirstPreview(
       stats.push(language === "en-US" ? `read guard ${readGuard}` : `读取保护 ${readGuard}`);
     }
   }
-  const hint = formatDetailsHint(language);
-  return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
+  // Run 3 C — Ctrl+O 提示必须和真实可展开内容绑定。
+  // 只有当原始输出确实有被隐藏的重要内容时才显示折叠提示。
+  const hasHiddenContent =
+    Boolean(output?.truncated) ||
+    Boolean(output?.details) ||
+    Boolean(output?.fullOutputPath) ||
+    lines.length > 3 ||
+    text.length > 200;
+  if (hasHiddenContent) {
+    const hint = formatDetailsHint(language);
+    return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
+  }
+  return { text: `- ${stats.join("; ")}`, truncated: false };
 }
 
 function readNumber(value: object | undefined, key: string): number | undefined {

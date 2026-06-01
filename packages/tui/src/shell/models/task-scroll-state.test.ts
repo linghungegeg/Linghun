@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { clampTaskScroll, createInitialTaskScroll, reduceTaskScroll } from "./task-scroll-state.js";
+import {
+  clampTaskScroll,
+  computeScrollViewportOffset,
+  createInitialTaskScroll,
+  reduceTaskScroll,
+} from "./task-scroll-state.js";
 
 describe("D.13Q-UX Task Surface — reduceTaskScroll", () => {
   it("初始状态：scrollOffset=0 / stickToBottom=true", () => {
@@ -54,6 +59,48 @@ describe("D.13Q-UX Task Surface — reduceTaskScroll", () => {
     s = reduceTaskScroll(s, { type: "scroll", delta: 1 });
     expect(s.scrollOffset).toBe(11);
     expect(s.stickToBottom).toBe(false);
+  });
+});
+
+describe("Run 3 small repair — computeScrollViewportOffset", () => {
+  it("stickToBottom=true / scrollOffset=0 显示底部", () => {
+    expect(
+      computeScrollViewportOffset(20, { scrollOffset: 0, stickToBottom: true }),
+    ).toMatchObject({
+      topOffset: 20,
+      marginTop: -20,
+      bottomOffset: 0,
+    });
+  });
+
+  it("scrollOffset=5 显示距离底部 5 行", () => {
+    expect(
+      computeScrollViewportOffset(20, { scrollOffset: 5, stickToBottom: false }),
+    ).toMatchObject({
+      topOffset: 15,
+      marginTop: -15,
+      bottomOffset: 5,
+    });
+  });
+
+  it("scrollOffset=maxOffset 显示顶部", () => {
+    expect(
+      computeScrollViewportOffset(20, { scrollOffset: 20, stickToBottom: false }),
+    ).toMatchObject({
+      topOffset: 0,
+      marginTop: 0,
+      bottomOffset: 20,
+    });
+  });
+
+  it("maxOffset=0 时不偏移", () => {
+    expect(computeScrollViewportOffset(0, { scrollOffset: 5, stickToBottom: false })).toMatchObject(
+      {
+        topOffset: 0,
+        marginTop: 0,
+        bottomOffset: 0,
+      },
+    );
   });
 });
 

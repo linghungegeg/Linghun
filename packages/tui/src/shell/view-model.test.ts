@@ -4409,6 +4409,86 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     const out = view.blocks.find((b) => b.id === "long-fail");
     expect(out?.nextAction).toContain("Ctrl+O");
   });
+
+  it("ProductBlock 层隐藏没有更多正文的 Ctrl+O 假提示", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "fake-hint",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "ok",
+        fullText: "ok",
+        nextAction: "Ctrl+O 查看完整内容",
+        messageKind: "assistant_text",
+      },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          viewMode: "task",
+          outputBlocks: blocks,
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).not.toContain("Ctrl+O");
+  });
+
+  it("ProductBlock 层保留多行错误的 Ctrl+O 完整错误提示", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "real-error-hint",
+        kind: "error",
+        status: "fail",
+        title: "Bash failed",
+        summary: "exit 1",
+        fullText: "exit 1\nstderr line A\nstderr line B",
+        nextAction: "按 Ctrl+O 查看完整错误",
+        messageKind: "tool_result_error",
+      },
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+          viewMode: "task",
+          outputBlocks: blocks,
+        }),
+      onInput: () => undefined,
+    };
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("Ctrl+O");
+  });
 });
 
 // ─── D.13Q-UX Task Surface Maturity Sweep ────────────────────────────────────
