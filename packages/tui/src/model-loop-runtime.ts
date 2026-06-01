@@ -672,6 +672,8 @@ const ACTION_EXECUTED_PATTERNS: RegExp[] = [
   /命令(?:已|都已)?(?:成功)?(?:执行|运行)/u, // 命令已执行/已运行
   /已(?:成功)?(?:刷新|重建)索引/u, // 已刷新索引 / 已重建索引
   /索引(?:已|都已)?(?:成功)?(?:刷新|重建|更新)/u, // 索引已刷新
+  /(?:生图结果|图片结果|image result).{0,20}(?:已落盘|已生成|generated|saved)/iu,
+  /\bimage(?:\s+result)?\s+(?:generated|saved)\b/iu,
   /已(?:成功)?写入(?:文件)?/u, // 已写入 / 已写入文件
   /\bnpm\s+install\b.{0,30}(?:succe|done|complete|成功|完成)/iu,
   /\b(?:pnpm|yarn|npm|pip|cargo)\s+(?:install|add|i)\b.{0,30}(?:succe|done|complete|ran|executed)/iu,
@@ -825,6 +827,9 @@ function evidenceSupportsGitOperation(record: EvidenceRecord): boolean {
 // 动作只会产生 `tool_failure` evidence（recordToolFailureEvidence，supportsClaims 含
 // tool_failure），因此无法支撑该 claim；真实执行成功的 Bash/Write/Edit/index 才放行。
 function evidenceSupportsActionExecuted(record: EvidenceRecord): boolean {
+  if (record.kind === "image_result") {
+    return record.supportsClaims.includes("image_result");
+  }
   if (record.kind !== "command_output" && record.kind !== "test_result") {
     return false;
   }
@@ -850,7 +855,9 @@ function evidenceSupportsActionExecuted(record: EvidenceRecord): boolean {
       claim === "file_written" ||
       claim === "index_operation" ||
       claim === "index_refresh" ||
-      claim === "index_repair",
+      claim === "index_init_fast" ||
+      claim === "index_repair" ||
+      claim === "image_result",
   );
 }
 

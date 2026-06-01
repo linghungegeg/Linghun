@@ -1059,6 +1059,26 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result?.actionSummary).toContain("稳定点");
   });
 
+  it("maps image_generation approval to a Write PermissionPanel view", () => {
+    const ctx = createContext({
+      pendingLocalApproval: {
+        kind: "image_generation",
+        sessionId: "session-1",
+        prompt: "logo concept",
+        id: "image-123",
+        assetPath: ".linghun/assets/image-123.json",
+        provider: "deepseek",
+        model: "deepseek-image",
+      },
+    } as unknown as Partial<TuiContext>);
+    const result = mapPendingApprovalToPermission(ctx);
+    expect(result).toBeDefined();
+    expect(result?.toolName).toBe("Write");
+    expect(result?.risk).toBe("medium");
+    expect(result?.scope).toContain(".linghun/assets/image-123.json");
+    expect(result?.actionSummary).toContain("image metadata");
+  });
+
   it("maps en-US language hint correctly", () => {
     const ctx = createContext({
       language: "en-US",

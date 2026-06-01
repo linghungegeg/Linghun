@@ -108,7 +108,11 @@ export function formatJobNextAction(job: DurableJobState, language: Language): s
     : `查看 /job report ${job.id}；completed/cancelled/timeout/stale/blocked 不等于 verification PASS。`;
 }
 
-export function formatBackgroundDetails(task: BackgroundTaskState, language: Language): string {
+export function formatBackgroundDetails(
+  task: BackgroundTaskState,
+  language: Language,
+  projectPath?: string,
+): string {
   const progress = task.progress
     ? `${task.progress.completed}/${task.progress.total ?? "?"} ${task.progress.label ?? ""}`.trim()
     : "none";
@@ -121,9 +125,9 @@ export function formatBackgroundDetails(task: BackgroundTaskState, language: Lan
     `- progress: ${progress}`,
     `- why stale/blocked: ${formatBackgroundReason(task, language)}`,
     `- resume/cancel: ${truncateLine(task.nextAction ?? "-", 96)}`,
-    `- summary: ${truncateLine(sanitizeDisplayPaths(task.userVisibleSummary), 120)}`,
-    `- logPath: ${formatDisplayPath(task.logPath)}`,
-    `- outputPath: ${formatDisplayPath(task.outputPath)}`,
+    `- summary: ${truncateLine(sanitizeDisplayPaths(task.userVisibleSummary, projectPath), 120)}`,
+    `- logPath: ${formatDisplayPath(task.logPath, projectPath)}`,
+    `- outputPath: ${formatDisplayPath(task.outputPath, projectPath)}`,
     `- hasOutput: ${task.hasOutput}`,
     `- startedAt: ${task.startedAt}`,
     `- updatedAt: ${task.updatedAt}`,
@@ -133,6 +137,7 @@ export function formatBackgroundDetails(task: BackgroundTaskState, language: Lan
 export function formatBackgroundOutputDetails(
   task: BackgroundTaskState,
   language: Language,
+  projectPath?: string,
 ): string {
   const location = task.outputPath ?? task.logPath;
   if (!location) {
@@ -142,10 +147,10 @@ export function formatBackgroundOutputDetails(
   }
   return [
     `Background output ${task.id}`,
-    `- path: ${formatDisplayPath(location)}`,
+    `- path: ${formatDisplayPath(location, projectPath)}`,
     `- hasOutput: ${task.hasOutput}`,
     `- status: ${task.status}`,
-    `- summary: ${sanitizeDisplayPaths(task.userVisibleSummary)}`,
+    `- summary: ${sanitizeDisplayPaths(task.userVisibleSummary, projectPath)}`,
     `- slices: /details output ${task.id} --tail 40 | --grep <pattern> --context 2 | --errors`,
   ].join("\n");
 }

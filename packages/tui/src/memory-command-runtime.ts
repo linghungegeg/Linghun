@@ -40,9 +40,28 @@ export type MemoryCommandRuntimeDeps = {
     level: "info" | "warning",
   ) => Promise<void>;
   ensureSession: (context: TuiContext) => Promise<string>;
+  requestMemoryMutationApproval: (
+    context: TuiContext,
+    output: Writable,
+    mutation: MemoryMutation,
+  ) => Promise<"approved" | "blocked" | "pending">;
   refreshCacheFreshness: (context: TuiContext) => void;
+  recordMemoryMutationEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    action: string,
+    memory: MemoryCandidate,
+  ) => Promise<void>;
   writeStatus: (output: Writable, context: TuiContext) => void;
 };
+
+export type MemoryMutation =
+  | { action: "accept"; candidate: MemoryCandidate }
+  | { action: "reject"; candidate: MemoryCandidate }
+  | { action: "disable"; memory: MemoryCandidate }
+  | { action: "rollback"; memory: MemoryCandidate }
+  | { action: "delete"; memory: MemoryCandidate }
+  | { action: "init" };
 
 let runtimeDeps: MemoryCommandRuntimeDeps | undefined;
 
@@ -233,22 +252,15 @@ export async function handleMemoryCommand(
       writeLine(output, "未找到候选记忆。用法：/memory accept <candidate-id>");
       return;
     }
-    const accepted = { ...candidate, status: "accepted" as const };
-    await writeMemoryRecord(accepted, context);
-    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
-    context.memory.accepted.unshift(accepted);
-    const sessionId = await deps().ensureSession(context);
-    await context.store.appendEvent(sessionId, {
-      type: "memory_accepted",
-      memory: accepted,
-      createdAt: new Date().toISOString(),
-    });
-    await appendMemoryLifecycleEvent(context, sessionId, "accepted", accepted);
-    deps().refreshCacheFreshness(context);
-    writeLine(
-      output,
-      `已写入${formatMemoryScope(accepted.scope)}级长期记忆：${accepted.id}；autoAccept=no，后续注入仍受 top-k/字符预算限制。`,
-    );
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, {
+        action: "accept",
+        candidate,
+      })) !== "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "accept", candidate });
     return;
   }
   if (action === "reject") {
@@ -258,14 +270,15 @@ export async function handleMemoryCommand(
       writeLine(output, "未找到候选记忆。用法：/memory reject <candidate-id>");
       return;
     }
-    const rejected = { ...candidate, status: "rejected" as const };
-    await writeMemoryRecord(rejected, context);
-    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== id);
-    context.memory.rejected.unshift(rejected);
-    const sessionId = await deps().ensureSession(context);
-    await appendMemoryLifecycleEvent(context, sessionId, "rejected", rejected);
-    deps().refreshCacheFreshness(context);
-    writeLine(output, `已拒绝候选记忆：${id}；不会写入长期记忆或注入 prompt。`);
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, {
+        action: "reject",
+        candidate,
+      })) !== "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "reject", candidate });
     return;
   }
   if (action === "disable") {
@@ -275,14 +288,15 @@ export async function handleMemoryCommand(
       writeLine(output, "未找到已接受记忆。用法：/memory disable <accepted-id>");
       return;
     }
-    const disabled = { ...memory, status: "disabled" as const };
-    await writeMemoryRecord(disabled, context);
-    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== id);
-    context.memory.disabled.unshift(disabled);
-    const sessionId = await deps().ensureSession(context);
-    await appendMemoryLifecycleEvent(context, sessionId, "disabled", disabled);
-    deps().refreshCacheFreshness(context);
-    writeLine(output, `已禁用长期记忆：${id}；保留记录但不再注入 prompt。`);
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, {
+        action: "disable",
+        memory,
+      })) !== "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "disable", memory });
     return;
   }
   if (action === "rollback") {
@@ -292,14 +306,15 @@ export async function handleMemoryCommand(
       writeLine(output, "未找到已禁用记忆。用法：/memory rollback <disabled-id>");
       return;
     }
-    const accepted = { ...memory, status: "accepted" as const };
-    await writeMemoryRecord(accepted, context);
-    context.memory.disabled = context.memory.disabled.filter((item) => item.id !== id);
-    context.memory.accepted.unshift(accepted);
-    const sessionId = await deps().ensureSession(context);
-    await appendMemoryLifecycleEvent(context, sessionId, "rollback", accepted);
-    deps().refreshCacheFreshness(context);
-    writeLine(output, `已回滚启用长期记忆：${id}；仍受受控 prompt 注入预算限制。`);
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, {
+        action: "rollback",
+        memory,
+      })) !== "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "rollback", memory });
     return;
   }
   if (action === "delete" || action === "forget") {
@@ -309,16 +324,29 @@ export async function handleMemoryCommand(
       writeLine(output, "未找到该记忆。用法：/memory delete <id> 或 /memory forget <id>");
       return;
     }
-    await removeMemoryRecord(memory, context);
-    removeMemoryFromState(context.memory, id);
-    const sessionId = await deps().ensureSession(context);
-    await appendMemoryLifecycleEvent(context, sessionId, "deleted", memory);
-    deps().refreshCacheFreshness(context);
-    writeLine(output, `已删除记忆记录：${id}；不会保留在候选/长期/禁用列表。`);
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, {
+        action: "delete",
+        memory,
+      })) !== "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "delete", memory });
     return;
   }
   if (action === "init") {
-    await initLinghunMd(context, output);
+    if (await pathExists(context.memory.projectRulesPath)) {
+      await initLinghunMd(context, output);
+      return;
+    }
+    if (
+      (await deps().requestMemoryMutationApproval(context, output, { action: "init" })) !==
+      "approved"
+    ) {
+      return;
+    }
+    await executeMemoryMutation(context, output, { action: "init" });
     return;
   }
   if (action === "import" && args[1] === "sessions") {
@@ -377,6 +405,96 @@ async function appendMemoryLifecycleEvent(
     sessionId,
     `memory_lifecycle action=${action} id=${memory.id} scope=${memory.scope} status=${memory.status} source=${memory.source}`,
     action === "deleted" ? "warning" : "info",
+  );
+}
+
+export async function executeMemoryMutation(
+  context: TuiContext,
+  output: Writable,
+  mutation: MemoryMutation,
+): Promise<void> {
+  if (mutation.action === "accept") {
+    const accepted = { ...mutation.candidate, status: "accepted" as const };
+    await writeMemoryRecord(accepted, context);
+    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== accepted.id);
+    context.memory.accepted.unshift(accepted);
+    const sessionId = await deps().ensureSession(context);
+    await context.store.appendEvent(sessionId, {
+      type: "memory_accepted",
+      memory: accepted,
+      createdAt: new Date().toISOString(),
+    });
+    await appendMemoryLifecycleEvent(context, sessionId, "accepted", accepted);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "accepted", accepted);
+    deps().refreshCacheFreshness(context);
+    writeLine(
+      output,
+      `已写入${formatMemoryScope(accepted.scope)}级长期记忆：${accepted.id}；autoAccept=no，后续注入仍受 top-k/字符预算限制。`,
+    );
+    return;
+  }
+  if (mutation.action === "reject") {
+    const rejected = { ...mutation.candidate, status: "rejected" as const };
+    await writeMemoryRecord(rejected, context);
+    context.memory.candidates = context.memory.candidates.filter((item) => item.id !== rejected.id);
+    context.memory.rejected.unshift(rejected);
+    const sessionId = await deps().ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "rejected", rejected);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "rejected", rejected);
+    deps().refreshCacheFreshness(context);
+    writeLine(output, `已拒绝候选记忆：${rejected.id}；不会写入长期记忆或注入 prompt。`);
+    return;
+  }
+  if (mutation.action === "disable") {
+    const disabled = { ...mutation.memory, status: "disabled" as const };
+    await writeMemoryRecord(disabled, context);
+    context.memory.accepted = context.memory.accepted.filter((item) => item.id !== disabled.id);
+    context.memory.disabled.unshift(disabled);
+    const sessionId = await deps().ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "disabled", disabled);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "disabled", disabled);
+    deps().refreshCacheFreshness(context);
+    writeLine(output, `已禁用长期记忆：${disabled.id}；保留记录但不再注入 prompt。`);
+    return;
+  }
+  if (mutation.action === "rollback") {
+    const accepted = { ...mutation.memory, status: "accepted" as const };
+    await writeMemoryRecord(accepted, context);
+    context.memory.disabled = context.memory.disabled.filter((item) => item.id !== accepted.id);
+    context.memory.accepted.unshift(accepted);
+    const sessionId = await deps().ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "rollback", accepted);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "rollback", accepted);
+    deps().refreshCacheFreshness(context);
+    writeLine(output, `已回滚启用长期记忆：${accepted.id}；仍受受控 prompt 注入预算限制。`);
+    return;
+  }
+  if (mutation.action === "delete") {
+    await removeMemoryRecord(mutation.memory, context);
+    removeMemoryFromState(context.memory, mutation.memory.id);
+    const sessionId = await deps().ensureSession(context);
+    await appendMemoryLifecycleEvent(context, sessionId, "deleted", mutation.memory);
+    await deps().recordMemoryMutationEvidence(context, sessionId, "deleted", mutation.memory);
+    deps().refreshCacheFreshness(context);
+    writeLine(output, `已删除记忆记录：${mutation.memory.id}；不会保留在候选/长期/禁用列表。`);
+    return;
+  }
+  const created = await initLinghunMd(context, output);
+  if (!created) {
+    return;
+  }
+  const sessionId = await deps().ensureSession(context);
+  await deps().appendSystemEvent(
+    context,
+    sessionId,
+    "memory_lifecycle action=init path=LINGHUN.md",
+    "info",
+  );
+  await deps().recordMemoryMutationEvidence(
+    context,
+    sessionId,
+    "init",
+    createMemoryCandidate("project", "generated LINGHUN.md", "memory init", ["LINGHUN.md"]),
   );
 }
 
@@ -486,11 +604,11 @@ export async function runAutoLearningOnTurnEnd(
   return run;
 }
 
-export async function initLinghunMd(context: TuiContext, output: Writable): Promise<void> {
+export async function initLinghunMd(context: TuiContext, output: Writable): Promise<boolean> {
   if (await pathExists(context.memory.projectRulesPath)) {
     context.memory.projectRulesExists = true;
     writeLine(output, `LINGHUN.md 已存在：${context.memory.projectRulesPath}`);
-    return;
+    return false;
   }
   const content = createLinghunMdTemplate(context.language);
   await writeFile(context.memory.projectRulesPath, content, "utf8");
@@ -499,6 +617,7 @@ export async function initLinghunMd(context: TuiContext, output: Writable): Prom
   context.memory.projectRulesError = undefined;
   deps().refreshCacheFreshness(context);
   writeLine(output, `已生成基础 LINGHUN.md：${context.memory.projectRulesPath}`);
+  return true;
 }
 
 export async function importAiSessions(

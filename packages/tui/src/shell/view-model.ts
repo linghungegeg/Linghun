@@ -794,7 +794,10 @@ export function mapPendingApprovalToPermission(
         toolCall?: { input?: unknown };
         warnings?: string[];
         plan?: { path?: string };
-        indexAction?: "refresh" | "repair";
+        indexAction?: "init fast" | "refresh" | "repair";
+        mutation?: { action?: string };
+        action?: string;
+        assetPath?: string;
         verdict?: {
           semantic?: PolicySemantic;
           pathSafety?: PathSafety;
@@ -827,21 +830,74 @@ export function mapPendingApprovalToPermission(
   // ink 主屏走同一 PermissionPanel；动作说明用人话。
   if (approval.kind === "index_tool") {
     const isEn = context.language === "en-US";
-    const action = approval.indexAction === "repair" ? "repair" : "refresh";
+    const action =
+      approval.indexAction === "repair"
+        ? "repair"
+        : approval.indexAction === "init fast"
+          ? "init fast"
+          : "refresh";
     const actionSummary = isEn
       ? action === "repair"
         ? "Repair and refresh the codebase index"
+        : action === "init fast"
+          ? "Initialize the codebase index in fast mode"
         : "Refresh (rebuild) the codebase index"
       : action === "repair"
         ? "修复并刷新代码索引"
+        : action === "init fast"
+          ? "快速初始化代码索引"
         : "刷新（重建）代码索引";
     return {
-      toolName: action === "repair" ? "修复代码索引" : "刷新代码索引",
+      toolName: action === "repair" ? "修复代码索引" : action === "init fast" ? "初始化代码索引" : "刷新代码索引",
       reason: "",
       risk: "medium",
       scope: [],
       hint: "",
       actionSummary,
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
+
+  if (approval.kind === "memory_mutation") {
+    const isEn = context.language === "en-US";
+    const action = approval.mutation?.action ?? "update";
+    return {
+      toolName: "Write",
+      reason: "",
+      risk: "medium",
+      scope: [],
+      hint: "",
+      actionSummary: isEn ? `Update controlled memory: ${action}` : `更新受控记忆：${action}`,
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
+
+  if (approval.kind === "break_cache_mutation") {
+    const isEn = context.language === "en-US";
+    const action = approval.action ?? "update";
+    return {
+      toolName: "Write",
+      reason: "",
+      risk: "medium",
+      scope: [".linghun/break-cache"],
+      hint: "",
+      actionSummary: isEn ? `Update break-cache marker: ${action}` : `更新 break-cache marker：${action}`,
+      actions: [],
+      explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
+    };
+  }
+
+  if (approval.kind === "image_generation") {
+    const isEn = context.language === "en-US";
+    return {
+      toolName: "Write",
+      reason: "",
+      risk: "medium",
+      scope: approval.assetPath ? [approval.assetPath] : [".linghun/assets"],
+      hint: "",
+      actionSummary: isEn ? "Write image metadata" : "写入 image metadata",
       actions: [],
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };

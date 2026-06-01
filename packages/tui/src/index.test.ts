@@ -1631,6 +1631,7 @@ describe("Phase 06 TUI slash commands", () => {
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand("/memory review", context, output);
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     await handleSlashCommand("/break-cache status", context, output);
     await handleSlashCommand("/resume", context, output);
     await handleSlashCommand("/branch 试验另一种实现", context, output);
@@ -1707,6 +1708,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/memory candidate 项目长期规则只保存稳定工程事实", context, output);
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    await handleNaturalInput("yes", context, output);
 
     const loaded = await createMemoryState(defaultConfig, project);
     const reloadedContext = await createTestContext(project, store, session);
@@ -1738,6 +1740,7 @@ describe("Phase 06 TUI slash commands", () => {
     const acceptedId = context.memory.candidates[0]?.id;
     expect(acceptedId).toBeTruthy();
     await handleSlashCommand(`/memory accept ${acceptedId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     await handleSlashCommand("/memory", context, output);
     await handleSlashCommand("/memory review", context, output);
     await handleSlashCommand("/memory stats", context, output);
@@ -1764,6 +1767,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("完整候选、聊天、日志和索引 dump 不注入 prompt");
 
     await handleSlashCommand(`/memory disable ${acceptedId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     const disabledPrompt = createModelSystemPrompt("帮我继续", context, {
       memory: { candidates: 0, accepted: 0 },
     });
@@ -1771,8 +1775,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.disabled).toHaveLength(1);
 
     await handleSlashCommand(`/memory rollback ${acceptedId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     expect(context.memory.accepted).toHaveLength(1);
     await handleSlashCommand(`/memory delete ${acceptedId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     expect(context.memory.accepted).toHaveLength(0);
     await expect(
       readFile(join(project, ".linghun", "memory", `${acceptedId}.json`), "utf8"),
@@ -1785,6 +1791,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const rejectedId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory reject ${rejectedId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     expect(context.memory.rejected).toHaveLength(1);
     expect(output.text).toContain("已拒绝候选记忆");
 
@@ -1796,6 +1803,7 @@ describe("Phase 06 TUI slash commands", () => {
     const sessionMemoryId = context.memory.candidates[0]?.id;
     expect(sessionMemoryId).toBeTruthy();
     await handleSlashCommand(`/memory accept ${sessionMemoryId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     const sessionPrompt = createModelSystemPrompt("继续当前任务", context, {
       memory: { candidates: 0, accepted: 1 },
     });
@@ -1904,6 +1912,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     const promptAfter = createModelSystemPrompt("继续", context, {
       memory: { candidates: 0, accepted: 1 },
     });
@@ -1922,6 +1931,7 @@ describe("Phase 06 TUI slash commands", () => {
     const candidateId = context.memory.candidates[0]?.id;
 
     await handleSlashCommand(`/memory forget ${candidateId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     expect(context.memory.candidates).toHaveLength(0);
     expect(output.text).toContain("已删除记忆记录");
   });
@@ -2074,6 +2084,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
+    await handleNaturalInput("yes", context, output);
     const promptAfter = createModelSystemPrompt("继续", context, {
       memory: { candidates: 0, accepted: 1 },
     });
@@ -2887,6 +2898,24 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toMatch(/Workflow plan preview|工作流计划预览/u);
     expect(context.backgroundTasks).toHaveLength(0);
+    const previewTranscript = (await store.resume(session.id)).transcript;
+    expect(
+      previewTranscript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.kind === "user_provided" &&
+          event.supportsClaims.includes("workflow_plan_preview") &&
+          event.supportsClaims.includes("workflow_preview_only"),
+      ),
+    ).toBe(true);
+    expect(
+      previewTranscript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("workflow_plan_preview") &&
+          event.message.includes("passEvidence=no"),
+      ),
+    ).toBe(true);
 
     await handleSlashCommand("/workflows run close product maturity gaps", context, output);
 
@@ -3949,6 +3978,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/image generate logo concept", context, output);
     await handleSlashCommand("/model route set image deepseek-image", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
+    await handleNaturalInput("yes", context, output);
     await handleSlashCommand("/usage", context, output);
     await handleSlashCommand("/stats", context, output);
 
@@ -3975,6 +4005,108 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.routeDecisions.some((decision) => decision.role === "planner")).toBe(true);
     expect(output.text).toContain("fallbackUsed=");
     expect(output.text).not.toContain("¥--");
+  });
+
+  it("routes /image generate metadata writes through permission and evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    await handleSlashCommand("/image generate logo concept", context, output);
+
+    expect(context.pendingLocalApproval?.kind).toBe("image_generation");
+    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    expect(pending?.assetPath).toContain(join(".linghun", "assets"));
+    await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
+    let transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+
+    await handleNaturalInput("yes", context, output);
+
+    expect(await readFile(pending?.assetPath ?? "", "utf8")).toContain("image_generation_metadata");
+    expect(context.imageResults).toHaveLength(1);
+    expect(context.backgroundTasks.some((task) => task.id === pending?.id)).toBe(true);
+    transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("image_result"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) => event.type === "background_task_update" && event.task.id === pending?.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not write /image generate metadata after denial", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    await handleSlashCommand("/image generate logo concept", context, output);
+
+    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    await handleNaturalInput("no", context, output);
+
+    await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
+    expect(context.imageResults).toHaveLength(0);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("tool_failure"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("image_result"),
+      ),
+    ).toBe(false);
+  });
+
+  it("auto-review allows /image generate metadata while cancel does not write it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    context.permissionMode = "auto-review";
+    await handleSlashCommand("/image generate logo concept", context, output);
+
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(context.imageResults).toHaveLength(1);
+    expect(await readFile(context.imageResults[0]?.images[0]?.path ?? "", "utf8")).toContain(
+      "image_generation_metadata",
+    );
+
+    context.permissionMode = "default";
+    await handleSlashCommand("/image generate second concept", context, output);
+    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    await handleNaturalInput("cancel", context, output);
+
+    await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
+    expect(context.imageResults).toHaveLength(1);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("tool_failure") &&
+          event.summary.includes("image generate"),
+      ),
+    ).toBe(true);
   });
 
   it("D.13Q-UX Closure: Freshness regex gate has been removed at the source level", async () => {
@@ -4432,6 +4564,7 @@ describe("Phase 06 TUI slash commands", () => {
         "/model\n",
         "/model doctor\n",
         "/index init fast\n",
+        "yes\n",
         "/index status\n",
         "读一下 LINGHUN.md\n",
         "看看这个文件\n",
@@ -4676,6 +4809,7 @@ describe("Phase 06 TUI slash commands", () => {
       const session = await store.create({ model: "deepseek-v4-flash" });
       const output = new MemoryOutput();
       const context = await createTestContext(project, store, session);
+      context.permissionMode = "full-access";
 
       await handleSlashCommand("/index refresh --force", context, output);
 
@@ -6737,6 +6871,39 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
   });
 
+  it("P0: /index init fast uses the same permission pipeline as refresh", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index init fast", context, output);
+
+    expect(context.pendingLocalApproval?.kind).toBe("index_tool");
+    expect(context.pendingLocalApproval?.kind === "index_tool" ? context.pendingLocalApproval.indexAction : "").toBe(
+      "init fast",
+    );
+    expect(await readMockCalls(callsPath)).not.toContain("index_repository");
+    let transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+
+    await handleNaturalInput("yes", context, output);
+
+    expect(await readMockCalls(callsPath)).toContain("index_repository");
+    transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("index_init_fast"),
+      ),
+    ).toBe(true);
+  });
+
   it("Run 3: Ink auto-skip summary hides commands while detailsText keeps skipped list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
@@ -8024,6 +8191,13 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory init", context, output);
+    expect(context.pendingLocalApproval?.kind).toBe("memory_mutation");
+    await expect(readFile(join(project, "LINGHUN.md"), "utf8")).rejects.toThrow();
+    let transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+
+    await handleNaturalInput("yes", context, output);
 
     expect(output.text).toContain("已生成基础 LINGHUN.md");
     const template = await readFile(join(project, "LINGHUN.md"), "utf8");
@@ -8039,11 +8213,46 @@ describe("Phase 06 TUI slash commands", () => {
     expect(template).toContain("涉及超过 3 个文件");
     expect(template).toContain("修 bug 要定位直接原因");
     expect(template).not.toContain("# Linghun Project Rules");
+    transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" && event.supportsClaims.includes("memory_init"),
+      ),
+    ).toBe(true);
 
     const existingOutput = new MemoryOutput();
     await handleSlashCommand("/memory init", context, existingOutput);
     expect(existingOutput.text).toContain("LINGHUN.md 已存在");
     expect(await readFile(join(project, "LINGHUN.md"), "utf8")).toBe(template);
+  });
+
+  it("routes break-cache marker writes through permission and evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/break-cache once", context, output);
+
+    expect(context.pendingLocalApproval?.kind).toBe("break_cache_mutation");
+    await expect(readFile(join(project, ".linghun", ".break-cache-once"), "utf8")).rejects.toThrow();
+    let transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+
+    await handleNaturalInput("yes", context, output);
+
+    expect(await readFile(join(project, ".linghun", ".break-cache-once"), "utf8")).toBeTruthy();
+    transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("break_cache_once"),
+      ),
+    ).toBe(true);
   });
 
   it("enforces plan permissions and records recent denials", async () => {
@@ -8800,6 +9009,48 @@ describe("Phase 06 TUI slash commands", () => {
     // D.13R: /rewind 文案明确为 Linghun snapshot checkpoint，不是 git reset。
     expect(output.text).toContain("已恢复 Linghun snapshot checkpoint");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("checkpoint_restore"),
+      ),
+    ).toBe(true);
+  });
+
+  it("blocks rewind restore in default mode before mutating files", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await writeFile(join(project, "sample.txt"), "alpha", "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    await writeFile(join(project, "sample.txt"), "beta", "utf8");
+    context.checkpoints.unshift({
+      id: "cp-test",
+      sessionId: session.id,
+      createdAt: new Date().toISOString(),
+      reason: "test checkpoint",
+      restoreKind: "snapshot",
+      changedFiles: ["sample.txt"],
+      files: [{ path: "sample.txt", existed: true, content: "alpha" }],
+    });
+    context.permissionMode = "default";
+
+    await handleSlashCommand("/rewind restore cp-test", context, output);
+
+    expect(output.text).toContain("权限已拒绝");
+    expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("tool_failure"),
+      ),
+    ).toBe(true);
   });
 
   it("tracks background task status and empty output state", async () => {
@@ -8851,7 +9102,11 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/verify smoke", context, output);
     expect(output.text).toContain("verification 后台任务已达到上限 1");
 
-    context.backgroundTasks = [createBackgroundTaskFixture("index")];
+    const indexTaskNow = new Date().toISOString();
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("index", { updatedAt: indexTaskNow, lastOutputAt: indexTaskNow }),
+    ];
+    context.permissionMode = "full-access";
     await handleSlashCommand("/index refresh", context, output);
     expect(output.text).toContain("index 后台任务已达到上限 1");
 
@@ -9759,12 +10014,25 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/cache-log", context, output);
     await handleSlashCommand("/cache-log config size 2", context, output);
     await handleSlashCommand("/cache-log", context, output);
+    context.permissionMode = "full-access";
+    await handleSlashCommand("/cache-log export cache-history.json", context, output);
 
     expect(context.cache.history).toHaveLength(2);
     expect(context.cache.history[0]?.turn).toBe(3);
     expect(output.text).toContain("Cache log 最近");
     expect(output.text).toContain("write_source=zero_reported");
     expect(output.text).toContain("cache history size：2");
+    expect(await readFile(join(project, "cache-history.json"), "utf8")).toContain(
+      '"cacheWriteTokensSource"',
+    );
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("cache_log_export"),
+      ),
+    ).toBe(true);
   });
 
   it("shows cache status, break-cache status, usage, and endpoint stats conservatively", async () => {
@@ -17004,6 +17272,32 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     // 用户取消不是模型失败：不落任何 failure learning 记录。
     const failures = await loadFailureRecords(context.failureLearning);
     expect(failures).toHaveLength(0);
+  });
+
+  it("D.14C: verifier agent verification evidence is visible to the parent final gate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/fork verifier run focused smoke", context, output);
+
+    expect(context.lastVerification).toBeDefined();
+    expect(
+      context.evidence.some(
+        (event) => event.kind === "test_result" && event.supportsClaims.includes("verified"),
+      ),
+    ).toBe(true);
+    const parentTranscript = (await store.resume(session.id)).transcript;
+    expect(
+      parentTranscript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.kind === "test_result" &&
+          event.supportsClaims.includes("verified"),
+      ),
+    ).toBe(true);
   });
 
   it("D.14C source invariant: agent business logic lives in job-agent-command-runtime, index.ts only glues", async () => {

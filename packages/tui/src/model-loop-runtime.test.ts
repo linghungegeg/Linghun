@@ -800,6 +800,16 @@ describe("model-loop-runtime", () => {
         }),
       ]);
       expect(repaired.status).toBe("passed");
+
+      const initialized = evaluateFinalAnswerClaims("索引已刷新。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "index_operation init fast: ready",
+          source: "index-operation:init fast",
+          supportsClaims: ["index_operation", "index_init_fast"],
+        }),
+      ]);
+      expect(initialized.status).toBe("passed");
     });
 
     it("Run 2 Closure addendum: denied or cancelled index evidence still cannot support refresh claims", () => {
@@ -822,6 +832,32 @@ describe("model-loop-runtime", () => {
       ]);
       expect(cancelled.status).toBe("needs_disclaimer");
       expect(cancelled.unsupportedKinds).toContain("action_executed");
+    });
+
+    it("image generated claims require image_result evidence", () => {
+      const missing = evaluateFinalAnswerClaims("image result generated.", []);
+      expect(missing.status).toBe("needs_disclaimer");
+      expect(missing.unsupportedKinds).toContain("action_executed");
+
+      const ok = evaluateFinalAnswerClaims("image result generated.", [
+        makeEvidence({
+          kind: "image_result",
+          summary: "ImageGenerationResult image-123 saved",
+          source: ".linghun/assets/image-123.json",
+          supportsClaims: ["image_result", "image generated"],
+        }),
+      ]);
+      expect(ok.status).toBe("passed");
+
+      const denied = evaluateFinalAnswerClaims("生图结果已落盘。", [
+        makeEvidence({
+          kind: "command_output",
+          summary: "Write failure: permission denied; image metadata was not written",
+          supportsClaims: ["tool_failure", "image_result"],
+        }),
+      ]);
+      expect(denied.status).toBe("needs_disclaimer");
+      expect(denied.unsupportedKinds).toContain("action_executed");
     });
   });
 

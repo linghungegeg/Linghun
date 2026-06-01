@@ -485,10 +485,12 @@ import {
   readOutputColumns,
   readOutputRows,
   sanitizeDiagnosticText,
+  sanitizeDisplayPaths,
   sanitizeUserFacingError,
   shouldEnterProductShellCandidate,
   stripAnsi,
   truncateDisplay,
+  formatDisplayPath,
   uniqueStrings,
   writeLine,
 } from "./startup-runtime.js";
@@ -603,7 +605,9 @@ import {
 export { writeLightHintsForTest } from "./cache-command-runtime.js";
 import {
   configureMemoryCommandRuntime,
+  executeMemoryMutation,
   handleMemoryCommand,
+  type MemoryMutation,
   resumeSessionWithHandoff,
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
@@ -812,6 +816,7 @@ import {
   type WorkflowBridgeRequestProposal,
   bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
+import type { WorkflowPlannerEntryResult } from "./workflow-planner-entry.js";
 import type { NormalizedWorkflowPlan } from "./workflow-plan-schema.js";
 export type {
   AgentRun,
@@ -960,6 +965,8 @@ type PendingAutopilotRequest = {
   createdAt: string;
 };
 
+type BreakCacheMutationAction = "always" | "clear" | "off" | "once";
+
 type PendingLocalApproval =
   | {
       kind: "index_ignore_write";
@@ -1013,11 +1020,30 @@ type PendingLocalApproval =
       // 权限确认。复用 pendingLocalApproval / PermissionPanel 管道；continuation
       // 仅模型工具路径需要（回灌工具结果给模型续轮）。
       kind: "index_tool";
-      indexAction: "refresh" | "repair";
+      indexAction: "init fast" | "refresh" | "repair";
       toolCall: ModelToolCall;
       sessionId: string;
       force?: boolean;
       continuation?: PendingModelContinuation;
+    }
+  | {
+      kind: "memory_mutation";
+      sessionId: string;
+      mutation: MemoryMutation;
+    }
+  | {
+      kind: "break_cache_mutation";
+      sessionId: string;
+      action: BreakCacheMutationAction;
+    }
+  | {
+      kind: "image_generation";
+      sessionId: string;
+      prompt: string;
+      id: string;
+      assetPath: string;
+      provider: string;
+      model: string;
     };
 
 export type PendingModelContinuation = {
@@ -2354,6 +2380,10 @@ export async function handleSlashCommand(
       await requestIndexRefreshApproval(rest, context, output);
       return "handled";
     }
+    if ((rest[0] ?? "") === "init" && (rest[1] ?? "") === "fast") {
+      await requestIndexInitFastApproval(rest, context, output);
+      return "handled";
+    }
     await handleIndexCommand(rest, context, output);
     return "handled";
   }
@@ -2553,6 +2583,7 @@ async function handleWorkflowsCommand(
     writeLine(output, formatWorkflowPlanPreview(result, context.language));
     if (result.ok) {
       context.lastFullOutput = result.detailsText;
+      await recordWorkflowPlanPreviewEvidence(context, await ensureSession(context), result);
     }
     return;
   }
@@ -3025,6 +3056,31 @@ function findWorkflowSliceTitle(plan: NormalizedWorkflowPlan, sliceId: string): 
 function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {
   const seen = new Set(before);
   return context.evidence.map((item) => item.id).filter((id) => !seen.has(id));
+}
+
+async function recordWorkflowPlanPreviewEvidence(
+  context: TuiContext,
+  sessionId: string,
+  result: Extract<WorkflowPlannerEntryResult, { ok: true }>,
+): Promise<void> {
+  const evidence = createEvidenceRecord(
+    "user_provided",
+    `workflow_plan_preview: ${result.plan.title}; evidenceMerge=${result.surface.evidenceMergeSummary}; requests runnable=${result.bridgeResult.summary.runnable} startGate=${result.bridgeResult.summary.startGateNeeded} blocked=${result.bridgeResult.summary.blocked}`,
+    `workflow-plan-preview:${result.plan.id}`,
+    [
+      "workflow_plan_preview",
+      "workflow_preview_only",
+      `workflow_evidence_merge:${result.surface.evidenceMergeSummary}`,
+    ],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `workflow_plan_preview evidence=${evidence.id} plan=${result.plan.id} previewOnly=yes passEvidence=no`,
+    "info",
+  );
 }
 
 function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {
@@ -4073,6 +4129,21 @@ async function executePermissionApprove(
     }
     return;
   }
+  if (approval.kind === "memory_mutation") {
+    await executeMemoryMutation(context, output, approval.mutation);
+    if (!context.isInkSession) writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "break_cache_mutation") {
+    await executeBreakCacheMutation(approval.action, context, output);
+    if (!context.isInkSession) writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "image_generation") {
+    await executeImageGeneration(approval, context, output);
+    if (!context.isInkSession) writeStatus(output, context);
+    return;
+  }
 }
 
 /**
@@ -4262,6 +4333,54 @@ async function executePermissionDeny(
       return;
     }
   }
+  if (approval.kind === "memory_mutation") {
+    await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      "Write",
+      `${outcomeText}: memory ${approval.mutation.action}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Permission denied. No memory file was written or deleted."
+        : "已拒绝权限。本轮未写入或删除记忆文件。",
+    );
+    writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "break_cache_mutation") {
+    await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      "Write",
+      `${outcomeText}: break-cache ${approval.action}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Permission denied. Break-cache marker was not changed."
+        : "已拒绝权限。本轮未修改 break-cache marker。",
+    );
+    writeStatus(output, context);
+    return;
+  }
+  if (approval.kind === "image_generation") {
+    await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
+      "Write",
+      `${outcomeText}: image generate ${approval.id}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Permission denied. Image metadata was not written."
+        : "已拒绝权限。本轮未写入 image metadata。",
+    );
+    writeStatus(output, context);
+    return;
+  }
   writeLine(output, formatPermissionDenialPrimary(context.language));
   writeStatus(output, context);
 }
@@ -4420,7 +4539,7 @@ async function runDetailsCommandBody(
     writeLine(
       output,
       task
-        ? formatBackgroundDetails(task, context.language)
+        ? formatBackgroundDetails(task, context.language, context.projectPath)
         : "未找到 background。用法：/details background <id>",
     );
     return;
@@ -4450,7 +4569,7 @@ async function runDetailsCommandBody(
       return;
     }
     if (task) {
-      writeLine(output, formatBackgroundOutputDetails(task, context.language));
+      writeLine(output, formatBackgroundOutputDetails(task, context.language, context.projectPath));
       return;
     }
     writeLine(
@@ -4505,7 +4624,12 @@ async function runDetailsCommandBody(
   if (context.evidence.length > 0) {
     summary.push("- recent evidence:");
     for (const evidence of context.evidence.slice(0, 5)) {
-      summary.push(`  - ${evidence.id} ${evidence.kind} ${evidence.source}: ${evidence.summary}`);
+      summary.push(
+        `  - ${evidence.id} ${evidence.kind} ${formatDisplayPath(
+          evidence.source,
+          context.projectPath,
+        )}: ${sanitizeDisplayPaths(evidence.summary, context.projectPath)}`,
+      );
     }
   }
   if (context.backgroundTasks.length > 0) {
@@ -4772,6 +4896,39 @@ async function handleRewindCommand(
     writeLine(output, `${t(context, "checkpointMissing")}：${checkpointId}`);
     return;
   }
+  const sessionId = await ensureSession(context);
+  const permission = await decidePermission(
+    "Write",
+    { path: checkpoint.changedFiles[0] ?? ".linghun/checkpoint-restore" },
+    context,
+    sessionId,
+  );
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision !== "allow") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `checkpoint restore ${permission.decision}: ${permission.reason}`,
+    );
+    writeLine(output, formatPermissionDenied(permission.reason, permission.request.summary));
+    writeStatus(output, context);
+    return;
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
   for (const file of checkpoint.files) {
     const target = resolve(context.projectPath, file.path);
     if (!file.existed) {
@@ -4785,12 +4942,19 @@ async function handleRewindCommand(
     ...context.tools.changedFiles,
     ...checkpoint.changedFiles,
   ]);
-  const sessionId = await ensureSession(context);
   await context.store.appendEvent(sessionId, {
     type: "checkpoint_restored",
     checkpointId: checkpoint.id,
     createdAt: new Date().toISOString(),
   });
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `checkpoint_restore ${checkpoint.id}: files=${checkpoint.changedFiles.join(",")}`,
+    `checkpoint:${checkpoint.id}`,
+    ["checkpoint_restore", "Write"],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   writeLine(
     output,
     context.language === "en-US"
@@ -5049,8 +5213,49 @@ async function handleCacheLogCommand(
   }
   if (args[0] === "export") {
     const path = args[1] ? resolve(context.projectPath, args[1]) : context.cache.config.persistPath;
+    const sessionId = await ensureSession(context);
+    const permission = await decidePermission(
+      "Write",
+      { path: relative(context.projectPath, path), content: "cache history export" },
+      context,
+      sessionId,
+    );
+    await context.store.appendEvent(sessionId, {
+      type: "permission_request",
+      request: permission.request,
+      createdAt: new Date().toISOString(),
+    });
+    await context.store.appendEvent(sessionId, {
+      type: "permission_result",
+      requestId: permission.request.id,
+      decision: permission.decision,
+      reason: permission.reason,
+      createdAt: new Date().toISOString(),
+    });
+    if (permission.decision !== "allow") {
+      await recordToolFailureEvidence(
+        context,
+        sessionId,
+        "Write",
+        `cache-log export ${permission.decision}: ${permission.reason}`,
+      );
+      writeLine(output, formatPermissionDenied(permission.reason, permission.request.summary));
+      writeStatus(output, context);
+      return;
+    }
+    if (permission.preflight) {
+      writeLine(output, permission.preflight);
+    }
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify(context.cache.history, null, 2)}\n`, "utf8");
+    const evidence = createEvidenceRecord(
+      "command_output",
+      `cache_log_export: ${relative(context.projectPath, path)}`,
+      `cache-log:${relative(context.projectPath, path)}`,
+      ["cache_log_export", "Write"],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     writeLine(
       output,
       `已导出最近缓存日志：${path}。用于和 provider usage 或账号账单对账，金额仍以账单为准。`,
@@ -5149,15 +5354,119 @@ async function handleBreakCacheCommand(
     return;
   }
   if (clearFlag) {
+    if ((await requestBreakCacheMutationApproval(context, output, "clear")) !== "approved") {
+      return;
+    }
+    await executeBreakCacheMutation("clear", context, output);
+    return;
+  }
+  if (action === "once") {
+    if ((await requestBreakCacheMutationApproval(context, output, "once")) !== "approved") {
+      return;
+    }
+    await executeBreakCacheMutation("once", context, output);
+    return;
+  }
+  if (action === "always") {
+    if ((await requestBreakCacheMutationApproval(context, output, "always")) !== "approved") {
+      return;
+    }
+    await executeBreakCacheMutation("always", context, output);
+    return;
+  }
+  if (action === "off") {
+    if ((await requestBreakCacheMutationApproval(context, output, "off")) !== "approved") {
+      return;
+    }
+    await executeBreakCacheMutation("off", context, output);
+    return;
+  }
+  writeLine(
+    output,
+    "用法：/break-cache status | /break-cache once | /break-cache always | /break-cache off | /break-cache --clear",
+  );
+}
+
+async function requestBreakCacheMutationApproval(
+  context: TuiContext,
+  output: Writable,
+  action: BreakCacheMutationAction,
+): Promise<"approved" | "blocked" | "pending"> {
+  const sessionId = await ensureSession(context);
+  const input = {
+    path: ".linghun/break-cache",
+    content: action,
+    reason: `explicit /break-cache ${action}`,
+  };
+  const permission = await decidePermission("Write", input, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = { kind: "break_cache_mutation", sessionId, action };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatLocalToolPermissionPrompt(
+          {
+            toolName: "Write",
+            decision: permission.decision,
+            risk: permission.request.risk,
+            mode: permission.request.mode,
+            reason: permission.reason,
+            scope: permission.request.files,
+          },
+          context.language,
+        ),
+      );
+      writeStatus(output, context);
+    }
+    return "pending";
+  }
+  if (permission.decision === "deny") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `permission ${permission.decision}: ${permission.reason}; break-cache ${action}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Permission blocked break-cache ${action}: ${permission.reason}`
+        : `权限阻止 break-cache ${action}：${permission.reason}`,
+    );
+    writeStatus(output, context);
+    return "blocked";
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  return "approved";
+}
+
+async function executeBreakCacheMutation(
+  action: BreakCacheMutationAction,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  if (action === "clear") {
     // /break-cache --clear 或 /break-cache <mode> --clear：清掉 once+always 两个 marker。
     await clearBreakCacheMarker(context, "all");
     await appendBreakCacheEvent(context, "cleared");
     refreshCacheFreshness(context);
     writeLine(output, "已清除 break-cache marker（once + always）。下次请求不再附加 nonce。");
     writeLine(output, formatBreakCacheStatus(context, getCurrentFreshness(context)));
-    return;
-  }
-  if (action === "once") {
+  } else if (action === "once") {
     const nonce = randomUUID();
     await writeBreakCacheMarker(context, "once", nonce);
     await appendBreakCacheEvent(context, "once_set");
@@ -5166,9 +5475,7 @@ async function handleBreakCacheCommand(
       output,
       "已设置 once：下一次模型请求将附加 cacheBreakNonce 破坏前缀缓存，命中后自动消费。",
     );
-    return;
-  }
-  if (action === "always") {
+  } else if (action === "always") {
     const nonce = randomUUID();
     await writeBreakCacheMarker(context, "always", nonce);
     await appendBreakCacheEvent(context, "always_set");
@@ -5177,19 +5484,13 @@ async function handleBreakCacheCommand(
       output,
       "已设置 always：固定 break-cache namespace（stable nonce），所有请求共享同一 cacheBreakNonce，相当于切到一个新的 cache 命名空间，并在该命名空间内继续命中前缀缓存；不会每次请求都破坏缓存。运行 /break-cache off 或 --clear 取消。",
     );
-    return;
-  }
-  if (action === "off") {
+  } else {
     await clearBreakCacheMarker(context, "all");
     await appendBreakCacheEvent(context, "off");
     refreshCacheFreshness(context);
     writeLine(output, "已关闭 break-cache：下次请求不再附加 nonce。");
-    return;
   }
-  writeLine(
-    output,
-    "用法：/break-cache status | /break-cache once | /break-cache always | /break-cache off | /break-cache --clear",
-  );
+  await recordBreakCacheMutationEvidence(context, await ensureSession(context), action);
 }
 
 async function handleResumeCommand(
@@ -5411,6 +5712,135 @@ function refreshCacheFreshness(context: TuiContext): void {
   };
 }
 
+async function requestMemoryMutationApproval(
+  context: TuiContext,
+  output: Writable,
+  mutation: MemoryMutation,
+): Promise<"approved" | "blocked" | "pending"> {
+  const sessionId = await ensureSession(context);
+  const input = createMemoryMutationPermissionInput(context, mutation);
+  const permission = await decidePermission("Write", input, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = { kind: "memory_mutation", sessionId, mutation };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatLocalToolPermissionPrompt(
+          {
+            toolName: "Write",
+            decision: permission.decision,
+            risk: permission.request.risk,
+            mode: permission.request.mode,
+            reason: permission.reason,
+            scope: permission.request.files,
+          },
+          context.language,
+        ),
+      );
+      writeStatus(output, context);
+    }
+    return "pending";
+  }
+  if (permission.decision === "deny") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `permission ${permission.decision}: ${permission.reason}; memory ${mutation.action}`,
+    );
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Permission blocked memory ${mutation.action}: ${permission.reason}`
+        : `权限阻止 memory ${mutation.action}：${permission.reason}`,
+    );
+    writeStatus(output, context);
+    return "blocked";
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  return "approved";
+}
+
+function createMemoryMutationPermissionInput(
+  context: TuiContext,
+  mutation: MemoryMutation,
+): Record<string, unknown> {
+  if (mutation.action === "init") {
+    return {
+      path: "LINGHUN.md",
+      content: createLinghunMdTemplate(context.language),
+      reason: "explicit /memory init",
+    };
+  }
+  const memory = "candidate" in mutation ? mutation.candidate : mutation.memory;
+  return {
+    path: memory.scope === "session" ? ".linghun/session-memory" : memoryFilePermissionPath(memory),
+    content: memory.summary,
+    reason: `explicit /memory ${mutation.action}`,
+  };
+}
+
+function memoryFilePermissionPath(memory: MemoryCandidate): string {
+  const root =
+    memory.scope === "user"
+      ? ".linghun/user-memory"
+      : memory.scope === "project"
+        ? ".linghun/memory"
+        : ".linghun/session-memory";
+  return `${root}/${memory.id}.json`;
+}
+
+async function recordMemoryMutationEvidence(
+  context: TuiContext,
+  sessionId: string,
+  action: string,
+  memory: MemoryCandidate,
+): Promise<void> {
+  const summary =
+    action === "init"
+      ? "memory_mutation init: generated LINGHUN.md"
+      : `memory_mutation ${action}: scope=${memory.scope} id=${memory.id} status=${memory.status}`;
+  const source = action === "init" ? "memory:init:LINGHUN.md" : `memory:${action}:${memory.id}`;
+  const evidence = createEvidenceRecord(
+    "command_output",
+    summary,
+    source,
+    ["memory_mutation", `memory_${action}`, "Write"],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
+async function recordBreakCacheMutationEvidence(
+  context: TuiContext,
+  sessionId: string,
+  action: BreakCacheMutationAction,
+): Promise<void> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `break_cache_mutation ${action}: marker updated`,
+    `break-cache:${action}`,
+    ["break_cache_mutation", `break_cache_${action}`, "Write"],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
 configureMcpIndexRuntime({
   getCurrentFreshness,
   writeStatus,
@@ -5431,7 +5861,9 @@ configureRemoteCommandRuntime({
 configureMemoryCommandRuntime({
   appendSystemEvent,
   ensureSession,
+  requestMemoryMutationApproval,
   refreshCacheFreshness,
+  recordMemoryMutationEvidence,
   writeStatus,
 });
 
@@ -5462,6 +5894,7 @@ configureJobAgentCommandRuntime({
   refreshBackgroundLifecycle,
   writeStatus,
   captureFailureLearning,
+  recordVerificationEvidence,
 });
 
 function normalizePath(path: string): string {
@@ -5816,26 +6249,105 @@ async function handleImageCommand(
   }
   const route = resolved.route;
   const id = `image-${randomUUID().slice(0, 8)}`;
-  const now = new Date().toISOString();
   const outputDir = join(context.projectPath, ".linghun", "assets");
-  await mkdir(outputDir, { recursive: true });
   const assetPath = join(outputDir, `${id}.json`);
-  const result: ImageGenerationResult = {
+  const approval: Extract<PendingLocalApproval, { kind: "image_generation" }> = {
+    kind: "image_generation",
+    sessionId,
+    prompt,
     id,
+    assetPath,
     provider: route.provider,
     model: route.primaryModel,
-    images: [{ path: assetPath, mimeType: "application/json", revisedPrompt: prompt }],
+  };
+  const permission = await decidePermission(
+    "Write",
+    {
+      path: relative(context.projectPath, assetPath),
+      content: "image generation metadata",
+      reason: "explicit /image generate",
+    },
+    context,
+    sessionId,
+  );
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = approval;
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatLocalToolPermissionPrompt(
+          {
+            toolName: "Write",
+            decision: permission.decision,
+            risk: permission.request.risk,
+            mode: permission.request.mode,
+            reason: permission.reason,
+            scope: permission.request.files,
+          },
+          context.language,
+        ),
+      );
+      writeStatus(output, context);
+    }
+    return;
+  }
+  if (permission.decision === "deny") {
+    await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `image generate deny: ${permission.reason}`,
+    );
+    writeLine(output, formatPermissionDenied(permission.reason, permission.request.summary));
+    writeStatus(output, context);
+    return;
+  }
+  if (permission.preflight) {
+    writeLine(output, permission.preflight);
+  }
+  await executeImageGeneration(approval, context, output);
+}
+
+async function executeImageGeneration(
+  approval: Extract<PendingLocalApproval, { kind: "image_generation" }>,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const guard = checkBackgroundStartGuard(context, "agent");
+  if (guard) {
+    writeLine(output, guard);
+    return;
+  }
+  const now = new Date().toISOString();
+  await mkdir(dirname(approval.assetPath), { recursive: true });
+  const result: ImageGenerationResult = {
+    id: approval.id,
+    provider: approval.provider,
+    model: approval.model,
+    images: [{ path: approval.assetPath, mimeType: "application/json", revisedPrompt: approval.prompt }],
     evidenceRefs: [],
     createdAt: now,
   };
   await writeFile(
-    assetPath,
+    approval.assetPath,
     `${JSON.stringify(
       {
         kind: "image_generation_metadata",
-        prompt,
-        provider: route.provider,
-        model: route.primaryModel,
+        prompt: approval.prompt,
+        provider: approval.provider,
+        model: approval.model,
         note: "Image result metadata recorded; no size/quality/format was fixed unless user specified it.",
       },
       null,
@@ -5845,23 +6357,34 @@ async function handleImageCommand(
   );
   const evidence = createEvidenceRecord(
     "image_result",
-    `ImageGenerationResult ${id}: provider=${route.provider}, model=${route.primaryModel}, asset=${assetPath}`,
-    assetPath,
+    `ImageGenerationResult ${approval.id}: provider=${approval.provider}, model=${approval.model}, asset=${approval.assetPath}`,
+    approval.assetPath,
     ["image_result", "生图结果", "image generated"],
   );
-  const guard = checkBackgroundStartGuard(context, "agent");
-  if (guard) {
-    writeLine(output, guard);
-    return;
-  }
   result.evidenceRefs.push(pickEvidence(evidence));
   context.imageResults.unshift(result);
   rememberEvidence(context, evidence);
-  addRoleUsage(context, "image", route, Math.ceil(prompt.length / 4), 0);
+  addRoleUsage(
+    context,
+    "image",
+    {
+      role: "image",
+      provider: approval.provider,
+      primaryModel: approval.model,
+      fallbackModels: [],
+      requiredCapabilities: ["image"],
+      allowTools: false,
+      allowWrite: false,
+      allowBash: false,
+      requireApprovalBeforeRun: false,
+    },
+    Math.ceil(approval.prompt.length / 4),
+    0,
+  );
   const task: BackgroundTaskState = {
-    id,
+    id: approval.id,
     kind: "agent",
-    title: `Image generate: ${truncateDisplay(prompt, 40)}`,
+    title: `Image generate: ${truncateDisplay(approval.prompt, 40)}`,
     status: "completed",
     currentStep: "image result metadata saved",
     progress: { completed: 1, total: 1, label: "image" },
@@ -5870,18 +6393,18 @@ async function handleImageCommand(
     lastOutputAt: now,
     heartbeatIntervalMs: 30_000,
     staleAfterMs: 120_000,
-    outputPath: assetPath,
+    outputPath: approval.assetPath,
     hasOutput: true,
     result: "pass",
-    userVisibleSummary: `image 结果已落盘：${assetPath}`,
+    userVisibleSummary: `image 结果已落盘：${approval.assetPath}`,
     nextAction: "查看 evidence 或把资产路径交给 executor；image role 不改代码。",
   };
   rememberBackgroundTask(context, task);
-  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
-  await appendBackgroundTaskEvent(context, sessionId, task);
-  writeLine(output, `ImageGenerationResult: ${id}`);
-  writeLine(output, `- provider/model: ${route.provider}/${route.primaryModel}`);
-  writeLine(output, `- asset path: ${assetPath}`);
+  await context.store.appendEvent(approval.sessionId, { type: "evidence_record", ...evidence });
+  await appendBackgroundTaskEvent(context, approval.sessionId, task);
+  writeLine(output, `ImageGenerationResult: ${approval.id}`);
+  writeLine(output, `- provider/model: ${approval.provider}/${approval.model}`);
+  writeLine(output, `- asset path: ${approval.assetPath}`);
   writeLine(output, "- request: 未固定 size/quality/format；只有用户明确指定才传。 ");
 }
 
@@ -6216,6 +6739,118 @@ async function requestIndexRefreshApproval(
   await executeApprovedIndexToolUse(
     toolCall,
     "refresh",
+    args.includes("--force"),
+    context,
+    sessionId,
+    output,
+  );
+  if (!context.isInkSession) writeStatus(output, context);
+}
+
+async function requestIndexInitFastApproval(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const toolCall: ModelToolCall = {
+    id: `slash-index-init-fast-${randomUUID().slice(0, 8)}`,
+    name: INDEX_REFRESH,
+    input: {
+      force: args.includes("--force"),
+      reason: "explicit /index init fast slash command",
+    },
+  };
+  const permission = await decidePermission(
+    "Write",
+    { path: ".linghun/index" },
+    context,
+    sessionId,
+  );
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: toolCall.name,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: { ...permission.request, toolName: INDEX_REFRESH as unknown as ToolName },
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (context.permissionMode === "auto-review" && permission.decision === "ask") {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      "slash_index_init_fast_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated",
+      "info",
+    );
+    await executeApprovedIndexToolUse(
+      toolCall,
+      "init fast",
+      args.includes("--force"),
+      context,
+      sessionId,
+      output,
+    );
+    if (!context.isInkSession) writeStatus(output, context);
+    return;
+  }
+  if (permission.decision === "deny") {
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `index init fast deny: ${permission.reason}`,
+    );
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      "Write",
+      `deny: ${permission.reason}`,
+      true,
+      evidence.id,
+    );
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+      writeStatus(output, context);
+    }
+    return;
+  }
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = {
+      kind: "index_tool",
+      indexAction: "init fast",
+      toolCall,
+      sessionId,
+      force: args.includes("--force"),
+    };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+      writeStatus(output, context);
+    }
+    return;
+  }
+
+  await executeApprovedIndexToolUse(
+    toolCall,
+    "init fast",
     args.includes("--force"),
     context,
     sessionId,
@@ -8563,7 +9198,7 @@ async function executeIndexToolUse(
 // 用户确认（或已允许）后真实执行索引刷新/修复，复用受控 runtime 路径。
 async function executeApprovedIndexToolUse(
   toolCall: ModelToolCall,
-  action: "refresh" | "repair",
+  action: "init fast" | "refresh" | "repair",
   force: boolean | undefined,
   context: TuiContext,
   sessionId: string,
@@ -8576,35 +9211,64 @@ async function executeApprovedIndexToolUse(
   evidenceId?: string;
 }> {
   const name = action === "repair" ? INDEX_REPAIR : INDEX_REFRESH;
-  startRequestActivity(output, context, "tool_running", { toolName: name });
+  if (action !== "repair") {
+    const guard = checkBackgroundStartGuard(context, "index", true);
+    if (guard) {
+      const evidence = await recordToolFailureEvidence(
+        context,
+        sessionId,
+        "Write",
+        `index ${action} resource guard: ${guard}`,
+      );
+      await appendToolResultEvent(context, sessionId, toolCall.id, "Write", guard, true, evidence.id);
+      writeLine(output, guard);
+      return { ok: false, tool: name, text: guard, evidenceId: evidence.id };
+    }
+  }
+  if (!context.isInkSession) {
+    startRequestActivity(output, context, "tool_running", { toolName: name });
+  }
   if (action === "repair") {
     // 复用 /index repair 续跑：追加 ignore 条目后刷新（内部已有 writeLine 摘要）。
     await runIndexSafetyRepair(context, output);
+  } else if (action === "init fast") {
+    await runIndexRepository(context, "fast", "init fast", Boolean(force), output);
   } else {
     await runIndexRepository(context, context.config.index.mode, "refresh", Boolean(force), output);
   }
   clearRequestActivity(context);
   const ok = context.index.status === "ready" || context.index.status === "stale";
   const text = ok
-    ? summarizeIndexRefreshOutcome(action, context.index.status, context.language)
+    ? summarizeIndexRefreshOutcome(
+        action === "init fast" ? "refresh" : action,
+        context.index.status,
+        context.language,
+      )
     : context.language === "en-US"
       ? `Index ${action} did not complete: status=${context.index.status}. ${context.index.error ?? ""}`.trim()
-      : `索引${action === "repair" ? "修复" : "刷新"}未完成：状态=${context.index.status}。${context.index.error ?? ""}`.trim();
+      : `索引${action === "repair" ? "修复" : action === "init fast" ? "初始化" : "刷新"}未完成：状态=${context.index.status}。${context.index.error ?? ""}`.trim();
+  const primaryText =
+    ok && action !== "repair" && context.index.status === "ready"
+      ? `${formatIndexRefreshSummary(
+          context,
+          action === "init fast" ? "init fast" : "refresh",
+        )}\n${text}`
+      : text;
   if (ok) {
     const panelAlreadyShown = Boolean(context.isInkSession && context.commandPanelState);
     const evidence = createEvidenceRecord(
       "command_output",
       `index_operation ${action}: ${text}`,
       `index-operation:${action}`,
-      ["index_operation", `index_${action}`],
+      ["index_operation", `index_${action.replace(" ", "_")}`],
     );
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, false, evidence.id);
     if (!context.isInkSession) {
-      writeLine(output, text);
+      writeLine(output, primaryText);
     } else if (!panelAlreadyShown) {
-      writeLine(output, text);
+      writeLine(output, primaryText);
     }
     return { ok: true, tool: name, text, evidenceId: evidence.id };
   }

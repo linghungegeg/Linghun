@@ -72,6 +72,7 @@ import type {
   DurableJobStatus,
   RoleHandoff,
   RoleRouteDecision,
+  VerificationReport,
 } from "./tui-data-types.js";
 import { formatAgentDetails } from "./tui-details-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
@@ -123,6 +124,11 @@ export type JobAgentCommandRuntimeDeps = {
     context: TuiContext,
     sessionId: string,
     input: FailureLearningInput,
+  ) => Promise<void>;
+  recordVerificationEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    report: VerificationReport,
   ) => Promise<void>;
 };
 
@@ -1142,6 +1148,11 @@ export async function runAgentWork(
       deps().appendBackgroundTaskEvent,
     );
     context.lastVerification = report;
+    await deps().recordVerificationEvidence(
+      context,
+      agent.parentSessionId ?? (await deps().ensureSession(context)),
+      report,
+    );
     return `verifier 摘要：session-scoped conservative verification；不是 durable job、不是第二套 job system、不是 Phase 17。已在独立 transcript 中运行验证命令，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
   }
   return runWorkerAgent(agent, context, output);
