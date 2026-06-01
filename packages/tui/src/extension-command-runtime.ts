@@ -174,12 +174,14 @@ export function createSkillEvolutionCandidate(
 
 export function formatWorkflows(context: TuiContext): string {
   return [
-    "Workflows（本地模板，启动前必须 Start Gate）",
+    "Workflows（本地模板与真实 runner 入口）",
     ...context.workflows.templates.map(
       (item) =>
         `- ${item.id}: purpose=${item.purpose} risk=${item.risk} writesFiles=${item.writesFiles ? "yes" : "no"} validation=${item.recommendedValidation.join(" | ")}`,
     ),
-    "- run: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
+    "- preview: /workflows plan <goal> 只生成预览，不执行。",
+    "- run: /workflows run <goal> 复用 durable job runner，写入真实 task/transcript/report。",
+    "- gate: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
   ].join("\n");
 }
 

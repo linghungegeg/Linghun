@@ -1091,21 +1091,7 @@ function runShell(
       });
     const requestStop = async (force: boolean): Promise<void> => {
       if (process.platform === "win32" && child.pid) {
-        await new Promise<void>((resolveStop) => {
-          const args = ["/pid", String(child.pid), "/t", "/f"];
-          const killer = spawn("taskkill", args, { windowsHide: true });
-          const stopTimeout = setTimeout(() => {
-            killer.kill("SIGKILL");
-            child.kill("SIGKILL");
-            resolveStop();
-          }, 750);
-          const finishStop = () => {
-            clearTimeout(stopTimeout);
-            resolveStop();
-          };
-          killer.on("error", finishStop);
-          killer.on("close", finishStop);
-        });
+        await stopWindowsProcessTree(child.pid, cwd);
         return;
       }
       child.kill(force ? "SIGKILL" : "SIGTERM");
@@ -1173,6 +1159,93 @@ function runShell(
     child.on("error", (error) => {
       finish(1, `命令执行失败：${error.message}`);
     });
+  });
+}
+
+async function stopWindowsProcessTree(rootPid: number, cwd: string): Promise<void> {
+  const deadline = Date.now() + 900;
+  await taskkillWindowsPids([rootPid]);
+  while (Date.now() < deadline) {
+    await stopWindowsWorkspaceProcesses(rootPid, cwd);
+    await sleep(50);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function taskkillWindowsPids(pids: number[]): Promise<void> {
+  return new Promise((resolveStop) => {
+    const uniquePids = [...new Set(pids.filter((pid) => Number.isInteger(pid) && pid > 0))];
+    if (uniquePids.length === 0) {
+      resolveStop();
+      return;
+    }
+    const args = [...uniquePids.flatMap((pid) => ["/pid", String(pid)]), "/t", "/f"];
+    const killer = spawn("taskkill", args, { windowsHide: true });
+    const stopTimeout = setTimeout(() => {
+      killer.kill("SIGKILL");
+      resolveStop();
+    }, 750);
+    const finishStop = () => {
+      clearTimeout(stopTimeout);
+      resolveStop();
+    };
+    killer.on("error", finishStop);
+    killer.on("close", finishStop);
+  });
+}
+
+function stopWindowsWorkspaceProcesses(rootPid: number, cwd: string): Promise<void> {
+  return new Promise((resolveStop) => {
+    const script = `
+$rootPid = ${rootPid}
+$cwd = ${JSON.stringify(cwd)}
+$rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine)
+$children = @{}
+foreach ($row in $rows) {
+  $parent = [int]$row.ParentProcessId
+  if (-not $children.ContainsKey($parent)) { $children[$parent] = @() }
+  $children[$parent] += [int]$row.ProcessId
+}
+$queue = New-Object System.Collections.Generic.Queue[int]
+$seen = New-Object 'System.Collections.Generic.HashSet[int]'
+$queue.Enqueue($rootPid)
+$pids = @()
+while ($queue.Count -gt 0) {
+  $pid = $queue.Dequeue()
+  if (-not $seen.Add($pid)) { continue }
+  $pids += $pid
+  if ($children.ContainsKey($pid)) {
+    foreach ($childPid in $children[$pid]) { $queue.Enqueue($childPid) }
+  }
+}
+$cwdLower = $cwd.ToLowerInvariant()
+foreach ($row in $rows) {
+  $cmd = [string]$row.CommandLine
+  if ($cmd.ToLowerInvariant().Contains($cwdLower)) { $pids += [int]$row.ProcessId }
+}
+$pids = $pids | Sort-Object -Unique
+foreach ($targetPid in $pids) {
+  if ($targetPid -gt 0 -and $targetPid -ne $PID) {
+    Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+  }
+}
+`;
+    const killer = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true,
+    });
+    const stopTimeout = setTimeout(() => {
+      killer.kill("SIGKILL");
+      resolveStop();
+    }, 900);
+    const finishStop = () => {
+      clearTimeout(stopTimeout);
+      resolveStop();
+    };
+    killer.on("error", finishStop);
+    killer.on("close", finishStop);
   });
 }
 

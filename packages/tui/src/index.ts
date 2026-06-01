@@ -805,8 +805,14 @@ import type {
   VerificationStepKind,
   VisionObservation,
   WorkflowState,
+  WorkflowStepState,
   WorkflowTemplate,
 } from "./tui-data-types.js";
+import {
+  type WorkflowBridgeRequestProposal,
+  bridgeWorkflowPlanToMainChainRequests,
+} from "./workflow-agent-runtime-bridge.js";
+import type { NormalizedWorkflowPlan } from "./workflow-plan-schema.js";
 export type {
   AgentRun,
   AgentType,
@@ -876,6 +882,7 @@ export type {
   VerificationStep,
   VerificationStepKind,
   VisionObservation,
+  WorkflowStepState,
   WorkflowState,
   WorkflowTemplate,
 } from "./tui-data-types.js";
@@ -2343,6 +2350,10 @@ export async function handleSlashCommand(
       await runIndexSafetyRepair(context, output);
       return "handled";
     }
+    if ((rest[0] ?? "") === "refresh") {
+      await requestIndexRefreshApproval(rest, context, output);
+      return "handled";
+    }
     await handleIndexCommand(rest, context, output);
     return "handled";
   }
@@ -2545,6 +2556,20 @@ async function handleWorkflowsCommand(
     }
     return;
   }
+  if (name === "run") {
+    const goal = args.slice(1).join(" ").trim();
+    if (!goal) {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Usage: /workflows run <goal>"
+          : "用法：/workflows run <目标描述>",
+      );
+      return;
+    }
+    await runWorkflowSteps(goal, context, output);
+    return;
+  }
   const template = context.workflows.templates.find((item) => item.id === name);
   if (!template) {
     writeLine(output, `未知 workflow：${name}。可运行 /workflows 查看可用模板。`);
@@ -2599,6 +2624,407 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
       ? { cacheFreshnessHint: summarizeWorkflowCacheFreshness(context.cache.lastFreshness) }
       : {}),
   };
+}
+
+async function runWorkflowSteps(
+  goal: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const { generateWorkflowPlanPreview } = await import("./workflow-planner-entry.js");
+  const preview = generateWorkflowPlanPreview({
+    goal,
+    permissionMode: context.permissionMode,
+    ...buildWorkflowPlannerContextInput(context),
+  });
+  if (!preview.ok) {
+    writeLine(output, `工作流计划生成失败：${preview.reason}`);
+    return;
+  }
+
+  const phase =
+    preview.plan.phases.find((item) => item.id === preview.plan.currentPhaseId) ??
+    preview.plan.phases[0];
+  if (!phase) {
+    writeLine(output, "工作流运行失败：计划没有可执行 phase。");
+    return;
+  }
+  const confirmed = generateWorkflowPlanPreview({
+    goal,
+    permissionMode: context.permissionMode,
+    ...buildWorkflowPlannerContextInput(context),
+    confirmedPhaseStopPoints: [phase.id],
+  });
+  if (!confirmed.ok) {
+    writeLine(output, `工作流运行失败：${confirmed.reason}`);
+    return;
+  }
+
+  const sessionId = await ensureSession(context);
+  const runId = `workflow-${randomUUID().slice(0, 8)}`;
+  const startedAt = new Date().toISOString();
+  const executableSlices = confirmed.plan.phases.flatMap((item) => item.slices);
+  const stepStates: WorkflowStepState[] = executableSlices.map((slice) => ({
+    id: slice.id,
+    title: slice.title,
+    status: "queued",
+    runtime:
+      slice.targetRuntime?.kind === "verification"
+        ? "verification"
+        : slice.targetRuntime?.kind === "details"
+          ? "details"
+          : "agent",
+    evidenceRefs: (slice.evidence ?? []).map((item) => item.ref),
+  }));
+  const workflowTask: BackgroundTaskState = {
+    id: runId,
+    kind: "job",
+    title: `Workflow: ${truncateDisplay(goal, 50)}`,
+    status: "running",
+    currentStep: "workflow starting",
+    progress: { completed: 0, total: stepStates.length, label: "workflow" },
+    startedAt,
+    updatedAt: startedAt,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    result: "partial",
+    userVisibleSummary: `Workflow 正在执行：${stepStates.length} 个真实步骤。`,
+    nextAction: "等待 step_result；失败时查看 /failures 和 transcript。",
+  };
+  context.workflows.activeRun = {
+    id: runId,
+    goal,
+    planId: confirmed.plan.id,
+    status: "running",
+    steps: stepStates,
+    startedAt,
+    result: "partial",
+  };
+  rememberBackgroundTask(context, workflowTask);
+  await context.store.appendEvent(sessionId, {
+    type: "workflow_start",
+    workflow: { id: runId, goal, planId: confirmed.plan.id, steps: stepStates },
+    createdAt: startedAt,
+  });
+  await appendBackgroundTaskEvent(context, sessionId, workflowTask);
+
+  let completed = 0;
+  for (const step of stepStates) {
+    const request = getCurrentWorkflowStepRequest(confirmed.plan, phase.id, stepStates, step.id);
+    const stepStartedAt = new Date().toISOString();
+    step.status = "running";
+    step.startedAt = stepStartedAt;
+    workflowTask.currentStep = step.title;
+    workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
+    workflowTask.updatedAt = stepStartedAt;
+    await context.store.appendEvent(sessionId, {
+      type: "workflow_step_start",
+      workflowId: runId,
+      step,
+      createdAt: stepStartedAt,
+    });
+    await appendBackgroundTaskEvent(context, sessionId, workflowTask);
+
+    const result = await executeWorkflowStep(request, context, output);
+    const stepEndedAt = new Date().toISOString();
+    step.status = result.status;
+    step.summary = result.summary;
+    step.evidenceRefs = result.evidenceRefs;
+    step.endedAt = stepEndedAt;
+    if (result.status === "completed") completed += 1;
+    workflowTask.currentStep = result.summary;
+    workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
+    workflowTask.updatedAt = stepEndedAt;
+    workflowTask.lastOutputAt = stepEndedAt;
+    workflowTask.hasOutput = true;
+    await context.store.appendEvent(sessionId, {
+      type: "workflow_step_result",
+      workflowId: runId,
+      stepId: step.id,
+      status: result.status,
+      summary: result.summary,
+      evidenceRefs: result.evidenceRefs,
+      createdAt: stepEndedAt,
+    });
+    await appendBackgroundTaskEvent(context, sessionId, workflowTask);
+
+    if (result.status !== "completed") {
+      await finishWorkflowRun(runId, "failed", result.summary, context, sessionId, workflowTask);
+      return;
+    }
+  }
+
+  await finishWorkflowRun(
+    runId,
+    "completed",
+    "Workflow steps completed; result remains PARTIAL until verification/final gate evidence proves PASS.",
+    context,
+    sessionId,
+    workflowTask,
+  );
+  writeLine(output, `Workflow ${runId} completed with PARTIAL result; no PASS evidence generated.`);
+}
+
+async function executeWorkflowStep(
+  request: WorkflowBridgeRequestProposal,
+  context: TuiContext,
+  output: Writable,
+): Promise<{
+  status: "completed" | "failed" | "blocked";
+  summary: string;
+  evidenceRefs: string[];
+}> {
+  if (!request.executable || !request.request) {
+    const summary = `workflow step ${request.sliceId} blocked: ${request.reason}`;
+    await captureWorkflowFailureLearning(request, summary, context);
+    return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
+  }
+  const beforeEvidence = context.evidence.map((item) => item.id);
+  const req = request.request;
+  try {
+    if (req.mainChain === "fork") {
+      const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
+      await handleForkCommand([req.role, req.task], context, output);
+      const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
+      if (!agent) {
+        const summary = `workflow step ${request.sliceId} blocked: agent runtime did not start`;
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "blocked",
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+      if (agent?.status === "failed") {
+        const summary = `workflow step ${request.sliceId} failed: ${agent.summary}`;
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "failed",
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+      if (agent?.summary.includes("权限管道拒绝")) {
+        const summary = `workflow step ${request.sliceId} blocked: ${agent.summary}`;
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "blocked",
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+    } else if (req.mainChain === "verification") {
+      await runWorkflowVerificationStep(req.level, context, output);
+    } else if (req.mainChain === "details") {
+      await handleSlashCommand("/details", context, output);
+    } else if (req.mainChain === "agents") {
+      await handleAgentsCommand([req.action, req.agentRef ?? ""].filter(Boolean), context, output);
+    } else {
+      const summary = `workflow step ${request.sliceId} blocked: unsupported nested job request`;
+      await captureWorkflowFailureLearning(request, summary, context);
+      return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const summary = `workflow step ${request.sliceId} failed: ${message}`;
+    await captureWorkflowFailureLearning(request, summary, context);
+    return {
+      status: "failed",
+      summary,
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+    };
+  }
+  return {
+    status: "completed",
+    summary: `workflow step ${request.sliceId} completed via ${req.mainChain}`,
+    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+  };
+}
+
+function getCurrentWorkflowStepRequest(
+  plan: NormalizedWorkflowPlan,
+  phaseId: string,
+  steps: WorkflowStepState[],
+  stepId: string,
+): WorkflowBridgeRequestProposal {
+  const completed = new Set(
+    steps.filter((step) => step.status === "completed").map((step) => step.id),
+  );
+  const runningPlan: NormalizedWorkflowPlan = {
+    ...plan,
+    currentPhaseId: phaseId,
+    phases: plan.phases.map((phase) => ({
+      ...phase,
+      status: phase.id === phaseId ? "running" : (phase.status ?? "pending"),
+      slices: phase.slices.map((slice) => ({
+        ...slice,
+        allowedToolClasses: slice.allowedToolClasses ?? [],
+        evidence: slice.evidence ?? [],
+        references: slice.references ?? [],
+        status:
+          slice.id === stepId
+            ? "queued"
+            : completed.has(slice.id)
+              ? "completed"
+              : slice.status === "blocked"
+                ? "queued"
+                : (slice.status ?? "queued"),
+      })),
+    })),
+  };
+  const bridge = bridgeWorkflowPlanToMainChainRequests(runningPlan, {
+    currentPhaseId: phaseId,
+    confirmedPhaseStopPoints: [phaseId],
+  });
+  return (
+    bridge.requests.find((request) => request.sliceId === stepId) ?? {
+      id: `${plan.id}:${phaseId}:${stepId}`,
+      proposalOnly: true,
+      workflowId: plan.id,
+      phaseId,
+      sliceId: stepId,
+      status: "blocked",
+      reason: "workflow step missing from bridge request set",
+      executable: false,
+      request: null,
+      safety: {
+        readonly: true,
+        mutating: false,
+        requiresStartGate: false,
+        requiresPermissionPipeline: false,
+        requiredPermissionAction: "none",
+        evidencePolicy: "neverTreatCompletionAsPass",
+      },
+      handoffProposal: {
+        boundedRefs: [],
+        workspaceCacheRefs: [],
+        evidenceRefs: [],
+        keyFilesSummary: [],
+        droppedRefKinds: [],
+        notIncluded: [],
+      },
+      backgroundProjection: {
+        source: "background-task-projection",
+        kind: "job",
+        userVisibleSummary: "workflow step missing from bridge request set",
+        nextAction: "Inspect workflow plan.",
+      },
+      taskSurfaceInput: {
+        phaseId,
+        sliceId: stepId,
+        requestStatus: "blocked",
+        evidenceRefs: [],
+        nextAction: "Inspect workflow plan.",
+      },
+    }
+  );
+}
+
+async function runWorkflowVerificationStep(
+  level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint",
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const plan =
+    level === "smoke" || level === "focused"
+      ? await createVerificationPlan(context.projectPath, "smoke")
+      : (await createVerificationPlan(context.projectPath, "default")).filter(
+          (step) => step.kind === level,
+        );
+  const effectivePlan =
+    plan.length > 0 ? plan : await createVerificationPlan(context.projectPath, "smoke");
+  const report = await runVerificationPlan(
+    effectivePlan,
+    context,
+    sessionId,
+    output,
+    appendBackgroundTaskEvent,
+  );
+  context.lastVerification = report;
+  await recordVerificationEvidence(context, sessionId, report);
+}
+
+async function finishWorkflowRun(
+  runId: string,
+  status: "completed" | "failed" | "blocked",
+  summary: string,
+  context: TuiContext,
+  sessionId: string,
+  task: BackgroundTaskState,
+): Promise<void> {
+  const now = new Date().toISOString();
+  if (context.workflows.activeRun?.id === runId) {
+    context.workflows.activeRun.status = status;
+    context.workflows.activeRun.endedAt = now;
+    context.workflows.activeRun.result = status === "completed" ? "partial" : status;
+  }
+  task.status = status === "completed" ? "completed" : "failed";
+  task.result = status === "completed" ? "partial" : "fail";
+  task.currentStep = summary;
+  task.updatedAt = now;
+  task.lastOutputAt = now;
+  task.userVisibleSummary = summary;
+  task.nextAction =
+    status === "completed"
+      ? "Review verification evidence; do not treat workflow completion as PASS."
+      : "Inspect /failures and rerun after fixing the failed step.";
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  await context.store.appendEvent(sessionId, {
+    type: "workflow_end",
+    workflowId: runId,
+    status,
+    summary,
+    createdAt: now,
+  });
+  if (status !== "completed") {
+    await captureFailureLearning(context, sessionId, {
+      category: "tool_failure",
+      failureSummary: summary,
+      rootCauseGuess: "workflow step failed or blocked before all planned steps completed",
+      avoidNextTime:
+        "Inspect the failed workflow step and existing runtime evidence before rerunning; do not claim workflow PASS",
+      sourceRef: `workflow:${runId}`,
+      relatedTarget: "workflow",
+      severity: "medium",
+    });
+  }
+}
+
+async function captureWorkflowFailureLearning(
+  request: WorkflowBridgeRequestProposal,
+  summary: string,
+  context: TuiContext,
+): Promise<void> {
+  await captureFailureLearning(context, await ensureSession(context), {
+    category: "tool_failure",
+    failureSummary: summary,
+    rootCauseGuess: `workflow step ${request.sliceId} did not complete through the main chain`,
+    avoidNextTime:
+      "Fix the blocked workflow step and rerun; do not rely on projected task surface state",
+    sourceRef: `workflow-step:${request.workflowId}:${request.sliceId}`,
+    relatedTarget: "workflow",
+    severity: "medium",
+  });
+}
+
+function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowStepState["runtime"] {
+  if (request.request?.mainChain === "verification") return "verification";
+  if (request.request?.mainChain === "details") return "details";
+  return "agent";
+}
+
+function findWorkflowSliceTitle(plan: NormalizedWorkflowPlan, sliceId: string): string {
+  return (
+    plan.phases.flatMap((phase) => phase.slices).find((slice) => slice.id === sliceId)?.title ??
+    sliceId
+  );
+}
+
+function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {
+  const seen = new Set(before);
+  return context.evidence.map((item) => item.id).filter((id) => !seen.has(id));
 }
 
 function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {
@@ -5683,6 +6109,118 @@ async function runIndexSafetyRepair(context: TuiContext, output: Writable): Prom
   if (!context.index.safetyWarning) {
     writeLine(output, formatIndexRefreshSummary(context));
   }
+  if (!context.isInkSession) writeStatus(output, context);
+}
+
+async function requestIndexRefreshApproval(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const toolCall: ModelToolCall = {
+    id: `slash-index-refresh-${randomUUID().slice(0, 8)}`,
+    name: INDEX_REFRESH,
+    input: {
+      force: args.includes("--force"),
+      reason: "explicit /index refresh slash command",
+    },
+  };
+  const permission = await decidePermission(
+    "Write",
+    { path: ".linghun/index" },
+    context,
+    sessionId,
+  );
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: toolCall.name,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: { ...permission.request, toolName: INDEX_REFRESH as unknown as ToolName },
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+
+  if (context.permissionMode === "auto-review" && permission.decision === "ask") {
+    await appendSystemEvent(
+      context,
+      sessionId,
+      "slash_index_refresh_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated",
+      "info",
+    );
+    await executeApprovedIndexToolUse(
+      toolCall,
+      "refresh",
+      args.includes("--force"),
+      context,
+      sessionId,
+      output,
+    );
+    if (!context.isInkSession) writeStatus(output, context);
+    return;
+  }
+  if (permission.decision === "deny") {
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `index refresh deny: ${permission.reason}`,
+    );
+    await appendToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      "Write",
+      `deny: ${permission.reason}`,
+      true,
+      evidence.id,
+    );
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+      writeStatus(output, context);
+    }
+    return;
+  }
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = {
+      kind: "index_tool",
+      indexAction: "refresh",
+      toolCall,
+      sessionId,
+      force: args.includes("--force"),
+    };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+      writeStatus(output, context);
+    }
+    return;
+  }
+
+  await executeApprovedIndexToolUse(
+    toolCall,
+    "refresh",
+    args.includes("--force"),
+    context,
+    sessionId,
+    output,
+  );
   if (!context.isInkSession) writeStatus(output, context);
 }
 

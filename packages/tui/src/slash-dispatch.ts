@@ -567,6 +567,8 @@ function formatHelp(language: Language): string {
   /skills install local|git|github ... Install skill metadata with trust/source record
   /skills enable|disable <id> Persist local skill enablement
   /workflows            List workflow templates, risks, write/validation hints
+  /workflows plan <goal> Preview a workflow plan without executing
+  /workflows run <goal> Start a real durable workflow job
   /workflows <name>     Show Start Gate for one workflow
   /plugins              List local plugin manifests and contributions
   /plugins doctor       Diagnose plugin lifecycle and load errors
@@ -672,6 +674,8 @@ Slash commands, config keys, and transcript event fields stay in English.`;
   /skills enable <id>   启用并信任本地 skill
   /skills disable <id>  禁用本地 skill，重启后保留
   /workflows            列出 workflow 模板、风险、写文件和验证提示
+  /workflows plan <目标>  预览 workflow 计划，不执行
+  /workflows run <目标>   启动真实 durable workflow job
   /workflows <name>     展示单个 workflow 的 Start Gate
   /plugins              列出本地 plugin manifest 与贡献项
   /plugins doctor       诊断 plugin 生命周期和加载错误

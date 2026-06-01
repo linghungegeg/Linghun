@@ -933,7 +933,9 @@ export async function handleForkCommand(
     writeLine(output, "用法：/fork explorer|planner|verifier|worker <task>");
     return;
   }
-  const guard = deps().checkBackgroundStartGuard(context, "agent", true);
+  const workflowTaskId =
+    context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined;
+  const guard = deps().checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
     return;

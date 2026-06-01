@@ -57,6 +57,17 @@ export type BackgroundTaskState = {
   nextAction?: string;
 };
 
+export type WorkflowStepState = {
+  id: string;
+  title: string;
+  status: "queued" | "running" | "completed" | "failed" | "blocked";
+  runtime: "agent" | "verification" | "details";
+  summary?: string;
+  evidenceRefs: string[];
+  startedAt?: string;
+  endedAt?: string;
+};
+
 export type CheckpointState = {
   id: string;
   sessionId: string;
@@ -825,6 +836,16 @@ export type WorkflowState = {
   templates: WorkflowTemplate[];
   disabledIds: string[];
   lastStarted?: string;
+  activeRun?: {
+    id: string;
+    goal: string;
+    planId: string;
+    status: "running" | "completed" | "failed" | "blocked";
+    steps: WorkflowStepState[];
+    startedAt: string;
+    endedAt?: string;
+    result: "partial" | "failed" | "blocked";
+  };
 };
 
 export type HookSummary = {

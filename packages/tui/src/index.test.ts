@@ -2758,6 +2758,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
     context.index.status = "ready";
     context.index.projectName = "F-Linghun";
     context.lastVerification = createVerificationReportFixture("partial");
@@ -2858,6 +2859,97 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("task graph: 4 steps");
     expect(output.text).toContain("fullOutputPath:");
     expect(output.text).not.toContain("Beta readiness PASS");
+  });
+
+  it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-workflow-run",
+      kind: "test_result",
+      summary: "workflow runner focused evidence",
+      source: "vitest",
+      supportsClaims: ["workflow-runner-focused"],
+      createdAt: new Date().toISOString(),
+    });
+
+    await handleSlashCommand("/workflows plan close product maturity gaps", context, output);
+
+    expect(output.text).toMatch(/Workflow plan preview|工作流计划预览/u);
+    expect(context.backgroundTasks).toHaveLength(0);
+
+    await handleSlashCommand("/workflows run close product maturity gaps", context, output);
+
+    const workflowTask = context.backgroundTasks.find((task) =>
+      task.title.includes("Workflow: close product maturity gaps"),
+    );
+    expect(workflowTask).toMatchObject({ kind: "job", status: "completed", result: "partial" });
+    expect(context.workflows.activeRun).toMatchObject({
+      status: "completed",
+      result: "partial",
+    });
+    expect(context.workflows.activeRun?.steps.map((step) => step.status)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+    ]);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "workflow_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "workflow_step_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "workflow_step_result")).toBe(true);
+    expect(transcript.some((event) => event.type === "workflow_end")).toBe(true);
+    expect(transcript.some((event) => event.type === "agent_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "agent_end")).toBe(true);
+    expect(transcript.some((event) => event.type === "verification_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "verification_end")).toBe(true);
+    expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
+    expect(output.text).toContain("completed with PARTIAL result");
+    expect(output.text).not.toContain("PASS：");
+  });
+
+  it("workflow run routes mutating worker steps through permission and failure learning", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "default";
+    await handleSlashCommand(
+      "/workflows plan write workflow-permission.txt hello",
+      context,
+      output,
+    );
+    expect(context.backgroundTasks).toHaveLength(0);
+
+    await handleSlashCommand("/workflows run write workflow-permission.txt hello", context, output);
+
+    expect(context.workflows.activeRun?.result).toBe("failed");
+    expect(context.workflows.activeRun?.steps.some((step) => step.status === "blocked")).toBe(true);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "workflow_step_result")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+    expect(
+      transcript.some((event) => event.type === "workflow_end" && event.status === "failed"),
+    ).toBe(true);
+    expect(
+      context.failureLearning.records.some((record) => record.relatedTarget === "workflow"),
+    ).toBe(true);
+    expect(context.backgroundTasks).toContainEqual(
+      expect.objectContaining({ title: expect.stringContaining("Workflow:"), result: "fail" }),
+    );
   });
 
   it("recovers Phase 17A durable jobs into background and marks missing owner heartbeat stale", async () => {
@@ -6542,7 +6634,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["/index refresh\n/index status\n/exit\n"]),
+      stdin: Readable.from(["/index refresh\nyes\n/index status\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
@@ -6553,6 +6645,46 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("阻塞原因");
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     await expect(readFile(join(project, ".cbmignore"), "utf8")).rejects.toThrow();
+  }, 10_000);
+
+  it("P0: /index status/doctor/refresh/check closes the stdin user path with permission and transcript evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from([
+        "/index status\n",
+        "/index doctor\n",
+        "/index refresh\n",
+        "yes\n",
+        "/index check\n",
+        "/exit\n",
+      ]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const calls = await readMockCalls(callsPath);
+    expect(calls).toContain("list_projects");
+    expect(calls).toContain("index_status");
+    expect(calls).toContain("detect_changes");
+    expect(calls).toContain("index_repository");
+    expect(output.text).toContain("status: ready");
+    expect(output.text).toContain("索引已刷新：状态=ready。");
+    expect(output.text).not.toContain("gateId");
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain('"type":"tool_call_start"');
+    expect(transcript).toContain('"type":"permission_request"');
+    expect(transcript).toContain('"type":"permission_result"');
   });
 
   it("Run 3: index refresh passes transient excludes and records full skipped details", async () => {
@@ -6564,6 +6696,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6584,6 +6717,26 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("P0: /index refresh in default mode asks permission and does not refresh before approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
+    const { config, callsPath } = await createMockCodebaseMemoryConfig(project, mockDir);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+
+    await handleSlashCommand("/index refresh", context, output);
+
+    expect(context.pendingLocalApproval?.kind).toBe("index_tool");
+    expect(output.text).toContain("Linghun 想执行 Write .linghun/index。");
+    expect(await readMockCalls(callsPath)).not.toContain("index_repository");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "tool_call_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+  });
+
   it("Run 3: Ink auto-skip summary hides commands while detailsText keeps skipped list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
@@ -6594,6 +6747,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
     (context as { isInkSession?: boolean }).isInkSession = true;
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6622,6 +6776,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6639,6 +6794,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
     const outputBlocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(context, outputBlocks);
 
@@ -6660,6 +6816,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6676,8 +6833,9 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
-
+    context.permissionMode = "full-access";
     await handleSlashCommand("/index refresh", context, output);
+    context.permissionMode = "default";
     await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("确认", context, output);
 
@@ -6743,6 +6901,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
     await writeFile(join(project, ".linghunignore"), "large.json\n", "utf8");
@@ -6765,7 +6924,9 @@ describe("Phase 06 TUI slash commands", () => {
     // P0-1 — ink 主屏：提权走 PermissionPanel，不把文本提示糊到主屏。
     (context as { isInkSession?: boolean }).isInkSession = true;
 
+    context.permissionMode = "full-access";
     await handleSlashCommand("/index refresh", context, output);
+    context.permissionMode = "default";
     await handleSlashCommand("/index repair", context, output);
 
     // ask 路径已挂起，等待 PermissionPanel 确认。
@@ -6880,12 +7041,13 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
     context.isInkSession = true;
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
     expect(await readMockCalls(callsPath)).toContain("index_repository");
     expect(context.commandPanelState).toBeUndefined();
-    expect(output.text).toContain("索引刷新完成");
+    expect(output.text).toContain("索引已刷新：状态=ready。");
   });
 
   it("D.14D-R P0-2: model IndexRefresh denied → no index_repository, model told NOT refreshed", async () => {
@@ -6946,6 +7108,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6969,6 +7132,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -6987,8 +7151,10 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
+    context.permissionMode = "default";
     const callsBeforeDeny = await readMockCalls(callsPath);
     await handleSlashCommand("/index repair", context, output);
     await handleNaturalInput("no", context, output);
@@ -7008,8 +7174,10 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
+    context.permissionMode = "default";
     await handleSlashCommand("/index repair", context, output);
     await expect(readFile(join(project, ".linghunignore"), "utf8")).rejects.toThrow();
     await handleNaturalInput("确认", context, output);
@@ -7047,6 +7215,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
 
@@ -9826,6 +9995,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index init fast", context, output);
     await handleSlashCommand("/index refresh", context, output);
@@ -9855,6 +10025,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index init fast --force", context, output);
     await handleSlashCommand("/index refresh --force", context, output);
@@ -9875,6 +10046,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh --force", context, output);
 
@@ -9895,6 +10067,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh --force", context, output);
 
@@ -10489,7 +10662,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("帮助：优先直接描述你的目标。");
     expect(output.text).toContain("索引刷新完成");
-    expect(output.text).toContain("当前没有待确认的写入动作");
+    expect(output.text).not.toContain("当前没有待确认的写入动作");
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("权限已拒绝");
@@ -16572,8 +16745,10 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
 
     await handleSlashCommand("/index refresh", context, output);
+    context.permissionMode = "default";
     await handleNaturalInput("帮我排除大文件 然后更新项目索引", context, output);
     await handleNaturalInput("no", context, output);
 

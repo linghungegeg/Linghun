@@ -137,7 +137,6 @@ describe("Phase 05 core tools", () => {
       ].join("\n"),
       "utf8",
     );
-    const waitForForceKill = () => new Promise((resolve) => setTimeout(resolve, 1_700));
 
     const timeoutSentinel = join(project, "timeout-grandchild.txt");
     const timeout = await runTool(
@@ -148,7 +147,6 @@ describe("Phase 05 core tools", () => {
       },
       createToolContext(project),
     );
-    await waitForForceKill();
 
     expect(timeout.output.data).toMatchObject({ exitCode: 1, outcome: "timeout" });
     if (process.platform === "win32") {
@@ -170,7 +168,6 @@ describe("Phase 05 core tools", () => {
     );
     controller.abort();
     const cancelled = await running;
-    await waitForForceKill();
 
     expect(cancelled.output.data).toMatchObject({ exitCode: 1, outcome: "cancelled" });
     if (process.platform === "win32") {

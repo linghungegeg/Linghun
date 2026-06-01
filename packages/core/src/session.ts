@@ -301,6 +301,24 @@ export type TranscriptEvent =
       summary: string;
       createdAt: string;
     }
+  | { type: "workflow_start"; workflow: unknown; createdAt: string }
+  | { type: "workflow_step_start"; workflowId: string; step: unknown; createdAt: string }
+  | {
+      type: "workflow_step_result";
+      workflowId: string;
+      stepId: string;
+      status: "completed" | "failed" | "blocked";
+      summary: string;
+      evidenceRefs: string[];
+      createdAt: string;
+    }
+  | {
+      type: "workflow_end";
+      workflowId: string;
+      status: "completed" | "failed" | "blocked";
+      summary: string;
+      createdAt: string;
+    }
   | { type: "memory_candidate"; candidate: unknown; createdAt: string }
   | { type: "memory_accepted"; memory: unknown; createdAt: string }
   | { type: "branch_created"; branch: unknown; createdAt: string }
