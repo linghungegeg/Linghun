@@ -118,7 +118,7 @@ export function formatFeaturePolicy(context: TuiContext): string {
     `- plugins: discover manifests=${context.plugins.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.plugins.trustedIds.join(",") || "none"}`,
     "- agents/background: manual commands only; verifier auto fork=no; coordinator/multi-worker=unsupported",
     "Dangerous defaults（off）",
-    "- full-access permission: default off; requires LINGHUN_ENABLE_FULL_ACCESS=1; auto-review never auto-allows Bash/network/deps/permission/plugin/hook/remote",
+    "- mode switching: direct /mode and Shift+Tab cycling; switching modes does not bypass hard denies, path safety, or the permission pipeline",
     `- hooks: enabled=${context.hooks.enabled ? "yes" : "no"}; projectTrusted=${context.hooks.projectTrusted ? "yes" : "no"}; auto execution=no`,
     "- auto accept all edits=no; auto dependency install=no; auto networking=no; delete/rename/restore auto execution=no",
     "- plugin marketplace auto install/update=no; remote bridge/control auto connect=no; continuous phase progression=no",

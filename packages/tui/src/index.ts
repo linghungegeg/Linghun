@@ -1646,25 +1646,20 @@ async function runInkShell(
         const modes: PermissionMode[] = ["default", "auto-review", "plan", "full-access"];
         const idx = modes.indexOf(context.permissionMode);
         const nextMode = modes[(idx + 1) % modes.length] ?? "default";
-        const guard = getModeChangeGuard(nextMode, context);
-        if (!guard) {
-          const previousMode = context.permissionMode;
-          context.permissionMode = nextMode;
-          context.planAccepted = false;
-          try {
-            const sessionId = await ensureSession(context);
-            await appendSystemEvent(
-              context,
-              sessionId,
-              `permission_mode_change: ${previousMode} -> ${nextMode}; reason=ink shift-tab quiet cycle; boundary=Start Gate and permission pipeline remain active`,
-              "info",
-            );
-          } catch {
-            // 会话/事件写入失败不阻断 UI 切换；底层日志路径不应把用户输入区拖死。
-          }
+        const previousMode = context.permissionMode;
+        context.permissionMode = nextMode;
+        context.planAccepted = false;
+        try {
+          const sessionId = await ensureSession(context);
+          await appendSystemEvent(
+            context,
+            sessionId,
+            `permission_mode_change: ${previousMode} -> ${nextMode}; reason=ink shift-tab quiet cycle; boundary=Start Gate and permission pipeline remain active`,
+            "info",
+          );
+        } catch {
+          // 会话/事件写入失败不阻断 UI 切换；底层日志路径不应把用户输入区拖死。
         }
-        // guard 命中（例如 full-access 需要 opt-in）也不写 transcript，
-        // TaskSuggestionBar / 后续显式 /mode 命令会暴露详细原因。
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -3078,7 +3073,7 @@ export async function handleTuiKeypress(
     return;
   }
   if (key === "shift-tab") {
-    openModeSwitch(context, output);
+    await cycleMode(context, output);
     return;
   }
   if (hasPendingEnterConfirmation(context)) {
@@ -3280,11 +3275,6 @@ async function handleModeCommand(
     writeLine(output, t(context, "modeUnknown"));
     return;
   }
-  const guard = getModeChangeGuard(nextMode, context);
-  if (guard) {
-    writeLine(output, guard);
-    return;
-  }
   await setPermissionMode(context, output, nextMode, `mode command -> ${nextMode}`);
 }
 
@@ -3292,11 +3282,6 @@ async function cycleMode(context: TuiContext, output: Writable): Promise<void> {
   const modes: PermissionMode[] = ["default", "auto-review", "plan", "full-access"];
   const index = modes.indexOf(context.permissionMode);
   const nextMode = modes[(index + 1) % modes.length] ?? "default";
-  const guard = getModeChangeGuard(nextMode, context);
-  if (guard) {
-    writeLine(output, guard);
-    return;
-  }
   await setPermissionMode(context, output, nextMode, "tab mode cycle");
 }
 
@@ -3308,28 +3293,18 @@ function openModeSwitch(context: TuiContext, output: Writable): void {
           "Mode switch",
           `- current: ${context.permissionMode}`,
           "- options: default / auto-review / plan / full-access",
-          "- Shift+Tab opens this switch only; it does not enable full-access.",
-          "- use /mode <mode> to switch. full-access still requires local opt-in and cannot bypass Start Gate.",
+          "- Shift+Tab cycles modes directly; /mode <mode> switches directly.",
+          "- switching mode does not bypass hard denies; dangerous actions still go through the permission pipeline.",
         ].join("\n")
       : [
           "模式切换",
           `- 当前：${context.permissionMode}`,
           "- 可选：default / auto-review / plan / full-access",
-          "- Shift+Tab 只打开这个切换提示；不会开启 full-access。",
-          "- 用 /mode <mode> 切换。full-access 仍需要本地显式 opt-in，不能绕过 Start Gate。",
+          "- Shift+Tab 会直接循环切换模式；/mode <mode> 可直接切换。",
+          "- 切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。",
         ].join("\n"),
   );
   writeStatus(output, context);
-}
-
-function getModeChangeGuard(nextMode: PermissionMode, context: TuiContext): string | null {
-  if (context.permissionMode === "plan" && nextMode === "full-access" && !context.planAccepted) {
-    return t(context, "modeFullAccessPlanBlocked");
-  }
-  if (nextMode === "full-access" && process.env.LINGHUN_ENABLE_FULL_ACCESS !== "1") {
-    return t(context, "modeFullAccessOptInBlocked");
-  }
-  return null;
 }
 
 async function setPermissionMode(
@@ -3695,6 +3670,12 @@ async function executePermissionDeny(
     return;
   }
   if (approval.kind === "architecture_drift") {
+    const text =
+      approval.toolName === "Write" ||
+      approval.toolName === "Edit" ||
+      approval.toolName === "MultiEdit"
+        ? `${outcomeText}; ${approval.toolName} was NOT written / NOT created.`
+        : outcomeText;
     const evidence = await recordToolFailureEvidence(
       context,
       approval.sessionId,
@@ -3704,7 +3685,7 @@ async function executePermissionDeny(
     const deniedResult = {
       ok: false,
       tool: approval.toolName,
-      text: outcomeText,
+      text,
       outcome: cancelled ? "cancelled" : "denied",
       evidenceId: evidence.id,
       architectureDrift: approval.warnings,
@@ -3720,6 +3701,13 @@ async function executePermissionDeny(
     );
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
+      if (
+        approval.toolName === "Write" ||
+        approval.toolName === "Edit" ||
+        approval.toolName === "MultiEdit"
+      ) {
+        writeLine(output, `${approval.toolName} was NOT written / NOT created.`);
+      }
       approval.continuation.messages.push({
         role: "tool",
         tool_call_id: approval.toolCall.id,
@@ -3741,7 +3729,12 @@ async function executePermissionDeny(
     const deniedResult = {
       ok: false,
       tool: approval.toolName,
-      text: outcomeText,
+      text:
+        approval.toolName === "Write" ||
+        approval.toolName === "Edit" ||
+        approval.toolName === "MultiEdit"
+          ? `${outcomeText}; ${approval.toolName} was NOT written / NOT created.`
+          : outcomeText,
       outcome: cancelled ? "cancelled" : "denied",
       evidenceId: evidence.id,
     };
@@ -3756,6 +3749,13 @@ async function executePermissionDeny(
     );
     if (gateway && approval.continuation) {
       writeLine(output, formatPermissionDenialPrimary(context.language));
+      if (
+        approval.toolName === "Write" ||
+        approval.toolName === "Edit" ||
+        approval.toolName === "MultiEdit"
+      ) {
+        writeLine(output, `${approval.toolName} was NOT written / NOT created.`);
+      }
       approval.continuation.messages.push({
         role: "tool",
         tool_call_id: approval.toolCall.id,
@@ -5538,8 +5538,8 @@ export async function handleNaturalInput(
     writeLine(
       output,
       context.language === "en-US"
-        ? "No pending confirmation is active. Describe the task or type the exact slash command; I did not send this confirmation to the model."
-        : "当前没有等待确认的 Start Gate。请说明要做的任务，或输入精确 slash command；这条确认不会发送给模型。",
+        ? "No pending write approval is active. The assistant must request a Write/Edit tool action before you can confirm it; I did not send this confirmation to the model."
+        : "当前没有待确认的写入动作；需要模型发起 Write/Edit 工具请求后才能确认。这条确认不会发送给模型。",
     );
     writeStatus(output, context);
     return "handled";

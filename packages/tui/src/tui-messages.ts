@@ -11,8 +11,6 @@ export type MessageKey =
   | "modeOptions"
   | "modeBoundary"
   | "modeUnknown"
-  | "modeFullAccessPlanBlocked"
-  | "modeFullAccessOptInBlocked"
   | "modeSwitched"
   | "modePlanBoundary"
   | "startGateConfirmed"
@@ -53,12 +51,8 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "当前权限模式：{mode}",
     modeOptions: "可选：default / auto-review / plan / full-access",
     modeBoundary:
-      "边界：full-access 需要本地显式 opt-in；auto-review 只自动允许低风险工作区编辑。Plan approval 不授权所有工具。",
+      "边界：切换模式不等于绕过硬拒绝；危险动作仍受权限底座约束。Plan 仍只读，auto-review 写入需按风险确认。",
     modeUnknown: "未知模式。可选：default / auto-review / plan / full-access",
-    modeFullAccessPlanBlocked:
-      "Plan 模式不能直接切到 full-access 执行写入。请先批准计划的明确边界，或切回 default。",
-    modeFullAccessOptInBlocked:
-      "已拒绝切换 full-access：full-access 必须本地显式 opt-in，不能由自然语言、workflow、agent、plugin 或 hook 静默开启。",
     modeSwitched: "已切换权限模式：{mode}",
     modePlanBoundary:
       "Plan 模式只允许 Read / Grep / Glob / Diff / Todo 等只读或会话内操作。确认方案后仍不等于授权所有工具。",
@@ -102,12 +96,8 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     modeCurrent: "Current permission mode: {mode}",
     modeOptions: "Options: default / auto-review / plan / full-access",
     modeBoundary:
-      "Boundary: full-access requires local opt-in; auto-review only allows low-risk workspace edits automatically. Plan approval does not authorize every tool.",
+      "Boundary: switching modes does not bypass hard denies; dangerous actions still go through the permission pipeline. Plan remains readonly; auto-review confirms writes by risk.",
     modeUnknown: "Unknown mode. Options: default / auto-review / plan / full-access",
-    modeFullAccessPlanBlocked:
-      "Plan mode cannot switch directly to full-access for writes. Approve a clear plan boundary first, or switch back to default.",
-    modeFullAccessOptInBlocked:
-      "Refused to switch to full-access: full-access requires local opt-in and cannot be silently enabled by natural language, workflow, agent, plugin, or hook.",
     modeSwitched: "Permission mode switched: {mode}",
     modePlanBoundary:
       "Plan mode only allows Read / Grep / Glob / Diff / Todo and session-scoped actions. Accepting a plan still does not authorize every tool.",

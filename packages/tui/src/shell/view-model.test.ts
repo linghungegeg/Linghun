@@ -2251,7 +2251,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       outputBlocks: [block],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("Ctrl+O");
+    expect(rendered).not.toContain("Ctrl+O");
     // fail status marker (✗ in color mode, [FAIL] in no-color)
     expect(rendered).toContain("\u2717");
   });
@@ -4448,6 +4448,68 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     await shell.waitUntilExit();
 
     expect(output.text).not.toContain("Ctrl+O");
+  });
+
+  it("plain renderer hides fake Ctrl+O when full text is already visible", () => {
+    const block: ProductBlockViewModel = {
+      id: "plain-fake-hint",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "ok",
+      fullText: "ok",
+      nextAction: "Ctrl+O 查看完整内容",
+      messageKind: "assistant_text",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).not.toContain("Ctrl+O");
+  });
+
+  it("plain renderer hides Ctrl+O when multiline full text is already visible", () => {
+    const block: ProductBlockViewModel = {
+      id: "plain-visible-multiline",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      fullText: "exit 1\nstderr line A\nstderr line B",
+      nextAction: "按 Ctrl+O 查看完整错误",
+      messageKind: "tool_result_error",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).not.toContain("Ctrl+O");
+  });
+
+  it("plain renderer keeps Ctrl+O for real hidden summary-only details", () => {
+    const block: ProductBlockViewModel = {
+      id: "plain-real-hidden-hint",
+      kind: "error",
+      status: "fail",
+      title: "Bash failed",
+      summary: "exit 1",
+      fullText: "exit 1\nstderr line A\nstderr line B",
+      nextAction: "按 Ctrl+O 查看完整错误",
+    };
+    const view = createShellViewModel(createContext(), {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).toContain("Ctrl+O");
   });
 
   it("ProductBlock 层保留多行错误的 Ctrl+O 完整错误提示", async () => {

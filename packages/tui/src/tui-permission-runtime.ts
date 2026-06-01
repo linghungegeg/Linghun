@@ -228,9 +228,8 @@ export async function decidePermission(
       return { request, decision: "allow", reason: "auto-review 允许只读或会话内工具。", verdict };
     }
     const reason =
-      "自动模式会自动通过低风险动作；Bash、联网、未知命令和高风险操作仍按权限策略确认或拒绝。本次动作不在自动放行范围。";
-    await recordPermissionDenied(context, name, reason);
-    return { request, decision: "deny", reason, verdict };
+      "auto-review 不会静默执行本次动作；需要用户确认后才会执行，硬拒绝和路径安全仍由权限底座处理。";
+    return { request, decision: "ask", reason, verdict };
   }
 
   if (context.permissionMode === "full-access") {

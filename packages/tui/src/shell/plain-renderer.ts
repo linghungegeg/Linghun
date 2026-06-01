@@ -88,6 +88,28 @@ function colorRisk(riskLabel: string, noColor: boolean): string {
   }
 }
 
+function hasHiddenContent(
+  block: ShellViewModel["blocks"][number],
+  renderedBody?: string,
+): boolean {
+  const fullText = (block.fullText ?? "").trim();
+  const summary = (block.summary ?? "").trim();
+  if (!fullText) return false;
+  if (renderedBody?.trim() === fullText) return false;
+  if (!summary) return fullText.length > 0;
+  const nonEmptyLines = fullText.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+  return nonEmptyLines >= 2 || fullText.length > summary.length + 16;
+}
+
+function visibleNextAction(
+  block: ShellViewModel["blocks"][number],
+  renderedBody?: string,
+): string | undefined {
+  if (!block.nextAction) return undefined;
+  if (!/Ctrl\+O/i.test(block.nextAction)) return block.nextAction;
+  return hasHiddenContent(block, renderedBody) ? block.nextAction : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Home view
 // ---------------------------------------------------------------------------
@@ -251,6 +273,7 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       messageKind !== "assistant_thinking"
     ) {
       const body = (block.fullText ?? block.summary ?? "").trim();
+      const nextAction = visibleNextAction(block, body);
       if (!body) return [];
       const lines = body.split("\n");
       const dimAll =
@@ -265,8 +288,8 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
         if (isDiagnostic) return colorCyan(line, noColor);
         return line;
       });
-      if (block.nextAction) {
-        out.push(`  ${dim(block.nextAction, noColor)}`);
+      if (nextAction) {
+        out.push(`  ${dim(nextAction, noColor)}`);
       }
       return out;
     }
@@ -279,6 +302,7 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
 
     if (messageKind === "tool_result_error") {
       const body = (block.fullText ?? block.summary ?? "").trim();
+      const nextAction = visibleNextAction(block, body);
       const out: string[] = [];
       const failMarker = getStatusMarker("fail", noColor);
       const coloredFailMarker = colorStatus(failMarker, "fail", noColor);
@@ -290,17 +314,19 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       if (body) {
         for (const line of body.split("\n")) out.push(colorRed(line, noColor));
       }
-      if (block.nextAction) out.push(`  ${dim(block.nextAction, noColor)}`);
+      if (nextAction) out.push(`  ${dim(nextAction, noColor)}`);
       return out;
     }
 
+    const renderedBody = block.fullText ? block.summary : undefined;
+    const nextAction = visibleNextAction(block, renderedBody);
     const marker = getStatusMarker(block.status, noColor);
     const coloredMarker = colorStatus(marker, block.status, noColor);
     return [
       `${coloredMarker} ${bold(block.title, noColor)}`,
       `  ${dim(block.summary, noColor)}`,
       block.detail ? `  ${dim(block.detail, noColor)}` : undefined,
-      block.nextAction ? `  ${colorCyan(block.nextAction, noColor)}` : undefined,
+      nextAction ? `  ${colorCyan(nextAction, noColor)}` : undefined,
     ].filter((line): line is string => Boolean(line));
   });
 }

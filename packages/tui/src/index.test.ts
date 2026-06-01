@@ -53,6 +53,7 @@ import {
   createSkillState,
   createSolutionCompletenessStatus,
   createWorkflowState,
+  decidePermission,
   deferredToolListHashInput,
   dingtalkBridgeAdapter,
   dingtalkStreamFrameToBridgeEvent,
@@ -199,6 +200,52 @@ function mockOpenAiToolSequence(
                     tool_calls: [
                       {
                         id: `call-${requests.length}`,
+                        type: "function",
+                        function: {
+                          name: toolCall.toolName,
+                          arguments: JSON.stringify(toolCall.input),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ].join("")
+        : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiReportReadThenWriteFlow(report: string, finalText: string): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as { messages?: Array<{ tool_call_id?: string }> };
+      requests.push(request);
+      const hasReadResult = request.messages?.some((message) => message.tool_call_id === "call-read");
+      const hasWriteResult = request.messages?.some(
+        (message) => message.tool_call_id === "call-write",
+      );
+      const toolCall = !hasReadResult
+        ? { id: "call-read", toolName: "Read", input: { path: "package.json" } }
+        : !hasWriteResult
+          ? { id: "call-write", toolName: "Write", input: { path: "report.md", content: report } }
+          : undefined;
+      const body = toolCall
+        ? [
+            `data: ${JSON.stringify({
+              id: `chatcmpl-test-${requests.length}`,
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: toolCall.id,
                         type: "function",
                         function: {
                           name: toolCall.toolName,
@@ -720,8 +767,8 @@ describe("Phase 06 TUI slash commands", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
-    const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
 
     const defaultHelpOutput = new MemoryOutput();
     await handleSlashCommand("/help", context, defaultHelpOutput);
@@ -5756,6 +5803,130 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"evidenceId"');
   });
 
+  it("auto-review report Write requests approval instead of direct deny", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "auto-review";
+    const permission = await decidePermission(
+      "Write",
+      { path: "report.md", content: "draft" },
+      context,
+      session.id,
+    );
+
+    expect(permission.decision).toBe("ask");
+    expect(permission.reason).toContain("auto-review 不会静默执行本次动作");
+    expect(context.permissions.recentDenied).toHaveLength(0);
+    await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
+  });
+
+  it("auto-review report Write denial and cancellation do not create report.md", async () => {
+    for (const answer of ["no", "deny", "cancel"] as const) {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          defaultModel: "tool-report-model",
+          permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+          providers: {
+            deepseek: { model: "different-model" },
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "tool-report-model",
+            },
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+      const requests = mockOpenAiReportReadThenWriteFlow(
+        "# Report",
+        "报告未保存，因为写入被拒绝。",
+      );
+      const output = new MemoryOutput();
+
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from(["请生成 report.md\n", `${answer}\n`, "/exit\n"]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
+
+      expect(requests.length).toBeGreaterThanOrEqual(3);
+      expect(output.text).toContain("NOT written / NOT created");
+      expect(output.text).not.toContain("报告已保存：report.md");
+      await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
+    }
+  });
+
+  it("plain yes without pending write approval is not sent to the model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleNaturalInput("yes", context, output);
+
+    expect(result).toBe("handled");
+    expect(output.text).toContain("当前没有待确认的写入动作");
+    expect(output.text).toContain("需要模型发起 Write/Edit 工具请求后才能确认");
+  });
+
+  it("model text asking permission to write report.md does not create a pending approval", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "text-only-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "text-only-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        return new Response(
+          `data: ${JSON.stringify({ id: "chatcmpl-text-only", choices: [{ delta: { content: "请允许我写 report.md。" } }] })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成 report.md\n", "yes\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(
+      requests.some((request) =>
+        (request as { messages?: Array<{ role?: string; content?: string }> }).messages?.some(
+          (message) => message.role === "user" && message.content?.trim() === "yes",
+        ),
+      ),
+    ).toBe(false);
+    expect(output.text).toContain("当前没有待确认的写入动作");
+    await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
+  });
+
   it("continues approved model tool results through another tool_use before final answer", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -7596,9 +7767,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
 
     await handleTuiKeypress("shift-tab", context, output);
-    expect(context.permissionMode).toBe("plan");
-    expect(output.text).toContain("Shift+Tab 只打开这个切换提示；不会开启 full-access");
-    expect(output.text).toContain("不能绕过 Start Gate");
+    expect(context.permissionMode).toBe("full-access");
+    expect(output.text).toContain("已切换权限模式：full-access");
   });
 
   it("covers Polish B pending interaction controls and slash fallbacks with safe details", async () => {
@@ -8026,7 +8196,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
     // D.13D 移除了自然语言→full-access 的 Start Gate；裸 yes 落到 no-pending 分支，
     // 不放行、不发模型。硬边界仍在（mode 始终保持 default）。
-    expect(output.text).toContain("当前没有等待确认的 Start Gate");
+    expect(output.text).toContain("当前没有待确认的写入动作");
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/write sample.txt beta", context, output);
@@ -8063,42 +8233,55 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    // D13E-P3: Shift+Tab cycles 4 canonical modes; full-access still requires
-    // local opt-in (LINGHUN_ENABLE_FULL_ACCESS=1) AND planAccepted when leaving
-    // plan mode. Without those guards full-access is silently denied.
-    process.env.LINGHUN_ENABLE_FULL_ACCESS = "1";
-    try {
-      await handleSlashCommand("/tab", context, output);
-      expect(context.permissionMode).toBe("auto-review");
-      await handleSlashCommand("/tab", context, output);
-      expect(context.permissionMode).toBe("plan");
-      context.planAccepted = true;
-      await handleSlashCommand("/tab", context, output);
-      expect(context.permissionMode).toBe("full-access");
-      await handleSlashCommand("/tab", context, output);
-      expect(context.permissionMode).toBe("default");
-    } finally {
-      process.env.LINGHUN_ENABLE_FULL_ACCESS = undefined;
-    }
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("auto-review");
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("plan");
+    context.planAccepted = false;
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("full-access");
+    await handleSlashCommand("/tab", context, output);
+    expect(context.permissionMode).toBe("default");
     expect(output.text).not.toContain("acceptEdits");
     expect(output.text).not.toContain("dontAsk");
   });
 
-  it("gates full-access aliases before local opt-in", async () => {
+  it("Shift+Tab cycles from default through all four modes back to default", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand("/mode bypass", context, output);
-    await handleSlashCommand("/mode full-access", context, output);
-
-    expect(output.text).toContain("full-access 必须本地显式 opt-in");
+    expect(context.permissionMode).toBe("default");
+    await handleTuiKeypress("shift-tab", context, output);
+    expect(context.permissionMode).toBe("auto-review");
+    await handleTuiKeypress("shift-tab", context, output);
+    expect(context.permissionMode).toBe("plan");
+    context.planAccepted = false;
+    await handleTuiKeypress("shift-tab", context, output);
+    expect(context.permissionMode).toBe("full-access");
+    await handleTuiKeypress("shift-tab", context, output);
     expect(context.permissionMode).toBe("default");
   });
 
-  it("allows auto-review low-risk edits but denies bash and medium writes", async () => {
+  it("/mode full-access switches without local opt-in", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    process.env.LINGHUN_ENABLE_FULL_ACCESS = undefined;
+
+    await handleSlashCommand("/mode bypass", context, output);
+    await handleSlashCommand("/mode full-access", context, output);
+
+    expect(output.text).toContain("已切换权限模式：full-access");
+    expect(output.text).not.toContain("full-access 必须本地显式 opt-in");
+    expect(context.permissionMode).toBe("full-access");
+  });
+
+  it("allows auto-review low-risk edits but asks for bash and medium writes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "sample.txt"), "alpha", "utf8");
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -8115,8 +8298,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已切换权限模式：auto-review");
     expect(output.text).toContain("写入前摘要");
     expect(output.text).toContain("工具 Edit 已完成");
-    expect(output.text).toContain("自动模式会自动通过低风险动作");
-    expect(output.text).toContain("Bash、联网、未知命令和高风险操作仍按权限策略确认或拒绝");
+    expect(output.text).toContain("auto-review 不会静默执行本次动作");
+    expect(output.text).toContain("需要用户确认后才会执行");
     expect(output.text).toContain("风险：low");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
     await expect(readFile(join(project, "medium.txt"), "utf8")).rejects.toThrow();
@@ -9704,7 +9887,7 @@ describe("Phase 06 TUI slash commands", () => {
       "plugins: discover manifests=yes; autoExecute=no; trustedIds=none",
     );
     expect(output.text).toContain(
-      "full-access permission: default off; requires LINGHUN_ENABLE_FULL_ACCESS=1",
+      "mode switching: direct /mode and Shift+Tab cycling",
     );
     expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
     expect(output.text).toContain("continuous phase progression=no");
@@ -10026,7 +10209,7 @@ describe("Phase 06 TUI slash commands", () => {
     const result = await handleNaturalInput("yes", context, output);
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("当前没有等待确认的 Start Gate");
+    expect(output.text).toContain("当前没有待确认的写入动作");
   });
 
   it("runs Phase 15 pre-Beta end-to-end CCB user journey smoke", async () => {
@@ -10084,7 +10267,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("帮助：优先直接描述你的目标。");
     expect(output.text).toContain("索引刷新完成");
-    expect(output.text).toContain("当前没有等待确认的 Start Gate");
+    expect(output.text).toContain("当前没有待确认的写入动作");
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("权限已拒绝");
