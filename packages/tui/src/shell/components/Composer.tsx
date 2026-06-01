@@ -285,11 +285,12 @@ const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "> ";
 const PROMPT_MARKER_CONTINUATION = "  ";
 
-// D.13L Block E — 权限卡对齐 CCB：主屏只暴露 3 个动作 [是 / 始终允许 / 否]，
-// 顺序 allow_once → allow_always_tool → deny。details / cancel 不再出现在
-// PermissionActionRow / 单字母快捷键表，但 PermissionActionId 类型仍保留这两个值，
-// 兼容已有 controller 路径（Esc 仍由 useInput 直接派发 cancel）。
-const PERMISSION_ACTION_ORDER: PermissionActionId[] = ["allow_once", "allow_always_tool", "deny"];
+const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
+  "allow_once",
+  "allow_always_tool",
+  "deny",
+  "details",
+];
 
 // D.13Q-UX Real Smoke Fix v2 — E. 旧的 PERMISSION_TEXT_MAP 把 PermissionActionId
 // 序列化为 yes / no / allow_once 文本，再通过 submit 文本路径上抛（让用户
@@ -512,9 +513,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           const lower = input.toLowerCase();
           // D.13L Block E — 权限卡 3 档（与 CCB 对齐）单字母快捷键：
           //   y → allow_once（本次允许；旧 yes 别名同义）
-          //   a → allow_always_tool（持久化 allow rule + 当次 approve）
+          //   a → allow_always_tool（项目级 allow rule + 当次 approve）
           //   n → deny（拒绝；旧 no 别名同义）
-          // details / cancel 不再走单字母路径；Esc 仍触发 cancel 关闭权限卡。
+          //   d → details（查看详情）
           if (lower === "y") {
             submitPermissionAction(resolveActionId(permissionActions, "allow_once", "yes"));
             return;
@@ -527,6 +528,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           }
           if (lower === "n") {
             submitPermissionAction(resolveActionId(permissionActions, "deny", "no"));
+            return;
+          }
+          if (lower === "d") {
+            submitPermissionAction("details");
             return;
           }
         }
@@ -621,6 +626,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // ─── 4. Composer default owner ────────────────────────────────────────
 
+      if (!key.ctrl && !key.meta && text.length === 0 && /^[1-4]$/.test(input)) {
+        const index = Number(input) - 1;
+        const suggestion = view.taskSuggestions?.[index];
+        if (suggestion) {
+          void onInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
+        }
+        return;
+      }
+
       // D.13Q-UX Task Surface — 任务区滚动键（PageUp / PageDown / End）。
       // 方向语义：scrollOffset = 从底部向上偏移的行数。
       //   - PgUp / wheel-up / 空 buffer ↑ → 向上看更早内容 → delta=+N（offset 增大）
@@ -644,6 +658,17 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // ─── Submit: Enter（无 shift）─────────────────────────────────────
       if (key.return && !key.shift) {
+        if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
+          const index = Math.max(
+            0,
+            Math.min(view.taskSuggestionCursor ?? 0, view.taskSuggestions.length - 1),
+          );
+          const suggestion = view.taskSuggestions[index];
+          if (suggestion) {
+            void onInput({ type: "task-suggestion-action", suggestionId: suggestion.id });
+            return;
+          }
+        }
         // D.13Q-UX Real Smoke Fix v2 — D. busy guard：模型仍在处理上一条时
         // Enter 不提交、不清空 buffer，仅显示一行轻提示。Ctrl+C 双击清空 / 上抛
         // interrupt 由现有分支接管，不在这里处理。slash command / setup flow
@@ -767,6 +792,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           });
           return;
         }
+        if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
+          void onInput({ type: "task-suggestion-move", delta: -1 });
+          return;
+        }
         if (inTaskModeWheel && text.length === 0) {
           void onInput({ type: "task-scroll", delta: 1 });
           return;
@@ -790,6 +819,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
             const safe = current < 0 ? 0 : current;
             return safe >= slashCandidates.length - 1 ? 0 : safe + 1;
           });
+          return;
+        }
+        if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
+          void onInput({ type: "task-suggestion-move", delta: 1 });
           return;
         }
         if (inTaskModeWheel && text.length === 0) {
@@ -1061,7 +1094,9 @@ function PermissionControl({
       <PermissionActionRow actions={actions} focused={focused} theme={theme} width={innerWidth} />
       <Text color={theme.dim ?? theme.muted} dimColor>
         {fitText(
-          isEn ? "Enter confirm · Tab switch · Esc cancel" : "Enter 确认 · Tab 切换 · Esc 取消",
+          isEn
+            ? "Enter confirm · Tab switch · d details · Esc cancel"
+            : "Enter 确认 · Tab 切换 · d 详情 · Esc 取消",
           innerWidth,
         )}
       </Text>
@@ -1119,16 +1154,12 @@ function buildPermissionActions(
   language: ShellViewModel["language"],
   _actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
 ): { id: PermissionActionId; label: string; shortcut?: string }[] {
-  // D.13L Section 2 — 主屏权限卡固定 3 动作 [是 / 始终允许 / 否]，
-  // 不再读 view.permission.actions：避免 buildElevationOptions 因
-  // 已存在的 allow rule 把 allow_always_tool 过滤掉，导致主屏丢按钮。
-  // 用户始终能在主屏看到"是 / 始终允许 / 否"完整选择；底层 controller
-  // 仍以 allowList 作为持久化判定来源，行为不变。
   const isEn = language === "en-US";
   return [
     { id: "allow_once", label: isEn ? "Yes" : "是", shortcut: "y" },
-    { id: "allow_always_tool", label: isEn ? "Always allow" : "始终允许", shortcut: "a" },
+    { id: "allow_always_tool", label: isEn ? "Project allow" : "项目级允许", shortcut: "a" },
     { id: "deny", label: isEn ? "No" : "否", shortcut: "n" },
+    { id: "details", label: isEn ? "Details" : "详情", shortcut: "d" },
   ];
 }
 

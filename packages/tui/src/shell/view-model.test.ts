@@ -742,8 +742,9 @@ describe("home → task view mode transition", () => {
     // Permission uses single border
     expect(output.text).toContain("│");
     expect(output.text).toContain("是");
-    expect(output.text).toContain("始终允许");
+    expect(output.text).toContain("项目级允许");
     expect(output.text).toContain("否");
+    expect(output.text).toContain("详情");
   });
 
   it("home mode Ink render does NOT show task activity or permission", async () => {
@@ -4069,10 +4070,59 @@ describe("D.13Q-UX Real Smoke Fix v2 — F. permission 主屏降噪", () => {
     const fs = await import("node:fs");
     const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // 主屏 PermissionControl 不再渲染 explanationLines.map（除了 SlashSuggestions 等不相关 map）
-    // 锚定 Enter/Tab/Esc 提示出现在源码中
-    expect(composerSource).toMatch(/Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*Esc\s*取消/);
-    // 旧的 d 详情提示已替换
+    // 锚定 Enter/Tab/d/Esc 提示出现在源码中
+    expect(composerSource).toMatch(
+      /Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*d\s*详情\s*·\s*Esc\s*取消/,
+    );
+    // 旧的"查看详情"提示已替换为更短的"详情"
     expect(composerSource).not.toMatch(/Esc\s*取消\s*·\s*d\s*查看详情/);
+  });
+});
+
+describe("TaskSuggestionBar executable state", () => {
+  it("filters handled suggestions and clamps cursor", () => {
+    const ctx = createContext({
+      handledTaskSuggestionIds: new Set(["tool_error:details:out-fail"]),
+      taskSuggestionCursor: 9,
+    } as Partial<TuiContext>);
+
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "out-fail",
+          kind: "error",
+          status: "fail",
+          title: "Bash 失败",
+          summary: "exit 1",
+        },
+      ],
+      setupNeeded: true,
+    });
+
+    expect(view.taskSuggestions?.some((item) => item.id === "tool_error:details:out-fail")).toBe(
+      false,
+    );
+    expect(view.taskSuggestions?.[0]?.id).toBe("setup:resume");
+    expect(view.taskSuggestionCursor).toBe(0);
+  });
+
+  it("permission view includes details and project-level allow choices", () => {
+    const ctx = createContext();
+    (ctx as unknown as { pendingLocalApproval?: unknown }).pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: { input: { command: "git status" } },
+    };
+    const permission = mapPendingApprovalToPermission(ctx);
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "pending",
+      permission,
+    });
+    expect(view.permission?.actions?.map((item) => item.id)).toContain("details");
+    expect(view.permission?.actions?.map((item) => item.id)).toContain("allow_always_tool");
   });
 });
 

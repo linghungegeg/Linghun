@@ -369,7 +369,7 @@ export function createShellViewModel(
           reasoningSent: options.reasoningSent,
         }).view;
 
-  // D.13E Step 2 — TaskSuggestionBar 数据（只读，UI 不接键盘）。
+  // D.13E Step 2 — TaskSuggestionBar 数据。
   // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
   const failBlocksForSuggestions = fittedBlocks.filter(
     (b) => b.status === "fail" || b.status === "blocked",
@@ -384,7 +384,14 @@ export function createShellViewModel(
           failBlocks: failBlocksForSuggestions,
           slashCandidates: options.slashCandidates,
           // 修正 v3 #6：不在 SuggestionBar 暴露 14 panel 作为 configHints
-        });
+        }).filter((item) => !context.handledTaskSuggestionIds?.has(item.id));
+  const taskSuggestionCursor =
+    taskSuggestions && taskSuggestions.length > 0
+      ? Math.max(
+          0,
+          Math.min(context.taskSuggestionCursor ?? 0, Math.max(0, taskSuggestions.length - 1)),
+        )
+      : 0;
 
   // D.13E Step 2 — ConfigPanel view 装配（runInkShell.onInput 拦截 /config 后填充
   // configPanelState；与 view.permission 互斥渲染由 ShellApp 保证）。
@@ -465,6 +472,7 @@ export function createShellViewModel(
     limitations: options.limitations ?? [],
     taskFooter,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
+    taskSuggestionCursor,
     configPanel,
     commandPanel,
     taskScroll,
@@ -571,10 +579,9 @@ function withPermissionActions(
   context: TuiContext,
 ): TaskPermissionView {
   if (permission.actions && permission.actions.length > 0) return permission;
-  // D.13L Block E — 主屏只暴露 3 个动作：allow_once / allow_always_tool / deny。
+  // 主屏暴露 4 个成熟动作：allow_once / allow_always_tool / deny / details。
   // 仍走 buildElevationOptions（以保留 allow_always_tool 在已有 allow 规则时
-  // 自动隐藏的逻辑），但 details 在主屏权限卡里被过滤掉，避免与"减少术语泄漏"
-  // 的目标冲突。details 入口由 /details 命令承担。
+  // 自动隐藏的逻辑）。
   const existingRules = context.permissions?.rules ?? [];
   const elevation = buildElevationOptions({
     toolName: permission.toolName as ToolName,
@@ -583,7 +590,7 @@ function withPermissionActions(
     existingRules,
     language,
   });
-  const visibleIds = new Set(["allow_once", "allow_always_tool", "deny"] as const);
+  const visibleIds = new Set(["allow_once", "allow_always_tool", "deny", "details"] as const);
   const actions: PermissionAction[] = elevation
     .filter((o) => visibleIds.has(o.id as "allow_once" | "allow_always_tool" | "deny"))
     .map((o) => ({
@@ -595,8 +602,12 @@ function withPermissionActions(
             : "Yes"
           : o.id === "allow_always_tool"
             ? language === "zh-CN"
-              ? "始终允许"
-              : "Always allow"
+              ? "项目级允许"
+              : "Project allow"
+            : o.id === "details"
+              ? language === "zh-CN"
+                ? "详情"
+                : "Details"
             : language === "zh-CN"
               ? "否"
               : "No",

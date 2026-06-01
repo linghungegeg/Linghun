@@ -1141,6 +1141,8 @@ export type TuiContext = {
   pendingLocalApproval?: PendingLocalApproval;
   pendingAutopilot?: PendingAutopilotRequest;
   pendingModelSetup?: PendingModelSetup;
+  taskSuggestionCursor?: number;
+  handledTaskSuggestionIds?: Set<string>;
   // D.13E Step 2 — ConfigPanel 当前状态。undefined = 未打开。
   // 由 runInkShell.onInput 拦截 /config 与 config-* 事件，经
   // reduceConfigState 推进；view-model 用 mapConfigPanelState 映射给 UI。
@@ -2046,9 +2048,12 @@ async function runInkShell(
           case "allow_always_tool": {
             // 修正 #3：先持久化 allow rule，成功后再 approve；失败则不 approve、保留 pending
             if (approval.kind !== "model_tool_use") {
-              // 非 model_tool_use 没有"工具规则持久化"语义，退化为 allow_once
-              context.pendingLocalApproval = undefined;
-              await executePermissionApprove(approval, context, gateway, shellOutput);
+              writeLine(
+                shellOutput,
+                context.language === "en-US"
+                  ? "Project-level allow is not available for this action yet. Choose allow once, deny, or details."
+                  : "此动作暂不支持项目级同类允许。请选择本次允许、拒绝或查看详情。",
+              );
               shell?.rerender();
               await shell?.waitUntilRenderFlush();
               return;
@@ -2056,7 +2061,7 @@ async function runInkShell(
             const tool = approval.toolName;
             const risk: PermissionRule["risk"] = tool === "Bash" ? "high" : "medium";
             const result = await addAllowRule(context, tool, risk);
-            // D.13L Block 0-C — 权限卡里的"始终允许"反馈降噪：
+            // D.13L Block 0-C — 权限卡里的"项目级允许"反馈降噪：
             // 不再把 "已添加权限规则：<uuid> allow Bash high" 这类含 rule.id 的审计文案
             // 直接写到主屏。added / duplicate 都视为持久化成功，给同一句"已记住"。
             // save_failed / invalid 走人性化分支，仍保留可操作信息但不含 rule.id。
@@ -2108,6 +2113,44 @@ async function runInkShell(
             await shell?.waitUntilRenderFlush();
             return;
           }
+        }
+        return;
+      }
+      if (event.type === "task-suggestion-move") {
+        const total = controller.getViewModel().taskSuggestions?.length ?? 0;
+        if (total <= 0) {
+          context.taskSuggestionCursor = 0;
+          return;
+        }
+        const current = context.taskSuggestionCursor ?? 0;
+        context.taskSuggestionCursor = (current + event.delta + total) % total;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "task-suggestion-action") {
+        const view = controller.getViewModel();
+        const suggestion = view.taskSuggestions?.find((item) => item.id === event.suggestionId);
+        if (!suggestion) return;
+        if (!context.handledTaskSuggestionIds) context.handledTaskSuggestionIds = new Set();
+        context.handledTaskSuggestionIds.add(suggestion.id);
+        context.taskSuggestionCursor = 0;
+        if (suggestion.action.kind === "slash") {
+          context.commandPanelState = undefined;
+          blocks.push(createCommandBlock(commandSequence++, suggestion.action.command));
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          await processTuiLine(suggestion.action.command, context, gateway, shellOutput, store);
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        if (suggestion.action.kind === "inline") {
+          await controller.onInput({
+            type: "permission-action",
+            actionId: suggestion.action.id as import("./shell/types.js").PermissionActionId,
+          });
+          return;
         }
         return;
       }

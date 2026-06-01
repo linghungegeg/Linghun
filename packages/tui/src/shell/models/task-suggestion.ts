@@ -98,7 +98,7 @@ function buildPermissionSuggestions(
   text: (typeof TEXT)[keyof typeof TEXT],
   permission: TaskPermissionView,
 ): TaskSuggestion[] {
-  // D.13L Block E — 权限卡现在主屏只渲染 [是 / 始终允许 / 否] 三个动作，
+  // 权限卡自带 [本次允许 / 项目级允许 / 拒绝 / 详情] 动作，
   // 不再额外曝出 details 入口或 /permissions 入口。details 由 /details 命令承担，
   // 持久化规则视图由用户主动调用 /permissions 看，不再在权限卡下方推。
   return [];
@@ -110,8 +110,9 @@ function buildToolErrorSuggestions(
 ): TaskSuggestion[] {
   if (failBlocks.length === 0) return [];
   const out: TaskSuggestion[] = [];
+  const latest = failBlocks[failBlocks.length - 1];
   pushIfValid(out, {
-    id: "tool_error:details",
+    id: `tool_error:details:${latest?.id ?? "latest"}`,
     source: "tool_error",
     label: text.toolErrorRetryLabel,
     hint: text.toolErrorRetryHint,

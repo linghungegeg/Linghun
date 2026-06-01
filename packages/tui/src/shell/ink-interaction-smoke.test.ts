@@ -202,4 +202,50 @@ describe("Ink TTY interaction smoke", () => {
 
     shell.unmount();
   });
+
+  it("selects task suggestions with arrows, Enter, and number keys", async () => {
+    let view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      taskSuggestions: [
+        {
+          id: "tool_error:details:block-1",
+          source: "tool_error",
+          label: "查看完整错误",
+          action: { kind: "slash", command: "/details" },
+        },
+        {
+          id: "setup:resume",
+          source: "setup",
+          label: "继续模型配置",
+          action: { kind: "slash", command: "/model" },
+        },
+      ],
+      taskSuggestionCursor: 0,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    input.write("\x1b[B");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({ type: "task-suggestion-move", delta: 1 });
+
+    view = { ...view, taskSuggestionCursor: 1 };
+    shell.rerender();
+    await shell.waitUntilRenderFlush();
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({
+      type: "task-suggestion-action",
+      suggestionId: "setup:resume",
+    });
+
+    input.write("1");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({
+      type: "task-suggestion-action",
+      suggestionId: "tool_error:details:block-1",
+    });
+
+    shell.unmount();
+  });
 });

@@ -55,7 +55,7 @@ describe("buildTaskSuggestions", () => {
       configHints: [{ id: "model", label: "模型设置", slash: "/model" }],
       slashCandidates: [{ slash: "/help", label: "帮助" }],
     });
-    // 权限卡现在在 PermissionControl 主屏自带 [是 / 始终允许 / 否]，
+    // 权限卡现在在 PermissionControl 主屏自带 [本次允许 / 项目级允许 / 拒绝 / 详情]，
     // suggestion bar 不再代为出 permission:details / permission:rules。
     expect(result.some((s) => s.source === "permission")).toBe(false);
     // 非 permission 来源仍按 tool_error > setup > config > slash 排序。

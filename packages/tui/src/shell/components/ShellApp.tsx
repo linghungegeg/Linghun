@@ -249,11 +249,11 @@ function TaskLayout({
             />
           ) : null}
 
-          {/* TaskSuggestionBar — 静态只读 hint 行；不接 useInput；空数组时不渲染。
-            permission / tool_error / setup / slash 优先级，最多 4 条。 */}
+          {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
           {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
             <TaskSuggestionBar
               suggestions={view.taskSuggestions}
+              cursor={view.taskSuggestionCursor ?? 0}
               width={view.width}
               noColor={noColor}
             />

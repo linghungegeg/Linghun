@@ -316,9 +316,10 @@ export type ShellViewModel = {
   notifications?: NotificationView[];
   /**
    * D.13E Step 2 — 由 view-model.taskSuggestions 计算后挂到 view 上，
-   * ShellApp 渲染只读 TaskSuggestionBar；空数组时 ShellApp 不渲染任何东西。
+   * ShellApp 渲染 TaskSuggestionBar；空数组时 ShellApp 不渲染任何东西。
    */
   taskSuggestions?: import("./models/task-suggestion.js").TaskSuggestion[];
+  taskSuggestionCursor?: number;
   /**
    * D.13E Step 2 — ConfigPanel UI 状态。idle 时 undefined；
    * 与 view.permission 互斥（permission 优先级更高，ShellApp 互斥渲染）。
@@ -384,6 +385,8 @@ export type ShellInputEvent =
   | { type: "config-enter" }
   | { type: "config-back" }
   | { type: "permission-action"; actionId: PermissionActionId }
+  | { type: "task-suggestion-move"; delta: -1 | 1 }
+  | { type: "task-suggestion-action"; suggestionId: string }
   /**
    * D.13Q-UX — Ctrl+O 派发：直接触发"展开完整内容"，不写 buffer、不进 transcript
    * 命令行（旧实现 submit "/details" 会让用户输入区里出现 /details）。
