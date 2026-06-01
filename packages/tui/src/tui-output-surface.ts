@@ -238,6 +238,31 @@ export class ShellBlockOutput extends Writable {
     }
     this.onWrite();
   }
+
+  writeLocalCommandOutputLine(text: string): void {
+    const normalized = text.replace(/\r/g, "").trim();
+    if (!normalized) return;
+    const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
+    const nonEmptyLines = normalized.split("\n").filter((line) => line.trim().length > 0).length;
+    const hasMore =
+      normalized.length > 0 && (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
+    const detailsHint =
+      this.context.language === "en-US" ? "Ctrl+O for details" : "Ctrl+O 查看完整内容";
+    this.blocks.push({
+      id: `local-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      kind: "tool",
+      status: "info",
+      title: "",
+      summary: firstLine,
+      fullText: normalized,
+      nextAction: hasMore ? detailsHint : undefined,
+      messageKind: "local_command_output",
+    });
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = normalized;
+    }
+    this.onWrite();
+  }
 }
 
 /**
@@ -328,6 +353,15 @@ export function writeErrorLine(output: Writable, text: string, title?: string): 
   writeLine(output, text);
 }
 
+export function writeLocalCommandOutputLine(output: Writable, text: string): void {
+  const candidate = output as { writeLocalCommandOutputLine?: (text: string) => void };
+  if (typeof candidate.writeLocalCommandOutputLine === "function") {
+    candidate.writeLocalCommandOutputLine(text);
+    return;
+  }
+  writeLine(output, text);
+}
+
 /**
  * 测试入口：构造一个 ShellBlockOutput 并暴露 begin/append/end + D.13V
  * discard/replace 操作，便于单测验证 streaming block / lastFullOutput 行为。
@@ -342,6 +376,7 @@ export function createShellBlockOutputForTest(
   endAssistantStream(): void;
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
+  writeLocalCommandOutputLine(text: string): void;
 } {
   return new ShellBlockOutput(context, blocks, onWrite);
 }

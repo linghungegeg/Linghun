@@ -15,6 +15,7 @@ export type LayeredToolOutput = {
 };
 
 const TODO_OUTPUT_ITEM_LIMIT = 8;
+const BASH_TAIL_LINE_LIMIT = 3;
 const RAW_TOOL_USE_PATTERNS = [
   /<tool_use\b[\s\S]*?<\/tool_use>/giu,
   /<tool_use\b[^>]*\/>/giu,
@@ -370,9 +371,20 @@ function createSummaryFirstPreview(
     text.length > 200;
   if (hasHiddenContent) {
     const hint = formatDetailsHint(language);
-    return { text: `- ${stats.join("; ")}\n- ${hint}`, truncated: true };
+    const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
+    return { text: [`- ${stats.join("; ")}`, ...tail, `- ${hint}`].join("\n"), truncated: true };
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
+}
+
+function formatBashTail(lines: string[], language: Language): string[] {
+  const tail = lines
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .slice(-BASH_TAIL_LINE_LIMIT);
+  if (tail.length === 0) return [];
+  const title = language === "en-US" ? "tail:" : "尾部：";
+  return [`- ${title}`, ...tail.map((line) => `  ${line}`)];
 }
 
 function readNumber(value: object | undefined, key: string): number | undefined {

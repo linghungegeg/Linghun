@@ -142,6 +142,40 @@ function InlineRow({
   );
 }
 
+function codePrefix(theme: ShellTheme, dim: boolean): React.ReactNode {
+  return (
+    <Text color={theme.dim ?? theme.muted} dimColor={dim}>
+      {"  | "}
+    </Text>
+  );
+}
+
+function CodeLine({
+  line,
+  lang,
+  theme,
+  dim,
+}: {
+  line: string;
+  lang?: string;
+  theme: ShellTheme;
+  dim: boolean;
+}): React.ReactNode {
+  const isDiff = lang === "diff" || lang === "patch";
+  const color =
+    isDiff && line.startsWith("+") && !line.startsWith("+++")
+      ? (theme.success ?? theme.status.pass)
+      : isDiff && line.startsWith("-") && !line.startsWith("---")
+        ? (theme.error ?? theme.status.fail)
+        : theme.diagnostic ?? theme.accent;
+  const dimLine = dim || (isDiff && !line.startsWith("+") && !line.startsWith("-"));
+  return (
+    <Text color={color} dimColor={dimLine}>
+      {line.length === 0 ? " " : line}
+    </Text>
+  );
+}
+
 export function MessageMarkdown({
   text,
   theme,
@@ -152,22 +186,30 @@ export function MessageMarkdown({
   const lines = text.replace(/\r/g, "").split("\n");
   const rendered: React.ReactNode[] = [];
   let inCode = false;
+  let codeLang: string | undefined;
   let codeBuffer: string[] = [];
   let blockIndex = 0;
-  const codeColor = theme.diagnostic ?? theme.accent;
 
   const flushCode = (): void => {
     if (codeBuffer.length === 0) return;
     rendered.push(
-      <Box key={`code-${blockIndex++}`} flexDirection="column" marginLeft={2}>
+      <Box key={`code-${blockIndex++}`} flexDirection="column" marginLeft={1}>
+        <Text color={theme.dim ?? theme.muted} dimColor={dim}>
+          {`  \u250C${codeLang ? ` ${codeLang} ` : ""}`}
+        </Text>
         {codeBuffer.map((line) => (
-          <Text key={`code-line-${line}`} color={codeColor} dimColor={dim}>
-            {line.length === 0 ? " " : line}
-          </Text>
+          <Box key={`code-line-${line}`} flexDirection="row">
+            {codePrefix(theme, dim)}
+            <CodeLine line={line} lang={codeLang} theme={theme} dim={dim} />
+          </Box>
         ))}
+        <Text color={theme.dim ?? theme.muted} dimColor={dim}>
+          {"  \u2514"}
+        </Text>
       </Box>,
     );
     codeBuffer = [];
+    codeLang = undefined;
   };
 
   for (const raw of lines) {
@@ -178,6 +220,7 @@ export function MessageMarkdown({
         inCode = false;
       } else {
         inCode = true;
+        codeLang = cls.lang;
       }
       continue;
     }

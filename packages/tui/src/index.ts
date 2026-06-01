@@ -517,6 +517,7 @@ import {
   writeAssistantDelta,
   writeDiagnosticLine,
   writeErrorLine,
+  writeLocalCommandOutputLine,
 } from "./tui-output-surface.js";
 import { CHAT_COMPLETIONS_ENDPOINT, formatStats, formatUsage } from "./usage-stats-presenter.js";
 import {
@@ -8822,16 +8823,18 @@ async function executeApprovedModelToolUse(
     if (backgroundController) {
       context.tools.abortSignal = previousAbortSignal;
     }
-    writeLine(
-      output,
-      formatModelToolOutput(
-        toolName,
-        result.output,
-        context.language,
-        evidence?.id,
-        reportWriteGuard,
-      ),
+    const userFacingToolOutput = formatModelToolOutput(
+      toolName,
+      result.output,
+      context.language,
+      evidence?.id,
+      reportWriteGuard,
     );
+    if (toolName === "Bash") {
+      writeLocalCommandOutputLine(output, userFacingToolOutput);
+    } else {
+      writeLine(output, userFacingToolOutput);
+    }
     return {
       ok: !isError,
       tool: toolName,

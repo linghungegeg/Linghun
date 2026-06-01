@@ -3885,6 +3885,117 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(rendered).toContain("段落三");
   });
 
+  it("code fence 在 plain renderer 中保留缩进和代码块层级", () => {
+    const block = createOutputBlock("说明\n```ts\nfunction x() {\n  return 1;\n}\n```", "zh-CN", "out-code");
+    const view = createShellViewModel(createContext(), {
+      noColor: true,
+      outputBlocks: [block],
+      width: 120,
+      viewMode: "task",
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).toContain("  + ts");
+    expect(rendered).toContain("  | function x() {");
+    expect(rendered).toContain("  |   return 1;");
+    expect(rendered).not.toContain("function x() { return 1; }");
+  });
+
+  it("diff code fence 在 color 与 no-color plain renderer 中区分 +/-/context", () => {
+    const diff = "```diff\n context line\n+added line\n-removed line\n```";
+    const colorView = createShellViewModel(createContext(), {
+      outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-color")],
+      width: 120,
+      viewMode: "task",
+    });
+    const noColorView = createShellViewModel(createContext(), {
+      noColor: true,
+      outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-nocolor")],
+      width: 120,
+      viewMode: "task",
+    });
+    const colorRendered = renderPlainShell(colorView);
+    const noColorRendered = renderPlainShell(noColorView);
+
+    expect(colorRendered).toContain("\x1B[32m+added line");
+    expect(colorRendered).toContain("\x1B[31m-removed line");
+    expect(colorRendered).toContain("  | ");
+    expect(noColorRendered).toContain("  | +added line");
+    expect(noColorRendered).toContain("  | -removed line");
+    expect(noColorRendered).toContain("  |  context line");
+    expect(noColorRendered).not.toContain("\x1B[");
+  });
+
+  it("task 主屏中 user / assistant / tool / code 四类 block 在 no-color 下可区分", () => {
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "u1",
+        kind: "command",
+        status: "info",
+        title: "请检查输出",
+        summary: "请检查输出",
+        messageKind: "user_text",
+        keep: true,
+      },
+      createOutputBlock("普通助手回复\n```js\n  const ok = true;\n```", "zh-CN", "a1"),
+      {
+        id: "tool-1",
+        kind: "tool",
+        status: "pass",
+        title: "",
+        summary: "Bash completed",
+        fullText: "Bash completed",
+        messageKind: "tool_result_success",
+      },
+      {
+        id: "local-1",
+        kind: "tool",
+        status: "pass",
+        title: "",
+        summary: "line one\nline two",
+        fullText: "line one\nline two",
+        messageKind: "local_command_output",
+      },
+    ];
+    const view = createShellViewModel(createContext(), {
+      noColor: true,
+      outputBlocks: blocks,
+      width: 120,
+      viewMode: "task",
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).toContain("› 请检查输出");
+    expect(rendered).toContain("普通助手回复");
+    expect(rendered).toContain("  |   const ok = true;");
+    expect(rendered).toContain("Bash completed");
+    expect(rendered).toContain("  ⎿  line one");
+    expect(rendered).not.toContain("\x1B[");
+  });
+
+  it("local_command_output/Bash 从属输出使用 ⎿，普通成功结果不出现 bordered CommandPanel", () => {
+    const block: ProductBlockViewModel = {
+      id: "local-bash",
+      kind: "tool",
+      status: "pass",
+      title: "",
+      summary: "ok",
+      fullText: "ok",
+      messageKind: "local_command_output",
+    };
+    const view = createShellViewModel(createContext(), {
+      outputBlocks: [block],
+      width: 120,
+      viewMode: "task",
+    });
+    const rendered = renderPlainShell(view);
+
+    expect(rendered).toContain("⎿");
+    expect(view.commandPanel).toBeUndefined();
+    expect(rendered).not.toContain("┌");
+    expect(rendered).not.toContain("╭");
+  });
+
   it("setupNeeded=true 时 footer model 显示 dim '--' 占位（不再回退到 deepseek-chat）", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,
@@ -4425,6 +4536,33 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     expect(blocks[0]?.messageKind).toBe("assistant_text");
     expect(blocks[0]?.status).toBe("info");
     expect(blocks[0]?.kind).toBe("details");
+  });
+
+  it("Bash/local command producer 写入 local_command_output，从属输出不走 CommandPanel", () => {
+    const ctx = createContext({
+      lastFullOutput: undefined,
+      suppressLastFullOutputCapture: false,
+    } as Partial<TuiContext>);
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
+      writeLocalCommandOutputLine?: (text: string) => void;
+    };
+    output.writeLocalCommandOutputLine?.("Tool Bash completed\n- 40 行\n- 输出已折叠，按 Ctrl+O 展开。");
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.messageKind).toBe("local_command_output");
+    expect(blocks[0]?.kind).toBe("tool");
+    expect(ctx.lastFullOutput).toContain("Tool Bash completed");
+    const view = createShellViewModel(ctx, {
+      outputBlocks: blocks,
+      width: 100,
+      viewMode: "task",
+    });
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("⎿");
+    expect(view.commandPanel).toBeUndefined();
+    expect(rendered).not.toContain("┌");
+    expect(rendered).not.toContain("╭");
   });
 });
 

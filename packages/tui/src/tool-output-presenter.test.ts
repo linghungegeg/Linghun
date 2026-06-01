@@ -130,6 +130,19 @@ describe("tool-output-presenter", () => {
       expect(text).toContain("命令已退出 2");
     });
 
+    it("长 Bash 输出主屏只显示摘要和尾部，完整内容仍需 Ctrl+O", () => {
+      const text = Array.from({ length: 8 }, (_, index) => `bash line ${index + 1}`).join("\n");
+      const formatted = formatToolOutput("Bash", { text, data: { exitCode: 0 } }, "zh-CN");
+
+      expect(formatted).toContain("8 行");
+      expect(formatted).toContain("尾部：");
+      expect(formatted).toContain("bash line 6");
+      expect(formatted).toContain("bash line 8");
+      expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
+      expect(formatted).not.toContain("bash line 1");
+      expect(formatted).not.toContain("bash line 5");
+    });
+
     it("短 Read 输出没有隐藏内容时不显示 Ctrl+O", () => {
       const layered = createLayeredToolOutput(
         "Read",

@@ -107,6 +107,54 @@ function visibleNextAction(
   return hasHiddenContent(block, renderedBody) ? block.nextAction : undefined;
 }
 
+function renderPlainMarkdownLines(
+  text: string,
+  noColor: boolean,
+  options: { dimAll?: boolean; diagnostic?: boolean; error?: boolean } = {},
+): string[] {
+  const lines = text.replace(/\r/g, "").split("\n");
+  const out: string[] = [];
+  let inCode = false;
+  let codeLang: string | undefined;
+  const applyTone = (line: string): string => {
+    if (options.error) return colorRed(line, noColor);
+    if (options.diagnostic) return colorCyan(line, noColor);
+    if (options.dimAll) return dim(line, noColor);
+    return line;
+  };
+
+  for (const raw of lines) {
+    const fence = raw.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/u);
+    if (fence) {
+      if (inCode) {
+        out.push(dim("  +", noColor));
+        inCode = false;
+        codeLang = undefined;
+      } else {
+        inCode = true;
+        codeLang = fence[1] || undefined;
+        out.push(dim(`  +${codeLang ? ` ${codeLang}` : ""}`, noColor));
+      }
+      continue;
+    }
+    if (!inCode) {
+      out.push(applyTone(raw));
+      continue;
+    }
+
+    const isDiff = codeLang === "diff" || codeLang === "patch";
+    const body =
+      isDiff && raw.startsWith("+") && !raw.startsWith("+++")
+        ? colorGreen(raw.length === 0 ? " " : raw, noColor)
+        : isDiff && raw.startsWith("-") && !raw.startsWith("---")
+          ? colorRed(raw.length === 0 ? " " : raw, noColor)
+          : dim(raw.length === 0 ? " " : raw, noColor);
+    out.push(`${dim("  | ", noColor)}${body}`);
+  }
+  if (inCode) out.push(dim("  +", noColor));
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Home view
 // ---------------------------------------------------------------------------
@@ -256,7 +304,10 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
     // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
     // task transcript（plain 渲染同步 Ink ProductBlock 的 command 分支）。
     if (block.kind === "command") {
-      return [`${dim("\u276F", noColor)} ${colorCyan(block.title, noColor)}`];
+      const isUserText = block.messageKind === "user_text";
+      const marker = isUserText ? "\u203A" : "\u276F";
+      const title = isUserText ? block.title : colorCyan(block.title, noColor);
+      return [`${dim(marker, noColor)} ${title}`];
     }
 
     // D.13Q-UX \u2014\u2014 \u6D88\u606F\u8BED\u4E49 block \u5728 plain \u6A21\u5F0F\u6309\u591A\u884C\u539F\u6837\u8F93\u51FA\u3002
@@ -277,14 +328,13 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
         messageKind === "tool_result_cancelled" || messageKind === "tool_result_rejected";
       const isDiagnostic = messageKind === "diagnostic";
       const isLocalOutput = messageKind === "local_command_output";
-      const out: string[] = lines.map((line) => {
-        if (isLocalOutput) {
-          return `${dim("  \u23BF  ", noColor)}${line}`;
-        }
-        if (dimAll) return dim(line, noColor);
-        if (isDiagnostic) return colorCyan(line, noColor);
-        return line;
+      const renderedMessage = renderPlainMarkdownLines(body, noColor, {
+        dimAll,
+        diagnostic: isDiagnostic,
       });
+      const out: string[] = isLocalOutput
+        ? renderedMessage.map((line) => `${dim("  \u23BF  ", noColor)}${line}`)
+        : renderedMessage;
       if (nextAction) {
         out.push(`  ${dim(nextAction, noColor)}`);
       }
@@ -309,7 +359,7 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
         out.push(coloredFailMarker);
       }
       if (body) {
-        for (const line of body.split("\n")) out.push(colorRed(line, noColor));
+        out.push(...renderPlainMarkdownLines(body, noColor, { error: true }));
       }
       if (nextAction) out.push(`  ${dim(nextAction, noColor)}`);
       return out;
