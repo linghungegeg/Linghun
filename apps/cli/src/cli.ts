@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { EndpointProfile } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelInfo } from "@linghun/providers";
@@ -62,6 +64,7 @@ export async function runCli(argv: string[]): Promise<CliResult> {
   const [command] = argv;
 
   if (!command) {
+    configureCliBundledRoot();
     const { runTui } = await import("@linghun/tui");
     const exitCode = await runTui();
     return { stdout: "", stderr: "", exitCode };
@@ -88,6 +91,13 @@ export async function runCli(argv: string[]): Promise<CliResult> {
     stderr: `未知命令：${command}\n运行 ${LINGHUN_CLI_NAME} --help 查看可用命令。\n`,
     exitCode: 2,
   };
+}
+
+function configureCliBundledRoot(): void {
+  if (process.env.LINGHUN_CLI_BUNDLED_ROOT) {
+    return;
+  }
+  process.env.LINGHUN_CLI_BUNDLED_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "bundled");
 }
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {

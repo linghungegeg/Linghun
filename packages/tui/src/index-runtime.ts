@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import type { LinghunConfig } from "@linghun/config";
 
-export type CodebaseMemoryBinarySource = "env" | "managed" | "path" | "missing";
+export type CodebaseMemoryBinarySource = "env" | "bundled" | "managed" | "path" | "missing";
 export type CodebaseMemoryBinaryStatus =
   | "ready"
   | "missing"

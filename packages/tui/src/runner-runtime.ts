@@ -23,6 +23,7 @@ import { formatJobRunnerInline } from "./job-runner-presenter.js";
 const NATIVE_RUNNER_VERSION_TIMEOUT_MS = 2_000;
 const NATIVE_RUNNER_START_STATE_WAIT_MS = 1_500;
 const NATIVE_RUNNER_APPROVED_TASK_HEARTBEAT_MS = 100;
+const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
 const NATIVE_RUNNER_BUNDLED_PLATFORM_ARCHES = new Set([
   "win32-x64",
   "linux-x64",
@@ -310,7 +311,13 @@ function getBundledNativeRunnerRoots(): string[] {
   if (process.env.LINGHUN_NATIVE_RUNNER_BUNDLED_DIR) {
     roots.push(process.env.LINGHUN_NATIVE_RUNNER_BUNDLED_DIR);
   }
+  if (process.env[CLI_BUNDLED_ROOT_ENV]) {
+    roots.push(join(process.env[CLI_BUNDLED_ROOT_ENV], "native-runner"));
+  }
   const moduleDir = dirname(fileURLToPath(import.meta.url));
+  roots.push(join(moduleDir, "..", "bundled", "native-runner"));
+  roots.push(join(moduleDir, "bundled", "native-runner"));
+  // Legacy paths for backward compat
   roots.push(join(moduleDir, "..", "native-runner"));
   roots.push(join(moduleDir, "native-runner"));
   return roots;

@@ -6,7 +6,7 @@
     "linghun": "./dist/main.js",
     "Linghun": "./dist/main.js"
   },
-  "files": ["dist"],
+  "files": ["dist", "bundled"],
   "scripts": {
     "build": "tsup src/main.ts --format esm --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit"

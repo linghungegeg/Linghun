@@ -581,6 +581,11 @@ import {
   stabilizeMcpToolList,
 } from "./mcp-index-runtime.js";
 export { executeExtraTool, executeSearchExtraTools } from "./mcp-index-runtime.js";
+export {
+  findBundledCodebaseMemoryBinary,
+  getBundledCodebaseMemoryRoots,
+  getCodebaseMemoryPlatformArch,
+} from "./mcp-index-runtime.js";
 import {
   buildCacheStatusPanel,
   formatCacheLog,

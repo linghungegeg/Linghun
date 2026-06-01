@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   type McpServerConfig,
   removeMcpServerConfig,
@@ -62,6 +63,14 @@ import { createMcpState, createMcpToolPlaceholders, pathExists } from "./tui-sta
 
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
+const CLI_BUNDLED_ROOT_ENV = "LINGHUN_CLI_BUNDLED_ROOT";
+const CODEBASE_MEMORY_BUNDLED_ENV = "LINGHUN_CODEBASE_MEMORY_BUNDLED_DIR";
+const CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES = new Set([
+  "win32-x64",
+  "linux-x64",
+  "darwin-arm64",
+  "darwin-x64",
+]);
 
 export type CodebaseMemoryResolution = {
   command: string;
@@ -316,6 +325,17 @@ export async function resolveCodebaseMemoryBinary(
     return probeCodebaseMemoryBinary(spec.command, spec.args, "env", context, spec.detailPath);
   }
 
+  const bundled = await findBundledCodebaseMemoryBinary();
+  if (bundled) {
+    return probeCodebaseMemoryBinary(
+      bundled.command,
+      bundled.args,
+      "bundled",
+      context,
+      bundled.detailPath,
+    );
+  }
+
   const managed = await findManagedCodebaseMemoryBinary(context);
   if (managed) {
     return probeCodebaseMemoryBinary(
@@ -432,6 +452,51 @@ export async function findManagedCodebaseMemoryBinary(
   return findCodebaseMemoryBinaryCandidate(candidates);
 }
 
+export async function findBundledCodebaseMemoryBinary(): Promise<
+  { command: string; args: string[]; detailPath: string } | undefined
+> {
+  const roots = getBundledCodebaseMemoryRoots();
+  const platformArch = getCodebaseMemoryPlatformArch();
+  if (!CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES.has(platformArch)) {
+    return undefined;
+  }
+  const names =
+    platformArch.startsWith("win32")
+      ? [`${CODEBASE_MEMORY_COMMAND}.exe`, `${CODEBASE_MEMORY_COMMAND}.cjs`]
+      : [CODEBASE_MEMORY_COMMAND, `${CODEBASE_MEMORY_COMMAND}.cjs`];
+  for (const root of roots) {
+    for (const name of names) {
+      const candidate = join(root, platformArch, name);
+      if (await pathExists(candidate)) {
+        return codebaseMemoryCommandSpec(candidate, []);
+      }
+    }
+  }
+  return undefined;
+}
+
+export function getBundledCodebaseMemoryRoots(): string[] {
+  const roots: string[] = [];
+  if (process.env[CODEBASE_MEMORY_BUNDLED_ENV]) {
+    roots.push(process.env[CODEBASE_MEMORY_BUNDLED_ENV]);
+  }
+  if (process.env[CLI_BUNDLED_ROOT_ENV]) {
+    roots.push(join(process.env[CLI_BUNDLED_ROOT_ENV], "codebase-memory"));
+  }
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  roots.push(join(moduleDir, "..", "bundled", "codebase-memory"));
+  roots.push(join(moduleDir, "bundled", "codebase-memory"));
+  return roots;
+}
+
+export function getCodebaseMemoryPlatformArch(): string {
+  const override = process.env.LINGHUN_CODEBASE_MEMORY_PLATFORM_ARCH_TEST;
+  if (override && CODEBASE_MEMORY_BUNDLED_PLATFORM_ARCHES.has(override)) {
+    return override;
+  }
+  return `${process.platform}-${process.arch}`;
+}
+
 export async function findPathCodebaseMemoryBinary(): Promise<
   { command: string; args: string[]; detailPath: string } | undefined
 > {
@@ -530,13 +595,15 @@ export function rememberCodebaseMemoryResolution(
   context.index.binaryVersion = resolution.version;
   context.index.binaryCommand = redactedPath(resolution.detailPath);
   context.index.runtime =
-    resolution.source === "managed"
-      ? "Linghun-managed codebase-memory"
-      : resolution.source === "path"
-        ? "external fallback from PATH"
-        : resolution.source === "env"
-          ? "explicit codebase-memory override"
-          : "missing codebase-memory runtime";
+    resolution.source === "bundled"
+      ? "bundled codebase-memory"
+      : resolution.source === "managed"
+        ? "Linghun-managed codebase-memory"
+        : resolution.source === "path"
+          ? "external fallback from PATH"
+          : resolution.source === "env"
+            ? "explicit codebase-memory override"
+            : "missing codebase-memory runtime";
 }
 
 export async function getCodebaseMemoryResolution(
