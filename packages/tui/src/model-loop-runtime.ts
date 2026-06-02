@@ -187,6 +187,7 @@ export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
 export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
 export const COMMAND_PROPOSAL_TOOL_NAME = "CommandProposal" as const;
 export const START_AGENT_TOOL_NAME = "StartAgent" as const;
+export const SEND_MESSAGE_TOOL_NAME = "SendMessage" as const;
 export const RUN_WORKFLOW_TOOL_NAME = "RunWorkflow" as const;
 export const INDEX_OPERATION_TOOL_NAME = "IndexOperation" as const;
 export const RUN_VERIFICATION_TOOL_NAME = "RunVerification" as const;
@@ -202,7 +203,10 @@ export const COMMAND_PROPOSAL_DESCRIPTION =
   "Fallback only: propose an explicit Linghun slash command when the requested capability cannot be executed by an available structured tool. Do not use this as the default path for agent, workflow, index, verification, or report-writing requests.";
 
 export const START_AGENT_DESCRIPTION =
-  "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
+  "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Supports addressable name/team, safe cwd/worktree isolation, and true background launch. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
+
+export const SEND_MESSAGE_DESCRIPTION =
+  "Send a text message to a running Linghun agent or team by id/name/team. The message enters the target agent mailbox and transcript; fail closed if no running target is found.";
 
 export const RUN_WORKFLOW_DESCRIPTION =
   "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs.";
@@ -257,9 +261,33 @@ export function createStartAgentInputSchema(): unknown {
     additionalProperties: false,
     properties: {
       role: { type: "string", enum: ["explorer", "planner", "worker", "verifier"] },
+      subagent_type: { type: "string" },
       task: { type: "string" },
+      name: { type: "string" },
+      teamName: { type: "string" },
+      team_name: { type: "string" },
+      runInBackground: { type: "boolean" },
+      run_in_background: { type: "boolean" },
+      cwd: { type: "string" },
+      isolation: { type: "string", enum: ["worktree"] },
     },
-    required: ["role", "task"],
+    required: ["task"],
+  };
+}
+
+export function createSendMessageInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      to: { type: "string" },
+      name: { type: "string" },
+      team: { type: "string" },
+      teamName: { type: "string" },
+      team_name: { type: "string" },
+      message: { type: "string" },
+    },
+    required: ["message"],
   };
 }
 
@@ -269,8 +297,12 @@ export function createRunWorkflowInputSchema(): unknown {
     additionalProperties: false,
     properties: {
       goal: { type: "string" },
+      workflowId: { type: "string" },
+      workflow_id: { type: "string" },
+      inputs: { type: "object" },
+      runInBackground: { type: "boolean" },
+      run_in_background: { type: "boolean" },
     },
-    required: ["goal"],
   };
 }
 
@@ -342,6 +374,11 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
       name: START_AGENT_TOOL_NAME,
       description: START_AGENT_DESCRIPTION,
       inputSchema: createStartAgentInputSchema(),
+    },
+    {
+      name: SEND_MESSAGE_TOOL_NAME,
+      description: SEND_MESSAGE_DESCRIPTION,
+      inputSchema: createSendMessageInputSchema(),
     },
     {
       name: RUN_WORKFLOW_TOOL_NAME,

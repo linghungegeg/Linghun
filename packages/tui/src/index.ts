@@ -11,7 +11,7 @@ import {
 } from "node:process";
 import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
-import type { Readable, Writable } from "node:stream";
+import { Writable, type Readable } from "node:stream";
 import {
   type LinghunConfig,
   type McpServerConfig,
@@ -69,6 +69,14 @@ import {
   createToolContext,
   runTool,
 } from "@linghun/tools";
+import {
+  loadAgentRegistry,
+  loadWorkflowRegistry,
+  registryAgentToWorkflowTemplate,
+  registryWorkflowToTemplate,
+  type RegistryAgentDefinition,
+  type RegistryWorkflowDefinition,
+} from "./agent-workflow-registry.js";
 import {
   type ArchitectureCard,
   type ArchitectureCardSummary,
@@ -219,6 +227,7 @@ import {
   RUN_VERIFICATION_TOOL_NAME,
   RUN_WORKFLOW_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
+  SEND_MESSAGE_TOOL_NAME,
   START_AGENT_TOOL_NAME,
   WRITE_REPORT_TOOL_NAME,
   type SolutionCompletenessClassification,
@@ -421,7 +430,9 @@ import {
   handleBackgroundCommand,
   handleForkCommand,
   handleJobCommand,
+  hydratePersistentAgents,
   hydrateDurableJobBackgroundTasks,
+  sendAgentMessage,
 } from "./job-agent-command-runtime.js";
 import {
   configureModelCommandRuntime,
@@ -1188,6 +1199,8 @@ export type TuiContext = {
   failureLearning: FailureLearningState;
   skills: SkillState;
   workflows: WorkflowState;
+  agentRegistry: { agents: RegistryAgentDefinition[]; errors: string[] };
+  workflowRegistry: { workflows: RegistryWorkflowDefinition[]; errors: string[] };
   hooks: HookState;
   plugins: PluginState;
   remote: RemoteState;
@@ -1432,6 +1445,30 @@ import {
   summarizeProjectRules,
 } from "./tui-state-runtime.js";
 
+async function createAgentRegistryState(
+  projectPath: string,
+): Promise<TuiContext["agentRegistry"]> {
+  const result = await loadAgentRegistry(projectPath);
+  return { agents: result.items, errors: result.errors };
+}
+
+async function createWorkflowRegistryState(
+  projectPath: string,
+): Promise<TuiContext["workflowRegistry"]> {
+  const result = await loadWorkflowRegistry(projectPath);
+  return { workflows: result.items, errors: result.errors };
+}
+
+function mergeWorkflowTemplates(...groups: WorkflowTemplate[][]): WorkflowTemplate[] {
+  const byId = new Map<string, WorkflowTemplate>();
+  for (const group of groups) {
+    for (const template of group) {
+      byId.set(template.id, template);
+    }
+  }
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const input = options.stdin ?? defaultStdin;
   const output = options.stdout ?? defaultStdout;
@@ -1460,6 +1497,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     failureLearning: createFailureLearningState(projectPath),
     skills: await createSkillState(config, projectPath),
     workflows: createWorkflowState(config),
+    agentRegistry: await createAgentRegistryState(projectPath),
+    workflowRegistry: await createWorkflowRegistryState(projectPath),
     hooks: await createHookState(config, projectPath),
     plugins: await createPluginState(config, projectPath),
     remote: createRemoteState(config),
@@ -1477,8 +1516,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundAbortControllers: new Map(),
     discoveredDeferredToolNames: new Set<string>(),
   };
+  context.workflows.templates = mergeWorkflowTemplates(
+    context.workflows.templates,
+    context.agentRegistry.agents.map(registryAgentToWorkflowTemplate),
+    context.workflowRegistry.workflows.map(registryWorkflowToTemplate),
+  );
   installProcessGuardExitHandlers();
   await hydrateDurableJobBackgroundTasks(context);
+  await hydratePersistentAgents(context);
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
   const gateway = createModelGateway(config);
   // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
@@ -2733,6 +2778,10 @@ async function handleWorkflowsCommand(
     writeLine(output, formatWorkflows(context));
     return;
   }
+  if (name === "registry" || name === "list") {
+    writeLine(output, formatWorkflowRegistryList(context));
+    return;
+  }
   if (name === "plan") {
     const goal = args.slice(1).join(" ").trim();
     if (!goal) {
@@ -2760,16 +2809,28 @@ async function handleWorkflowsCommand(
     return;
   }
   if (name === "run") {
-    const goal = args.slice(1).join(" ").trim();
-    if (!goal) {
+    const target = args[1];
+    const rest = args.slice(2).join(" ").trim();
+    if (!target) {
       writeLine(
         output,
         context.language === "en-US"
-          ? "Usage: /workflows run <goal>"
-          : "用法：/workflows run <目标描述>",
+          ? "Usage: /workflows run <workflowId|goal>"
+          : "用法：/workflows run <workflowId|目标描述>",
       );
       return;
     }
+    const registry = findRegistryWorkflow(context, target);
+    if (registry) {
+      await runRegistryWorkflow(registry, rest, false, context, output);
+      return;
+    }
+    const registryAgent = findRegistryAgentWorkflow(context, target);
+    if (registryAgent) {
+      await runRegistryAgentWorkflow(registryAgent, rest, false, context, output);
+      return;
+    }
+    const goal = args.slice(1).join(" ").trim();
     await runWorkflowSteps(goal, context, output);
     return;
   }
@@ -2982,6 +3043,236 @@ async function runWorkflowSteps(
     workflowTask,
   );
   writeLine(output, `Workflow ${runId} completed with PARTIAL result; no PASS evidence generated.`);
+}
+
+function formatWorkflowRegistryList(context: TuiContext): string {
+  const lines = [context.language === "en-US" ? "Workflow registry:" : "Workflow registry："];
+  if (context.workflowRegistry.errors.length > 0 || context.agentRegistry.errors.length > 0) {
+    lines.push("- registry schema errors:");
+    for (const error of [...context.agentRegistry.errors, ...context.workflowRegistry.errors]) {
+      lines.push(`  - ${error}`);
+    }
+  }
+  if (context.workflowRegistry.workflows.length === 0 && context.agentRegistry.agents.length === 0) {
+    lines.push(
+      context.language === "en-US"
+        ? "- no custom agents/workflows found under .linghun/agents or .linghun/workflows"
+        : "- .linghun/agents 或 .linghun/workflows 下暂无自定义 agent/workflow",
+    );
+    return lines.join("\n");
+  }
+  for (const agent of context.agentRegistry.agents) {
+    lines.push(`- agent:${agent.id} ${agent.name}: ${agent.description}`);
+  }
+  for (const workflow of context.workflowRegistry.workflows) {
+    lines.push(`- ${workflow.id} ${workflow.name}: ${workflow.description}`);
+  }
+  return lines.join("\n");
+}
+
+function findRegistryWorkflow(
+  context: TuiContext,
+  id: string | undefined,
+): RegistryWorkflowDefinition | undefined {
+  if (!id) return undefined;
+  return context.workflowRegistry.workflows.find((workflow) => workflow.id === id);
+}
+
+function findRegistryAgentWorkflow(
+  context: TuiContext,
+  id: string | undefined,
+): RegistryAgentDefinition | undefined {
+  if (!id?.startsWith("agent:")) return undefined;
+  const agentId = id.slice("agent:".length);
+  return context.agentRegistry.agents.find((agent) => agent.id === agentId || agent.name === agentId);
+}
+
+async function runRegistryAgentWorkflow(
+  agent: RegistryAgentDefinition,
+  goal: string,
+  runInBackground: boolean,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const task = goal || agent.description;
+  await handleForkCommand(
+    [agent.id, task, ...(runInBackground ? ["--background"] : [])],
+    context,
+    output,
+  );
+}
+
+async function runRegistryWorkflow(
+  workflow: RegistryWorkflowDefinition,
+  goal: string,
+  runInBackground: boolean,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const sessionId = await ensureSession(context);
+  const runId = `workflow-${workflow.id}-${randomUUID().slice(0, 8)}`;
+  const startedAt = new Date().toISOString();
+  const stepStates: WorkflowStepState[] = workflow.steps.map((step) => ({
+    id: step.id,
+    title: `${step.action}:${step.id}`,
+    status: "queued",
+    runtime: step.action === "verification" ? "verification" : step.action === "details" ? "details" : "agent",
+    evidenceRefs: [],
+  }));
+  const task: BackgroundTaskState = {
+    id: runId,
+    kind: "job",
+    title: `Workflow: ${workflow.id}`,
+    status: "running",
+    currentStep: "workflow starting",
+    progress: { completed: 0, total: stepStates.length, label: "workflow" },
+    startedAt,
+    updatedAt: startedAt,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    result: "partial",
+    userVisibleSummary: `Workflow ${workflow.id} 正在执行：${stepStates.length} 个 registry step。`,
+    nextAction: "查看 /workflows registry、/background 或 /details background。",
+  };
+  context.workflows.activeRun = {
+    id: runId,
+    goal: goal || workflow.description,
+    planId: workflow.id,
+    status: "running",
+    steps: stepStates,
+    startedAt,
+    result: "partial",
+  };
+  rememberBackgroundTask(context, task);
+  await context.store.appendEvent(sessionId, {
+    type: "workflow_start",
+    workflow: { id: runId, goal: goal || workflow.description, planId: workflow.id, steps: stepStates },
+    createdAt: startedAt,
+  });
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  writeLine(output, formatBackgroundTask(task, context.language));
+  if (runInBackground || workflow.runInBackground) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Background workflow started: ${runId}. Use /background.`
+        : `后台 workflow 已启动：${runId}。可用 /background 查看。`,
+    );
+    setTimeout(() => {
+      void executeRegistryWorkflowRun(
+        workflow,
+        goal,
+        runId,
+        stepStates,
+        task,
+        context,
+        sessionId,
+        createSilentOutput(),
+      ).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        void finishWorkflowRun(
+          runId,
+          "failed",
+          `registry workflow ${workflow.id} failed: ${message}`,
+          context,
+          sessionId,
+          task,
+        );
+      });
+    }, 0);
+    return;
+  }
+
+  await executeRegistryWorkflowRun(workflow, goal, runId, stepStates, task, context, sessionId, output);
+}
+
+async function executeRegistryWorkflowRun(
+  workflow: RegistryWorkflowDefinition,
+  goal: string,
+  runId: string,
+  stepStates: WorkflowStepState[],
+  task: BackgroundTaskState,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+): Promise<void> {
+  let completed = 0;
+  for (const step of workflow.steps) {
+    const state = stepStates.find((item) => item.id === step.id);
+    const started = new Date().toISOString();
+    if (state) {
+      state.status = "running";
+      state.startedAt = started;
+    }
+    task.currentStep = `${step.action}:${step.id}`;
+    task.updatedAt = started;
+    task.progress = { completed, total: stepStates.length, label: step.action };
+    await appendBackgroundTaskEvent(context, sessionId, task);
+    const result = await executeRegistryWorkflowStep(workflow, step, goal, context, output);
+    const ended = new Date().toISOString();
+    if (state) {
+      state.status = result.status;
+      state.summary = result.summary;
+      state.evidenceRefs = result.evidenceRefs;
+      state.endedAt = ended;
+    }
+    if (result.status === "completed") completed += 1;
+    task.currentStep = result.summary;
+    task.updatedAt = ended;
+    task.lastOutputAt = ended;
+    task.hasOutput = true;
+    task.progress = { completed, total: stepStates.length, label: step.action };
+    await appendBackgroundTaskEvent(context, sessionId, task);
+    if (result.status !== "completed") {
+      await finishWorkflowRun(runId, result.status, result.summary, context, sessionId, task);
+      return;
+    }
+  }
+  await finishWorkflowRun(
+    runId,
+    "completed",
+    `registry workflow ${workflow.id} completed; result remains PARTIAL until verification/final gate evidence proves PASS.`,
+    context,
+    sessionId,
+    task,
+  );
+}
+
+async function executeRegistryWorkflowStep(
+  workflow: RegistryWorkflowDefinition,
+  step: RegistryWorkflowDefinition["steps"][number],
+  goal: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<{ status: "completed" | "failed" | "blocked"; summary: string; evidenceRefs: string[] }> {
+  const beforeEvidence = context.evidence.map((item) => item.id);
+  try {
+    if (step.action === "agent") {
+      const role = step.role ?? "worker";
+      const task = step.task ?? (goal || workflow.description);
+      await handleForkCommand([role, task], context, output);
+    } else if (step.action === "verification") {
+      await runWorkflowVerificationStep(step.level ?? "focused", context, output);
+    } else if (step.action === "details") {
+      await handleSlashCommand("/details", context, output);
+    } else if (step.action === "index") {
+      await handleSlashCommand("/index status", context, output);
+    } else if (step.action === "bash") {
+      if (!step.command) return { status: "blocked", summary: `workflow step ${step.id} blocked: missing command`, evidenceRefs: [] };
+      await handleToolCommand("Bash", [step.command], context, output);
+    } else if (step.action === "write") {
+      return { status: "blocked", summary: `workflow step ${step.id} blocked: write registry step requires existing Write tool input and is not auto-synthesized`, evidenceRefs: [] };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: "failed", summary: `workflow step ${step.id} failed: ${message}`, evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context) };
+  }
+  return {
+    status: "completed",
+    summary: `workflow step ${step.id} completed via registry ${step.action}`,
+    evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+  };
 }
 
 async function executeWorkflowStep(
@@ -8825,6 +9116,7 @@ async function executeModelToolUse(
   }
   if (
     toolCall.name === START_AGENT_TOOL_NAME ||
+    toolCall.name === SEND_MESSAGE_TOOL_NAME ||
     toolCall.name === RUN_WORKFLOW_TOOL_NAME ||
     toolCall.name === INDEX_OPERATION_TOOL_NAME ||
     toolCall.name === RUN_VERIFICATION_TOOL_NAME ||
@@ -9393,12 +9685,12 @@ async function executeLinghunControlToolUse(
   });
   try {
     if (toolCall.name === START_AGENT_TOOL_NAME) {
-      const input = parseStartAgentToolInput(toolCall.input);
+      const input = parseStartAgentToolInput(toolCall.input, context);
       if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       const before = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([input.role, input.task], context, output);
+      await handleForkCommand(buildForkArgsFromStartAgentInput(input, context), context, output);
       const agent = context.agents.find((item) => !before.has(item.id));
-      const ok = agent?.status === "completed";
+      const ok = agent?.status === "completed" || agent?.status === "running";
       const text = agent
         ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
         : "Agent runtime did not start.";
@@ -9407,12 +9699,34 @@ async function executeLinghunControlToolUse(
         status: agent?.status ?? "blocked",
       });
     }
-    if (toolCall.name === RUN_WORKFLOW_TOOL_NAME) {
-      const input = parseStringFieldToolInput(toolCall.input, "goal");
+    if (toolCall.name === SEND_MESSAGE_TOOL_NAME) {
+      const input = parseSendMessageToolInput(toolCall.input);
       if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
-      await runWorkflowSteps(input.value, context, output);
+      const result = await sendAgentMessage(context, { ...input, from: "model" });
+      return await finishControlToolResult(toolCall, context, sessionId, output, result.text, !result.ok, {
+        delivered: result.delivered,
+      });
+    }
+    if (toolCall.name === RUN_WORKFLOW_TOOL_NAME) {
+      const input = parseRunWorkflowToolInput(toolCall.input);
+      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (input.workflowId) {
+        const registry = findRegistryWorkflow(context, input.workflowId);
+        const registryAgent = findRegistryAgentWorkflow(context, input.workflowId);
+        if (!registry && !registryAgent) {
+          return await finishControlToolFailure(toolCall, context, sessionId, output, `Unknown workflowId: ${input.workflowId}`);
+        }
+        const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
+        if (registry) {
+          await runRegistryWorkflow(registry, workflowGoal, input.runInBackground, context, output);
+        } else if (registryAgent) {
+          await runRegistryAgentWorkflow(registryAgent, workflowGoal, input.runInBackground, context, output);
+        }
+      } else {
+        await runWorkflowSteps(input.goal ?? "", context, output);
+      }
       const run = context.workflows.activeRun;
-      const ok = run?.status === "completed";
+      const ok = run?.status === "completed" || (input.runInBackground && run?.status === "running");
       const text = run
         ? `Workflow ${run.id} ${run.status}; result=${run.result}.`
         : "Workflow runtime did not start.";
@@ -9486,16 +9800,112 @@ function executableCommandProposalTool(command: string): string | undefined {
   return undefined;
 }
 
-function parseStartAgentToolInput(input: unknown):
-  | { ok: true; role: AgentType; task: string }
+function parseStartAgentToolInput(input: unknown, context: TuiContext):
+  | {
+      ok: true;
+      role: AgentType;
+      task: string;
+      name?: string;
+      teamName?: string;
+      runInBackground: boolean;
+      cwd?: string;
+      isolation?: "worktree";
+      registryAgentId?: string;
+    }
   | { ok: false; text: string } {
   const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
-  const role = typeof obj.role === "string" ? obj.role : "";
+  const rawRole = typeof obj.role === "string" ? obj.role : typeof obj.subagent_type === "string" ? obj.subagent_type : "";
   const task = obj.task;
-  if (!isAgentType(role) || typeof task !== "string" || !task.trim()) {
-    return { ok: false, text: "StartAgent requires role and task." };
+  const registryAgent = !isAgentType(rawRole)
+    ? context.agentRegistry.agents.find((agent) => agent.id === rawRole || agent.name === rawRole)
+    : undefined;
+  const role = isAgentType(rawRole)
+    ? rawRole
+    : registryAgent
+      ? inferRegistryAgentRole(registryAgent)
+      : undefined;
+  if (!role || typeof task !== "string" || !task.trim()) {
+    return { ok: false, text: "StartAgent requires role/subagent_type explorer|planner|worker|verifier and task." };
   }
-  return { ok: true, role, task: task.trim() };
+  const isolation = obj.isolation === "worktree" ? "worktree" : undefined;
+  return {
+    ok: true,
+    role,
+    task: task.trim(),
+    ...(typeof obj.name === "string" && obj.name.trim() ? { name: obj.name.trim() } : {}),
+    ...(typeof obj.teamName === "string" && obj.teamName.trim()
+      ? { teamName: obj.teamName.trim() }
+      : typeof obj.team_name === "string" && obj.team_name.trim()
+        ? { teamName: obj.team_name.trim() }
+        : {}),
+    runInBackground: obj.runInBackground === true || obj.run_in_background === true,
+    ...(typeof obj.cwd === "string" && obj.cwd.trim() ? { cwd: obj.cwd.trim() } : {}),
+    ...(isolation ? { isolation } : {}),
+    ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
+  };
+}
+
+function inferRegistryAgentRole(agent: RegistryAgentDefinition): AgentType {
+  const tools = agent.allowedTools ?? [];
+  if (tools.some((tool) => ["Write", "Edit", "MultiEdit", "Bash"].includes(tool))) return "worker";
+  return "planner";
+}
+
+function buildForkArgsFromStartAgentInput(
+  input: Extract<ReturnType<typeof parseStartAgentToolInput>, { ok: true }>,
+  _context: TuiContext,
+): string[] {
+  const args = [input.registryAgentId ?? input.role, input.task];
+  if (input.runInBackground) args.push("--background");
+  if (input.name) args.push("--name", input.name);
+  if (input.teamName) args.push("--team", input.teamName);
+  if (input.cwd) args.push("--cwd", input.cwd);
+  if (input.isolation) args.push("--isolation", input.isolation);
+  return args;
+}
+
+function parseSendMessageToolInput(input: unknown):
+  | { ok: true; to?: string; name?: string; team?: string; teamName?: string; team_name?: string; message: string }
+  | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const message = obj.message;
+  if (typeof message !== "string" || !message.trim()) {
+    return { ok: false, text: "SendMessage requires message." };
+  }
+  return {
+    ok: true,
+    ...(typeof obj.to === "string" && obj.to.trim() ? { to: obj.to.trim() } : {}),
+    ...(typeof obj.name === "string" && obj.name.trim() ? { name: obj.name.trim() } : {}),
+    ...(typeof obj.team === "string" && obj.team.trim() ? { team: obj.team.trim() } : {}),
+    ...(typeof obj.teamName === "string" && obj.teamName.trim() ? { teamName: obj.teamName.trim() } : {}),
+    ...(typeof obj.team_name === "string" && obj.team_name.trim() ? { team_name: obj.team_name.trim() } : {}),
+    message: message.trim(),
+  };
+}
+
+function parseRunWorkflowToolInput(input: unknown):
+  | { ok: true; goal?: string; workflowId?: string; inputs?: Record<string, unknown>; runInBackground: boolean }
+  | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const goal = typeof obj.goal === "string" && obj.goal.trim() ? obj.goal.trim() : undefined;
+  const workflowId =
+    typeof obj.workflowId === "string" && obj.workflowId.trim()
+      ? obj.workflowId.trim()
+      : typeof obj.workflow_id === "string" && obj.workflow_id.trim()
+        ? obj.workflow_id.trim()
+        : undefined;
+  if (!goal && !workflowId) {
+    return { ok: false, text: "RunWorkflow requires goal or workflowId." };
+  }
+  return {
+    ok: true,
+    ...(goal ? { goal } : {}),
+    ...(workflowId ? { workflowId } : {}),
+    ...(obj.inputs && typeof obj.inputs === "object" && !Array.isArray(obj.inputs)
+      ? { inputs: obj.inputs as Record<string, unknown> }
+      : {}),
+    runInBackground: obj.runInBackground === true || obj.run_in_background === true,
+  };
 }
 
 function parseStringFieldToolInput(
@@ -10969,6 +11379,14 @@ async function ensureSession(context: TuiContext): Promise<string> {
   context.sessionId = session.id;
   context.sessionEnded = false;
   return session.id;
+}
+
+function createSilentOutput(): Writable {
+  return new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
 }
 
 function isSessionEnded(transcript: TranscriptEvent[]): boolean {

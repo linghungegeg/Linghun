@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { resolve, relative } from "node:path";
 import type { Writable } from "node:stream";
 import type { ModelRole, RoleModelRoute } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
 import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import type { ToolName, ToolOutput } from "@linghun/tools";
-import { builtInTools, runTool } from "@linghun/tools";
+import { builtInTools, createToolContext, runTool } from "@linghun/tools";
+import { createManagedWorktree } from "./git-operation-runtime.js";
+import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
@@ -65,11 +69,13 @@ import {
   listDurableJobs,
   mapAgentBackgroundResult,
   rememberBackgroundTask,
+  registerBackgroundAbortController,
   toJobContext,
   upsertJobBackgroundTask,
 } from "./tui-agent-job-runtime.js";
 import type {
   AgentRun,
+  AgentMailboxMessage,
   AgentType,
   BackgroundTaskState,
   DurableJobState,
@@ -96,6 +102,7 @@ type AgentWorkResult = {
 };
 
 const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS;
+const AGENT_RUNS_DIR = ".linghun/agent-runs";
 
 export type JobAgentCommandRuntimeDeps = {
   addRoleUsage: (
@@ -957,6 +964,21 @@ export async function handleAgentsCommand(
   output: Writable,
 ): Promise<void> {
   const action = args[0] ?? "list";
+  if (action === "registry") {
+    const detailsText = formatAgentRegistryList(context);
+    showCommandPanel(context, output, {
+      title: "/agents registry",
+      tone: "neutral",
+      summary: [
+        context.language === "en-US"
+          ? `Custom agents · ${context.agentRegistry.agents.length} available — Ctrl+O for details.`
+          : `自定义 agents · ${context.agentRegistry.agents.length} 个可用 — Ctrl+O 查看详情。`,
+      ],
+      actions: ["/fork explorer|planner|verifier|worker <task>", "/workflows registry"],
+      detailsText,
+    });
+    return;
+  }
   if (action === "list") {
     // D.14D-E — /agents 走降噪 CommandPanel：完整 agent 列表进 detailsText。
     const isEn = context.language === "en-US";
@@ -976,6 +998,21 @@ export async function handleAgentsCommand(
           : ["/fork explorer|planner|verifier|worker <task>"],
       detailsText: formatAgentsList(context),
     });
+    return;
+  }
+  if (action === "send") {
+    const to = args[1];
+    const message = args.slice(2).join(" ").trim();
+    if (!to || !message) {
+      writeLine(output, "用法：/agents send <id|name|team> <message>");
+      return;
+    }
+    const result = await sendAgentMessage(context, {
+      to,
+      message,
+      from: "user",
+    });
+    writeLine(output, result.text);
     return;
   }
   if (action === "show") {
@@ -1006,7 +1043,7 @@ export async function handleAgentsCommand(
     await cancelAgent(agent, context, output);
     return;
   }
-  writeLine(output, "用法：/agents | /agents show <id> | /agents cancel <id>");
+  writeLine(output, "用法：/agents | /agents registry | /agents show <id> | /agents cancel <id> | /agents send <id|name|team> <message>");
 }
 
 export async function handleForkCommand(
@@ -1014,10 +1051,12 @@ export async function handleForkCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const type = args[0] as AgentType | undefined;
-  const task = args.slice(1).join(" ").trim();
+  const options = parseForkCommandArgs(args);
+  const registryAgent = resolveForkRegistryAgent(context, options.rawType);
+  const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
+  const task = options.task;
   if (!type || !isAgentType(type) || !task) {
-    writeLine(output, "用法：/fork explorer|planner|verifier|worker <task>");
+    writeLine(output, "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]");
     return;
   }
   const workflowTaskId =
@@ -1038,7 +1077,15 @@ export async function handleForkCommand(
 
   const parentSessionId = await deps().ensureSession(context);
   const packet = await loadOrCreateHandoffPacket(context, parentSessionId);
+  const cwdResult = await resolveAgentCwd(context, options);
+  if (!cwdResult.ok) {
+    writeLine(output, cwdResult.text);
+    return;
+  }
   const role = getAgentRole(type);
+  const effectiveTask = registryAgent
+    ? `${registryAgent.prompt}\n\nTask: ${task}`
+    : task;
   const resolved = resolveRoleRoute(context, role, `/fork ${type}`);
   await deps().appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
   if (!resolved.usable) {
@@ -1046,8 +1093,11 @@ export async function handleForkCommand(
     return;
   }
   const route = resolved.route;
+  const effectiveModel = registryAgent?.model ?? route.primaryModel ?? context.model;
+  const registryAllowedTools = normalizeRegistryAllowedTools(registryAgent?.allowedTools);
+  const registryMaxTurns = normalizeRegistryAgentMaxTurns(registryAgent?.maxTurns);
   const child = await context.store.create({
-    model: route.primaryModel || context.model,
+    model: effectiveModel,
     summary: `agent:${type}:${truncateDisplay(task, 60)}`,
   });
   const now = new Date().toISOString();
@@ -1055,19 +1105,29 @@ export async function handleForkCommand(
     id: `agent-${randomUUID().slice(0, 8)}`,
     type,
     displayName: deriveAgentDisplayName(type, task),
+    addressableName: options.name ?? registryAgent?.name,
+    teamName: options.teamName,
     role,
     provider: route.provider || "unconfigured",
     parentSessionId,
     forkedFrom: packet.id,
-    task,
-    model: route.primaryModel || context.model,
+    task: effectiveTask,
+    model: effectiveModel,
+    ...(registryAgent ? { registryAgentId: registryAgent.id } : {}),
+    ...(registryAllowedTools ? { allowedTools: registryAllowedTools } : {}),
+    ...(registryMaxTurns ? { maxTurns: registryMaxTurns } : {}),
     permissionMode: getAgentPermissionMode(type, context.permissionMode),
     status: "running",
     transcriptPath: child.transcriptPath,
     transcriptSessionId: child.id,
+    mailbox: [],
+    cwd: cwdResult.cwd,
+    isolation: cwdResult.isolation,
+    cancelTokenId: randomUUID(),
+    heartbeatAt: now,
     summary: "agent running",
     contextSummary: createAgentContextSummary(packet, task, context),
-    cost: createEmptyAgentCost(task),
+    cost: createEmptyAgentCost(effectiveTask),
     startedAt: now,
     updatedAt: now,
   };
@@ -1075,24 +1135,39 @@ export async function handleForkCommand(
   context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
   rememberBackgroundTask(context, background);
+  registerBackgroundAbortController(context, agent.id);
+  await persistAgentRun(context, agent);
   await context.store.appendEvent(parentSessionId, { type: "agent_start", agent, createdAt: now });
   await context.store.appendEvent(child.id, {
     type: "system_event",
     id: randomUUID(),
     level: "info",
-    message: agent.contextSummary,
+    message: `${agent.contextSummary} | cwd=${cwdResult.cwd} | isolation=${cwdResult.isolation ?? "none"} | registry=${agent.registryAgentId ?? "none"} | model=${agent.model} | maxTurns=${agent.maxTurns ?? AGENT_MAX_MODEL_TURNS} | allowedTools=${agent.allowedTools?.join(",") ?? "default"}`,
     createdAt: now,
   });
+  if (cwdResult.evidenceText) {
+    await context.store.appendEvent(child.id, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "info",
+      message: cwdResult.evidenceText,
+      createdAt: now,
+    });
+  }
   await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   writeLine(output, formatBackgroundTask(background, context.language));
 
-  if (task.includes("--background")) {
+  if (options.runInBackground) {
     writeLine(
       output,
       context.language === "en-US"
-        ? "Background agent execution is not available in this runtime; running synchronously instead so no fake running state is created."
-        : "当前 runtime 不支持真实后台 agent 执行；已降级为同步执行，避免生成假的 running 状态。",
+        ? `Background agent started: ${agent.id}. Use /agents show ${agent.id} or /agents cancel ${agent.id}.`
+        : `后台 agent 已启动：${agent.id}。可用 /agents show ${agent.id} 或 /agents cancel ${agent.id}。`,
     );
+    setTimeout(() => {
+      void completeAgent(agent, background, context, output);
+    }, 0);
+    return;
   }
 
   await completeAgent(agent, background, context, output);
@@ -1110,6 +1185,10 @@ export async function completeAgent(
     result = await runAgentWork(agent, context, output);
   } catch (error) {
     await failAgent(agent, task, context, output, parentSessionId, error);
+    return;
+  }
+  if (agent.status === "cancelled") {
+    await persistAgentRun(context, agent);
     return;
   }
   const now = new Date().toISOString();
@@ -1179,6 +1258,7 @@ export async function completeAgent(
   if (agentEvidenceId) {
     result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
   }
+  await persistAgentRun(context, agent);
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   writeLine(output, formatAgentSummary(agent, context));
   deps().writeStatus(output, context);
@@ -1218,6 +1298,7 @@ async function failAgent(
     createdAt: now,
   });
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+  await persistAgentRun(context, agent);
   // 真实失败搭车进 D.14B；失败摘要交给 captureFailureLearning 内部脱敏，只当风险提示，
   // 不进 context.evidence，不污染 D.13U/D.13V final answer gate。
   await deps().captureFailureLearning(context, parentSessionId, {
@@ -1284,12 +1365,37 @@ export async function runModelBackedAgent(
     },
     {
       role: "user",
-      content: agent.task,
+      content: buildAgentUserMessage(agent),
     },
   ];
-  const controller = new AbortController();
+  const backgroundSignal = context.backgroundAbortControllers?.get(agent.id)?.signal;
+  const controller = backgroundSignal ? undefined : new AbortController();
+  const signal = backgroundSignal ?? controller?.signal;
+  if (!signal) {
+    return {
+      status: "failed",
+      summary: `${agent.type} failed：无法创建 agent abort signal。`,
+      evidenceRefs: [],
+    };
+  }
   let finalText = "";
-  for (let round = 0; round < AGENT_MAX_MODEL_TURNS; round += 1) {
+  const maxTurns = getAgentMaxTurns(agent);
+  for (let round = 0; round < maxTurns; round += 1) {
+    const mailbox = consumeAgentMailbox(agent);
+    if (mailbox.length > 0) await persistAgentRun(context, agent);
+    for (const message of mailbox) {
+      messages.push({
+        role: "user",
+        content: `Mailbox message ${message.id} from ${message.from}: ${message.text}`,
+      });
+      await context.store.appendEvent(agent.transcriptSessionId, {
+        type: "system_event",
+        id: randomUUID(),
+        level: "info",
+        message: `mailbox_consumed:${message.id}`,
+        createdAt: message.consumedAt ?? new Date().toISOString(),
+      });
+    }
     const toolCalls: ModelToolCall[] = [];
     let assistantText = "";
     const budgeted = await applyToolResultBudgetToMessages(messages, {
@@ -1306,7 +1412,7 @@ export async function runModelBackedAgent(
       continuation.provider,
       {
         messages: budgeted.messages,
-        model: continuation.model,
+        model: agent.model || continuation.model,
         endpointProfile: continuation.endpointProfile,
         ...(continuation.reasoningSent
           ? { reasoningLevel: continuation.reasoningLevel }
@@ -1314,7 +1420,7 @@ export async function runModelBackedAgent(
         tools: createModelToolDefinitionsForTools(getAgentAllowedTools(agent)),
         toolChoice: "auto",
       },
-      controller.signal,
+      signal,
     )) {
       if (event.type === "assistant_text_delta") {
         assistantText += event.text;
@@ -1378,7 +1484,7 @@ export async function runModelBackedAgent(
   if (!finalText) {
     return {
       status: "blocked",
-      summary: `${agent.type} blocked：agent child execution turn budget exhausted (${AGENT_MAX_MODEL_TURNS}) without a final answer.`,
+      summary: `${agent.type} blocked：agent child execution turn budget exhausted (${maxTurns}) without a final answer.`,
       evidenceRefs: [],
     };
   }
@@ -1409,6 +1515,12 @@ async function executeAgentToolCall(
     await appendAgentToolResultEvent(agent, context, toolCall.id, toolCall.name, text, true);
     return { ok: false, tool: toolCall.name, text };
   }
+  const allowedTools = new Set(getAgentAllowedTools(agent).map((tool) => tool.name));
+  if (!allowedTools.has(toolName)) {
+    const text = `Tool ${toolName} is not allowed for agent ${agent.id}.`;
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    return { ok: false, tool: toolName, text };
+  }
   const permission = await decidePermission(toolName, toolCall.input, context, parentSessionId);
   await context.store.appendEvent(parentSessionId, {
     type: "permission_request",
@@ -1435,7 +1547,7 @@ async function executeAgentToolCall(
   if (permission.preflight) {
     writeLine(output, permission.preflight);
   }
-  const result = await runTool(toolName, toolCall.input, context.tools);
+  const result = await runAgentToolInCwd(toolName, toolCall.input, agent, context);
   await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
   const failed = isAgentToolOutputFailure(toolName, result.output);
   return {
@@ -1459,13 +1571,38 @@ function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): stri
     `You are a Linghun ${agent.type} child agent running in an isolated sidechain transcript.`,
     roleHint,
     `Project path: ${context.projectPath}`,
+    `Agent cwd: ${agent.cwd ?? context.projectPath}`,
+    `Addressable name: ${agent.addressableName ?? "(none)"}`,
+    `Team: ${agent.teamName ?? "(none)"}`,
     `Permission mode: ${agent.permissionMode}`,
+    `Pending mailbox messages: ${countPendingMailbox(agent)}`,
     "Use structured tools only; never write raw tool_use/tool_result protocol as text.",
     "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
   ].join("\n");
 }
 
+function buildAgentUserMessage(agent: AgentRun): string {
+  const mailbox = consumeAgentMailbox(agent);
+  const lines = [agent.task];
+  for (const message of mailbox) {
+    lines.push(`Mailbox message ${message.id} from ${message.from}: ${message.text}`);
+  }
+  return lines.join("\n\n");
+}
+
+function consumeAgentMailbox(agent: AgentRun): AgentMailboxMessage[] {
+  const now = new Date().toISOString();
+  const pending = agent.mailbox.filter((message) => !message.consumedAt);
+  for (const message of pending) {
+    message.consumedAt = now;
+  }
+  return pending;
+}
+
 function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
+  if (agent.allowedTools) {
+    return normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? [];
+  }
   const readOnly = [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Todo];
   if (agent.type === "explorer" || agent.type === "planner") return readOnly;
   if (agent.type === "worker") {
@@ -1481,6 +1618,23 @@ function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][
     ];
   }
   return [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Bash];
+}
+
+function normalizeRegistryAllowedTools(tools: string[] | undefined): ToolName[] | undefined {
+  if (!tools?.length) return undefined;
+  const normalized = tools.filter((name): name is ToolName =>
+    Object.prototype.hasOwnProperty.call(builtInTools, name),
+  );
+  return normalized.length === tools.length ? normalized : [];
+}
+
+function normalizeRegistryAgentMaxTurns(value: number | undefined): number | undefined {
+  if (!Number.isInteger(value) || !value || value <= 0) return undefined;
+  return Math.min(value, AGENT_MAX_MODEL_TURNS);
+}
+
+function getAgentMaxTurns(agent: AgentRun): number {
+  return normalizeRegistryAgentMaxTurns(agent.maxTurns) ?? AGENT_MAX_MODEL_TURNS;
 }
 
 function normalizeAgentToolName(name: string): ToolName | null {
@@ -1546,6 +1700,7 @@ export async function cancelAgent(
     background.updatedAt = now;
     background.currentStep = context.language === "en-US" ? "cancelled" : "已取消";
   }
+  context.backgroundAbortControllers?.get(agent.id)?.abort();
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
   await context.store.appendEvent(parentSessionId, {
     type: "agent_end",
@@ -1557,8 +1712,103 @@ export async function cancelAgent(
   if (background) {
     await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
   }
+  await persistAgentRun(context, agent);
   writeLine(output, agent.summary);
   deps().writeStatus(output, context);
+}
+
+export async function hydratePersistentAgents(context: TuiContext): Promise<void> {
+  let files: string[];
+  try {
+    files = await readdir(resolve(context.projectPath, AGENT_RUNS_DIR));
+  } catch {
+    return;
+  }
+  const existing = new Set(context.agents.map((agent) => agent.id));
+  for (const file of files.filter((name) => name.endsWith(".json")).sort()) {
+    try {
+      const raw = await readFile(resolve(context.projectPath, AGENT_RUNS_DIR, file), "utf8");
+      const parsed = JSON.parse(raw) as AgentRun;
+      if (!parsed.id || existing.has(parsed.id)) continue;
+      const now = new Date().toISOString();
+      const allowedTools = normalizeRegistryAllowedTools(parsed.allowedTools);
+      const maxTurns = normalizeRegistryAgentMaxTurns(parsed.maxTurns);
+      const agent: AgentRun = {
+        ...parsed,
+        mailbox: parsed.mailbox ?? [],
+        ...(allowedTools !== undefined ? { allowedTools } : {}),
+        ...(maxTurns ? { maxTurns } : {}),
+        status: parsed.status === "running" ? "stale" : parsed.status,
+        summary:
+          parsed.status === "running"
+            ? `agent ${parsed.id} is stale/resumable after TUI restart; it was not marked completed.`
+            : parsed.summary,
+        updatedAt: now,
+      };
+      context.agents.push(agent);
+      const background = createAgentBackgroundTask(agent, context);
+      background.status = agent.status === "stale" ? "stale" : background.status;
+      background.currentStep = agent.status === "stale" ? "stale/resumable" : background.currentStep;
+      background.result = agent.status === "stale" ? "partial" : background.result;
+      background.userVisibleSummary = agent.summary;
+      rememberBackgroundTask(context, background);
+    } catch {
+      continue;
+    }
+  }
+}
+
+async function persistAgentRun(context: TuiContext, agent: AgentRun): Promise<void> {
+  const dir = resolve(context.projectPath, AGENT_RUNS_DIR);
+  await mkdir(dir, { recursive: true });
+  await writeFile(resolve(dir, `${agent.id}.json`), `${JSON.stringify(agent, null, 2)}\n`, "utf8");
+}
+
+export async function sendAgentMessage(
+  context: TuiContext,
+  input: {
+    to?: string;
+    name?: string;
+    team?: string;
+    teamName?: string;
+    team_name?: string;
+    message: string;
+    from?: AgentMailboxMessage["from"];
+  },
+): Promise<{ ok: boolean; text: string; delivered: string[] }> {
+  const target = input.to ?? input.name ?? input.team ?? input.teamName ?? input.team_name;
+  const text = input.message.trim();
+  if (!target || !text) {
+    return { ok: false, text: "SendMessage requires target and non-empty message.", delivered: [] };
+  }
+  const targets = findMessageTargets(context, target);
+  if (targets.length === 0) {
+    return { ok: false, text: `SendMessage failed: no running agent/team found for "${target}".`, delivered: [] };
+  }
+  const now = new Date().toISOString();
+  for (const agent of targets) {
+    const message: AgentMailboxMessage = {
+      id: `msg-${randomUUID().slice(0, 8)}`,
+      from: input.from ?? "model",
+      text,
+      createdAt: now,
+    };
+    agent.mailbox.push(message);
+    agent.updatedAt = now;
+    await context.store.appendEvent(agent.transcriptSessionId, {
+      type: "user_message",
+      id: message.id,
+      text,
+      createdAt: now,
+    });
+    await persistAgentRun(context, agent);
+  }
+  const delivered = targets.map((agent) => agent.id);
+  return {
+    ok: true,
+    text: `SendMessage delivered to ${delivered.join(", ")}; pending mailbox updated.`,
+    delivered,
+  };
 }
 
 // Module 4 — findAgent moved to ./tui-agent-job-runtime.ts
@@ -1571,9 +1821,11 @@ function formatAgentsList(context: TuiContext): string {
   }
   const lines = [context.language === "en-US" ? "Agents:" : "Agents："];
   for (const agent of context.agents) {
-    const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
+    const label = truncateDisplay(agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task), 30);
+    const pending = countPendingMailbox(agent);
+    const cwd = agent.cwd ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18) : ".";
     lines.push(
-      `${agent.id}  ${label}  type=${agent.type}  role=${agent.role}  ${agent.status}  mode=${agent.permissionMode}  tokens~${agent.cost.inputTokens + agent.cost.outputTokens}  task=${truncateDisplay(agent.task, 24)}`,
+      `${agent.id}  ${label}  status=${agent.status}  type=${agent.type}  role=${agent.role}  name=${agent.addressableName ?? "-"}  team=${agent.teamName ?? "-"}  pending=${pending}  cwd=${cwd}`,
     );
   }
   lines.push(
@@ -1582,6 +1834,156 @@ function formatAgentsList(context: TuiContext): string {
       : "displayName 仅用于展示；role、权限模式、资源守卫、证据和生命周期不变。",
   );
   return lines.join("\n");
+}
+
+function formatAgentRegistryList(context: TuiContext): string {
+  const lines = [context.language === "en-US" ? "Agent registry:" : "Agent registry："];
+  if (context.agentRegistry.errors.length > 0) {
+    lines.push("- registry schema errors:");
+    for (const error of context.agentRegistry.errors) lines.push(`  - ${error}`);
+  }
+  if (context.agentRegistry.agents.length === 0) {
+    lines.push(
+      context.language === "en-US"
+        ? "- no custom agents found under .linghun/agents"
+        : "- .linghun/agents 下暂无自定义 agent",
+    );
+    return lines.join("\n");
+  }
+  for (const agent of context.agentRegistry.agents) {
+    const tools = agent.allowedTools?.length ? ` tools=${agent.allowedTools.join(",")}` : "";
+    const turns = agent.maxTurns ? ` maxTurns=${agent.maxTurns}` : "";
+    const model = agent.model ? ` model=${agent.model}` : "";
+    lines.push(`- ${agent.id} ${agent.name}: ${agent.description}${model}${tools}${turns}`);
+  }
+  return lines.join("\n");
+}
+
+function countPendingMailbox(agent: AgentRun): number {
+  return agent.mailbox.filter((message) => !message.consumedAt).length;
+}
+
+function findMessageTargets(context: TuiContext, target: string): AgentRun[] {
+  const normalized = target.trim();
+  return context.agents.filter(
+    (agent) =>
+      agent.status === "running" &&
+      (agent.id === normalized ||
+        agent.id.endsWith(normalized) ||
+        agent.addressableName === normalized ||
+        agent.teamName === normalized),
+  );
+}
+
+type ForkCommandOptions = {
+  rawType?: string;
+  type?: AgentType;
+  task: string;
+  name?: string;
+  teamName?: string;
+  runInBackground: boolean;
+  cwd?: string;
+  isolation?: "worktree";
+};
+
+function parseForkCommandArgs(args: string[]): ForkCommandOptions {
+  const rawType = args[0];
+  const type = isAgentType(rawType) ? rawType : undefined;
+  const taskParts: string[] = [];
+  const options: ForkCommandOptions = { rawType, type, task: "", runInBackground: false };
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--background") {
+      options.runInBackground = true;
+      continue;
+    }
+    if ((arg === "--name" || arg === "--team" || arg === "--team-name" || arg === "--cwd" || arg === "--isolation") && args[index + 1]) {
+      const value = args[index + 1];
+      index += 1;
+      if (arg === "--name") options.name = value;
+      if (arg === "--team" || arg === "--team-name") options.teamName = value;
+      if (arg === "--cwd") options.cwd = value;
+      if (arg === "--isolation" && value === "worktree") options.isolation = "worktree";
+      continue;
+    }
+    taskParts.push(arg);
+  }
+  options.task = taskParts.join(" ").trim();
+  return options;
+}
+
+function resolveForkRegistryAgent(
+  context: TuiContext,
+  rawType: string | undefined,
+): TuiContext["agentRegistry"]["agents"][number] | undefined {
+  if (!rawType) return undefined;
+  return context.agentRegistry.agents.find((agent) => agent.id === rawType || agent.name === rawType);
+}
+
+function mapRegistryAgentType(
+  agent: TuiContext["agentRegistry"]["agents"][number],
+): AgentType {
+  return agent.allowedTools?.some((tool) => tool === "Write" || tool === "Edit" || tool === "MultiEdit" || tool === "Bash")
+    ? "worker"
+    : "planner";
+}
+
+async function resolveAgentCwd(
+  context: TuiContext,
+  options: ForkCommandOptions,
+): Promise<{ ok: true; cwd: string; isolation?: "worktree"; evidenceText?: string } | { ok: false; text: string }> {
+  if (options.cwd && options.isolation === "worktree") {
+    return { ok: false, text: "agent cwd and isolation=worktree are mutually exclusive." };
+  }
+  if (options.isolation === "worktree") {
+    const name = options.name ?? `${options.type ?? "agent"}-${randomUUID().slice(0, 6)}`;
+    const outcome = await createManagedWorktree(context.projectPath, { name });
+    const summary = summarizeWorktreeCreateOutcome(outcome, context.language);
+    if (!summary.ok || (outcome.kind !== "created" && outcome.kind !== "resumed")) {
+      return { ok: false, text: summary.text };
+    }
+    return {
+      ok: true,
+      cwd: outcome.path,
+      isolation: "worktree",
+      evidenceText: `managed_worktree ${outcome.kind}: ${summary.text}`,
+    };
+  }
+  const cwd = options.cwd ? resolve(context.projectPath, options.cwd) : context.projectPath;
+  if (!isSafeAgentCwd(context.projectPath, cwd)) {
+    return {
+      ok: false,
+      text:
+        context.language === "en-US"
+          ? `Illegal agent cwd rejected: ${options.cwd}. Use the workspace or a managed worktree.`
+          : `已拒绝非法 agent cwd：${options.cwd}。只能使用工作区内路径或 managed worktree。`,
+    };
+  }
+  return { ok: true, cwd };
+}
+
+function isSafeAgentCwd(projectPath: string, cwd: string): boolean {
+  const project = resolve(projectPath);
+  const normalized = resolve(cwd);
+  return normalized === project || normalized.startsWith(`${project}\\`) || normalized.startsWith(`${project}/`);
+}
+
+async function runAgentToolInCwd(
+  toolName: ToolName,
+  input: unknown,
+  agent: AgentRun,
+  context: TuiContext,
+): ReturnType<typeof runTool> {
+  if (!agent.cwd || agent.cwd === context.projectPath) {
+    return runTool(toolName, input, context.tools);
+  }
+  const previousSignal = context.tools.abortSignal;
+  const scoped = createToolContext(agent.cwd);
+  scoped.abortSignal = previousSignal;
+  scoped.todos = context.tools.todos;
+  const result = await runTool(toolName, input, scoped);
+  context.tools.changedFiles.push(...scoped.changedFiles.map((file) => relative(context.projectPath, resolve(agent.cwd ?? context.projectPath, file))));
+  return result;
 }
 
 function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {

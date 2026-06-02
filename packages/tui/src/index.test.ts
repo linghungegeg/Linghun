@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
@@ -471,6 +471,80 @@ function mockOpenAiStartAgentChildToolSequence(
   return requests;
 }
 
+function createOpenAiRegistryAgentConfig(routeModel = "route-model"): LinghunConfig {
+  return {
+    ...defaultConfig,
+    defaultModel: routeModel,
+    providers: {
+      ...defaultConfig.providers,
+      "openai-compatible": {
+        type: "openai-compatible",
+        baseUrl: "https://example.test/v1",
+        apiKey: "sk-test",
+        model: routeModel,
+      },
+    },
+    modelRoutes: {
+      ...defaultConfig.modelRoutes,
+      defaultModel: routeModel,
+      routes: defaultConfig.modelRoutes.routes.map((route) =>
+        route.role === "planner" || route.role === "executor"
+          ? { ...route, provider: "openai-compatible", primaryModel: routeModel }
+          : route,
+      ),
+    },
+  };
+}
+
+function mockOpenAiCustomStartAgentFetch(options: {
+  registryAgentId: string;
+  task: string;
+  childFinalText?: string;
+}): unknown[] {
+  const requests: unknown[] = [];
+  const requestText = (request: unknown): string => JSON.stringify(request);
+  const isChildAgentRequest = (request: unknown): boolean =>
+    requestText(request).includes("child agent running in an isolated sidechain transcript");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      const body = requests.length === 1
+        ? [
+            `data: ${JSON.stringify({
+              id: "chatcmpl-custom-start-agent",
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: "call-custom-start-agent",
+                        type: "function",
+                        function: {
+                          name: "StartAgent",
+                          arguments: JSON.stringify({
+                            subagent_type: options.registryAgentId,
+                            task: options.task,
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ].join("")
+        : isChildAgentRequest(request)
+          ? `data: ${JSON.stringify({ id: "chatcmpl-custom-child", choices: [{ delta: { content: options.childFinalText ?? "custom child done" } }] })}\n\ndata: [DONE]\n\n`
+          : `data: ${JSON.stringify({ id: "chatcmpl-custom-main-final", choices: [{ delta: { content: "custom StartAgent final" } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
 async function createMockCodebaseMemoryBinary(
   project: string,
   mockDir: string,
@@ -627,6 +701,8 @@ async function createTestContext(
     failureLearning: createFailureLearningState(project),
     skills: await createSkillState(config, project),
     workflows: createWorkflowState(config),
+    agentRegistry: { agents: [], errors: [] },
+    workflowRegistry: { workflows: [], errors: [] },
     hooks: await createHookState(config, project),
     plugins: await createPluginState(config, project),
     remote: createRemoteState(config),
@@ -2825,7 +2901,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(inspectAgent?.role).toBe("executor");
     expect(inspectAgent?.permissionMode).toBe("plan");
     expect(output.text).toContain("transcript:");
-    expect(output.text).toContain("已降级为同步执行");
+    expect(output.text).toContain("后台 agent 已启动");
     expect(output.text).toContain("- full output: /details evidence <id>");
     expect(output.text).toContain("Background agent-");
     expect(output.text).toContain("Evidence evidence-test-1");
@@ -2839,6 +2915,87 @@ describe("Phase 06 TUI slash commands", () => {
     expect(parentTranscript.some((event) => event.type === "agent_start")).toBe(true);
     expect(parentTranscript.some((event) => event.type === "agent_end")).toBe(true);
     expect(agentTranscript.some((event) => event.type === "system_event")).toBe(true);
+  });
+
+  it("supports named background agent mailbox, cancel, cwd rejection, and stale hydrate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-mailbox-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const backgroundTimer = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((() => 0) as unknown as typeof setTimeout);
+    context.modelGateway = createModelGateway({
+      ...defaultConfig,
+      providers: {
+        openai: {
+          type: "openai-compatible",
+          apiKey: "sk-test",
+          baseUrl: "https://api.openai.test/v1",
+          model: "deepseek-v4-flash",
+        },
+      },
+      defaultModel: "deepseek-v4-flash",
+      modelRoutes: {
+        defaultModel: "deepseek-v4-flash",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? { ...route, provider: "openai", primaryModel: "deepseek-v4-flash" }
+            : route,
+        ),
+      },
+    });
+    mockOpenAiTextFetch("agent consumed mailbox");
+
+    await handleSlashCommand(
+      "/fork worker inspect mailbox --background --name alice --team core",
+      context,
+      output,
+    );
+    backgroundTimer.mockRestore();
+    const agent = context.agents[0];
+    expect(agent?.status).toBe("running");
+    expect(agent?.addressableName).toBe("alice");
+    expect(agent?.teamName).toBe("core");
+    expect(output.text).toContain("后台 agent 已启动");
+
+    await handleSlashCommand("/agents send alice 请继续检查队列", context, output);
+    expect(agent?.mailbox).toHaveLength(1);
+    expect(agent?.mailbox[0]?.consumedAt).toBeUndefined();
+    await handleSlashCommand("/agents", context, output);
+    expect(output.text).toContain("pending=1");
+    const { completeAgent } = await import("./job-agent-command-runtime.js");
+    const background = context.backgroundTasks.find((task) => task.id === agent?.id);
+    expect(background).toBeDefined();
+    await completeAgent(agent, background as BackgroundTaskState, context, output);
+    expect(agent?.mailbox[0]?.consumedAt).toBeDefined();
+    const persistedAgent = JSON.parse(
+      await readFile(join(project, ".linghun", "agent-runs", `${agent?.id}.json`), "utf8"),
+    ) as { mailbox?: Array<{ consumedAt?: string }> };
+    expect(persistedAgent.mailbox?.[0]?.consumedAt).toBeDefined();
+    await handleSlashCommand(`/agents cancel ${agent?.id}`, context, output);
+    expect(agent?.status).toBe("cancelled");
+
+    await handleSlashCommand("/fork worker unsafe cwd --cwd ..", context, output);
+    expect(output.text).toContain("已拒绝非法 agent cwd");
+
+    const freshContext = await createTestContext(project, store, session);
+    const { hydratePersistentAgents } = await import("./job-agent-command-runtime.js");
+    await hydratePersistentAgents(freshContext);
+    const stale = freshContext.agents.find((item) => item.addressableName === "alice");
+    expect(stale?.status).toBe("cancelled");
+
+    await handleSlashCommand(
+      "/fork worker stale hydrate --background --name stale-one",
+      context,
+      new MemoryOutput(),
+    );
+    const staleContext = await createTestContext(project, store, session);
+    await hydratePersistentAgents(staleContext);
+    expect(staleContext.agents.find((item) => item.addressableName === "stale-one")?.status).toBe(
+      "stale",
+    );
   });
 
   it("keeps Polish D agent display names cosmetic, ASCII-safe, and bounded", async () => {
@@ -3091,6 +3248,287 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks).toContainEqual(
       expect.objectContaining({ title: expect.stringContaining("Workflow:"), result: "partial" }),
     );
+  });
+
+  it("loads registry workflows and runs them through the existing workflow background surface", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-workflow-"));
+    await mkdir(join(project, ".linghun", "agents"), { recursive: true });
+    await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "agents", "reviewer.json"),
+      JSON.stringify({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Review with a custom prompt.",
+        prompt: "Review the requested change.",
+        model: "registry-reviewer-model",
+        allowedTools: ["Read"],
+        maxTurns: 2,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, ".linghun", "workflows", "check.json"),
+      JSON.stringify({
+        id: "check",
+        name: "Check",
+        description: "Run registry details step.",
+        steps: [{ id: "details", action: "details" }],
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, ".linghun", "workflows", "bad.json"),
+      JSON.stringify({ id: "bad", name: "Bad", description: "Bad", steps: [] }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const { loadAgentRegistry, loadWorkflowRegistry, registryWorkflowToTemplate } = await import(
+      "./agent-workflow-registry.js"
+    );
+    const agentRegistry = await loadAgentRegistry(project);
+    const registry = await loadWorkflowRegistry(project);
+    context.agentRegistry = { agents: agentRegistry.items, errors: agentRegistry.errors };
+    context.workflowRegistry = { workflows: registry.items, errors: registry.errors };
+    context.workflows.templates = [
+      ...context.workflows.templates,
+      ...registry.items.map(registryWorkflowToTemplate),
+    ];
+
+    await handleSlashCommand("/agents registry", context, output);
+    expect(output.text).toContain("reviewer Reviewer");
+    expect(output.text).toContain("model=registry-reviewer-model");
+    expect(output.text).toContain("tools=Read");
+    expect(output.text).toContain("maxTurns=2");
+    await handleSlashCommand("/workflows registry", context, output);
+    expect(output.text).toContain("agent:reviewer Reviewer");
+    expect(output.text).toContain("check Check");
+    expect(output.text).toContain("bad.json: steps must be a non-empty array");
+
+    await handleSlashCommand("/workflows run check", context, output);
+    expect(context.workflows.activeRun?.planId).toBe("check");
+    expect(context.workflows.activeRun?.status).toBe("completed");
+    expect(context.workflows.activeRun?.result).toBe("partial");
+    expect(context.backgroundTasks.find((task) => task.title.includes("Workflow: check"))).toMatchObject({
+      kind: "job",
+      result: "partial",
+    });
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "workflow_start")).toBe(true);
+    expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
+
+    await handleSlashCommand("/workflows run agent:reviewer inspect docs", context, output);
+    expect(context.agents[0]?.addressableName).toBe("Reviewer");
+    expect(context.agents[0]?.model).toBe("registry-reviewer-model");
+    expect(context.agents[0]?.allowedTools).toEqual(["Read"]);
+    expect(context.agents[0]?.maxTurns).toBe(2);
+    expect(context.agents[0]?.task).toContain("Review the requested change.");
+  });
+
+  it("passes custom agent registry model to child provider stream", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-model-"));
+    await mkdir(join(project, ".linghun", "agents"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "agents", "reviewer.json"),
+      JSON.stringify({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Review with a custom model.",
+        prompt: "Review precisely.",
+        model: "custom-child-model",
+        allowedTools: ["Read"],
+        maxTurns: 3,
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const { loadAgentRegistry } = await import("./agent-workflow-registry.js");
+    const agentRegistry = await loadAgentRegistry(project);
+    context.agentRegistry = { agents: agentRegistry.items, errors: agentRegistry.errors };
+    const requests = mockOpenAiTextFetch("review done");
+
+    await handleSlashCommand("/fork reviewer inspect src", context, output);
+
+    expect(agentRegistry.errors).toEqual([]);
+    expect(context.agents[0]?.registryAgentId).toBe("reviewer");
+    expect(context.agents[0]?.model).toBe("custom-child-model");
+    expect((requests[0] as { model?: string }).model).toBe("custom-child-model");
+  });
+
+  it("applies custom agent maxTurns instead of the default child budget", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-max-turns-"));
+    await mkdir(join(project, ".linghun", "agents"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "agents", "reviewer.json"),
+      JSON.stringify({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Review with a tiny loop budget.",
+        prompt: "Keep reading until done.",
+        model: "custom-child-model",
+        allowedTools: ["Read"],
+        maxTurns: 2,
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const { loadAgentRegistry } = await import("./agent-workflow-registry.js");
+    const agentRegistry = await loadAgentRegistry(project);
+    context.agentRegistry = { agents: agentRegistry.items, errors: agentRegistry.errors };
+    const requests = mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "a.txt" } },
+        { toolName: "Read", input: { path: "a.txt" } },
+      ],
+      "should not reach default budget",
+    );
+
+    await handleSlashCommand("/fork reviewer inspect a.txt", context, output);
+
+    expect(requests).toHaveLength(2);
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(context.agents[0]?.summary).toContain(
+      "agent child execution turn budget exhausted (2) without a final answer",
+    );
+  });
+
+  it("fail-closes custom agent allowedTools and blocks disallowed child tools before permission", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-tools-"));
+    await mkdir(join(project, ".linghun", "agents"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "agents", "reviewer.json"),
+      JSON.stringify({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Read-only review.",
+        prompt: "Do not mutate files.",
+        model: "custom-child-model",
+        allowedTools: ["Read"],
+        maxTurns: 3,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(project, ".linghun", "agents", "bad.json"),
+      JSON.stringify({
+        id: "bad",
+        name: "Bad",
+        description: "Invalid tool config.",
+        prompt: "Bad.",
+        allowedTools: ["Read", "NotATool"],
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const { loadAgentRegistry } = await import("./agent-workflow-registry.js");
+    const agentRegistry = await loadAgentRegistry(project);
+    context.agentRegistry = { agents: agentRegistry.items, errors: agentRegistry.errors };
+    const blockedPath = join(project, "blocked.txt");
+    const requests = mockOpenAiToolFetch("Bash", {
+      command: `echo should-not-run > "${blockedPath}"`,
+    });
+
+    await handleSlashCommand("/fork reviewer try forbidden bash", context, output);
+
+    expect(agentRegistry.errors.join("\n")).toContain("allowedTools contains invalid tool: NotATool");
+    expect((requests[0] as { tools?: Array<{ function?: { name?: string } }> }).tools?.map((tool) => tool.function?.name)).toEqual(["Read"]);
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(context.agents[0]?.summary).toContain("Tool Bash is not allowed");
+    await expect(stat(blockedPath)).rejects.toThrow();
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(false);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(false);
+  });
+
+  it("uses the same custom agent runtime parameters for model-facing StartAgent as slash fork", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-startagent-"));
+    await mkdir(join(project, ".linghun", "agents"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "agents", "reviewer.json"),
+      JSON.stringify({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Review through StartAgent.",
+        prompt: "Review through the custom registry prompt.",
+        model: "custom-child-model",
+        allowedTools: ["Read"],
+        maxTurns: 2,
+      }),
+      "utf8",
+    );
+    const output = new MemoryOutput();
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify(createOpenAiRegistryAgentConfig("route-model")),
+      "utf8",
+    );
+    const requests = mockOpenAiCustomStartAgentFetch({
+      registryAgentId: "reviewer",
+      task: "inspect custom runtime",
+      childFinalText: "custom child completed",
+    });
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请启动 reviewer 检查 runtime 参数\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const childRequest = requests.find((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as { model?: string; tools?: Array<{ function?: { name?: string } }> } | undefined;
+    expect(childRequest?.model).toBe("custom-child-model");
+    expect(childRequest?.tools?.map((tool) => tool.function?.name)).toEqual(["Read"]);
+    expect(output.text).toContain("custom child completed");
+    const persistedAgent = JSON.parse(
+      await readFile(
+        join(
+          project,
+          ".linghun",
+          "agent-runs",
+          ((await readdir(join(project, ".linghun", "agent-runs"))).find((file) =>
+            file.endsWith(".json"),
+          ) ?? ""),
+        ),
+        "utf8",
+      ),
+    ) as {
+      registryAgentId?: string;
+      addressableName?: string;
+      model?: string;
+      allowedTools?: string[];
+      maxTurns?: number;
+      task?: string;
+    };
+    expect(persistedAgent).toMatchObject({
+      registryAgentId: "reviewer",
+      addressableName: "Reviewer",
+      model: "custom-child-model",
+      allowedTools: ["Read"],
+      maxTurns: 2,
+    });
+    expect(persistedAgent.task).toContain("Review through the custom registry prompt.");
+    expect(persistedAgent.task).toContain("inspect custom runtime");
   });
 
   it("recovers Phase 17A durable jobs into background and marks missing owner heartbeat stale", async () => {
@@ -18187,6 +18625,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
       status: "running",
       transcriptPath: child.transcriptPath,
       transcriptSessionId: child.id,
+      mailbox: [],
       summary: "agent running",
       contextSummary: "trimmed",
       cost: {

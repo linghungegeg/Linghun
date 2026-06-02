@@ -14,7 +14,7 @@ import type {
 } from "@linghun/config";
 import type { CacheFreshness, CacheTurnStats } from "@linghun/core";
 import type { PermissionMode } from "@linghun/shared";
-import type { DiffSummary, TodoItem } from "@linghun/tools";
+import type { DiffSummary, TodoItem, ToolName } from "@linghun/tools";
 import type { ArchitectureCardSummary } from "./architecture-runtime.js";
 import type { CompactBoundary } from "./compact-context.js";
 import type { IndexState } from "./index-runtime.js";
@@ -254,6 +254,14 @@ export type HandoffPacket = {
 
 export type AgentType = "explorer" | "worker" | "verifier" | "planner";
 
+export type AgentMailboxMessage = {
+  id: string;
+  from: "user" | "model" | "workflow" | "system";
+  text: string;
+  createdAt: string;
+  consumedAt?: string;
+};
+
 export type RoleUsage = {
   role: ModelRole;
   provider: string;
@@ -333,16 +341,26 @@ export type AgentRun = {
   id: string;
   type: AgentType;
   displayName?: string;
+  addressableName?: string;
+  teamName?: string;
   role: ModelRole;
   provider: string;
   parentSessionId?: string;
   forkedFrom?: string;
   task: string;
   model: string;
+  registryAgentId?: string;
+  allowedTools?: ToolName[];
+  maxTurns?: number;
   permissionMode: PermissionMode;
-  status: "running" | "completed" | "failed" | "blocked" | "cancelled";
+  status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
   transcriptPath: string;
   transcriptSessionId: string;
+  mailbox: AgentMailboxMessage[];
+  cwd?: string;
+  isolation?: "worktree";
+  cancelTokenId?: string;
+  heartbeatAt?: string;
   summary: string;
   contextSummary: string;
   cost: {

@@ -334,6 +334,8 @@ async function createRemoteTestContext(
     failureLearning: createFailureLearningState(project),
     skills: await createSkillState(config, project),
     workflows: createWorkflowState(config),
+    agentRegistry: { agents: [], errors: [] },
+    workflowRegistry: { workflows: [], errors: [] },
     hooks: await createHookState(config, project),
     plugins: await createPluginState(config, project),
     remote: createRemoteState(config),
