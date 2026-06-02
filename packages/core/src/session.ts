@@ -297,7 +297,7 @@ export type TranscriptEvent =
   | {
       type: "agent_end";
       agentId: string;
-      status: "completed" | "failed" | "cancelled";
+      status: "completed" | "failed" | "blocked" | "cancelled";
       summary: string;
       createdAt: string;
     }

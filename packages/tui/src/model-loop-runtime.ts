@@ -186,6 +186,11 @@ export function createToolInputSchema(name: ToolName): unknown {
 export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
 export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
 export const COMMAND_PROPOSAL_TOOL_NAME = "CommandProposal" as const;
+export const START_AGENT_TOOL_NAME = "StartAgent" as const;
+export const RUN_WORKFLOW_TOOL_NAME = "RunWorkflow" as const;
+export const INDEX_OPERATION_TOOL_NAME = "IndexOperation" as const;
+export const RUN_VERIFICATION_TOOL_NAME = "RunVerification" as const;
+export const WRITE_REPORT_TOOL_NAME = "WriteReport" as const;
 
 export const SEARCH_EXTRA_TOOLS_DESCRIPTION =
   "Discover deferred tools provided by enabled MCP servers, trusted skills, trusted plugins, and codebase-memory. Returns name/kind/description/requiredArgs/executable/reason for each match. Pass a free-text query to filter; pass empty string to list all. Use ExecuteExtraTool to actually invoke a discovered tool.";
@@ -194,7 +199,22 @@ export const EXECUTE_EXTRA_TOOL_DESCRIPTION =
   "Invoke a deferred tool that was previously returned by SearchExtraTools with executable=true. Built-in tools (Read/Edit/Write/Bash/Grep/Glob/Todo) MUST be called directly, not via this wrapper. tool_name must match a discovered tool exactly; params must include all required args.";
 
 export const COMMAND_PROPOSAL_DESCRIPTION =
-  "Propose an explicit Linghun slash command for workflow, agent, job, memory, index, or status capabilities when the user asks for those capabilities in natural language. This tool does not execute the command; it returns a concise proposal so the assistant can explain or ask before using the explicit slash command path.";
+  "Fallback only: propose an explicit Linghun slash command when the requested capability cannot be executed by an available structured tool. Do not use this as the default path for agent, workflow, index, verification, or report-writing requests.";
+
+export const START_AGENT_DESCRIPTION =
+  "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
+
+export const RUN_WORKFLOW_DESCRIPTION =
+  "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs.";
+
+export const INDEX_OPERATION_DESCRIPTION =
+  "Run a real Linghun index operation for requests such as inspect index status, refresh index, initialize fast index, or repair index ignore rules. Mutating operations use the existing permission pipeline.";
+
+export const RUN_VERIFICATION_DESCRIPTION =
+  "Run Linghun Verification Runner for requests such as run verification, typecheck, tests, build, lint, or smoke checks. Uses the existing verification runtime and records evidence.";
+
+export const WRITE_REPORT_DESCRIPTION =
+  "Write a report or controlled file using Linghun's real Write/Edit permission pipeline. Use for requests that explicitly ask to write a report file; do not answer as if a report was written without this tool result.";
 
 export function createSearchExtraToolsInputSchema(): unknown {
   return {
@@ -231,6 +251,68 @@ export function createCommandProposalInputSchema(): unknown {
   };
 }
 
+export function createStartAgentInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      role: { type: "string", enum: ["explorer", "planner", "worker", "verifier"] },
+      task: { type: "string" },
+    },
+    required: ["role", "task"],
+  };
+}
+
+export function createRunWorkflowInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      goal: { type: "string" },
+    },
+    required: ["goal"],
+  };
+}
+
+export function createIndexOperationInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: { type: "string", enum: ["inspect", "refresh", "init_fast", "repair"] },
+      force: { type: "boolean" },
+    },
+    required: ["action"],
+  };
+}
+
+export function createRunVerificationInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      level: {
+        type: "string",
+        enum: ["smoke", "focused", "typecheck", "test", "build", "lint"],
+      },
+    },
+    required: ["level"],
+  };
+}
+
+export function createWriteReportInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      path: { type: "string" },
+      content: { type: "string" },
+      expectedHash: { type: "string" },
+    },
+    required: ["path", "content"],
+  };
+}
+
 export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
   return [
     {
@@ -242,11 +324,6 @@ export function createDeferredToolDispatchDefinitions(): ModelToolDefinition[] {
       name: EXECUTE_EXTRA_TOOL_NAME,
       description: EXECUTE_EXTRA_TOOL_DESCRIPTION,
       inputSchema: createExecuteExtraToolInputSchema(),
-    },
-    {
-      name: COMMAND_PROPOSAL_TOOL_NAME,
-      description: COMMAND_PROPOSAL_DESCRIPTION,
-      inputSchema: createCommandProposalInputSchema(),
     },
   ];
 }
@@ -261,10 +338,40 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
       Object.values(builtInTools) as (typeof builtInTools)[ToolName][],
     ),
     ...createDeferredToolDispatchDefinitions(),
+    {
+      name: START_AGENT_TOOL_NAME,
+      description: START_AGENT_DESCRIPTION,
+      inputSchema: createStartAgentInputSchema(),
+    },
+    {
+      name: RUN_WORKFLOW_TOOL_NAME,
+      description: RUN_WORKFLOW_DESCRIPTION,
+      inputSchema: createRunWorkflowInputSchema(),
+    },
+    {
+      name: INDEX_OPERATION_TOOL_NAME,
+      description: INDEX_OPERATION_DESCRIPTION,
+      inputSchema: createIndexOperationInputSchema(),
+    },
+    {
+      name: RUN_VERIFICATION_TOOL_NAME,
+      description: RUN_VERIFICATION_DESCRIPTION,
+      inputSchema: createRunVerificationInputSchema(),
+    },
+    {
+      name: WRITE_REPORT_TOOL_NAME,
+      description: WRITE_REPORT_DESCRIPTION,
+      inputSchema: createWriteReportInputSchema(),
+    },
     ...createGitToolDefinitions(),
     // D.14D-R P0-2 — 结构化索引能力：模型需要"看索引 / 更新索引"时调用真实工具，
     // 而不是文本冒充执行，也不是本地 NL 正则；mutating 刷新/修复走权限确认。
     ...createIndexToolDefinitions(),
+    {
+      name: COMMAND_PROPOSAL_TOOL_NAME,
+      description: COMMAND_PROPOSAL_DESCRIPTION,
+      inputSchema: createCommandProposalInputSchema(),
+    },
   ];
 }
 

@@ -5,11 +5,11 @@ import {
   selectInputOwner,
 } from "./input-owner-controller.js";
 import {
-  clampTaskScroll,
+  clampTranscriptScroll,
   computeScrollViewportOffset,
-  createInitialTaskScroll,
-  reduceTaskScroll,
-} from "./task-scroll-state.js";
+  createInitialTranscriptScroll,
+  reduceTranscriptScroll,
+} from "./transcript-scroll-state.js";
 
 type ShellViewModelContext = Parameters<typeof import("../view-model.js").createShellViewModel>[0];
 
@@ -23,7 +23,7 @@ type MinimalTuiContext = {
   cache: Record<string, never>;
   config: { workspaceTrust: { recorded: true; level: "trusted" } };
   commandPanelState?: import("../types.js").CommandPanelView;
-  taskScrollState?: import("../types.js").TaskScrollView;
+  transcriptScrollState?: import("../types.js").TranscriptScrollView;
 };
 
 /**
@@ -39,40 +39,72 @@ type MinimalTuiContext = {
 
 describe("TUI Interaction Contract — 滚动语义", () => {
   it("初始 scrollOffset=0 表示吸底（显示最新内容）", () => {
-    const init = createInitialTaskScroll();
+    const init = createInitialTranscriptScroll();
     expect(init.scrollOffset).toBe(0);
     expect(init.stickToBottom).toBe(true);
   });
 
-  it("PageUp（delta>0）离开底部", () => {
-    const next = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 5 });
-    expect(next.scrollOffset).toBe(5);
+  it("PageUp 语义动作按半页离开底部", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 20,
+      contentHeight: 80,
+    });
+    const next = reduceTranscriptScroll(measured, { type: "scroll", action: "halfPageUp" });
+    expect(next.scrollOffset).toBe(10);
     expect(next.stickToBottom).toBe(false);
   });
 
-  it("PageDown 回到底部", () => {
-    const up = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 10 });
-    const down = reduceTaskScroll(up, { type: "scroll", delta: -10 });
+  it("PageDown 语义动作回到底部", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 20,
+      contentHeight: 80,
+    });
+    const up = reduceTranscriptScroll(measured, { type: "scroll", action: "halfPageUp" });
+    const down = reduceTranscriptScroll(up, { type: "scroll", action: "halfPageDown" });
     expect(down.scrollOffset).toBe(0);
     expect(down.stickToBottom).toBe(true);
   });
 
   it("End 从任意位置回到底部", () => {
-    const up = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 20 });
-    const ended = reduceTaskScroll(up, { type: "end" });
+    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), { type: "scroll", delta: 20 });
+    const ended = reduceTranscriptScroll(up, { type: "end" });
     expect(ended.scrollOffset).toBe(0);
     expect(ended.stickToBottom).toBe(true);
   });
 
+  it("Home/top 使用测量上界跳到顶部", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 10,
+      contentHeight: 35,
+    });
+    const top = reduceTranscriptScroll(measured, { type: "scroll", action: "top" });
+    expect(top.scrollOffset).toBe(25);
+    expect(top.stickToBottom).toBe(false);
+  });
+
+  it("旧 delta 兼容路径仍被 clamp 到测量上界", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 10,
+      contentHeight: 25,
+    });
+    const next = reduceTranscriptScroll(measured, { type: "scroll", delta: 100 });
+    expect(next.scrollOffset).toBe(15);
+    expect(next.stickToBottom).toBe(false);
+  });
+
   it("clamp 防止滚动超出内容范围", () => {
-    const up = reduceTaskScroll(createInitialTaskScroll(), { type: "scroll", delta: 100 });
-    const clamped = clampTaskScroll(up, 15);
+    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), { type: "scroll", delta: 100 });
+    const clamped = clampTranscriptScroll(up, 15);
     expect(clamped.scrollOffset).toBe(15);
     expect(clamped.hasOverflow).toBe(true);
   });
 
   it("内容未溢出时 hasOverflow=false", () => {
-    const clamped = clampTaskScroll(createInitialTaskScroll(), 0);
+    const clamped = clampTranscriptScroll(createInitialTranscriptScroll(), 0);
     expect(clamped.hasOverflow).toBe(false);
     expect(clamped.scrollOffset).toBe(0);
   });
@@ -222,7 +254,7 @@ describe("TUI Interaction Contract — Todo 预算分类", () => {
 });
 
 describe("TUI Interaction Contract — 面板可见性（view-model 层）", () => {
-  it("commandPanel 打开时 taskScroll 保留用户滚动位置（不强制 stickToBottom）", async () => {
+  it("commandPanel 打开时 transcriptScroll 保留用户滚动位置（不强制 stickToBottom）", async () => {
     const { createShellViewModel } = await import("../view-model.js");
     const context: MinimalTuiContext = {
       language: "zh-CN" as const,
@@ -234,17 +266,17 @@ describe("TUI Interaction Contract — 面板可见性（view-model 层）", () 
       cache: {},
       config: { workspaceTrust: { recorded: true, level: "trusted" } },
       commandPanelState: { title: "Test", summary: ["line"] },
-      taskScrollState: { scrollOffset: 10, stickToBottom: false },
+      transcriptScrollState: { scrollOffset: 10, stickToBottom: false },
     };
     const vm = createShellViewModel(context as unknown as ShellViewModelContext, {
       viewMode: "task",
       outputBlocks: [{ id: "b1", kind: "details", status: "info", title: "old", summary: "old" }],
     });
-    expect(vm.taskScroll?.stickToBottom).toBe(false);
-    expect(vm.taskScroll?.scrollOffset).toBe(10);
+    expect(vm.transcriptScroll?.stickToBottom).toBe(false);
+    expect(vm.transcriptScroll?.scrollOffset).toBe(10);
   });
 
-  it("面板关闭后 taskScroll 恢复用户滚动位置", async () => {
+  it("面板关闭后 transcriptScroll 恢复用户滚动位置", async () => {
     const { createShellViewModel } = await import("../view-model.js");
     const context: MinimalTuiContext = {
       language: "zh-CN" as const,
@@ -255,14 +287,14 @@ describe("TUI Interaction Contract — 面板可见性（view-model 层）", () 
       backgroundTasks: [],
       cache: {},
       config: { workspaceTrust: { recorded: true, level: "trusted" } },
-      taskScrollState: { scrollOffset: 7, stickToBottom: false },
+      transcriptScrollState: { scrollOffset: 7, stickToBottom: false },
     };
     const vm = createShellViewModel(context as unknown as ShellViewModelContext, {
       viewMode: "task",
       outputBlocks: [{ id: "b1", kind: "details", status: "info", title: "old", summary: "old" }],
     });
-    expect(vm.taskScroll?.scrollOffset).toBe(7);
-    expect(vm.taskScroll?.stickToBottom).toBe(false);
+    expect(vm.transcriptScroll?.scrollOffset).toBe(7);
+    expect(vm.transcriptScroll?.stickToBottom).toBe(false);
   });
 });
 

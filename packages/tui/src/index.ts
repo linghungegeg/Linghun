@@ -215,7 +215,12 @@ import {
 import {
   COMMAND_PROPOSAL_TOOL_NAME,
   EXECUTE_EXTRA_TOOL_NAME,
+  INDEX_OPERATION_TOOL_NAME,
+  RUN_VERIFICATION_TOOL_NAME,
+  RUN_WORKFLOW_TOOL_NAME,
   SEARCH_EXTRA_TOOLS_NAME,
+  START_AGENT_TOOL_NAME,
+  WRITE_REPORT_TOOL_NAME,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
@@ -506,6 +511,43 @@ import {
   formatToolOutput,
   formatToolStart,
 } from "./tool-output-presenter.js";
+import {
+  applyToolResultBudgetToMessages,
+  formatToolResultBudgetEvidenceSummary,
+  formatToolResultBudgetSystemEvent,
+  type ToolResultBudgetRecord,
+} from "./tool-result-budget.js";
+import {
+  LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
+  LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
+  LINGHUN_BYTES_PER_TOKEN,
+  LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
+  LINGHUN_MAX_AGENTIC_TURNS,
+  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
+  LINGHUN_MAX_TOOL_RESULT_BYTES,
+  LINGHUN_MAX_TOOL_RESULT_TOKENS,
+  LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+  LINGHUN_TASK_MAX_OUTPUT_DEFAULT,
+  LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
+} from "./runtime-budget.js";
+export {
+  LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
+  LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
+  LINGHUN_BYTES_PER_TOKEN,
+  LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
+  LINGHUN_MAX_AGENTIC_TURNS,
+  LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS,
+  LINGHUN_MAX_AGENT_CHILD_TURNS,
+  LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS,
+  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
+  LINGHUN_MAX_TOOL_RESULT_BYTES,
+  LINGHUN_MAX_TOOL_RESULT_TOKENS,
+  LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+  LINGHUN_TASK_MAX_OUTPUT_DEFAULT,
+  LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
+} from "./runtime-budget.js";
 import { type MessageKey, messages } from "./tui-messages.js";
 import {
   ShellBlockOutput,
@@ -1028,6 +1070,12 @@ type PendingLocalApproval =
       continuation?: PendingModelContinuation;
     }
   | {
+      kind: "report_write_tool";
+      toolCall: ModelToolCall;
+      sessionId: string;
+      continuation?: PendingModelContinuation;
+    }
+  | {
       kind: "memory_mutation";
       sessionId: string;
       mutation: MemoryMutation;
@@ -1070,6 +1118,22 @@ function runtimeFromContinuation(continuation: PendingModelContinuation): Select
     ),
     reasoningSent: continuation.reasoningSent,
   };
+}
+
+async function prepareMessagesForProviderWithToolResultBudget(
+  messages: ModelMessage[],
+  context: TuiContext,
+  sessionId: string,
+): Promise<ModelMessage[]> {
+  const budgeted = await applyToolResultBudgetToMessages(messages, {
+    projectPath: context.projectPath,
+    sessionId,
+  });
+  if (budgeted.records.length === 0) return messages;
+  for (const record of budgeted.records) {
+    await recordToolResultBudgetEvidence(context, sessionId, record);
+  }
+  return budgeted.messages;
 }
 
 function createSingleToolCallContinuation(
@@ -1251,7 +1315,7 @@ export type TuiContext = {
    * D.13Q-UX Task Surface — 任务区滚动状态。home 模式下不读取；task/pending
    * 模式默认为 { scrollOffset: 0, stickToBottom: true }。
    */
-  taskScrollState?: import("./shell/types.js").TaskScrollView;
+  transcriptScrollState?: import("./shell/types.js").TranscriptScrollView;
 };
 
 const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1260,10 +1324,9 @@ const MIN_CACHE_HISTORY_SIZE = 1;
 const MAX_CACHE_HISTORY_SIZE = 200;
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
-const MAX_MODEL_TOOL_ROUNDS = 4;
-const MAX_TODO_ONLY_CONSECUTIVE_ROUNDS = 1;
-const MAX_MODEL_TOTAL_TOOL_ROUNDS = 8;
-const MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES = 1;
+const MAX_TODO_ONLY_CONSECUTIVE_ROUNDS = LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS;
+const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS;
+const MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES = LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES;
 const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
 const PROJECT_RULES_STATUS_WIDTH = 160;
@@ -1828,22 +1891,56 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
-      // ─── D.13Q-UX Task Surface — 任务区滚动 ─────────────────────────────────
-      // 推进逻辑下沉到 reduceTaskScroll 纯函数（packages/tui/src/shell/models/
-      // task-scroll-state.ts），保持 controller 层只做事件路由 + rerender。
-      if (event.type === "task-scroll") {
-        const { reduceTaskScroll } = await import("./shell/models/task-scroll-state.js");
-        context.taskScrollState = reduceTaskScroll(context.taskScrollState, {
-          type: "scroll",
-          delta: event.delta,
+      // ─── Main transcript scroll ─────────────────────────────────────────────
+      if (event.type === "transcript-scroll") {
+        const { reduceTranscriptScroll } = await import(
+          "./shell/models/transcript-scroll-state.js"
+        );
+        context.transcriptScrollState =
+          "action" in event
+            ? reduceTranscriptScroll(context.transcriptScrollState, {
+                type: "scroll",
+                action: event.action,
+              })
+            : reduceTranscriptScroll(context.transcriptScrollState, {
+                type: "scroll",
+                delta: event.delta,
+              });
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "transcript-scroll-measure") {
+        const { reduceTranscriptScroll } = await import(
+          "./shell/models/transcript-scroll-state.js"
+        );
+        context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+          type: "measure",
+          viewportHeight: event.viewportHeight,
+          contentHeight: event.contentHeight,
         });
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
       }
-      if (event.type === "task-scroll-end") {
-        const { reduceTaskScroll } = await import("./shell/models/task-scroll-state.js");
-        context.taskScrollState = reduceTaskScroll(context.taskScrollState, { type: "end" });
+      if (event.type === "transcript-scroll-end") {
+        const { reduceTranscriptScroll } = await import(
+          "./shell/models/transcript-scroll-state.js"
+        );
+        context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+          type: "end",
+        });
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "transcript-scroll-top") {
+        const { reduceTranscriptScroll } = await import(
+          "./shell/models/transcript-scroll-state.js"
+        );
+        context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+          type: "top",
+        });
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
         return;
@@ -2871,7 +2968,7 @@ async function runWorkflowSteps(
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
     if (result.status !== "completed") {
-      await finishWorkflowRun(runId, "failed", result.summary, context, sessionId, workflowTask);
+      await finishWorkflowRun(runId, result.status, result.summary, context, sessionId, workflowTask);
       return;
     }
   }
@@ -2926,7 +3023,7 @@ async function executeWorkflowStep(
           evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
         };
       }
-      if (agent?.summary.includes("权限管道拒绝")) {
+      if (agent?.status === "blocked" || agent?.summary.includes("权限管道拒绝")) {
         const summary = `workflow step ${request.sliceId} blocked: ${agent.summary}`;
         await captureWorkflowFailureLearning(request, summary, context);
         return {
@@ -3082,7 +3179,7 @@ async function finishWorkflowRun(
     context.workflows.activeRun.result = status === "completed" ? "partial" : status;
   }
   task.status = status === "completed" ? "completed" : "failed";
-  task.result = status === "completed" ? "partial" : "fail";
+  task.result = status === "completed" || status === "blocked" ? "partial" : "fail";
   task.currentStep = summary;
   task.updatedAt = now;
   task.lastOutputAt = now;
@@ -4219,6 +4316,30 @@ async function executePermissionApprove(
     }
     return;
   }
+  if (approval.kind === "report_write_tool") {
+    const result = await executeApprovedModelToolUse(
+      { ...approval.toolCall, name: "Write" },
+      "Write",
+      context,
+      approval.sessionId,
+      output,
+      undefined,
+      approval.continuation?.reportWriteGuard,
+    );
+    if (gateway && approval.continuation) {
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(result),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+    }
+    if (!context.isInkSession) {
+      writeLightHints(output, context);
+      writeStatus(output, context);
+    }
+    return;
+  }
   if (approval.kind === "memory_mutation") {
     await executeMemoryMutation(context, output, approval.mutation);
     if (!context.isInkSession) writeStatus(output, context);
@@ -4396,16 +4517,52 @@ async function executePermissionDeny(
     );
     const deniedResult = {
       ok: false,
-      tool: approval.indexAction === "repair" ? INDEX_REPAIR : INDEX_REFRESH,
+      tool: approval.toolCall.name,
       text: `${outcomeText}; the index was NOT refreshed.`,
       outcome: cancelled ? "cancelled" : "denied",
       evidenceId: evidence.id,
     };
-    await appendToolResultEvent(
+    await appendDeferredToolResultEvent(
       context,
       approval.sessionId,
       approval.toolCall.id,
+      approval.toolCall.name,
+      deniedResult.text,
+      true,
+      evidence.id,
+    );
+    if (gateway && approval.continuation) {
+      writeLine(output, formatPermissionDenialPrimary(context.language));
+      approval.continuation.messages.push({
+        role: "tool",
+        tool_call_id: approval.toolCall.id,
+        content: JSON.stringify(deniedResult),
+      });
+      await continueModelAfterToolResults(approval.continuation, context, gateway, output);
+      writeLightHints(output, context);
+      writeStatus(output, context);
+      return;
+    }
+  }
+  if (approval.kind === "report_write_tool") {
+    const evidence = await recordToolFailureEvidence(
+      context,
+      approval.sessionId,
       "Write",
+      `${outcomeText}: WriteReport`,
+    );
+    const deniedResult = {
+      ok: false,
+      tool: WRITE_REPORT_TOOL_NAME,
+      text: `${outcomeText}; the report file was NOT written.`,
+      outcome: cancelled ? "cancelled" : "denied",
+      evidenceId: evidence.id,
+    };
+    await appendDeferredToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      WRITE_REPORT_TOOL_NAME,
       deniedResult.text,
       true,
       evidence.id,
@@ -5985,6 +6142,20 @@ configureJobAgentCommandRuntime({
   writeStatus,
   captureFailureLearning,
   recordVerificationEvidence,
+  createAgentGatewayContinuation: (context, agent) => {
+    const runtime = getSelectedModelRuntime(context, agent.role);
+    if (!context.modelGateway) return null;
+    return {
+      gateway: context.modelGateway,
+      provider: runtime.provider,
+      model: runtime.model,
+      endpointProfile: runtime.endpointProfile,
+      reasoningLevel: runtime.reasoningLevel,
+      reasoningSent: runtime.reasoningSent,
+    };
+  },
+  recordAgentExecutionEvidence,
+  recordToolResultBudgetEvidence,
 });
 
 function normalizePath(path: string): string {
@@ -6548,6 +6719,50 @@ async function recordVerificationEvidence(
       severity: report.status === "fail" ? "high" : "medium",
     });
   }
+}
+
+async function recordAgentExecutionEvidence(
+  context: TuiContext,
+  sessionId: string,
+  agent: AgentRun,
+  result: { status: "completed" | "failed" | "blocked"; summary: string },
+): Promise<string | undefined> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `agent_execution ${agent.type} ${result.status}: ${result.summary}`,
+    `agent:${agent.id}`,
+    result.status === "completed"
+      ? ["agent_execution", `agent_${agent.type}`, "action_executed"]
+      : ["tool_failure", "agent_execution", `agent_${agent.type}`],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  return evidence.id;
+}
+
+async function recordToolResultBudgetEvidence(
+  context: TuiContext,
+  sessionId: string,
+  record: ToolResultBudgetRecord,
+): Promise<string> {
+  const evidence = createEvidenceRecord(
+    "command_output",
+    formatToolResultBudgetEvidenceSummary(record),
+    record.artifact.relativePath,
+    ["tool_result_budget", "artifact", `toolUseId:${record.toolUseId}`],
+  );
+  evidence.fullOutputPath = record.artifact.path;
+  evidence.outputPath = record.artifact.path;
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  await appendSystemEvent(context, sessionId, formatToolResultBudgetSystemEvent(record), "info");
+  return evidence.id;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -7374,11 +7589,17 @@ async function sendMessage(
             : "当前 provider/model 不支持 tool calling；本轮降级为纯文本，不发送 tools/toolChoice。可运行 /model doctor 查看详情。",
         );
       }
+      const requestMessages = await prepareMessagesForProviderWithToolResultBudget(
+        messagesForProvider,
+        context,
+        sessionId,
+      );
+      messagesForProvider = requestMessages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         selectedRuntime.provider,
         {
-          messages: messagesForProvider,
+          messages: requestMessages,
           model: selectedRuntime.model,
           endpointProfile: selectedRuntime.endpointProfile,
           ...(selectedRuntime.reasoningSent
@@ -7618,17 +7839,16 @@ async function sendMessage(
           continue;
         }
       }
-      const reachedEvidenceLimit = evidenceRounds >= MAX_MODEL_TOOL_ROUNDS;
       const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
-      if (reachedEvidenceLimit || reachedTotalLimit) {
+      if (reachedTotalLimit) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"
-            ? "Reached the tool-call limit for this turn. Only planning/Todo was executed; no repository verification was performed. If verification is needed, run the matching command or send the request again."
-            : "本轮工具调用已达上限，仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。"
+            ? `Execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Only planning/Todo was executed; no repository verification was performed. If verification is needed, run the matching command or send the request again.`
+            : `执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。`
           : context.language === "en-US"
-            ? "Reached the tool-call limit for this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
-            : "本轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。";
+            ? `Execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again.`
+            : `执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。`;
         writeLine(output, limitMsg);
         const finalText = await streamFinalModelAnswerWithoutTools(
           {
@@ -8121,11 +8341,17 @@ async function continueModelAfterToolResults(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      const requestMessages = await prepareMessagesForProviderWithToolResultBudget(
+        continuation.messages,
+        context,
+        sessionId,
+      );
+      continuation.messages = requestMessages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         continuation.provider,
         {
-          messages: continuation.messages,
+          messages: requestMessages,
           model: continuation.model,
           endpointProfile: continuation.endpointProfile,
           ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
@@ -8337,17 +8563,16 @@ async function continueModelAfterToolResults(
           continue;
         }
       }
-      const reachedEvidenceLimit = evidenceRounds >= MAX_MODEL_TOOL_ROUNDS;
       const reachedTotalLimit = round + 1 >= MAX_MODEL_TOTAL_TOOL_ROUNDS;
-      if (reachedEvidenceLimit || reachedTotalLimit) {
+      if (reachedTotalLimit) {
         const onlyPlanning = evidenceRounds === 0;
         const limitMsg = onlyPlanning
           ? context.language === "en-US"
-            ? "Reached the tool-call limit while continuing this turn. Only planning/Todo was executed; no repository verification was performed."
-            : "续轮工具调用已达上限，仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。"
+            ? `Continuation execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Only planning/Todo was executed; no repository verification was performed.`
+            : `续轮执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。仅完成计划整理，尚未执行仓库验证。如需验证请运行对应命令或重新发起请求。`
           : context.language === "en-US"
-            ? "Reached the tool-call limit while continuing this turn. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again."
-            : "续轮工具调用已达上限，将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。";
+            ? `Continuation execution turn budget exhausted after ${MAX_MODEL_TOTAL_TOOL_ROUNDS} turns. Summarizing with what was gathered so far; no further tools will run. If an action still needs to finish (for example refreshing the index), run the matching command such as /index refresh, or send the request again.`
+            : `续轮执行轮次预算已耗尽（${MAX_MODEL_TOTAL_TOOL_ROUNDS} 轮）。将基于目前已收集的信息给出回答，不再继续调用工具。如果还有动作需要完成（例如刷新索引），请运行对应命令（如 /index refresh）或重新发起请求。`;
         writeLine(output, limitMsg);
         const finalText = await streamFinalModelAnswerWithoutTools(
           continuation,
@@ -8597,6 +8822,15 @@ async function executeModelToolUse(
   // mutating Refresh/Repair 走既有 pendingLocalApproval / PermissionPanel 确认管道。
   if (isIndexToolName(toolCall.name)) {
     return executeIndexToolUse(toolCall, context, sessionId, output, continuation);
+  }
+  if (
+    toolCall.name === START_AGENT_TOOL_NAME ||
+    toolCall.name === RUN_WORKFLOW_TOOL_NAME ||
+    toolCall.name === INDEX_OPERATION_TOOL_NAME ||
+    toolCall.name === RUN_VERIFICATION_TOOL_NAME ||
+    toolCall.name === WRITE_REPORT_TOOL_NAME
+  ) {
+    return executeLinghunControlToolUse(toolCall, context, sessionId, output, continuation);
   }
   const toolName = normalizeToolName(toolCall.name);
   if (!toolName) {
@@ -8990,6 +9224,23 @@ async function executeDeferredDispatchToolUse(
         clearRequestActivity(context);
         return { ok: false, tool: dispatchName, text };
       }
+      const structuredTool = executableCommandProposalTool(command);
+      if (structuredTool) {
+        const text =
+          context.language === "en-US"
+            ? `CommandProposal is not allowed for executable ${structuredTool} requests. Call the real structured tool instead.`
+            : `CommandProposal 不能用于可执行的 ${structuredTool} 请求。请改用真实结构化工具调用。`;
+        await appendDeferredToolResultEvent(
+          context,
+          sessionId,
+          toolCall.id,
+          dispatchName,
+          text,
+          true,
+        );
+        clearRequestActivity(context);
+        return { ok: false, tool: dispatchName, text };
+      }
       const text =
         context.language === "en-US"
           ? `Suggested command: ${command}${reason ? ` (${reason})` : ""}`
@@ -9118,6 +9369,348 @@ async function executeDeferredDispatchToolUse(
   }
 }
 
+async function executeLinghunControlToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  continuation?: PendingModelContinuation,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  pendingApproval?: boolean;
+}> {
+  startRequestActivity(output, context, "tool_running", { toolName: toolCall.name });
+  await context.store.appendEvent(sessionId, {
+    type: "tool_call_start",
+    id: toolCall.id,
+    name: toolCall.name,
+    input: toolCall.input,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    if (toolCall.name === START_AGENT_TOOL_NAME) {
+      const input = parseStartAgentToolInput(toolCall.input);
+      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      const before = new Set(context.agents.map((agent) => agent.id));
+      await handleForkCommand([input.role, input.task], context, output);
+      const agent = context.agents.find((item) => !before.has(item.id));
+      const ok = agent?.status === "completed";
+      const text = agent
+        ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
+        : "Agent runtime did not start.";
+      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
+        agentId: agent?.id,
+        status: agent?.status ?? "blocked",
+      });
+    }
+    if (toolCall.name === RUN_WORKFLOW_TOOL_NAME) {
+      const input = parseStringFieldToolInput(toolCall.input, "goal");
+      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      await runWorkflowSteps(input.value, context, output);
+      const run = context.workflows.activeRun;
+      const ok = run?.status === "completed";
+      const text = run
+        ? `Workflow ${run.id} ${run.status}; result=${run.result}.`
+        : "Workflow runtime did not start.";
+      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
+        workflowId: run?.id,
+        status: run?.status ?? "blocked",
+        result: run?.result ?? "blocked",
+      });
+    }
+    if (toolCall.name === INDEX_OPERATION_TOOL_NAME) {
+      const input = parseIndexOperationToolInput(toolCall.input);
+      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      const mappedName =
+        input.action === "inspect"
+          ? INDEX_STATUS_INSPECT
+          : input.action === "repair"
+            ? INDEX_REPAIR
+            : INDEX_REFRESH;
+      const mappedInput = { force: input.force };
+      const action = input.action === "init_fast" ? "init fast" : undefined;
+      return executeIndexToolUse(
+        { id: toolCall.id, name: mappedName, input: mappedInput },
+        context,
+        sessionId,
+        output,
+        continuation,
+        action,
+        INDEX_OPERATION_TOOL_NAME,
+        false,
+      );
+    }
+    if (toolCall.name === RUN_VERIFICATION_TOOL_NAME) {
+      const input = parseVerificationToolInput(toolCall.input);
+      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      await runWorkflowVerificationStep(input.level, context, output);
+      const report = context.lastVerification;
+      const ok = report?.status === "pass";
+      const text = report
+        ? `Verification ${report.status.toUpperCase()}: ${report.summary}`
+        : "Verification runner did not produce a report.";
+      return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
+        status: report?.status ?? "partial",
+        reportId: report?.id,
+      });
+    }
+    if (toolCall.name === WRITE_REPORT_TOOL_NAME) {
+      return executeWriteReportToolUse(toolCall, context, sessionId, output, continuation);
+    }
+    return await finishControlToolFailure(
+      toolCall,
+      context,
+      sessionId,
+      output,
+      `Unknown Linghun control tool: ${toolCall.name}`,
+    );
+  } finally {
+    clearRequestActivity(context);
+  }
+}
+
+function executableCommandProposalTool(command: string): string | undefined {
+  const normalized = command.trim().toLowerCase();
+  if (/^\/(?:fork|agents?\b|agent\b)/u.test(normalized)) return START_AGENT_TOOL_NAME;
+  if (/^\/workflows?\s+(?:run|plan|enable|disable|[^\s]+)/u.test(normalized)) {
+    return RUN_WORKFLOW_TOOL_NAME;
+  }
+  if (/^\/index\b/u.test(normalized)) return INDEX_OPERATION_TOOL_NAME;
+  if (/^\/verify\b/u.test(normalized)) return RUN_VERIFICATION_TOOL_NAME;
+  if (/^\/(?:report|review)\b/u.test(normalized)) return WRITE_REPORT_TOOL_NAME;
+  if (/^\/(?:write|edit|multiedit)\b/u.test(normalized)) return "Write/Edit";
+  return undefined;
+}
+
+function parseStartAgentToolInput(input: unknown):
+  | { ok: true; role: AgentType; task: string }
+  | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const role = typeof obj.role === "string" ? obj.role : "";
+  const task = obj.task;
+  if (!isAgentType(role) || typeof task !== "string" || !task.trim()) {
+    return { ok: false, text: "StartAgent requires role and task." };
+  }
+  return { ok: true, role, task: task.trim() };
+}
+
+function parseStringFieldToolInput(
+  input: unknown,
+  field: string,
+): { ok: true; value: string } | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const value = obj[field];
+  if (typeof value !== "string" || !value.trim()) {
+    return { ok: false, text: `${field} must be a non-empty string.` };
+  }
+  return { ok: true, value: value.trim() };
+}
+
+function parseIndexOperationToolInput(input: unknown):
+  | { ok: true; action: "inspect" | "refresh" | "init_fast" | "repair"; force?: boolean }
+  | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const action = obj.action;
+  if (action !== "inspect" && action !== "refresh" && action !== "init_fast" && action !== "repair") {
+    return { ok: false, text: "IndexOperation requires action inspect|refresh|init_fast|repair." };
+  }
+  return { ok: true, action, force: typeof obj.force === "boolean" ? obj.force : undefined };
+}
+
+function parseVerificationToolInput(input: unknown):
+  | { ok: true; level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint" }
+  | { ok: false; text: string } {
+  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const level = obj.level;
+  if (
+    level !== "smoke" &&
+    level !== "focused" &&
+    level !== "typecheck" &&
+    level !== "test" &&
+    level !== "build" &&
+    level !== "lint"
+  ) {
+    return { ok: false, text: "RunVerification requires a valid level." };
+  }
+  return { ok: true, level };
+}
+
+async function finishControlToolFailure(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  text: string,
+) {
+  return finishControlToolResult(toolCall, context, sessionId, output, text, true);
+}
+
+function controlToolEvidenceSpec(
+  toolName: string,
+  isError: boolean,
+): { source: string; supportsClaims: string[] } {
+  if (toolName === START_AGENT_TOOL_NAME) {
+    return {
+      source: "agent-execution",
+      supportsClaims: isError
+        ? ["tool_failure", "agent_execution"]
+        : ["agent_execution", "action_executed"],
+    };
+  }
+  if (toolName === RUN_WORKFLOW_TOOL_NAME) {
+    return {
+      source: "workflow-execution",
+      supportsClaims: isError
+        ? ["tool_failure", "workflow_execution"]
+        : ["workflow_execution", "action_executed"],
+    };
+  }
+  if (toolName === INDEX_OPERATION_TOOL_NAME) {
+    return {
+      source: "index-operation",
+      supportsClaims: isError
+        ? ["tool_failure", "index_operation"]
+        : ["index_operation", "action_executed"],
+    };
+  }
+  if (toolName === RUN_VERIFICATION_TOOL_NAME) {
+    return {
+      source: "verification-result",
+      supportsClaims: isError
+        ? ["tool_failure", "verification_result"]
+        : ["verification_result", "verified", "已验证"],
+    };
+  }
+  if (toolName === WRITE_REPORT_TOOL_NAME) {
+    return {
+      source: "report-write",
+      supportsClaims: isError
+        ? ["tool_failure", "report_write"]
+        : ["report_write", "write_result", "action_executed"],
+    };
+  }
+  return {
+    source: `control-tool:${toolName}`,
+    supportsClaims: isError ? ["tool_failure", toolName] : [toolName, "action_executed"],
+  };
+}
+
+async function finishControlToolResult(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  text: string,
+  isError: boolean,
+  data?: unknown,
+) {
+  const spec = controlToolEvidenceSpec(toolCall.name, isError);
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `${toolCall.name}: ${truncateDisplay(text, 160)}`,
+    spec.source,
+    spec.supportsClaims,
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendDeferredToolResultEvent(
+    context,
+    sessionId,
+    toolCall.id,
+    toolCall.name,
+    { text, data },
+    isError,
+    evidence?.id,
+  );
+  writeLine(output, text);
+  return { ok: !isError, tool: toolCall.name, text, data, evidenceId: evidence?.id };
+}
+
+async function executeWriteReportToolUse(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  continuation?: PendingModelContinuation,
+) {
+  const obj =
+    toolCall.input && typeof toolCall.input === "object" && !Array.isArray(toolCall.input)
+      ? (toolCall.input as Record<string, unknown>)
+      : {};
+  const path = obj.path;
+  const content = obj.content;
+  if (typeof path !== "string" || !path.trim() || typeof content !== "string") {
+    return finishControlToolFailure(
+      toolCall,
+      context,
+      sessionId,
+      output,
+      "WriteReport requires path and content.",
+    );
+  }
+  const writeCall: ModelToolCall = {
+    ...toolCall,
+    name: "Write",
+    input: {
+      path,
+      content,
+      ...(typeof obj.expectedHash === "string" ? { expectedHash: obj.expectedHash } : {}),
+    },
+  };
+  const permission = await decidePermission("Write", writeCall.input, context, sessionId);
+  await context.store.appendEvent(sessionId, {
+    type: "permission_request",
+    request: permission.request,
+    createdAt: new Date().toISOString(),
+  });
+  await context.store.appendEvent(sessionId, {
+    type: "permission_result",
+    requestId: permission.request.id,
+    decision: permission.decision,
+    reason: permission.reason,
+    createdAt: new Date().toISOString(),
+  });
+  if (permission.decision === "ask") {
+    context.pendingLocalApproval = {
+      kind: "report_write_tool",
+      toolCall: writeCall,
+      sessionId,
+      continuation,
+    };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+    }
+    return {
+      ok: false,
+      tool: WRITE_REPORT_TOOL_NAME,
+      text: `ask: ${permission.reason}`,
+      pendingApproval: true,
+    };
+  }
+  if (permission.decision !== "allow") {
+    const text = `${permission.decision}: ${permission.reason}`;
+    const evidence = await recordToolFailureEvidence(context, sessionId, "Write", text);
+    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+    return { ok: false, tool: WRITE_REPORT_TOOL_NAME, text, evidenceId: evidence.id };
+  }
+  return executeApprovedModelToolUse(
+    writeCall,
+    "Write",
+    context,
+    sessionId,
+    output,
+    permission.preflight,
+    continuation?.reportWriteGuard,
+  );
+}
+
 async function appendDeferredToolResultEvent(
   context: TuiContext,
   sessionId: string,
@@ -9172,6 +9765,9 @@ async function executeIndexToolUse(
   sessionId: string,
   output: Writable,
   continuation?: PendingModelContinuation,
+  forcedAction?: "init fast",
+  resultToolName?: string,
+  appendToolStart = true,
 ): Promise<{
   ok: boolean;
   tool: string;
@@ -9181,13 +9777,16 @@ async function executeIndexToolUse(
   pendingApproval?: boolean;
 }> {
   const name = toolCall.name;
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
+  const dispatchName = resultToolName ?? name;
+  if (appendToolStart) {
+    await context.store.appendEvent(sessionId, {
+      type: "tool_call_start",
+      id: toolCall.id,
+      name,
+      input: toolCall.input,
+      createdAt: new Date().toISOString(),
+    });
+  }
 
   if (name === INDEX_STATUS_INSPECT) {
     // 只读：刷新状态读取（不重建），返回摘要。明确标注"仅检查，未刷新"。
@@ -9209,13 +9808,22 @@ async function executeIndexToolUse(
     );
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
-    await appendToolResultEvent(context, sessionId, toolCall.id, "Read", text, false, evidence.id);
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      dispatchName,
+      { text },
+      false,
+      evidence.id,
+    );
     writeLine(output, text);
     return { ok: true, tool: name, text, evidenceId: evidence.id };
   }
 
   // IndexRefresh / IndexRepair — mutating：走权限确认。
-  const action: "refresh" | "repair" = name === INDEX_REPAIR ? "repair" : "refresh";
+  const action: "init fast" | "refresh" | "repair" =
+    forcedAction ?? (name === INDEX_REPAIR ? "repair" : "refresh");
   const parsed = parseIndexRefreshInput(toolCall.input);
   // 复用既有 decidePermission（Write 语义代表索引写入/外部 runtime 写入）。default /
   // auto-review 下 Write 为 ask；命中允许规则或 full-access 时直接执行。
@@ -9261,7 +9869,15 @@ async function executeIndexToolUse(
       "Write",
       `index ${action} ${text}`,
     );
-    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      dispatchName,
+      text,
+      true,
+      evidence.id,
+    );
     return { ok: false, tool: name, text, evidenceId: evidence.id };
   }
   if (permission.decision === "ask") {
@@ -9269,7 +9885,7 @@ async function executeIndexToolUse(
     context.pendingLocalApproval = {
       kind: "index_tool",
       indexAction: action,
-      toolCall,
+      toolCall: { ...toolCall, name: dispatchName },
       sessionId,
       force: parsed.force,
       continuation,
@@ -9284,7 +9900,14 @@ async function executeIndexToolUse(
     return { ok: false, tool: name, text: `ask: ${permission.reason}`, pendingApproval: true };
   }
   // allow（命中允许规则 / full-access）：直接执行。
-  return executeApprovedIndexToolUse(toolCall, action, parsed.force, context, sessionId, output);
+  return executeApprovedIndexToolUse(
+    { ...toolCall, name: dispatchName },
+    action,
+    parsed.force,
+    context,
+    sessionId,
+    output,
+  );
 }
 
 // 用户确认（或已允许）后真实执行索引刷新/修复，复用受控 runtime 路径。
@@ -9302,17 +9925,31 @@ async function executeApprovedIndexToolUse(
   data?: unknown;
   evidenceId?: string;
 }> {
-  const name = action === "repair" ? INDEX_REPAIR : INDEX_REFRESH;
+  const name = toolCall.name;
+  const evidenceToolName =
+    name === INDEX_OPERATION_TOOL_NAME
+      ? INDEX_OPERATION_TOOL_NAME
+      : action === "repair"
+        ? INDEX_REPAIR
+        : INDEX_REFRESH;
   if (action !== "repair") {
     const guard = checkBackgroundStartGuard(context, "index", true);
     if (guard) {
-      const evidence = await recordToolFailureEvidence(
+    const evidence = await recordToolFailureEvidence(
+      context,
+      sessionId,
+      "Write",
+      `index ${action} resource guard: ${guard}`,
+    );
+      await appendDeferredToolResultEvent(
         context,
         sessionId,
-        "Write",
-        `index ${action} resource guard: ${guard}`,
+        toolCall.id,
+        evidenceToolName,
+        guard,
+        true,
+        evidence.id,
       );
-      await appendToolResultEvent(context, sessionId, toolCall.id, "Write", guard, true, evidence.id);
       writeLine(output, guard);
       return { ok: false, tool: name, text: guard, evidenceId: evidence.id };
     }
@@ -9356,7 +9993,15 @@ async function executeApprovedIndexToolUse(
     );
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
-    await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, false, evidence.id);
+    await appendDeferredToolResultEvent(
+      context,
+      sessionId,
+      toolCall.id,
+      evidenceToolName,
+      { text },
+      false,
+      evidence.id,
+    );
     if (!context.isInkSession) {
       writeLine(output, primaryText);
     } else if (!panelAlreadyShown) {
@@ -9370,7 +10015,15 @@ async function executeApprovedIndexToolUse(
     "Write",
     `index ${action}: ${text}`,
   );
-  await appendToolResultEvent(context, sessionId, toolCall.id, "Write", text, true, evidence.id);
+  await appendDeferredToolResultEvent(
+    context,
+    sessionId,
+    toolCall.id,
+    evidenceToolName,
+    text,
+    true,
+    evidence.id,
+  );
   if (!context.isInkSession) {
     writeLine(output, text);
   } else {

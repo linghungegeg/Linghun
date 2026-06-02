@@ -126,6 +126,17 @@ describe("model-loop-runtime", () => {
       expect(names).toContain("IndexStatusInspect");
       expect(names).toContain("IndexRefresh");
       expect(names).toContain("IndexRepair");
+      expect(names).toContain("IndexOperation");
+    });
+
+    it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
+      const names = createModelToolDefinitions().map((d) => d.name);
+      expect(names).toContain("StartAgent");
+      expect(names).toContain("RunWorkflow");
+      expect(names).toContain("RunVerification");
+      expect(names).toContain("WriteReport");
+      expect(names.indexOf("StartAgent")).toBeLessThan(names.indexOf("CommandProposal"));
+      expect(names.indexOf("RunWorkflow")).toBeLessThan(names.indexOf("CommandProposal"));
     });
 
     it("Mature UX Cutback: index tool descriptions match auto-review permission behavior", () => {

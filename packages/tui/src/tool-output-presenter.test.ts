@@ -222,6 +222,36 @@ describe("tool-output-presenter", () => {
       expect(cleaned).not.toContain("secret.ts");
     });
 
+    it("hides raw XML tool_use_error blocks from the main assistant stream", () => {
+      const raw =
+        '失败\n<tool_use_error call_id="bad-call">工具 call id 格式错误</tool_use_error>\n请重试';
+      const cleaned = sanitizeAssistantPrimaryText(raw, "zh-CN");
+
+      expect(cleaned).toContain("工具调用细节已隐藏");
+      expect(cleaned).toContain("失败");
+      expect(cleaned).toContain("请重试");
+      expect(cleaned).not.toContain("<tool_use_error");
+      expect(cleaned).not.toContain("call id 格式错误");
+      expect(cleaned).not.toContain("bad-call");
+    });
+
+    it("hides raw XML tool_use_error blocks split across stream deltas", () => {
+      const sanitizer = createAssistantPrimaryTextSanitizer("zh-CN");
+      const visible = [
+        sanitizer.push("失败\n<tool_use_"),
+        sanitizer.push('error call_id="bad-call">'),
+        sanitizer.push("工具 call id 格式错误</tool_use_error>\n请重试"),
+        sanitizer.flush(),
+      ].join("");
+
+      expect(visible).toContain("工具调用细节已隐藏");
+      expect(visible).toContain("失败");
+      expect(visible).toContain("请重试");
+      expect(visible).not.toContain("<tool_use_error");
+      expect(visible).not.toContain("call id 格式错误");
+      expect(visible).not.toContain("bad-call");
+    });
+
     it("hides raw JSON tool_use blocks from the main assistant stream", () => {
       const cleaned = sanitizeAssistantPrimaryText(
         '{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"secret.ts"}}',

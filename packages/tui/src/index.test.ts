@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
@@ -221,6 +221,32 @@ function mockOpenAiToolSequence(
   return requests;
 }
 
+function toolMessageContents(request: unknown): string[] {
+  const body = request as {
+    messages?: Array<{ role?: string; content?: string }>;
+    input?: Array<{ type?: string; output?: string }>;
+  };
+  return [
+    ...(body.messages ?? [])
+      .filter((message) => message.role === "tool" && typeof message.content === "string")
+      .map((message) => message.content as string),
+    ...(body.input ?? [])
+      .filter((item) => item.type === "function_call_output" && typeof item.output === "string")
+      .map((item) => item.output as string),
+  ];
+}
+
+async function expectBudgetArtifact(project: string, transcript: string): Promise<string> {
+  const match = transcript.match(/\.linghun\/session\/tool-results\/[^"\s]+\.txt/u);
+  expect(match?.[0]).toBeTruthy();
+  const artifactPath = join(project, match?.[0] ?? "");
+  await expect(stat(artifactPath)).resolves.toBeTruthy();
+  const artifact = await readFile(artifactPath, "utf8");
+  expect(transcript).toContain("tool_result_budget_persisted");
+  expect(transcript).toMatch(/sha256=[a-f0-9]{64}/u);
+  return artifact;
+}
+
 function mockOpenAiRawToolProtocolThenFinal(
   rawText: string,
   finalText = "已改用普通正文回答。",
@@ -344,6 +370,101 @@ function mockOpenAiToolSequenceWithFinalCalls(
             "data: [DONE]\n\n",
           ].join("")
         : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiStartAgentChildToolSequence(
+  childToolCount: number,
+  childFinalText?: string,
+): unknown[] {
+  const requests: unknown[] = [];
+  const requestText = (request: unknown): string => JSON.stringify(request);
+  const isChildAgentRequest = (request: unknown): boolean =>
+    requestText(request).includes("child agent running in an isolated sidechain transcript");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as {
+        messages?: Array<{ role?: string; content?: string }>;
+        tool_choice?: string;
+        toolChoice?: string;
+      };
+      requests.push(request);
+      const finalOnly = request.tool_choice === "none" || request.toolChoice === "none";
+      const isChildLoop = isChildAgentRequest(request);
+      let body: string;
+      if (requests.length === 1) {
+        body = [
+          `data: ${JSON.stringify({
+            id: "chatcmpl-start-agent",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-start-agent",
+                      type: "function",
+                      function: {
+                        name: "StartAgent",
+                        arguments: JSON.stringify({
+                          role: "worker",
+                          task: "连续读取 a.txt 后总结",
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join("");
+      } else if (isChildLoop) {
+        const childToolRequests = requests.filter((item) => {
+          const childRequest = item as {
+            messages?: Array<{ role?: string; content?: string }>;
+            tool_choice?: string;
+            toolChoice?: string;
+          };
+          const childFinalOnly =
+            childRequest.tool_choice === "none" || childRequest.toolChoice === "none";
+          return (
+            !childFinalOnly &&
+            isChildAgentRequest(childRequest)
+          );
+        }).length;
+        if (!finalOnly && childToolRequests <= childToolCount) {
+          body = [
+            `data: ${JSON.stringify({
+              id: `chatcmpl-child-${childToolRequests}`,
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: `call-child-read-${childToolRequests}`,
+                        type: "function",
+                        function: {
+                          name: "Read",
+                          arguments: JSON.stringify({ path: "a.txt" }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ].join("");
+        } else {
+          body = `data: ${JSON.stringify({ id: "chatcmpl-child-final", choices: [{ delta: { content: childFinalText ?? "child done" } }] })}\n\ndata: [DONE]\n\n`;
+        }
+      } else {
+        body = `data: ${JSON.stringify({ id: "chatcmpl-main-final", choices: [{ delta: { content: "主 agent 续轮完成。" } }] })}\n\ndata: [DONE]\n\n`;
+      }
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
@@ -2691,11 +2812,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Agent context package (trimmed)");
     expect(output.text).toContain("notIncluded=full transcript/full memory/full index/large logs");
-    expect(output.text).toContain("explorer 摘要");
-    expect(output.text).toContain("planner 摘要");
-    expect(output.text).toContain("verifier 摘要");
-    expect(output.text).toContain("session-scoped conservative verification");
-    expect(output.text).toContain("不是 durable job、不是第二套 job system、不是 Phase 17");
+    expect(output.text).toContain("explorer blocked：模型网关未就绪");
+    expect(output.text).toContain("planner blocked：模型网关未就绪");
+    expect(output.text).toContain("verifier 已运行真实验证");
     expect(output.text).toContain("Agents：");
     expect(output.text).toContain("inspect-cache-explorer");
     expect(output.text).toContain("displayName: inspect-cache-explorer");
@@ -2923,18 +3042,12 @@ describe("Phase 06 TUI slash commands", () => {
     const workflowTask = context.backgroundTasks.find((task) =>
       task.title.includes("Workflow: close product maturity gaps"),
     );
-    expect(workflowTask).toMatchObject({ kind: "job", status: "completed", result: "partial" });
+    expect(workflowTask).toMatchObject({ kind: "job", status: "failed", result: "partial" });
     expect(context.workflows.activeRun).toMatchObject({
-      status: "completed",
-      result: "partial",
+      status: "blocked",
+      result: "blocked",
     });
-    expect(context.workflows.activeRun?.steps.map((step) => step.status)).toEqual([
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-    ]);
+    expect(context.workflows.activeRun?.steps.some((step) => step.status === "blocked")).toBe(true);
     const transcript = (await store.resume(session.id)).transcript;
     expect(transcript.some((event) => event.type === "workflow_start")).toBe(true);
     expect(transcript.some((event) => event.type === "workflow_step_start")).toBe(true);
@@ -2942,14 +3055,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript.some((event) => event.type === "workflow_end")).toBe(true);
     expect(transcript.some((event) => event.type === "agent_start")).toBe(true);
     expect(transcript.some((event) => event.type === "agent_end")).toBe(true);
-    expect(transcript.some((event) => event.type === "verification_start")).toBe(true);
-    expect(transcript.some((event) => event.type === "verification_end")).toBe(true);
     expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
-    expect(output.text).toContain("completed with PARTIAL result");
+    expect(output.text).toContain("模型网关未就绪");
     expect(output.text).not.toContain("PASS：");
   });
 
-  it("workflow run routes mutating worker steps through permission and failure learning", async () => {
+  it("workflow run blocks mutating worker steps when the real agent loop is unavailable", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -2965,20 +3076,20 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/workflows run write workflow-permission.txt hello", context, output);
 
-    expect(context.workflows.activeRun?.result).toBe("failed");
+    expect(context.workflows.activeRun?.result).toBe("blocked");
     expect(context.workflows.activeRun?.steps.some((step) => step.status === "blocked")).toBe(true);
     const transcript = (await store.resume(session.id)).transcript;
     expect(transcript.some((event) => event.type === "workflow_step_result")).toBe(true);
-    expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
-    expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
+    expect(transcript.some((event) => event.type === "permission_request")).toBe(false);
+    expect(transcript.some((event) => event.type === "permission_result")).toBe(false);
     expect(
-      transcript.some((event) => event.type === "workflow_end" && event.status === "failed"),
+      transcript.some((event) => event.type === "workflow_end" && event.status === "blocked"),
     ).toBe(true);
     expect(
       context.failureLearning.records.some((record) => record.relatedTarget === "workflow"),
     ).toBe(true);
     expect(context.backgroundTasks).toContainEqual(
-      expect.objectContaining({ title: expect.stringContaining("Workflow:"), result: "fail" }),
+      expect.objectContaining({ title: expect.stringContaining("Workflow:"), result: "partial" }),
     );
   });
 
@@ -5269,46 +5380,90 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
   });
 
-  it("workflow/agent/job/memory capabilities are model-tool proposals, not natural-language routers", async () => {
-    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
-    await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(
-      join(project, ".linghun", "settings.json"),
-      JSON.stringify({
-        defaultModel: "command-proposal-model",
-        providers: {
-          deepseek: { model: "different-model" },
-          "openai-compatible": {
-            baseUrl: "https://example.test/v1",
-            apiKey: "sk-test",
-            model: "command-proposal-model",
+  it.each([
+    {
+      prompt: "拆成工作流继续做",
+      proposed: "/workflows plan 修复 TUI 噪音",
+      realTool: "RunWorkflow",
+      realInput: { goal: "修复 TUI 噪音" },
+    },
+    {
+      prompt: "多开智能体继续工作",
+      proposed: "/fork planner 修复 TUI 噪音",
+      realTool: "StartAgent",
+      realInput: { role: "planner", task: "修复 TUI 噪音" },
+    },
+    {
+      prompt: "生成报告",
+      proposed: "/report generated-summary.txt",
+      realTool: "WriteReport",
+      realInput: { path: "generated-summary.txt", content: "summary\n" },
+    },
+    {
+      prompt: "刷新索引",
+      proposed: "/index refresh",
+      realTool: "IndexOperation",
+      realInput: { action: "refresh", force: false },
+    },
+    {
+      prompt: "跑验证",
+      proposed: "/verify smoke",
+      realTool: "RunVerification",
+      realInput: { level: "smoke" },
+    },
+  ])(
+    "可执行自然语言必须拒绝 CommandProposal fallback 并继续真实 $realTool tool_use: $prompt",
+    async ({ prompt, proposed, realTool, realInput }) => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          defaultModel: "command-proposal-model",
+          providers: {
+            deepseek: { model: "different-model" },
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: "command-proposal-model",
+            },
           },
-        },
-      }),
-      "utf8",
-    );
-    const requests = mockOpenAiToolFetch(
-      "CommandProposal",
-      { command: "/workflows plan 修复 TUI 噪音", reason: "用户要求工作流计划" },
-      "建议先查看这个命令提案。",
-    );
-    const output = new MemoryOutput();
+        }),
+        "utf8",
+      );
+      const requests = mockOpenAiToolSequence(
+        [
+          {
+            toolName: "CommandProposal",
+            input: { command: proposed, reason: "用户要求可执行能力" },
+          },
+          { toolName: realTool, input: realInput },
+        ],
+        "已改用真实结构化工具。",
+      );
+      const output = new MemoryOutput();
 
-    await runTui({
-      projectPath: project,
-      stdin: Readable.from(["拆成工作流继续做\n/exit\n"]),
-      stdout: output,
-      stderr: new MemoryOutput(),
-    });
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from([`${prompt}\n/exit\n`]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
 
-    expect(requests.length).toBeGreaterThanOrEqual(2);
-    const first = requests[0] as { tools?: Array<{ function?: { name?: string }; name?: string }> };
-    expect(
-      first.tools?.some((tool) => (tool.function?.name ?? tool.name) === "CommandProposal"),
-    ).toBe(true);
-    expect(output.text).toContain("建议命令：/workflows plan 修复 TUI 噪音");
-    expect(output.text).not.toContain("工作流计划预览");
-  });
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(output.text).not.toContain("建议命令");
+      expect(output.text).not.toContain("Suggested command");
+      expect(output.text).not.toContain("工作流计划预览");
+      const sessions = await new SessionStore({
+        sessionRootDir: getSessionRootDir(),
+        projectPath: project,
+      }).list();
+      const transcript = await readFile(sessions[0]?.transcriptPath ?? "", "utf8");
+      expect(transcript).toContain('"toolName":"CommandProposal"');
+      expect(transcript).toContain("CommandProposal 不能用于可执行");
+      expect(transcript).toContain(`"name":"${realTool}"`);
+    },
+  );
 
   it("raw tool_use text is retried as a structured-tool reminder and never fake-executes", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -5393,6 +5548,44 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).not.toContain('"name":"Write"');
   });
 
+  it("raw tool_use_error text is treated as protocol leakage, not as a tool-limit failure", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "raw-tool-use-error-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "raw-tool-use-error-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiRepeatedRawToolProtocol(
+      '<tool_use_error call_id="bad-call">工具 call id 格式错误</tool_use_error>',
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["继续执行工具调用\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(output.text).toContain("没有执行任何非结构化工具请求");
+    expect(output.text).not.toContain("<tool_use_error");
+    expect(output.text).not.toContain("工具 call id 格式错误");
+    expect(output.text).not.toContain("工具调用次数过多");
+    expect(output.text).not.toContain("工具调用上限");
+  });
+
   it("long context is auto-compacted without exposing fixed character limits on the main screen", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -5472,8 +5665,7 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
-    // 4 个只读 Read 工具调用（MAX_MODEL_TOOL_ROUNDS=4），最后一轮触发轮次上限。
-    // Read 走 auto-allow（readonly），不会被 permission 打断。
+    // 分层预算不再用 4/8 短阀门挡所有情况；4 个 Read 后可正常进入最终回答。
     const requests = mockOpenAiToolSequenceWithFinalCalls(
       [
         { toolName: "Read", input: { path: "a.txt" } },
@@ -5492,16 +5684,93 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    // 成熟摘要文案：不再是"将不再调用工具，并请求模型给出最终回答"这种机械文案。
-    expect(output.text).toContain("本轮工具调用已达上限");
-    expect(output.text).toContain("/index refresh");
+    expect(output.text).toContain("已综合现有信息回答。");
+    expect(output.text).not.toContain("本轮工具调用已达上限");
     // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
     expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
     expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
     expect(requests.length).toBeGreaterThanOrEqual(5);
   });
 
-  it("Todo-only round does not reduce the four evidence tool rounds", async () => {
+  it("normal progressing tool_use continues past 40 evidence rounds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "progressing-tool-rounds-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "progressing-tool-rounds-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      Array.from({ length: 41 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
+      "已完成 41 轮有进展读取。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请持续读取直到完成\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(41);
+    expect(output.text).toContain("已完成 41 轮有进展读取。");
+    expect(output.text).not.toContain("工具调用上限");
+    expect(output.text).not.toContain("执行轮次预算已耗尽");
+    expect(requests.length).toBeGreaterThanOrEqual(42);
+  });
+
+  it("normal tool_use stops at the 100-turn execution budget with an accurate reason", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "hundred-turn-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "hundred-turn-budget-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      Array.from({ length: 100 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
+      "预算耗尽后的无工具总结。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请持续读取直到预算停止\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(100);
+    expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
+    expect(output.text).toContain("预算耗尽后的无工具总结。");
+    expect(output.text).not.toContain("工具调用上限");
+    expect(requests.length).toBeGreaterThanOrEqual(101);
+  });
+
+  it("Todo-only round does not reduce progressing evidence tool rounds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
@@ -5540,7 +5809,8 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
-    expect(output.text).toContain("本轮工具调用已达上限");
+    expect(output.text).toContain("已综合现有信息回答。");
+    expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(6);
   });
 
@@ -5578,7 +5848,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("仅完成计划整理");
+    expect(output.text).toContain("只完成计划整理");
     expect(output.text).toContain("尚未执行仓库验证");
     expect(output.text).not.toContain("将基于目前已收集的信息");
     expect(requests.length).toBeGreaterThanOrEqual(9);
@@ -5623,6 +5893,34 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("Git 状态：");
     expect(output.text).toContain("工具 Read 已完成");
+  });
+
+  it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
+    const budgetSrc = await readFile("src/runtime-budget.ts", "utf8");
+    const indexSrc = await readFile("src/index.ts", "utf8");
+    const agentSrc = await readFile("src/job-agent-command-runtime.ts", "utf8");
+
+    expect(budgetSrc).toContain("LINGHUN_MAX_AGENTIC_TURNS = 100");
+    expect(budgetSrc).toContain("LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS = 40");
+    expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TURNS = 100");
+    expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS = 40");
+    expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_TOKENS = 100_000");
+    expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_BYTES");
+    expect(indexSrc).toContain(
+      "const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS",
+    );
+    expect(indexSrc).not.toContain(
+      "const MAX_MODEL_TOOL_ROUNDS = LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS",
+    );
+    expect(indexSrc).not.toContain("reachedEvidenceLimit");
+    expect(agentSrc).toContain(
+      "const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS",
+    );
+    expect(agentSrc).not.toContain(
+      "const AGENT_MAX_TOOL_ROUNDS = LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS",
+    );
+    expect(agentSrc).not.toContain("agent child tool/evidence budget exhausted");
+    expect(agentSrc).toContain("agent child execution turn budget exhausted");
   });
 
   it("continues after denied model tool permission as a tool_result", async () => {
@@ -6674,6 +6972,323 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已读取 package.json");
   });
 
+  it("StartAgent child loop on Claude uses anthropic_messages tool_use/tool_result continuation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-claude-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "chat_completions");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "chat_completions",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: Array<{
+      url: string;
+      body: { messages?: Array<{ role: string; content: unknown }>; tools?: unknown[] };
+    }> = [];
+    const toolUseStream = (id: string, name: string, inputJson: string): string[] => [
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"msg-${id}","usage":{"input_tokens":10}}}\n\n`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"${id}","name":"${name}"}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(inputJson)}}}\n\n`,
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ];
+    const textStream = (id: string, text: string): string[] => [
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"${id}","usage":{"input_tokens":20}}}\n\n`,
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`,
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ];
+    const streams = [
+      toolUseStream(
+        "toolu_start_agent_1",
+        "StartAgent",
+        '{"role":"planner","task":"拆分验证工作并记录 Todo"}',
+      ),
+      toolUseStream(
+        "toolu_child_todo_1",
+        "Todo",
+        '{"action":"add","content":"记录验证点"}',
+      ),
+      textStream("msg-child-final", "子 agent 已完成真实 Todo 工具调用。"),
+      textStream("msg-main-final", "已通过真实 StartAgent 完成多智能体任务。"),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role: string; content: unknown }>;
+          tools?: unknown[];
+        };
+        requests.push({ url: String(url), body });
+        const chunks = streams[requests.length - 1] ?? textStream("msg-extra", "done");
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["多开智能体继续工作\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(4);
+    for (const request of requests) {
+      expect(request.url).toBe("https://relay.example.com/v1/messages");
+      expect(request.url.endsWith("/chat/completions")).toBe(false);
+    }
+    const mainContinuation = requests[3]?.body.messages ?? [];
+    const mainBlocks = mainContinuation.flatMap((message) =>
+      Array.isArray(message.content)
+        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string }>)
+        : [],
+    );
+    expect(
+      mainBlocks.some(
+        (block) =>
+          block.type === "tool_use" &&
+          block.id === "toolu_start_agent_1" &&
+          block.name === "StartAgent",
+      ),
+    ).toBe(true);
+    expect(
+      mainBlocks.some(
+        (block) => block.type === "tool_result" && block.tool_use_id === "toolu_start_agent_1",
+      ),
+    ).toBe(true);
+    const childContinuation = requests[2]?.body.messages ?? [];
+    const childBlocks = childContinuation.flatMap((message) =>
+      Array.isArray(message.content)
+        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string }>)
+        : [],
+    );
+    expect(
+      childBlocks.some(
+        (block) =>
+          block.type === "tool_use" &&
+          block.id === "toolu_child_todo_1" &&
+          block.name === "Todo",
+      ),
+    ).toBe(true);
+    expect(
+      childBlocks.some(
+        (block) => block.type === "tool_result" && block.tool_use_id === "toolu_child_todo_1",
+      ),
+    ).toBe(true);
+    const childTools = requests[1]?.body.tools as
+      | Array<{ name?: string; function?: unknown; input_schema?: unknown }>
+      | undefined;
+    expect(childTools?.some((tool) => tool.name === "Todo" && tool.input_schema)).toBe(true);
+    expect(childTools?.some((tool) => tool.function)).toBe(false);
+    expect(output.text).not.toContain("endpointProfile");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("工具调用上限");
+    expect(output.text).toContain("已通过真实 StartAgent");
+  });
+
+  it("StartAgent child loop continues past 40 progressing tool rounds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "agent-child-progress-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "agent-child-progress-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiStartAgentChildToolSequence(
+      41,
+      "子 agent 已完成 41 轮读取并总结。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["多开智能体继续工作\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(43);
+    expect(output.text).toContain("worker completed");
+    expect(output.text).toContain("子 agent 已完成 41 轮读取并总结。");
+    expect(output.text).not.toContain("agent child tool/evidence budget exhausted");
+    expect(output.text).not.toContain("工具调用上限");
+  });
+
+  it("StartAgent child loop blocks at the 100-turn execution budget", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "agent-child-hundred-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "agent-child-hundred-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiStartAgentChildToolSequence(100);
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["多开智能体继续工作\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(102);
+    expect(output.text).toContain(
+      "agent child execution turn budget exhausted (100) without a final answer",
+    );
+    expect(output.text).not.toContain("agent child tool/evidence budget exhausted");
+    expect(output.text).not.toContain("工具调用上限");
+  });
+
+  it("keeps StartAgent tool_result paired without breaking Claude anthropic_messages continuation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "chat_completions");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "chat_completions",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: Array<{ url: string; body: { messages?: Array<{ role: string; content: unknown }> } }> = [];
+    const encoder = new TextEncoder();
+    const sse = (chunks: string[]) =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role: string; content: unknown }>;
+        };
+        requests.push({ url: String(url), body });
+        const chunks =
+          requests.length === 1
+            ? [
+                'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-main","usage":{"input_tokens":10}}}\n\n',
+                'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_start_budget_1","name":"StartAgent"}}\n\n',
+                `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify('{"role":"planner","task":"写一段超长总结"}')}}}\n\n`,
+                'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+                'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+              ]
+            : requests.length === 2
+              ? [
+                  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-child","usage":{"input_tokens":10}}}\n\n',
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+                  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(`AGENT_BUDGET_START ${"z".repeat(60_000)} AGENT_BUDGET_END_SHOULD_NOT_REACH_PROVIDER`)}}}\n\n`,
+                  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+                  'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+                ]
+              : [
+                  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-final","usage":{"input_tokens":10}}}\n\n',
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+                  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"StartAgent budget continuation ok."}}\n\n',
+                  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+                  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+                  'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+                ];
+        return new Response(sse(chunks), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["多开智能体继续工作\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const childBlocks = (requests[1]?.body.messages ?? [])
+      .filter((message) => Array.isArray(message.content))
+      .flatMap(
+        (message) =>
+          message.content as Array<{ type?: string; tool_use_id?: string; content?: string }>,
+      );
+    const toolResult = childBlocks.find(
+      (block) => block.type === "tool_result" && block.tool_use_id === "toolu_start_budget_1",
+    );
+    expect(toolResult).toBeTruthy();
+    expect(toolResult?.content).not.toContain("<persisted-tool-result>");
+    expect(toolResult?.content).not.toContain("AGENT_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(output.text).not.toContain("raw budget");
+  });
+
   it("returns Bash non-zero exits as failed model-visible tool_results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -6722,6 +7337,95 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"type":"tool_result"');
     expect(transcript).toContain('"toolName":"Bash"');
     expect(transcript).toContain('"isError":true');
+  });
+
+  it("keeps Read tool_result paired in the next OpenAI chat provider request without leaking raw budget state", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-tool-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const large = `READ_BUDGET_START\n${"x".repeat(60_000)}\nREAD_BUDGET_END_SHOULD_NOT_REACH_PROVIDER`;
+    await writeFile(join(project, "large.txt"), large, "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-budget-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch("Read", { path: "large.txt" }, "读取完成。");
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["读大文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const second = requests[1] as { messages?: Array<{ role?: string; tool_call_id?: string; content?: string }> };
+    const toolMessage = (second.messages ?? []).find((message) => message.role === "tool");
+    expect(toolMessage?.tool_call_id).toBe("call-1");
+    expect(toolMessage?.content).not.toContain("<persisted-tool-result>");
+    expect(toolMessage?.content).not.toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(output.text).not.toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(output.text).not.toContain("raw budget");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain('"toolName":"Read"');
+    expect(transcript).toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+  });
+
+  it("keeps Bash function_call_output paired in the next OpenAI responses provider request without raw budget state", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-tool-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "responses-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "responses-budget-model",
+            endpointProfile: "responses",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolFetch(
+      "Bash",
+      { command: 'node -e "console.log(\'BASH_BUDGET_START\'); console.log(\'y\'.repeat(60000)); console.log(\'BASH_BUDGET_END_SHOULD_NOT_REACH_PROVIDER\')"' },
+      "Bash 完成。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["运行大输出命令\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(2);
+    const toolContent = toolMessageContents(requests[1])[0] ?? "";
+    expect(toolContent).not.toContain("<persisted-tool-result>");
+    const input = (requests[1] as { input?: Array<{ type?: string; call_id?: string }> }).input ?? [];
+    expect(input.some((item) => item.type === "function_call_output" && item.call_id === "call-1")).toBe(
+      true,
+    );
+    expect(output.text).not.toContain("raw budget");
   });
 
   it("records failed model tool_result evidence for follow-up prompts", async () => {
@@ -8192,10 +8896,8 @@ describe("Phase 06 TUI slash commands", () => {
     context.permissionMode = "full-access";
     await handleSlashCommand("/fork worker write agent.txt hello", context, output);
 
-    expect(output.text).toContain("权限管道拒绝写入 agent.txt");
-    expect(output.text).toContain("Plan 模式禁止写入");
-    expect(output.text).toContain("已通过权限管道执行低风险写入 agent.txt");
-    expect(await readFile(join(project, "agent.txt"), "utf8")).toBe("hello");
+    expect(output.text).toContain("worker blocked：模型网关未就绪");
+    await expect(readFile(join(project, "agent.txt"), "utf8")).rejects.toThrow();
   });
 
   it("creates LINGHUN.md only on explicit memory init", async () => {
@@ -14264,6 +14966,133 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     expect(output.text).not.toContain("Tool calling is not supported");
   });
 
+  it("budgets oversized ExecuteExtraTool result before Claude receives anthropic tool_result continuation", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-extra-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const mockDir = join(project, "mock");
+    await mkdir(mockDir, { recursive: true });
+    const callsPath = join(mockDir, "calls.jsonl");
+    const mockPath = join(mockDir, "codebase-memory-large.cjs");
+    await writeFile(
+      mockPath,
+      `const fs = require("node:fs");
+const tool = process.argv[3];
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ tool }) + "\\n");
+if (process.argv.includes("--version")) { console.log("codebase-memory-mcp mock 0.0.0"); process.exit(0); }
+if (tool === "list_projects") { console.log(JSON.stringify({ text: "EXEC_EXTRA_BUDGET_START " + "q".repeat(60000) + " EXEC_EXTRA_BUDGET_END_SHOULD_NOT_REACH_PROVIDER", projects: [{ name: "test-project", root_path: ${JSON.stringify(project)} }] })); process.exit(0); }
+console.log(JSON.stringify({ ok: true }));
+`,
+      "utf8",
+    );
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "chat_completions");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        mcp: {
+          ...defaultConfig.mcp,
+          servers: {
+            ...defaultConfig.mcp.servers,
+            "codebase-memory": { command: mockPath, args: [] },
+          },
+        },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "chat_completions",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests: Array<{ body: { messages?: Array<{ role: string; content: unknown }> } }> = [];
+    const encoder = new TextEncoder();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role: string; content: unknown }>;
+        };
+        requests.push({ body });
+        const tool =
+          requests.length === 1
+            ? { id: "toolu_search_budget_1", name: "SearchExtraTools", input: '{"query":"list_projects"}' }
+            : requests.length === 2
+              ? {
+                  id: "toolu_exec_budget_1",
+                  name: "ExecuteExtraTool",
+                  input: '{"tool_name":"list_projects","params":{}}',
+                }
+              : undefined;
+        const chunks = tool
+          ? [
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg","usage":{"input_tokens":10}}}\n\n',
+              `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"${tool.id}","name":"${tool.name}"}}\n\n`,
+              `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tool.input)}}}\n\n`,
+              'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n',
+              'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ]
+          : [
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-final","usage":{"input_tokens":10}}}\n\n',
+              'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+              'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ExecuteExtraTool budget ok."}}\n\n',
+              'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+              'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+              'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+            ];
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["帮我搜索代码\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    const round3Blocks = (requests[2]?.body.messages ?? [])
+      .filter((message) => Array.isArray(message.content))
+      .flatMap(
+        (message) =>
+          message.content as Array<{ type?: string; tool_use_id?: string; content?: string }>,
+      );
+    const execResult = round3Blocks.find(
+      (block) => block.type === "tool_result" && block.tool_use_id === "toolu_exec_budget_1",
+    );
+    expect(execResult?.content).toContain("<persisted-tool-result>");
+    expect(execResult?.content).toContain("artifactPath:");
+    expect(execResult?.content).toMatch(/sha256: [a-f0-9]{64}/u);
+    expect(execResult?.content).toContain("preview:");
+    expect(execResult?.content).toContain("EXEC_EXTRA_BUDGET_START");
+    expect(execResult?.content).not.toContain("EXEC_EXTRA_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    const artifact = await expectBudgetArtifact(project, transcript);
+    expect(artifact).toContain("EXEC_EXTRA_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(output.text).not.toContain("raw budget");
+  });
+
   it("D.13I system reminder + hash input: only emit reminder when deferred list non-empty; hash input contains only name/kind/executable/requiredArgs", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -17314,25 +18143,24 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     await writeFile(join(project, "blocked"), "occupied", "utf8");
     await handleSlashCommand("/fork worker write blocked/child.txt hello", context, output);
 
-    // agent 真实失败：状态 failed、background result=fail（不是 cancelled、不是 pass）。
+    // 没有 modelGateway 时 worker 不再靠 write parser 假执行；必须 blocked。
     const failed = context.agents.find((agent) => agent.type === "worker");
-    expect(failed?.status).toBe("failed");
-    expect(output.text).toContain("执行失败");
+    expect(failed?.status).toBe("blocked");
+    expect(output.text).toContain("worker blocked：模型网关未就绪");
     const agentTask = context.backgroundTasks.find((task) => task.id === failed?.id);
     expect(agentTask?.status).toBe("failed");
-    expect(agentTask?.result).toBe("fail");
+    expect(agentTask?.result).toBe("partial");
 
     // 真实失败搭车进 D.14B：落盘一条 tool_failure 教训；不进 context.evidence。
     const failures = await loadFailureRecords(context.failureLearning);
     const agentFailure = failures.find((record) => record.relatedTarget === "agent_worker");
-    expect(agentFailure?.category).toBe("tool_failure");
-    expect(agentFailure?.inferred).toBe(true);
+    expect(agentFailure).toBeUndefined();
     expect(context.evidence.some((item) => item.id === agentFailure?.id)).toBe(false);
 
     // 失败事件进父会话 transcript（status=failed），可追溯。
     const parentTranscript = (await store.resume(session.id)).transcript;
     expect(
-      parentTranscript.some((event) => event.type === "agent_end" && event.status === "failed"),
+      parentTranscript.some((event) => event.type === "agent_end" && event.status === "blocked"),
     ).toBe(true);
   });
 

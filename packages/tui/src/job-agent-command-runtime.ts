@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { ModelRole, RoleModelRoute } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
+import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import type { ToolName, ToolOutput } from "@linghun/tools";
-import { runTool } from "@linghun/tools";
+import { builtInTools, runTool } from "@linghun/tools";
+import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
@@ -79,8 +81,21 @@ import type {
 import { formatAgentDetails } from "./tui-details-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
+import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
+import {
+  applyToolResultBudgetToMessages,
+  type ToolResultBudgetRecord,
+} from "./tool-result-budget.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
+
+type AgentWorkResult = {
+  status: "completed" | "failed" | "blocked";
+  summary: string;
+  evidenceRefs: string[];
+};
+
+const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS;
 
 export type JobAgentCommandRuntimeDeps = {
   addRoleUsage: (
@@ -132,6 +147,30 @@ export type JobAgentCommandRuntimeDeps = {
     sessionId: string,
     report: VerificationReport,
   ) => Promise<void>;
+  createAgentGatewayContinuation: (
+    context: TuiContext,
+    agent: AgentRun,
+  ) => AgentGatewayContinuation | null;
+  recordAgentExecutionEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    agent: AgentRun,
+    result: AgentWorkResult,
+  ) => Promise<string | undefined>;
+  recordToolResultBudgetEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    record: ToolResultBudgetRecord,
+  ) => Promise<string | undefined>;
+};
+
+export type AgentGatewayContinuation = {
+  gateway: ModelGateway;
+  provider: string;
+  model: string;
+  endpointProfile: EndpointProfile;
+  reasoningLevel?: string;
+  reasoningSent: boolean;
 };
 
 let runtimeDeps: JobAgentCommandRuntimeDeps | undefined;
@@ -1066,18 +1105,18 @@ export async function completeAgent(
   output: Writable,
 ): Promise<void> {
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
-  let summary: string;
+  let result: AgentWorkResult;
   try {
-    summary = await runAgentWork(agent, context, output);
+    result = await runAgentWork(agent, context, output);
   } catch (error) {
     await failAgent(agent, task, context, output, parentSessionId, error);
     return;
   }
   const now = new Date().toISOString();
-  agent.status = "completed";
-  agent.summary = summary;
+  agent.status = result.status;
+  agent.summary = result.summary;
   agent.updatedAt = now;
-  agent.cost.outputTokens = Math.ceil(summary.length / 4);
+  agent.cost.outputTokens = Math.ceil(result.summary.length / 4);
   deps().addRoleUsage(
     context,
     agent.role,
@@ -1088,15 +1127,31 @@ export async function completeAgent(
     },
     agent.cost.inputTokens,
     agent.cost.outputTokens,
-    `${agent.type} agent summary`,
+    `${agent.type} agent ${result.status}`,
   );
   context.roleHandoffs.unshift(
-    deps().createRoleHandoff("executor", agent.role, agent.id, summary, context),
+    deps().createRoleHandoff("executor", agent.role, agent.id, result.summary, context),
   );
   const verifierStatus = agent.type === "verifier" ? context.lastVerification?.status : undefined;
-  task.status = "completed";
-  task.result = mapAgentBackgroundResult(agent, verifierStatus);
-  task.currentStep = context.language === "en-US" ? "summary ready" : "摘要已生成";
+  task.status = result.status === "completed" ? "completed" : "failed";
+  task.result =
+    result.status === "completed"
+      ? mapAgentBackgroundResult(agent, verifierStatus)
+      : result.status === "blocked"
+        ? "partial"
+        : "fail";
+  task.currentStep =
+    result.status === "completed"
+      ? context.language === "en-US"
+        ? "summary ready"
+        : "摘要已生成"
+      : result.status === "blocked"
+        ? context.language === "en-US"
+          ? "blocked"
+          : "已阻塞"
+        : context.language === "en-US"
+          ? "failed"
+          : "已失败";
   task.progress = { completed: 1, total: 1, label: agent.type };
   task.updatedAt = now;
   task.lastOutputAt = now;
@@ -1105,16 +1160,25 @@ export async function completeAgent(
   await context.store.appendEvent(agent.transcriptSessionId, {
     type: "assistant_text_delta",
     id: randomUUID(),
-    text: summary,
+    text: result.summary,
     createdAt: now,
   });
   await context.store.appendEvent(parentSessionId, {
     type: "agent_end",
     agentId: agent.id,
-    status: "completed",
-    summary,
+    status: result.status,
+    summary: result.summary,
     createdAt: now,
   });
+  const agentEvidenceId = await deps().recordAgentExecutionEvidence(
+    context,
+    parentSessionId,
+    agent,
+    result,
+  );
+  if (agentEvidenceId) {
+    result.evidenceRefs = Array.from(new Set([...result.evidenceRefs, agentEvidenceId]));
+  }
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   writeLine(output, formatAgentSummary(agent, context));
   deps().writeStatus(output, context);
@@ -1173,13 +1237,7 @@ export async function runAgentWork(
   agent: AgentRun,
   context: TuiContext,
   output: Writable,
-): Promise<string> {
-  if (agent.type === "explorer") {
-    return `explorer 摘要：只读分析任务「${agent.task}」。可读取索引/证据/关键文件；不会写入。上下文已裁剪为 handoff、Todo、证据和关键文件。`;
-  }
-  if (agent.type === "planner") {
-    return `planner 摘要：只规划任务「${agent.task}」。输出计划建议，不执行写入、Bash 或后续阶段能力。`;
-  }
+): Promise<AgentWorkResult> {
   if (agent.type === "verifier") {
     const plan = await createVerificationPlan(context.projectPath, "smoke");
     const report = await runVerificationPlan(
@@ -1195,24 +1253,163 @@ export async function runAgentWork(
       agent.parentSessionId ?? (await deps().ensureSession(context)),
       report,
     );
-    return `verifier 摘要：session-scoped conservative verification；不是 durable job、不是第二套 job system、不是 Phase 17。已在独立 transcript 中运行验证命令，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`;
+    return {
+      status:
+        report.status === "pass" ? "completed" : report.status === "fail" ? "failed" : "blocked",
+      summary: `verifier 已运行真实验证，结果 ${report.status.toUpperCase()}；任务「${agent.task}」。`,
+      evidenceRefs: [],
+    };
   }
-  return runWorkerAgent(agent, context, output);
+  return runModelBackedAgent(agent, context, output);
 }
 
-export async function runWorkerAgent(
+export async function runModelBackedAgent(
   agent: AgentRun,
   context: TuiContext,
   output: Writable,
-): Promise<string> {
-  const match = /^write\s+(\S+)\s+([\s\S]+)$/u.exec(agent.task);
-  if (!match) {
-    return `worker 摘要：已接收明确子任务「${agent.task}」。worker 可编辑，但本次没有匹配低风险 write 路径，因此未改文件。所有编辑必须走权限管道。`;
+): Promise<AgentWorkResult> {
+  const continuation = deps().createAgentGatewayContinuation(context, agent);
+  if (!continuation) {
+    return {
+      status: "blocked",
+      summary: `${agent.type} blocked：模型网关未就绪，无法启动真实 agent loop。任务「${agent.task}」未执行。`,
+      evidenceRefs: [],
+    };
   }
-  const [, path, content] = match;
-  const input = { path, content };
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
-  const permission = await decidePermission("Write", input, context, parentSessionId);
+  const messages: ModelMessage[] = [
+    {
+      role: "system",
+      content: createAgentLoopSystemPrompt(agent, context),
+    },
+    {
+      role: "user",
+      content: agent.task,
+    },
+  ];
+  const controller = new AbortController();
+  let finalText = "";
+  for (let round = 0; round < AGENT_MAX_MODEL_TURNS; round += 1) {
+    const toolCalls: ModelToolCall[] = [];
+    let assistantText = "";
+    const budgeted = await applyToolResultBudgetToMessages(messages, {
+      projectPath: context.projectPath,
+      sessionId: parentSessionId,
+    });
+    if (budgeted.records.length > 0) {
+      for (const record of budgeted.records) {
+        await deps().recordToolResultBudgetEvidence(context, parentSessionId, record);
+      }
+      messages.splice(0, messages.length, ...budgeted.messages);
+    }
+    for await (const event of continuation.gateway.stream(
+      continuation.provider,
+      {
+        messages: budgeted.messages,
+        model: continuation.model,
+        endpointProfile: continuation.endpointProfile,
+        ...(continuation.reasoningSent
+          ? { reasoningLevel: continuation.reasoningLevel }
+          : {}),
+        tools: createModelToolDefinitionsForTools(getAgentAllowedTools(agent)),
+        toolChoice: "auto",
+      },
+      controller.signal,
+    )) {
+      if (event.type === "assistant_text_delta") {
+        assistantText += event.text;
+        continue;
+      }
+      if (event.type === "tool_use") {
+        toolCalls.push({ id: event.id, name: event.name, input: event.input });
+        continue;
+      }
+      if (event.type === "usage") {
+        agent.cost.inputTokens += event.usage.inputTokens;
+        agent.cost.outputTokens += event.usage.outputTokens;
+        continue;
+      }
+      if (event.type === "error") {
+        return {
+          status: "failed",
+          summary: `${agent.type} failed：模型请求失败：${event.error.message}`,
+          evidenceRefs: [],
+        };
+      }
+    }
+    if (assistantText || toolCalls.length > 0) {
+      messages.push({ role: "assistant", content: assistantText, toolCalls });
+      if (assistantText) {
+        await context.store.appendEvent(agent.transcriptSessionId, {
+          type: "assistant_text_delta",
+          id: randomUUID(),
+          text: assistantText,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
+    if (toolCalls.length === 0) {
+      finalText = assistantText.trim();
+      break;
+    }
+    for (const toolCall of toolCalls) {
+      const result = await executeAgentToolCall(agent, toolCall, context, parentSessionId, output);
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(result),
+      });
+      if (result.pendingApproval) {
+        return {
+          status: "blocked",
+          summary: `${agent.type} blocked：${result.tool} 需要用户确认，agent loop 已停止并回灌 tool_result。`,
+          evidenceRefs: result.evidenceId ? [result.evidenceId] : [],
+        };
+      }
+      if (!result.ok) {
+        return {
+          status: "blocked",
+          summary: `${agent.type} blocked：${result.tool} 未成功执行：${truncateDisplay(result.text, 180)}`,
+          evidenceRefs: result.evidenceId ? [result.evidenceId] : [],
+        };
+      }
+    }
+  }
+  if (!finalText) {
+    return {
+      status: "blocked",
+      summary: `${agent.type} blocked：agent child execution turn budget exhausted (${AGENT_MAX_MODEL_TURNS}) without a final answer.`,
+      evidenceRefs: [],
+    };
+  }
+  return {
+    status: "completed",
+    summary: `${agent.type} completed：${truncateDisplay(finalText, 500)}`,
+    evidenceRefs: [],
+  };
+}
+
+async function executeAgentToolCall(
+  agent: AgentRun,
+  toolCall: ModelToolCall,
+  context: TuiContext,
+  parentSessionId: string,
+  output: Writable,
+): Promise<{
+  ok: boolean;
+  tool: string;
+  text: string;
+  data?: unknown;
+  evidenceId?: string;
+  pendingApproval?: boolean;
+}> {
+  const toolName = normalizeAgentToolName(toolCall.name);
+  if (!toolName) {
+    const text = `Unknown agent tool: ${toolCall.name}`;
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolCall.name, text, true);
+    return { ok: false, tool: toolCall.name, text };
+  }
+  const permission = await decidePermission(toolName, toolCall.input, context, parentSessionId);
   await context.store.appendEvent(parentSessionId, {
     type: "permission_request",
     request: permission.request,
@@ -1226,24 +1423,111 @@ export async function runWorkerAgent(
     createdAt: new Date().toISOString(),
   });
   if (permission.decision !== "allow") {
-    return `worker 摘要：权限管道拒绝写入 ${path}。原因：${permission.reason}`;
+    const text = `${permission.decision}: ${permission.reason}`;
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    return {
+      ok: false,
+      tool: toolName,
+      text,
+      pendingApproval: permission.decision === "ask",
+    };
   }
   if (permission.preflight) {
     writeLine(output, permission.preflight);
   }
-  const result = await runTool("Write", input, context.tools);
+  const result = await runTool(toolName, toolCall.input, context.tools);
+  await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
+  const failed = isAgentToolOutputFailure(toolName, result.output);
+  return {
+    ok: !failed,
+    tool: toolName,
+    text: result.output.text,
+    data: result.output.data,
+  };
+}
+
+function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): string {
+  const roleHint =
+    agent.type === "explorer"
+      ? "Explore with read-only tools first. Return concise findings and evidence."
+      : agent.type === "planner"
+        ? "Build a practical plan. Use Todo when it helps, but do not stop at a stub."
+        : agent.type === "worker"
+          ? "Execute the assigned work with real tools. Stop and report blocked if permission is required."
+          : "Verify with real project commands and report PASS/FAIL/PARTIAL honestly.";
+  return [
+    `You are a Linghun ${agent.type} child agent running in an isolated sidechain transcript.`,
+    roleHint,
+    `Project path: ${context.projectPath}`,
+    `Permission mode: ${agent.permissionMode}`,
+    "Use structured tools only; never write raw tool_use/tool_result protocol as text.",
+    "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
+  ].join("\n");
+}
+
+function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
+  const readOnly = [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Todo];
+  if (agent.type === "explorer" || agent.type === "planner") return readOnly;
+  if (agent.type === "worker") {
+    return [
+      builtInTools.Read,
+      builtInTools.Grep,
+      builtInTools.Glob,
+      builtInTools.Todo,
+      builtInTools.Write,
+      builtInTools.Edit,
+      builtInTools.MultiEdit,
+      builtInTools.Bash,
+    ];
+  }
+  return [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Bash];
+}
+
+function normalizeAgentToolName(name: string): ToolName | null {
+  return Object.values(builtInTools).some((tool) => tool.name === name) ? (name as ToolName) : null;
+}
+
+function isAgentToolOutputFailure(toolName: ToolName, output: ToolOutput): boolean {
+  if (toolName !== "Bash") return false;
+  const exitCode = (output.data as { exitCode?: unknown } | undefined)?.exitCode;
+  return typeof exitCode === "number" && exitCode !== 0;
+}
+
+async function appendAgentToolEvents(
+  agent: AgentRun,
+  context: TuiContext,
+  name: ToolName,
+  input: unknown,
+  output: ToolOutput,
+  callId: string = randomUUID(),
+): Promise<void> {
   await context.store.appendEvent(agent.transcriptSessionId, {
     type: "tool_call_start",
-    id: randomUUID(),
-    name: "Write",
+    id: callId,
+    name,
     input,
     createdAt: new Date().toISOString(),
   });
-  await context.store.appendEvent(
-    agent.transcriptSessionId,
-    createToolEndEvent(randomUUID(), result.output),
-  );
-  return `worker 摘要：已通过权限管道执行低风险写入 ${path}。${result.output.text}`;
+  await context.store.appendEvent(agent.transcriptSessionId, createToolEndEvent(callId, output));
+  await appendAgentToolResultEvent(agent, context, callId, name, output, false);
+}
+
+async function appendAgentToolResultEvent(
+  agent: AgentRun,
+  context: TuiContext,
+  toolUseId: string,
+  toolName: string,
+  content: unknown,
+  isError: boolean,
+): Promise<void> {
+  await context.store.appendEvent(agent.transcriptSessionId, {
+    type: "tool_result",
+    toolUseId,
+    toolName: toolName as ToolName,
+    content,
+    isError,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 export async function cancelAgent(

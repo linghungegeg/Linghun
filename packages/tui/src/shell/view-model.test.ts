@@ -3700,21 +3700,21 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
     // Output region uses flexGrow=1; the composer band uses flexShrink=0.
-    // D.14D-C2: overflow="hidden" culling moved into the measured ScrollViewport
+    // D.14D-C2: overflow="hidden" culling moved into the measured TranscriptViewport
     // (TaskLayout delegates the output region to it), so it lives there now.
     expect(body).toContain("flexGrow={1}");
-    expect(body).toContain("<ScrollViewport");
+    expect(body).toContain("<TranscriptViewport");
     expect(body).toContain("flexShrink={0}");
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
   });
 
-  it("D.14D-C2: ScrollViewport owns the measured overflow=hidden culling", async () => {
+  it("D.14D-C2: TranscriptViewport owns the measured overflow=hidden culling", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
     expect(source).toContain('overflow="hidden"');
-    expect(source).toContain("clampTaskScroll");
+    expect(source).toContain("clampTranscriptScroll");
     expect(source).toContain("getComputedHeight");
   });
 });
@@ -4963,7 +4963,7 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(output.text).toContain("❯");
   });
 
-  it("普通 CommandPanel 不停用 Composer，保留 PageUp/PageDown task-scroll 路径", async () => {
+  it("普通 CommandPanel 不停用 Composer，保留 PageUp/PageDown transcript-scroll 路径", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     const activeConfig = source.slice(
@@ -4972,31 +4972,33 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     );
     expect(activeConfig).not.toContain("view.commandPanel");
     expect(source).toContain("{ isActive: !configPanelActive }");
-    expect(source).toContain('void onInput({ type: "task-scroll", delta: 5 })');
-    expect(source).toContain('void onInput({ type: "task-scroll", delta: -5 })');
+    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "halfPageUp" })');
+    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "halfPageDown" })');
+    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelUp" })');
+    expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelDown" })');
   });
 });
 
-describe("D.13Q-UX Task Surface — taskScroll 状态", () => {
-  it("taskScrollState 装配为 view.taskScroll，包含 scrollOffset 与 stickToBottom", () => {
+describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
+  it("transcriptScrollState 装配为 view.transcriptScroll，包含 scrollOffset 与 stickToBottom", () => {
     const ctx = createContext() as TuiContext & {
-      taskScrollState?: { scrollOffset: number; stickToBottom: boolean };
+      transcriptScrollState?: { scrollOffset: number; stickToBottom: boolean };
     };
-    ctx.taskScrollState = { scrollOffset: 4, stickToBottom: false };
+    ctx.transcriptScrollState = { scrollOffset: 4, stickToBottom: false };
     const view = createShellViewModel(ctx, { width: 80, viewMode: "task" });
-    expect(view.taskScroll).toBeDefined();
-    expect(view.taskScroll?.scrollOffset).toBe(4);
-    expect(view.taskScroll?.stickToBottom).toBe(false);
+    expect(view.transcriptScroll).toBeDefined();
+    expect(view.transcriptScroll?.scrollOffset).toBe(4);
+    expect(view.transcriptScroll?.stickToBottom).toBe(false);
   });
 
-  it("无 taskScrollState 时 view.taskScroll 为默认 stickToBottom=true / offset=0", () => {
+  it("无 transcriptScrollState 时 view.transcriptScroll 为默认 stickToBottom=true / offset=0", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
     });
-    expect(view.taskScroll).toBeDefined();
-    expect(view.taskScroll?.scrollOffset).toBe(0);
-    expect(view.taskScroll?.stickToBottom).toBe(true);
+    expect(view.transcriptScroll).toBeDefined();
+    expect(view.transcriptScroll?.scrollOffset).toBe(0);
+    expect(view.transcriptScroll?.stickToBottom).toBe(true);
   });
 });
 
@@ -5256,7 +5258,7 @@ describe("D.14D-C — scroll hint noise + activity placement", () => {
     const controller = {
       getViewModel: () =>
         createShellViewModel(
-          createContext({ taskScrollState: { scrollOffset: 5, stickToBottom: false } }),
+          createContext({ transcriptScrollState: { scrollOffset: 5, stickToBottom: false } }),
           {
             width: output.columns,
             height: output.rows,

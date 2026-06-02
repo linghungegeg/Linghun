@@ -18,7 +18,10 @@ import type { TaskScrollView } from "../types.js";
  *
  * Clamp：scrollOffset 永远 >= 0，避免负数越界。
  */
-export type TaskScrollAction = { type: "scroll"; delta: number } | { type: "end" };
+export type TaskScrollAction =
+  | { type: "scroll"; delta: number }
+  | { type: "end" }
+  | { type: "top" };
 
 export function createInitialTaskScroll(): TaskScrollView {
   return { scrollOffset: 0, stickToBottom: true };
@@ -31,6 +34,9 @@ export function reduceTaskScroll(
   const current = state ?? createInitialTaskScroll();
   if (action.type === "end") {
     return { scrollOffset: 0, stickToBottom: true };
+  }
+  if (action.type === "top") {
+    return { scrollOffset: Number.MAX_SAFE_INTEGER, stickToBottom: false };
   }
   const raw = current.scrollOffset + action.delta;
   const next = raw < 0 ? 0 : raw;

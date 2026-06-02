@@ -17,7 +17,7 @@ import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
-import { ScrollViewport } from "./ScrollViewport.js";
+import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
@@ -156,20 +156,22 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const composerLine = lineChar(noColor, capability).repeat(cw);
-  // D.14D-C2 Task Surface — 任务区滚动改用 ScrollViewport（测量 + 夹紧）。
-  // 旧实现是无界的 marginTop={-scrollOffset}，offset 没有上界，用户可以一直
-  // 向上滚动把内容整体推出可视区进入空白。ScrollViewport 量出内容/可视高度后
-  // 把偏移夹到 [0, contentH-viewH]，并在 stickToBottom 时自动吸底。
+  // Main transcript scroll：任务页主输出统一走 transcript viewport；composer 固定底部。
   // C1：原来在 output 区与 composer 之间常驻的滚动提示行已删除（噪音），
   // footer 已承载状态；如需 hint 只在 footer/help 区，不在主流。
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
       {/* Output region: top-left, fills remaining vertical space. Long output
           gets the full terminal width; padding keeps the visual breathing room.
-          ScrollViewport owns overflow=hidden + minHeight=0 and the measured,
+          TranscriptViewport owns overflow=hidden + minHeight=0 and the measured,
           clamped translate; this wrapper only supplies padding + flexGrow. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
-        <ScrollViewport scroll={view.taskScroll}>
+        <TranscriptViewport
+          scroll={view.transcriptScroll}
+          onMeasure={(measurement) =>
+            void controller.onInput({ type: "transcript-scroll-measure", ...measurement })
+          }
+        >
           {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
             ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
             blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
@@ -268,7 +270,7 @@ function TaskLayout({
               ))}
             </Box>
           ) : null}
-        </ScrollViewport>
+        </TranscriptViewport>
       </Box>
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents

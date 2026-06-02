@@ -1,8 +1,8 @@
 import { Box, type DOMElement } from "ink";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { computeScrollViewportOffset } from "../models/task-scroll-state.js";
-import type { TaskScrollView } from "../types.js";
+import { computeScrollViewportOffset } from "../models/transcript-scroll-state.js";
+import type { TranscriptScrollView } from "../types.js";
 
 /**
  * D.14D-C2 — Measured, clamped scroll viewport (standard ink).
@@ -29,24 +29,27 @@ import type { TaskScrollView } from "../types.js";
  * 行为：
  * - 测量 content（内层 Box）高度与 viewport（外层 Box）高度。
  * - maxOffset = max(0, contentHeight - viewportHeight)。
- * - clampTaskScroll 把 scroll.scrollOffset 夹到 [0, maxOffset]。
+ * - clampTranscriptScroll 把 scroll.scrollOffset 夹到 [0, maxOffset]。
  * - stickToBottom=true 时强制 effectiveOffset=0（新内容保持最新可见 / 吸底）。
  * - effectiveMarginTop = -effectiveOffset（永远 <=0，且不会超过可滚动距离）。
- * - onOverflowChange(hasOverflow) 上报溢出状态，驱动 TaskScrollView.hasOverflow。
+ * - onOverflowChange(hasOverflow) 上报溢出状态，驱动 TranscriptScrollView.hasOverflow。
  */
-export function ScrollViewport({
+export function TranscriptViewport({
   scroll,
   onOverflowChange,
+  onMeasure,
   children,
 }: {
-  scroll: TaskScrollView | undefined;
+  scroll: TranscriptScrollView | undefined;
   onOverflowChange?: (hasOverflow: boolean) => void;
+  onMeasure?: (measurement: { viewportHeight: number; contentHeight: number }) => void;
   children: React.ReactNode;
 }): React.ReactNode {
   const viewportRef = useRef<DOMElement | null>(null);
   const contentRef = useRef<DOMElement | null>(null);
   const [maxOffset, setMaxOffset] = useState(0);
   const lastReportedOverflow = useRef<boolean | undefined>(undefined);
+  const lastReportedMeasure = useRef<string | undefined>(undefined);
 
   // Measure after layout. measureElement() returns 0 during render, so we read
   // the computed yoga layout in a post-render effect and store maxOffset. The
@@ -60,6 +63,11 @@ export function ScrollViewport({
     const viewportHeight = viewportNode.getComputedHeight();
     const contentHeight = contentNode.getComputedHeight();
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
+    const measureKey = `${viewportHeight}:${contentHeight}`;
+    if (onMeasure && lastReportedMeasure.current !== measureKey) {
+      lastReportedMeasure.current = measureKey;
+      onMeasure({ viewportHeight, contentHeight });
+    }
     setMaxOffset((prev) => (prev === nextMax ? prev : nextMax));
     const hasOverflow = nextMax > 0;
     if (onOverflowChange && lastReportedOverflow.current !== hasOverflow) {

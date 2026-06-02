@@ -276,18 +276,29 @@ export type CommandPanelView = {
   expanded?: boolean;
 };
 
-/**
- * D.13Q-UX Task Surface — 任务区滚动视图。
- *   - scrollOffset：从顶部开始的滚动行数（Yoga 通过子容器的 marginTop 实现）。
- *   - stickToBottom：true 时新输出强制吸底；用户手动向上滚动后置 false，
- *     直到下次 End 或 submit 新消息时再吸底。
- *   - hasOverflow：是否有内容溢出可滚动区，用于决定底部是否露出 hint。
- */
-export type TaskScrollView = {
+export type TranscriptScrollView = {
   scrollOffset: number;
   stickToBottom: boolean;
   hasOverflow?: boolean;
+  viewportHeight?: number;
+  contentHeight?: number;
+  wheelStep?: number;
 };
+
+/** Legacy task-scroll model shape; main transcript wiring uses TranscriptScrollView. */
+export type TaskScrollView = TranscriptScrollView;
+
+export type TranscriptScrollActionName =
+  | "lineUp"
+  | "lineDown"
+  | "halfPageUp"
+  | "halfPageDown"
+  | "fullPageUp"
+  | "fullPageDown"
+  | "wheelUp"
+  | "wheelDown"
+  | "top"
+  | "bottom";
 
 export type ShellViewModel = {
   language: Language;
@@ -334,7 +345,7 @@ export type ShellViewModel = {
    * D.13Q-UX Task Surface — 任务区滚动状态。home 模式不存在；task/pending
    * 模式始终存在，默认 scrollOffset=0 / stickToBottom=true。
    */
-  taskScroll?: TaskScrollView;
+  transcriptScroll?: TranscriptScrollView;
   /**
    * D.13Q-UX Closure — HelpPanel UI 状态。打开时显示三组 Tab + 命令列表，
    * Enter dispatch slash，Esc 关闭。
@@ -417,14 +428,19 @@ export type ShellInputEvent =
   | { type: "sessions-resume" }
   | { type: "sessions-close" }
   /**
-   * D.13Q-UX Task Surface Maturity Sweep — 任务区滚动事件。
-   *   - task-scroll: PageUp/PageDown/wheel 改变 scrollOffset。delta 为正
-   *     向下、负向上；以行为单位（不是字符）。
-   *   - task-scroll-end: End 键回到底部并重新吸底。
+   * Transcript scroll events. CCB-compatible behavior is implemented in
+   * shell/models/transcript-scroll-state.ts: PgUp/PgDn are page actions,
+   * wheel/arrow are line actions, Home/End are absolute top/bottom jumps.
    *   - command-panel-close: Esc 关闭通用 CommandPanel。
    */
-  | { type: "task-scroll"; delta: number }
-  | { type: "task-scroll-end" }
+  | {
+      type: "transcript-scroll";
+      action: TranscriptScrollActionName;
+    }
+  | { type: "transcript-scroll"; delta: number }
+  | { type: "transcript-scroll-measure"; viewportHeight: number; contentHeight: number }
+  | { type: "transcript-scroll-end" }
+  | { type: "transcript-scroll-top" }
   | { type: "command-panel-close" };
 
 export type ShellController = {

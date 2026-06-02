@@ -635,24 +635,25 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // D.13Q-UX Task Surface — 任务区滚动键（PageUp / PageDown / End）。
-      // 方向语义：scrollOffset = 从底部向上偏移的行数。
-      //   - PgUp / wheel-up / 空 buffer ↑ → 向上看更早内容 → delta=+N（offset 增大）
-      //   - PgDn / wheel-down / 空 buffer ↓ → 向下回到更新内容 → delta=-N
-      //   - End → task-scroll-end，offset 归零
+      // Main transcript scroll keys（PageUp / PageDown / Home / End）。
       // 仅在 task / pending 模式生效；home 模式无 transcript 滚动需求。
+      // 事件只表达用户意图，页大小/夹紧/吸底由 transcript-scroll-state 统一计算。
       const inTaskMode = view.viewMode === "task" || view.viewMode === "pending";
       const k = key as { pageUp?: boolean; pageDown?: boolean; end?: boolean; home?: boolean };
       if (inTaskMode && k.pageUp) {
-        void onInput({ type: "task-scroll", delta: 5 });
+        void onInput({ type: "transcript-scroll", action: "halfPageUp" });
         return;
       }
       if (inTaskMode && k.pageDown) {
-        void onInput({ type: "task-scroll", delta: -5 });
+        void onInput({ type: "transcript-scroll", action: "halfPageDown" });
+        return;
+      }
+      if (inTaskMode && k.home && text.length === 0) {
+        void onInput({ type: "transcript-scroll", action: "top" });
         return;
       }
       if (inTaskMode && k.end && text.length === 0) {
-        void onInput({ type: "task-scroll-end" });
+        void onInput({ type: "transcript-scroll", action: "bottom" });
         return;
       }
 
@@ -789,8 +790,8 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // Up / Down — slash 列表优先；多行先在内部走，到达边界再走历史。
-      // D.13Q-UX Task Surface — 鼠标滚轮归属：在 task/pending 模式下 buffer 为空时，
-      // ↑↓ 派发 task-scroll（Win10 conhost 等终端把 wheel 报告为 ↑↓），让滚轮
+      // 鼠标滚轮归属：在 task/pending 模式下 buffer 为空时，
+      // ↑↓ 派发 transcript-scroll（Win10 conhost 等终端把 wheel 报告为 ↑↓），让滚轮
       // 滚动 transcript 而不是切 history。buffer 非空时仍走 history（用户已经
       // 在打字，明确在用键盘 ↑↓ 翻 history 草稿）。
       const inTaskModeWheel = view.viewMode === "task" || view.viewMode === "pending";
@@ -807,7 +808,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (inTaskModeWheel && text.length === 0) {
-          void onInput({ type: "task-scroll", delta: 1 });
+          void onInput({ type: "transcript-scroll", action: "wheelUp" });
           return;
         }
         const { row } = getCursorLinePosition(buffer);
@@ -836,7 +837,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         if (inTaskModeWheel && text.length === 0) {
-          void onInput({ type: "task-scroll", delta: -1 });
+          void onInput({ type: "transcript-scroll", action: "wheelDown" });
           return;
         }
         const { row } = getCursorLinePosition(buffer);
@@ -855,6 +856,14 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // Home / End
+      if (key.home) {
+        setBufferAndResetSelection(bufferHome(buffer));
+        return;
+      }
+      if (key.end) {
+        setBufferAndResetSelection(bufferEnd(buffer));
+        return;
+      }
       if (key.ctrl && input === "a") {
         setBufferAndResetSelection(bufferHome(buffer));
         return;

@@ -130,6 +130,19 @@ export type ModelRequest = {
   cacheBreakNonce?: string;
 };
 
+export type ToolMessagePairingIssue =
+  | "missing_tool_result"
+  | "orphan_tool_result"
+  | "duplicate_tool_result"
+  | "duplicate_tool_call_id"
+  | "invalid_tool_call_id"
+  | "invalid_tool_result_id";
+
+export type ToolMessagePairingRepair = {
+  messages: ModelMessage[];
+  issues: ToolMessagePairingIssue[];
+};
+
 export type Provider = {
   id: string;
   displayName: string;
@@ -1256,9 +1269,10 @@ function createChatProfileRequest(
   const contract = resolveProviderRuntimeContract(config, request);
   const model = request.model ?? config.model;
   const tools = createOpenAiChatTools(request, contract);
+  const repaired = repairToolMessagePairing(request.messages);
   return {
     model,
-    messages: request.messages.map(toOpenAiMessage),
+    messages: repaired.messages.map(toOpenAiMessage),
     stream: true,
     ...createOptionalMaxTokens("max_tokens", request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
@@ -1284,9 +1298,10 @@ function createResponsesProfileRequest(
   const contract = resolveProviderRuntimeContract(config, request);
   const model = request.model ?? config.model;
   const tools = createOpenAiResponsesTools(request, contract);
+  const repaired = repairToolMessagePairing(request.messages);
   return {
     model,
-    input: request.messages.flatMap(toOpenAiResponsesInputItem),
+    input: repaired.messages.flatMap(toOpenAiResponsesInputItem),
     stream: true,
     ...createOptionalMaxTokens("max_output_tokens", request, config),
     ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
@@ -1341,7 +1356,8 @@ function createAnthropicMessagesProfileRequest(
   //   - 如果 assistant 之后没有任何 tool_result 配对该 id → 在末尾注入合成 is_error tool_result
   //   - 如果出现 orphan tool_result（id 不在已发起集合里）→ 直接丢弃；不产生 user 消息
   const pendingToolUseIds = new Set<string>();
-  for (const message of request.messages) {
+  const repaired = repairToolMessagePairing(request.messages);
+  for (const message of repaired.messages) {
     if (message.role === "system") {
       if (message.content) systemSegments.push(message.content);
       continue;
@@ -1395,6 +1411,7 @@ function createAnthropicMessagesProfileRequest(
         type: "tool_result",
         tool_use_id: message.tool_call_id,
         content: message.content,
+        ...(isSyntheticToolResultError(message.content) ? { is_error: true } : {}),
       };
       // 末位 user 消息合并 tool_result block，避免在 Anthropic 强制 user/assistant 交替时
       // 因为多个 tool 消息被拆成多个独立 user 消息而违反契约。
@@ -1574,6 +1591,88 @@ function assertToolCapability(request: ModelRequest, contract: ProviderRuntimeCo
       "请切换到 supportsTools=true 的 provider/model，或不要发送 tools/toolChoice；Linghun 不会静默移除工具字段后伪装成功。",
     recoverable: true,
   });
+}
+
+const TOOL_CALL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+
+export function repairToolMessagePairing(messages: ModelMessage[]): ToolMessagePairingRepair {
+  const issues: ToolMessagePairingIssue[] = [];
+  const pending = new Map<string, ModelToolCall>();
+  const emittedResults = new Set<string>();
+  const repaired: ModelMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      const seenInMessage = new Set<string>();
+      const toolCalls: ModelToolCall[] = [];
+      for (const toolCall of message.toolCalls ?? []) {
+        if (!isValidToolMessageId(toolCall.id)) {
+          issues.push("invalid_tool_call_id");
+          continue;
+        }
+        if (pending.has(toolCall.id) || seenInMessage.has(toolCall.id)) {
+          issues.push("duplicate_tool_call_id");
+          continue;
+        }
+        pending.set(toolCall.id, toolCall);
+        seenInMessage.add(toolCall.id);
+        toolCalls.push(toolCall);
+      }
+      repaired.push(
+        toolCalls.length > 0 ? { ...message, toolCalls } : { role: "assistant", content: message.content },
+      );
+      continue;
+    }
+
+    if (message.role === "tool") {
+      if (!isValidToolMessageId(message.tool_call_id)) {
+        issues.push("invalid_tool_result_id");
+        continue;
+      }
+      if (!pending.has(message.tool_call_id)) {
+        issues.push("orphan_tool_result");
+        continue;
+      }
+      if (emittedResults.has(message.tool_call_id)) {
+        issues.push("duplicate_tool_result");
+        continue;
+      }
+      pending.delete(message.tool_call_id);
+      emittedResults.add(message.tool_call_id);
+      repaired.push(message);
+      continue;
+    }
+
+    repaired.push(message);
+  }
+
+  for (const toolUseId of pending.keys()) {
+    issues.push("missing_tool_result");
+    repaired.push({
+      role: "tool",
+      tool_call_id: toolUseId,
+      content: JSON.stringify({
+        ok: false,
+        text: "missing tool_result; synthesized by Linghun before provider request",
+        isError: true,
+      }),
+    });
+  }
+
+  return { messages: repaired, issues };
+}
+
+function isValidToolMessageId(id: string): boolean {
+  return TOOL_CALL_ID_PATTERN.test(id);
+}
+
+function isSyntheticToolResultError(content: string): boolean {
+  try {
+    const parsed = JSON.parse(content) as { isError?: unknown; ok?: unknown };
+    return parsed.isError === true || parsed.ok === false;
+  } catch {
+    return false;
+  }
 }
 
 function createReasoningPayload(level: string | undefined): { reasoning?: { effort: string } } {

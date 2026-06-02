@@ -17,14 +17,28 @@ export type LayeredToolOutput = {
 const TODO_OUTPUT_ITEM_LIMIT = 8;
 const BASH_TAIL_LINE_LIMIT = 3;
 const RAW_TOOL_USE_PATTERNS = [
-  /<tool_use\b[\s\S]*?<\/tool_use>/giu,
-  /<tool_use\b[^>]*\/>/giu,
+  /<tool_use(?:_error)?\b[\s\S]*?<\/tool_use(?:_error)?>/giu,
+  /<tool_use(?:_error)?\b[^>]*\/>/giu,
   /<tool_uses\b[\s\S]*?<\/tool_uses>/giu,
   /```(?:json|xml)?\s*[\s\S]*?\btool_use(?:_id)?\b[\s\S]*?```/giu,
   /\{[\s\S]{0,400}?"type"\s*:\s*"tool_use"[\s\S]{0,1600}?\}/giu,
 ];
-const RAW_TOOL_XML_START = /<tool_uses?\b/iu;
-const RAW_TOOL_PREFIXES = ["<", "<t", "<to", "<too", "<tool", "<tool_", "<tool_u", "<tool_us"];
+const RAW_TOOL_XML_START = /<tool_use(?:_error)?\b|<tool_uses\b/iu;
+const RAW_TOOL_PREFIXES = [
+  "<",
+  "<t",
+  "<to",
+  "<too",
+  "<tool",
+  "<tool_",
+  "<tool_u",
+  "<tool_us",
+  "<tool_use_",
+  "<tool_use_e",
+  "<tool_use_er",
+  "<tool_use_err",
+  "<tool_use_erro",
+];
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -242,6 +256,10 @@ function findPendingRawToolStart(text: string): number | undefined {
   const tail = text.slice(start).toLowerCase();
   if (tail.startsWith("<tool_uses")) {
     return tail.includes("</tool_uses>") ? undefined : start;
+  }
+  if (tail.startsWith("<tool_use_error")) {
+    if (tail.includes("/>")) return undefined;
+    return tail.includes("</tool_use_error>") ? undefined : start;
   }
   if (tail.includes("/>")) return undefined;
   return tail.includes("</tool_use>") ? undefined : start;

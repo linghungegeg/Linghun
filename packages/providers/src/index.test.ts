@@ -13,6 +13,7 @@ import {
   normalizeProviderError,
   parseAnthropicMessagesStream,
   parseOpenAiStream,
+  repairToolMessagePairing,
   resolveAnthropicContextEditingDiagnostic,
   resolveEffectiveEndpointProfile,
   resolveProviderBaseUrlDiagnostic,
@@ -115,6 +116,50 @@ describe("OpenAI compatible provider", () => {
         ],
       },
       { role: "tool", tool_call_id: "call-1", content: "ok" },
+    ]);
+  });
+
+  it("repairs OpenAI chat tool continuation before sending provider requests", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+
+    const request = provider.createChatRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call-1", name: "Read", input: { path: "README.md" } },
+            { id: "bad id", name: "Read", input: {} },
+          ],
+        },
+        { role: "tool", tool_call_id: "call-ghost", content: "orphan" },
+      ],
+    });
+
+    expect(request.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call-1",
+            type: "function",
+            function: { name: "Read", arguments: '{"path":"README.md"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-1",
+        content:
+          '{"ok":false,"text":"missing tool_result; synthesized by Linghun before provider request","isError":true}',
+      },
     ]);
   });
 
@@ -239,6 +284,100 @@ describe("OpenAI compatible provider", () => {
       },
       { type: "function_call_output", call_id: "call-1", output: "ok" },
     ]);
+  });
+
+  it("repairs responses function_call_output pairing before sending provider requests", () => {
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "gpt-5.5",
+      endpointProfile: "responses",
+    });
+
+    const request = provider.createResponsesRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "call-1", name: "Read", input: { path: "README.md" } },
+            { id: "call-1", name: "Grep", input: { pattern: "x" } },
+          ],
+        },
+      ],
+    });
+
+    expect(request.input).toEqual([
+      {
+        type: "function_call",
+        call_id: "call-1",
+        name: "Read",
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-1",
+        output:
+          '{"ok":false,"text":"missing tool_result; synthesized by Linghun before provider request","isError":true}',
+      },
+    ]);
+  });
+
+  it("repairs DeepSeek chat continuations through the OpenAI-compatible path", () => {
+    const provider = new DeepSeekProvider({ model: "deepseek-v4-pro", apiKey: "test-key" });
+
+    const request = provider.createChatRequest({
+      messages: [
+        { role: "tool", tool_call_id: "orphan", content: "bad" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "deepseek-call-1", name: "Read", input: { path: "README.md" } }],
+        },
+      ],
+    });
+
+    expect(request.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "deepseek-call-1",
+            type: "function",
+            function: { name: "Read", arguments: '{"path":"README.md"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "deepseek-call-1",
+        content:
+          '{"ok":false,"text":"missing tool_result; synthesized by Linghun before provider request","isError":true}',
+      },
+    ]);
+  });
+
+  it("reports tool pairing issues for request boundary diagnostics", () => {
+    const result = repairToolMessagePairing([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "call-1", name: "Read", input: {} },
+          { id: "call-1", name: "Read", input: {} },
+        ],
+      },
+      { role: "tool", tool_call_id: "call-1", content: "ok" },
+      { role: "tool", tool_call_id: "call-1", content: "dup" },
+      { role: "tool", tool_call_id: "ghost", content: "orphan" },
+    ]);
+
+    expect(result.issues).toContain("duplicate_tool_call_id");
+    expect(result.issues).toContain("orphan_tool_result");
+    expect(result.messages).toHaveLength(2);
   });
 
   it("exposes provider runtime contract boundaries for doctor diagnostics", () => {

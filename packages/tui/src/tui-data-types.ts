@@ -340,7 +340,7 @@ export type AgentRun = {
   task: string;
   model: string;
   permissionMode: PermissionMode;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "blocked" | "cancelled";
   transcriptPath: string;
   transcriptSessionId: string;
   summary: string;

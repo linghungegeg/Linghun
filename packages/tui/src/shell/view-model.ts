@@ -33,7 +33,7 @@ import type {
   TaskActivityView,
   TaskFooterView,
   TaskPermissionView,
-  TaskScrollView,
+  TranscriptScrollView,
 } from "./types.js";
 
 const shellText = {
@@ -408,15 +408,11 @@ export function createShellViewModel(
   const commandPanel: CommandPanelView | undefined =
     (context as { commandPanelState?: CommandPanelView }).commandPanelState ?? undefined;
 
-  // D.13Q-UX Task Surface — TaskScroll view 装配。home 模式下不暴露 taskScroll；
-  // task/pending 模式默认 stickToBottom=true / scrollOffset=0；上层 controller
-  // 通过 context.taskScrollState 写入用户的滚动位置。
-  // Pre-open-source parity: 面板打开时不再强制 stickToBottom，用户 PageUp/PageDown/
-  // 滚轮仍能回看上下文。只有交互型 picker 面板（Permission）独占上下箭头。
-  const taskScroll: TaskScrollView | undefined =
+  // Main transcript scroll：home 模式不暴露；task/pending 模式默认吸底。
+  const transcriptScroll: TranscriptScrollView | undefined =
     effectiveViewMode === "home"
       ? undefined
-      : ((context as { taskScrollState?: TaskScrollView }).taskScrollState ?? {
+      : ((context as { transcriptScrollState?: TranscriptScrollView }).transcriptScrollState ?? {
           scrollOffset: 0,
           stickToBottom: true,
         });
@@ -478,7 +474,7 @@ export function createShellViewModel(
     taskSuggestionCursor,
     configPanel,
     commandPanel,
-    taskScroll,
+    transcriptScroll,
     helpPanel: (() => {
       const state = (
         context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }

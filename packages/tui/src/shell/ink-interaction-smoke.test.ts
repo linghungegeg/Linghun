@@ -91,7 +91,7 @@ function baseTaskView(): ShellViewModel {
       summary: ["索引 ready"],
       detailsText: "Index status\n- status: ready",
     },
-    taskScroll: { scrollOffset: 0, stickToBottom: true, hasOverflow: true },
+    transcriptScroll: { scrollOffset: 0, stickToBottom: true, hasOverflow: true },
   };
 }
 
@@ -140,11 +140,17 @@ describe("Ink TTY interaction smoke", () => {
 
     input.write("\x1b[5~");
     input.write("\x1b[6~");
+    input.write("\x1b[H");
     input.write("\x1b[F");
+    input.write("\x1b[A");
+    input.write("\x1b[B");
     await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({ type: "task-scroll", delta: 5 });
-    expect(events).toContainEqual({ type: "task-scroll", delta: -5 });
-    expect(events).toContainEqual({ type: "task-scroll-end" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "halfPageUp" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "halfPageDown" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "top" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "bottom" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
 
     input.write("\x1b");
     await new Promise((resolve) => setTimeout(resolve, 80));
@@ -152,7 +158,9 @@ describe("Ink TTY interaction smoke", () => {
     expect(events).toContainEqual({ type: "command-panel-close" });
     expect(events).not.toContainEqual({ type: "escape" });
 
-    const beforePermissionTyping = events.length;
+    const userEventCount = () =>
+      events.filter((event) => event.type !== "transcript-scroll-measure").length;
+    const beforePermissionTyping = userEventCount();
     view = {
       ...view,
       commandPanel: undefined,
@@ -174,7 +182,7 @@ describe("Ink TTY interaction smoke", () => {
 
     input.write("x");
     await shell.waitUntilRenderFlush();
-    expect(events).toHaveLength(beforePermissionTyping);
+    expect(userEventCount()).toBe(beforePermissionTyping);
 
     input.write("y");
     await shell.waitUntilRenderFlush();
