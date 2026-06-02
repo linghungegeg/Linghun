@@ -36,6 +36,8 @@ import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
+  type DurableJobState,
+  type DurableJobStatus,
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
@@ -100,7 +102,7 @@ import {
   wecomBridgeAdapter,
   writeLightHintsForTest,
 } from "./index.js";
-import { listDurableJobs as listDurableJobsFromRuntime } from "./job-runtime.js";
+import { listDurableJobs as listDurableJobsFromRuntime, persistDurableJob } from "./job-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -1058,6 +1060,151 @@ function createNestedJobWorkflowPlan(permissionMode: TuiContext["permissionMode"
   };
 }
 
+function createNestedJobStatusWorkflowPlan(
+  permissionMode: TuiContext["permissionMode"],
+  jobId: string,
+): WorkflowPlan {
+  return {
+    ...createNestedJobWorkflowPlan(permissionMode),
+    id: `wf-nested-job-${jobId}`,
+    phases: [
+      {
+        id: "phase-job",
+        title: "Nested job phase",
+        status: "running",
+        stopPoint: {
+          required: true,
+          confirmationRequired: true,
+          reason: "Inspect nested job status.",
+        },
+        slices: [
+          {
+            id: "slice-job-status",
+            title: "Inspect nested durable job",
+            role: "planner",
+            status: "queued",
+            targetRuntime: { kind: "slash", slash: "/job", action: "status", mutating: false },
+            nextAction: jobId,
+            budget: { maxTokens: 1200, maxDurationMs: 30_000, maxRunningAgents: 1 },
+            evidence: [],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function createVerificationWorkflowPlan(
+  level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint" = "smoke",
+): WorkflowPlan {
+  return {
+    id: `wf-verification-${level}`,
+    title: "Verification workflow",
+    source: "manual",
+    createdAt: new Date().toISOString(),
+    permissionMode: "full-access",
+    currentPhaseId: "phase-verify",
+    phases: [
+      {
+        id: "phase-verify",
+        title: "Verification phase",
+        status: "running",
+        stopPoint: {
+          required: true,
+          confirmationRequired: true,
+          reason: "Run verification.",
+        },
+        slices: [
+          {
+            id: "slice-verify",
+            title: "Run verification",
+            role: "verifier",
+            status: "queued",
+            targetRuntime: { kind: "verification", level, mutating: false },
+            nextAction: "run verification",
+            budget: { maxTokens: 1200, maxDurationMs: 30_000, maxRunningAgents: 1 },
+            evidence: [],
+          },
+        ],
+      },
+    ],
+    budget: { maxRunningAgents: 1 },
+    references: [],
+    evidence: [],
+    stopConditions: ["verification status must map conservatively"],
+  };
+}
+
+async function persistDurableJobFixture(
+  project: string,
+  config: LinghunConfig,
+  status: DurableJobStatus,
+  resultStatus?: NonNullable<DurableJobState["result"]>["status"],
+): Promise<DurableJobState> {
+  const now = new Date().toISOString();
+  const id = `job-fixture-${status}-${resultStatus ?? "none"}`;
+  const dir = join(resolveStoragePaths(config, project).jobs, id);
+  const job: DurableJobState = {
+    id,
+    goal: `fixture ${status}`,
+    projectPath: project,
+    phase: "fixture",
+    target: "workflow-test",
+    plan: ["fixture"],
+    budget: {
+      maxTokens: 1200,
+      maxRunningAgents: 1,
+      maxSteps: 1,
+      note: "fixture",
+      usedTokens: 0,
+      remainingTokens: 1200,
+      usedSteps: 0,
+      maxRuntimeMs: 30_000,
+      explicit: {},
+    },
+    effectiveAgentCap: 0,
+    capReason: "fixture",
+    timeoutMs: 30_000,
+    permissionPolicy: "full-access",
+    allowEdit: false,
+    allowBash: false,
+    allowMultiAgent: false,
+    status,
+    pauseReason: status === "blocked" ? "fixture blocked" : undefined,
+    agents: [],
+    createdAt: now,
+    updatedAt: now,
+    startedAt: now,
+    endedAt:
+      status === "completed" || status === "failed" || status === "cancelled" ? now : undefined,
+    logPath: join(dir, "job.log"),
+    reportPath: join(dir, "report.md"),
+    fullOutputPath: join(dir, "full-output.log"),
+    evidenceRefs: [
+      {
+        id: `ev-${id}`,
+        kind: "test_result",
+        source: "fixture",
+        summary: `fixture ${status}`,
+      },
+    ],
+    verification: { status: "not_run", summary: "fixture" },
+    result: resultStatus
+      ? {
+          status: resultStatus,
+          summary: `fixture result ${resultStatus}`,
+          facts: [`result=${resultStatus}`],
+          evidenceRefs: [`ev-${id}`],
+          generatedAt: now,
+        }
+      : undefined,
+    adoptedConclusions: [],
+    rejectedConclusions: [],
+  };
+  await persistDurableJob(job);
+  return job;
+}
+
 async function createMockNativeRunner(
   project: string,
   options: { runnerDir?: string; runnerName?: string } = {},
@@ -1718,6 +1865,30 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("reasoning=ignored/unsupported");
     expect(output.text).toContain("apiKey=present");
     expect(output.text).not.toContain("sk-provider-env-secret");
+  });
+
+  it("clarifies shell LINGHUN_OPENAI env does not switch executor route without provider.env or route set", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-shell-env-route-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://shell.invalid/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-shell-env-secret");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: config.defaultModel });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/model doctor", context, output);
+
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
+      "deepseek",
+    );
+    expect(output.text).toContain("shell env routing");
+    expect(output.text).toContain("executor still uses the configured route");
+    expect(output.text).toContain("/model route set executor <model>");
+    expect(output.text).not.toContain("sk-shell-env-secret");
   });
 
   it("shows Polish A slash discovery and unknown command suggestions", async () => {
@@ -2976,7 +3147,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(reloaded.accepted).toHaveLength(0);
   });
 
-  it("restores transcript memory candidates on resume but skips accepted/rejected/disabled/deleted ids", () => {
+  it("restores transcript memory on resume without duplicating accepted candidates", () => {
     const project = join(tmpdir(), "linghun-resume-memory");
     const context = {
       projectPath: project,
@@ -2991,9 +3162,9 @@ describe("Phase 06 TUI slash commands", () => {
       evidence: [],
       cache: { compacted: false, compactBoundaries: [] },
     } as unknown as TuiContext;
-    const makeCandidate = (id: string) => ({
+    const makeCandidate = (id: string, scope = "user") => ({
       id,
-      scope: "user",
+      scope,
       status: "candidate",
       summary: `summary ${id}`,
       source: "test",
@@ -3011,6 +3182,11 @@ describe("Phase 06 TUI slash commands", () => {
       },
       {
         type: "memory_candidate",
+        candidate: makeCandidate("session-accepted", "session"),
+        createdAt: "2026-06-01T00:00:00.500Z",
+      },
+      {
+        type: "memory_candidate",
         candidate: makeCandidate("accepted-candidate"),
         createdAt: "2026-06-01T00:00:01.000Z",
       },
@@ -3018,6 +3194,22 @@ describe("Phase 06 TUI slash commands", () => {
         type: "memory_accepted",
         memory: makeCandidate("accepted-candidate"),
         createdAt: "2026-06-01T00:00:02.000Z",
+      },
+      {
+        type: "memory_accepted",
+        memory: {
+          ...makeCandidate("session-accepted", "session"),
+          status: "accepted",
+        },
+        createdAt: "2026-06-01T00:00:02.500Z",
+      },
+      {
+        type: "system_event",
+        id: "memory-session-accepted-event",
+        level: "info",
+        message:
+          "memory_lifecycle action=accepted id=session-accepted scope=session status=accepted source=test",
+        createdAt: "2026-06-01T00:00:02.600Z",
       },
       {
         type: "memory_candidate",
@@ -3045,9 +3237,39 @@ describe("Phase 06 TUI slash commands", () => {
           "memory_lifecycle action=disabled id=disabled-candidate scope=user status=disabled source=test",
         createdAt: "2026-06-01T00:00:06.000Z",
       },
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("rollback-candidate"),
+        createdAt: "2026-06-01T00:00:07.000Z",
+      },
+      {
+        type: "system_event",
+        id: "memory-rollback-event",
+        level: "info",
+        message:
+          "memory_lifecycle action=rollback id=rollback-candidate scope=user status=accepted source=test",
+        createdAt: "2026-06-01T00:00:08.000Z",
+      },
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("deleted-candidate"),
+        createdAt: "2026-06-01T00:00:09.000Z",
+      },
+      {
+        type: "system_event",
+        id: "memory-deleted-event",
+        level: "warning",
+        message:
+          "memory_lifecycle action=deleted id=deleted-candidate scope=user status=candidate source=test",
+        createdAt: "2026-06-01T00:00:10.000Z",
+      },
     ]);
 
     expect(context.memory.candidates.map((item) => item.id)).toEqual(["pending-candidate"]);
+    expect(context.memory.accepted.map((item) => item.id)).toEqual([
+      "session-accepted",
+      "accepted-candidate",
+    ]);
   });
 
   it("D.14B: auto-learning generates candidates from user input when active", async () => {
@@ -3628,6 +3850,52 @@ describe("Phase 06 TUI slash commands", () => {
     expect(committed).not.toContain('"linghunMd"');
     // 人话正文仍保留。
     expect(committed).toContain("你的环境基本正常");
+  });
+
+  it("D.14D: sanitizes natural-language internal field-name leakage from committed answers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "leak-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "leak-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiTextFetch(
+      "当前 RuntimeStatusForModel 中 name 为 leak-model，ControlledMemorySummary 为空。\n你的模型是 leak-model。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["当前模型是什么\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const resumed = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).resume(session?.id ?? "missing");
+    const finalAnswer = [...resumed.transcript]
+      .reverse()
+      .find((e) => e.type === "assistant_text_delta") as { text: string } | undefined;
+    const committed = finalAnswer?.text ?? "";
+    expect(committed).not.toContain("RuntimeStatusForModel");
+    expect(committed).not.toContain("ControlledMemorySummary");
+    expect(committed).toContain("内部运行时上下文已从主屏省略");
+    expect(committed).toContain("你的模型是 leak-model");
   });
 
   it("includes engineering structure constraints in zh-CN system prompt", async () => {
@@ -4594,6 +4862,122 @@ describe("Phase 06 TUI slash commands", () => {
     expect(state.status).toBe("blocked");
     expect(output.text).toContain("durable job");
     expect(output.text).not.toContain("PASS：");
+  });
+
+  it.each([
+    ["failed", "failed", undefined],
+    ["cancelled", "cancelled", undefined],
+    ["timeout", "timeout", undefined],
+    ["blocked", "blocked", undefined],
+    ["result-blocked", "completed", "blocked"],
+    ["result-overbudget", "completed", "overbudget"],
+    ["result-stale", "completed", "stale"],
+  ] as const)(
+    "keeps nested workflow job %s conservative and records failure learning",
+    async (_caseName, jobStatus, resultStatus) => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-workflow-nested-job-status-"));
+      const config: LinghunConfig = {
+        ...defaultConfig,
+        storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+      };
+      const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+      const session = await store.create({ model: "deepseek-v4-flash" });
+      const context = await createTestContext(project, store, session, config);
+      context.permissionMode = "full-access";
+      const job = await persistDurableJobFixture(project, config, jobStatus, resultStatus);
+      const plan = normalizeWorkflowPlan(createNestedJobStatusWorkflowPlan("full-access", job.id));
+      expect(plan.ok).toBe(true);
+      if (!plan.ok) throw new Error("invalid nested job status plan");
+      const output = new MemoryOutput();
+
+      await __testRunWorkflowStepsWithPlan(`nested job ${job.id}`, plan.plan, context, output);
+
+      const stepStatus = context.workflows.activeRun?.steps[0]?.status;
+      expect(
+        stepStatus,
+        `${context.workflows.activeRun?.steps[0]?.summary ?? ""}\n${output.text}`,
+      ).not.toBe("completed");
+      if (jobStatus === "cancelled") {
+        expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("cancelled");
+      } else if (
+        jobStatus === "failed" ||
+        jobStatus === "timeout" ||
+        resultStatus === "overbudget"
+      ) {
+        expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("failed");
+      } else {
+        expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("blocked");
+      }
+      expect(context.workflows.activeRun?.result).not.toBe("partial");
+      const transcript = (await store.resume(session.id)).transcript;
+      expect(
+        transcript.some(
+          (event) =>
+            event.type === "workflow_step_result" &&
+            event.status !== "completed" &&
+            String(event.summary).includes(job.id),
+        ),
+      ).toBe(true);
+      expect(
+        transcript.some((event) => event.type === "workflow_end" && event.status !== "completed"),
+      ).toBe(true);
+      expect(
+        context.failureLearning.records.some((record) => record.relatedTarget === "workflow"),
+      ).toBe(true);
+      expect(output.text).not.toContain("PASS：");
+    },
+  );
+
+  it("maps workflow verification fail report conservatively", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-verification-"));
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        scripts: { test: 'node -e "process.exit(1)"' },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const plan = normalizeWorkflowPlan(createVerificationWorkflowPlan("test"));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid verification plan");
+    const output = new MemoryOutput();
+
+    await __testRunWorkflowStepsWithPlan("verification fail", plan.plan, context, output);
+
+    expect(context.lastVerification?.status).toBe("fail");
+    expect(context.workflows.activeRun?.steps[0]?.status).toBe("failed");
+    expect(context.workflows.activeRun?.status).toBe("failed");
+    expect(context.workflows.activeRun?.result).toBe("failed");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "workflow_step_result" &&
+          event.status === "failed" &&
+          String(event.summary).includes("verification fail"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some((event) => event.type === "workflow_end" && event.status === "failed"),
+    ).toBe(true);
+    expect(output.text).not.toContain("PASS：");
+  });
+
+  it("source: workflow verification maps partial/cancelled/timeout/stale to conservative non-completed states", async () => {
+    const src = await readFile(srcPath("index.ts"), "utf8");
+    const helperStart = src.indexOf("function workflowStepStatusFromVerification");
+    expect(helperStart).toBeGreaterThan(-1);
+    const helper = src.slice(helperStart, helperStart + 700);
+    expect(helper).toContain('if (status === "pass") return "completed"');
+    expect(helper).toContain('if (status === "partial") return "partial"');
+    expect(helper).toContain('if (status === "cancelled") return "cancelled"');
+    expect(helper).toContain('if (status === "stale") return "stale"');
+    expect(helper).toContain('return "failed"');
+    expect(src).toContain("const report = await runWorkflowVerificationStep");
+    expect(src).toContain("workflowStepStatusFromVerification(report.status)");
   });
 
   it("blocks nested /job workflow steps in plan mode before run instead of diverging from bridge", async () => {
@@ -7655,6 +8039,51 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("预算耗尽后的无工具总结。");
     expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(101);
+  });
+
+  it("gates no-tool final summary after total tool-round budget exhaustion", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), "alpha\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "hundred-turn-no-tool-gate-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "hundred-turn-no-tool-gate-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      Array.from({ length: 100 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
+      "已完成，测试通过，PASS。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请持续读取直到预算停止\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
+    expect(output.text).toContain("[未验证]");
+    expect(output.text).not.toContain("已完成，测试通过，PASS。");
+    expect(requests.length).toBeGreaterThanOrEqual(101);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = (await store.list()).at(0);
+    expect(session).toBeTruthy();
+    const transcript = (await store.resume(session?.id ?? "")).transcript;
+    expect(JSON.stringify(transcript)).toContain("final_answer_claim_gate downgrade");
+    expect(JSON.stringify(transcript)).toContain("[未验证]");
+    expect(JSON.stringify(transcript)).not.toContain("已完成，测试通过，PASS。");
   });
 
   it("Todo-only round does not reduce progressing evidence tool rounds", async () => {

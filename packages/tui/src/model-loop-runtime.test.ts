@@ -747,6 +747,20 @@ describe("model-loop-runtime", () => {
       expect(verdict.status).toBe("passed");
     });
 
+    it("does not let architecture aggregate index evidence support code facts", () => {
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
+        makeEvidence({
+          kind: "index_query",
+          source: "codebase-memory:F-Linghun:architecture",
+          summary:
+            "Index architecture - nodes/edges: 3725/8068 - node labels: Class=100, Function=500",
+          supportsClaims: ["index_query", "index_code_fact", "architecture"],
+        }),
+      ]);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
     it("blocks external current fact when no web_source evidence", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),

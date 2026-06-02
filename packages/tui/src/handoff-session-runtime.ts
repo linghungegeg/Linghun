@@ -52,6 +52,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = handoff.packet;
   }
+  restoreSessionAcceptedMemory(context, transcript);
   restorePendingMemoryCandidates(context, transcript);
   const deepCompact = [...transcript]
     .reverse()
@@ -89,28 +90,27 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   }
 }
 
-function restorePendingMemoryCandidates(context: TuiContext, transcript: TranscriptEvent[]): void {
-  const processed = new Set<string>();
+function restoreSessionAcceptedMemory(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const finalActions = collectMemoryFinalActions(transcript);
+  const known = new Set(context.memory.accepted.map((item) => item.id));
+  const restored: MemoryCandidate[] = [];
   for (const event of transcript) {
-    if (event.type === "memory_accepted") {
-      const id = readMemoryId(event.memory);
-      if (id) processed.add(id);
-      continue;
-    }
-    if (event.type !== "system_event") continue;
-    const match = event.message.match(/\bmemory_lifecycle action=(\w+) id=([^\s]+)/u);
-    if (!match) continue;
-    const action = match[1];
-    if (
-      action === "accepted" ||
-      action === "rejected" ||
-      action === "disabled" ||
-      action === "rollback" ||
-      action === "deleted"
-    ) {
-      processed.add(match[2]);
-    }
+    if (event.type !== "memory_accepted") continue;
+    const memory = parseResumeAcceptedMemory(event.memory);
+    if (!memory) continue;
+    if (known.has(memory.id)) continue;
+    const finalAction = finalActions.get(memory.id);
+    if (finalAction && finalAction !== "accepted" && finalAction !== "rollback") continue;
+    restored.push(memory);
+    known.add(memory.id);
   }
+  if (restored.length > 0) {
+    context.memory.accepted = [...restored.reverse(), ...context.memory.accepted];
+  }
+}
+
+function restorePendingMemoryCandidates(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const processed = collectMemoryProcessedIds(transcript);
 
   const known = new Set(
     [
@@ -135,8 +135,51 @@ function restorePendingMemoryCandidates(context: TuiContext, transcript: Transcr
   }
 }
 
-function readMemoryId(value: unknown): string | undefined {
-  return isRecord(value) && typeof value.id === "string" ? value.id : undefined;
+function collectMemoryProcessedIds(transcript: TranscriptEvent[]): Set<string> {
+  const processed = new Set<string>();
+  for (const event of transcript) {
+    if (event.type === "memory_accepted") {
+      const id = readMemoryId(event.memory);
+      if (id) processed.add(id);
+      continue;
+    }
+    const lifecycle = parseMemoryLifecycleEvent(event);
+    if (lifecycle) processed.add(lifecycle.id);
+  }
+  return processed;
+}
+
+function collectMemoryFinalActions(transcript: TranscriptEvent[]): Map<string, string> {
+  const actions = new Map<string, string>();
+  for (const event of transcript) {
+    if (event.type === "memory_accepted") {
+      const id = readMemoryId(event.memory);
+      if (id) actions.set(id, "accepted");
+      continue;
+    }
+    const lifecycle = parseMemoryLifecycleEvent(event);
+    if (lifecycle) actions.set(lifecycle.id, lifecycle.action);
+  }
+  return actions;
+}
+
+function parseMemoryLifecycleEvent(
+  event: TranscriptEvent,
+): { action: string; id: string } | undefined {
+  if (event.type !== "system_event") return undefined;
+  const match = event.message.match(/\bmemory_lifecycle action=(\w+) id=([^\s]+)/u);
+  if (!match) return undefined;
+  const action = match[1];
+  if (
+    action !== "accepted" &&
+    action !== "rejected" &&
+    action !== "disabled" &&
+    action !== "rollback" &&
+    action !== "deleted"
+  ) {
+    return undefined;
+  }
+  return { action, id: match[2] };
 }
 
 function parseResumeMemoryCandidate(value: unknown): MemoryCandidate | undefined {
@@ -162,6 +205,37 @@ function parseResumeMemoryCandidate(value: unknown): MemoryCandidate | undefined
     id: value.id,
     scope: value.scope,
     status: "candidate",
+    summary: value.summary,
+    source: value.source,
+    sourceRefs: sourceRefs.slice(0, 6),
+    risk: value.risk === "medium" || value.risk === "high" ? value.risk : "low",
+    inferred: value.inferred === true,
+    createdAt: value.createdAt,
+  };
+}
+
+function readMemoryId(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.id === "string" ? value.id : undefined;
+}
+
+function parseResumeAcceptedMemory(value: unknown): MemoryCandidate | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.id !== "string" ||
+    typeof value.summary !== "string" ||
+    typeof value.source !== "string" ||
+    typeof value.createdAt !== "string"
+  ) {
+    return undefined;
+  }
+  if (value.scope !== "session") return undefined;
+  const sourceRefs = Array.isArray(value.sourceRefs)
+    ? value.sourceRefs.filter((item): item is string => typeof item === "string")
+    : [value.source];
+  return {
+    id: value.id,
+    scope: "session",
+    status: "accepted",
     summary: value.summary,
     source: value.source,
     sourceRefs: sourceRefs.slice(0, 6),

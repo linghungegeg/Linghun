@@ -98,7 +98,7 @@ describe("mcp-index-runtime", () => {
     ).toBe(false);
   });
 
-  test("isSupportiveIndexEvidence accepts ready search/architecture summaries with real code facts", () => {
+  test("isSupportiveIndexEvidence accepts ready search summaries with real code facts", () => {
     const context = {
       index: { status: "ready", projectName: "F-Linghun" },
     };
@@ -110,12 +110,19 @@ describe("mcp-index-runtime", () => {
         "Index search\n- #1 path=packages/providers/src/index.ts symbol=OpenAiCompatibleProvider",
       ),
     ).toBe(true);
+  });
+
+  test("isSupportiveIndexEvidence treats architecture aggregates as supplemental only", () => {
+    const context = {
+      index: { status: "ready", projectName: "F-Linghun" },
+    };
+
     expect(
       isSupportiveIndexEvidence(
         context as never,
         "architecture",
-        "Index architecture\n- nodes/edges: 3725/8068\n- node labels: Class=100, Function=500",
+        "Index architecture\n- nodes/edges: 3725/8068\n- node labels: Class=100, Function=500\n- edge types: CALLS=3000, IMPORTS=2000",
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

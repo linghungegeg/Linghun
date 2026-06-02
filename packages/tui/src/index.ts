@@ -226,6 +226,7 @@ import {
 import {
   COMMAND_PROPOSAL_TOOL_NAME,
   EXECUTE_EXTRA_TOOL_NAME,
+  type FinalAnswerClaimVerdict,
   INDEX_OPERATION_TOOL_NAME,
   RUN_VERIFICATION_TOOL_NAME,
   RUN_WORKFLOW_TOOL_NAME,
@@ -3231,6 +3232,7 @@ function formatWorkflowStatus(context: TuiContext): string {
       queued: 0,
       running: 0,
       completed: 0,
+      partial: 0,
       failed: 0,
       blocked: 0,
       cancelled: 0,
@@ -3242,7 +3244,7 @@ function formatWorkflowStatus(context: TuiContext): string {
     `- status: ${run.status}; result=${run.result}`,
     `- goal: ${truncateDisplay(run.goal, 120)}`,
     `- planId: ${run.planId}`,
-    `- steps: queued=${counts.queued}; running=${counts.running}; completed=${counts.completed}; blocked=${counts.blocked}; failed=${counts.failed}; cancelled=${counts.cancelled}; stale=${counts.stale}`,
+    `- steps: queued=${counts.queued}; running=${counts.running}; completed=${counts.completed}; partial=${counts.partial}; blocked=${counts.blocked}; failed=${counts.failed}; cancelled=${counts.cancelled}; stale=${counts.stale}`,
     `- evidenceRefs: ${run.steps.flatMap((step) => step.evidenceRefs).join(", ") || "none"}`,
     "- completion is PARTIAL only; blocked/stale/cancelled/failed steps never claim PASS.",
     "- background: /background; details: /details background <id>",
@@ -3650,7 +3652,7 @@ async function executeRegistryWorkflowStep(
   context: TuiContext,
   output: Writable,
 ): Promise<{
-  status: "completed" | "failed" | "blocked";
+  status: WorkflowStepTerminalStatus;
   summary: string;
   evidenceRefs: string[];
 }> {
@@ -3661,7 +3663,20 @@ async function executeRegistryWorkflowStep(
       const task = step.task ?? (goal || workflow.description);
       await handleForkCommand([role, task], context, output);
     } else if (step.action === "verification") {
-      await runWorkflowVerificationStep(step.level ?? "focused", context, output);
+      const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output);
+      const status = workflowStepStatusFromVerification(report.status);
+      if (status !== "completed") {
+        return {
+          status,
+          summary: formatWorkflowStepSummary(
+            step.id,
+            status,
+            `verification ${report.status}: ${report.summary}`,
+            context.language,
+          ),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
     } else if (step.action === "details") {
       await handleSlashCommand("/details", context, output);
     } else if (step.action === "index") {
@@ -3712,15 +3727,56 @@ async function executeRegistryWorkflowStep(
 
 function formatWorkflowStepSummary(
   stepId: string,
-  status: "completed" | "failed" | "blocked",
+  status: WorkflowStepState["status"],
   detail: string,
   language: TuiContext["language"],
 ): string {
   if (language === "en-US") {
     return `Workflow step ${stepId} ${status}: ${detail}`;
   }
-  const statusText = status === "completed" ? "已完成" : status === "failed" ? "失败" : "受阻";
+  const statusText =
+    status === "completed"
+      ? "已完成"
+      : status === "failed"
+        ? "失败"
+        : status === "cancelled"
+          ? "已取消"
+          : status === "stale"
+            ? "已过期"
+            : status === "partial"
+              ? "部分完成"
+              : "受阻";
   return `工作流步骤 ${stepId} ${statusText}：${detail}`;
+}
+
+type WorkflowStepTerminalStatus = Extract<
+  WorkflowStepState["status"],
+  "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale"
+>;
+
+function workflowStepStatusFromVerification(
+  status: VerificationReport["status"],
+): WorkflowStepTerminalStatus {
+  if (status === "pass") return "completed";
+  if (status === "partial") return "partial";
+  if (status === "cancelled") return "cancelled";
+  if (status === "stale") return "stale";
+  return "failed";
+}
+
+function workflowStepStatusFromNestedJob(job: DurableJobState): WorkflowStepTerminalStatus {
+  const resultStatus = job.result?.status;
+  if (job.status === "failed" || job.status === "timeout") return "failed";
+  if (job.status === "cancelled") return "cancelled";
+  if (job.status === "blocked" || job.status === "sleeping" || job.status === "stale") {
+    return "blocked";
+  }
+  if (resultStatus === "failed" || resultStatus === "timeout" || resultStatus === "overbudget") {
+    return "failed";
+  }
+  if (resultStatus === "cancelled") return "cancelled";
+  if (resultStatus === "blocked" || resultStatus === "stale") return "blocked";
+  return "completed";
 }
 
 async function executeWorkflowStep(
@@ -3728,7 +3784,7 @@ async function executeWorkflowStep(
   context: TuiContext,
   output: Writable,
 ): Promise<{
-  status: "completed" | "failed" | "blocked";
+  status: WorkflowStepTerminalStatus;
   summary: string;
   evidenceRefs: string[];
 }> {
@@ -3803,7 +3859,22 @@ async function executeWorkflowStep(
         };
       }
     } else if (req.mainChain === "verification") {
-      await runWorkflowVerificationStep(req.level, context, output);
+      const report = await runWorkflowVerificationStep(req.level, context, output);
+      const status = workflowStepStatusFromVerification(report.status);
+      if (status !== "completed") {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          status,
+          `verification ${report.status}: ${report.summary}`,
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status,
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
     } else if (req.mainChain === "details") {
       await handleSlashCommand("/details", context, output);
     } else if (req.mainChain === "agents") {
@@ -3854,16 +3925,17 @@ async function executeWorkflowStep(
         await captureWorkflowFailureLearning(request, summary, context);
         return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
       }
-      if (job.status === "blocked" || job.status === "sleeping" || job.status === "stale") {
+      const nestedStatus = workflowStepStatusFromNestedJob(job);
+      if (nestedStatus !== "completed") {
         const summary = formatWorkflowStepSummary(
           request.sliceId,
-          "blocked",
-          `nested job ${job.id} ${job.status}: ${job.pauseReason ?? job.result?.summary ?? "not runnable"}`,
+          nestedStatus,
+          `nested job ${job.id} ${job.status}${job.result?.status ? ` result=${job.result.status}` : ""}: ${job.pauseReason ?? job.result?.summary ?? "not runnable"}`,
           context.language,
         );
         await captureWorkflowFailureLearning(request, summary, context);
         return {
-          status: "blocked",
+          status: nestedStatus,
           summary,
           evidenceRefs: mergeWorkflowEvidenceRefs(
             newWorkflowEvidenceRefs(beforeEvidence, context),
@@ -3876,7 +3948,7 @@ async function executeWorkflowStep(
         summary: formatWorkflowStepSummary(
           request.sliceId,
           "completed",
-          `nested job ${job.id} ${job.status}; persisted state=${getDurableJobStatePath(job)}`,
+          `nested job lifecycle ${job.id} ${job.status}; workflow result remains PARTIAL; persisted state=${getDurableJobStatePath(job)}`,
           context.language,
         ),
         evidenceRefs: mergeWorkflowEvidenceRefs(
@@ -4001,7 +4073,7 @@ async function runWorkflowVerificationStep(
   level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint",
   context: TuiContext,
   output: Writable,
-): Promise<void> {
+): Promise<VerificationReport> {
   const sessionId = await ensureSession(context);
   const plan =
     level === "smoke" || level === "focused"
@@ -4020,6 +4092,7 @@ async function runWorkflowVerificationStep(
   );
   context.lastVerification = report;
   await recordVerificationEvidence(context, sessionId, report);
+  return report;
 }
 
 async function runNestedWorkflowJobCommand(
@@ -4046,7 +4119,7 @@ async function runNestedWorkflowJobCommand(
 
 async function finishWorkflowRun(
   runId: string,
-  status: "completed" | "failed" | "blocked" | "cancelled" | "stale",
+  status: WorkflowStepTerminalStatus,
   summary: string,
   context: TuiContext,
   sessionId: string,
@@ -4061,18 +4134,21 @@ async function finishWorkflowRun(
   task.status =
     status === "completed"
       ? "completed"
-      : status === "stale"
-        ? "stale"
-        : status === "cancelled"
-          ? "cancelled"
-          : "failed";
-  task.result = status === "completed" || status === "blocked" ? "partial" : "fail";
+      : status === "partial"
+        ? "completed"
+        : status === "stale"
+          ? "stale"
+          : status === "cancelled"
+            ? "cancelled"
+            : "failed";
+  task.result =
+    status === "completed" || status === "partial" || status === "blocked" ? "partial" : "fail";
   task.currentStep = summary;
   task.updatedAt = now;
   task.lastOutputAt = now;
   task.userVisibleSummary = summary;
   task.nextAction =
-    status === "completed"
+    status === "completed" || status === "partial"
       ? "Review verification evidence; do not treat workflow completion as PASS."
       : "Inspect /failures and rerun after fixing the failed step.";
   if (context.workflows.activeRun?.id === runId) {
@@ -4082,7 +4158,7 @@ async function finishWorkflowRun(
   await context.store.appendEvent(sessionId, {
     type: "workflow_end",
     workflowId: runId,
-    status: status === "completed" || status === "failed" ? status : "blocked",
+    status,
     summary,
     createdAt: now,
   });
@@ -8929,41 +9005,20 @@ async function sendMessage(
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
-    // D.13U — 最后一道关卡：若已用过一次 retry 仍违规，本地降级，原文不入 transcript
-    if (finalAnswerClaimRetried) {
+    // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
+    // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
+    {
       const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
       if (verdict.status === "needs_disclaimer") {
-        await appendSystemEvent(
+        assistantText = await downgradeUnsupportedFinalAnswer(
+          assistantText,
+          verdict,
           context,
           sessionId,
-          `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
-          "warning",
+          output,
+          assistantStreamBlockId,
         );
-        assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
-        // D.13V — 同步把 streaming block 与 lastFullOutput 替换为降级文本，
-        // 避免主屏 / Ctrl+O / details 仍展示原始违规文本。
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        // D.14B — final answer gate 降级是真实失败：模型空口声称未被 evidence 支持。
-        // D.14E+ — 避免把 benign secret-safety answer 误记为 code_fact failure：
-        // 如果回答包含明显的 secret/key/安全拒答关键词，且不是真实的 code_fact 声称，跳过记录。
-        const isBenignSecretSafety =
-          (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
-            !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
-          verdict.unsupportedKinds.length === 0;
-        if (!isBenignSecretSafety) {
-          await captureFailureLearning(context, sessionId, {
-            category: "final_gate_downgrade",
-            failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
-            rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
-            avoidNextTime:
-              "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
-            sourceRef: "event:final_answer_claim_gate",
-            relatedTarget: verdict.unsupportedKinds.join(","),
-            severity: "high",
-          });
-        }
       }
-      // D.13V-B — Architecture / Completeness 降级（与 D.13U 共享 retry 预算）
       const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
       if (extended.status === "needs_disclaimer") {
         await appendSystemEvent(
@@ -9260,9 +9315,6 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
-      if (visibleText) {
-        writeAssistantDelta(output, assistantStreamBlockId, visibleText);
-      }
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -9284,9 +9336,6 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "tool_use") {
       const visibleText = textSanitizer.flush();
       assistantText += visibleText;
-      if (visibleText) {
-        writeAssistantDelta(output, assistantStreamBlockId, visibleText);
-      }
       await appendSystemEvent(
         context,
         sessionId,
@@ -9345,9 +9394,6 @@ async function streamFinalModelAnswerWithoutTools(
   }
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
-  if (finalVisibleText) {
-    writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
-  }
   if (textSanitizer.hadRawToolProtocol()) {
     ignoredRawToolProtocolText = true;
     assistantText = "";
@@ -9379,6 +9425,37 @@ async function streamFinalModelAnswerWithoutTools(
       }
     }
   }
+  if (assistantText) {
+    const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
+    if (verdict.status === "needs_disclaimer") {
+      assistantText = await downgradeUnsupportedFinalAnswer(
+        assistantText,
+        verdict,
+        context,
+        sessionId,
+        output,
+        assistantStreamBlockId,
+      );
+    }
+    const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
+    if (extended.status === "needs_disclaimer") {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
+        "warning",
+      );
+      assistantText = buildExtendedDowngradedFinalAnswer(
+        assistantText,
+        extended.verdict,
+        context.language,
+      );
+      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    }
+  }
+  if (assistantText) {
+    writeAssistantDelta(output, assistantStreamBlockId, assistantText);
+  }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
     endAssistantStream(output);
@@ -9399,6 +9476,41 @@ async function streamFinalModelAnswerWithoutTools(
     );
   }
   return assistantText;
+}
+
+async function downgradeUnsupportedFinalAnswer(
+  assistantText: string,
+  verdict: FinalAnswerClaimVerdict,
+  context: TuiContext,
+  sessionId: string,
+  output: Writable,
+  assistantStreamBlockId: string,
+): Promise<string> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
+    "warning",
+  );
+  const downgraded = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+  replaceAssistantBlockContent(output, assistantStreamBlockId, downgraded);
+  const isBenignSecretSafety =
+    (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(downgraded) &&
+      !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(downgraded)) ||
+    verdict.unsupportedKinds.length === 0;
+  if (!isBenignSecretSafety) {
+    await captureFailureLearning(context, sessionId, {
+      category: "final_gate_downgrade",
+      failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
+      rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
+      avoidNextTime:
+        "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+      sourceRef: "event:final_answer_claim_gate",
+      relatedTarget: verdict.unsupportedKinds.join(","),
+      severity: "high",
+    });
+  }
+  return downgraded;
 }
 
 async function continueModelAfterToolResults(
@@ -9726,39 +9838,20 @@ async function continueModelAfterToolResults(
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
-      // D.13U — 最后一道关卡：retry 后仍违规则降级，原文不入 transcript
-      if (finalAnswerClaimRetried) {
+      // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
+      // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
+      {
         const verdict = evaluateFinalAnswerClaims(assistantText, context.evidence);
         if (verdict.status === "needs_disclaimer") {
-          await appendSystemEvent(
+          assistantText = await downgradeUnsupportedFinalAnswer(
+            assistantText,
+            verdict,
             context,
             sessionId,
-            `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
-            "warning",
+            output,
+            assistantStreamBlockId,
           );
-          assistantText = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
-          // D.13V — 同步替换 continuation streaming block 与 lastFullOutput。
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-          // D.14B — continuation 路径的 final gate 降级镜像。
-          // D.14E+ — 避免把 benign secret-safety answer 误记为 code_fact failure。
-          const isBenignSecretSafety =
-            (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
-              !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
-            verdict.unsupportedKinds.length === 0;
-          if (!isBenignSecretSafety) {
-            await captureFailureLearning(context, sessionId, {
-              category: "final_gate_downgrade",
-              failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
-              rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
-              avoidNextTime:
-                "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
-              sourceRef: "event:final_answer_claim_gate",
-              relatedTarget: verdict.unsupportedKinds.join(","),
-              severity: "high",
-            });
-          }
         }
-        // D.13V-B — Architecture / Completeness 降级（continuation 镜像）
         const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
         if (extended.status === "needs_disclaimer") {
           await appendSystemEvent(

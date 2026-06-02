@@ -190,10 +190,11 @@ export function sanitizeMainScreenLeakage(
   const tokenAlternation = INTERNAL_PROMPT_TOKENS.join("|");
   // 命中 "Token=..." 或 "Token: ..."（行内或多行 JSON dump 的起始行）。
   const lineRe = new RegExp(`^\\s*(?:${tokenAlternation})\\s*[=:].*$`, "u");
+  const naturalLanguageLeakRe = new RegExp(`\\b(?:${tokenAlternation})\\b`, "u");
   const lines = text.split("\n");
   let redacted = false;
   const cleaned = lines.filter((line) => {
-    if (lineRe.test(line)) {
+    if (lineRe.test(line) || naturalLanguageLeakRe.test(line)) {
       redacted = true;
       return false;
     }

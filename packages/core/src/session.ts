@@ -307,7 +307,7 @@ export type TranscriptEvent =
       type: "workflow_step_result";
       workflowId: string;
       stepId: string;
-      status: "completed" | "failed" | "blocked";
+      status: "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";
       summary: string;
       evidenceRefs: string[];
       createdAt: string;
@@ -315,7 +315,7 @@ export type TranscriptEvent =
   | {
       type: "workflow_end";
       workflowId: string;
-      status: "completed" | "failed" | "blocked";
+      status: "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";
       summary: string;
       createdAt: string;
     }

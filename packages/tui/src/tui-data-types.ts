@@ -60,7 +60,15 @@ export type BackgroundTaskState = {
 export type WorkflowStepState = {
   id: string;
   title: string;
-  status: "queued" | "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+  status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "blocked"
+    | "cancelled"
+    | "stale";
   runtime: "agent" | "job" | "verification" | "details";
   summary?: string;
   evidenceRefs: string[];
@@ -932,7 +940,7 @@ export type WorkflowState = {
     id: string;
     goal: string;
     planId: string;
-    status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+    status: "running" | "completed" | "partial" | "failed" | "blocked" | "cancelled" | "stale";
     steps: WorkflowStepState[];
     startedAt: string;
     endedAt?: string;

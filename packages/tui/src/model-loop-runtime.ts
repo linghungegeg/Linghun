@@ -1030,7 +1030,7 @@ function evidenceSupportsIndexCodeFact(record: EvidenceRecord): boolean {
   ) {
     return false;
   }
-  return /(?:path=|file_path|file:|symbol=|snippet=|match=|nodes\/edges:\s*\d+\/\d+|\b(?:class|function|method|calls|imports)=\d+)/iu.test(
+  return /(?:\bpath\s*=\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile_path\s*[:=]\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile:\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsymbol\s*=\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsnippet\s*=\s*(?!\s*$).+|\bmatch\s*=\s*(?!\s*$).+)/imu.test(
     tokens,
   );
 }

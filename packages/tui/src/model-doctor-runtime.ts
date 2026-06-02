@@ -289,6 +289,21 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       "- provider.env merge: applied=no (~/.linghun/provider.env 未覆盖项目 settings；如需切换 provider 请使用 /model setup)",
     );
   }
+  const hasShellOpenAiEnv = Boolean(
+    process.env.LINGHUN_OPENAI_BASE_URL ||
+      process.env.LINGHUN_OPENAI_API_KEY ||
+      process.env.LINGHUN_OPENAI_MODEL,
+  );
+  const executorRoute = getRoleRoute(context.config, "executor");
+  if (
+    hasShellOpenAiEnv &&
+    !lastProviderEnvMerge?.applied &&
+    executorRoute.provider !== "openai-compatible"
+  ) {
+    lines.push(
+      "- shell env routing: LINGHUN_OPENAI_* is present, but shell env only fills the openai-compatible provider fields; executor still uses the configured route. Use /model route set executor <model> or /model setup/provider.env to switch the text route.",
+    );
+  }
   // D.13J Block 1：占位 / 未成熟模型名 doctor 标记。
   // deepseek-v4-flash / deepseek-v4-pro / openai-compatible-model 都是占位符；
   // 出现在 provider.model 或 route.primary/fallback 上时，必须显式提示用户用环境变量替换为现役模型名。
