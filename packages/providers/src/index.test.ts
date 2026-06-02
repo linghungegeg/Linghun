@@ -1341,8 +1341,129 @@ describe("ModelGateway", () => {
       suggestion: expect.stringContaining("compatibilityProfile"),
     });
     await expect(collect()).rejects.not.toMatchObject({
+      code: "PROVIDER_QUOTA_EXHAUSTED",
+    });
+    await expect(collect()).rejects.not.toMatchObject({
       message: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
       suggestion: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
+    });
+  });
+
+  it("classifies plain HTTP 429 as rate limit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("Too many requests: rate limit reached", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          }),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_RATE_LIMITED",
+      message: expect.stringContaining("HTTP 429"),
+      suggestion: expect.stringContaining("降低请求频率"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      code: "PROVIDER_QUOTA_EXHAUSTED",
+    });
+  });
+
+  it("classifies HTTP 429 quota or balance exhaustion separately without leaking body details", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            '{"error":{"message":"insufficient_quota account balance too low sk-test-secret C:/Users/Admin/project prompt text"}}',
+            { status: 429, headers: { "retry-after": "0" } },
+          ),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_QUOTA_EXHAUSTED",
+      message: expect.stringContaining("HTTP 429"),
+      suggestion: expect.stringContaining("Linghun 没有查询余额"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
+      suggestion: expect.stringMatching(/sk-test-secret|C:\/Users|prompt text/),
+    });
+  });
+
+  it("classifies HTTP 402 payment or billing exhaustion as quota exhausted", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("payment required billing limit reached balance exhausted sk-test-secret", {
+            status: 402,
+          }),
+      ),
+    );
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const collect = async () => {
+      const events = [];
+      for await (const event of provider.stream(
+        { messages: [{ role: "user", content: "hi" }] },
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    await expect(collect()).rejects.toMatchObject({
+      code: "PROVIDER_QUOTA_EXHAUSTED",
+      message: expect.stringContaining("HTTP 402"),
+      suggestion: expect.stringContaining("充值或检查账单"),
+    });
+    await expect(collect()).rejects.not.toMatchObject({
+      message: expect.stringMatching(/sk-test-secret/),
+      suggestion: expect.stringMatching(/sk-test-secret/),
     });
   });
 

@@ -2632,6 +2632,16 @@ function sanitizeProviderBadRequestHint(responseText?: string): string | undefin
   return "provider rejected request body; check schema/profile/model";
 }
 
+function isQuotaOrBalanceExhaustedResponse(responseText?: string): boolean {
+  if (!responseText) {
+    return false;
+  }
+  const lower = maskSensitiveFragments(responseText).toLowerCase();
+  return /insufficient[_\s-]?quota|quota\s*(?:exhausted|exceeded|limit|reached)|credits?\s*(?:exhausted|used\s*up|insufficient|limit)|balance\s*(?:exhausted|insufficient|too\s*low|不足)|billing\s*(?:hard\s*limit|limit|required|payment)|payment[_\s-]?required|account\s+balance|余额不足|额度不足|欠费|充值/iu.test(
+    lower,
+  );
+}
+
 function createHttpStatusError(
   status: number,
   responseText?: string,
@@ -2662,10 +2672,28 @@ function createHttpStatusError(
     });
   }
   if (status === 429) {
+    if (isQuotaOrBalanceExhaustedResponse(responseText)) {
+      return new LinghunError({
+        code: "PROVIDER_QUOTA_EXHAUSTED",
+        message: `模型请求失败：HTTP 429，provider 返回额度或余额不足${suffix}。`,
+        suggestion:
+          "请充值或检查账单，或切换可用的 key/provider/model；Linghun 没有查询余额，只是根据上游错误分类。",
+        recoverable: true,
+      });
+    }
     return new LinghunError({
       code: "PROVIDER_RATE_LIMITED",
-      message: `模型请求失败：HTTP 429，已触发 provider 限流或额度限制${suffix}。`,
-      suggestion: "请稍后重试，或运行 /usage 与 /model doctor 检查当前 provider/model 配置。",
+      message: `模型请求失败：HTTP 429，已触发 provider 限流${suffix}。`,
+      suggestion: "请稍后重试、降低请求频率，或运行 /model doctor 检查当前 provider/model 配置。",
+      recoverable: true,
+    });
+  }
+  if (status === 402 || (status < 500 && isQuotaOrBalanceExhaustedResponse(responseText))) {
+    return new LinghunError({
+      code: "PROVIDER_QUOTA_EXHAUSTED",
+      message: `模型请求失败：HTTP ${status}，provider 返回额度、余额或账单不可用${suffix}。`,
+      suggestion:
+        "请充值或检查账单，或切换可用的 key/provider/model；Linghun 没有查询余额，只是根据上游错误分类。",
       recoverable: true,
     });
   }

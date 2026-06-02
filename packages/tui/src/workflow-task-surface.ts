@@ -128,6 +128,7 @@ export function projectWorkflowTaskSurface(
   );
   const detailsText = buildDetailsText(
     plan.title,
+    plan.references ?? [],
     bridgeResult,
     evidenceMergeRows,
     failureLearningRefs,
@@ -326,12 +327,16 @@ function buildSummaryText(
 
 function buildDetailsText(
   title: string,
+  references: NonNullable<NormalizedWorkflowPlan["references"]>,
   bridgeResult: WorkflowAgentRuntimeBridgeResult,
   evidenceRows: EvidenceMergeRow[],
   failureLearningRefs: Array<{ ref: string; kind: WorkflowEvidenceKind; claim: string }>,
 ): string {
   const header = `Workflow Task Surface details: ${title}`;
   const requestLines = bridgeResult.requests.map((r) => formatRequestRow(r));
+  const referenceLines = references.map(
+    (ref) => `  reference: ${ref.ref} | ${ref.kind} | ${ref.summary}`,
+  );
   const evidenceLines = evidenceRows.map(
     (row) => `  evidence: ${row.ref} | ${row.kind} | ${row.verdict} | ${row.reason}`,
   );
@@ -345,6 +350,7 @@ function buildDetailsText(
     "Requests:",
     "  phase | slice | role | status | permission | evidence | nextAction",
     ...requestLines,
+    ...(referenceLines.length > 0 ? ["", "References:", ...referenceLines] : []),
     "",
     "Evidence Merge:",
     ...evidenceLines,

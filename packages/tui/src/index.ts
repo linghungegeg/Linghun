@@ -220,6 +220,7 @@ import {
   formatModelRouteSummary,
   formatModelRoutes,
   getRoleRoute,
+  inferProviderForRouteModel,
   isModelRole,
 } from "./model-doctor-runtime.js";
 import {
@@ -449,9 +450,13 @@ import {
   formatWorkspaceTrustStatus,
 } from "./pending-details-presenter.js";
 import {
+  classifyProviderFailure,
+  type ProviderFailureKind,
   type RequestActivityPhase,
+  formatProviderFallbackAttemptSummary,
   formatProviderEmptyResponsePrimary,
   formatProviderFailurePrimary,
+  formatProviderFailureKindLabel,
   formatProviderThinkingOnlyResponsePrimary,
   formatReportEvidenceRequired,
   formatReportIncompletePrimary,
@@ -836,6 +841,7 @@ import type {
   NativeRunnerLifecycleStatus,
   NativeRunnerResolutionStatus,
   PlanProposal,
+  ProviderFallbackAttemptSummary,
   PluginState,
   PluginSummary,
   ProviderFailureSummary,
@@ -1134,6 +1140,148 @@ function runtimeFromContinuation(continuation: PendingModelContinuation): Select
   };
 }
 
+function getProviderErrorCode(error: unknown): string {
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "PROVIDER_ERROR";
+}
+
+function shouldAttemptRuntimeFallback(kind: ProviderFailureKind): boolean {
+  return (
+    kind === "rate_limit" ||
+    kind === "quota_or_balance_exhausted" ||
+    kind === "gateway" ||
+    kind === "transit" ||
+    kind === "timeout"
+  );
+}
+
+function createRuntimeForFallbackModel(
+  context: TuiContext,
+  baseRuntime: SelectedModelRuntime,
+  fallbackModel: string,
+): SelectedModelRuntime | undefined {
+  if (!fallbackModel || fallbackModel === baseRuntime.model) return undefined;
+  const provider = inferProviderForRouteModel(fallbackModel, context.config);
+  const providerConfig = context.config.providers[provider];
+  if (!providerConfig) return undefined;
+  const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
+  const endpointProfile = rawEndpointProfile === "responses" ? "responses" : "chat_completions";
+  const compatibilityProfile =
+    providerConfig.compatibilityProfile ??
+    (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
+  const reasoningLevel = providerConfig.reasoningLevel;
+  const reasoningSent = Boolean(
+    reasoningLevel &&
+      (endpointProfile === "responses" ||
+        compatibilityProfile === "permissive_openai_compatible" ||
+        rawEndpointProfile === "anthropic_messages"),
+  );
+  return {
+    role: baseRuntime.role,
+    provider,
+    model: fallbackModel,
+    endpointProfile,
+    reasoningLevel,
+    reasoningStatus: formatReasoningEffectiveState(reasoningLevel, reasoningSent),
+    reasoningSent,
+  };
+}
+
+function resolveRuntimeFallback(
+  context: TuiContext,
+  runtime: SelectedModelRuntime,
+  error: unknown,
+): { runtime: SelectedModelRuntime; kind: ProviderFailureKind; code: string } | undefined {
+  const kind = classifyProviderFailure(error);
+  if (!shouldAttemptRuntimeFallback(kind)) return undefined;
+  const route = getRoleRoute(context.config, runtime.role);
+  for (const fallbackModel of route.fallbackModels) {
+    const fallbackRuntime = createRuntimeForFallbackModel(context, runtime, fallbackModel);
+    if (!fallbackRuntime) continue;
+    if (fallbackRuntime.provider === runtime.provider && fallbackRuntime.model === runtime.model) {
+      continue;
+    }
+    return { runtime: fallbackRuntime, kind, code: getProviderErrorCode(error) };
+  }
+  return undefined;
+}
+
+async function recordProviderFallbackAttempt(
+  context: TuiContext,
+  sessionId: string,
+  input: {
+    from: SelectedModelRuntime;
+    to: SelectedModelRuntime;
+    kind: ProviderFailureKind;
+    code: string;
+    status: "attempted" | "succeeded" | "failed";
+  },
+): Promise<void> {
+  const summary = formatProviderFallbackAttemptSummary(
+    {
+      fromProvider: input.from.provider,
+      fromModel: input.from.model,
+      toProvider: input.to.provider,
+      toModel: input.to.model,
+      reasonKind: input.kind,
+    },
+    context.language,
+  );
+  context.lastProviderFallbackAttempt = {
+    fromProvider: input.from.provider,
+    fromModel: input.from.model,
+    toProvider: input.to.provider,
+    toModel: input.to.model,
+    reasonKind: input.kind,
+    reasonCode: input.code,
+    status: input.status,
+    summary,
+    createdAt: new Date().toISOString(),
+  };
+  const decision = context.routeDecisions.find(
+    (item) => item.role === input.from.role && item.selectedModel === input.from.model,
+  );
+  if (decision) {
+    decision.fallbackUsed = true;
+  } else {
+    context.routeDecisions.unshift({
+      id: `route-${randomUUID().slice(0, 8)}`,
+      triggerReason: "provider runtime fallback",
+      role: input.from.role,
+      selectedProvider: input.to.provider,
+      selectedModel: input.to.model,
+      fallbackCandidates: [input.to.model],
+      requiredCapabilities: [],
+      stopConditions: [],
+      repairSuggestions: [],
+      fallbackUsed: true,
+      budgetStop: false,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `provider_fallback_attempt from=${input.from.provider}/${input.from.model} to=${input.to.provider}/${input.to.model} reason=${input.kind} code=${input.code} status=${input.status}`,
+    input.status === "succeeded" ? "info" : "warning",
+  );
+}
+
+function checkAndWriteProviderCooldown(
+  context: TuiContext,
+  runtime: SelectedModelRuntime,
+  output: Writable,
+): boolean {
+  const cooldownCheck = checkProviderCooldown(context.providerBreaker, runtime.provider, runtime.model);
+  if (!cooldownCheck.blocked) return false;
+  writeLine(
+    output,
+    formatCooldownMessage(runtime.provider, runtime.model, cooldownCheck.remainingMs, context.language),
+  );
+  return true;
+}
+
 function createSingleToolCallContinuation(
   continuation: PendingModelContinuation,
   toolCall: ModelToolCall,
@@ -1219,6 +1367,7 @@ export type TuiContext = {
   backgroundAbortControllers?: Map<string, AbortController>;
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
+  lastProviderFallbackAttempt?: ProviderFallbackAttemptSummary;
   providerBreaker: ProviderCircuitBreakerState;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
@@ -1495,6 +1644,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     interrupt: { type: "idle" },
     recentlyMentionedFiles: [],
     lastProviderFailure: undefined,
+    lastProviderFallbackAttempt: undefined,
     providerBreaker: createProviderCircuitBreakerState(),
     solutionCompleteness: createSolutionCompletenessStatus(),
     backgroundAbortControllers: new Map(),
@@ -3255,17 +3405,52 @@ async function executeRegistryWorkflowStep(
       if (!step.command) return { status: "blocked", summary: `workflow step ${step.id} blocked: missing command`, evidenceRefs: [] };
       await handleToolCommand("Bash", [step.command], context, output);
     } else if (step.action === "write") {
-      return { status: "blocked", summary: `workflow step ${step.id} blocked: write registry step requires existing Write tool input and is not auto-synthesized`, evidenceRefs: [] };
+      return {
+        status: "blocked",
+        summary: formatWorkflowStepSummary(
+          step.id,
+          "blocked",
+          context.language === "en-US"
+            ? "write registry step requires existing Write tool input and is not auto-synthesized"
+            : "write registry step 需要现有 Write 工具输入，不能自动合成",
+          context.language,
+        ),
+        evidenceRefs: [],
+      };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { status: "failed", summary: `workflow step ${step.id} failed: ${message}`, evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context) };
+    return {
+      status: "failed",
+      summary: formatWorkflowStepSummary(step.id, "failed", message, context.language),
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+    };
   }
   return {
     status: "completed",
-    summary: `workflow step ${step.id} completed via registry ${step.action}`,
+    summary: formatWorkflowStepSummary(
+      step.id,
+      "completed",
+      context.language === "en-US"
+        ? `completed via registry ${step.action}`
+        : `已通过 registry ${step.action} 完成`,
+      context.language,
+    ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
   };
+}
+
+function formatWorkflowStepSummary(
+  stepId: string,
+  status: "completed" | "failed" | "blocked",
+  detail: string,
+  language: TuiContext["language"],
+): string {
+  if (language === "en-US") {
+    return `Workflow step ${stepId} ${status}: ${detail}`;
+  }
+  const statusText = status === "completed" ? "已完成" : status === "failed" ? "失败" : "受阻";
+  return `工作流步骤 ${stepId} ${statusText}：${detail}`;
 }
 
 async function executeWorkflowStep(
@@ -3278,7 +3463,12 @@ async function executeWorkflowStep(
   evidenceRefs: string[];
 }> {
   if (!request.executable || !request.request) {
-    const summary = `workflow step ${request.sliceId} blocked: ${request.reason}`;
+    const summary = formatWorkflowStepSummary(
+      request.sliceId,
+      "blocked",
+      request.reason,
+      context.language,
+    );
     await captureWorkflowFailureLearning(request, summary, context);
     return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
   }
@@ -3290,7 +3480,12 @@ async function executeWorkflowStep(
       await handleForkCommand([req.role, req.task], context, output);
       const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
       if (!agent) {
-        const summary = `workflow step ${request.sliceId} blocked: agent runtime did not start`;
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          context.language === "en-US" ? "agent runtime did not start" : "agent runtime 未启动",
+          context.language,
+        );
         await captureWorkflowFailureLearning(request, summary, context);
         return {
           status: "blocked",
@@ -3299,7 +3494,12 @@ async function executeWorkflowStep(
         };
       }
       if (agent?.status === "failed") {
-        const summary = `workflow step ${request.sliceId} failed: ${agent.summary}`;
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "failed",
+          agent.summary,
+          context.language,
+        );
         await captureWorkflowFailureLearning(request, summary, context);
         return {
           status: "failed",
@@ -3308,7 +3508,12 @@ async function executeWorkflowStep(
         };
       }
       if (agent?.status === "blocked" || agent?.summary.includes("权限管道拒绝")) {
-        const summary = `workflow step ${request.sliceId} blocked: ${agent.summary}`;
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          agent.summary,
+          context.language,
+        );
         await captureWorkflowFailureLearning(request, summary, context);
         return {
           status: "blocked",
@@ -3323,13 +3528,20 @@ async function executeWorkflowStep(
     } else if (req.mainChain === "agents") {
       await handleAgentsCommand([req.action, req.agentRef ?? ""].filter(Boolean), context, output);
     } else {
-      const summary = `workflow step ${request.sliceId} blocked: unsupported nested job request`;
+      const summary = formatWorkflowStepSummary(
+        request.sliceId,
+        "blocked",
+        context.language === "en-US"
+          ? "unsupported nested job request"
+          : "不支持嵌套 job 请求",
+        context.language,
+      );
       await captureWorkflowFailureLearning(request, summary, context);
       return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const summary = `workflow step ${request.sliceId} failed: ${message}`;
+    const summary = formatWorkflowStepSummary(request.sliceId, "failed", message, context.language);
     await captureWorkflowFailureLearning(request, summary, context);
     return {
       status: "failed",
@@ -3339,7 +3551,14 @@ async function executeWorkflowStep(
   }
   return {
     status: "completed",
-    summary: `workflow step ${request.sliceId} completed via ${req.mainChain}`,
+    summary: formatWorkflowStepSummary(
+      request.sliceId,
+      "completed",
+      context.language === "en-US"
+        ? `completed via ${req.mainChain}`
+        : `已通过 ${req.mainChain} 完成`,
+      context.language,
+    ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
   };
 }
@@ -7774,19 +7993,7 @@ async function sendMessage(
     return;
   }
   const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
-  const cooldownCheck = checkProviderCooldown(
-    context.providerBreaker,
-    selectedRuntimeForCooldown.provider,
-    selectedRuntimeForCooldown.model,
-  );
-  if (cooldownCheck.blocked) {
-    const cooldownMsg = formatCooldownMessage(
-      selectedRuntimeForCooldown.provider,
-      selectedRuntimeForCooldown.model,
-      cooldownCheck.remainingMs,
-      context.language,
-    );
-    writeLine(output, cooldownMsg);
+  if (checkAndWriteProviderCooldown(context, selectedRuntimeForCooldown, output)) {
     return;
   }
   const sessionId = await ensureSession(context);
@@ -7799,9 +8006,9 @@ async function sendMessage(
     writeStatus(output, context);
     return;
   }
-  const selectedRuntime = getSelectedModelRuntime(context);
+  let selectedRuntime = getSelectedModelRuntime(context);
   context.model = selectedRuntime.model;
-  const selectedTools = currentModelSupportsTools(context, selectedRuntime);
+  let selectedTools = currentModelSupportsTools(context, selectedRuntime);
   const reportWriteGuard = createReportWriteGuard(text);
   await appendSystemEvent(
     context,
@@ -7883,7 +8090,7 @@ async function sendMessage(
     let totalPlanningOnlyRounds = 0;
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
-    for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
+    modelRoundLoop: for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -8010,6 +8217,37 @@ async function sendMessage(
             selectedRuntime.model,
             event.error.code ?? "UNKNOWN",
           );
+          const fallback = resolveRuntimeFallback(context, selectedRuntime, event.error);
+          if (fallback) {
+            await recordProviderFallbackAttempt(context, sessionId, {
+              from: selectedRuntime,
+              to: fallback.runtime,
+              kind: fallback.kind,
+              code: fallback.code,
+              status: "attempted",
+            });
+            writeLine(
+              output,
+              context.lastProviderFallbackAttempt?.summary ??
+                formatProviderFallbackAttemptSummary(
+                  {
+                    fromProvider: selectedRuntime.provider,
+                    fromModel: selectedRuntime.model,
+                    toProvider: fallback.runtime.provider,
+                    toModel: fallback.runtime.model,
+                    reasonKind: fallback.kind,
+                  },
+                  context.language,
+                ),
+            );
+            selectedRuntime = fallback.runtime;
+            context.model = selectedRuntime.model;
+            selectedTools = currentModelSupportsTools(context, selectedRuntime);
+            if (checkAndWriteProviderCooldown(context, selectedRuntime, output)) {
+              return;
+            }
+            continue modelRoundLoop;
+          }
           writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
@@ -8224,6 +8462,20 @@ async function sendMessage(
 
   // Successful response — clear the circuit breaker for this provider+model
   clearProviderBreaker(context.providerBreaker, selectedRuntime.provider, selectedRuntime.model);
+  if (
+    context.lastProviderFallbackAttempt?.toProvider === selectedRuntime.provider &&
+    context.lastProviderFallbackAttempt.toModel === selectedRuntime.model &&
+    context.lastProviderFallbackAttempt.status === "attempted"
+  ) {
+    context.lastProviderFallbackAttempt.status = "succeeded";
+    context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `provider_fallback_attempt status=succeeded to=${selectedRuntime.provider}/${selectedRuntime.model}`,
+      "info",
+    );
+  }
 
   if (reportWriteGuard && !reportWriteGuard.completed) {
     const message = await recordReportIncompleteEvidence(context, sessionId, reportWriteGuard);
@@ -8510,6 +8762,7 @@ async function streamFinalModelAnswerWithoutTools(
   // assistantStreamBlockId 累计 round 文本，这里复用同一 id，downgrade/discard
   // 才能命中真实 block。不传则保持旧行为新建一个 final 专用 id。
   reuseAssistantStreamBlockId?: string,
+  fallbackAttempted = false,
 ): Promise<string> {
   let assistantText = "";
   const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -8525,16 +8778,20 @@ async function streamFinalModelAnswerWithoutTools(
   let finishReason: string | undefined;
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
+  const runtime = runtimeFromContinuation(continuation);
   const preflight = await prepareMessagesForProviderPreflight({
     messages: continuation.messages,
     context,
     sessionId,
-    runtime: runtimeFromContinuation(continuation),
+    runtime,
     trigger: "final",
     deps: compactPreflightDeps,
   });
   if (preflight.blocked) {
     writeLine(output, preflight.message);
+    return "";
+  }
+  if (checkAndWriteProviderCooldown(context, runtime, output)) {
     return "";
   }
   continuation.messages = preflight.messages;
@@ -8597,11 +8854,12 @@ async function streamFinalModelAnswerWithoutTools(
     }
     if (event.type === "error") {
       clearRequestActivity(context);
+      const currentRuntime = runtimeFromContinuation(continuation);
       await recordProviderFailureEvidence(
         context,
         sessionId,
         event.error,
-        runtimeFromContinuation(continuation),
+        currentRuntime,
       );
       recordProviderFailure(
         context.providerBreaker,
@@ -8609,6 +8867,40 @@ async function streamFinalModelAnswerWithoutTools(
         continuation.model,
         event.error.code ?? "UNKNOWN",
       );
+      const fallback = fallbackAttempted
+        ? undefined
+        : resolveRuntimeFallback(context, currentRuntime, event.error);
+      if (fallback) {
+        await recordProviderFallbackAttempt(context, sessionId, {
+          from: currentRuntime,
+          to: fallback.runtime,
+          kind: fallback.kind,
+          code: fallback.code,
+          status: "attempted",
+        });
+        writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
+        continuation.provider = fallback.runtime.provider;
+        continuation.model = fallback.runtime.model;
+        continuation.endpointProfile = fallback.runtime.endpointProfile;
+        continuation.reasoningLevel = fallback.runtime.reasoningLevel;
+        continuation.reasoningSent = fallback.runtime.reasoningSent;
+        if (checkAndWriteProviderCooldown(context, fallback.runtime, output)) {
+          return assistantText;
+        }
+        return (
+          assistantText +
+          (await streamFinalModelAnswerWithoutTools(
+            continuation,
+            context,
+            gateway,
+            sessionId,
+            output,
+            signal,
+            assistantStreamBlockId,
+            true,
+          ))
+        );
+      }
       writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
       return assistantText;
     }
@@ -8653,6 +8945,21 @@ async function streamFinalModelAnswerWithoutTools(
   if (!reuseAssistantStreamBlockId) {
     endAssistantStream(output);
   }
+  clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+  if (
+    context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
+    context.lastProviderFallbackAttempt.toModel === continuation.model &&
+    context.lastProviderFallbackAttempt.status === "attempted"
+  ) {
+    context.lastProviderFallbackAttempt.status = "succeeded";
+    context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `provider_fallback_attempt status=succeeded to=${continuation.provider}/${continuation.model}`,
+      "info",
+    );
+  }
   return assistantText;
 }
 
@@ -8680,7 +8987,8 @@ async function continueModelAfterToolResults(
     let totalPlanningOnlyRounds = 0;
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
-    for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
+    let runtimeFallbackAttempted = false;
+    continuationRoundLoop: for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
       if (round > 0) {
         assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-${round}`;
         beginAssistantStream(output, assistantStreamBlockId);
@@ -8688,17 +8996,23 @@ async function continueModelAfterToolResults(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
+      const continuationRuntime = runtimeFromContinuation(continuation);
       const preflight = await prepareMessagesForProviderPreflight({
         messages: continuation.messages,
         context,
         sessionId,
-        runtime: runtimeFromContinuation(continuation),
+        runtime: continuationRuntime,
         trigger: "continuation",
         deps: compactPreflightDeps,
       });
       if (preflight.blocked) {
         clearRequestActivity(context);
         writeLine(output, preflight.message);
+        writeStatus(output, context);
+        return;
+      }
+      if (checkAndWriteProviderCooldown(context, continuationRuntime, output)) {
+        clearRequestActivity(context);
         writeStatus(output, context);
         return;
       }
@@ -8754,11 +9068,12 @@ async function continueModelAfterToolResults(
         }
         if (event.type === "error") {
           clearRequestActivity(context);
+          const currentRuntime = runtimeFromContinuation(continuation);
           await recordProviderFailureEvidence(
             context,
             sessionId,
             event.error,
-            runtimeFromContinuation(continuation),
+            currentRuntime,
           );
           recordProviderFailure(
             context.providerBreaker,
@@ -8766,6 +9081,30 @@ async function continueModelAfterToolResults(
             continuation.model,
             event.error.code ?? "UNKNOWN",
           );
+          const fallback = runtimeFallbackAttempted
+            ? undefined
+            : resolveRuntimeFallback(context, currentRuntime, event.error);
+          if (fallback) {
+            runtimeFallbackAttempted = true;
+            await recordProviderFallbackAttempt(context, sessionId, {
+              from: currentRuntime,
+              to: fallback.runtime,
+              kind: fallback.kind,
+              code: fallback.code,
+              status: "attempted",
+            });
+            writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
+            continuation.provider = fallback.runtime.provider;
+            continuation.model = fallback.runtime.model;
+            continuation.endpointProfile = fallback.runtime.endpointProfile;
+            continuation.reasoningLevel = fallback.runtime.reasoningLevel;
+            continuation.reasoningSent = fallback.runtime.reasoningSent;
+            if (checkAndWriteProviderCooldown(context, fallback.runtime, output)) {
+              writeStatus(output, context);
+              return;
+            }
+            continue continuationRoundLoop;
+          }
           writeErrorLine(output, formatProviderFailurePrimary(event.error, context.language));
           return;
         }
@@ -9012,6 +9351,21 @@ async function continueModelAfterToolResults(
         writeLine(output, message);
         await appendSystemEvent(context, sessionId, message, "warning");
       }
+    }
+    clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
+    if (
+      context.lastProviderFallbackAttempt?.toProvider === continuation.provider &&
+      context.lastProviderFallbackAttempt.toModel === continuation.model &&
+      context.lastProviderFallbackAttempt.status === "attempted"
+    ) {
+      context.lastProviderFallbackAttempt.status = "succeeded";
+      context.lastProviderFallbackAttempt.createdAt = new Date().toISOString();
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `provider_fallback_attempt status=succeeded to=${continuation.provider}/${continuation.model}`,
+        "info",
+      );
     }
     endAssistantStream(output);
   } finally {

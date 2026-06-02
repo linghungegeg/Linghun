@@ -179,9 +179,14 @@ function mockOpenAiEmptyFetch(body = "data: [DONE]\n\n"): unknown[] {
 
 function mockOpenAiErrorFetch(): unknown[] {
   const requests: unknown[] = [];
+  const realFetch = globalThis.fetch;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (_url: string, init: RequestInit) => {
+    vi.fn(async (url: string | URL | Request, init: RequestInit) => {
+      const target = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+      if (!target.startsWith("https://example.test")) {
+        return realFetch(url, init);
+      }
       requests.push(JSON.parse(String(init.body)));
       const body = `data: ${JSON.stringify({ error: { message: "quota exceeded" } })}\n\ndata: [DONE]\n\n`;
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -563,6 +568,118 @@ function mockOpenAiStartAgentChildToolSequence(
         body = `data: ${JSON.stringify({ id: "chatcmpl-main-final", choices: [{ delta: { content: "主 agent 续轮完成。" } }] })}\n\ndata: [DONE]\n\n`;
       }
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function createStartAgentChildFallbackConfig(
+  primaryModel = "child-primary-model",
+  fallbackModel = "child-fallback-model",
+): LinghunConfig {
+  return {
+    ...defaultConfig,
+    defaultModel: primaryModel,
+    providers: {
+      ...defaultConfig.providers,
+      deepseek: { ...defaultConfig.providers.deepseek, model: "different-model" },
+      "openai-compatible": {
+        ...defaultConfig.providers["openai-compatible"],
+        baseUrl: "https://example.test/v1",
+        apiKey: "sk-test",
+        model: primaryModel,
+      },
+    },
+    modelRoutes: {
+      ...defaultConfig.modelRoutes,
+      defaultModel: primaryModel,
+      routes: defaultConfig.modelRoutes.routes.map((route) =>
+        route.role === "executor"
+          ? {
+              ...route,
+              provider: "openai-compatible",
+              primaryModel,
+              fallbackModels: [fallbackModel],
+              allowTools: true,
+            }
+          : route,
+      ),
+    },
+  };
+}
+
+function mockOpenAiStartAgentChildFallbackFetch(options: {
+  primaryModel?: string;
+  fallbackModel?: string;
+  primaryResponse: Response;
+  fallbackResponse?: Response;
+  childFallbackFinalText?: string;
+  mainFinalText?: string;
+}): unknown[] {
+  const primaryModel = options.primaryModel ?? "child-primary-model";
+  const fallbackModel = options.fallbackModel ?? "child-fallback-model";
+  const requests: unknown[] = [];
+  const requestText = (request: unknown): string => JSON.stringify(request);
+  const isChildAgentRequest = (request: unknown): boolean =>
+    requestText(request).includes("child agent running in an isolated sidechain transcript");
+  const textStream = (id: string, text: string): string =>
+    `data: ${JSON.stringify({ id, choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
+  const startAgentToolStream = [
+    `data: ${JSON.stringify({
+      id: "chatcmpl-start-agent",
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              {
+                id: "call-start-agent",
+                type: "function",
+                function: {
+                  name: "StartAgent",
+                  arguments: JSON.stringify({
+                    role: "worker",
+                    task: "use child provider fallback",
+                  }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      if (isChildAgentRequest(request)) {
+        const model = (request as { model?: string }).model;
+        if (model === primaryModel) return options.primaryResponse;
+        if (model === fallbackModel) {
+          return (
+            options.fallbackResponse ??
+            new Response(
+              textStream(
+                "chatcmpl-child-fallback",
+                options.childFallbackFinalText ?? "fallback child final",
+              ),
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            )
+          );
+        }
+      }
+      if (requests.length === 1) {
+        return new Response(startAgentToolStream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response(
+        textStream("chatcmpl-main-final", options.mainFinalText ?? "StartAgent final ok"),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
     }),
   );
   return requests;
@@ -5131,7 +5248,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/stats", context, output);
 
     expect(output.text).toContain("Model routes（多模型按角色触发");
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("已设置 planner role");
     expect(output.text).toContain("已设置 verifier role");
     expect(output.text).toContain("role=planner");
@@ -5310,12 +5427,29 @@ describe("Phase 06 TUI slash commands", () => {
 
     const primary = formatProviderFailurePrimary(error, "en-US");
 
-    expect(primary).toContain("provider rejected the request schema");
+    expect(primary).toContain("The model service rejected the request shape");
     expect(primary).toContain("/model doctor");
-    expect(primary).toContain("tool_choice");
+    expect(primary).toContain("tool choice");
     expect(primary).not.toContain("example.invalid");
     expect(primary).not.toContain("private-token");
     expect(primary).not.toContain("123e4567");
+  });
+
+  it("formats quota or balance exhaustion primary output in zh-CN and en-US", () => {
+    const error = new Error("upstream insufficient_quota account balance exhausted") as Error & {
+      code: string;
+    };
+    error.code = "PROVIDER_QUOTA_EXHAUSTED";
+
+    const zh = formatProviderFailurePrimary(error, "zh-CN");
+    const en = formatProviderFailurePrimary(error, "en-US");
+
+    expect(zh).toContain("额度、点数或账户余额不足");
+    expect(zh).toContain("Linghun 没有查询余额");
+    expect(zh).toContain("/model doctor");
+    expect(en).toContain("exhausted quota, credits, or account balance");
+    expect(en).toContain("has not queried your balance");
+    expect(en).toContain("/model doctor");
   });
 
   it("D.14D: natural workspace-trust wording falls through to the model, not a local Start Gate", async () => {
@@ -5732,7 +5866,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "当前模型：role=executor provider=openai-compatible model=control-plane-model reasoning=未生效",
     );
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("索引初始化完成");
     expect(output.text).not.toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
@@ -8608,6 +8742,193 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("raw budget");
   });
 
+  it("StartAgent child rate limit uses fallback model and succeeds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-fallback-ok-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const output = new MemoryOutput();
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response("Too many requests: rate limit reached", {
+        status: 429,
+        headers: { "retry-after": "0" },
+      }),
+      childFallbackFinalText: "fallback child final",
+    });
+
+    await handleSlashCommand("/fork worker continue this child task", context, output);
+
+    const childRequests = requests.filter((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as Array<{ model?: string }>;
+    expect(childRequests.map((request) => request.model)).toContain("child-primary-model");
+    expect(childRequests.map((request) => request.model)).toContain("child-fallback-model");
+    expect(childRequests.at(-1)?.model).toBe("child-fallback-model");
+    expect(context.agents[0]?.status).toBe("completed");
+    expect(output.text).toContain("正在尝试备用模型");
+    expect(output.text).toContain("因限流失败");
+    expect(output.text).toContain("worker completed");
+    expect(output.text).toContain("fallback child final");
+    expect(context.agents[0]?.provider).toBe("openai-compatible");
+    expect(context.agents[0]?.model).toBe("child-fallback-model");
+
+    const persistedAgent = JSON.parse(
+      await readFile(join(project, ".linghun", "agent-runs", `${context.agents[0]?.id}.json`), "utf8"),
+    ) as { provider?: string; model?: string };
+    expect(persistedAgent.provider).toBe("openai-compatible");
+    expect(persistedAgent.model).toBe("child-fallback-model");
+
+    const showOutput = new MemoryOutput();
+    await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, showOutput);
+    expect(showOutput.text).toContain(
+      "- provider/model: openai-compatible / child-fallback-model",
+    );
+    expect(showOutput.text).not.toContain(
+      "- provider/model: openai-compatible / child-primary-model",
+    );
+    expect(
+      context.roleUsage.some(
+        (usage) =>
+          usage.role === "executor" &&
+          usage.provider === "openai-compatible" &&
+          usage.model === "child-fallback-model" &&
+          usage.fallbackUsed,
+      ),
+    ).toBe(true);
+    expect(
+      context.roleUsage.some(
+        (usage) => usage.role === "executor" && usage.model === "child-primary-model",
+      ),
+    ).toBe(false);
+
+    const childTranscript = (await store.resume(context.agents[0]?.transcriptSessionId ?? ""))
+      .transcript;
+    const fallbackMessages = childTranscript
+      .filter((event) => event.type === "system_event")
+      .map((event) => event.message)
+      .filter((message) => message.includes("provider_fallback_attempt"));
+    expect(fallbackMessages.some((message) => message.includes("status=attempted"))).toBe(true);
+    expect(fallbackMessages.some((message) => message.includes("status=succeeded"))).toBe(true);
+    expect(fallbackMessages[0]).toContain("from=openai-compatible/child-primary-model");
+    expect(fallbackMessages[0]).toContain("to=openai-compatible/child-fallback-model");
+    expect(fallbackMessages[0]).toContain("reason=rate_limit");
+    expect(fallbackMessages[0]).toContain("code=PROVIDER_RATE_LIMITED");
+  });
+
+  it("StartAgent child fallback target cooldown blocks before fallback request", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-fallback-cooldown-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    recordProviderFailure(
+      context.providerBreaker,
+      "openai-compatible",
+      "child-fallback-model",
+      "PROVIDER_RATE_LIMITED",
+    );
+    recordProviderFailure(
+      context.providerBreaker,
+      "openai-compatible",
+      "child-fallback-model",
+      "PROVIDER_RATE_LIMITED",
+    );
+    const output = new MemoryOutput();
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response("Too many requests: rate limit reached", {
+        status: 429,
+        headers: { "retry-after": "0" },
+      }),
+    });
+
+    await handleSlashCommand("/fork worker continue this child task", context, output);
+
+    const childRequests = requests.filter((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as Array<{ model?: string }>;
+    expect(childRequests.map((request) => request.model)).toContain("child-primary-model");
+    expect(childRequests.map((request) => request.model)).not.toContain("child-fallback-model");
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(output.text).toContain("child-fallback-model");
+    expect(output.text).toContain("/model doctor");
+    expect(output.text).not.toContain("worker completed");
+  });
+
+  it.each([
+    ["schema", "PROVIDER_SCHEMA_ERROR", 400, "Invalid schema"],
+    ["auth", "PROVIDER_AUTH_ERROR", 401, "Invalid API key"],
+    ["bad request", "PROVIDER_BAD_REQUEST", 400, "Bad request"],
+  ])("StartAgent child %s failure does not fallback", async (_label, code, status, body) => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-no-fallback-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const output = new MemoryOutput();
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response(body, { status, headers: { "x-linghun-code": code } }),
+    });
+
+    await handleSlashCommand("/fork worker continue this child task", context, output);
+
+    const childRequests = requests.filter((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as Array<{ model?: string }>;
+    expect(childRequests).toHaveLength(1);
+    expect(childRequests[0]?.model).toBe("child-primary-model");
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(output.text).not.toContain("正在尝试备用模型");
+    const childTranscript = JSON.stringify(
+      (await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript,
+    );
+    expect(childTranscript).not.toContain("provider_fallback_attempt");
+  });
+
+  it("StartAgent child fallback failure blocks instead of completing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-fallback-fail-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-primary-model" });
+    const config = createStartAgentChildFallbackConfig();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const output = new MemoryOutput();
+    const requests = mockOpenAiStartAgentChildFallbackFetch({
+      primaryResponse: new Response("Too many requests: rate limit reached", {
+        status: 429,
+        headers: { "retry-after": "0" },
+      }),
+      fallbackResponse: new Response("Gateway failed", { status: 502 }),
+    });
+
+    await handleSlashCommand("/fork worker continue this child task", context, output);
+
+    const childRequests = requests.filter((request) =>
+      JSON.stringify(request).includes("child agent running in an isolated sidechain transcript"),
+    ) as Array<{ model?: string }>;
+    expect(childRequests.map((request) => request.model)).toContain("child-primary-model");
+    expect(childRequests.map((request) => request.model)).toContain("child-fallback-model");
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(output.text).not.toContain("worker completed");
+    const parentTranscript = (await store.resume(session.id)).transcript;
+    expect(
+      parentTranscript.some((event) => event.type === "agent_end" && event.status === "blocked"),
+    ).toBe(true);
+    const childTranscript = JSON.stringify(
+      (await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript,
+    );
+    expect(childTranscript).toContain("status=attempted");
+    expect(childTranscript).toContain("status=failed");
+    expect(childTranscript).not.toContain("status=succeeded");
+  });
+
   it("returns Bash non-zero exits as failed model-visible tool_results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -10038,7 +10359,7 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("模型服务或网络传输问题");
     expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
@@ -10070,9 +10391,14 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
+    const realFetch = globalThis.fetch;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (url: string | URL | Request, init: RequestInit) => {
+        const target = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+        if (!target.startsWith("https://example.test")) {
+          return realFetch(url, init);
+        }
         const body = `data: ${JSON.stringify({ error: { message: "quota exceeded sk-provider-secret C:/Users/Admin/Linghun api_key=private" } })}\n\ndata: [DONE]\n\n`;
         return new Response(body, {
           status: 200,
@@ -10089,7 +10415,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("模型服务或网络传输问题");
     expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
@@ -10099,12 +10425,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(output.text).toContain(
-      "last provider failure: kind=provider/transit code=PROVIDER_STREAM_ERROR",
-    );
+    expect(output.text).toContain("最近模型服务失败：类型=传输失败 code=PROVIDER_STREAM_ERROR");
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
-    expect(output.text).toContain("details: /details evidence");
+    expect(output.text).toMatch(/details: \/details evidence|详情：\/details evidence/u);
     expect(output.text).not.toContain("sk-provider-secret");
     expect(output.text).not.toContain("C:/Users/Admin/Linghun");
     expect(output.text).not.toContain("api_key=private");
@@ -10148,7 +10472,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("openai-compatible 缺已确认模型");
     expect(output.text).toContain("LINGHUN_OPENAI_API_KEY");
     expect(output.text).not.toContain("test-openai-secret");
@@ -10314,7 +10638,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("test-openai-secret");
     expect(output.text).toContain("vision role 未就绪");
     expect(output.text).toContain("修复建议");
-    expect(output.text).toContain("recent route decisions");
+    expect(output.text).toContain("最近路由决策");
     expect(context.routeDecisions[0]?.stopConditions.length).toBeGreaterThan(0);
     expect(context.visionObservations).toHaveLength(0);
   });
@@ -10382,7 +10706,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("apiKey=present source=project-settings");
     expect(output.text).toContain(
       "WARN: project-settings provider=openai-compatible contains apiKey",
@@ -13064,12 +13388,90 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("provider 与网络传输问题");
+    expect(output.text).toContain("模型服务或网络传输问题");
     expect(output.text).toContain("不是 Linghun 本地缺陷");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("quota exceeded");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
+  });
+
+  it("zh-CN rate limit uses configured fallback model and succeeds", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-fallback-rate-limit-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "primary-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          type: "openai-compatible",
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "primary-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "primary-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "primary-model",
+                fallbackModels: ["fallback-model"],
+                allowTools: true,
+              }
+            : route,
+        ),
+      },
+    };
+    await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
+    const output = new MemoryOutput();
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        if (requests.length <= 3) {
+          return new Response("Too many requests: rate limit reached", {
+            status: 429,
+            headers: { "retry-after": "0" },
+          });
+        }
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-fallback", choices: [{ delta: { content: "备用模型回答成功" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请总结这个项目\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(4);
+    expect(output.text).toContain("正在尝试备用模型");
+    expect(output.text).toContain("因限流失败");
+    expect(output.text).toContain("备用模型回答成功");
+    expect(output.text).not.toContain("模型服务触发限流。本次请求未完成");
+
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const sessions = await store.list();
+    const transcript = (await store.resume(sessions[0]?.id ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("provider_fallback_attempt") &&
+          event.message.includes("status=succeeded"),
+      ),
+    ).toBe(true);
   });
 
   it("clears a previous Architecture Card before a non-triggering small task tool_use", async () => {
@@ -13313,7 +13715,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
     expect(output.text).toContain("工具 Bash 已完成");
     expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("Cache status");
     expect(output.text).toContain("查看 /permissions recent");
@@ -17501,7 +17903,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     await handleSlashCommand("/details", context, output);
 
     expect(output.text).toContain("最近一次输出（完整正文）");
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("provider.env merge");
     expect(output.text).toContain("endpointPath=/v1/messages");
     expect(output.text).toContain("providers: openai-compatible");
@@ -17714,7 +18116,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     // handleSlashCommand 返回 "handled" 表示已被 slash 派发处理；只有 "message" 才会
     // 让 processTuiLine 继续走 sendMessage → gateway.stream。
     expect(result).toBe("handled");
-    expect(output.text).toContain("Model route doctor");
+    expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
   });
 
   it("explicit slash and pending approval stay local instead of entering the model path", async () => {
@@ -18683,7 +19085,7 @@ describe("D.13V-B/C source invariants", () => {
     const text = await readFile("src/index.ts", "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
-    const body = text.slice(start, start + 15000);
+    const body = text.slice(start, start + 30000);
     expect(body).toContain("runArchitectureAndCompletenessFinalGate");
     expect(body).toContain("buildExtendedDowngradedFinalAnswer");
   });
@@ -18695,7 +19097,7 @@ describe("D.13V-B/C source invariants", () => {
     const text = await readFile("src/index.ts", "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
-    const body = text.slice(start, start + 15000);
+    const body = text.slice(start, start + 30000);
     expect(body).toContain("needsSolutionCompletenessReportClosure");
     expect(body).toContain("formatSolutionCompletenessReportBlock");
     // closure 必须在 assistant_text_delta append 之后（安全文本入 transcript 后才追加）

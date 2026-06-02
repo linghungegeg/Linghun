@@ -988,10 +988,23 @@ export type PluginState = {
 
 export type ProviderFailureSummary = {
   code: string;
+  kind?: string;
   provider: string;
   model: string;
   endpointProfile: string;
   summary: string;
   evidenceId: string;
+  createdAt: string;
+};
+
+export type ProviderFallbackAttemptSummary = {
+  fromProvider: string;
+  fromModel: string;
+  toProvider: string;
+  toModel: string;
+  reasonKind: string;
+  reasonCode: string;
+  status: "attempted" | "succeeded" | "failed";
+  summary: string;
   createdAt: string;
 };

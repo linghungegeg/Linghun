@@ -45,6 +45,19 @@ import {
   writeDurableJobReport,
 } from "./job-runtime.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
+import { inferProviderForRouteModel } from "./model-doctor-runtime.js";
+import {
+  checkProviderCooldown,
+  clearProviderBreaker,
+  formatCooldownMessage,
+  recordProviderFailure,
+} from "./provider-circuit-breaker.js";
+import {
+  classifyProviderFailure,
+  formatProviderFallbackAttemptSummary,
+  formatProviderFailureKindLabel,
+  type ProviderFailureKind,
+} from "./request-lifecycle-presenter.js";
 import {
   type RunnerContext,
   type RunnerRuntimeDeps,
@@ -187,6 +200,8 @@ export type AgentGatewayContinuation = {
   reasoningLevel?: string;
   reasoningSent: boolean;
 };
+
+type AgentProviderRuntime = Omit<AgentGatewayContinuation, "gateway">;
 
 let runtimeDeps: JobAgentCommandRuntimeDeps | undefined;
 
@@ -1352,6 +1367,152 @@ export async function runAgentWork(
   return runModelBackedAgent(agent, context, output);
 }
 
+function getProviderErrorCode(error: unknown): string {
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "PROVIDER_ERROR";
+}
+
+function shouldAttemptAgentRuntimeFallback(kind: ProviderFailureKind): boolean {
+  return (
+    kind === "rate_limit" ||
+    kind === "quota_or_balance_exhausted" ||
+    kind === "gateway" ||
+    kind === "transit" ||
+    kind === "timeout"
+  );
+}
+
+function createAgentRuntimeForFallbackModel(
+  context: TuiContext,
+  baseRuntime: AgentProviderRuntime,
+  fallbackModel: string,
+): AgentProviderRuntime | undefined {
+  if (!fallbackModel || fallbackModel === baseRuntime.model) return undefined;
+  const provider = inferProviderForRouteModel(fallbackModel, context.config);
+  const providerConfig = context.config.providers[provider];
+  if (!providerConfig) return undefined;
+  const rawEndpointProfile = providerConfig.endpointProfile ?? "chat_completions";
+  const endpointProfile = rawEndpointProfile === "responses" ? "responses" : "chat_completions";
+  const compatibilityProfile =
+    providerConfig.compatibilityProfile ??
+    (providerConfig.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
+  const reasoningLevel = providerConfig.reasoningLevel;
+  const reasoningSent = Boolean(
+    reasoningLevel &&
+      (endpointProfile === "responses" ||
+        compatibilityProfile === "permissive_openai_compatible" ||
+        rawEndpointProfile === "anthropic_messages"),
+  );
+  return {
+    provider,
+    model: fallbackModel,
+    endpointProfile,
+    reasoningLevel,
+    reasoningSent,
+  };
+}
+
+function resolveAgentRuntimeFallback(
+  context: TuiContext,
+  agent: AgentRun,
+  runtime: AgentProviderRuntime,
+  error: unknown,
+  attemptedModels: Set<string>,
+): { runtime: AgentProviderRuntime; kind: ProviderFailureKind; code: string } | undefined {
+  const kind = classifyProviderFailure(error);
+  if (!shouldAttemptAgentRuntimeFallback(kind)) return undefined;
+  const route = getRoleRoute(context.config, agent.role);
+  for (const fallbackModel of route.fallbackModels) {
+    if (attemptedModels.has(fallbackModel)) continue;
+    const fallbackRuntime = createAgentRuntimeForFallbackModel(context, runtime, fallbackModel);
+    if (!fallbackRuntime) continue;
+    if (fallbackRuntime.provider === runtime.provider && fallbackRuntime.model === runtime.model) {
+      continue;
+    }
+    return { runtime: fallbackRuntime, kind, code: getProviderErrorCode(error) };
+  }
+  return undefined;
+}
+
+async function recordAgentProviderFallbackAttempt(
+  context: TuiContext,
+  sessionId: string,
+  input: {
+    from: AgentProviderRuntime;
+    to: AgentProviderRuntime;
+    kind: ProviderFailureKind;
+    code: string;
+    status: "attempted" | "succeeded" | "failed";
+  },
+): Promise<string> {
+  const summary = formatProviderFallbackAttemptSummary(
+    {
+      fromProvider: input.from.provider,
+      fromModel: input.from.model,
+      toProvider: input.to.provider,
+      toModel: input.to.model,
+      reasonKind: input.kind,
+    },
+    context.language,
+  );
+  context.lastProviderFallbackAttempt = {
+    fromProvider: input.from.provider,
+    fromModel: input.from.model,
+    toProvider: input.to.provider,
+    toModel: input.to.model,
+    reasonKind: input.kind,
+    reasonCode: input.code,
+    status: input.status,
+    summary,
+    createdAt: new Date().toISOString(),
+  };
+  await context.store.appendEvent(sessionId, {
+    type: "system_event",
+    id: randomUUID(),
+    level: input.status === "succeeded" ? "info" : "warning",
+    message: `provider_fallback_attempt from=${input.from.provider}/${input.from.model} to=${input.to.provider}/${input.to.model} reason=${input.kind} code=${input.code} status=${input.status}`,
+    createdAt: new Date().toISOString(),
+  });
+  return summary;
+}
+
+function syncAgentRuntimeFallbackMetadata(
+  context: TuiContext,
+  agent: AgentRun,
+  from: AgentProviderRuntime,
+  to: AgentProviderRuntime,
+): void {
+  agent.provider = to.provider;
+  agent.model = to.model;
+  const existing = context.routeDecisions.find(
+    (decision) =>
+      decision.role === agent.role &&
+      decision.selectedProvider === to.provider &&
+      decision.selectedModel === to.model,
+  );
+  if (existing) {
+    existing.fallbackUsed = true;
+    return;
+  }
+  context.routeDecisions.unshift({
+    id: `route-${randomUUID().slice(0, 8)}`,
+    triggerReason: "agent child provider runtime fallback",
+    role: agent.role,
+    selectedProvider: to.provider,
+    selectedModel: to.model,
+    fallbackCandidates: [to.model],
+    requiredCapabilities: [],
+    stopConditions: [],
+    repairSuggestions: [
+      `fallback from ${from.provider}/${from.model} to ${to.provider}/${to.model}`,
+    ],
+    fallbackUsed: true,
+    budgetStop: false,
+    createdAt: new Date().toISOString(),
+  });
+}
+
 export async function runModelBackedAgent(
   agent: AgentRun,
   context: TuiContext,
@@ -1388,6 +1549,22 @@ export async function runModelBackedAgent(
   }
   let finalText = "";
   const maxTurns = getAgentMaxTurns(agent);
+  let currentRuntime: AgentProviderRuntime = {
+    provider: continuation.provider,
+    model: agent.model || continuation.model,
+    endpointProfile: continuation.endpointProfile,
+    reasoningLevel: continuation.reasoningLevel,
+    reasoningSent: continuation.reasoningSent,
+  };
+  const attemptedFallbackModels = new Set<string>();
+  let activeFallback:
+    | {
+        from: AgentProviderRuntime;
+        to: AgentProviderRuntime;
+        kind: ProviderFailureKind;
+        code: string;
+      }
+    | undefined;
   for (let round = 0; round < maxTurns; round += 1) {
     const mailbox = consumeAgentMailbox(agent);
     if (mailbox.length > 0) await persistAgentRun(context, agent);
@@ -1404,61 +1581,197 @@ export async function runModelBackedAgent(
         createdAt: message.consumedAt ?? new Date().toISOString(),
       });
     }
-    const toolCalls: ModelToolCall[] = [];
+    let toolCalls: ModelToolCall[] = [];
     let assistantText = "";
-    const preflight = await deps().prepareProviderPreflight(
-      context,
-      agent.transcriptSessionId,
-      messages,
-      {
-        role: agent.role,
-        provider: continuation.provider,
-        model: agent.model || continuation.model,
-      },
-      "agent-child",
-    );
-    if (preflight.blocked) {
-      writeLine(output, preflight.message);
-      return {
-        status: "blocked",
-        summary: `${agent.type} blocked：context compact blocked the child provider request. ${preflight.message}`,
-        evidenceRefs: [],
-      };
-    }
-    messages.splice(0, messages.length, ...preflight.messages);
-    for await (const event of continuation.gateway.stream(
-      continuation.provider,
-      {
-        messages: preflight.messages,
-        model: agent.model || continuation.model,
-        endpointProfile: continuation.endpointProfile,
-        ...(continuation.reasoningSent
-          ? { reasoningLevel: continuation.reasoningLevel }
-          : {}),
-        tools: createModelToolDefinitionsForTools(getAgentAllowedTools(agent)),
-        toolChoice: "auto",
-      },
-      signal,
-    )) {
-      if (event.type === "assistant_text_delta") {
-        assistantText += event.text;
-        continue;
-      }
-      if (event.type === "tool_use") {
-        toolCalls.push({ id: event.id, name: event.name, input: event.input });
-        continue;
-      }
-      if (event.type === "usage") {
-        agent.cost.inputTokens += event.usage.inputTokens;
-        agent.cost.outputTokens += event.usage.outputTokens;
-        continue;
-      }
-      if (event.type === "error") {
+    let providerRequestCompleted = false;
+    while (!providerRequestCompleted) {
+      toolCalls = [];
+      assistantText = "";
+      const preflight = await deps().prepareProviderPreflight(
+        context,
+        agent.transcriptSessionId,
+        messages,
+        {
+          role: agent.role,
+          provider: currentRuntime.provider,
+          model: currentRuntime.model,
+        },
+        "agent-child",
+      );
+      if (preflight.blocked) {
+        writeLine(output, preflight.message);
         return {
-          status: "failed",
-          summary: `${agent.type} failed：模型请求失败：${event.error.message}`,
+          status: "blocked",
+          summary: `${agent.type} blocked：context compact blocked the child provider request. ${preflight.message}`,
           evidenceRefs: [],
         };
+      }
+      messages.splice(0, messages.length, ...preflight.messages);
+      const cooldown = checkProviderCooldown(
+        context.providerBreaker,
+        currentRuntime.provider,
+        currentRuntime.model,
+      );
+      if (cooldown.blocked) {
+        const message = formatCooldownMessage(
+          currentRuntime.provider,
+          currentRuntime.model,
+          cooldown.remainingMs,
+          context.language,
+        );
+        await context.store.appendEvent(agent.transcriptSessionId, {
+          type: "system_event",
+          id: randomUUID(),
+          level: "warning",
+          message: `agent_child_provider_cooldown provider=${currentRuntime.provider} model=${currentRuntime.model} code=${cooldown.reasonCode}`,
+          createdAt: new Date().toISOString(),
+        });
+        return {
+          status: "blocked",
+          summary:
+            context.language === "en-US"
+              ? `${agent.type} blocked: child model request is waiting before retry. ${message}`
+              : `${agent.type} blocked：子 agent 模型请求正在等待恢复。${message}`,
+          evidenceRefs: [],
+        };
+      }
+      let retryWithFallback = false;
+      for await (const event of continuation.gateway.stream(
+        currentRuntime.provider,
+        {
+          messages: preflight.messages,
+          model: currentRuntime.model,
+          endpointProfile: currentRuntime.endpointProfile,
+          ...(currentRuntime.reasoningSent
+            ? { reasoningLevel: currentRuntime.reasoningLevel }
+            : {}),
+          tools: createModelToolDefinitionsForTools(getAgentAllowedTools(agent)),
+          toolChoice: "auto",
+        },
+        signal,
+      )) {
+        if (event.type === "assistant_text_delta") {
+          assistantText += event.text;
+          continue;
+        }
+        if (event.type === "tool_use") {
+          toolCalls.push({ id: event.id, name: event.name, input: event.input });
+          continue;
+        }
+        if (event.type === "usage") {
+          agent.cost.inputTokens += event.usage.inputTokens;
+          agent.cost.outputTokens += event.usage.outputTokens;
+          continue;
+        }
+        if (event.type === "error") {
+          const code = event.error.code ?? "PROVIDER_ERROR";
+          const kind = classifyProviderFailure(event.error);
+          recordProviderFailure(context.providerBreaker, currentRuntime.provider, currentRuntime.model, code);
+          await context.store.appendEvent(agent.transcriptSessionId, {
+            type: "system_event",
+            id: randomUUID(),
+            level: "warning",
+            message: `agent_child_provider_failure kind=${kind} code=${code} provider=${currentRuntime.provider} model=${currentRuntime.model}`,
+            createdAt: new Date().toISOString(),
+          });
+          const fallback = resolveAgentRuntimeFallback(
+            context,
+            agent,
+            currentRuntime,
+            event.error,
+            attemptedFallbackModels,
+          );
+          if (fallback) {
+            const fallbackCooldown = checkProviderCooldown(
+              context.providerBreaker,
+              fallback.runtime.provider,
+              fallback.runtime.model,
+            );
+            if (fallbackCooldown.blocked) {
+              const message = formatCooldownMessage(
+                fallback.runtime.provider,
+                fallback.runtime.model,
+                fallbackCooldown.remainingMs,
+                context.language,
+              );
+              await context.store.appendEvent(agent.transcriptSessionId, {
+                type: "system_event",
+                id: randomUUID(),
+                level: "warning",
+                message: `agent_child_provider_cooldown provider=${fallback.runtime.provider} model=${fallback.runtime.model} code=${fallbackCooldown.reasonCode}`,
+                createdAt: new Date().toISOString(),
+              });
+              return {
+                status: "blocked",
+                summary:
+                  context.language === "en-US"
+                    ? `${agent.type} blocked: fallback child model is cooling down. ${message}`
+                    : `${agent.type} blocked：备用子 agent 模型仍在冷却中。${message}`,
+                evidenceRefs: [],
+              };
+            }
+            attemptedFallbackModels.add(fallback.runtime.model);
+            const fromRuntime = { ...currentRuntime };
+            const summary = await recordAgentProviderFallbackAttempt(
+              context,
+              agent.transcriptSessionId,
+              {
+                from: fromRuntime,
+                to: fallback.runtime,
+                kind: fallback.kind,
+                code: fallback.code,
+                status: "attempted",
+              },
+            );
+            writeLine(output, summary);
+            activeFallback = {
+              from: fromRuntime,
+              to: fallback.runtime,
+              kind: fallback.kind,
+              code: fallback.code,
+            };
+            currentRuntime = fallback.runtime;
+            retryWithFallback = true;
+            break;
+          }
+          if (
+            activeFallback &&
+            activeFallback.to.provider === currentRuntime.provider &&
+            activeFallback.to.model === currentRuntime.model
+          ) {
+            await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
+              ...activeFallback,
+              status: "failed",
+            });
+          }
+          const kindLabel = formatProviderFailureKindLabel(kind, context.language);
+          return {
+            status: "blocked",
+            summary:
+              context.language === "en-US"
+                ? `${agent.type} blocked: child model request failed with ${kindLabel} (${code}). Run /model doctor for details; no completion was claimed.`
+                : `${agent.type} blocked：子 agent 模型请求因${kindLabel}失败（${code}）。可运行 /model doctor 查看详情；本次没有声称已完成。`,
+            evidenceRefs: [],
+          };
+        }
+      }
+      if (!retryWithFallback) {
+        providerRequestCompleted = true;
+        if (activeFallback) {
+          syncAgentRuntimeFallbackMetadata(
+            context,
+            agent,
+            activeFallback.from,
+            activeFallback.to,
+          );
+          await persistAgentRun(context, agent);
+          clearProviderBreaker(context.providerBreaker, currentRuntime.provider, currentRuntime.model);
+          await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
+            ...activeFallback,
+            status: "succeeded",
+          });
+          activeFallback = undefined;
+        }
       }
     }
     if (assistantText || toolCalls.length > 0) {

@@ -1116,6 +1116,64 @@ describe("model-doctor-runtime", () => {
   });
 
   describe("D.13J Block 2 discovered deferred tools doctor surfacing", () => {
+    it("renders quota or balance exhausted doctor note in zh-CN and en-US", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-quota-"));
+      try {
+        const common = {
+          config: baseConfig,
+          projectPath,
+          routeDecisions: [],
+          lastProviderFailure: {
+            code: "PROVIDER_QUOTA_EXHAUSTED",
+            kind: "quota_or_balance_exhausted",
+            provider: "openai-compatible",
+            model: "gpt-4o",
+            endpointProfile: "chat_completions",
+          },
+        };
+
+        const zh = await formatModelRouteDoctor({ ...common, language: "zh-CN" as const });
+        const en = await formatModelRouteDoctor({ ...common, language: "en-US" as const });
+
+        expect(zh).toContain("最近模型服务失败");
+        expect(zh).toContain("额度或余额不足");
+        expect(zh).toContain("额度/余额说明");
+        expect(en).toContain("last model-service failure");
+        expect(en).toContain("quota or balance exhausted");
+        expect(en).toContain("quota/balance note");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
+    it("renders zh-CN fallback success status in doctor", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-fallback-"));
+      try {
+        const text = await formatModelRouteDoctor({
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN",
+          routeDecisions: [],
+          lastProviderFallbackAttempt: {
+            fromProvider: "openai-compatible",
+            fromModel: "primary-model",
+            toProvider: "openai-compatible",
+            toModel: "fallback-model",
+            reasonKind: "rate_limit",
+            reasonCode: "PROVIDER_RATE_LIMITED",
+            status: "succeeded",
+            summary: "ignored in doctor",
+          },
+        });
+
+        expect(text).toContain("最近备用模型尝试");
+        expect(text).toContain("状态=已成功");
+        expect(text).toContain("原因=限流");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
+      }
+    });
+
     it("discoveredDeferredToolsSummary total=0 时输出排查指引", async () => {
       const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-discovered-empty-"));
       try {

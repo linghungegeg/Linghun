@@ -26,6 +26,14 @@ import {
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
+import {
+  type ProviderCircuitBreakerState,
+  formatCooldownDoctorLine,
+} from "./provider-circuit-breaker.js";
+import {
+  type ProviderFailureKind,
+  formatProviderFailureKindLabel,
+} from "./request-lifecycle-presenter.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,10 +54,22 @@ export type ModelDoctorContext = {
   }>;
   lastProviderFailure?: {
     code: string;
+    kind?: string;
     provider: string;
     model: string;
     endpointProfile: string;
   };
+  lastProviderFallbackAttempt?: {
+    fromProvider: string;
+    fromModel: string;
+    toProvider: string;
+    toModel: string;
+    reasonKind: string;
+    reasonCode: string;
+    status: "attempted" | "succeeded" | "failed";
+    summary: string;
+  };
+  providerBreaker?: ProviderCircuitBreakerState;
   // D.13I：deferred 工具发现快照摘要。仅含 total / byKind / executableCount，不含 raw schema/secret/参数；
   // 由调用方（index.ts）注入 snapshotDeferredTools(context) 的摘要字段，doctor 仅做 read-only 渲染。
   deferredToolsSummary?: {
@@ -242,7 +262,8 @@ export function collectPlaceholderModelHits(config: LinghunConfig): {
 }
 
 export async function formatModelRouteDoctor(context: ModelDoctorContext): Promise<string> {
-  const lines = ["Model route doctor"];
+  const isEn = context.language === "en-US";
+  const lines = [isEn ? "Model route doctor" : "模型路由诊断"];
   const projectSettingsApiKeyProviders = await readProjectSettingsApiKeyProviders(
     context.projectPath,
   );
@@ -459,20 +480,61 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     );
   }
   if (context.routeDecisions.length > 0) {
-    lines.push("- recent route decisions:");
+    lines.push(isEn ? "- recent route decisions:" : "- 最近路由决策：");
     for (const decision of context.routeDecisions.slice(0, 3)) {
       lines.push(
         `  - ${decision.role}: trigger=${decision.triggerReason} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} stop=${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
       );
     }
   }
+  if (context.providerBreaker) {
+    const cooldownLine = formatCooldownDoctorLine(context.providerBreaker, context.language);
+    if (cooldownLine) {
+      lines.push(`- ${cooldownLine}`);
+    }
+  }
   if (context.lastProviderFailure) {
     const failure = context.lastProviderFailure;
-    const failureKind = isProviderTransitFailureCode(failure.code)
-      ? "provider/transit"
-      : "provider";
+    const failureKind = toProviderFailureKind(
+      isProviderTransitFailureCode(failure.code) ? "transit" : failure.kind,
+    );
+    const humanKind = formatProviderFailureKindLabel(failureKind, context.language);
+    if (isEn) {
+      lines.push(
+        `- last model-service failure: kind=${humanKind} code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
+      );
+      if (failure.kind === "quota_or_balance_exhausted") {
+        lines.push(
+          "- quota/balance note: this is an upstream error classification, not a balance query.",
+        );
+      }
+    } else {
+      lines.push(
+        `- 最近模型服务失败：类型=${humanKind} code=${failure.code} 服务商=${failure.provider} 模型=${failure.model} 接口类型=${failure.endpointProfile}；详情：/details evidence`,
+      );
+      if (failure.kind === "quota_or_balance_exhausted") {
+        lines.push("- 额度/余额说明：这是上游错误分类，不是 Linghun 查询余额的结果。");
+      }
+    }
+  }
+  if (context.lastProviderFallbackAttempt) {
+    const attempt = context.lastProviderFallbackAttempt;
+    const reason = formatProviderFailureKindLabel(
+      toProviderFailureKind(attempt.reasonKind),
+      context.language,
+    );
+    const statusText =
+      context.language === "en-US"
+        ? attempt.status
+        : attempt.status === "attempted"
+          ? "已尝试"
+          : attempt.status === "succeeded"
+            ? "已成功"
+            : "已失败";
     lines.push(
-      `- last provider failure: kind=${failureKind} code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
+      isEn
+        ? `- last fallback attempt: ${statusText}; ${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}; reason=${reason} code=${attempt.reasonCode}`
+        : `- 最近备用模型尝试：状态=${statusText}；${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}；原因=${reason} code=${attempt.reasonCode}`,
     );
   }
   if (hasOpenAiCompatibleDoctorProblem(context.config)) {
@@ -492,6 +554,24 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     "- handoff: 角色间只传 summary/evidence/diff/verification/keyFiles，不传完整 transcript/memory/index/logs。",
   );
   return lines.join("\n");
+}
+
+function toProviderFailureKind(value: string | undefined): ProviderFailureKind {
+  if (
+    value === "rate_limit" ||
+    value === "quota_or_balance_exhausted" ||
+    value === "schema" ||
+    value === "auth" ||
+    value === "not_found" ||
+    value === "gateway" ||
+    value === "transit" ||
+    value === "timeout" ||
+    value === "abort" ||
+    value === "reasoning_unsupported"
+  ) {
+    return value;
+  }
+  return "generic";
 }
 
 function isProviderTransitFailureCode(code: string): boolean {

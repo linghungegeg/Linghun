@@ -54,14 +54,26 @@ export function formatRequestActivity(
 export function formatProviderFailurePrimary(error: unknown, language: Language): string {
   const kind = classifyProviderFailure(error);
   if (language === "en-US") {
+    if (kind === "rate_limit") {
+      return "The model service is rate limited. Slow down or retry later; a configured fallback model can be used when available. Run /model doctor for details.";
+    }
+    if (kind === "quota_or_balance_exhausted") {
+      return "The model service reported exhausted quota, credits, or account balance. Add billing or credits, or switch key/provider/model. Linghun has not queried your balance. Run /model doctor for details.";
+    }
     if (kind === "reasoning_unsupported") {
       return "This gateway or model does not accept reasoning params. Lower the reasoning level or switch the gateway/model. Run /model doctor for details.";
     }
+    if (kind === "auth") {
+      return "The model service rejected the API key or permission. Check the key, account permissions, or selected provider/model. Run /model doctor for details.";
+    }
+    if (kind === "not_found") {
+      return "The endpoint or model was not found. Check the base URL, endpoint profile, and model name. Run /model doctor for details.";
+    }
     if (kind === "gateway") {
-      return "The upstream gateway is temporarily unavailable, so this request did not complete. Retry later or run /model doctor for details.";
+      return "The upstream model service or gateway is temporarily unavailable, so this request did not complete. Retry later or run /model doctor for details.";
     }
     if (kind === "transit") {
-      return "The provider's response stream failed in transit (decode / checksum / stream error), so this request did not complete. This is a provider/network transport issue, not a local Linghun bug. Retry later or run /model doctor for details.";
+      return "The response stream failed in transit, so this request did not complete. This is a service or network transport issue, not a local Linghun bug. Retry later or run /model doctor for details.";
     }
     if (kind === "timeout") {
       return "The model took too long to respond, so this request did not complete. Retry later or run /model doctor for details.";
@@ -70,18 +82,30 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
       return "This request was interrupted. Input is ready again.";
     }
     if (kind === "schema") {
-      return "The provider rejected the request schema. Run /model doctor to check endpointProfile, tools/tool_choice, tool_result, and reasoning compatibility.";
+      return "The model service rejected the request shape: schema, tool choice, tool result, or reasoning settings are incompatible. Run /model doctor for details.";
     }
     return "The model request did not complete. Run /model doctor for details, then retry.";
+  }
+  if (kind === "rate_limit") {
+    return "模型服务触发限流。本次请求未完成；请降低请求频率或稍后重试。若已配置备用模型，Linghun 会尝试切换。可运行 /model doctor 查看详情。";
+  }
+  if (kind === "quota_or_balance_exhausted") {
+    return "模型服务返回额度、点数或账户余额不足。本次请求未完成；请充值或检查账单，或切换密钥、服务商或模型。Linghun 没有查询余额，只是根据上游错误分类。可运行 /model doctor 查看详情。";
   }
   if (kind === "reasoning_unsupported") {
     return "当前网关或模型不接受推理参数。请降低推理等级或更换网关/模型。可运行 /model doctor 查看详情。";
   }
+  if (kind === "auth") {
+    return "模型服务拒绝了密钥或权限。本次请求未完成；请检查密钥、账号权限或当前服务商/模型配置。可运行 /model doctor 查看详情。";
+  }
+  if (kind === "not_found") {
+    return "接口或模型不存在。本次请求未完成；请检查服务地址、接口类型和模型名称。可运行 /model doctor 查看详情。";
+  }
   if (kind === "gateway") {
-    return "上游网关暂时异常，本次请求未完成。稍后重试，或运行 /model doctor 查看详情。";
+    return "上游模型服务或网关暂时异常，本次请求未完成。请稍后重试，或运行 /model doctor 查看详情。";
   }
   if (kind === "transit") {
-    return "provider 返回的响应流在传输中失败（解码/校验/流错误），本次请求未完成。这是 provider 与网络传输问题，不是 Linghun 本地缺陷。请稍后重试，或运行 /model doctor 查看详情。";
+    return "响应流传输失败，本次请求未完成。这是模型服务或网络传输问题，不是 Linghun 本地缺陷。请稍后重试，或运行 /model doctor 查看详情。";
   }
   if (kind === "timeout") {
     return "等待模型响应过久，本次请求未完成。稍后重试，或运行 /model doctor 查看详情。";
@@ -90,9 +114,37 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
     return "已中断本次请求，可以继续输入。";
   }
   if (kind === "schema") {
-    return "provider 拒绝了本次请求 schema。请运行 /model doctor 检查 endpointProfile、tools/tool_choice、tool_result 和 reasoning 兼容性。";
+    return "模型服务拒绝了请求格式：接口类型、工具选择、工具结果或推理设置不兼容。请运行 /model doctor 查看详情。";
   }
   return "模型请求未完成。可运行 /model doctor 查看详情后重试。";
+}
+
+export function formatProviderFallbackAttemptSummary(
+  input: { fromProvider: string; fromModel: string; toProvider: string; toModel: string; reasonKind: ProviderFailureKind },
+  language: Language,
+): string {
+  if (language === "en-US") {
+    return `Fallback attempt: ${input.fromProvider}/${input.fromModel} failed with ${formatProviderFailureKindLabel(input.reasonKind, language)}; trying ${input.toProvider}/${input.toModel}.`;
+  }
+  return `正在尝试备用模型：${input.fromProvider}/${input.fromModel} 因${formatProviderFailureKindLabel(input.reasonKind, language)}失败，改用 ${input.toProvider}/${input.toModel}。`;
+}
+
+export function formatProviderFailureKindLabel(kind: ProviderFailureKind, language: Language): string {
+  const labels: Record<ProviderFailureKind, { zh: string; en: string }> = {
+    rate_limit: { zh: "限流", en: "rate limit" },
+    quota_or_balance_exhausted: { zh: "额度或余额不足", en: "quota or balance exhausted" },
+    schema: { zh: "请求格式不兼容", en: "schema/tool compatibility" },
+    auth: { zh: "密钥或权限问题", en: "API key or permission" },
+    not_found: { zh: "接口或模型不存在", en: "endpoint or model not found" },
+    gateway: { zh: "服务端或网关异常", en: "server or gateway failure" },
+    transit: { zh: "传输失败", en: "stream or transit failure" },
+    timeout: { zh: "响应超时", en: "timeout" },
+    abort: { zh: "请求已中断", en: "interrupted request" },
+    reasoning_unsupported: { zh: "推理设置不兼容", en: "reasoning settings unsupported" },
+    generic: { zh: "模型请求失败", en: "model request failure" },
+  };
+  const label = labels[kind] ?? labels.generic;
+  return language === "en-US" ? label.en : label.zh;
 }
 
 export function formatProviderEmptyResponsePrimary(language: Language): string {
@@ -121,13 +173,47 @@ export function formatReportIncompletePrimary(path: string, language: Language):
     : `报告生成受阻：尚未在 ${path} 生成报告文件。`;
 }
 
-function classifyProviderFailure(
-  error: unknown,
-): "gateway" | "timeout" | "abort" | "schema" | "reasoning_unsupported" | "transit" | "generic" {
+export type ProviderFailureKind =
+  | "rate_limit"
+  | "quota_or_balance_exhausted"
+  | "schema"
+  | "auth"
+  | "not_found"
+  | "gateway"
+  | "transit"
+  | "timeout"
+  | "abort"
+  | "reasoning_unsupported"
+  | "generic";
+
+export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   const code = readStringField(error, "code");
   const name = readStringField(error, "name");
+  const status = readNumberField(error, "status") ?? readNumberField(error, "statusCode");
   const message = error instanceof Error ? error.message : String(error ?? "");
-  const text = `${code ?? ""} ${name ?? ""} ${message}`;
+  const text = `${code ?? ""} ${name ?? ""} ${status ?? ""} ${message}`;
+  // Explicit stream/transit provider codes win over body keywords. Some gateways put quota-like
+  // text inside a stream error envelope; the transport envelope is the actionable failure kind.
+  if (
+    code === "PROVIDER_STREAM_ERROR" ||
+    code === "PROVIDER_STREAM_DECODE_ERROR" ||
+    code === "PROVIDER_RETRY_EXHAUSTED" ||
+    code === "PROVIDER_NON_SSE_STREAM" ||
+    code === "PROVIDER_MALFORMED_STREAM"
+  ) {
+    return "transit";
+  }
+  if (
+    code === "PROVIDER_QUOTA_EXHAUSTED" ||
+    /insufficient[_\s-]?quota|quota\s*(?:exhausted|exceeded|limit|reached)|credits?\s*(?:exhausted|used\s*up|insufficient|limit)|balance\s*(?:exhausted|insufficient|too\s*low|不足)|billing\s*(?:hard\s*limit|limit|required|payment)|payment[_\s-]?required|account\s+balance|余额不足|额度不足|欠费|充值/iu.test(
+      text,
+    )
+  ) {
+    return "quota_or_balance_exhausted";
+  }
+  if (code === "PROVIDER_RATE_LIMITED" || status === 429 || /\brate\s*limit(?:ed)?\b|too many requests|请求过快|限流/iu.test(text)) {
+    return "rate_limit";
+  }
   // 推理参数不被网关/模型接受 —— 必须在 schema 之前分流，否则会被 schema 吞掉。
   if (
     /thinking|extended_thinking|reasoning|unsupported_param|不支持.*推理|推理.*不支持/iu.test(text)
@@ -141,14 +227,28 @@ function classifyProviderFailure(
   // decode 类错误；用户可见归因必须明确是 provider/transit failure。文案仍是固定
   // 脱敏摘要，不回显 baseUrl/key/raw response。
   if (
-    code === "PROVIDER_STREAM_ERROR" ||
-    code === "PROVIDER_STREAM_DECODE_ERROR" ||
-    code === "PROVIDER_RETRY_EXHAUSTED" ||
     /crc|checksum|eventstream|event[-\s]?stream|stream\s*decode|decode\s*(?:error|failed|mismatch)|malformed\s*(?:sse|stream|chunk)|retry\s*exhausted|重试.*耗尽|流.*解码|解码.*失败/iu.test(
       text,
     )
   ) {
     return "transit";
+  }
+  if (
+    code === "PROVIDER_API_KEY_ERROR" ||
+    code === "PROVIDER_AUTH_ERROR" ||
+    status === 401 ||
+    status === 403 ||
+    /api\s*key|permission|forbidden|unauthorized|authentication|权限|鉴权|密钥/iu.test(text)
+  ) {
+    return "auth";
+  }
+  if (
+    code === "PROVIDER_NOT_FOUND" ||
+    code === "MODEL_NOT_FOUND" ||
+    status === 404 ||
+    /not[_\s-]?found|model.*not.*found|endpoint.*not.*found|不存在|未找到/iu.test(text)
+  ) {
+    return "not_found";
   }
   if (/\b(?:502|503|504)\b/u.test(text) || code === "PROVIDER_SERVER_ERROR") {
     return "gateway";
@@ -177,4 +277,10 @@ function readStringField(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const field = (value as Record<string, unknown>)[key];
   return typeof field === "string" ? field : undefined;
+}
+
+function readNumberField(value: unknown, key: string): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "number" ? field : undefined;
 }

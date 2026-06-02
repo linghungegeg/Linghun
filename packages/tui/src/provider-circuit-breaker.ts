@@ -36,6 +36,11 @@ const RECOVERABLE_CODES = new Set([
   "PROVIDER_REQUEST_TIMEOUT",
   "PROVIDER_STREAM_TIMEOUT",
   "PROVIDER_NETWORK_ERROR",
+  "PROVIDER_STREAM_ERROR",
+  "PROVIDER_STREAM_DECODE_ERROR",
+  "PROVIDER_RETRY_EXHAUSTED",
+  "PROVIDER_NON_SSE_STREAM",
+  "PROVIDER_MALFORMED_STREAM",
 ]);
 
 export function createProviderCircuitBreakerState(): ProviderCircuitBreakerState {
@@ -139,15 +144,15 @@ export function formatCooldownMessage(
   const seconds = Math.ceil(remainingMs / 1000);
   if (language === "en-US") {
     return [
-      `Provider ${providerId}/${model} is temporarily unstable and in cooldown.`,
+      `Model service ${providerId}/${model} is temporarily unstable and waiting before retry.`,
       `Retry available in ~${seconds}s.`,
       "You can run /model doctor to diagnose, or switch provider/model with /model.",
     ].join(" ");
   }
   return [
-    `Provider ${providerId}/${model} 暂时不稳定，正在冷却中。`,
+    `模型服务 ${providerId}/${model} 暂时不稳定，正在等待恢复。`,
     `约 ${seconds} 秒后可重试。`,
-    "可运行 /model doctor 诊断，或用 /model 切换 provider/model。",
+    "可运行 /model doctor 诊断，或用 /model 切换服务商或模型。",
   ].join("");
 }
 
@@ -164,14 +169,16 @@ export function formatCooldownDoctorLine(
     if (entry.cooldownUntil > now) {
       const seconds = Math.ceil((entry.cooldownUntil - now) / 1000);
       active.push(
-        `${entry.providerId}/${entry.model} cooldown=${seconds}s reason=${entry.reasonCode}`,
+        language === "en-US"
+          ? `${entry.providerId}/${entry.model} waiting=${seconds}s reason=${entry.reasonCode}`
+          : `${entry.providerId}/${entry.model} 等待=${seconds}秒 原因=${entry.reasonCode}`,
       );
     }
   }
   if (active.length === 0) {
     return undefined;
   }
-  const prefix = language === "en-US" ? "Provider cooldown" : "Provider 冷却";
+  const prefix = language === "en-US" ? "Active model-service cooldown" : "模型服务等待恢复";
   return `${prefix}: ${active.join("; ")}`;
 }
 

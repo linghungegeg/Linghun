@@ -65,6 +65,10 @@ describe("provider-circuit-breaker", () => {
       expect(isRecoverableProviderFailure("PROVIDER_SCHEMA_ERROR")).toBe(false);
     });
 
+    it("returns false for PROVIDER_QUOTA_EXHAUSTED", () => {
+      expect(isRecoverableProviderFailure("PROVIDER_QUOTA_EXHAUSTED")).toBe(false);
+    });
+
     it("returns false for ABORT", () => {
       expect(isRecoverableProviderFailure("ABORT")).toBe(false);
     });
@@ -78,6 +82,14 @@ describe("provider-circuit-breaker", () => {
     it("ignores non-recoverable error codes", () => {
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
       expect(state.entries.size).toBe(0);
+    });
+
+    it("does not enter cooldown for schema/tool_choice bad request failures", () => {
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_BAD_REQUEST");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_BAD_REQUEST");
+
+      expect(state.entries.size).toBe(0);
+      expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
     });
 
     it("records first recoverable failure without entering cooldown", () => {
@@ -244,7 +256,7 @@ describe("provider-circuit-breaker", () => {
       vi.setSystemTime(15_000);
       const result = formatCooldownDoctorLine(state, "en-US");
       expect(result).toBeDefined();
-      expect(result).toContain("Provider cooldown");
+      expect(result).toContain("Active model-service cooldown");
       expect(result).toContain("openai/gpt-4o");
       expect(result).toContain("PROVIDER_RATE_LIMITED");
     });
@@ -256,7 +268,7 @@ describe("provider-circuit-breaker", () => {
       vi.setSystemTime(15_000);
       const result = formatCooldownDoctorLine(state, "zh-CN");
       expect(result).toBeDefined();
-      expect(result).toContain("Provider 冷却");
+      expect(result).toContain("模型服务等待恢复");
       expect(result).toContain("openai/gpt-4o");
     });
 
@@ -316,6 +328,7 @@ describe("provider-circuit-breaker", () => {
     it("non-recoverable errors do not affect breaker state", () => {
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_SERVER_ERROR");
       recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_AUTH_ERROR");
+      recordProviderFailure(state, "openai", "gpt-4o", "PROVIDER_QUOTA_EXHAUSTED");
       // Auth error should not increment — still at 1
       expect(state.entries.get("openai::gpt-4o")?.consecutiveFailures).toBe(1);
       expect(checkProviderCooldown(state, "openai", "gpt-4o").blocked).toBe(false);
@@ -331,8 +344,21 @@ describe("provider-circuit-breaker", () => {
       expect(BREAKER_CONSTANTS.COOLDOWN_MS).toBe(45_000);
     });
 
-    it("recoverable codes set has 5 entries", () => {
-      expect(BREAKER_CONSTANTS.RECOVERABLE_CODES.size).toBe(5);
+    it("recoverable codes set covers server, rate limit, timeout, network, and stream failures", () => {
+      expect([...BREAKER_CONSTANTS.RECOVERABLE_CODES]).toEqual(
+        expect.arrayContaining([
+          "PROVIDER_SERVER_ERROR",
+          "PROVIDER_RATE_LIMITED",
+          "PROVIDER_REQUEST_TIMEOUT",
+          "PROVIDER_STREAM_TIMEOUT",
+          "PROVIDER_NETWORK_ERROR",
+          "PROVIDER_STREAM_ERROR",
+          "PROVIDER_STREAM_DECODE_ERROR",
+          "PROVIDER_RETRY_EXHAUSTED",
+          "PROVIDER_NON_SSE_STREAM",
+          "PROVIDER_MALFORMED_STREAM",
+        ]),
+      );
     });
   });
 });

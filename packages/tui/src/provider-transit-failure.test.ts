@@ -19,7 +19,7 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("Anthropic Messages stream decode failed: eventstream CRC mismatch"),
       "en-US",
     );
-    expect(text).toContain("provider/network transport issue");
+    expect(text).toContain("service or network transport issue");
     expect(text).toContain("not a local Linghun bug");
     // 不退化成通用 runtime 文案。
     expect(text).not.toBe(
@@ -32,7 +32,7 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("流解码失败：eventstream CRC 校验不一致"),
       "zh-CN",
     );
-    expect(text).toContain("provider 与网络传输问题");
+    expect(text).toContain("模型服务或网络传输问题");
     expect(text).toContain("不是 Linghun 本地缺陷");
     expect(text).not.toBe("模型请求未完成。可运行 /model doctor 查看详情后重试。");
   });
@@ -52,7 +52,7 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("quota exceeded", "PROVIDER_STREAM_ERROR"),
       "zh-CN",
     );
-    expect(text).toContain("provider 与网络传输问题");
+    expect(text).toContain("模型服务或网络传输问题");
     expect(text).toContain("不是 Linghun 本地缺陷");
   });
 
