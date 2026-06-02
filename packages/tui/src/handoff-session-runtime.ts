@@ -9,10 +9,12 @@ import {
   createPhase15BetaVerdictScope,
 } from "./final-answer-gate.js";
 import type { TuiContext } from "./index.js";
-import type { HandoffPacket, VerificationReport } from "./tui-data-types.js";
+import type { CompactProjection, HandoffPacket, VerificationReport } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
+
+const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 
 export function hydrateResumeContext(context: TuiContext, transcript: TranscriptEvent[]): void {
   const latestTodo = [...transcript].reverse().find((event) => event.type === "todo_update");
@@ -44,6 +46,60 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = handoff.packet;
   }
+  const compactEvent = [...transcript]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "system_event" &&
+        event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX),
+    );
+  if (compactEvent?.type === "system_event") {
+    const projection = parseCompactProjectionEvent(compactEvent.message);
+    if (projection) {
+      context.cache.compacted = true;
+      context.cache.compactProjection = projection;
+      if (!context.cache.compactBoundaries.some((boundary) => boundary.id === projection.boundaryId)) {
+        context.cache.compactBoundaries.push({
+          id: projection.boundaryId,
+          kind: "micro",
+          createdAt: projection.createdAt,
+          preCompactTokenEstimate: Math.ceil(projection.preCompactChars / 4),
+          postCompactTokenEstimate: Math.ceil(projection.postCompactChars / 4),
+          compactedToolResultIds: [],
+          preservedEvidenceRefs: projection.evidenceRefs,
+          preservedFiles: [],
+        });
+      }
+    }
+  }
+}
+
+function parseCompactProjectionEvent(message: string): CompactProjection | undefined {
+  try {
+    const parsed = JSON.parse(message.slice(COMPACT_PROJECTION_EVENT_PREFIX.length));
+    if (!isCompactProjection(parsed)) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function isCompactProjection(value: unknown): value is CompactProjection {
+  return (
+    isRecord(value) &&
+    typeof value.boundaryId === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.summary === "string" &&
+    typeof value.pressureRatio === "number" &&
+    typeof value.preCompactChars === "number" &&
+    typeof value.postCompactChars === "number" &&
+    typeof value.discardedRange === "string" &&
+    typeof value.toolPairingSafe === "boolean" &&
+    Array.isArray(value.risks) &&
+    Array.isArray(value.evidenceRefs)
+  );
 }
 
 export async function loadOrCreateHandoffPacket(

@@ -169,8 +169,41 @@ export type CacheState = {
   hintLastShownAt: Record<string, number>;
   compacted: boolean;
   compactBoundaries: CompactBoundary[];
+  compactProjection?: CompactProjection;
+  compactPressure?: CompactPressureSnapshot;
+  compactFailure?: CompactFailureState;
+  compactCooldownUntil?: number;
   workspaceReference: WorkspaceReferenceCache;
   startedAt: number;
+};
+
+export type CompactProjection = {
+  boundaryId: string;
+  createdAt: string;
+  summary: string;
+  pressureRatio: number;
+  preCompactChars: number;
+  postCompactChars: number;
+  discardedRange: string;
+  toolPairingSafe: boolean;
+  risks: string[];
+  evidenceRefs: string[];
+};
+
+export type CompactPressureSnapshot = {
+  estimatedChars: number;
+  maxChars: number;
+  triggerChars: number;
+  ratio: number;
+  toolPairingSafe: boolean;
+  updatedAt: string;
+};
+
+export type CompactFailureState = {
+  at: string;
+  reason: string;
+  blocked: boolean;
+  cooldownUntil: string;
 };
 
 export type McpServerState = {

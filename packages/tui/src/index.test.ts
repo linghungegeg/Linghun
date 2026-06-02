@@ -16,6 +16,7 @@ import {
 } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
+import type { ModelMessage } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -105,6 +106,8 @@ import {
 } from "./provider-circuit-breaker.js";
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
+import { formatCompactStatus } from "./cache-command-runtime.js";
+import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
@@ -370,6 +373,77 @@ function mockOpenAiToolSequenceWithFinalCalls(
             "data: [DONE]\n\n",
           ].join("")
         : `data: ${JSON.stringify({ id: `chatcmpl-test-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiLongHistoryThenToolFetch(): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      let body: string;
+      if (requests.length === 1) {
+        const text = `RAW_TOOL_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
+        body = `data: ${JSON.stringify({ id: "chatcmpl-compact-tool-1", choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
+      } else if (requests.length === 2) {
+        body = [
+          `data: ${JSON.stringify({
+            id: "chatcmpl-compact-tool-2",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-compact-read",
+                      type: "function",
+                      function: { name: "Read", arguments: JSON.stringify({ path: "pair.txt" }) },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join("");
+      } else {
+        body = `data: ${JSON.stringify({ id: "chatcmpl-compact-tool-3", choices: [{ delta: { content: "pairing ok" } }] })}\n\ndata: [DONE]\n\n`;
+      }
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiResponsesLongHistoryThenToolFetch(): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      let body: string;
+      if (requests.length === 1) {
+        const text = `RAW_RESPONSES_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
+        body = [
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-1", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
+        ].join("");
+      } else if (requests.length === 2) {
+        body = [
+          `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", call_id: "call-compact-bash", name: "Bash" } })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: JSON.stringify({ command: "node -e \"console.log('responses pair content')\"" }) })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "call-compact-bash", name: "Bash" } })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-2", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
+        ].join("");
+      } else {
+        body = [
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "responses pairing ok" })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-3", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
+        ].join("");
+      }
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
@@ -1772,7 +1846,13 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
-    const fetchMock = vi.fn();
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("example.test")) {
+        return new Response("{}", { status: 200 });
+      }
+      return originalFetch(url, init);
+    });
     vi.stubGlobal("fetch", fetchMock);
     context.evidence.push({
       id: "ev-compact",
@@ -1788,8 +1868,12 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/compact auto", context, output);
     await handleSlashCommand("/compact manual", context, output);
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(output.text).toContain("Compact Lite status");
+    const providerCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("example.test"),
+    );
+    expect(providerCalls).toHaveLength(0);
+    expect(output.text).toContain("Context Compact status");
+    expect(output.text).toContain("scope: provider-visible recent context projection");
     expect(output.text).toContain("无工具、无文件写入、无额外模型调用");
     expect(output.text).toContain("不执行工具、不写项目文件、不写长期记忆、不启动后台任务");
     expect(context.cache.compactBoundaries).toHaveLength(1);
@@ -1797,6 +1881,201 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(["ev-compact"]);
     expect(context.cache.compactBoundaries[0]?.preservedFiles).toEqual(["README.md"]);
     expect(context.permissionMode).toBe("default");
+  });
+
+  it("redacts compact summary secrets in provider context, transcript projection, and status", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-redact-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "compact-redact-model" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "compact-redact-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "compact-redact-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "compact-redact-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "compact-redact-model",
+                maxInputTokens: 80_000,
+                maxOutputTokens: 64,
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const rawSk = "sk-compactsecret123";
+    const rawBearer = "Bearer compact.secret.token";
+    const rawApiKey = "api_key=compact-api-key";
+    const rawApiKeyCamel = "apiKey=compact-camel-key";
+    const rawToken = "token=compact-token-value";
+    context.tools.todos.unshift({
+      id: "todo-secret",
+      content: `continue with ${rawSk} and ${rawApiKeyCamel}`,
+      status: "pending",
+    });
+    mergeFailureRecord(context.failureLearning, {
+      category: "provider_failure",
+      failureSummary: `failure used ${rawBearer}`,
+      rootCauseGuess: "secret in failure",
+      avoidNextTime: "redact it",
+      sourceRef: "test",
+      relatedTarget: "compact",
+    });
+    context.agents.push({
+      id: "agent-secret",
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      task: "secret agent task",
+      model: "compact-redact-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: join(project, "agent.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `agent summary has ${rawApiKey} and ${rawApiKeyCamel}`,
+      contextSummary: "summary",
+      cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    context.memory.lastHandoff = {
+      goal: `handoff goal has Authorization: ${rawBearer} and ${rawToken}`,
+    } as TuiContext["memory"]["lastHandoff"];
+    const messages: ModelMessage[] = [
+      { role: "system", content: "system" },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: `old context ${index} ${"x".repeat(20_000)} ${index === 0 ? rawSk : ""}`,
+      })),
+      { role: "user", content: "latest request" },
+    ];
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "compact-redact-model" },
+      trigger: "request",
+      deps: {
+        appendSystemEvent: async (ctx, id, message, level = "info") => {
+          await ctx.store.appendEvent(id, {
+            type: "system_event",
+            id: "compact-test-event",
+            level,
+            message,
+            createdAt: new Date().toISOString(),
+          });
+        },
+        captureFailureLearning: async () => undefined,
+        recordToolResultBudgetEvidence: async () => undefined,
+        refreshCacheFreshness: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toBe(false);
+    const providerText = JSON.stringify(result.messages);
+    expect(providerText).toContain("[Context compact boundary");
+    expect(providerText).toContain("scope=provider-visible recent context projection");
+    const transcript = JSON.stringify((await store.resume(session.id)).transcript);
+    const status = formatCompactStatus(context);
+    const detailsText = __testBuildToggleDetailsCommandPanel(context)?.detailsText ?? "";
+    for (const text of [providerText, transcript, status, detailsText]) {
+      expect(text).not.toContain(rawSk);
+      expect(text).not.toContain(rawBearer);
+      expect(text).not.toContain(rawApiKey);
+      expect(text).not.toContain(rawApiKeyCamel);
+      expect(text).not.toContain(rawToken);
+    }
+    expect(providerText).toContain("sk-***");
+    expect(providerText).toContain("Bearer ***");
+    expect(providerText).toContain("api_key=***");
+    expect(transcript).toContain("sk-***");
+    expect(transcript).toContain("Bearer ***");
+    expect(transcript).toContain("api_key=***");
+    expect(status).toContain("Authorization: ***");
+    expect(status).toContain("token=***");
+    expect(status).toContain("scope: provider-visible recent context projection");
+    expect(detailsText).toContain("sk-***");
+    expect(detailsText).toContain("Bearer ***");
+    expect(detailsText).toContain("api_key=***");
+    expect(detailsText).toContain("scope: provider-visible recent context projection");
+  });
+
+  it("blocks provider requests during compact failure cooldown instead of sending partial context", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-cooldown-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tiny-compact-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tiny-compact-model",
+          },
+        },
+        modelRoutes: {
+          ...defaultConfig.modelRoutes,
+          defaultModel: "tiny-compact-model",
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.role === "executor"
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: "tiny-compact-model",
+                  maxInputTokens: 8,
+                  maxOutputTokens: 1,
+                }
+              : route,
+          ),
+        },
+      }),
+      "utf8",
+    );
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("example.test")) {
+        return new Response("{}", { status: 200 });
+      }
+      return originalFetch(url, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const output = new MemoryOutput();
+
+    const stderr = new MemoryOutput();
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["第一条超限请求\n第二条应该冷却阻断\n/exit\n"]),
+      stdout: output,
+      stderr,
+    });
+
+    const providerCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("example.test"));
+    expect(providerCalls).toHaveLength(0);
+    expect(`${output.text}\n${stderr.text}`).toContain("上下文压缩摘要后仍超过 provider 上限");
+    expect(output.text).toContain("上一次上下文压缩失败后仍在冷却中");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("context_compact_failed");
+    expect(transcript).toContain("context_compact_cooldown_active");
   });
 
   it("resumes a previous session through structured handoff", async () => {
@@ -6024,7 +6303,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("工具调用上限");
   });
 
-  it("long context is auto-compacted without exposing fixed character limits on the main screen", async () => {
+  it("long context is auto-compacted into a provider-visible summary without leaking raw history", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     const config: LinghunConfig = {
@@ -6049,7 +6328,7 @@ describe("Phase 06 TUI slash commands", () => {
                 ...route,
                 provider: "openai-compatible",
                 primaryModel: "small-context-model",
-                maxInputTokens: 1500,
+                maxInputTokens: 80_000,
                 maxOutputTokens: 64,
               }
             : route,
@@ -6057,31 +6336,50 @@ describe("Phase 06 TUI slash commands", () => {
       },
     };
     await writeFile(join(project, ".linghun", "settings.json"), JSON.stringify(config), "utf8");
-    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "small-context-model" });
-    await store.appendEvent(session.id, {
-      type: "assistant_text_delta",
-      id: "old-assistant",
-      text: "旧输出\n".repeat(1800),
-      createdAt: new Date().toISOString(),
-    });
-    const requests = mockOpenAiTextFetch("压缩后继续。");
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        const text =
+          requests.length === 1
+            ? `RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER\n${"旧输出\n".repeat(70_000)}`
+            : "压缩后继续。";
+        const body = `data: ${JSON.stringify({ id: `chatcmpl-compact-${requests.length}`, choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
     const output = new MemoryOutput();
 
     await runTui({
       projectPath: project,
-      stdin: Readable.from(["请继续处理这个问题\n/exit\n"]),
+      stdin: Readable.from(["先记录一段长输出\n请继续处理这个问题\n/exit\n"]),
       stdout: output,
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    const request = requests[1] as { messages?: Array<{ role?: string; content?: string }> };
+    const requestText = JSON.stringify(request.messages ?? []);
+    expect(requestText).toContain("[Context compact boundary");
+    expect(requestText).toContain("Linghun compact summary");
+    expect(requestText).toContain("filesOrEvidenceRefs");
+    expect(requestText).toContain("failureLearning");
+    expect(requestText).not.toContain("RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER");
     expect(output.text).toContain("压缩后继续");
     expect(output.text).not.toContain("48000");
     expect(output.text).not.toContain("48_000");
     expect(output.text).not.toContain("chars");
     expect(output.text).not.toContain("字符上限");
     expect(output.text).not.toContain("context safety limit");
+    const latestSession = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(latestSession?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("compact_projection:");
   });
 
   it("D.14D-R P1-3: tool round exhaustion shows a mature summary, not a scary failure box", async () => {
@@ -7553,6 +7851,219 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已通过真实 StartAgent");
   });
 
+  it("StartAgent child loop oversized context triggers compact projection in child provider requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-compact-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "a.txt"), `RAW_CHILD_CONTEXT_MARKER\n${"a".repeat(20_000)}`, "utf8");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-compact-model" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "child-compact-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "child-compact-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "child-compact-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "child-compact-model",
+                maxInputTokens: 15_000,
+                maxOutputTokens: 64,
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const request = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role?: string; content?: string }>;
+        };
+        requests.push(request);
+        const childRequests = requests.length;
+        const body =
+          childRequests <= 16
+            ? [
+                `data: ${JSON.stringify({
+                  id: `chatcmpl-child-compact-${childRequests}`,
+                  choices: [
+                    {
+                      delta: {
+                        tool_calls: [
+                          {
+                            id: `call-child-read-${childRequests}`,
+                            type: "function",
+                            function: {
+                              name: "Read",
+                              arguments: JSON.stringify({ path: "a.txt" }),
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                })}\n\n`,
+                "data: [DONE]\n\n",
+              ].join("")
+            : `data: ${JSON.stringify({ id: "chatcmpl-child-final", choices: [{ delta: { content: "child compact done" } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+
+    await handleSlashCommand("/fork worker inspect a.txt", context, output);
+
+    expect(requests.length).toBeGreaterThan(2);
+    const compactedRequest = requests.find((request) =>
+      JSON.stringify((request as { messages?: unknown[] }).messages ?? []).includes(
+        "[Context compact boundary",
+      ),
+    );
+    expect(compactedRequest).toBeTruthy();
+    const requestText = JSON.stringify((compactedRequest as { messages?: unknown[] }).messages ?? []);
+    expect(requestText).toContain("scope=provider-visible recent context projection");
+    expect(context.cache.compactProjection?.summary).toContain(
+      "scope=provider-visible recent context projection",
+    );
+    const childTranscript = JSON.stringify((await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript);
+    expect(childTranscript).toContain("compact_projection:");
+    expect(context.agents[0]?.status).toBe("completed");
+  });
+
+  it("StartAgent child loop compact failure then cooldown blocks without provider requests", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-compact-block-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-tiny-compact-model" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "child-tiny-compact-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "child-tiny-compact-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "child-tiny-compact-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "child-tiny-compact-model",
+                maxInputTokens: 8,
+                maxOutputTokens: 1,
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await handleSlashCommand(`/fork worker ${"oversized child task ".repeat(40)}`, context, output);
+    await handleSlashCommand("/fork worker second child should hit cooldown", context, output);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(output.text).toContain("上下文压缩摘要后仍超过 provider 上限");
+    expect(output.text).toContain("上一次上下文压缩失败后仍在冷却中");
+    expect(context.agents[0]?.status).toBe("blocked");
+    expect(context.agents[1]?.status).toBe("blocked");
+  });
+
+  it("agent-child compact preflight blocks unfinished tool pairs over the provider limit", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-pair-block-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "child-pair-block-model" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "child-pair-block-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "child-pair-block-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "child-pair-block-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "child-pair-block-model",
+                maxInputTokens: 8,
+                maxOutputTokens: 1,
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    const messages: ModelMessage[] = [
+      { role: "system", content: "child system" },
+      {
+        role: "assistant",
+        content: "unfinished child tool pair " + "x".repeat(2_000),
+        toolCalls: [{ id: "call-unfinished-child", name: "Read", input: { path: "a.txt" } }],
+      },
+    ];
+    const result = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "child-pair-block-model" },
+      trigger: "agent-child",
+      deps: {
+        appendSystemEvent: async (ctx, id, message, level = "info") => {
+          await ctx.store.appendEvent(id, {
+            type: "system_event",
+            id: "compact-pair-block",
+            level,
+            message,
+            createdAt: new Date().toISOString(),
+          });
+        },
+        captureFailureLearning: async () => undefined,
+        recordToolResultBudgetEvidence: async () => undefined,
+        refreshCacheFreshness: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toBe(true);
+    if (!result.blocked) throw new Error("expected compact preflight to block unfinished child tool pair");
+    expect(result.message).toContain("未闭合 tool pair");
+    const transcript = JSON.stringify((await store.resume(session.id)).transcript);
+    expect(transcript).toContain("context_compact_skipped_tool_pairing");
+    expect(transcript).toContain("context_compact_failed");
+  });
+
   it("StartAgent child loop continues past 40 progressing tool rounds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-budget-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -7821,6 +8332,254 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
     expect(transcript).toContain('"toolName":"Read"');
     expect(transcript).toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+  });
+
+  it("keeps OpenAI chat tool_call/tool_result paired after provider preflight compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-pair-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "pair.txt"), "pair content\n", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "compact-pair-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "compact-pair-model",
+          },
+        },
+        modelRoutes: {
+          ...defaultConfig.modelRoutes,
+          defaultModel: "compact-pair-model",
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.role === "executor"
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: "compact-pair-model",
+                  maxInputTokens: 80_000,
+                  maxOutputTokens: 64,
+                }
+              : route,
+          ),
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiLongHistoryThenToolFetch();
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["制造长历史\n继续读取 pair.txt\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    const secondText = JSON.stringify((requests[1] as { messages?: unknown[] }).messages ?? []);
+    expect(secondText).toContain("[Context compact boundary");
+    expect(secondText).not.toContain("RAW_TOOL_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
+    const third = requests[2] as {
+      messages?: Array<{ role?: string; tool_call_id?: string; content?: string }>;
+    };
+    const toolMessage = (third.messages ?? []).find((message) => message.role === "tool");
+    expect(toolMessage?.tool_call_id).toBe("call-compact-read");
+    expect(toolMessage?.content).toContain("pair content");
+  });
+
+  it("keeps OpenAI responses function_call/function_call_output paired after provider preflight compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-responses-pair-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "compact-responses-pair-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "compact-responses-pair-model",
+            endpointProfile: "responses",
+          },
+        },
+        modelRoutes: {
+          ...defaultConfig.modelRoutes,
+          defaultModel: "compact-responses-pair-model",
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.role === "executor"
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: "compact-responses-pair-model",
+                  maxInputTokens: 80_000,
+                  maxOutputTokens: 64,
+                }
+              : route,
+          ),
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiResponsesLongHistoryThenToolFetch();
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["制造 responses 长历史\n继续执行 responses 工具\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    const secondText = JSON.stringify((requests[1] as { input?: unknown[] }).input ?? []);
+    expect(secondText).toContain("[Context compact boundary");
+    expect(secondText).not.toContain("RAW_RESPONSES_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
+    const thirdInput =
+      (requests[2] as { input?: Array<{ type?: string; call_id?: string; output?: string }> })
+        .input ?? [];
+    expect(
+      thirdInput.some(
+        (item) => item.type === "function_call" && item.call_id === "call-compact-bash",
+      ),
+    ).toBe(true);
+    const toolOutput = thirdInput.find(
+      (item) => item.type === "function_call_output" && item.call_id === "call-compact-bash",
+    );
+    expect(toolOutput?.output).toContain("responses pair content");
+  });
+
+  it("keeps Anthropic tool_use/tool_result paired after provider preflight compact", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-anthropic-pair-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "pair.txt"), "anthropic pair content\n", "utf8");
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
+    vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", "anthropic_messages");
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "claude-3-5-sonnet-latest");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "claude-3-5-sonnet-latest",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://relay.example.com/v1",
+            apiKey: "sk-test",
+            model: "claude-3-5-sonnet-latest",
+            endpointProfile: "anthropic_messages",
+          },
+        },
+        modelRoutes: {
+          ...defaultConfig.modelRoutes,
+          defaultModel: "claude-3-5-sonnet-latest",
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.role === "executor"
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: "claude-3-5-sonnet-latest",
+                  maxInputTokens: 80_000,
+                  maxOutputTokens: 64,
+                }
+              : route,
+          ),
+        },
+      }),
+      "utf8",
+    );
+    const requests: Array<{
+      url: string;
+      body: { messages?: Array<{ role?: string; content?: unknown }>; tools?: unknown[] };
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          messages?: Array<{ role?: string; content?: unknown }>;
+          tools?: unknown[];
+        };
+        requests.push({ url: String(url), body });
+        const encoder = new TextEncoder();
+        let chunks: string[];
+        if (requests.length === 1) {
+          const text = `RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
+          chunks = [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-1","usage":{"input_tokens":10}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+            `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } })}\n\n`,
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ];
+        } else if (requests.length === 2) {
+          chunks = [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-2","usage":{"input_tokens":10}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_compact_read","name":"Read"}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"pair.txt\\"}"}}\n\n',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":10}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ];
+        } else {
+          chunks = [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-3","usage":{"input_tokens":10}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic pairing ok"}}\n\n',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ];
+        }
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["制造 Claude 长历史\n继续读取 pair.txt\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.url).toBe("https://relay.example.com/v1/messages");
+    }
+    const secondText = JSON.stringify(requests[1]?.body.messages ?? []);
+    expect(secondText).toContain("[Context compact boundary");
+    expect(secondText).not.toContain("RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
+    const thirdBlocks = (requests[2]?.body.messages ?? []).flatMap((message) =>
+      Array.isArray(message.content)
+        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string; content?: string }>)
+        : [],
+    );
+    expect(
+      thirdBlocks.some(
+        (block) =>
+          block.type === "tool_use" &&
+          block.id === "toolu_compact_read" &&
+          block.name === "Read",
+      ),
+    ).toBe(true);
+    const toolResult = thirdBlocks.find(
+      (block) => block.type === "tool_result" && block.tool_use_id === "toolu_compact_read",
+    );
+    expect(toolResult?.content).toContain("anthropic pair content");
   });
 
   it("keeps Bash function_call_output paired in the next OpenAI responses provider request without raw budget state", async () => {

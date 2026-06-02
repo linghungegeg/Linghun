@@ -4,6 +4,7 @@ import type { CacheFreshness } from "@linghun/core";
 import { diffFreshness } from "./cache-freshness.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
+import { sanitizeDiagnosticText } from "./startup-runtime.js";
 import type { LightHint } from "./tui-data-types.js";
 import { formatPercent } from "./usage-stats-presenter.js";
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
@@ -106,16 +107,33 @@ export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
 
 export function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
+  const pressure = context.cache.compactPressure;
+  const projection = context.cache.compactProjection;
+  const failure = context.cache.compactFailure;
   return [
-    "Compact Lite status",
+    "Context Compact status",
+    "- scope: provider-visible recent context projection",
+    `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger=${pressure.triggerChars})` : "unknown"}`,
     `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
     `- boundaries: ${context.cache.compactBoundaries.length}`,
     `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
     `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}->${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
+    `- latest compact time: ${projection?.createdAt ?? latest?.createdAt ?? "none"}`,
+    `- retained summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
+    `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
+    `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
+    `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldownUntil=${failure.cooldownUntil}` : "none"}`,
     `- preserved evidence refs: ${latest?.preservedEvidenceRefs.length ?? 0}`,
     `- preserved files: ${latest?.preservedFiles.length ?? 0}`,
-    "- boundary: no tools, no file writes, no long-term memory writes, no background task starts, no extra model calls.",
+    "- boundary: summary is redacted; raw transcript, secrets, large tool results, and provider raw requests stay out of compact summary.",
   ].join("\n");
+}
+
+function sanitizeCompactStatusText(value: string): string {
+  return sanitizeDiagnosticText(value)
+    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }
 
 export function collectLightHints(context: TuiContext): LightHint[] {

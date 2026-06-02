@@ -96,6 +96,10 @@ export function createCacheState(
     hintLastShownAt: {},
     compacted: false,
     compactBoundaries: [],
+    compactProjection: undefined,
+    compactPressure: undefined,
+    compactFailure: undefined,
+    compactCooldownUntil: undefined,
     workspaceReference: createWorkspaceReferenceCache(),
     startedAt: Date.now(),
   };

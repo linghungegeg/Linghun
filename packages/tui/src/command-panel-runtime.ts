@@ -1,7 +1,7 @@
 import type { Writable } from "node:stream";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
-import { sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
+import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
 
 /**
  * D.13Q-UX Task Surface Maturity Sweep — 通用 CommandPanel 设置器。
@@ -34,9 +34,10 @@ import { sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
 export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
   const isEn = context.language === "en-US";
   const hasOutput = Boolean(context.lastFullOutput);
+  const hasCompact = Boolean(context.cache.compactProjection || context.cache.compactFailure);
   const evidenceCount = context.evidence.length;
   const backgroundCount = context.backgroundTasks.length;
-  if (!hasOutput && evidenceCount === 0 && backgroundCount === 0) {
+  if (!hasOutput && !hasCompact && evidenceCount === 0 && backgroundCount === 0) {
     return undefined;
   }
   // D.14D — summary-first details viewer。主屏（summary + sections）只展示人话
@@ -113,6 +114,49 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
     }
   }
 
+  if (context.cache.compactProjection || context.cache.compactFailure) {
+    const projection = context.cache.compactProjection;
+    const failure = context.cache.compactFailure;
+    sections.push({
+      title: isEn ? "Context compact" : "上下文压缩",
+      rows: [
+        projection
+          ? isEn
+            ? `Last compact ${projection.createdAt}; pairing=${projection.toolPairingSafe ? "safe" : "unsafe"}`
+            : `最近压缩 ${projection.createdAt}；pairing=${projection.toolPairingSafe ? "安全" : "不安全"}`
+          : isEn
+            ? "No successful compact projection"
+            : "没有成功的 compact projection",
+        failure
+          ? isEn
+            ? `Failure cooldown until ${failure.cooldownUntil}`
+            : `失败冷却至 ${failure.cooldownUntil}`
+          : isEn
+            ? "No compact failure cooldown"
+            : "没有 compact 失败冷却",
+      ],
+    });
+    detailsParts.push("");
+    detailsParts.push(isEn ? "## Context compact" : "## 上下文压缩");
+    if (projection) {
+      detailsParts.push(
+        [
+          `- boundary: ${projection.boundaryId}`,
+          `- pressure: ${projection.pressureRatio}`,
+          `- scope: provider-visible recent context projection`,
+          `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
+          `- evidenceRefs: ${projection.evidenceRefs.join(", ") || "none"}`,
+          `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
+        ].join("\n"),
+      );
+    }
+    if (failure) {
+      detailsParts.push(
+        `- failure: ${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactDetailsText(failure.reason, context.projectPath)}; cooldownUntil=${failure.cooldownUntil}`,
+      );
+    }
+  }
+
   const summary: string[] = [];
   if (hasOutput) {
     summary.push(isEn ? "Latest output available." : "最近一次输出可展开。");
@@ -131,6 +175,9 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
         : `后台任务 ${backgroundCount} 条。`,
     );
   }
+  if (hasCompact) {
+    summary.push(isEn ? "Context compact state available." : "上下文压缩状态可查看。");
+  }
   return {
     title: isEn ? "Details" : "详情",
     tone: "neutral",
@@ -147,6 +194,13 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
     // 一上来就把内部 id / 完整正文糊一屏。
     expanded: false,
   };
+}
+
+function sanitizeCompactDetailsText(value: string, projectPath: string): string {
+  return sanitizeDiagnosticText(sanitizeDisplayPaths(value, projectPath))
+    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }
 
 export function showCommandPanel(

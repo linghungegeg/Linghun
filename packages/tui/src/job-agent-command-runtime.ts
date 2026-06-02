@@ -12,6 +12,10 @@ import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
+import type {
+  CompactPreflightRuntime,
+  ProviderPreflightCompactResult,
+} from "./compact-preflight-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
@@ -88,10 +92,7 @@ import { formatAgentDetails } from "./tui-details-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
 import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
-import {
-  applyToolResultBudgetToMessages,
-  type ToolResultBudgetRecord,
-} from "./tool-result-budget.js";
+import type { ToolResultBudgetRecord } from "./tool-result-budget.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
@@ -169,6 +170,13 @@ export type JobAgentCommandRuntimeDeps = {
     sessionId: string,
     record: ToolResultBudgetRecord,
   ) => Promise<string | undefined>;
+  prepareProviderPreflight: (
+    context: TuiContext,
+    sessionId: string,
+    messages: ModelMessage[],
+    runtime: CompactPreflightRuntime,
+    trigger: "agent-child",
+  ) => Promise<ProviderPreflightCompactResult>;
 };
 
 export type AgentGatewayContinuation = {
@@ -1398,20 +1406,30 @@ export async function runModelBackedAgent(
     }
     const toolCalls: ModelToolCall[] = [];
     let assistantText = "";
-    const budgeted = await applyToolResultBudgetToMessages(messages, {
-      projectPath: context.projectPath,
-      sessionId: parentSessionId,
-    });
-    if (budgeted.records.length > 0) {
-      for (const record of budgeted.records) {
-        await deps().recordToolResultBudgetEvidence(context, parentSessionId, record);
-      }
-      messages.splice(0, messages.length, ...budgeted.messages);
+    const preflight = await deps().prepareProviderPreflight(
+      context,
+      agent.transcriptSessionId,
+      messages,
+      {
+        role: agent.role,
+        provider: continuation.provider,
+        model: agent.model || continuation.model,
+      },
+      "agent-child",
+    );
+    if (preflight.blocked) {
+      writeLine(output, preflight.message);
+      return {
+        status: "blocked",
+        summary: `${agent.type} blocked：context compact blocked the child provider request. ${preflight.message}`,
+        evidenceRefs: [],
+      };
     }
+    messages.splice(0, messages.length, ...preflight.messages);
     for await (const event of continuation.gateway.stream(
       continuation.provider,
       {
-        messages: budgeted.messages,
+        messages: preflight.messages,
         model: agent.model || continuation.model,
         endpointProfile: continuation.endpointProfile,
         ...(continuation.reasoningSent

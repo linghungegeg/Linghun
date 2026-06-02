@@ -105,12 +105,16 @@ import {
   stableStringify,
 } from "./cache-freshness.js";
 import {
-  type CompactBoundary,
   compactBoundaryHash,
-  compactMessagesToFit,
   createManualCompactBoundary,
-  microCompactMessages,
 } from "./compact-context.js";
+import {
+  getAutoCompactTriggerChars,
+  getProviderContextMaxChars,
+  inspectToolPairingSafety,
+  prepareMessagesForProviderPreflight,
+  recordCompactBoundary,
+} from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars, estimateTranscriptContextChars } from "./context-estimator.js";
 import {
   type DeferredToolDescriptor,
@@ -523,7 +527,6 @@ import {
   formatToolStart,
 } from "./tool-output-presenter.js";
 import {
-  applyToolResultBudgetToMessages,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
   type ToolResultBudgetRecord,
@@ -802,6 +805,7 @@ import type {
   CacheHistoryConfig,
   CacheState,
   CheckpointState,
+  CompactProjection,
   DurableJobAgent,
   DurableJobAgentStatus,
   DurableJobState,
@@ -978,6 +982,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/cache-log",
   "/cache",
   "/compact",
+  "/context",
   "/break-cache",
   "/mcp",
   "/index",
@@ -1129,22 +1134,6 @@ function runtimeFromContinuation(continuation: PendingModelContinuation): Select
     ),
     reasoningSent: continuation.reasoningSent,
   };
-}
-
-async function prepareMessagesForProviderWithToolResultBudget(
-  messages: ModelMessage[],
-  context: TuiContext,
-  sessionId: string,
-): Promise<ModelMessage[]> {
-  const budgeted = await applyToolResultBudgetToMessages(messages, {
-    projectPath: context.projectPath,
-    sessionId,
-  });
-  if (budgeted.records.length === 0) return messages;
-  for (const record of budgeted.records) {
-    await recordToolResultBudgetEvidence(context, sessionId, record);
-  }
-  return budgeted.messages;
 }
 
 function createSingleToolCallContinuation(
@@ -1347,9 +1336,6 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const MAX_CONTEXT_MESSAGES = 12;
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
-const CONTEXT_INPUT_HEADROOM_TOKENS = 8_192;
-const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
 const REQUEST_SLOW_HINT_MS = 20_000;
 const MAX_EVIDENCE_RECORDS = 50;
 const MAX_BACKGROUND_TASKS = 50;
@@ -2573,7 +2559,7 @@ export async function handleSlashCommand(
     await handleCacheCommand(rest, context, output);
     return "handled";
   }
-  if (command === "/compact") {
+  if (command === "/compact" || command === "/context") {
     await handleCompactCommand(rest, context, output);
     return "handled";
   }
@@ -5845,6 +5831,7 @@ async function handleCompactCommand(
 ): Promise<void> {
   const action = args[0] ?? "status";
   if (action === "status") {
+    await refreshCompactPressureSnapshot(context);
     writeLine(output, formatCompactStatus(context));
     return;
   }
@@ -5852,9 +5839,10 @@ async function handleCompactCommand(
     const sessionId = await ensureSession(context);
     const resumed = await context.store.resume(sessionId);
     const preChars = estimateTranscriptContextChars(resumed.transcript);
+    const runtime = getSelectedModelRuntime(context);
     const boundary = createManualCompactBoundary({
       preCompactChars: preChars,
-      postCompactChars: Math.min(preChars, getProviderContextMaxChars(context)),
+      postCompactChars: Math.min(preChars, getProviderContextMaxChars(context, runtime)),
       preservedEvidenceRefs: context.evidence.map((item) => item.id),
       preservedFiles: context.recentlyMentionedFiles,
       handoffPacketId: context.memory.lastHandoff?.id,
@@ -5876,6 +5864,48 @@ async function handleCompactCommand(
     return;
   }
   writeLine(output, "用法：/compact status | /compact manual | /compact auto");
+}
+
+async function refreshCompactPressureSnapshot(context: TuiContext): Promise<void> {
+  if (!context.sessionId) {
+    context.cache.compactPressure = undefined;
+    return;
+  }
+  try {
+    const runtimeStatus = buildRuntimeStatusForModel({
+      ...context,
+      provider: getRuntimeStatusProvider(context),
+    });
+    const systemPrompt = createModelSystemPrompt(
+      "",
+      context,
+      runtimeStatus,
+      undefined,
+      undefined,
+      buildFailureLearningSummaryForPrompt(context.failureLearning),
+    );
+    const messages = await buildModelMessagesWithRecentContext(
+      context,
+      context.sessionId,
+      systemPrompt,
+      "",
+      getSelectedModelRuntime(context),
+    );
+    const runtime = getSelectedModelRuntime(context);
+    const estimatedChars = estimateModelMessageChars(messages);
+    const maxChars = getProviderContextMaxChars(context, runtime);
+    const triggerChars = getAutoCompactTriggerChars(context, runtime);
+    context.cache.compactPressure = {
+      estimatedChars,
+      maxChars,
+      triggerChars,
+      ratio: Number((estimatedChars / Math.max(1, maxChars)).toFixed(3)),
+      toolPairingSafe: inspectToolPairingSafety(messages).safe,
+      updatedAt: new Date().toISOString(),
+    };
+  } catch {
+    context.cache.compactPressure = undefined;
+  }
 }
 
 async function handleBreakCacheCommand(
@@ -6447,7 +6477,23 @@ configureJobAgentCommandRuntime({
   },
   recordAgentExecutionEvidence,
   recordToolResultBudgetEvidence,
+  prepareProviderPreflight: (context, sessionId, messages, runtime, trigger) =>
+    prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId,
+      runtime,
+      trigger,
+      deps: compactPreflightDeps,
+    }),
 });
+
+const compactPreflightDeps = {
+  appendSystemEvent,
+  captureFailureLearning,
+  recordToolResultBudgetEvidence,
+  refreshCacheFreshness,
+};
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
@@ -6476,14 +6522,6 @@ function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSour
 function trimCacheHistory(cache: CacheState): void {
   while (cache.history.length > cache.config.maxTurns) {
     cache.history.shift();
-  }
-}
-
-function recordCompactBoundary(context: TuiContext, boundary: CompactBoundary): void {
-  context.cache.compacted = true;
-  context.cache.compactBoundaries.push(boundary);
-  if (context.cache.compactBoundaries.length > MAX_CHECKPOINTS) {
-    context.cache.compactBoundaries.shift();
   }
 }
 
@@ -7811,46 +7849,6 @@ async function sendMessage(
     selectedRuntime,
   );
   let messagesForProvider = messages;
-  const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
-  let contextChars = estimateModelMessageChars(messagesForProvider);
-  if (contextChars > contextMaxChars) {
-    const compacted = compactMessagesToFit(messagesForProvider, {
-      maxChars: contextMaxChars,
-      preserveRecentMessages: MAX_CONTEXT_MESSAGES,
-      kind: "micro",
-    });
-    if (compacted.changed && compacted.boundary) {
-      recordCompactBoundary(context, compacted.boundary);
-      refreshCacheFreshness(context);
-      await appendSystemEvent(
-        context,
-        sessionId,
-        `context_auto_compacted_before_provider: model=${selectedRuntime.model} boundary=${compacted.boundary.id}`,
-        "info",
-      );
-    }
-    messagesForProvider = compacted.messages;
-    contextChars = estimateModelMessageChars(messagesForProvider);
-  }
-  if (contextChars > contextMaxChars) {
-    const warning =
-      context.language === "en-US"
-        ? "This request is still too large after automatic compaction. Please shorten the latest input or summarize older context, then retry."
-        : "自动压缩后这次请求仍过长。请缩短最新输入或先摘要较早上下文后重试。";
-    await appendSystemEvent(
-      context,
-      sessionId,
-      `context_still_too_large_after_compaction: model=${selectedRuntime.model} inputTooLarge=${text.length > contextMaxChars ? "yes" : "no"}`,
-      "warning",
-    );
-    clearRequestActivity(context);
-    context.activeAbortController = undefined;
-    context.tools.abortSignal = undefined;
-    context.interrupt = { type: "idle" };
-    writeLine(output, warning);
-    writeStatus(output, context);
-    return;
-  }
   if (reportWriteGuard) {
     messagesForProvider.push({
       role: "user",
@@ -7880,12 +7878,45 @@ async function sendMessage(
             : "当前 provider/model 不支持 tool calling；本轮降级为纯文本，不发送 tools/toolChoice。可运行 /model doctor 查看详情。",
         );
       }
-      const requestMessages = await prepareMessagesForProviderWithToolResultBudget(
-        messagesForProvider,
+      const preflight = await prepareMessagesForProviderPreflight({
+        messages: messagesForProvider,
         context,
         sessionId,
-      );
-      messagesForProvider = requestMessages;
+        runtime: selectedRuntime,
+        trigger: "request",
+        deps: compactPreflightDeps,
+      });
+      if (preflight.blocked) {
+        clearRequestActivity(context);
+        context.activeAbortController = undefined;
+        context.tools.abortSignal = undefined;
+        context.interrupt = { type: "idle" };
+        writeLine(output, preflight.message);
+        writeStatus(output, context);
+        return;
+      }
+      messagesForProvider = preflight.messages;
+      const requestMessages = preflight.messages;
+      const contextMaxChars = getProviderContextMaxChars(context, selectedRuntime);
+      if (estimateModelMessageChars(requestMessages) > contextMaxChars) {
+        const warning =
+          context.language === "en-US"
+            ? "This request is still too large after automatic compaction. Please shorten the latest input or summarize older context, then retry."
+            : "自动压缩后这次请求仍过长。请缩短最新输入或先摘要较早上下文后重试。";
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `context_still_too_large_after_compaction: model=${selectedRuntime.model} inputTooLarge=${text.length > contextMaxChars ? "yes" : "no"}`,
+          "warning",
+        );
+        clearRequestActivity(context);
+        context.activeAbortController = undefined;
+        context.tools.abortSignal = undefined;
+        context.interrupt = { type: "idle" };
+        writeLine(output, warning);
+        writeStatus(output, context);
+        return;
+      }
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         selectedRuntime.provider,
@@ -8443,17 +8474,7 @@ async function buildModelMessagesWithRecentContext(
     );
   }
   messages.push({ role: "user", content: currentUserText });
-  const maxChars = getProviderContextMaxChars(context, runtime);
-  const compacted = microCompactMessages(messages, {
-    maxChars,
-    preserveRecentMessages: MAX_CONTEXT_MESSAGES,
-    kind: "micro",
-  });
-  if (compacted.changed && compacted.boundary) {
-    recordCompactBoundary(context, compacted.boundary);
-    refreshCacheFreshness(context);
-  }
-  return compacted.messages;
+  return messages;
 }
 
 async function streamFinalModelAnswerWithoutTools(
@@ -8482,11 +8503,24 @@ async function streamFinalModelAnswerWithoutTools(
   let finishReason: string | undefined;
   let hadThinking = false;
   let ignoredRawToolProtocolText = false;
+  const preflight = await prepareMessagesForProviderPreflight({
+    messages: continuation.messages,
+    context,
+    sessionId,
+    runtime: runtimeFromContinuation(continuation),
+    trigger: "final",
+    deps: compactPreflightDeps,
+  });
+  if (preflight.blocked) {
+    writeLine(output, preflight.message);
+    return "";
+  }
+  continuation.messages = preflight.messages;
   const promptCacheFields = await buildPromptCacheRequestFields(context);
   for await (const event of gateway.stream(
     continuation.provider,
     {
-      messages: continuation.messages,
+      messages: preflight.messages,
       model: continuation.model,
       endpointProfile: continuation.endpointProfile,
       ...(continuation.reasoningSent ? { reasoningLevel: continuation.reasoningLevel } : {}),
@@ -8632,12 +8666,22 @@ async function continueModelAfterToolResults(
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
-      const requestMessages = await prepareMessagesForProviderWithToolResultBudget(
-        continuation.messages,
+      const preflight = await prepareMessagesForProviderPreflight({
+        messages: continuation.messages,
         context,
         sessionId,
-      );
-      continuation.messages = requestMessages;
+        runtime: runtimeFromContinuation(continuation),
+        trigger: "continuation",
+        deps: compactPreflightDeps,
+      });
+      if (preflight.blocked) {
+        clearRequestActivity(context);
+        writeLine(output, preflight.message);
+        writeStatus(output, context);
+        return;
+      }
+      continuation.messages = preflight.messages;
+      const requestMessages = preflight.messages;
       const promptCacheFields = await buildPromptCacheRequestFields(context);
       for await (const event of gateway.stream(
         continuation.provider,
@@ -9017,24 +9061,6 @@ function currentModelSupportsTools(
   }
   const known = findKnownModel(runtime.model);
   return known?.supportsTools !== false;
-}
-
-function getProviderContextMaxChars(
-  context: TuiContext,
-  runtime = getSelectedModelRuntime(context),
-): number {
-  const route = getRoleRoute(context.config, runtime.role);
-  const known = findKnownModel(runtime.model);
-  const maxInputTokens =
-    route.maxInputTokens ??
-    Math.max(
-      1,
-      (known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW_TOKENS) -
-        (route.maxOutputTokens ??
-          context.config.providers[runtime.provider]?.maxOutputTokens ??
-          CONTEXT_INPUT_HEADROOM_TOKENS),
-    );
-  return Math.max(1, maxInputTokens * CONTEXT_CHARS_PER_TOKEN_ESTIMATE);
 }
 
 function createRawToolProtocolReminder(language: Language): string {
