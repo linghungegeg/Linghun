@@ -258,6 +258,39 @@ describe("CLI", () => {
     }
   });
 
+  it("shows the real headless openai-compatible model without DeepSeek fallback", async () => {
+    await withIsolatedCliConfig(async ({ home, project }) => {
+      await writeFile(
+        getProviderEnvPath(home),
+        [
+          "LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1",
+          "LINGHUN_OPENAI_API_KEY=sk-cli-provider-secret",
+          "LINGHUN_OPENAI_MODEL=gpt-5.5",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const shown = await runCli(["model"]);
+      let projectSettings = "";
+      try {
+        projectSettings = await readFile(getProjectSettingsPath(project), "utf8");
+      } catch {
+        projectSettings = "";
+      }
+
+      expect(shown.stdout).toContain("provider：openai-compatible");
+      expect(shown.stdout).toContain("gpt-5.5");
+      expect(shown.stdout).toContain("上下文窗口：unknown");
+      expect(shown.stdout).toContain("厂商最大输出：unknown");
+      expect(shown.stdout).not.toContain("DeepSeek Chat");
+      expect(shown.stdout).not.toContain("deepseek-chat");
+      expect(shown.stdout).not.toContain("sk-cli-provider-secret");
+      expect(projectSettings).not.toContain("sk-cli-provider-secret");
+      expect(shown.exitCode).toBe(0);
+    });
+  });
+
   it("creates, lists, resumes, and summarizes a session", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
     const previousCwd = process.cwd();

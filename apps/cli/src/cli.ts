@@ -106,7 +106,7 @@ function configureCliBundledRoot(): void {
 
 async function runModelCommand(argv: string[]): Promise<CliResult> {
   const [subcommand, ...rest] = argv;
-  const [configModule, { deepSeekModels, resolveProviderBaseUrlDiagnostic }] = await Promise.all([
+  const [configModule, { findKnownModel, resolveProviderBaseUrlDiagnostic }] = await Promise.all([
     import("@linghun/config"),
     import("@linghun/providers"),
   ]);
@@ -121,11 +121,10 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
   const target = resolveDoctorTarget(config);
   const provider = target.provider;
   const modelId = target.modelId;
-  const model = deepSeekModels.find((item) => item.id === modelId) ?? deepSeekModels[0];
 
   if (!subcommand) {
     return {
-      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl, target.providerId),
+      stdout: formatModelInfo(findKnownModel, modelId, provider.baseUrl, target.providerId),
       stderr: "",
       exitCode: 0,
     };
@@ -149,7 +148,7 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
       : "";
     return {
       stdout: `当前 headless 模型已切换为：${resolved.model}\n${aliasNote}${formatModelInfo(
-        deepSeekModels,
+        findKnownModel,
         resolved.model,
         nextProvider.baseUrl,
         resolved.provider,
@@ -221,13 +220,18 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
 }
 
 function formatModelInfo(
-  models: ModelInfo[],
+  findDeepSeekModel: (modelId: string) => ModelInfo | undefined,
   modelId: string,
   baseUrl: string | undefined,
   providerId = "deepseek",
 ): string {
-  const model = models.find((item) => item.id === modelId) ?? models[0];
-  return `当前模型：${model.displayName} (${model.id})\nprovider：${providerId}\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n厂商最大输出：${model.maxOutputTokens}\n请求输出上限：未设置\n`;
+  if (providerId === "deepseek") {
+    const model = findDeepSeekModel(modelId) ?? findDeepSeekModel("deepseek-chat");
+    if (model) {
+      return `当前模型：${model.displayName} (${model.id})\nprovider：${providerId}\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n厂商最大输出：${model.maxOutputTokens}\n请求输出上限：未设置\n`;
+    }
+  }
+  return `当前模型：${modelId}\nprovider：${providerId}\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：unknown\n厂商最大输出：unknown\n请求输出上限：未设置\n`;
 }
 
 type DoctorProviderConfig = {
