@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -123,6 +123,49 @@ describe("/model set command", () => {
 
     expect(output.lines.some((line) => line.includes("deepseek-chat"))).toBe(true);
     expect(context.model).toBe("deepseek-chat");
+
+    const reloaded = await loadConfig(projectPath);
+    const executorRoute = reloaded.modelRoutes.routes.find((r) => r.role === "executor");
+    expect(executorRoute?.primaryModel).toBe("deepseek-chat");
+    expect(executorRoute?.provider).toBe("deepseek");
+  });
+
+  it("sets executor route to deepseek-chat and persists it", async () => {
+    await handleModelCommand(["route", "set", "executor", "deepseek-chat"], context, output);
+
+    expect(output.lines).toContain("已设置 executor role：provider=deepseek model=deepseek-chat");
+    expect(context.model).toBe("deepseek-chat");
+
+    const reloaded = await loadConfig(projectPath);
+    const executorRoute = reloaded.modelRoutes.routes.find((r) => r.role === "executor");
+    expect(executorRoute?.primaryModel).toBe("deepseek-chat");
+    expect(executorRoute?.provider).toBe("deepseek");
+  });
+
+  it("rejects invalid executor route model without persisting", async () => {
+    const before = await loadConfig(projectPath);
+
+    await handleModelCommand(["route", "set", "executor", "invalid-model"], context, output);
+
+    expect(output.lines.some((line) => line.includes("错误：未知模型"))).toBe(true);
+    expect(context.model).toBe("deepseek-chat");
+    const after = await loadConfig(projectPath);
+    expect(after.modelRoutes.routes.find((r) => r.role === "executor")).toEqual(
+      before.modelRoutes.routes.find((r) => r.role === "executor"),
+    );
+  });
+
+  it("normalizes legacy DeepSeek alias before route persistence", async () => {
+    await handleModelCommand(["route", "set", "executor", "deepseek-v4-flash"], context, output);
+
+    expect(output.lines).toContain("已设置 executor role：provider=deepseek model=deepseek-chat");
+    expect(output.lines.some((line) => line.includes("legacy/display alias"))).toBe(true);
+    const reloaded = await loadConfig(projectPath);
+    const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");
+    expect(reloaded.modelRoutes.routes.find((r) => r.role === "executor")?.primaryModel).toBe(
+      "deepseek-chat",
+    );
+    expect(raw).not.toContain("deepseek-v4-flash");
   });
 
   it("does not silently no-op on invalid model", async () => {

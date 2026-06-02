@@ -2,6 +2,22 @@ export const LINGHUN_NAME = "Linghun";
 export const LINGHUN_CLI_NAME = "linghun";
 export const LINGHUN_VERSION = "0.1.0";
 
+export const DEEPSEEK_API_MODELS = ["deepseek-chat", "deepseek-reasoner"] as const;
+export type DeepSeekApiModel = (typeof DEEPSEEK_API_MODELS)[number];
+
+export const DEEPSEEK_LEGACY_MODEL_ALIASES: Readonly<Record<string, DeepSeekApiModel>> = {
+  "deepseek-v4-flash": "deepseek-chat",
+  "deepseek-v4-pro": "deepseek-reasoner",
+};
+
+export function normalizeDeepSeekModelName(model: string): string {
+  return DEEPSEEK_LEGACY_MODEL_ALIASES[model] ?? model;
+}
+
+export function isDeepSeekApiModel(model: string): model is DeepSeekApiModel {
+  return (DEEPSEEK_API_MODELS as readonly string[]).includes(model);
+}
+
 export type Language = "zh-CN" | "en-US";
 
 export type PermissionMode = "default" | "auto-review" | "plan" | "full-access";

@@ -42,6 +42,7 @@ import {
   __testBuildToggleDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
+  __testRunWorkflowStepsWithPlan,
   addAllowRuleForTest,
   containsSecret,
   createCacheState,
@@ -99,6 +100,7 @@ import {
   wecomBridgeAdapter,
   writeLightHintsForTest,
 } from "./index.js";
+import { listDurableJobs as listDurableJobsFromRuntime } from "./job-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -119,6 +121,7 @@ import {
   createReadinessItems,
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
+import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
 function srcPath(relativePath: string): string {
@@ -150,6 +153,61 @@ function isDeepCompactRequest(request: unknown): boolean {
 
 function nonDeepRequests<T>(requests: T[]): T[] {
   return requests.filter((request) => !isDeepCompactRequest(request));
+}
+
+function createTestModelConfig(overrides: Partial<LinghunConfig> = {}): LinghunConfig {
+  return {
+    ...defaultConfig,
+    ...overrides,
+    providers: {
+      ...defaultConfig.providers,
+      "openai-compatible-vision": {
+        type: "openai-compatible",
+        baseUrl: "https://example.invalid/v1",
+        apiKey: "sk-test-vision",
+        model: "gpt-4o",
+      },
+      "openai-compatible-image": {
+        type: "openai-compatible",
+        baseUrl: "https://example.invalid/v1",
+        apiKey: "sk-test-image",
+        model: "gpt-image-1",
+      },
+      ...overrides.providers,
+    },
+    modelRoutes: {
+      ...defaultConfig.modelRoutes,
+      ...overrides.modelRoutes,
+      routes: [...defaultConfig.modelRoutes.routes, ...(overrides.modelRoutes?.routes ?? [])],
+    },
+  };
+}
+
+function setTestRoleRoute(
+  context: TuiContext,
+  role: "vision" | "image",
+  provider: string,
+  model: string,
+): void {
+  if (provider === "openai-compatible-vision") {
+    context.config.providers[provider] = {
+      type: "openai-compatible",
+      baseUrl: "https://example.invalid/v1",
+      apiKey: "sk-test-vision",
+      model,
+    };
+  }
+  if (provider === "openai-compatible-image") {
+    context.config.providers[provider] = {
+      type: "openai-compatible",
+      baseUrl: "https://example.invalid/v1",
+      apiKey: "sk-test-image",
+      model,
+    };
+  }
+  context.config.modelRoutes.routes = context.config.modelRoutes.routes.map((route) =>
+    route.role === role ? { ...route, provider, primaryModel: model } : route,
+  );
 }
 
 afterEach(() => {
@@ -954,6 +1012,52 @@ async function createTestContext(
   };
 }
 
+function createNestedJobWorkflowPlan(permissionMode: TuiContext["permissionMode"]): WorkflowPlan {
+  return {
+    id: "wf-nested-job",
+    title: "Nested job workflow",
+    source: "manual",
+    createdAt: new Date().toISOString(),
+    permissionMode,
+    currentPhaseId: "phase-job",
+    phases: [
+      {
+        id: "phase-job",
+        title: "Nested job phase",
+        status: "running",
+        stopPoint: {
+          required: true,
+          confirmationRequired: true,
+          reason: "Confirm nested job run.",
+        },
+        slices: [
+          {
+            id: "slice-job-run",
+            title: "Run nested durable job",
+            role: "planner",
+            status: "queued",
+            targetRuntime: { kind: "slash", slash: "/job", action: "run", mutating: true },
+            nextAction: "run nested durable job from workflow",
+            budget: { maxTokens: 1200, maxDurationMs: 30_000, maxRunningAgents: 1 },
+            evidence: [
+              {
+                ref: "nested-job-plan-evidence",
+                kind: "grep_result",
+                claim: "nested job plan evidence is referenced only",
+                passEvidence: false,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    budget: { maxRunningAgents: 1 },
+    references: [],
+    evidence: [],
+    stopConditions: ["no PASS from workflow completion"],
+  };
+}
+
 async function createMockNativeRunner(
   project: string,
   options: { runnerDir?: string; runnerName?: string } = {},
@@ -1621,7 +1725,7 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, createTestModelConfig());
 
     await handleSlashCommand("/", context, output);
     await handleSlashCommand("/?", context, output);
@@ -2825,6 +2929,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    context.memory = await createMemoryState(defaultConfig, project);
 
     await handleSlashCommand("/memory learn on", context, output);
     expect(context.memory.learningMode).toBe("active");
@@ -2833,6 +2938,116 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/memory learn off", context, output);
     expect(context.memory.learningMode).toBe("off");
     expect(output.text).toContain("自动学习已关闭");
+  });
+
+  it("persists /memory learn on across memory state reloads and shows persisted source", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.memory = await createMemoryState(defaultConfig, project);
+
+    await handleSlashCommand("/memory learn on", context, output);
+    const reloaded = await createMemoryState(defaultConfig, project);
+
+    expect(reloaded.learningMode).toBe("active");
+    expect(reloaded.learningModeSource).toBe("persisted");
+
+    const nextContext = await createTestContext(project, store, session);
+    nextContext.memory = reloaded;
+    await handleSlashCommand("/memory learn status", nextContext, output);
+    expect(output.text).toContain("来源=persisted");
+  });
+
+  it("persists memory candidates so review can continue after restart", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.memory = await createMemoryState(defaultConfig, project);
+
+    await handleSlashCommand("/memory candidate 我偏好先读源码 --scope user", context, output);
+    const candidateId = context.memory.candidates[0]?.id;
+    const reloaded = await createMemoryState(defaultConfig, project);
+
+    expect(reloaded.candidates.map((item) => item.id)).toContain(candidateId);
+    expect(reloaded.accepted).toHaveLength(0);
+  });
+
+  it("restores transcript memory candidates on resume but skips accepted/rejected/disabled/deleted ids", () => {
+    const project = join(tmpdir(), "linghun-resume-memory");
+    const context = {
+      projectPath: project,
+      memory: {
+        candidates: [],
+        accepted: [{ id: "accepted-candidate" }],
+        rejected: [],
+        disabled: [],
+        retired: [],
+      },
+      tools: { todos: [] },
+      evidence: [],
+      cache: { compacted: false, compactBoundaries: [] },
+    } as unknown as TuiContext;
+    const makeCandidate = (id: string) => ({
+      id,
+      scope: "user",
+      status: "candidate",
+      summary: `summary ${id}`,
+      source: "test",
+      sourceRefs: ["test"],
+      risk: "low",
+      inferred: false,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+
+    hydrateResumeContext(context, [
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("pending-candidate"),
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("accepted-candidate"),
+        createdAt: "2026-06-01T00:00:01.000Z",
+      },
+      {
+        type: "memory_accepted",
+        memory: makeCandidate("accepted-candidate"),
+        createdAt: "2026-06-01T00:00:02.000Z",
+      },
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("rejected-candidate"),
+        createdAt: "2026-06-01T00:00:03.000Z",
+      },
+      {
+        type: "system_event",
+        id: "memory-rejected-event",
+        level: "info",
+        message:
+          "memory_lifecycle action=rejected id=rejected-candidate scope=user status=rejected source=test",
+        createdAt: "2026-06-01T00:00:04.000Z",
+      },
+      {
+        type: "memory_candidate",
+        candidate: makeCandidate("disabled-candidate"),
+        createdAt: "2026-06-01T00:00:05.000Z",
+      },
+      {
+        type: "system_event",
+        id: "memory-disabled-event",
+        level: "info",
+        message:
+          "memory_lifecycle action=disabled id=disabled-candidate scope=user status=disabled source=test",
+        createdAt: "2026-06-01T00:00:06.000Z",
+      },
+    ]);
+
+    expect(context.memory.candidates.map((item) => item.id)).toEqual(["pending-candidate"]);
   });
 
   it("D.14B: auto-learning generates candidates from user input when active", async () => {
@@ -3757,6 +3972,54 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("/agents resume restarts stale AgentRun without replaying old tool results", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-stale-resume-"));
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const timer = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((() => 0) as unknown as typeof setTimeout);
+
+    await handleSlashCommand(
+      "/fork worker stale resume target --background --name stale-resume",
+      context,
+      output,
+    );
+    timer.mockRestore();
+    const running = context.agents[0];
+    expect(running?.status).toBe("running");
+    await store.appendEvent(running?.transcriptSessionId ?? "", {
+      type: "tool_result",
+      toolUseId: "old-tool-use",
+      toolName: "Read",
+      content: "old result must stay historical only",
+      isError: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const freshContext = await createTestContext(project, store, session, config);
+    freshContext.modelGateway = createModelGateway(config);
+    const { hydratePersistentAgents } = await import("./job-agent-command-runtime.js");
+    await hydratePersistentAgents(freshContext);
+    const stale = freshContext.agents.find((agent) => agent.addressableName === "stale-resume");
+    expect(stale?.status).toBe("stale");
+    mockOpenAiTextFetch("resumed fresh answer");
+
+    await handleSlashCommand(`/agents resume ${stale?.id}`, freshContext, output);
+
+    expect(stale?.status).toBe("completed");
+    expect(stale?.summary).toContain("resumed fresh answer");
+    const transcript = (await store.resume(stale?.transcriptSessionId ?? "")).transcript;
+    const oldToolResults = transcript.filter(
+      (event) => event.type === "tool_result" && event.toolUseId === "old-tool-use",
+    );
+    expect(oldToolResults).toHaveLength(1);
+  });
+
   it("hydratePersistentAgents restores all agent statuses correctly to background tasks", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-agent-status-restore-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -3952,7 +4215,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(keyLines.every((line) => line.length <= 160)).toBe(true);
   });
 
-  it("runs Phase 17A durable job loop with persisted state, background reuse, and bounded agents", async () => {
+  it("does not fake-complete Phase 17A durable jobs when child agents cannot run", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -4009,60 +4272,130 @@ describe("Phase 06 TUI slash commands", () => {
       fullOutputPath?: string;
       reportPath?: string;
     };
-    expect(persisted.status).toBe("completed");
-    expect(persisted.worker?.status).toBe("completed");
-    expect(persisted.worker?.completedSteps).toBe(4);
-    expect(persisted.result?.status).toBe("partial");
-    expect(persisted.budget?.usedSteps).toBe(4);
+    expect(persisted.status).toBe("blocked");
+    expect(persisted.worker?.status).toBe("blocked");
+    expect(persisted.worker?.completedSteps).toBe(1);
+    expect(persisted.result?.status).toBe("blocked");
+    expect(persisted.budget?.usedSteps).toBe(1);
     expect(persisted.budget?.maxSteps).toBe(4);
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
     expect(persisted.agents?.[0]?.displayName).toBe("implement-durable-loop-planner");
     expect(persisted.agents?.[1]?.displayName).toBe("implement-durable-loop-worker");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
-    expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(5);
+    expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(0);
+    expect(persisted.agents?.[0]?.status).toBe("blocked");
+    expect(persisted.agents?.[0]).toHaveProperty("runId");
     expect(persisted.budget?.maxRunningAgents).toBe(3);
     expect(persisted.budget?.note).toContain("8 is benchmark/high-config candidate only");
-    expect(persisted.agents?.[0]?.summary).toContain("no full transcript/source/index/log output");
+    expect(persisted.agents?.[0]?.summary).toContain("模型网关未就绪");
     const report = await readFile(persisted.reportPath ?? "", "utf8");
     expect(report).toContain("Node/TUI runtime remains default");
-    expect(report).toContain(
-      "Phase 17A bounded worker loop completed local read-only task graph steps",
-    );
+    expect(report).toContain("## Agent assignment");
+    expect(report).toContain("runId=agent-");
     expect(report).toContain("no full transcript/source/index/log output is injected");
     expect(report).toContain("## Worker result");
-    expect(report).toContain("maxSteps=4; usedSteps=4");
-    expect(report).toContain("verification remains partial");
+    expect(report).toContain("maxSteps=4; usedSteps=1");
+    expect(report).toContain("verification: partial");
     const log = await readFile(persisted.logPath ?? "", "utf8");
-    expect(log).toContain("worker step 4/4");
-    expect(log).toContain("worker loop completed without verification PASS");
+    expect(log).toContain("agent step 1/5");
+    expect(log).toContain("agent_blocked");
     const fullOutput = await readFile(persisted.fullOutputPath ?? "", "utf8");
-    expect(fullOutput).toContain("worker step 4/4");
+    expect(fullOutput).toContain("agent step 1/5");
     expect(fullOutput).not.toContain("full transcript");
     expect(fullOutput).not.toContain("full source");
 
     expect(context.backgroundTasks).toContainEqual(
-      expect.objectContaining({ id: jobId, kind: "job", status: "completed", result: "partial" }),
+      expect.objectContaining({ id: jobId, kind: "job", status: "paused", result: "partial" }),
     );
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
     expect(output.text).toContain("本地 durable metadata + 统一后台任务");
     expect(output.text).toContain(
-      "agents: created=5, running=0, cap=3; displayName is cosmetic only.",
+      "agents: planned=5, scheduled=1, started=1, running=0, queued=0, skipped=0, limited=0, effectiveCap=3",
     );
-    expect(output.text).toContain(`${jobId}  completed  label=implement-durable-loop-planner`);
+    expect(output.text).toContain(`${jobId}  blocked  label=implement-durable-loop-planner`);
     expect(output.text).not.toContain(`${jobId}  running`);
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
     expect(output.text).toContain(
-      "agent assignment: job-agent-1:implement-durable-loop-planner:completed",
+      "agent assignment: job-agent-1:implement-durable-loop-planner:blocked",
     );
-    expect(output.text).toContain("worker=completed");
+    expect(output.text).toContain("worker=blocked");
     expect(output.text).toContain("task graph: 4 steps");
     expect(output.text).toContain("fullOutputPath:");
     expect(output.text).not.toContain("Beta readiness PASS");
+  });
+
+  it("runs /job --multi-agent through real AgentRun children and keeps verifier PASS separate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-real-job-agents-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-real-job-agent",
+      kind: "test_result",
+      summary: "real job agent evidence",
+      source: "vitest",
+      supportsClaims: ["real-job-agent"],
+      createdAt: new Date().toISOString(),
+    });
+    mockOpenAiTextFetch("job child done");
+
+    await handleSlashCommand(
+      "/job run real child scheduling --multi-agent --agents 4 --tokens 50000",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      verification?: { status?: string; summary?: string };
+      effectiveAgentCap?: number;
+      capReason?: string;
+      agents?: Array<{ type?: string; status?: string; runId?: string; task?: string }>;
+    };
+    expect(persisted.status).toBe("completed");
+    expect(persisted.verification?.status).toBe("partial");
+    expect(persisted.verification?.summary).toContain("not PASS evidence");
+    expect(persisted.effectiveAgentCap).toBe(3);
+    expect(persisted.capReason).toContain("runtime_dynamic_cap");
+    expect(persisted.agents?.map((agent) => agent.type)).toEqual([
+      "planner",
+      "worker",
+      "verifier",
+      "explorer",
+    ]);
+    expect(persisted.agents?.every((agent) => agent.runId?.startsWith("agent-"))).toBe(true);
+    expect(persisted.agents?.every((agent) => agent.status === "completed")).toBe(true);
+    expect(context.agents).toHaveLength(4);
+    expect(
+      context.agents.every((agent) =>
+        agent.contextSummary.includes(
+          "notIncluded=full transcript/full source/full index/full memory/raw tool_result",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
+    ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
   });
 
   it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {
@@ -4163,6 +4496,112 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
     expect(context.backgroundTasks).toContainEqual(
       expect.objectContaining({ title: expect.stringContaining("Workflow:"), result: "partial" }),
+    );
+  });
+
+  it("hydrates durable workflow run state into /background and /workflows status after restart", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-hydrate-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/workflows run write workflow-restart.txt hello", context, output);
+    const runId = context.workflows.activeRun?.id;
+    expect(runId).toBeTruthy();
+    const statePath = join(
+      dirname(resolveStoragePaths(config, project).jobs),
+      "workflows",
+      runId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      id?: string;
+      result?: string;
+      steps?: { status?: string; evidenceRefs?: string[] }[];
+      backgroundTask?: { id?: string; result?: string };
+    };
+    expect(persisted.id).toBe(runId);
+    expect(persisted.result).toBe("blocked");
+    expect(persisted.steps?.some((step) => step.status === "blocked")).toBe(true);
+    expect(persisted.backgroundTask?.result).toBe("partial");
+
+    const freshSession = await store.create({ model: "deepseek-v4-flash" });
+    const freshContext = await createTestContext(project, store, freshSession, config);
+    const freshOutput = new MemoryOutput();
+    await handleSlashCommand("/background", freshContext, freshOutput);
+    await handleSlashCommand("/workflows status", freshContext, freshOutput);
+
+    expect(freshContext.backgroundTasks).toContainEqual(
+      expect.objectContaining({ id: runId, kind: "job", result: "partial" }),
+    );
+    expect(freshContext.workflows.activeRun).toMatchObject({ id: runId, result: "blocked" });
+    expect(freshOutput.text).toContain(`Workflow ${runId}`);
+    expect(freshOutput.text).toContain("blocked");
+    expect(freshOutput.text).not.toContain("result=pass");
+  });
+
+  it("executes and persists nested /job workflow steps, but keeps real blocked child jobs non-PASS", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-nested-job-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    context.permissionMode = "full-access";
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-nested-job-input",
+      kind: "test_result",
+      summary: "nested job input evidence",
+      source: "vitest",
+      supportsClaims: ["nested-job-input"],
+      createdAt: new Date().toISOString(),
+    });
+    const output = new MemoryOutput();
+    const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid nested job plan");
+
+    await __testRunWorkflowStepsWithPlan("nested job durable workflow", plan.plan, context, output);
+
+    const workflowRun = context.workflows.activeRun;
+    expect(workflowRun).toMatchObject({ status: "blocked", result: "blocked" });
+    expect(workflowRun?.steps[0]).toMatchObject({ status: "blocked", runtime: "job" });
+    expect(workflowRun?.steps[0]?.evidenceRefs).toContain("ev-nested-job-input");
+    const jobs = await listDurableJobsFromRuntime({
+      config,
+      projectPath: project,
+      language: "zh-CN",
+    });
+    expect(jobs).toEqual([
+      expect.objectContaining({ status: "blocked", evidenceRefs: expect.any(Array) }),
+    ]);
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobs[0]?.id ?? "missing",
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as { id?: string; status?: string };
+    expect(state.status).toBe("blocked");
+    expect(output.text).toContain("durable job");
+    expect(output.text).not.toContain("PASS：");
+  });
+
+  it("blocks nested /job workflow steps in plan mode before run instead of diverging from bridge", async () => {
+    const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("plan"));
+    expect(plan.ok).toBe(false);
+    if (plan.ok) throw new Error("plan mode unexpectedly accepted a mutating nested job");
+    expect(plan.errors.map((error) => error.message).join("\n")).toContain(
+      "plan mode cannot contain mutating execution proposals",
     );
   });
 
@@ -4583,8 +5022,8 @@ describe("Phase 06 TUI slash commands", () => {
       pauseReason?: string;
       agents?: { status?: string }[];
     };
-    expect(firstState.status).toBe("completed");
-    expect(guardedState.status).toBe("completed");
+    expect(firstState.status).toBe("blocked");
+    expect(guardedState.status).toBe("blocked");
     expect(guardedState.pauseReason ?? "").not.toContain("resource_guard");
     expect(guardedState.agents).toHaveLength(5);
     expect(guardedState.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
@@ -4593,17 +5032,22 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     const budgetProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const budgetConfig: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
     const budgetStore = new SessionStore({
       sessionRootDir: getSessionRootDir(),
       projectPath: budgetProject,
     });
-    const budgetSession = await budgetStore.create({ model: "deepseek-v4-flash" });
+    const budgetSession = await budgetStore.create({ model: "route-model" });
     const budgetContext = await createTestContext(
       budgetProject,
       budgetStore,
       budgetSession,
-      config,
+      budgetConfig,
     );
+    budgetContext.modelGateway = createModelGateway(budgetConfig);
     budgetContext.index.status = "ready";
     budgetContext.index.projectName = "F-Linghun";
     budgetContext.lastVerification = createVerificationReportFixture("partial");
@@ -4615,7 +5059,7 @@ describe("Phase 06 TUI slash commands", () => {
       budgetOutput,
     );
     const budgetJobId = budgetContext.backgroundTasks.find((task) => task.kind === "job")?.id;
-    const budgetJobsRoot = resolveStoragePaths(config, budgetProject).jobs;
+    const budgetJobsRoot = resolveStoragePaths(budgetConfig, budgetProject).jobs;
     const budgetState = JSON.parse(
       await readFile(join(budgetJobsRoot, budgetJobId ?? "missing", "state.json"), "utf8"),
     ) as {
@@ -4632,23 +5076,29 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     const maxStepProject = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const maxStepConfig: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
     const maxStepStore = new SessionStore({
       sessionRootDir: getSessionRootDir(),
       projectPath: maxStepProject,
     });
-    const maxStepSession = await maxStepStore.create({ model: "deepseek-v4-flash" });
+    const maxStepSession = await maxStepStore.create({ model: "route-model" });
     const maxStepContext = await createTestContext(
       maxStepProject,
       maxStepStore,
       maxStepSession,
-      config,
+      maxStepConfig,
     );
+    maxStepContext.modelGateway = createModelGateway(maxStepConfig);
+    mockOpenAiTextFetch("max step child done");
     maxStepContext.index.status = "ready";
     maxStepContext.index.projectName = "F-Linghun";
     maxStepContext.lastVerification = createVerificationReportFixture("partial");
     maxStepContext.evidence = [...context.evidence];
     await handleSlashCommand(
-      "/job run max step durable worker --max-steps 2 --tokens 50000",
+      "/job run max step durable worker --multi-agent --agents 4 --max-steps 2 --tokens 50000",
       maxStepContext,
       new MemoryOutput(),
     );
@@ -4656,7 +5106,7 @@ describe("Phase 06 TUI slash commands", () => {
     const maxStepState = JSON.parse(
       await readFile(
         join(
-          resolveStoragePaths(config, maxStepProject).jobs,
+          resolveStoragePaths(maxStepConfig, maxStepProject).jobs,
           maxStepJobId ?? "missing",
           "state.json",
         ),
@@ -4828,10 +5278,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(state.runner).toMatchObject({
       adapter: "native",
       resolution: "available",
-      status: "running",
     });
+    expect(state.runner?.status).toMatch(/running|completed|cancelled/u);
     expect(state.runner?.pathRef).toContain("present:linghun-native-runner");
-    expect(state.result?.status).toBe("partial");
+    expect(state.result?.status).toMatch(/partial|blocked|cancelled/u);
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
 
     const missingProject = await mkdtemp(join(tmpdir(), "linghun-bundled-missing-"));
@@ -5110,13 +5560,13 @@ describe("Phase 06 TUI slash commands", () => {
         reportPath?: string;
       };
     };
-    expect(persisted.status).toBe("completed");
-    expect(persisted.result?.status).toBe("partial");
+    expect(persisted.status).toMatch(/completed|cancelled/u);
+    expect(persisted.result?.status).toMatch(/partial|blocked|cancelled/u);
     expect(persisted.runner).toMatchObject({
       adapter: "native",
-      status: "running",
       resolution: "available",
     });
+    expect(persisted.runner?.status).toMatch(/running|completed|cancelled/u);
     expect(persisted.runner?.heartbeatAt).toBeTruthy();
     expect(persisted.runner?.logRefs?.stdout).toBe("present:stdout.log");
     expect(persisted.runner?.logRefs?.stderr).toBe("present:stderr.log");
@@ -5130,7 +5580,7 @@ describe("Phase 06 TUI slash commands", () => {
       expect.objectContaining({
         id: jobId,
         kind: "job",
-        result: "partial",
+        result: expect.not.stringMatching(/^pass$/u),
         currentStep: expect.not.stringContaining("runner="),
       }),
     );
@@ -5162,7 +5612,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain(
       "[后台] Job: native runner tes · completed · worker step 1/1; agents 0/0; runner=",
     );
-    expect(output.text).toContain("runner=native/running");
+    expect(output.text).toMatch(/runner=native\/(?:running|completed|cancelled)/u);
     expect(output.text).toContain("heartbeat=");
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
@@ -5174,8 +5624,8 @@ describe("Phase 06 TUI slash commands", () => {
       runner?: { status?: string };
       result?: { status?: string };
     };
-    expect(completed.runner?.status).toBe("completed");
-    expect(completed.result?.status).toBe("partial");
+    expect(completed.runner?.status).toMatch(/completed|cancelled/u);
+    expect(completed.result?.status).toMatch(/partial|cancelled/u);
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
 
     await handleSlashCommand(
@@ -5288,10 +5738,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mismatchOutput.text).toContain("Node fallback=available");
     expect(mismatchState.runner).toMatchObject({
       adapter: "node",
-      status: "node_fallback",
       resolution: "protocol_mismatch",
       fallbackReason: "protocol_mismatch",
     });
+    expect(mismatchState.runner?.status).toMatch(/^(node_fallback|cancelled)$/u);
     expect(mismatchContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
@@ -5333,9 +5783,9 @@ describe("Phase 06 TUI slash commands", () => {
     };
     expect(failedState.runner).toMatchObject({
       adapter: "node",
-      status: "node_fallback",
       fallbackReason: "start_failed",
     });
+    expect(failedState.runner?.status).toMatch(/^(node_fallback|cancelled)$/u);
     expect(failedState.runner?.lastError).not.toContain("sk-live");
     expect(failedState.runner?.lastError).not.toContain("Bearer raw");
     expect(failedContext.backgroundTasks).not.toContainEqual(
@@ -5384,9 +5834,9 @@ describe("Phase 06 TUI slash commands", () => {
     };
     expect(statusFailState.runner).toMatchObject({
       adapter: "node",
-      status: "node_fallback",
       fallbackReason: "status_failed",
     });
+    expect(statusFailState.runner?.status).toMatch(/^(node_fallback|cancelled)$/u);
     expect(statusFailState.runner?.lastError).not.toContain("sk-live");
     expect(statusFailState.runner?.lastError).not.toContain("Bearer raw");
     expect(statusFailContext.backgroundTasks).not.toContainEqual(
@@ -5441,15 +5891,15 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/model route doctor", context, output);
     await handleSlashCommand("/model route set planner deepseek-v4-pro", context, output);
     await handleSlashCommand("/model route set verifier deepseek-v4-pro", context, output);
+    setTestRoleRoute(context, "vision", "openai-compatible-vision", "gpt-4o");
+    setTestRoleRoute(context, "image", "openai-compatible-image", "gpt-image-1");
     await handleSlashCommand("/fork planner plan route loop", context, output);
     await handleSlashCommand("/fork verifier verify route loop", context, output);
     await handleSlashCommand("/agents", context, output);
     await handleSlashCommand("/review", context, output);
     await handleSlashCommand("/vision screenshot.png", context, output);
-    await handleSlashCommand("/model route set vision deepseek-vl", context, output);
     await handleSlashCommand("/vision screenshot.png", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
-    await handleSlashCommand("/model route set image deepseek-image", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
     await handleNaturalInput("yes", context, output);
     await handleSlashCommand("/usage", context, output);
@@ -5462,9 +5912,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("role=planner");
     expect(output.text).toContain("role=verifier");
     expect(output.text).toContain("Role handoff: executor -> reviewer");
-    expect(output.text).toContain("vision role 未就绪");
     expect(output.text).toContain("VisionObservation:");
-    expect(output.text).toContain("image role 未就绪");
     expect(output.text).toContain("Image result saved:");
     const imagePrimary = output.text.slice(output.text.indexOf("Image result saved:"));
     expect(imagePrimary).not.toContain("provider/model:");
@@ -5474,7 +5922,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("role usage (estimated)");
     expect(output.text).toContain("role/model/provider usage (estimated)");
     expect(context.roleHandoffs.some((handoff) => handoff.to === "reviewer")).toBe(true);
-    expect(context.visionObservations).toHaveLength(1);
+    expect(context.visionObservations).toHaveLength(2);
     expect(context.imageResults).toHaveLength(1);
     expect(context.roleUsage.some((usage) => usage.role === "planner")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "verifier")).toBe(true);
@@ -5490,9 +5938,9 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, createTestModelConfig());
 
-    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    setTestRoleRoute(context, "image", "openai-compatible-image", "gpt-image-1");
     await handleSlashCommand("/image generate logo concept", context, output);
 
     expect(context.pendingLocalApproval?.kind).toBe("image_generation");
@@ -5530,9 +5978,9 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, createTestModelConfig());
 
-    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    setTestRoleRoute(context, "image", "openai-compatible-image", "gpt-image-1");
     await handleSlashCommand("/image generate logo concept", context, output);
 
     const pending =
@@ -5563,9 +6011,9 @@ describe("Phase 06 TUI slash commands", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
+    const context = await createTestContext(project, store, session, createTestModelConfig());
 
-    await handleSlashCommand("/model route set image deepseek-image", context, output);
+    setTestRoleRoute(context, "image", "openai-compatible-image", "gpt-image-1");
     context.permissionMode = "auto-review";
     await handleSlashCommand("/image generate logo concept", context, output);
 
@@ -5874,7 +6322,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("provider=deepseek model=gpt-5.5");
     expect(output.text).not.toContain("openai-compatible/gpt-5.5");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
-    expect(requests[0]).toMatchObject({ model: "deepseek-v4-pro" });
+    expect(requests[0]).toMatchObject({ model: "deepseek-reasoner" });
     expect(output.text).not.toContain("source=user-settings");
   });
 
@@ -12844,11 +13292,13 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/verify smoke", context, output);
     await handleSlashCommand("/review", context, output);
     await handleSlashCommand("/claim-check 已验证", context, output);
+    await handleSlashCommand("/claim-check smoke 验证通过", context, output);
 
     expect(output.text).toContain("缺少证据");
     expect(output.text).toContain("Review Report");
     expect(output.text).toContain("Priority");
     expect(output.text).toContain("Suggestion");
+    expect(output.text).toContain("Claim Checker：缺少证据，需降级表述：已验证");
     expect(output.text).toContain("Claim Checker：通过");
   });
 

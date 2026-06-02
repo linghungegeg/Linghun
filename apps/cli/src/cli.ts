@@ -110,16 +110,22 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     import("@linghun/config"),
     import("@linghun/providers"),
   ]);
-  const { getProjectSettingsPath, loadConfig, readProviderEnvValues, saveDefaultModel } =
-    configModule;
+  const {
+    getProjectSettingsPath,
+    loadConfig,
+    readProviderEnvValues,
+    resolveModelSelection,
+    saveDefaultModel,
+  } = configModule;
   const config = await loadConfig();
-  const provider = config.providers.deepseek;
-  const modelId = provider.model;
+  const target = resolveDoctorTarget(config);
+  const provider = target.provider;
+  const modelId = target.modelId;
   const model = deepSeekModels.find((item) => item.id === modelId) ?? deepSeekModels[0];
 
   if (!subcommand) {
     return {
-      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl),
+      stdout: formatModelInfo(deepSeekModels, model.id, provider.baseUrl, target.providerId),
       stderr: "",
       exitCode: 0,
     };
@@ -127,17 +133,26 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
 
   if (subcommand === "set") {
     const [nextModel] = rest;
-    const target = deepSeekModels.find((item) => item.id === nextModel);
-    if (!target) {
-      return usageError(`未知模型：${nextModel ?? "（空）"}`);
+    if (!nextModel) {
+      return usageError("用法：linghun model set <model>");
     }
-    const nextConfig = await saveDefaultModel(target.id, process.cwd());
-    const nextProvider = nextConfig.providers.deepseek;
+    let resolved: ReturnType<typeof resolveModelSelection>;
+    try {
+      resolved = resolveModelSelection(nextModel, config.providers);
+    } catch (error) {
+      return usageError(error instanceof Error ? error.message : "模型不可用。");
+    }
+    const nextConfig = await saveDefaultModel(resolved.model, process.cwd());
+    const nextProvider = nextConfig.providers[resolved.provider];
+    const aliasNote = resolved.legacyAlias
+      ? `说明：${resolved.inputModel} 是 legacy/display alias，已保存为 ${resolved.model}\n`
+      : "";
     return {
-      stdout: `当前 headless 模型已切换为：${target.id}\n${formatModelInfo(
+      stdout: `当前 headless 模型已切换为：${resolved.model}\n${aliasNote}${formatModelInfo(
         deepSeekModels,
-        target.id,
+        resolved.model,
         nextProvider.baseUrl,
+        resolved.provider,
       )}`,
       stderr: "",
       exitCode: 0,
@@ -209,9 +224,10 @@ function formatModelInfo(
   models: ModelInfo[],
   modelId: string,
   baseUrl: string | undefined,
+  providerId = "deepseek",
 ): string {
   const model = models.find((item) => item.id === modelId) ?? models[0];
-  return `当前模型：${model.displayName} (${model.id})\nprovider：deepseek\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n厂商最大输出：${model.maxOutputTokens}\n请求输出上限：未设置\n`;
+  return `当前模型：${model.displayName} (${model.id})\nprovider：${providerId}\nbase_url：${baseUrl ? "present" : "missing"}\n上下文窗口：${model.contextWindow}\n厂商最大输出：${model.maxOutputTokens}\n请求输出上限：未设置\n`;
 }
 
 type DoctorProviderConfig = {

@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildFailureLearningPanel } from "./failure-learning-presenter.js";
 import {
   buildFailureLearningSummaryForPrompt,
   buildFailureRecord,
@@ -244,6 +245,23 @@ describe("D.14B Failure Learning — persistence (Windows-compatible paths)", ()
     await (await import("node:fs/promises")).writeFile(corruptPath, "{not json", "utf8");
     const reloaded = await loadFailureRecords(state);
     expect(reloaded.length).toBe(1);
+  });
+
+  it("records degraded warning when persistence write fails and /failures can display it", async () => {
+    const project = await makeProject();
+    const state = createFailureLearningState(project);
+    const blockedPath = join(project, "not-a-directory");
+    await (await import("node:fs/promises")).writeFile(blockedPath, "blocked", "utf8");
+    state.directory = blockedPath;
+    const record = buildFailureRecord(state, input());
+
+    await expect(writeFailureRecord(state, record)).rejects.toThrow();
+
+    expect(state.degradedWarnings.length).toBeGreaterThan(0);
+    const panel = buildFailureLearningPanel(state, "zh-CN");
+    expect(panel.summary?.join("\n")).toContain("降级");
+    expect(panel.detailsText).toContain("降级警告");
+    expect(panel.detailsText).toContain("write_failed");
   });
 });
 

@@ -23,16 +23,28 @@ import {
 const EXPECTED_REQUEST_USER_AGENT = `${LINGHUN_NAME}/${LINGHUN_VERSION} (@linghun/${LINGHUN_CLI_NAME})`;
 
 describe("DeepSeek model capabilities", () => {
-  it("records DeepSeek V4 Flash and V4 Pro 1M limits", () => {
-    const flash = deepSeekModels.find((model) => model.id === "deepseek-v4-flash");
-    const pro = deepSeekModels.find((model) => model.id === "deepseek-v4-pro");
+  it("records real DeepSeek API model names", () => {
+    const chat = deepSeekModels.find((model) => model.id === "deepseek-chat");
+    const reasoner = deepSeekModels.find((model) => model.id === "deepseek-reasoner");
 
-    expect(flash?.displayName).toBe("DeepSeek V4 Flash");
-    expect(flash?.contextWindow).toBe(128_000);
-    expect(flash?.maxOutputTokens).toBe(8_192);
-    expect(pro?.displayName).toBe("DeepSeek V4 Pro 1M");
-    expect(pro?.contextWindow).toBe(1_048_576);
-    expect(pro?.maxOutputTokens).toBe(16_384);
+    expect(chat?.displayName).toBe("DeepSeek Chat");
+    expect(chat?.contextWindow).toBe(128_000);
+    expect(chat?.maxOutputTokens).toBe(8_192);
+    expect(reasoner?.displayName).toBe("DeepSeek Reasoner");
+    expect(reasoner?.contextWindow).toBe(64_000);
+    expect(reasoner?.maxOutputTokens).toBe(8_192);
+    expect(deepSeekModels.map((model) => model.id)).not.toContain("deepseek-v4-pro");
+    expect(deepSeekModels.map((model) => model.id)).not.toContain("deepseek-v4-flash");
+  });
+
+  it("maps legacy DeepSeek display aliases to real API models before request body", () => {
+    const provider = new DeepSeekProvider({ model: "deepseek-v4-pro", apiKey: "test-key" });
+
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+
+    expect(request.model).toBe("deepseek-reasoner");
   });
 });
 
@@ -326,7 +338,7 @@ describe("OpenAI compatible provider", () => {
   });
 
   it("repairs DeepSeek chat continuations through the OpenAI-compatible path", () => {
-    const provider = new DeepSeekProvider({ model: "deepseek-v4-pro", apiKey: "test-key" });
+    const provider = new DeepSeekProvider({ model: "deepseek-reasoner", apiKey: "test-key" });
 
     const request = provider.createChatRequest({
       messages: [
@@ -769,8 +781,8 @@ describe("OpenAI compatible provider", () => {
     const provider = new DeepSeekProvider({ model: "deepseek-v4-pro" });
     const models = await provider.listModels();
 
-    expect(models[0]?.id).toBe("deepseek-v4-pro");
-    expect(models[0]?.contextWindow).toBe(1_048_576);
+    expect(models[0]?.id).toBe("deepseek-reasoner");
+    expect(models[0]?.contextWindow).toBe(64_000);
   });
 });
 
@@ -1700,6 +1712,15 @@ describe("joinBaseUrlAndEndpoint", () => {
     );
     expect(joinBaseUrlAndEndpoint("https://relay.example.com/v1", "/responses")).toBe(
       "https://relay.example.com/v1/responses",
+    );
+  });
+
+  it("does not add /v1 to OpenAI-compatible root baseUrl automatically", () => {
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com", "/chat/completions")).toBe(
+      "https://relay.example.com/chat/completions",
+    );
+    expect(joinBaseUrlAndEndpoint("https://relay.example.com", "/responses")).toBe(
+      "https://relay.example.com/responses",
     );
   });
 

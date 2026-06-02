@@ -43,6 +43,7 @@ import {
   OpenAiCompatibleProvider,
   resolveEffectiveEndpointProfile,
 } from "@linghun/providers";
+import { isDeepSeekApiModel, normalizeDeepSeekModelName } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import {
   diagnoseConcreteRoute,
@@ -216,21 +217,25 @@ export function formatReasoningEffectiveState(
 }
 
 export function resolveProviderForModel(config: LinghunConfig, model: string): string {
+  const normalized = normalizeDeepSeekModelName(model);
   const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
-  if (executor?.primaryModel === model && executor.provider) {
+  if (
+    (executor?.primaryModel === model || executor?.primaryModel === normalized) &&
+    executor.provider
+  ) {
     return executor.provider;
   }
-  if (config.defaultModel === model) {
+  if (config.defaultModel === model || config.defaultModel === normalized) {
     for (const [providerId, provider] of Object.entries(config.providers)) {
-      if (provider.model === model) return providerId;
+      if (provider.model === model || provider.model === normalized) return providerId;
     }
   }
   for (const [providerId, provider] of Object.entries(config.providers)) {
-    if (provider.model === model) {
+    if (provider.model === model || provider.model === normalized) {
       return providerId;
     }
   }
-  return model.startsWith("deepseek-") ? "deepseek" : "unknown";
+  return isDeepSeekApiModel(normalized) ? "deepseek" : "unknown";
 }
 
 export function createModelGateway(config: LinghunConfig): ModelGateway {

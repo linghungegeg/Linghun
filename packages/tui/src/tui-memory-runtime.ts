@@ -63,6 +63,7 @@ const MEMORY_PROMPT_TOP_K = 3;
 const MEMORY_PROMPT_ITEM_WIDTH = 180;
 const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 const PROJECT_RULES_STATUS_WIDTH = 160;
+const MEMORY_LEARNING_STATE_FILE = "learning-state.json";
 
 export function createMemoryCandidate(
   scope: MemoryScope,
@@ -111,6 +112,25 @@ export async function writeMemoryRecord(
   await writeFile(path, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
 }
 
+export async function writeMemoryLearningMode(context: TuiContext): Promise<void> {
+  const userDir = resolveStoragePaths(context.config, context.projectPath).memoryUser;
+  await mkdir(userDir, { recursive: true });
+  await writeFile(
+    join(userDir, MEMORY_LEARNING_STATE_FILE),
+    `${JSON.stringify(
+      {
+        learningMode: context.memory.learningMode,
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  context.memory.userDir = userDir;
+  context.memory.learningModeSource = "persisted";
+}
+
 export async function removeMemoryRecord(
   candidate: MemoryCandidate,
   context: TuiContext,
@@ -118,9 +138,11 @@ export async function removeMemoryRecord(
   if (candidate.scope === "session") {
     return;
   }
-  await rm(join(getMemoryDirectory(candidate.scope, context), `${candidate.id}.json`), {
-    force: true,
-  });
+  const directory = getMemoryDirectory(candidate.scope, context);
+  await Promise.all([
+    rm(join(directory, `${candidate.id}.json`), { force: true }),
+    rm(join(directory, "candidates", `${candidate.id}.json`), { force: true }),
+  ]);
 }
 
 export function getMemoryDirectory(scope: MemoryScope, context: TuiContext): string {
@@ -170,11 +192,12 @@ export function formatProjectRulesContext(context: TuiContext): string {
 export function formatMemoryStatus(context: TuiContext): string {
   const injected = createControlledMemoryInjection(context);
   const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
+  const learningSource = context.memory.learningModeSource ?? "default";
   return [
     "Memory status",
     `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary=${formatProjectRulesContext(context)}`,
     `- review queue: candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-    `- autoLearning: ${learningLabel}; autoAccept=no; long-term memory requires /memory accept <id>`,
+    `- autoLearning: ${learningLabel}; autoAccept=no; source=${learningSource}; long-term memory requires /memory accept <id>`,
     `- prompt injection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injected.items.length}; estimatedTokens=${estimateMemoryTokens(injected.text)}; details=/memory stats`,
     "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,

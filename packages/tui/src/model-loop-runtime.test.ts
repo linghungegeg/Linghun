@@ -651,7 +651,7 @@ describe("model-loop-runtime", () => {
       expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
 
-    it("passes completion/PASS when test_passed evidence exists", () => {
+    it("passes test PASS claim when test_passed evidence exists", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
@@ -659,8 +659,53 @@ describe("model-loop-runtime", () => {
           summary: "Bash: vitest --run all green",
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence);
+      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence);
       expect(verdict.status).toBe("passed");
+    });
+
+    it("blocks overall completion when only typecheck PASS evidence exists", () => {
+      const verdict = evaluateFinalAnswerClaims("已完成，PASS，无问题。", [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
+          summary: "Bash: tsc --noEmit exited 0",
+        }),
+      ]);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
+    });
+
+    it("passes overall completion only with task completion scope validation and remaining risk evidence", () => {
+      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: [
+            "task_completed",
+            "scope:packages/tui/src/model-loop-runtime.ts",
+            "validation:focused vitest",
+            "remaining_risk:none",
+          ],
+          summary: "task_completed scope=claim-check validation=focused vitest remaining_risk=none",
+        }),
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+          summary: "Bash: vitest --run model-loop-runtime.test.ts exited 0",
+        }),
+      ]);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("does not let typecheck PASS support test PASS claim", () => {
+      const verdict = evaluateFinalAnswerClaims("测试通过。", [
+        makeEvidence({
+          kind: "command_output",
+          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
+          summary: "Bash: tsc --noEmit exited 0",
+        }),
+      ]);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
 
     it("blocks code-fact claims when no Read/Grep/index evidence", () => {
@@ -674,6 +719,31 @@ describe("model-loop-runtime", () => {
         makeEvidence({ kind: "grep_result", supportsClaims: ["Grep", "local_read"] }),
       ];
       const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence);
+      expect(verdict.status).toBe("passed");
+    });
+
+    it("does not let index status/missing/stale records support code facts", () => {
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
+        makeEvidence({
+          kind: "index_query",
+          source: "codebase-memory:F-Linghun:status",
+          summary: "Index status: stale; project=F-Linghun",
+          supportsClaims: ["index_query", "status"],
+        }),
+      ]);
+      expect(verdict.status).toBe("needs_disclaimer");
+      expect(verdict.unsupportedKinds).toContain("code_fact");
+    });
+
+    it("allows ready index search evidence with real symbol/path to support code facts", () => {
+      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
+        makeEvidence({
+          kind: "index_query",
+          source: "codebase-memory:F-Linghun:search X",
+          summary: "Index search - #1 path=packages/tui/src/model-loop-runtime.ts symbol=X",
+          supportsClaims: ["index_query", "index_code_fact", "search X"],
+        }),
+      ]);
       expect(verdict.status).toBe("passed");
     });
 
@@ -1002,7 +1072,7 @@ describe("model-loop-runtime", () => {
     const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60 * 1000).toISOString();
     const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 60 * 60 * 1000).toISOString();
 
-    it("fresh test_passed evidence still allows PASS (baseline)", () => {
+    it("fresh test_passed evidence still allows test PASS (baseline)", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
@@ -1011,11 +1081,11 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(10),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
       expect(verdict.status).toBe("passed");
     });
 
-    it("stale test_passed evidence (>30min) blocks PASS", () => {
+    it("stale test_passed evidence (>30min) blocks test PASS", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
@@ -1024,7 +1094,7 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(45),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
       expect(verdict.staleKinds ?? []).toContain("completion_pass");
@@ -1130,7 +1200,7 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(5),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
       expect(verdict.status).toBe("passed");
     });
 

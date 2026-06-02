@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaultConfig, getProviderEnvPath } from "@linghun/config";
+import { defaultConfig, getProjectSettingsPath, getProviderEnvPath } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCli } from "./cli.js";
 
@@ -98,18 +98,18 @@ describe("CLI", () => {
   it("shows and diagnoses the current model through slash commands", async () => {
     await withIsolatedCliConfig(async () => {
       const shown = await runCli(["/model"]);
-      const switched = await runCli(["/model", "set", "deepseek-v4-pro"]);
+      const switched = await runCli(["/model", "set", "deepseek-reasoner"]);
       const doctor = await runCli(["/model", "doctor"]);
 
-      expect(shown.stdout).toContain("DeepSeek V4 Flash");
+      expect(shown.stdout).toContain("DeepSeek Chat");
       expect(shown.stdout).toContain("上下文窗口：128000");
       expect(shown.stdout).toContain("base_url：present");
       expect(shown.stdout).not.toContain("https://api.deepseek.com");
-      expect(switched.stdout).toContain("deepseek-v4-pro");
-      expect(switched.stdout).toContain("上下文窗口：1048576");
-      expect(switched.stdout).toContain("厂商最大输出：16384");
+      expect(switched.stdout).toContain("deepseek-reasoner");
+      expect(switched.stdout).toContain("上下文窗口：64000");
+      expect(switched.stdout).toContain("厂商最大输出：8192");
       expect(switched.stdout).toContain("请求输出上限：未设置");
-      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-v4-pro");
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-reasoner");
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
       expect(doctor.stdout).toContain("baseUrl=present");
@@ -118,6 +118,33 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain("缺少 api_key");
       expect(doctor.stdout).toContain("建议：修复后重新运行 /model doctor");
       expect(doctor.exitCode).toBe(0);
+    });
+  });
+
+  it("normalizes legacy DeepSeek alias in CLI model set and persists the real API model", async () => {
+    await withIsolatedCliConfig(async ({ project }) => {
+      const switched = await runCli(["model", "set", "deepseek-v4-pro"]);
+      const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+      expect(switched.stdout).toContain("当前 headless 模型已切换为：deepseek-reasoner");
+      expect(switched.stdout).toContain("legacy/display alias");
+      expect(raw).toContain("deepseek-reasoner");
+      expect(raw).not.toContain("deepseek-v4-pro");
+      expect(switched.exitCode).toBe(0);
+    });
+  });
+
+  it("rejects invalid CLI model set without changing persisted settings", async () => {
+    await withIsolatedCliConfig(async ({ project }) => {
+      await runCli(["model", "set", "deepseek-chat"]);
+      const before = await readFile(getProjectSettingsPath(project), "utf8");
+
+      const rejected = await runCli(["model", "set", "invalid-model"]);
+      const after = await readFile(getProjectSettingsPath(project), "utf8");
+
+      expect(rejected.exitCode).toBe(2);
+      expect(rejected.stderr).toContain("未知模型：invalid-model");
+      expect(after).toBe(before);
     });
   });
 

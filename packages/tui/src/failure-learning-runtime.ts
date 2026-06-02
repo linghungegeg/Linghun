@@ -19,10 +19,11 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { join } from "node:path";
 import { type LinghunConfig, resolveStoragePaths } from "@linghun/config";
 import { stableHash } from "./cache-freshness.js";
+import { formatError } from "./startup-runtime.js";
 import type {
   FailureLearningCategory,
   FailureLearningRecord,
@@ -82,7 +83,15 @@ function clamp(text: string, width: number): string {
 // 项目作用域键：脱敏后的项目目录名，不含完整绝对路径。
 export function resolveFailureProjectScope(projectPath: string): string {
   const base = basename(projectPath || "").trim();
-  return base ? sanitizeFailureText(base).slice(0, 48) || "project" : "project";
+  return base ? sanitizeFailureText(base).slice(0, 80) || "project" : "project";
+}
+
+function resolveFailureProjectScopeFromDirectory(directory: string, projectPath: string): string {
+  if (!process.env.LINGHUN_DATA_DIR) {
+    return resolveFailureProjectScope(projectPath);
+  }
+  const namespace = basename(dirname(directory)).trim();
+  return namespace || "project";
 }
 
 export function getFailureLearningDirectory(projectPath: string, config?: LinghunConfig): string {
@@ -125,10 +134,12 @@ export function createFailureLearningState(
   projectPath: string,
   config?: LinghunConfig,
 ): FailureLearningState {
+  const directory = getFailureLearningDirectory(projectPath, config);
   return {
-    directory: getFailureLearningDirectory(projectPath, config),
-    projectScope: resolveFailureProjectScope(projectPath),
+    directory,
+    projectScope: resolveFailureProjectScopeFromDirectory(directory, projectPath),
     records: [],
+    degradedWarnings: [],
   };
 }
 
@@ -200,12 +211,20 @@ export async function writeFailureRecord(
   state: FailureLearningState,
   record: FailureLearningRecord,
 ): Promise<void> {
-  await mkdir(state.directory, { recursive: true });
-  await writeFile(
-    join(state.directory, `${record.id}.json`),
-    `${JSON.stringify(record, null, 2)}\n`,
-    "utf8",
-  );
+  try {
+    await mkdir(state.directory, { recursive: true });
+    await writeFile(
+      join(state.directory, `${record.id}.json`),
+      `${JSON.stringify(record, null, 2)}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    recordFailureLearningDegradedWarning(
+      state,
+      `write_failed directory=${state.directory} id=${record.id} reason=${formatError(error)}`,
+    );
+    throw error;
+  }
 }
 
 export async function removeFailureRecordFile(
@@ -253,7 +272,13 @@ export async function loadFailureRecords(
   let files: string[];
   try {
     files = await readdir(state.directory);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      recordFailureLearningDegradedWarning(
+        state,
+        `read_failed directory=${state.directory} reason=${formatError(error)}`,
+      );
+    }
     return [];
   }
   const records: FailureLearningRecord[] = [];
@@ -269,6 +294,18 @@ export async function loadFailureRecords(
     }
   }
   return records.sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)).slice(0, MAX_FAILURE_RECORDS);
+}
+
+export function recordFailureLearningDegradedWarning(
+  state: FailureLearningState,
+  warning: string,
+): void {
+  const sanitized = sanitizeFailureText(warning).slice(0, 240);
+  if (!sanitized || state.degradedWarnings.includes(sanitized)) {
+    return;
+  }
+  state.degradedWarnings.unshift(sanitized);
+  state.degradedWarnings = state.degradedWarnings.slice(0, 5);
 }
 
 export function findFailureRecord(

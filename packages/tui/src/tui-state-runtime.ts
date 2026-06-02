@@ -56,6 +56,7 @@ import { createWorkspaceReferenceCache } from "./workspace-reference-cache.js";
 const DEFAULT_CACHE_HISTORY_SIZE = 20;
 const DEFAULT_CACHE_WARN_BELOW_HIT_RATE = 0.75;
 const PROJECT_RULES_SUMMARY_WIDTH = 600;
+const MEMORY_LEARNING_STATE_FILE = "learning-state.json";
 
 // D.13P boundary cleanup: cache freshness 默认维度不再硬编码 deepseek/deepseek-v4-flash。
 // 调用方（context bootstrap）会传入 resolved initialModel；无 model 时以 unknown 占位，
@@ -71,6 +72,7 @@ export function createCacheState(
   projectPath: string,
   model = "unknown",
   mcpToolList: McpToolState[] = [],
+  config?: LinghunConfig,
 ): CacheState {
   const freshness = createCacheFreshness({
     systemPrompt: "Linghun interactive terminal with local extensions and workflows",
@@ -87,7 +89,7 @@ export function createCacheState(
     config: {
       maxTurns: DEFAULT_CACHE_HISTORY_SIZE,
       warnBelowHitRate: DEFAULT_CACHE_WARN_BELOW_HIT_RATE,
-      persistPath: join(projectPath, ".linghun", "cache-log.json"),
+      persistPath: join(resolveStoragePaths(config, projectPath).cache, "cache-log.json"),
       hintsMuted: false,
     },
     history: [],
@@ -295,12 +297,15 @@ export async function createMemoryState(
     projectDir: paths.memoryProject,
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
-    candidates: [],
+    candidates: await loadMemoryByStatus(paths, "candidate"),
     accepted: await loadMemoryByStatus(paths, "accepted"),
     rejected: await loadMemoryByStatus(paths, "rejected"),
     disabled: await loadMemoryByStatus(paths, "disabled"),
     retired: await loadMemoryByStatus(paths, "retired"),
-    learningMode: "off",
+    ...((await loadMemoryLearningMode(paths)) ?? {
+      learningMode: "off" as const,
+      learningModeSource: "default" as const,
+    }),
   };
 }
 
@@ -338,6 +343,21 @@ async function loadMemoryByStatus(
     loadMemoryDirByStatus(paths.memoryUser, status),
   ]);
   return [...projectMemory, ...userMemory].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function loadMemoryLearningMode(
+  paths: ReturnType<typeof resolveStoragePaths>,
+): Promise<{ learningMode: MemoryState["learningMode"]; learningModeSource: "persisted" } | null> {
+  try {
+    const value = JSON.parse(
+      await readFile(join(paths.memoryUser, MEMORY_LEARNING_STATE_FILE), "utf8"),
+    ) as unknown;
+    if (!isRecord(value)) return null;
+    if (value.learningMode !== "active" && value.learningMode !== "off") return null;
+    return { learningMode: value.learningMode, learningModeSource: "persisted" };
+  } catch {
+    return null;
+  }
 }
 
 async function loadMemoryDirByStatus(

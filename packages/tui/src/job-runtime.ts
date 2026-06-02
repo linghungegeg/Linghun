@@ -240,6 +240,9 @@ export function countDurableJobAgents(job: DurableJobState): Record<DurableJobAg
       running: 0,
       queued: 0,
       sleeping: 0,
+      skipped: 0,
+      budget_limited: 0,
+      resource_limited: 0,
       blocked: 0,
       stale: 0,
       cancelled: 0,
@@ -252,20 +255,51 @@ export function countDurableJobAgents(job: DurableJobState): Record<DurableJobAg
 
 export function rescheduleDurableJobAgents(job: DurableJobState): void {
   let running = 0;
+  const cap = getEffectiveAgentCap(job);
   for (const agent of job.agents) {
-    if (job.status === "running" && running < job.budget.maxRunningAgents) {
+    const previousStatus = agent.status;
+    if (agent.status === "completed" || agent.status === "failed" || agent.status === "cancelled") {
+      continue;
+    }
+    if (
+      job.status === "running" &&
+      (agent.status === "running" || agent.status === "queued" || agent.status === "sleeping") &&
+      running < cap
+    ) {
       agent.status = "running";
       agent.heartbeatAt = job.updatedAt;
       running += 1;
       continue;
     }
     if (job.status === "running") {
-      agent.status = "sleeping";
+      agent.status =
+        previousStatus === "running" || previousStatus === "sleeping" || agent.runId
+          ? "sleeping"
+          : "queued";
       continue;
     }
     agent.status =
       job.status === "sleeping" ? "sleeping" : job.status === "blocked" ? "blocked" : job.status;
   }
+}
+
+export function getEffectiveAgentCap(job: DurableJobState): number {
+  return Math.max(
+    0,
+    Math.min(job.effectiveAgentCap ?? job.budget.maxRunningAgents, job.agents.length),
+  );
+}
+
+export function updateDurableJobEffectiveAgentCap(
+  job: DurableJobState,
+  cap: number,
+  reason: string,
+): void {
+  job.effectiveAgentCap = Math.max(
+    0,
+    Math.min(cap, job.budget.maxRunningAgents, job.agents.length),
+  );
+  job.capReason = reason;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,33 +355,47 @@ export function createDurableJobAgents(
   runningCap: number,
 ): DurableJobAgent[] {
   const total = Math.max(1, Math.min(options.requestedAgents, MAX_AGENTS));
+  const tasks = createDurableJobAgentTasks(options.goal, total);
   return Array.from({ length: total }, (_, index) => {
-    const active = status === "running" && index < runningCap;
+    const active = false;
     const agentStatus: DurableJobAgentStatus =
       status === "running"
-        ? active
-          ? "running"
+        ? index < runningCap
+          ? "queued"
           : "sleeping"
         : status === "created"
           ? "created"
           : status;
+    const type =
+      index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer";
     return {
       id: `job-agent-${index + 1}`,
-      type:
-        index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer",
-      displayName: deriveAgentDisplayName(
-        index === 0 ? "planner" : index === 1 ? "worker" : index === 2 ? "verifier" : "explorer",
-        options.goal,
-      ),
+      type,
+      displayName: deriveAgentDisplayName(type, options.goal),
       goal: `${options.goal}#${index + 1}`,
+      task: tasks[index] ?? `${type}: ${options.goal}`,
       status: agentStatus,
       budgetTokens: Math.floor(options.maxTokens / total),
       heartbeatAt: active ? new Date().toISOString() : undefined,
       summary: active
         ? "scheduled with trimmed handoff/evidence/cache refs only; no full transcript/source/index/log output"
-        : "not running; queued/sleeping behind Phase 17A resource cap",
+        : "planned; not started until durable job scheduler creates a real AgentRun",
     };
   });
+}
+
+export function createDurableJobAgentTasks(goal: string, total: number): string[] {
+  const templates = [
+    `planner subtask: turn the job goal into a concise execution plan. Goal: ${goal}`,
+    `worker subtask: execute the next bounded work item with real tools when available. Goal: ${goal}`,
+    `verifier subtask: run real verification only; do not treat job lifecycle completion as PASS. Goal: ${goal}`,
+  ];
+  for (let index = templates.length; index < total; index += 1) {
+    templates.push(
+      `explorer subtask ${index - 2}: inspect facts and risks with read-only tools. Goal: ${goal}`,
+    );
+  }
+  return templates.slice(0, total);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +499,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- permission: ${job.permissionPolicy}; allowEdit=${job.allowEdit}; allowBash=${job.allowBash}; allowMultiAgent=${job.allowMultiAgent}`,
-    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; runningAgentCap=${job.budget.maxRunningAgents}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
+    `- budget: maxTokens=${job.budget.maxTokens}; usedTokens=${job.budget.usedTokens ?? 0}; remainingTokens=${job.budget.remainingTokens ?? job.budget.maxTokens}; maxSteps=${getDurableJobMaxSteps(job)}; usedSteps=${job.budget.usedSteps ?? 0}; runningAgentCap=${job.budget.maxRunningAgents}; effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}; timeoutMs=${job.timeoutMs}; maxRuntimeMs=${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
     `- budget note: ${job.budget.note}`,
     `- pauseReason: ${job.pauseReason ?? "-"}`,
     `- owner: session=${job.ownerSessionId ?? "-"}; pid=${job.ownerPid ?? "-"}; heartbeatAt=${job.heartbeatAt ?? "-"}`,
@@ -470,7 +518,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     "## Agent assignment",
     ...job.agents.map(
       (agent) =>
-        `- ${agent.id}: ${agent.type} status=${agent.status} budgetTokens=${agent.budgetTokens} goal=${agent.goal}`,
+        `- ${agent.id}: ${agent.type} status=${agent.status} runId=${agent.runId ?? "-"} statusReason=${agent.statusReason ?? "-"} budgetTokens=${agent.budgetTokens} goal=${agent.goal}`,
     ),
     "",
     "## Worker result",
@@ -520,7 +568,7 @@ export function formatJobList(jobs: DurableJobState[], context: JobContext): str
     ...jobs.map((job) => {
       const counts = countDurableJobAgents(job);
       const label = job.agents[0]?.displayName ?? deriveAgentDisplayName("worker", job.goal);
-      return `${job.id}  ${job.status}  label=${label}  agents=${job.agents.length}/${counts.running}  blocked=${counts.blocked} stale=${counts.stale}  step=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal=${truncateDisplay(job.goal, 42)}  next=/job status ${job.id}`;
+      return `${job.id}  ${job.status}  label=${label}  agents=${job.agents.length}/${counts.running}  queued=${counts.queued} skipped=${counts.skipped} limited=${counts.budget_limited + counts.resource_limited} blocked=${counts.blocked} stale=${counts.stale}  effectiveCap=${getEffectiveAgentCap(job)} capReason=${job.capReason ?? "default"}  step=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal=${truncateDisplay(job.goal, 42)}  next=/job status ${job.id}`;
     }),
     context.language === "en-US"
       ? `Running cap=${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} remains benchmark-only. Details: /job report <id> or /job logs <id>.`
@@ -539,7 +587,7 @@ export function formatJobPrimary(job: DurableJobState, context: JobContext): str
     context.language === "en-US"
       ? "- scope: local durable metadata + unified background task; no remote channel, Phase 18, Beta PASS, or smoke-ready claim."
       : "- \u8303\u56F4\uFF1A\u672C\u5730 durable metadata + \u7EDF\u4E00\u540E\u53F0\u4EFB\u52A1\uFF1B\u672A\u8FDB\u5165 remote\u3001Phase 18\u3001Beta PASS \u6216 smoke-ready\u3002",
-    `- agents: created=${job.agents.length}, running=${runningAgents}, cap=${job.budget.maxRunningAgents}; displayName is cosmetic only.`,
+    `- agents: planned=${job.agents.length}, scheduled=${job.agents.filter((agent) => agent.runId).length}, started=${job.agents.filter((agent) => agent.startedAt).length}, running=${runningAgents}, queued=${job.agents.filter((agent) => agent.status === "queued").length}, skipped=${job.agents.filter((agent) => agent.status === "skipped").length}, limited=${job.agents.filter((agent) => agent.status === "budget_limited" || agent.status === "resource_limited").length}, effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}.`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
@@ -557,7 +605,7 @@ export function formatJobStatus(job: DurableJobState): string {
     `- goal: ${truncateDisplay(job.goal, 120)}`,
     `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
     `- phase/target: ${job.phase} / ${job.target}`,
-    `- agents: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
+    `- agents: planned=${job.agents.length}; scheduled=${job.agents.filter((agent) => agent.runId).length}; started=${job.agents.filter((agent) => agent.startedAt).length}; running=${counts.running}; completed=${counts.completed}; queued=${counts.queued}; sleeping=${counts.sleeping}; skipped=${counts.skipped}; budget_limited=${counts.budget_limited}; resource_limited=${counts.resource_limited}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}; effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}`,
     `- agent labels: ${formatJobAgentLabels(job.agents)}`,
     formatJobBudgetLine(job),
     `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
@@ -577,7 +625,7 @@ export function formatJobReport(job: DurableJobState): string {
     `- conclusion: ${formatJobReportConclusion(job)}`,
     `- task graph: ${job.plan.length} steps; worker=${job.worker?.status ?? "not_started"}; usedSteps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
-    `- agent counts: created=${job.agents.length}; running=${counts.running}; sleeping=${counts.sleeping}; queued=${counts.queued}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}`,
+    `- agent counts: planned=${job.agents.length}; scheduled=${job.agents.filter((agent) => agent.runId).length}; started=${job.agents.filter((agent) => agent.startedAt).length}; running=${counts.running}; completed=${counts.completed}; queued=${counts.queued}; sleeping=${counts.sleeping}; skipped=${counts.skipped}; budget_limited=${counts.budget_limited}; resource_limited=${counts.resource_limited}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}; effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}`,
     formatJobBudgetLine(job),
     `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
@@ -594,7 +642,7 @@ export function formatJobAgentLabels(agents: DurableJobAgent[]): string {
     agents
       .map(
         (agent) =>
-          `${agent.id}:${agent.displayName ?? deriveAgentDisplayName(agent.type, agent.goal)}:${agent.status}`,
+          `${agent.id}:${agent.displayName ?? deriveAgentDisplayName(agent.type, agent.goal)}:${agent.status}${agent.runId ? `:${agent.runId}` : ""}`,
       )
       .join(", "),
     140,

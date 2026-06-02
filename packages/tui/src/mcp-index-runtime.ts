@@ -1083,17 +1083,46 @@ export async function recordIndexEvidence(
   summary: string,
   supportsClaims: string[] = [],
 ): Promise<void> {
+  const supportsIndexCodeFact = isSupportiveIndexEvidence(context, query, summary);
+  const isSupplementalEvidence = supportsClaims.length > 0;
+  if (!supportsIndexCodeFact && !isSupplementalEvidence) {
+    return;
+  }
   const sessionId = await deps().ensureSession(context);
   const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind: "index_query",
     summary: truncateDisplay(summary.replace(/\s+/g, " "), 160),
     source: `codebase-memory:${context.index.projectName ?? "unknown"}:${query}`,
-    supportsClaims: ["index_query", query, ...supportsClaims],
+    supportsClaims: [
+      "index_query",
+      ...(supportsIndexCodeFact ? ["index_code_fact"] : []),
+      query,
+      ...supportsClaims,
+    ],
     createdAt: new Date().toISOString(),
   };
   deps().rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+}
+
+export function isSupportiveIndexEvidence(
+  context: TuiContext,
+  query: string,
+  summary: string,
+): boolean {
+  if (context.index.status !== "ready" || !context.index.projectName) {
+    return false;
+  }
+  const text = `${query}\n${summary}`;
+  if (
+    /(?:missing|stale|error|not ready|no matches|status[:=\s]+(?:missing|stale|error))/iu.test(text)
+  ) {
+    return false;
+  }
+  return /(?:path=|file_path|file:|symbol=|snippet=|match=|nodes\/edges:\s*\d+\/\d+|\b(?:class|function|method|calls|imports)=\d+)/iu.test(
+    text,
+  );
 }
 
 export async function runCodebaseMemoryCli(

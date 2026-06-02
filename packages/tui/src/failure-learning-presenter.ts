@@ -45,11 +45,12 @@ export function buildFailureLearningPanel(
   const resolved = state.records.filter((r) => r.status === "resolved").length;
   const ignored = state.records.filter((r) => r.status === "ignored").length;
   const lessons = selectActiveLessons(state);
+  const degraded = state.degradedWarnings.length;
 
   const summary: string[] = [
     isEn
-      ? `Failure learning · active ${active.length} · resolved ${resolved} · ignored ${ignored}`
-      : `失败学习 · 活跃 ${active.length} · 已解决 ${resolved} · 已忽略 ${ignored}`,
+      ? `Failure learning · active ${active.length} · resolved ${resolved} · ignored ${ignored}${degraded > 0 ? ` · degraded ${degraded}` : ""}`
+      : `失败学习 · 活跃 ${active.length} · 已解决 ${resolved} · 已忽略 ${ignored}${degraded > 0 ? ` · 降级 ${degraded}` : ""}`,
   ];
   if (active.length === 0) {
     summary.push(
@@ -91,6 +92,12 @@ export function formatFailureLearningDetails(
 ): string {
   const isEn = language === "en-US";
   const lines: string[] = [isEn ? "Failure learning (fact-based)" : "失败学习（基于事实）"];
+  if (state.degradedWarnings.length > 0) {
+    lines.push(isEn ? "- degraded warnings:" : "- 降级警告：");
+    for (const warning of state.degradedWarnings) {
+      lines.push(`  - ${warning}`);
+    }
+  }
   const ordered = [...state.records].sort((a, b) => {
     if (a.status !== b.status) {
       const rank = (s: FailureLearningRecord["status"]) =>

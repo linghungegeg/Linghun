@@ -1,5 +1,10 @@
 import { LinghunError } from "@linghun/core";
-import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
+import {
+  LINGHUN_CLI_NAME,
+  LINGHUN_NAME,
+  LINGHUN_VERSION,
+  normalizeDeepSeekModelName,
+} from "@linghun/shared";
 
 export type ModelUsage = {
   inputTokens: number;
@@ -379,8 +384,8 @@ type OpenAiToolCall = {
 
 export const deepSeekModels: ModelInfo[] = [
   {
-    id: "deepseek-v4-flash",
-    displayName: "DeepSeek V4 Flash",
+    id: "deepseek-chat",
+    displayName: "DeepSeek Chat",
     providerId: "deepseek",
     contextWindow: 128_000,
     maxOutputTokens: 8_192,
@@ -390,11 +395,11 @@ export const deepSeekModels: ModelInfo[] = [
     supportsPromptCache: false,
   },
   {
-    id: "deepseek-v4-pro",
-    displayName: "DeepSeek V4 Pro 1M",
+    id: "deepseek-reasoner",
+    displayName: "DeepSeek Reasoner",
     providerId: "deepseek",
-    contextWindow: 1_048_576,
-    maxOutputTokens: 16_384,
+    contextWindow: 64_000,
+    maxOutputTokens: 8_192,
     supportsTools: true,
     supportsVision: false,
     supportsThinking: false,
@@ -403,7 +408,8 @@ export const deepSeekModels: ModelInfo[] = [
 ];
 
 export function findKnownModel(modelId: string): ModelInfo | undefined {
-  return deepSeekModels.find((model) => model.id === modelId);
+  const normalized = normalizeDeepSeekModelName(modelId);
+  return deepSeekModels.find((model) => model.id === normalized);
 }
 
 export class ModelGateway {
@@ -412,7 +418,8 @@ export class ModelGateway {
   async currentModel(providerId: string, modelId: string): Promise<ModelInfo> {
     const provider = this.findProvider(providerId);
     const models = await provider.listModels();
-    const model = models.find((item) => item.id === modelId);
+    const normalizedModelId = normalizeDeepSeekModelName(modelId);
+    const model = models.find((item) => item.id === normalizedModelId);
     if (!model) {
       throw new LinghunError({
         code: "MODEL_NOT_FOUND",
@@ -1254,6 +1261,10 @@ function withStreamIdleTimeout(
   });
 }
 
+function normalizeProviderRequestModel(model: string, config: ProviderConfig): string {
+  return config.type === "deepseek" ? normalizeDeepSeekModelName(model) : model;
+}
+
 function createChatProfileRequest(
   request: ModelRequest,
   config: ProviderConfig,
@@ -1267,7 +1278,7 @@ function createChatProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
-  const model = request.model ?? config.model;
+  const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiChatTools(request, contract);
   const repaired = repairToolMessagePairing(request.messages);
   return {
@@ -1300,7 +1311,7 @@ function createResponsesProfileRequest(
     });
   }
   const contract = resolveProviderRuntimeContract(config, request);
-  const model = request.model ?? config.model;
+  const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   const tools = createOpenAiResponsesTools(request, contract);
   const repaired = repairToolMessagePairing(request.messages);
   return {
@@ -1354,7 +1365,7 @@ function createAnthropicMessagesProfileRequest(
   // D.13G：anthropic_messages 现在原生支持 tools；只有 contract.supportsTools=false（用户
   // 显式禁用）时才让 assertToolCapability 抛 MODEL_TOOLS_UNSUPPORTED；否则直接放过。
   assertToolCapability(request, contract);
-  const model = request.model ?? config.model;
+  const model = normalizeProviderRequestModel(request.model ?? config.model, config);
   // Anthropic 的 system prompt 是顶层字段；从 messages 中抽出第一个 system 文本，
   // 其余 system 消息合并到 system 字段，剩下 user/assistant 按顺序保留。
   const systemSegments: string[] = [];

@@ -10,7 +10,12 @@ import {
   createPhase15BetaVerdictScope,
 } from "./final-answer-gate.js";
 import type { TuiContext } from "./index.js";
-import type { CompactProjection, HandoffPacket, VerificationReport } from "./tui-data-types.js";
+import type {
+  CompactProjection,
+  HandoffPacket,
+  MemoryCandidate,
+  VerificationReport,
+} from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
@@ -47,6 +52,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = handoff.packet;
   }
+  restorePendingMemoryCandidates(context, transcript);
   const deepCompact = [...transcript]
     .reverse()
     .find((event) => event.type === "deep_compact_packet");
@@ -81,6 +87,88 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
       }
     }
   }
+}
+
+function restorePendingMemoryCandidates(context: TuiContext, transcript: TranscriptEvent[]): void {
+  const processed = new Set<string>();
+  for (const event of transcript) {
+    if (event.type === "memory_accepted") {
+      const id = readMemoryId(event.memory);
+      if (id) processed.add(id);
+      continue;
+    }
+    if (event.type !== "system_event") continue;
+    const match = event.message.match(/\bmemory_lifecycle action=(\w+) id=([^\s]+)/u);
+    if (!match) continue;
+    const action = match[1];
+    if (
+      action === "accepted" ||
+      action === "rejected" ||
+      action === "disabled" ||
+      action === "rollback" ||
+      action === "deleted"
+    ) {
+      processed.add(match[2]);
+    }
+  }
+
+  const known = new Set(
+    [
+      ...context.memory.candidates,
+      ...context.memory.accepted,
+      ...context.memory.rejected,
+      ...context.memory.disabled,
+      ...context.memory.retired,
+    ].map((item) => item.id),
+  );
+  const restored: MemoryCandidate[] = [];
+  for (const event of transcript) {
+    if (event.type !== "memory_candidate") continue;
+    const candidate = parseResumeMemoryCandidate(event.candidate);
+    if (!candidate) continue;
+    if (processed.has(candidate.id) || known.has(candidate.id)) continue;
+    restored.push(candidate);
+    known.add(candidate.id);
+  }
+  if (restored.length > 0) {
+    context.memory.candidates = [...restored.reverse(), ...context.memory.candidates];
+  }
+}
+
+function readMemoryId(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.id === "string" ? value.id : undefined;
+}
+
+function parseResumeMemoryCandidate(value: unknown): MemoryCandidate | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.id !== "string" ||
+    typeof value.summary !== "string" ||
+    typeof value.source !== "string" ||
+    typeof value.createdAt !== "string"
+  ) {
+    return undefined;
+  }
+  if (value.scope !== "project" && value.scope !== "user" && value.scope !== "session") {
+    return undefined;
+  }
+  if (value.status !== "candidate") {
+    return undefined;
+  }
+  const sourceRefs = Array.isArray(value.sourceRefs)
+    ? value.sourceRefs.filter((item): item is string => typeof item === "string")
+    : [value.source];
+  return {
+    id: value.id,
+    scope: value.scope,
+    status: "candidate",
+    summary: value.summary,
+    source: value.source,
+    sourceRefs: sourceRefs.slice(0, 6),
+    risk: value.risk === "medium" || value.risk === "high" ? value.risk : "low",
+    inferred: value.inferred === true,
+    createdAt: value.createdAt,
+  };
 }
 
 function parseCompactProjectionEvent(message: string): CompactProjection | undefined {

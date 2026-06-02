@@ -203,6 +203,43 @@ const SAFE_CONTEXT_REF_KINDS = new Set<WorkflowReference["kind"]>([
   "architecture",
 ]);
 
+export type WorkflowStepCapabilityDecision =
+  | { ok: true; reason: string }
+  | { ok: false; reason: string };
+
+export function decideWorkflowStepCapability(input: {
+  permissionMode: NormalizedWorkflowPlan["permissionMode"];
+  phaseStopPointConfirmed: boolean;
+  target: WorkflowRuntimeTarget | undefined;
+  request: WorkflowMainChainRequest | null;
+}): WorkflowStepCapabilityDecision {
+  if (!input.target) {
+    return { ok: false, reason: "missing structured targetRuntime" };
+  }
+  if (containsRawCommand(input.target)) {
+    return { ok: false, reason: "raw command strings are rejected by the workflow bridge" };
+  }
+  if (input.permissionMode === "plan" && input.target.mutating) {
+    return {
+      ok: false,
+      reason: "plan mode cannot produce executable mutating workflow proposals",
+    };
+  }
+  if (!input.request) {
+    return {
+      ok: false,
+      reason: "targetRuntime is outside the D.14H-C bridge allowlist",
+    };
+  }
+  if (input.target.mutating && !input.phaseStopPointConfirmed) {
+    return {
+      ok: false,
+      reason: "phase stopPoint must be confirmed before a mutating request becomes runnable",
+    };
+  }
+  return { ok: true, reason: "workflow step is executable through the existing main chain" };
+}
+
 export function bridgeWorkflowPlanToMainChainRequests(
   plan: NormalizedWorkflowPlan,
   options: WorkflowAgentRuntimeBridgeOptions = {},
@@ -278,10 +315,18 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
-    if (!target) {
+    const request = createMainChainRequest(plan, currentPhase.id, currentPhase.title, slice);
+    const capability = decideWorkflowStepCapability({
+      permissionMode: plan.permissionMode,
+      phaseStopPointConfirmed,
+      target,
+      request,
+    });
+
+    if (!capability.ok && capability.reason === "missing structured targetRuntime") {
       return createProposal(base, {
         status: "blocked",
-        reason: "missing structured targetRuntime",
+        reason: capability.reason,
         executable: false,
         request: null,
         safety,
@@ -292,10 +337,10 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
-    if (containsRawCommand(target)) {
+    if (!capability.ok && capability.reason.includes("raw command strings")) {
       return createProposal(base, {
         status: "blocked",
-        reason: "raw command strings are rejected by the workflow bridge",
+        reason: capability.reason,
         executable: false,
         request: null,
         safety,
@@ -306,10 +351,10 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
-    if (plan.permissionMode === "plan" && target.mutating) {
+    if (!capability.ok && capability.reason.includes("plan mode")) {
       return createProposal(base, {
         status: "blocked",
-        reason: "plan mode cannot produce executable mutating workflow proposals",
+        reason: capability.reason,
         executable: false,
         request: null,
         safety,
@@ -320,11 +365,10 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
-    const request = createMainChainRequest(plan, currentPhase.id, currentPhase.title, slice);
-    if (!request) {
+    if (!capability.ok && capability.reason.includes("allowlist")) {
       return createProposal(base, {
         status: "blocked",
-        reason: "targetRuntime is outside the D.14H-C bridge allowlist",
+        reason: capability.reason,
         executable: false,
         request: null,
         safety,
@@ -336,10 +380,10 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
-    if (target.mutating && !phaseStopPointConfirmed) {
+    if (!capability.ok && capability.reason.includes("stopPoint")) {
       return createProposal(base, {
         status: "start_gate_needed",
-        reason: "phase stopPoint must be confirmed before a mutating request becomes runnable",
+        reason: capability.reason,
         executable: false,
         request,
         safety,
@@ -354,6 +398,20 @@ export function bridgeWorkflowPlanToMainChainRequests(
           requiresExactConfirmation: true,
           doesNotReplacePermissionPipeline: true,
         },
+      });
+    }
+
+    if (!target) {
+      return createProposal(base, {
+        status: "blocked",
+        reason: "missing structured targetRuntime",
+        executable: false,
+        request: null,
+        safety,
+        phase: currentPhase.title,
+        sliceTitle: slice.title,
+        nextAction: slice.nextAction ?? "Add a structured main-chain target.",
+        contextRefs,
       });
     }
 

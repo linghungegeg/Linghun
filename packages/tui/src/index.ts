@@ -877,6 +877,7 @@ import type {
 import {
   type WorkflowBridgeRequestProposal,
   bridgeWorkflowPlanToMainChainRequests,
+  decideWorkflowStepCapability,
 } from "./workflow-agent-runtime-bridge.js";
 import type { NormalizedWorkflowPlan } from "./workflow-plan-schema.js";
 import type { WorkflowPlannerEntryResult } from "./workflow-planner-entry.js";
@@ -1630,7 +1631,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     backgroundTasks: [],
     checkpoints: [],
     evidence: [],
-    cache: createCacheState(projectPath, initialModel),
+    cache: createCacheState(projectPath, initialModel, [], config),
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
@@ -2651,6 +2652,7 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/background") {
+    await hydrateWorkflowRuns(context);
     await handleBackgroundCommand(rest, context, output);
     return "handled";
   }
@@ -2933,9 +2935,14 @@ async function handleWorkflowsCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  await hydrateWorkflowRuns(context);
   const name = args[0];
   if (!name) {
     writeLine(output, formatWorkflows(context));
+    return;
+  }
+  if (name === "status") {
+    writeLine(output, formatWorkflowStatus(context));
     return;
   }
   if (name === "registry" || name === "list") {
@@ -3076,6 +3083,172 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
   };
 }
 
+type DurableWorkflowRunState = NonNullable<WorkflowState["activeRun"]> & {
+  projectPath: string;
+  updatedAt: string;
+  backgroundTask: BackgroundTaskState;
+};
+
+function getWorkflowRunsRoot(context: TuiContext): string {
+  return join(dirname(resolveStoragePaths(context.config, context.projectPath).jobs), "workflows");
+}
+
+function getWorkflowRunStatePath(context: TuiContext, runId: string): string {
+  return join(getWorkflowRunsRoot(context), runId, "state.json");
+}
+
+async function persistWorkflowRunState(
+  context: TuiContext,
+  run: NonNullable<WorkflowState["activeRun"]>,
+  task: BackgroundTaskState,
+): Promise<void> {
+  const path = getWorkflowRunStatePath(context, run.id);
+  const state: DurableWorkflowRunState = {
+    ...run,
+    projectPath: context.projectPath,
+    updatedAt: new Date().toISOString(),
+    backgroundTask: task,
+  };
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
+  const root = getWorkflowRunsRoot(context);
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const state = await readWorkflowRunState(join(root, entry.name, "state.json"));
+    if (
+      !state ||
+      resolve(state.projectPath).toLowerCase() !== resolve(context.projectPath).toLowerCase()
+    ) {
+      continue;
+    }
+    const run = recoverWorkflowRunState(state);
+    context.workflows.activeRun = run;
+    const background = createWorkflowBackgroundProjection(state.backgroundTask, run);
+    upsertWorkflowBackgroundTask(context, background);
+    if (
+      run.status !== state.status ||
+      run.steps.some((step, index) => step.status !== state.steps[index]?.status)
+    ) {
+      await persistWorkflowRunState(context, run, background);
+    }
+  }
+}
+
+async function readWorkflowRunState(path: string): Promise<DurableWorkflowRunState | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<DurableWorkflowRunState>;
+    if (
+      typeof parsed.id !== "string" ||
+      typeof parsed.goal !== "string" ||
+      typeof parsed.planId !== "string" ||
+      typeof parsed.projectPath !== "string" ||
+      !Array.isArray(parsed.steps) ||
+      !parsed.backgroundTask
+    ) {
+      return null;
+    }
+    return parsed as DurableWorkflowRunState;
+  } catch {
+    return null;
+  }
+}
+
+function recoverWorkflowRunState(
+  state: DurableWorkflowRunState,
+): NonNullable<WorkflowState["activeRun"]> {
+  const recoveredSteps = state.steps.map((step) =>
+    step.status === "running"
+      ? {
+          ...step,
+          status: "stale" as const,
+          summary: step.summary ?? "Workflow step was running before restart; marked stale.",
+        }
+      : step,
+  );
+  const hasStale = recoveredSteps.some((step) => step.status === "stale");
+  const status = state.status === "running" && hasStale ? "stale" : state.status;
+  return {
+    id: state.id,
+    goal: state.goal,
+    planId: state.planId,
+    status,
+    steps: recoveredSteps,
+    startedAt: state.startedAt,
+    endedAt: state.endedAt,
+    result: status === "completed" ? "partial" : status === "stale" ? "stale" : state.result,
+  };
+}
+
+function createWorkflowBackgroundProjection(
+  task: BackgroundTaskState,
+  run: NonNullable<WorkflowState["activeRun"]>,
+): BackgroundTaskState {
+  const runningStep = run.steps.find((step) => step.status === "running");
+  const staleStep = run.steps.find((step) => step.status === "stale");
+  return {
+    ...task,
+    status: run.status === "running" ? "running" : run.status === "stale" ? "stale" : task.status,
+    currentStep: staleStep?.summary ?? runningStep?.title ?? task.currentStep,
+    updatedAt: new Date().toISOString(),
+    result: run.status === "completed" ? "partial" : run.status === "failed" ? "fail" : "partial",
+    userVisibleSummary:
+      run.status === "stale"
+        ? `Workflow ${run.id} stale after restart; inspect /workflows status before rerun.`
+        : task.userVisibleSummary,
+    nextAction:
+      run.status === "stale"
+        ? "Use /workflows status and rerun after checking stale step evidence."
+        : task.nextAction,
+  };
+}
+
+function upsertWorkflowBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {
+  const existing = context.backgroundTasks.find((item) => item.id === task.id);
+  if (existing) {
+    Object.assign(existing, task);
+    return;
+  }
+  rememberBackgroundTask(context, task);
+}
+
+function formatWorkflowStatus(context: TuiContext): string {
+  const run = context.workflows.activeRun;
+  if (!run) {
+    return context.language === "en-US"
+      ? "No active workflow run."
+      : "当前没有 active workflow run。";
+  }
+  const counts = run.steps.reduce(
+    (acc, step) => {
+      acc[step.status] += 1;
+      return acc;
+    },
+    {
+      queued: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      blocked: 0,
+      cancelled: 0,
+      stale: 0,
+    } satisfies Record<WorkflowStepState["status"], number>,
+  );
+  return [
+    `Workflow ${run.id}`,
+    `- status: ${run.status}; result=${run.result}`,
+    `- goal: ${truncateDisplay(run.goal, 120)}`,
+    `- planId: ${run.planId}`,
+    `- steps: queued=${counts.queued}; running=${counts.running}; completed=${counts.completed}; blocked=${counts.blocked}; failed=${counts.failed}; cancelled=${counts.cancelled}; stale=${counts.stale}`,
+    `- evidenceRefs: ${run.steps.flatMap((step) => step.evidenceRefs).join(", ") || "none"}`,
+    "- completion is PARTIAL only; blocked/stale/cancelled/failed steps never claim PASS.",
+    "- background: /background; details: /details background <id>",
+  ].join("\n");
+}
+
 async function runWorkflowSteps(
   goal: string,
   context: TuiContext,
@@ -3110,20 +3283,39 @@ async function runWorkflowSteps(
     return;
   }
 
+  await runWorkflowPlanSteps(goal, confirmed.plan, context, output);
+}
+
+export async function __testRunWorkflowStepsWithPlan(
+  goal: string,
+  plan: NormalizedWorkflowPlan,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  await runWorkflowPlanSteps(goal, plan, context, output);
+}
+
+async function runWorkflowPlanSteps(
+  goal: string,
+  plan: NormalizedWorkflowPlan,
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const phase = plan.phases.find((item) => item.id === plan.currentPhaseId) ?? plan.phases[0];
+  if (!phase) {
+    writeLine(output, "工作流运行失败：计划没有可执行 phase。");
+    return;
+  }
+
   const sessionId = await ensureSession(context);
   const runId = `workflow-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
-  const executableSlices = confirmed.plan.phases.flatMap((item) => item.slices);
+  const executableSlices = plan.phases.flatMap((item) => item.slices);
   const stepStates: WorkflowStepState[] = executableSlices.map((slice) => ({
     id: slice.id,
     title: slice.title,
     status: "queued",
-    runtime:
-      slice.targetRuntime?.kind === "verification"
-        ? "verification"
-        : slice.targetRuntime?.kind === "details"
-          ? "details"
-          : "agent",
+    runtime: workflowRuntimeKind(getCurrentWorkflowStepRequest(plan, phase.id, [], slice.id)),
     evidenceRefs: (slice.evidence ?? []).map((item) => item.ref),
   }));
   const workflowTask: BackgroundTaskState = {
@@ -3145,29 +3337,31 @@ async function runWorkflowSteps(
   context.workflows.activeRun = {
     id: runId,
     goal,
-    planId: confirmed.plan.id,
+    planId: plan.id,
     status: "running",
     steps: stepStates,
     startedAt,
     result: "partial",
   };
   rememberBackgroundTask(context, workflowTask);
+  await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
   await context.store.appendEvent(sessionId, {
     type: "workflow_start",
-    workflow: { id: runId, goal, planId: confirmed.plan.id, steps: stepStates },
+    workflow: { id: runId, goal, planId: plan.id, steps: stepStates },
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
   let completed = 0;
   for (const step of stepStates) {
-    const request = getCurrentWorkflowStepRequest(confirmed.plan, phase.id, stepStates, step.id);
+    const request = getCurrentWorkflowStepRequest(plan, phase.id, stepStates, step.id);
     const stepStartedAt = new Date().toISOString();
     step.status = "running";
     step.startedAt = stepStartedAt;
     workflowTask.currentStep = step.title;
     workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
     workflowTask.updatedAt = stepStartedAt;
+    await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
     await context.store.appendEvent(sessionId, {
       type: "workflow_step_start",
       workflowId: runId,
@@ -3188,6 +3382,7 @@ async function runWorkflowSteps(
     workflowTask.updatedAt = stepEndedAt;
     workflowTask.lastOutputAt = stepEndedAt;
     workflowTask.hasOutput = true;
+    await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
     await context.store.appendEvent(sessionId, {
       type: "workflow_step_result",
       workflowId: runId,
@@ -3333,6 +3528,7 @@ async function runRegistryWorkflow(
     result: "partial",
   };
   rememberBackgroundTask(context, task);
+  await persistWorkflowRunState(context, context.workflows.activeRun, task);
   await context.store.appendEvent(sessionId, {
     type: "workflow_start",
     workflow: {
@@ -3410,6 +3606,9 @@ async function executeRegistryWorkflowRun(
     task.currentStep = `${step.action}:${step.id}`;
     task.updatedAt = started;
     task.progress = { completed, total: stepStates.length, label: step.action };
+    if (context.workflows.activeRun?.id === runId) {
+      await persistWorkflowRunState(context, context.workflows.activeRun, task);
+    }
     await appendBackgroundTaskEvent(context, sessionId, task);
     const result = await executeRegistryWorkflowStep(workflow, step, goal, context, output);
     const ended = new Date().toISOString();
@@ -3425,6 +3624,9 @@ async function executeRegistryWorkflowRun(
     task.lastOutputAt = ended;
     task.hasOutput = true;
     task.progress = { completed, total: stepStates.length, label: step.action };
+    if (context.workflows.activeRun?.id === runId) {
+      await persistWorkflowRunState(context, context.workflows.activeRun, task);
+    }
     await appendBackgroundTaskEvent(context, sessionId, task);
     if (result.status !== "completed") {
       await finishWorkflowRun(runId, result.status, result.summary, context, sessionId, task);
@@ -3530,11 +3732,22 @@ async function executeWorkflowStep(
   summary: string;
   evidenceRefs: string[];
 }> {
-  if (!request.executable || !request.request) {
+  const capability = decideWorkflowStepCapability({
+    permissionMode: context.permissionMode,
+    phaseStopPointConfirmed: true,
+    target:
+      request.safety.mutating || request.request
+        ? ({ kind: "details", view: "evidence", mutating: request.safety.mutating } as never)
+        : undefined,
+    request: request.request,
+  });
+  if (!capability.ok || !request.executable || !request.request) {
     const summary = formatWorkflowStepSummary(
       request.sliceId,
       "blocked",
-      request.reason,
+      !capability.ok && capability.reason.includes("plan mode")
+        ? capability.reason
+        : request.reason,
       context.language,
     );
     await captureWorkflowFailureLearning(request, summary, context);
@@ -3595,6 +3808,82 @@ async function executeWorkflowStep(
       await handleSlashCommand("/details", context, output);
     } else if (req.mainChain === "agents") {
       await handleAgentsCommand([req.action, req.agentRef ?? ""].filter(Boolean), context, output);
+    } else if (req.mainChain === "job") {
+      const beforeJobIds = new Set((await listDurableJobs(context)).map((job) => job.id));
+      if (req.action === "run" || req.action === "create") {
+        await runNestedWorkflowJobCommand(
+          [
+            req.action,
+            req.goal ?? request.taskSurfaceInput.nextAction,
+            "--phase",
+            req.phase,
+            "--target",
+            req.target,
+            ...(req.maxTokens ? ["--tokens", String(req.maxTokens)] : []),
+            ...(req.maxDurationMs ? ["--timeout", String(req.maxDurationMs)] : []),
+            ...(req.requestedAgents && req.requestedAgents > 1
+              ? ["--multi-agent", "--agents", String(req.requestedAgents)]
+              : []),
+          ],
+          context,
+          output,
+        );
+      } else {
+        await runNestedWorkflowJobCommand(
+          [req.action, req.jobRef ?? ""].filter(Boolean),
+          context,
+          output,
+        );
+      }
+      const jobs = await listDurableJobs(context);
+      const job =
+        jobs.find((item) => !beforeJobIds.has(item.id)) ??
+        (req.jobRef
+          ? jobs.find((item) => item.id === req.jobRef || item.id.endsWith(req.jobRef ?? ""))
+          : undefined) ??
+        jobs[0];
+      if (!job) {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          context.language === "en-US"
+            ? "nested job did not persist state"
+            : "嵌套 job 未持久化 state",
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
+      }
+      if (job.status === "blocked" || job.status === "sleeping" || job.status === "stale") {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          `nested job ${job.id} ${job.status}: ${job.pauseReason ?? job.result?.summary ?? "not runnable"}`,
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "blocked",
+          summary,
+          evidenceRefs: mergeWorkflowEvidenceRefs(
+            newWorkflowEvidenceRefs(beforeEvidence, context),
+            job.evidenceRefs.map((item) => item.id),
+          ),
+        };
+      }
+      return {
+        status: "completed",
+        summary: formatWorkflowStepSummary(
+          request.sliceId,
+          "completed",
+          `nested job ${job.id} ${job.status}; persisted state=${getDurableJobStatePath(job)}`,
+          context.language,
+        ),
+        evidenceRefs: mergeWorkflowEvidenceRefs(
+          newWorkflowEvidenceRefs(beforeEvidence, context),
+          job.evidenceRefs.map((item) => item.id),
+        ),
+      };
     } else {
       const summary = formatWorkflowStepSummary(
         request.sliceId,
@@ -3733,9 +4022,31 @@ async function runWorkflowVerificationStep(
   await recordVerificationEvidence(context, sessionId, report);
 }
 
+async function runNestedWorkflowJobCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const workflowTaskIndex = context.backgroundTasks.findIndex(
+    (task) => task.kind === "job" && task.id.startsWith("workflow-") && task.status === "running",
+  );
+  if (workflowTaskIndex < 0) {
+    await handleJobCommand(args, context, output);
+    return;
+  }
+  const [workflowTask] = context.backgroundTasks.splice(workflowTaskIndex, 1);
+  try {
+    await handleJobCommand(args, context, output);
+  } finally {
+    if (workflowTask && !context.backgroundTasks.some((task) => task.id === workflowTask.id)) {
+      rememberBackgroundTask(context, workflowTask);
+    }
+  }
+}
+
 async function finishWorkflowRun(
   runId: string,
-  status: "completed" | "failed" | "blocked",
+  status: "completed" | "failed" | "blocked" | "cancelled" | "stale",
   summary: string,
   context: TuiContext,
   sessionId: string,
@@ -3747,7 +4058,14 @@ async function finishWorkflowRun(
     context.workflows.activeRun.endedAt = now;
     context.workflows.activeRun.result = status === "completed" ? "partial" : status;
   }
-  task.status = status === "completed" ? "completed" : "failed";
+  task.status =
+    status === "completed"
+      ? "completed"
+      : status === "stale"
+        ? "stale"
+        : status === "cancelled"
+          ? "cancelled"
+          : "failed";
   task.result = status === "completed" || status === "blocked" ? "partial" : "fail";
   task.currentStep = summary;
   task.updatedAt = now;
@@ -3757,11 +4075,14 @@ async function finishWorkflowRun(
     status === "completed"
       ? "Review verification evidence; do not treat workflow completion as PASS."
       : "Inspect /failures and rerun after fixing the failed step.";
+  if (context.workflows.activeRun?.id === runId) {
+    await persistWorkflowRunState(context, context.workflows.activeRun, task);
+  }
   await appendBackgroundTaskEvent(context, sessionId, task);
   await context.store.appendEvent(sessionId, {
     type: "workflow_end",
     workflowId: runId,
-    status,
+    status: status === "completed" || status === "failed" ? status : "blocked",
     summary,
     createdAt: now,
   });
@@ -3797,6 +4118,7 @@ async function captureWorkflowFailureLearning(
 }
 
 function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowStepState["runtime"] {
+  if (request.request?.mainChain === "job") return "job";
   if (request.request?.mainChain === "verification") return "verification";
   if (request.request?.mainChain === "details") return "details";
   return "agent";
@@ -3812,6 +4134,10 @@ function findWorkflowSliceTitle(plan: NormalizedWorkflowPlan, sliceId: string): 
 function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {
   const seen = new Set(before);
   return context.evidence.map((item) => item.id).filter((id) => !seen.has(id));
+}
+
+function mergeWorkflowEvidenceRefs(...groups: string[][]): string[] {
+  return Array.from(new Set(groups.flat().filter(Boolean)));
 }
 
 async function recordWorkflowPlanPreviewEvidence(
@@ -11822,8 +12148,9 @@ async function captureFailureLearning(
   sessionId: string,
   input: FailureLearningInput,
 ): Promise<void> {
+  let record: FailureLearningRecord | undefined;
   try {
-    const { record } = mergeFailureRecord(context.failureLearning, input);
+    ({ record } = mergeFailureRecord(context.failureLearning, input));
     await writeFailureRecord(context.failureLearning, record);
     await appendSystemEvent(
       context,
@@ -11831,8 +12158,14 @@ async function captureFailureLearning(
       `failure_learning recorded category=${record.category} count=${record.count} severity=${record.severity}`,
       "info",
     );
-  } catch {
+  } catch (error) {
     // 失败学习是加性能力；记录自身失败不得影响主链。
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `failure_learning degraded warning=write_failed category=${record?.category ?? input.category}`,
+      "warning",
+    ).catch(() => undefined);
   }
 }
 

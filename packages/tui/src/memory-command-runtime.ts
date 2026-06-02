@@ -27,6 +27,7 @@ import {
   parseMemoryCandidateArgs,
   removeMemoryFromState,
   removeMemoryRecord,
+  writeMemoryLearningMode,
   writeMemoryRecord,
 } from "./tui-memory-runtime.js";
 import { writeErrorLine } from "./tui-output-surface.js";
@@ -171,6 +172,7 @@ export async function handleMemoryCommand(
     const subAction = args[1];
     if (subAction === "on") {
       context.memory.learningMode = "active";
+      await writeMemoryLearningMode(context);
       const sessionId = await deps().ensureSession(context);
       await deps().appendSystemEvent(context, sessionId, "memory_learning_mode=active", "info");
       writeLine(
@@ -183,6 +185,7 @@ export async function handleMemoryCommand(
     }
     if (subAction === "off") {
       context.memory.learningMode = "off";
+      await writeMemoryLearningMode(context);
       const sessionId = await deps().ensureSession(context);
       await deps().appendSystemEvent(context, sessionId, "memory_learning_mode=off", "info");
       writeLine(
@@ -197,8 +200,8 @@ export async function handleMemoryCommand(
       writeLine(
         output,
         context.language === "en-US"
-          ? `Learning mode: ${context.memory.learningMode}; candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}`
-          : `学习模式：${context.memory.learningMode === "active" ? "开启" : "关闭"}；候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}`,
+          ? `Learning mode: ${context.memory.learningMode}; source=${context.memory.learningModeSource ?? "default"}; candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}`
+          : `学习模式：${context.memory.learningMode === "active" ? "开启" : "关闭"}；来源=${context.memory.learningModeSource ?? "default"}；候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}`,
       );
       return;
     }
@@ -232,6 +235,7 @@ export async function handleMemoryCommand(
       ["user:/memory candidate"],
     );
     context.memory.candidates.unshift(candidate);
+    await writeMemoryRecord(candidate, context);
     const sessionId = await deps().ensureSession(context);
     await context.store.appendEvent(sessionId, {
       type: "memory_candidate",
@@ -507,6 +511,7 @@ async function runControlledMemoryLearning(context: TuiContext): Promise<MemoryL
   context.memory.candidates.unshift(...candidates);
   const sessionId = await deps().ensureSession(context);
   for (const candidate of candidates) {
+    await writeMemoryRecord(candidate, context);
     await context.store.appendEvent(sessionId, {
       type: "memory_candidate",
       candidate,
@@ -580,6 +585,7 @@ export async function runAutoLearningOnTurnEnd(
   context.memory.candidates.unshift(...candidates);
   const sessionId = await deps().ensureSession(context);
   for (const candidate of candidates) {
+    await writeMemoryRecord(candidate, context);
     await context.store.appendEvent(sessionId, {
       type: "memory_candidate",
       candidate,
@@ -642,6 +648,7 @@ export async function importAiSessions(
     [`ai-sessions:${source}:${query}`],
   );
   context.memory.candidates.unshift(candidate);
+  await writeMemoryRecord(candidate, context);
   deps().refreshCacheFreshness(context);
   writeLine(output, summary);
   writeLine(output, `已创建候选记忆等待确认：${candidate.id}`);

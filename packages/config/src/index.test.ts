@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createProjectDataNamespace,
   defaultConfig,
   ensureConfigDirs,
   ensureProviderEnvTemplate,
@@ -18,6 +19,7 @@ import {
   readProviderEnvValues,
   removeMcpServerConfig,
   resetExtensionTrustForInstall,
+  resolveModelSelection,
   resolveStoragePaths,
   saveDefaultModel,
   saveExtensionEnablement,
@@ -84,15 +86,37 @@ describe("config directories", () => {
     }
   });
 
-  it("saves and loads the Phase 03 default model in project settings", async () => {
+  it("saves and loads the real DeepSeek default model in project settings", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
-    const config = await saveDefaultModel("deepseek-v4-pro", project);
+    const config = await saveDefaultModel("deepseek-reasoner", project);
     const loaded = await loadConfig(project);
     const raw = await readFile(getProjectSettingsPath(project), "utf8");
 
-    expect(config.defaultModel).toBe("deepseek-v4-pro");
-    expect(loaded.providers.deepseek.model).toBe("deepseek-v4-pro");
-    expect(raw).toContain("deepseek-v4-pro");
+    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(loaded.providers.deepseek.model).toBe("deepseek-reasoner");
+    expect(raw).toContain("deepseek-reasoner");
+  });
+
+  it("normalizes legacy DeepSeek aliases before saving default model", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const config = await saveDefaultModel("deepseek-v4-pro", project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(config.providers.deepseek.model).toBe("deepseek-reasoner");
+    expect(raw).toContain("deepseek-reasoner");
+    expect(raw).not.toContain("deepseek-v4-pro");
+  });
+
+  it("rejects invalid default model before writing project settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await saveDefaultModel("deepseek-chat", project);
+    const before = await readFile(getProjectSettingsPath(project), "utf8");
+
+    await expect(saveDefaultModel("deepseek-v4-invalid", project)).rejects.toThrow("未知模型");
+    const after = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(after).toBe(before);
   });
 
   it("loads Phase 13 storage, MCP, index, and model route defaults", async () => {
@@ -153,11 +177,11 @@ describe("config directories", () => {
     );
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
 
-    const saved = await cleanSaveModelRoute("planner", "deepseek-v4-pro", project);
+    const saved = await cleanSaveModelRoute("planner", "deepseek-reasoner", project);
     const loaded = await cleanLoadConfig(project);
 
     expect(saved.modelRoutes.routes.find((route) => route.role === "planner")?.primaryModel).toBe(
-      "deepseek-v4-pro",
+      "deepseek-reasoner",
     );
     expect(loaded.modelRoutes.routes.find((route) => route.role === "planner")?.provider).toBe(
       "deepseek",
@@ -167,10 +191,50 @@ describe("config directories", () => {
     );
   });
 
+  it("normalizes legacy DeepSeek aliases before saving role routes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const saved = await saveModelRoute("executor", "deepseek-v4-flash", project);
+    const raw = await readFile(getProjectSettingsPath(project), "utf8");
+    const route = saved.modelRoutes.routes.find((item) => item.role === "executor");
+
+    expect(route?.provider).toBe("deepseek");
+    expect(route?.primaryModel).toBe("deepseek-chat");
+    expect(raw).toContain("deepseek-chat");
+    expect(raw).not.toContain("deepseek-v4-flash");
+  });
+
+  it("rejects invalid role route model before writing project settings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    await saveModelRoute("executor", "deepseek-chat", project);
+    const before = await readFile(getProjectSettingsPath(project), "utf8");
+
+    await expect(saveModelRoute("executor", "invalid-model", project)).rejects.toThrow("未知模型");
+    const after = await readFile(getProjectSettingsPath(project), "utf8");
+
+    expect(after).toBe(before);
+  });
+
+  it("resolves DeepSeek real models and legacy display aliases through one validator", () => {
+    expect(resolveModelSelection("deepseek-chat", defaultConfig.providers)).toMatchObject({
+      model: "deepseek-chat",
+      provider: "deepseek",
+      legacyAlias: false,
+    });
+    expect(resolveModelSelection("deepseek-v4-pro", defaultConfig.providers)).toMatchObject({
+      model: "deepseek-reasoner",
+      provider: "deepseek",
+      legacyAlias: true,
+    });
+    expect(() => resolveModelSelection("deepseek-v4-invalid", defaultConfig.providers)).toThrow(
+      "未知模型",
+    );
+  });
+
   it("allows env to override default DeepSeek model and Linghun default model", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
-    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-v4-pro");
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-reasoner");
     vi.stubEnv("LINGHUN_DEFAULT_MODEL", "gpt-5.5");
     vi.resetModules();
     const { defaultConfig: envDefaultConfig, loadConfig: envLoadConfig } = await import(
@@ -179,16 +243,35 @@ describe("config directories", () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
     const config = await envLoadConfig(project);
 
-    expect(envDefaultConfig.providers.deepseek.model).toBe("deepseek-v4-pro");
-    expect(config.providers.deepseek.model).toBe("deepseek-v4-pro");
+    expect(envDefaultConfig.providers.deepseek.model).toBe("deepseek-reasoner");
+    expect(config.providers.deepseek.model).toBe("deepseek-reasoner");
     expect(
       envDefaultConfig.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel,
-    ).toBe("deepseek-v4-pro");
+    ).toBe("deepseek-reasoner");
     expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel).toBe(
-      "deepseek-v4-pro",
+      "deepseek-reasoner",
     );
     expect(envDefaultConfig.defaultModel).toBe("gpt-5.5");
     expect(config.defaultModel).toBe("gpt-5.5");
+  });
+
+  it("normalizes legacy LINGHUN_DEEPSEEK_MODEL before runtime defaults use it", async () => {
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-v4-pro");
+    vi.resetModules();
+    const { defaultConfig: envDefaultConfig } = await import("./index.js");
+
+    expect(envDefaultConfig.providers.deepseek.model).toBe("deepseek-reasoner");
+    expect(
+      envDefaultConfig.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel,
+    ).toBe("deepseek-reasoner");
+  });
+
+  it("normalizes legacy LINGHUN_DEFAULT_MODEL before runtime defaults use it", async () => {
+    vi.stubEnv("LINGHUN_DEFAULT_MODEL", "deepseek-v4-flash");
+    vi.resetModules();
+    const { defaultConfig: envDefaultConfig } = await import("./index.js");
+
+    expect(envDefaultConfig.defaultModel).toBe("deepseek-chat");
   });
 
   it("keeps LINGHUN_OPENAI_MODEL when project settings contain the placeholder model", async () => {
@@ -327,7 +410,7 @@ describe("config directories", () => {
     );
 
     const legacy = await loadConfig(project);
-    await saveModelRoute("planner", "deepseek-v4-flash", project);
+    await saveModelRoute("planner", "deepseek-chat", project);
     const raw = await readFile(getProjectSettingsPath(project), "utf8");
 
     expect(legacy.providers.deepseek.apiKey).toBe("sk-project-legacy-secret");
@@ -821,7 +904,7 @@ describe("config directories", () => {
       "utf8",
     );
 
-    await saveModelRoute("planner", "deepseek-v4-flash", project);
+    await saveModelRoute("planner", "deepseek-chat", project);
     const raw = await readFile(getProjectSettingsPath(project), "utf8");
 
     expect(raw).toContain('"defaultMode": "auto-review"');
@@ -1137,6 +1220,7 @@ describe("config directories", () => {
 
       expect(paths1.agentRuns).not.toBe(paths2.agentRuns);
       expect(paths1.failures).not.toBe(paths2.failures);
+      expect(paths1.cache).not.toBe(paths2.cache);
       expect(paths1.memorySession).not.toBe(paths2.memorySession);
 
       await mkdir(paths1.agentRuns, { recursive: true });
@@ -1150,6 +1234,42 @@ describe("config directories", () => {
 
       expect(files1).toEqual(["agent1.json"]);
       expect(files2).toEqual(["agent2.json"]);
+    });
+
+    it("uses a path-unique safe namespace for projects with the same basename", async () => {
+      const rootA = await mkdtemp(join(tmpdir(), "linghun-same-a-"));
+      const rootB = await mkdtemp(join(tmpdir(), "linghun-same-b-"));
+      const project1 = join(rootA, "same-name");
+      const project2 = join(rootB, "same-name");
+      const isolatedDataDir = await mkdtemp(join(tmpdir(), "linghun-same-data-"));
+      await mkdir(project1, { recursive: true });
+      await mkdir(project2, { recursive: true });
+
+      vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+      const paths1 = resolveStoragePaths(await loadConfig(project1), project1);
+      const paths2 = resolveStoragePaths(await loadConfig(project2), project2);
+      const expectedNamespace1 = createProjectDataNamespace(project1);
+      const expectedNamespace2 = createProjectDataNamespace(project2);
+      const namespace1 = paths1.agentRuns
+        .slice(isolatedDataDir.length)
+        .replaceAll("\\", "/")
+        .split("/")
+        .filter(Boolean)[1];
+      const namespace2 = paths2.agentRuns
+        .slice(isolatedDataDir.length)
+        .replaceAll("\\", "/")
+        .split("/")
+        .filter(Boolean)[1];
+
+      expect(paths1.agentRuns).not.toBe(paths2.agentRuns);
+      expect(namespace1).toBe(expectedNamespace1);
+      expect(namespace2).toBe(expectedNamespace2);
+      expect(namespace1).toMatch(/^same-name-[a-f0-9]{16}$/u);
+      expect(namespace2).toMatch(/^same-name-[a-f0-9]{16}$/u);
+      expect(namespace1).not.toBe(namespace2);
+      expect(namespace1).not.toMatch(/[\\/:*?"<>|]/u);
+      expect(namespace2).not.toMatch(/[\\/:*?"<>|]/u);
     });
 
     it("does not isolate when LINGHUN_DATA_DIR is not set", async () => {

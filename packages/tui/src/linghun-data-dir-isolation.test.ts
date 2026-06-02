@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LinghunConfig } from "@linghun/config";
-import { loadConfig, resolveStoragePaths } from "@linghun/config";
+import { getSessionRootDir, loadConfig, resolveStoragePaths } from "@linghun/config";
+import { SessionStore } from "@linghun/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import type { AgentRun } from "./tui-data-types.js";
@@ -187,6 +188,55 @@ describe("LINGHUN_DATA_DIR isolation", () => {
 
       expect(paths.logs).toContain(isolatedDataDir);
       expect(paths.logs).not.toContain(join(project, ".linghun"));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps runtime data separate for projects with the same basename", async () => {
+    const root1 = await mkdtemp(join(tmpdir(), "linghun-same-runtime-a-"));
+    const root2 = await mkdtemp(join(tmpdir(), "linghun-same-runtime-b-"));
+    const project1 = join(root1, "same-runtime");
+    const project2 = join(root2, "same-runtime");
+    const isolatedDataDir = await mkdtemp(join(tmpdir(), "linghun-data-"));
+    await mkdir(project1, { recursive: true });
+    await mkdir(project2, { recursive: true });
+
+    vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+    try {
+      const paths1 = resolveStoragePaths(await loadConfig(project1), project1);
+      const paths2 = resolveStoragePaths(await loadConfig(project2), project2);
+
+      for (const key of ["memorySession", "failures", "agentRuns", "cache", "index"] as const) {
+        expect(paths1[key]).toContain(isolatedDataDir);
+        expect(paths2[key]).toContain(isolatedDataDir);
+        expect(paths1[key]).not.toBe(paths2[key]);
+      }
+
+      await mkdir(paths1.failures, { recursive: true });
+      await mkdir(paths2.failures, { recursive: true });
+      await writeFile(join(paths1.failures, "one.json"), "{}", "utf8");
+      await writeFile(join(paths2.failures, "two.json"), "{}", "utf8");
+
+      expect(await readdir(paths1.failures)).toEqual(["one.json"]);
+      expect(await readdir(paths2.failures)).toEqual(["two.json"]);
+
+      const store1 = new SessionStore({
+        sessionRootDir: getSessionRootDir(),
+        projectPath: project1,
+      });
+      const store2 = new SessionStore({
+        sessionRootDir: getSessionRootDir(),
+        projectPath: project2,
+      });
+      const session1 = await store1.create();
+      const session2 = await store2.create();
+
+      expect(session1.transcriptPath).toContain(isolatedDataDir);
+      expect(session2.transcriptPath).toContain(isolatedDataDir);
+      expect(session1.transcriptPath).not.toBe(session2.transcriptPath);
+      await expect(store1.resume(session2.id)).rejects.toThrow("未找到会话");
     } finally {
       vi.unstubAllEnvs();
     }

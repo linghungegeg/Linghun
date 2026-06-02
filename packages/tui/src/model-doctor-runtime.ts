@@ -26,6 +26,7 @@ import {
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
+import { isDeepSeekApiModel, normalizeDeepSeekModelName } from "@linghun/shared";
 import {
   type ProviderCircuitBreakerState,
   formatCooldownDoctorLine,
@@ -733,10 +734,11 @@ export function routeSupportsCapability(
 }
 
 export function inferProviderForRouteModel(model: string, config: LinghunConfig): string {
+  const normalized = normalizeDeepSeekModelName(model);
   for (const [providerId, provider] of Object.entries(config.providers)) {
-    if (provider.model === model) {
+    if (provider.model === model || provider.model === normalized) {
       return providerId;
     }
   }
-  return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
+  return isDeepSeekApiModel(normalized) ? "deepseek" : "openai-compatible";
 }

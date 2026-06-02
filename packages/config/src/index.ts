@@ -1,11 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import {
+  DEEPSEEK_API_MODELS,
   type Language,
   type PermissionMode,
+  canonicalPathForCompare,
+  isDeepSeekApiModel,
   isRawPermissionMode,
+  normalizeDeepSeekModelName,
+  normalizePathSeparators,
   normalizePermissionMode,
 } from "@linghun/shared";
 
@@ -247,6 +252,45 @@ export function isDefaultPlaceholderModel(model: string | undefined): boolean {
   return defaultPlaceholderModelNames.has(model);
 }
 
+export type ResolvedModelSelection = {
+  inputModel: string;
+  model: string;
+  provider: string;
+  legacyAlias: boolean;
+};
+
+export function resolveModelSelection(
+  model: string,
+  providers: Record<string, ProviderConfig>,
+): ResolvedModelSelection {
+  const inputModel = model.trim();
+  if (!inputModel) {
+    throw new Error("模型名不能为空。");
+  }
+  const normalized = normalizeDeepSeekModelName(inputModel);
+  for (const [providerId, provider] of Object.entries(providers)) {
+    if (provider.model === normalized) {
+      return {
+        inputModel,
+        model: normalized,
+        provider: providerId,
+        legacyAlias: normalized !== inputModel,
+      };
+    }
+  }
+  if (isDeepSeekApiModel(normalized) && providers.deepseek) {
+    return {
+      inputModel,
+      model: normalized,
+      provider: "deepseek",
+      legacyAlias: normalized !== inputModel,
+    };
+  }
+  throw new Error(
+    `未知模型：${inputModel}。DeepSeek 可用真实模型：${DEEPSEEK_API_MODELS.join("、")}。`,
+  );
+}
+
 // D.13J Block 1：上一次 mergeProviderEnvConfig 的合并摘要。
 // doctor 能据此明确告诉用户："你 ~/.linghun/provider.env 覆盖了 modelRoutes / providers / defaultModel"。
 // 仅记录字段是否覆盖、provider id 列表，**绝不**记录 apiKey、baseUrl、modelRoutes 内容等敏感数据。
@@ -301,8 +345,12 @@ export type LinghunConfig = {
 // 现役默认改为 `deepseek-chat`；当用户设置 LINGHUN_DEEPSEEK_MODEL 时跟随该值。
 // `defaultPlaceholderModelNames` 仍保留 deepseek-v4-flash / deepseek-v4-pro / openai-compatible-model
 // 用于 doctor warning 与测试 fixture，识别能力不变。
-const defaultDeepSeekModel = process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-chat";
-const defaultLinghunModel = process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel;
+const defaultDeepSeekModel = normalizeDeepSeekModelName(
+  process.env.LINGHUN_DEEPSEEK_MODEL ?? "deepseek-chat",
+);
+const defaultLinghunModel = normalizeDeepSeekModelName(
+  process.env.LINGHUN_DEFAULT_MODEL ?? defaultDeepSeekModel,
+);
 const openAiCompatibleModelPlaceholder = "openai-compatible-model";
 const defaultOpenAiEndpointProfile = normalizeEndpointProfile(
   process.env.LINGHUN_OPENAI_ENDPOINT_PROFILE,
@@ -629,7 +677,14 @@ export function resolveStoragePaths(
     index: resolveStorageLocation(config.storage.index, projectPath, home, "index"),
     logs: resolveStorageLocation(config.storage.logs, projectPath, home, "logs"),
     jobs: resolveStorageLocation(config.storage.jobs, projectPath, home, "jobs"),
-    cache: resolveStorageLocation(config.storage.cache, projectPath, home, "cache"),
+    cache: resolveStorageLocation(
+      process.env.LINGHUN_DATA_DIR && config.storage.cache.scope === "user"
+        ? { scope: "project" }
+        : config.storage.cache,
+      projectPath,
+      home,
+      "cache",
+    ),
     agentRuns: resolveStorageLocation({ scope: "project" }, projectPath, home, "agent-runs"),
     failures: resolveStorageLocation({ scope: "project" }, projectPath, home, "failures"),
   };
@@ -651,8 +706,7 @@ function resolveStorageLocation(
   // multi-window, and development scenarios.
   const dataRoot = process.env.LINGHUN_DATA_DIR;
   if (location.scope === "project" && dataRoot) {
-    const projectName = basename(projectPath) || "project";
-    const projectNamespace = `projects/${projectName}`;
+    const projectNamespace = join("projects", createProjectDataNamespace(projectPath));
     return defaultSubdir
       ? join(dataRoot, projectNamespace, defaultSubdir)
       : join(dataRoot, projectNamespace);
@@ -661,6 +715,22 @@ function resolveStorageLocation(
   const root =
     location.scope === "project" ? getProjectConfigDir(projectPath) : getUserDataDir(home);
   return defaultSubdir ? join(root, defaultSubdir) : root;
+}
+
+export function createProjectDataNamespace(projectPath: string): string {
+  const canonical = canonicalPathForCompare(normalizePathSeparators(resolve(projectPath)), true);
+  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  const readable = sanitizeProjectNamespaceSegment(basename(resolve(projectPath)) || "project");
+  return `${readable}-${hash}`;
+}
+
+function sanitizeProjectNamespaceSegment(value: string): string {
+  const safe = value
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 48);
+  return safe || "project";
 }
 
 export function getProjectSettingsPath(projectPath = process.cwd()): string {
@@ -1064,14 +1134,16 @@ export async function saveDefaultModel(
   projectPath = process.cwd(),
 ): Promise<LinghunConfig> {
   const current = await loadConfig(projectPath);
+  const resolved = resolveModelSelection(model, current.providers);
+  const providerConfig = current.providers[resolved.provider];
   const next: LinghunConfig = {
     ...current,
-    defaultModel: model,
+    defaultModel: resolved.model,
     providers: {
       ...current.providers,
-      deepseek: {
-        ...current.providers.deepseek,
-        model,
+      [resolved.provider]: {
+        ...providerConfig,
+        model: resolved.model,
       },
     },
   };
@@ -1085,13 +1157,15 @@ export async function saveModelRoute(
   projectPath = process.cwd(),
 ): Promise<LinghunConfig> {
   const current = await loadConfig(projectPath);
-  const provider = inferProviderForModel(model, current.providers);
+  const resolved = resolveModelSelection(model, current.providers);
   const next: LinghunConfig = {
     ...current,
     modelRoutes: {
       ...current.modelRoutes,
       routes: current.modelRoutes.routes.map((route) =>
-        route.role === role ? { ...route, provider, primaryModel: model } : route,
+        route.role === role
+          ? { ...route, provider: resolved.provider, primaryModel: resolved.model }
+          : route,
       ),
     },
   };
@@ -1719,7 +1793,7 @@ function inferProviderForModel(model: string, providers: Record<string, Provider
       return providerId;
     }
   }
-  return model.startsWith("deepseek-") ? "deepseek" : "openai-compatible";
+  return isDeepSeekApiModel(normalizeDeepSeekModelName(model)) ? "deepseek" : "openai-compatible";
 }
 
 export async function ensureConfigDirs(projectPath = process.cwd()): Promise<string[]> {

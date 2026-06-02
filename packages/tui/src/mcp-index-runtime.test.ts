@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { summarizeIndexResult } from "./index-result-presenter.js";
+import { isSupportiveIndexEvidence } from "./mcp-index-runtime.js";
 
 describe("mcp-index-runtime", () => {
   test("summarizeIndexResult handles search_graph results", () => {
@@ -76,5 +77,45 @@ describe("mcp-index-runtime", () => {
     expect(summary).toContain("nodes/edges: 3725/8068");
     expect(summary).toContain("Class=100");
     expect(summary).toContain("CALLS=3000");
+  });
+
+  test("isSupportiveIndexEvidence rejects missing/stale/error/status-only summaries", () => {
+    const context = {
+      index: { status: "ready", projectName: "F-Linghun" },
+    };
+
+    expect(isSupportiveIndexEvidence(context as never, "search missing", "Index: missing")).toBe(
+      false,
+    );
+    expect(isSupportiveIndexEvidence(context as never, "search stale", "Index status: stale")).toBe(
+      false,
+    );
+    expect(
+      isSupportiveIndexEvidence(context as never, "search none", "Index search\n- no matches"),
+    ).toBe(false);
+    expect(
+      isSupportiveIndexEvidence(context as never, "status", "Index status ready; nodes=10"),
+    ).toBe(false);
+  });
+
+  test("isSupportiveIndexEvidence accepts ready search/architecture summaries with real code facts", () => {
+    const context = {
+      index: { status: "ready", projectName: "F-Linghun" },
+    };
+
+    expect(
+      isSupportiveIndexEvidence(
+        context as never,
+        "search OpenAiCompatibleProvider",
+        "Index search\n- #1 path=packages/providers/src/index.ts symbol=OpenAiCompatibleProvider",
+      ),
+    ).toBe(true);
+    expect(
+      isSupportiveIndexEvidence(
+        context as never,
+        "architecture",
+        "Index architecture\n- nodes/edges: 3725/8068\n- node labels: Class=100, Function=500",
+      ),
+    ).toBe(true);
   });
 });

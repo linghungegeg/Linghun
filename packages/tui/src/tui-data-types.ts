@@ -60,8 +60,8 @@ export type BackgroundTaskState = {
 export type WorkflowStepState = {
   id: string;
   title: string;
-  status: "queued" | "running" | "completed" | "failed" | "blocked";
-  runtime: "agent" | "verification" | "details";
+  status: "queued" | "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+  runtime: "agent" | "job" | "verification" | "details";
   summary?: string;
   evidenceRefs: string[];
   startedAt?: string;
@@ -421,6 +421,7 @@ export type AgentRun = {
   isolation?: "worktree";
   cancelTokenId?: string;
   heartbeatAt?: string;
+  staleReason?: string;
   summary: string;
   contextSummary: string;
   cost: {
@@ -450,6 +451,9 @@ export type DurableJobAgentStatus =
   | "running"
   | "queued"
   | "sleeping"
+  | "skipped"
+  | "budget_limited"
+  | "resource_limited"
   | "blocked"
   | "stale"
   | "cancelled"
@@ -462,10 +466,16 @@ export type DurableJobAgent = {
   type: AgentType;
   displayName?: string;
   goal: string;
+  task?: string;
   status: DurableJobAgentStatus;
+  runId?: string;
+  statusReason?: string;
   budgetTokens: number;
   owner?: string;
   heartbeatAt?: string;
+  scheduledAt?: string;
+  startedAt?: string;
+  endedAt?: string;
   summary?: string;
 };
 
@@ -528,6 +538,8 @@ export type DurableJobState = {
     // enforcement 不触发，UI 显示"预算：未设置"。缺省（旧 state.json）按未设置处理。
     explicit?: { tokens?: boolean; steps?: boolean; runtime?: boolean };
   };
+  effectiveAgentCap?: number;
+  capReason?: string;
   timeoutMs: number;
   permissionPolicy: PermissionMode;
   allowEdit: boolean;
@@ -785,6 +797,7 @@ export type MemoryState = {
   disabled: MemoryCandidate[];
   retired: MemoryCandidate[];
   learningMode: MemoryLearningMode;
+  learningModeSource?: "default" | "persisted";
   lastLearningRun?: MemoryLearningRun;
   lastHandoff?: HandoffPacket;
   lastResumeReadonly?: boolean;
@@ -836,6 +849,7 @@ export type FailureLearningState = {
   directory: string;
   projectScope: string;
   records: FailureLearningRecord[];
+  degradedWarnings: string[];
 };
 
 export type ExtensionSource = "local" | "official" | "third-party";
@@ -918,11 +932,11 @@ export type WorkflowState = {
     id: string;
     goal: string;
     planId: string;
-    status: "running" | "completed" | "failed" | "blocked";
+    status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
     steps: WorkflowStepState[];
     startedAt: string;
     endedAt?: string;
-    result: "partial" | "failed" | "blocked";
+    result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
   };
 };
 

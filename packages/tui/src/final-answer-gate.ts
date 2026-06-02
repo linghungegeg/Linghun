@@ -5,6 +5,7 @@ import type { TuiContext } from "./index.js";
 import {
   evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
+  evidenceSupportsLocalCodeFact,
   finalAnswerHasCompletenessClassification,
   hasArchitectureEvidenceForClaims,
 } from "./model-loop-runtime.js";
@@ -86,14 +87,8 @@ export function checkEvidenceGate(text: string, context: TuiContext): string | n
     return null;
   }
   // D.13U：不再"任意 evidence 即放行"。要求至少一条本地代码事实证据
-  // （file_read / grep_result / index_query 或带 git_local_fact / local_read 标记）。
-  const hasLocalCodeEvidence = context.evidence.some(
-    (item) =>
-      item.kind === "file_read" ||
-      item.kind === "grep_result" ||
-      item.kind === "index_query" ||
-      item.supportsClaims.some((c) => c === "local_read" || c === "git_local_fact"),
-  );
+  // （file_read / grep_result / 精确 index_code_fact，或带 git_local_fact / local_read 标记）。
+  const hasLocalCodeEvidence = context.evidence.some(evidenceSupportsLocalCodeFact);
   if (hasLocalCodeEvidence) {
     return null;
   }

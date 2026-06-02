@@ -728,11 +728,14 @@ export function isEvidenceStaleForClaim(
 
 const COMPLETION_PASS_PATTERNS: RegExp[] = [
   /\u5df2\u5b8c\u6210/u, // \u5df2\u5b8c\u6210
+  /\u5168\u90e8\u5b8c\u6210/u, // \u5168\u90e8\u5b8c\u6210
   /\u5df2\u4fee\u590d/u, // \u5df2\u4fee\u590d
   /\u5df2\u9a8c\u8bc1/u, // \u5df2\u9a8c\u8bc1
   /\u6d4b\u8bd5\u901a\u8fc7/u, // \u6d4b\u8bd5\u901a\u8fc7
   /\u6210\u719f\u53ef\u53d1\u5e03/u, // \u6210\u719f\u53ef\u53d1\u5e03
   /\u65e0\u98ce\u9669/u, // \u65e0\u98ce\u9669
+  /\u65e0\u95ee\u9898/u, // \u65e0\u95ee\u9898
+  /\u6ca1\u95ee\u9898/u, // \u6ca1\u95ee\u9898
   /\bbuild\s+(?:has\s+)?passed\b/iu,
   /\btsc\s+(?:has\s+)?passed\b/iu,
   /\bdiff[-\s]?check\s+passed\b/iu,
@@ -912,22 +915,131 @@ function evidenceTokens(record: EvidenceRecord): string {
     .toLowerCase();
 }
 
-function evidenceSupportsCompletion(record: EvidenceRecord): boolean {
-  if (record.kind === "test_result") {
-    return /(?:status[=:\s]+)?pass(?![a-z])/iu.test(evidenceTokens(record));
+function claimWindow(text: string, phrase: string): string {
+  const index = text.indexOf(phrase);
+  if (index < 0) return phrase;
+  return text.slice(Math.max(0, index - 48), index + phrase.length + 48).toLowerCase();
+}
+
+function isTestCompletionClaim(text: string, phrase: string): boolean {
+  const lowered = phrase.toLowerCase();
+  return /(?:测试|tests?\s+passed|vitest|jest|pytest|go\s+test|cargo\s+test)/iu.test(lowered);
+}
+
+function isTypecheckCompletionClaim(text: string, phrase: string): boolean {
+  const lowered = phrase.toLowerCase();
+  return (
+    /(?:typecheck|type\s+check|tsc|类型检查)/iu.test(lowered) ||
+    (lowered === "pass" &&
+      /(?:typecheck|type\s+check|tsc|类型检查)/iu.test(claimWindow(text, phrase)))
+  );
+}
+
+function isBuildCompletionClaim(text: string, phrase: string): boolean {
+  const lowered = phrase.toLowerCase();
+  return (
+    /(?:build|构建)/iu.test(lowered) ||
+    (lowered === "pass" && /(?:build|构建)/iu.test(claimWindow(text, phrase)))
+  );
+}
+
+function isDiffCheckCompletionClaim(text: string, phrase: string): boolean {
+  const lowered = phrase.toLowerCase();
+  return (
+    /(?:diff[-\s]?check|git\s+diff\s+--check)/iu.test(lowered) ||
+    (lowered === "pass" &&
+      /(?:diff[-\s]?check|git\s+diff\s+--check)/iu.test(claimWindow(text, phrase)))
+  );
+}
+
+function isSmokeCompletionClaim(text: string, phrase: string): boolean {
+  const lowered = phrase.toLowerCase();
+  return (
+    /(?:smoke|冒烟)/iu.test(lowered) ||
+    (lowered === "pass" && /(?:smoke|冒烟)/iu.test(claimWindow(text, phrase)))
+  );
+}
+
+function evidenceSupportsTaskCompletion(record: EvidenceRecord): boolean {
+  const tokens = evidenceTokens(record);
+  return (
+    /(?:task_completed|completion_evidence|任务完成证据)/iu.test(tokens) &&
+    /(?:scope[:=]|scope_|范围[:=]|范围_)/iu.test(tokens) &&
+    /(?:validation[:=]|validation_|验证[:=]|验证_)/iu.test(tokens) &&
+    /(?:remaining[_\s-]?risk[:=]|remaining[_\s-]?risk_|residual[_\s-]?risk[:=]|risk[:=]|剩余风险[:=]|剩余风险_)/iu.test(
+      tokens,
+    )
+  );
+}
+
+function evidenceSupportsCommandClaim(
+  record: EvidenceRecord,
+  claim: "test" | "typecheck" | "build" | "diff_check" | "smoke",
+): boolean {
+  const tokens = evidenceTokens(record);
+  if (claim === "test") {
+    return /(?:test_passed|tests?\s+passed|测试通过)/iu.test(tokens);
+  }
+  if (claim === "typecheck") {
+    return /(?:typecheck_passed|typecheck\s+passed|tsc\s+passed|类型检查通过)/iu.test(tokens);
+  }
+  if (claim === "build") {
+    return /(?:build_passed|build\s+passed|构建通过)/iu.test(tokens);
+  }
+  if (claim === "diff_check") {
+    return /(?:diff_check_passed|diff[-\s]?check\s+passed)/iu.test(tokens);
+  }
+  return /(?:smoke_passed|smoke_ran|smoke\s+passed|冒烟通过)/iu.test(tokens);
+}
+
+function evidenceSupportsCompletionClaim(
+  record: EvidenceRecord,
+  text: string,
+  match: FinalAnswerClaimMatch,
+): boolean {
+  if (isTestCompletionClaim(text, match.phrase)) {
+    return evidenceSupportsCommandClaim(record, "test");
+  }
+  if (isTypecheckCompletionClaim(text, match.phrase)) {
+    return evidenceSupportsCommandClaim(record, "typecheck");
+  }
+  if (isBuildCompletionClaim(text, match.phrase)) {
+    return evidenceSupportsCommandClaim(record, "build");
+  }
+  if (isDiffCheckCompletionClaim(text, match.phrase)) {
+    return evidenceSupportsCommandClaim(record, "diff_check");
+  }
+  if (isSmokeCompletionClaim(text, match.phrase)) {
+    return evidenceSupportsCommandClaim(record, "smoke");
+  }
+  return evidenceSupportsTaskCompletion(record);
+}
+
+function evidenceSupportsIndexCodeFact(record: EvidenceRecord): boolean {
+  if (record.kind !== "index_query") {
+    return false;
+  }
+  if (!record.supportsClaims.includes("index_code_fact")) {
+    return false;
   }
   const tokens = evidenceTokens(record);
-  return /(?:test_passed|build_passed|typecheck_passed|diff_check_passed|smoke_passed|verified|tests passed|\u5df2\u9a8c\u8bc1|\u9a8c\u8bc1\u901a\u8fc7|\u6d4b\u8bd5\u901a\u8fc7)/iu.test(
+  if (
+    /(?:missing|stale|error|not ready|no matches|status[:=\s]+(?:missing|stale|error))/iu.test(
+      tokens,
+    )
+  ) {
+    return false;
+  }
+  return /(?:path=|file_path|file:|symbol=|snippet=|match=|nodes\/edges:\s*\d+\/\d+|\b(?:class|function|method|calls|imports)=\d+)/iu.test(
     tokens,
   );
 }
 
-function evidenceSupportsCodeFact(record: EvidenceRecord): boolean {
-  if (
-    record.kind === "file_read" ||
-    record.kind === "grep_result" ||
-    record.kind === "index_query"
-  ) {
+export function evidenceSupportsLocalCodeFact(record: EvidenceRecord): boolean {
+  if (record.kind === "index_query") {
+    return evidenceSupportsIndexCodeFact(record);
+  }
+  if (record.kind === "file_read" || record.kind === "grep_result") {
     return true;
   }
   const tokens = evidenceTokens(record);
@@ -1037,9 +1149,24 @@ export function evaluateFinalAnswerClaims(
     let supported = false;
     let supporter: (record: EvidenceRecord) => boolean;
     if (kind === "completion_pass") {
-      supporter = evidenceSupportsCompletion;
-    } else if (kind === "code_fact") {
-      supporter = evidenceSupportsCodeFact;
+      const completionMatches = matches.filter((item) => item.kind === "completion_pass");
+      const matching = evidence.filter((record) =>
+        completionMatches.some((match) => evidenceSupportsCompletionClaim(record, text, match)),
+      );
+      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
+      supported = completionMatches.every((match) =>
+        fresh.some((record) => evidenceSupportsCompletionClaim(record, text, match)),
+      );
+      if (!supported) {
+        unsupported.push(kind);
+        if (matching.length > 0 && fresh.length === 0) {
+          staleKinds.push(kind);
+        }
+      }
+      continue;
+    }
+    if (kind === "code_fact") {
+      supporter = evidenceSupportsLocalCodeFact;
     } else if (kind === "external_current_fact") {
       supporter = evidenceSupportsExternalCurrent;
     } else if (kind === "ccb_parity") {

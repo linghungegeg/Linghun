@@ -1,12 +1,12 @@
 import type { Writable } from "node:stream";
 import {
   type ModelRole,
-  type ProviderConfig,
   type ProviderEnvSetup,
   ensureProviderEnvTemplate,
   getProviderEnvPath,
   loadConfig,
   providerEnvExists,
+  resolveModelSelection,
   saveModelRoute,
   saveProviderEnvSetup,
 } from "@linghun/config";
@@ -55,24 +55,6 @@ function deps(): ModelCommandRuntimeDeps {
   return runtimeDeps;
 }
 
-function findProviderForModel(
-  model: string,
-  providers: Record<string, ProviderConfig>,
-): string | undefined {
-  // First, check if any provider explicitly has this model configured
-  for (const [providerId, provider] of Object.entries(providers)) {
-    if (provider.model === model) {
-      return providerId;
-    }
-  }
-  // For deepseek- prefix models, only allow if deepseek provider exists
-  if (model.startsWith("deepseek-")) {
-    return providers.deepseek ? "deepseek" : undefined;
-  }
-  // No automatic fallback to openai-compatible for unknown models
-  return undefined;
-}
-
 export async function handleModelCommand(
   args: string[],
   context: TuiContext,
@@ -113,21 +95,31 @@ export async function handleModelCommand(
       writeLine(output, "用法：/model set <model>");
       return;
     }
-    // Validate model exists in configured providers
-    const provider = findProviderForModel(model, context.config.providers);
-    if (!provider) {
-      writeLine(output, `错误：未找到模型 "${model}"。请先配置对应 provider 或运行 /model setup。`);
+    let resolved: ReturnType<typeof resolveModelSelection>;
+    try {
+      resolved = resolveModelSelection(model, context.config.providers);
+    } catch (error) {
+      writeLine(output, `错误：${error instanceof Error ? error.message : "模型不可用。"}`);
       return;
     }
     // Set executor role and update defaultModel
     context.config = await saveModelRoute("executor", model, context.projectPath);
-    context.model = model;
+    context.model = resolved.model;
     const route = getRoleRoute(context.config, "executor");
-    writeLine(output, `已设置默认模型为 ${model}（provider=${route.provider}，role=executor）`);
-    if (context.config.defaultModel !== model) {
+    writeLine(
+      output,
+      `已设置默认模型为 ${resolved.model}（provider=${route.provider}，role=executor）`,
+    );
+    if (resolved.legacyAlias) {
       writeLine(
         output,
-        `说明：executor role 已设置为 ${model}，defaultModel=${context.config.defaultModel}`,
+        `说明：${resolved.inputModel} 是 legacy/display alias，已保存为 ${resolved.model}`,
+      );
+    }
+    if (context.config.defaultModel !== resolved.model) {
+      writeLine(
+        output,
+        `说明：executor role 已设置为 ${resolved.model}，defaultModel=${context.config.defaultModel}`,
       );
     }
     return;
@@ -327,6 +319,13 @@ export async function handleModelRouteCommand(
       );
       return;
     }
+    let resolved: ReturnType<typeof resolveModelSelection>;
+    try {
+      resolved = resolveModelSelection(model, context.config.providers);
+    } catch (error) {
+      writeLine(output, `错误：${error instanceof Error ? error.message : "模型不可用。"}`);
+      return;
+    }
     context.config = await saveModelRoute(role, model, context.projectPath);
     const route = getRoleRoute(context.config, role);
     if (role === "executor") {
@@ -336,6 +335,12 @@ export async function handleModelRouteCommand(
       output,
       `已设置 ${role} role：provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
     );
+    if (resolved.legacyAlias) {
+      writeLine(
+        output,
+        `说明：${resolved.inputModel} 是 legacy/display alias，已保存为 ${resolved.model}`,
+      );
+    }
     if (role === "executor" && context.config.defaultModel !== route.primaryModel) {
       writeLine(
         output,
