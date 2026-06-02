@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EndpointProfile } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
-import type { ModelInfo } from "@linghun/providers";
+import { type ModelInfo, resolveProviderRuntimeContract } from "@linghun/providers";
 import { LINGHUN_CLI_NAME, LINGHUN_NAME, LINGHUN_VERSION } from "@linghun/shared";
 
 export const helpText = `${LINGHUN_NAME} ${LINGHUN_VERSION}
@@ -186,7 +186,16 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
         `WARN: project-settings provider=${target.providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
       );
     }
-    const endpointProfile = target.provider.endpointProfile ?? "chat_completions";
+    const contract = resolveProviderRuntimeContract({
+      id: target.providerId,
+      type: target.provider.type,
+      baseUrl: target.provider.baseUrl,
+      apiKey: target.provider.apiKey,
+      model: target.provider.model,
+      endpointProfile: target.provider.endpointProfile,
+      reasoningLevel: target.provider.reasoningLevel,
+    });
+    const endpointProfile = contract.endpointProfile;
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       target.provider.baseUrl,
       endpointProfile,
@@ -204,7 +213,12 @@ async function runModelCommand(argv: string[]): Promise<CliResult> {
     const apiKeyStatus = target.provider.apiKey
       ? `present source=${keySource} masked=${maskSecret(target.provider.apiKey)}`
       : "missing source=missing";
-    const header = `模型诊断：${target.modelId}\nprovider=${target.providerId} model=${target.modelId} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nbaseUrl=${target.provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli; full route diagnostics: TUI /model doctor\n`;
+    const reasoningStatus = contract.sendReasoning
+      ? `sent level=${target.provider.reasoningLevel ?? "request"}`
+      : target.provider.reasoningLevel
+        ? `not-sent level=${target.provider.reasoningLevel}`
+        : "not-configured";
+    const header = `模型诊断：${target.modelId}\nprovider=${target.providerId} model=${target.modelId} endpointProfile=${endpointProfile} endpointPath=${baseUrlDiagnostic.endpointPath}\nreasoning=${reasoningStatus}\nbaseUrl=${target.provider.baseUrl ? "present" : "missing"}\napiKey=${apiKeyStatus}\nlimited=headless-cli; full route diagnostics: TUI /model doctor\n`;
     const warningText = warnings.length > 0 ? `${warnings.join("\n")}\n` : "";
     if (problems.length === 0) {
       return { stdout: `${header}${warningText}状态：配置看起来可用。\n`, stderr: "", exitCode: 0 };
@@ -243,6 +257,7 @@ type DoctorProviderConfig = {
   // 否则 LinghunConfig.providers 不能赋给 DoctorConfig。doctor 只读这些字段做诊断，
   // 不影响 provider/model route 真实选择逻辑。
   endpointProfile?: EndpointProfile;
+  reasoningLevel?: string;
 };
 
 type DoctorConfig = {

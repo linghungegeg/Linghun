@@ -755,6 +755,31 @@ describe("model-doctor-runtime", () => {
       expect(output).toContain("reason=");
     });
 
+    it("uses runtime contract endpoint profile for responses suffix reasoning diagnostics", async () => {
+      const config: LinghunConfig = {
+        ...baseConfig,
+        providers: {
+          ...baseConfig.providers,
+          "openai-compatible": {
+            type: "openai-compatible",
+            baseUrl: "https://relay.example.com/responses",
+            apiKey: "sk-test-secret",
+            model: "gpt-5.5",
+            reasoningLevel: "High",
+          },
+        },
+      };
+
+      const output = await formatModelRouteDoctor(makeContext(config));
+
+      expect(output).toContain(
+        "provider=openai-compatible model=gpt-5.5 runtimeProfile=openai_responses endpointProfile=responses",
+      );
+      expect(output).toContain("endpointPath=/responses");
+      expect(output).toContain("reasoning=effective/sent level=High");
+      expect(output).not.toContain("reasoning=ignored/unsupported");
+    });
+
     it("D.13H model doctor shows anthropic context editing disabled reason without leaking apiKey", async () => {
       // 默认 contextEditingEnabled 未配置 → enabled=no、sendable=no、reason="disabled by config"。
       // 即使 apiKey 配置了完整字符串，doctor 也不能在输出里出现 raw apiKey 或 raw beta header。

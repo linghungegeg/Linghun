@@ -32,8 +32,7 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
       err("流解码失败：eventstream CRC 校验不一致"),
       "zh-CN",
     );
-    expect(text).toContain("模型服务或网络传输问题");
-    expect(text).toContain("不是 Linghun 本地缺陷");
+    expect(text).toContain("模型服务、网关传输或本地兼容层问题");
     expect(text).not.toBe("模型请求未完成。可运行 /model doctor 查看详情后重试。");
   });
 
@@ -47,13 +46,20 @@ describe("D.14D-R2 P2-1 provider transit failure attribution", () => {
     expect(retry).toContain("transport issue");
   });
 
-  it("PROVIDER_STREAM_ERROR is attributed as provider/transit failure", () => {
-    const text = formatProviderFailurePrimary(
+  it("PROVIDER_STREAM_ERROR is classified by its inner provider error text", () => {
+    const quota = formatProviderFailurePrimary(
       err("quota exceeded", "PROVIDER_STREAM_ERROR"),
       "zh-CN",
     );
-    expect(text).toContain("模型服务或网络传输问题");
-    expect(text).toContain("不是 Linghun 本地缺陷");
+    const gateway = formatProviderFailurePrimary(
+      err(
+        "An error occurred while processing your request. You can retry your request.",
+        "PROVIDER_STREAM_ERROR",
+      ),
+      "zh-CN",
+    );
+    expect(quota).toContain("额度");
+    expect(gateway).toContain("网关");
   });
 
   it("does not leak baseUrl / api key / raw response in the attribution", () => {

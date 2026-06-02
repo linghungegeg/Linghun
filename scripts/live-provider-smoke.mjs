@@ -1,49 +1,91 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 process.exitCode = await main();
 
 async function main() {
-  if (!process.env.LINGHUN_DEEPSEEK_API_KEY && !process.env.LINGHUN_OPENAI_API_KEY) {
+  const providerEnv = await readProviderEnv();
+  const openAiApiKey = envValue("LINGHUN_OPENAI_API_KEY", providerEnv);
+  const deepSeekApiKey = envValue("LINGHUN_DEEPSEEK_API_KEY", providerEnv);
+  const openAiModel = envValue("LINGHUN_OPENAI_MODEL", providerEnv);
+  const deepSeekModel = envValue("LINGHUN_DEEPSEEK_MODEL", providerEnv);
+
+  if (!deepSeekApiKey && !openAiApiKey) {
     console.log(
-      "SKIPPED live provider smoke: set LINGHUN_DEEPSEEK_API_KEY or LINGHUN_OPENAI_API_KEY",
+      "SKIPPED live provider smoke: set LINGHUN_DEEPSEEK_API_KEY or LINGHUN_OPENAI_API_KEY in shell env or private provider.env",
     );
     return 0;
   }
 
-  if (process.env.LINGHUN_OPENAI_API_KEY && !process.env.LINGHUN_OPENAI_MODEL) {
+  if (openAiApiKey && !openAiModel) {
     console.error(
       "FAIL live provider smoke: LINGHUN_OPENAI_API_KEY is set but LINGHUN_OPENAI_MODEL is missing; set an explicit real model, no placeholder is used.",
     );
     return 1;
   }
 
-  if (
-    process.env.LINGHUN_DEEPSEEK_API_KEY &&
-    !process.env.LINGHUN_OPENAI_API_KEY &&
-    !process.env.LINGHUN_DEEPSEEK_MODEL
-  ) {
+  if (deepSeekApiKey && !openAiApiKey && !deepSeekModel) {
     console.error(
       "FAIL live provider smoke: LINGHUN_DEEPSEEK_API_KEY is set but LINGHUN_DEEPSEEK_MODEL is missing; set an explicit real model, no placeholder is used.",
     );
     return 1;
   }
 
-  const { DeepSeekProvider, OpenAiCompatibleProvider, normalizeProviderError } = await import(
-    "../packages/providers/dist/index.js"
-  );
+  const {
+    DeepSeekProvider,
+    OpenAiCompatibleProvider,
+    joinBaseUrlAndEndpoint,
+    normalizeProviderError,
+    resolveProviderBaseUrlDiagnostic,
+    resolveProviderRuntimeContract,
+  } = await import("../packages/providers/dist/index.js");
 
-  const provider = process.env.LINGHUN_OPENAI_API_KEY
-    ? new OpenAiCompatibleProvider({
+  const providerConfig = openAiApiKey
+    ? {
         id: "openai-compatible",
         type: "openai-compatible",
-        baseUrl: process.env.LINGHUN_OPENAI_BASE_URL,
-        apiKey: process.env.LINGHUN_OPENAI_API_KEY,
-        model: process.env.LINGHUN_OPENAI_MODEL,
+        baseUrl: envValue("LINGHUN_OPENAI_BASE_URL", providerEnv),
+        apiKey: openAiApiKey,
+        model: openAiModel,
+        endpointProfile: normalizeEndpointProfile(
+          envValue("LINGHUN_OPENAI_ENDPOINT_PROFILE", providerEnv),
+        ),
+        reasoningLevel: normalizeReasoningLevel(envValue("LINGHUN_INFERENCE_LEVEL", providerEnv)),
         supportsTools: false,
-      })
-    : new DeepSeekProvider({
-        apiKey: process.env.LINGHUN_DEEPSEEK_API_KEY,
-        model: process.env.LINGHUN_DEEPSEEK_MODEL,
+      }
+    : {
+        id: "deepseek",
+        type: "deepseek",
+        apiKey: deepSeekApiKey,
+        model: deepSeekModel,
         supportsTools: false,
-      });
+      };
+  const provider = openAiApiKey
+    ? new OpenAiCompatibleProvider(providerConfig)
+    : new DeepSeekProvider(providerConfig);
+  const contract = resolveProviderRuntimeContract(providerConfig);
+  const diagnostic = resolveProviderBaseUrlDiagnostic(
+    providerConfig.baseUrl,
+    contract.endpointProfile,
+  );
+  const endpointPath =
+    providerConfig.baseUrl && diagnostic.normalizedBaseUrl
+      ? new URL(joinBaseUrlAndEndpoint(diagnostic.normalizedBaseUrl, contract.endpoint)).pathname
+      : contract.endpoint;
+  console.log(
+    [
+      "live provider route:",
+      `provider=${providerConfig.id}`,
+      `model=${providerConfig.model}`,
+      `endpointProfile=${contract.endpointProfile}`,
+      `endpointPath=${endpointPath}`,
+      `reasoning=${contract.sendReasoning ? `sent level=${providerConfig.reasoningLevel ?? "request"}` : "not-sent"}`,
+      `baseUrl=${providerConfig.baseUrl ? "present" : "missing"}`,
+      `apiKey=${providerConfig.apiKey ? "present" : "missing"}`,
+      `source=${openAiApiKey ? providerEnvSource("LINGHUN_OPENAI_API_KEY", providerEnv) : providerEnvSource("LINGHUN_DEEPSEEK_API_KEY", providerEnv)}`,
+    ].join(" "),
+  );
 
   let text = "";
   let tool = false;
@@ -96,4 +138,69 @@ function printProviderFailure(error) {
   if (error.suggestion) {
     console.error(`suggestion: ${error.suggestion}`);
   }
+}
+
+async function readProviderEnv() {
+  try {
+    const raw = await readFile(join(homedir(), ".linghun", "provider.env"), "utf8");
+    const values = {};
+    for (const line of raw.split(/\r?\n/u)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const equalsIndex = trimmed.indexOf("=");
+      if (equalsIndex <= 0) continue;
+      const key = trimmed.slice(0, equalsIndex).trim();
+      const value = trimmed.slice(equalsIndex + 1).trim();
+      if (
+        [
+          "LINGHUN_OPENAI_BASE_URL",
+          "LINGHUN_OPENAI_API_KEY",
+          "LINGHUN_OPENAI_MODEL",
+          "LINGHUN_OPENAI_ENDPOINT_PROFILE",
+          "LINGHUN_INFERENCE_LEVEL",
+        ].includes(key)
+      ) {
+        values[key] = unquote(value);
+      }
+    }
+    return values;
+  } catch {
+    return {};
+  }
+}
+
+function envValue(key, providerEnv) {
+  return process.env[key] || providerEnv[key] || "";
+}
+
+function providerEnvSource(key, providerEnv) {
+  if (process.env[key]) return "shell-env";
+  if (providerEnv[key]) return "user-provider-env";
+  return "missing";
+}
+
+function normalizeEndpointProfile(value) {
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (!normalized) return "chat_completions";
+  if (["chat_completions", "responses", "anthropic_messages"].includes(normalized)) {
+    return normalized;
+  }
+  return "chat_completions";
+}
+
+function normalizeReasoningLevel(value) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "low") return "Low";
+  if (normalized === "medium") return "Medium";
+  if (normalized === "high") return "High";
+  return undefined;
+}
+
+function unquote(value) {
+  if (!value) return "";
+  const quote = value[0];
+  if ((quote === "'" || quote === '"') && value.endsWith(quote) && value.length > 1) {
+    return value.slice(1, -1);
+  }
+  return value;
 }

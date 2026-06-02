@@ -237,7 +237,7 @@ export function createExecuteExtraToolInputSchema(): unknown {
     additionalProperties: false,
     properties: {
       tool_name: { type: "string" },
-      params: { type: "object" },
+      params: { type: "object", additionalProperties: true },
     },
     required: ["tool_name"],
   };
@@ -299,7 +299,7 @@ export function createRunWorkflowInputSchema(): unknown {
       goal: { type: "string" },
       workflowId: { type: "string" },
       workflow_id: { type: "string" },
-      inputs: { type: "object" },
+      inputs: { type: "object", additionalProperties: true },
       runInBackground: { type: "boolean" },
       run_in_background: { type: "boolean" },
     },

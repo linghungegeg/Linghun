@@ -351,8 +351,10 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   }
   lines.push("- providers:");
   for (const [providerId, provider] of Object.entries(context.config.providers)) {
-    const endpointProfile = provider.endpointProfile ?? "chat_completions";
+    const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
+    const endpointProfile = contract.endpointProfile;
     const compatibilityProfile =
+      contract.compatibilityProfile ??
       provider.compatibilityProfile ??
       (provider.type === "deepseek" ? "deepseek" : "strict_openai_compatible");
     const reasoningLevel = provider.reasoningLevel;
@@ -400,7 +402,6 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     const keySource = provider.apiKey
       ? getProviderKeySource(providerId, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
       : undefined;
-    const contract = resolveProviderRuntimeContract({ id: providerId, ...provider });
     // 决策器输出：source / reason / warnings 让 /model doctor 显示"为什么是这个 endpoint"。
     // 仅作只读摘要追加，不改 contract / endpointProfile / endpointPath 主行的信号。
     const decision = resolveEffectiveEndpointProfile({
@@ -485,6 +486,10 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
         lines.push(
           `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${endpointProfile}`,
         );
+      } else if (provider.endpointProfile && provider.endpointProfile !== endpointProfile) {
+        lines.push(
+          `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${provider.endpointProfile}，runtimeEndpointProfile=${endpointProfile}`,
+        );
       }
     }
   }
@@ -511,9 +516,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   }
   if (context.lastProviderFailure) {
     const failure = context.lastProviderFailure;
-    const failureKind = toProviderFailureKind(
-      isProviderTransitFailureCode(failure.code) ? "transit" : failure.kind,
-    );
+    const failureKind = toProviderFailureKind(failure.kind);
     const humanKind = formatProviderFailureKindLabel(failureKind, context.language);
     if (isEn) {
       lines.push(
@@ -588,14 +591,6 @@ function toProviderFailureKind(value: string | undefined): ProviderFailureKind {
     return value;
   }
   return "generic";
-}
-
-function isProviderTransitFailureCode(code: string): boolean {
-  return (
-    code === "PROVIDER_STREAM_ERROR" ||
-    code === "PROVIDER_STREAM_DECODE_ERROR" ||
-    code === "PROVIDER_RETRY_EXHAUSTED"
-  );
 }
 
 // ---------------------------------------------------------------------------

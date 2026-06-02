@@ -112,6 +112,7 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain("provider=deepseek model=deepseek-reasoner");
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("reasoning=not-configured");
       expect(doctor.stdout).toContain("baseUrl=present");
       expect(doctor.stdout).toContain("apiKey=missing");
       expect(doctor.stdout).not.toContain("base_url：");
@@ -177,6 +178,7 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain(`provider=deepseek model=${DEFAULT_DEEPSEEK_MODEL}`);
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("reasoning=not-configured");
       expect(doctor.stdout).toContain("baseUrl=present");
       expect(doctor.stdout).not.toContain("base_url：https://api.deepseek.com/v1");
       expect(doctor.stdout).not.toContain("sk-cli-project-secret");
@@ -213,6 +215,7 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain(`provider=deepseek model=${DEFAULT_DEEPSEEK_MODEL}`);
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("reasoning=not-configured");
       expect(doctor.stdout).toContain("baseUrl=present");
       expect(doctor.stdout).not.toContain("base_url：https://api.deepseek.com/v1");
       expect(doctor.stdout).not.toContain("sk-cli-project-overridden-secret");
@@ -249,6 +252,7 @@ describe("CLI", () => {
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
+      expect(doctor.stdout).toContain("reasoning=not-sent level=Low");
       expect(doctor.stdout).toContain("baseUrl=present");
       expect(doctor.stdout).not.toContain("sk-cli-provider-secret");
       expect(doctor.stdout).not.toContain(project);

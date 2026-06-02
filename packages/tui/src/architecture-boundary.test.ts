@@ -3,6 +3,7 @@ import {
   DEFAULT_THRESHOLDS,
   type FileMetrics,
   checkBoundaries,
+  checkBoundaryEditPreflight,
   checkFileBoundaries,
   detectCircularDependencyRisk,
   detectCrossLayerImports,
@@ -253,6 +254,70 @@ describe("architecture-boundary", () => {
         realSmokeRequired: ["TUI rendering"],
       });
       expect(warnings).toHaveLength(0);
+    });
+  });
+
+  describe("checkBoundaryEditPreflight", () => {
+    const largeSource = Array.from(
+      { length: 900 },
+      (_, index) => `const value${index} = ${index};`,
+    ).join("\n");
+
+    it("asks for confirmation before adding substantial lines to an existing large file", () => {
+      const result = checkBoundaryEditPreflight({
+        toolName: "Edit",
+        path: "packages/tui/src/index.ts",
+        targetExists: true,
+        existingSource: largeSource,
+        input: {
+          oldText: "const value1 = 1;",
+          newText: Array.from({ length: 45 }, (_, index) => `const added${index} = ${index};`).join(
+            "\n",
+          ),
+        },
+      });
+
+      expect(result.decision).toBe("confirm");
+      if (result.decision === "confirm") {
+        expect(result.path).toBe("packages/tui/src/index.ts");
+        expect(result.lineCount).toBe(900);
+        expect(result.estimatedAddedLines).toBeGreaterThanOrEqual(40);
+      }
+    });
+
+    it("allows small local edits to existing large files", () => {
+      const result = checkBoundaryEditPreflight({
+        toolName: "Edit",
+        path: "packages/tui/src/index.ts",
+        targetExists: true,
+        existingSource: largeSource,
+        input: {
+          oldText: "const value1 = 1;",
+          newText: "const value1 = 2;",
+        },
+      });
+
+      expect(result).toEqual({ decision: "allow", reason: "small local edit" });
+    });
+
+    it("allows report artifacts and new files", () => {
+      const report = checkBoundaryEditPreflight({
+        toolName: "Write",
+        path: "report.md",
+        targetExists: true,
+        existingSource: largeSource,
+        input: { path: "report.md", content: Array.from({ length: 100 }, () => "line").join("\n") },
+        reportArtifact: true,
+      });
+      const newFile = checkBoundaryEditPreflight({
+        toolName: "Write",
+        path: "packages/tui/src/new-file.ts",
+        targetExists: false,
+        input: { path: "packages/tui/src/new-file.ts", content: "export const x = 1;" },
+      });
+
+      expect(report.decision).toBe("allow");
+      expect(newFile.decision).toBe("allow");
     });
   });
 

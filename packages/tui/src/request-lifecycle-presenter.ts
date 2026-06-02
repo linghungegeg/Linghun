@@ -105,7 +105,7 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
     return "上游模型服务或网关暂时异常，本次请求未完成。请稍后重试，或运行 /model doctor 查看详情。";
   }
   if (kind === "transit") {
-    return "响应流传输失败，本次请求未完成。这是模型服务或网络传输问题，不是 Linghun 本地缺陷。请稍后重试，或运行 /model doctor 查看详情。";
+    return "响应流传输失败，本次请求未完成。可能是模型服务、网关传输或本地兼容层问题；请稍后重试，或运行 /model doctor 和 /details evidence 查看详情。";
   }
   if (kind === "timeout") {
     return "等待模型响应过久，本次请求未完成。稍后重试，或运行 /model doctor 查看详情。";
@@ -201,10 +201,11 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   const status = readNumberField(error, "status") ?? readNumberField(error, "statusCode");
   const message = error instanceof Error ? error.message : String(error ?? "");
   const text = `${code ?? ""} ${name ?? ""} ${status ?? ""} ${message}`;
-  // Explicit stream/transit provider codes win over body keywords. Some gateways put quota-like
-  // text inside a stream error envelope; the transport envelope is the actionable failure kind.
+  // Decode / malformed transport envelopes are transit failures. Plain provider
+  // SSE `error` events may carry quota, schema, or gateway text, so classify
+  // those by message below instead of treating every PROVIDER_STREAM_ERROR as
+  // a transport problem.
   if (
-    code === "PROVIDER_STREAM_ERROR" ||
     code === "PROVIDER_STREAM_DECODE_ERROR" ||
     code === "PROVIDER_RETRY_EXHAUSTED" ||
     code === "PROVIDER_NON_SSE_STREAM" ||
@@ -263,7 +264,13 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   ) {
     return "not_found";
   }
-  if (/\b(?:502|503|504)\b/u.test(text) || code === "PROVIDER_SERVER_ERROR") {
+  if (
+    /\b(?:502|503|504)\b/u.test(text) ||
+    code === "PROVIDER_SERVER_ERROR" ||
+    /an error occurred while processing your request|upstream.*(?:error|failed)|gateway.*(?:error|failed)|service unavailable/iu.test(
+      text,
+    )
+  ) {
     return "gateway";
   }
   if (/TIMEOUT|timeout|超时|等待.*过久/iu.test(text)) {
@@ -282,6 +289,9 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
     )
   ) {
     return "schema";
+  }
+  if (code === "PROVIDER_STREAM_ERROR") {
+    return "gateway";
   }
   return "generic";
 }

@@ -8,7 +8,8 @@
  * - Code blob markers (god files, deep nesting)
  * - Cross-layer import warnings
  *
- * Does NOT perform automatic refactoring. Only marks risks for reporting.
+ * Does NOT perform automatic refactoring. Marks risks for reporting and
+ * provides a conservative edit preflight helper for existing large files.
  * Does NOT modify any files. Pure classification and detection.
  *
  * D.14A Global Architecture Guard — Anti-Hallucination Runtime Enhancement.
@@ -92,6 +93,26 @@ export type ChangeDeclaration = {
   realSmokeRequired: string[];
 };
 
+export type BoundaryEditPreflightInput = {
+  toolName: "Write" | "Edit" | "MultiEdit";
+  path: string;
+  existingSource?: string;
+  targetExists: boolean;
+  input: unknown;
+  reportArtifact?: boolean;
+};
+
+export type BoundaryEditPreflightResult =
+  | { decision: "allow"; reason: string }
+  | {
+      decision: "confirm";
+      reason: string;
+      path: string;
+      lineCount: number;
+      threshold: number;
+      estimatedAddedLines: number;
+    };
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -103,6 +124,9 @@ export const DEFAULT_THRESHOLDS: BoundaryThresholds = {
   maxExportsForGodFile: 40,
   godFileLineThreshold: 1500,
 };
+
+const SUBSTANTIAL_ADDED_LINES = 40;
+const MULTI_EDIT_SUBSTANTIAL_COUNT = 3;
 
 /**
  * Layer ordering for cross-layer import detection.
@@ -335,6 +359,48 @@ export function validateChangeDeclaration(declaration: Partial<ChangeDeclaration
 }
 
 /**
+ * Conservative source-level preflight for model Write/Edit/MultiEdit calls.
+ * It only asks for confirmation when an existing large/god file would receive
+ * clear new logic or a large amount of added lines. New files, reports, small
+ * edits, and ordinary wiring stay on the existing permission path.
+ */
+export function checkBoundaryEditPreflight(
+  request: BoundaryEditPreflightInput,
+  thresholds: BoundaryThresholds = DEFAULT_THRESHOLDS,
+): BoundaryEditPreflightResult {
+  if (!request.targetExists || request.reportArtifact) {
+    return { decision: "allow", reason: "new file or report artifact" };
+  }
+  const existingSource = request.existingSource;
+  if (existingSource === undefined) {
+    return { decision: "allow", reason: "existing content unavailable" };
+  }
+  const metrics = estimateFileMetrics(request.path, existingSource);
+  const isLargeFile =
+    metrics.lineCount > thresholds.maxFileLines ||
+    metrics.lineCount > thresholds.godFileLineThreshold ||
+    ((metrics.exportCount ?? 0) > thresholds.maxExportsForGodFile &&
+      metrics.lineCount > thresholds.maxFileLines);
+  if (!isLargeFile) {
+    return { decision: "allow", reason: "target is below large-file thresholds" };
+  }
+
+  const estimatedAddedLines = estimateAddedLines(request.toolName, request.input);
+  if (!isSubstantialEdit(request.toolName, request.input, estimatedAddedLines)) {
+    return { decision: "allow", reason: "small local edit" };
+  }
+
+  return {
+    decision: "confirm",
+    reason: "large-file-boundary",
+    path: request.path,
+    lineCount: metrics.lineCount,
+    threshold: thresholds.maxFileLines,
+    estimatedAddedLines,
+  };
+}
+
+/**
  * Format boundary violations for report output.
  */
 export function formatBoundaryViolations(violations: BoundaryViolation[]): string {
@@ -496,6 +562,55 @@ function estimateMaxNesting(lines: string[]): number {
   }
 
   return maxDepth;
+}
+
+function estimateAddedLines(toolName: "Write" | "Edit" | "MultiEdit", input: unknown): number {
+  if (typeof input !== "object" || input === null) {
+    return 0;
+  }
+  if (toolName === "Write") {
+    const content = (input as { content?: unknown }).content;
+    return typeof content === "string" ? lineCountOf(content) : 0;
+  }
+  if (toolName === "Edit") {
+    const oldText = (input as { oldText?: unknown }).oldText;
+    const newText = (input as { newText?: unknown }).newText;
+    if (typeof newText !== "string") return 0;
+    const oldLines = typeof oldText === "string" ? lineCountOf(oldText) : 0;
+    return Math.max(0, lineCountOf(newText) - oldLines);
+  }
+  const edits = (input as { edits?: unknown }).edits;
+  if (!Array.isArray(edits)) {
+    return 0;
+  }
+  return edits.reduce((total, item) => {
+    if (typeof item !== "object" || item === null) return total;
+    const oldText = (item as { oldText?: unknown }).oldText;
+    const newText = (item as { newText?: unknown }).newText;
+    if (typeof newText !== "string") return total;
+    const oldLines = typeof oldText === "string" ? lineCountOf(oldText) : 0;
+    return total + Math.max(0, lineCountOf(newText) - oldLines);
+  }, 0);
+}
+
+function isSubstantialEdit(
+  toolName: "Write" | "Edit" | "MultiEdit",
+  input: unknown,
+  estimatedAddedLines: number,
+): boolean {
+  if (estimatedAddedLines >= SUBSTANTIAL_ADDED_LINES) {
+    return true;
+  }
+  if (toolName !== "MultiEdit" || typeof input !== "object" || input === null) {
+    return false;
+  }
+  const edits = (input as { edits?: unknown }).edits;
+  return Array.isArray(edits) && edits.length >= MULTI_EDIT_SUBSTANTIAL_COUNT;
+}
+
+function lineCountOf(text: string): number {
+  if (text.length === 0) return 0;
+  return text.split(/\r?\n/).length;
 }
 
 function formatBoundaryCheckSummary(violations: BoundaryViolation[]): string {

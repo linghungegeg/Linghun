@@ -78,6 +78,12 @@ import {
   registryWorkflowToTemplate,
 } from "./agent-workflow-registry.js";
 import {
+  type BoundaryEditPreflightResult,
+  checkBoundaries,
+  checkBoundaryEditPreflight,
+  estimateFileMetrics,
+} from "./architecture-boundary.js";
+import {
   type ArchitectureCard,
   type ArchitectureCardSummary,
   createArchitectureCard,
@@ -1045,6 +1051,7 @@ type PendingLocalApproval =
       continuation?: PendingModelContinuation;
       // D.13Q-UX Closure: 携带 engine 真实 verdict 给 PermissionPanel 用。
       verdict?: import("./permission-policy-engine.js").PolicyVerdict;
+      boundaryPreflight?: BoundaryEditPreflightResult & { decision: "confirm" };
     }
   | {
       kind: "architecture_drift";
@@ -1497,6 +1504,7 @@ const MAX_CONTEXT_MESSAGES = 12;
 const REQUEST_SLOW_HINT_MS = 20_000;
 const MAX_EVIDENCE_RECORDS = 50;
 const MAX_BACKGROUND_TASKS = 50;
+const WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT = 8;
 const BACKGROUND_RUNNING_GLOBAL_CAP = 4;
 const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>> = {
   bash: 1,
@@ -3812,6 +3820,9 @@ async function executeWorkflowStep(
   const beforeEvidence = context.evidence.map((item) => item.id);
   const req = request.request;
   try {
+    if (request.sliceId === "slice-architecture-review") {
+      return await executeWorkflowArchitectureReviewStep(request, context);
+    }
     if (req.mainChain === "fork") {
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
       await handleForkCommand([req.role, req.task], context, output);
@@ -3988,6 +3999,140 @@ async function executeWorkflowStep(
     ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
   };
+}
+
+async function executeWorkflowArchitectureReviewStep(
+  request: WorkflowBridgeRequestProposal,
+  context: TuiContext,
+): Promise<{
+  status: WorkflowStepTerminalStatus;
+  summary: string;
+  evidenceRefs: string[];
+}> {
+  const sessionId = await ensureSession(context);
+  const candidates = selectWorkflowArchitectureReviewFiles(context);
+  if (candidates.length === 0) {
+    const evidence = createEvidenceRecord(
+      "command_output",
+      "workflow architecture review blocked: no workflow files available for boundary check",
+      "workflow-architecture-review:no-files",
+      ["architecture_boundary_check", "workflow_slice_architecture_review", "needs_review"],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `workflow_architecture_review slice=${request.sliceId} status=blocked evidence=${evidence.id} files=0 reason=no-files`,
+      "warning",
+    );
+    return {
+      status: "blocked",
+      summary: formatWorkflowStepSummary(
+        request.sliceId,
+        "blocked",
+        "architecture boundary check found no readable workflow files",
+        context.language,
+      ),
+      evidenceRefs: [evidence.id],
+    };
+  }
+
+  const metrics = [];
+  const scannedFiles: string[] = [];
+  for (const relativePath of candidates) {
+    try {
+      const source = await readFile(resolve(context.projectPath, relativePath), "utf8");
+      metrics.push(estimateFileMetrics(relativePath, source));
+      scannedFiles.push(relativePath);
+    } catch {
+      // Missing optional workflow files should not hide the result for files that were scanned.
+    }
+  }
+
+  if (metrics.length === 0) {
+    const evidence = createEvidenceRecord(
+      "command_output",
+      `workflow architecture review blocked: candidate files unreadable (${candidates.join(", ")})`,
+      "workflow-architecture-review:unreadable",
+      ["architecture_boundary_check", "workflow_slice_architecture_review", "needs_review"],
+    );
+    rememberEvidence(context, evidence);
+    await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `workflow_architecture_review slice=${request.sliceId} status=blocked evidence=${evidence.id} files=0 reason=unreadable`,
+      "warning",
+    );
+    return {
+      status: "blocked",
+      summary: formatWorkflowStepSummary(
+        request.sliceId,
+        "blocked",
+        "architecture boundary check could not read workflow files",
+        context.language,
+      ),
+      evidenceRefs: [evidence.id],
+    };
+  }
+
+  const check = checkBoundaries(metrics);
+  const status: WorkflowStepTerminalStatus = check.hasBlocking
+    ? "blocked"
+    : check.violations.length > 0
+      ? "partial"
+      : "completed";
+  const riskKinds = Array.from(new Set(check.violations.map((item) => item.kind)));
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `workflow architecture boundary check ${check.summary}; files=${scannedFiles.length}; risks=${riskKinds.join(",") || "none"}`,
+    `workflow-architecture-review:${request.workflowId}:${request.phaseId}:${request.sliceId}`,
+    [
+      "architecture_boundary_check",
+      "workflow_slice_architecture_review",
+      status === "completed" ? "architecture_boundary_clean" : "needs_review",
+      ...riskKinds.map((kind) => `architecture_risk:${kind}`),
+    ],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `workflow_architecture_review slice=${request.sliceId} status=${status} evidence=${evidence.id} files=${scannedFiles.join(",")} summary=${check.summary}`,
+    status === "completed" ? "info" : "warning",
+  );
+
+  return {
+    status,
+    summary: formatWorkflowStepSummary(
+      request.sliceId,
+      status,
+      `architecture boundary check ${check.summary}; evidence=${evidence.id}`,
+      context.language,
+    ),
+    evidenceRefs: [evidence.id],
+  };
+}
+
+function selectWorkflowArchitectureReviewFiles(context: TuiContext): string[] {
+  const files = new Set<string>();
+  for (const file of [
+    ...context.tools.changedFiles,
+    ...context.recentlyMentionedFiles,
+    "packages/tui/src/index.ts",
+    "packages/tui/src/workflow-planner-entry.ts",
+    "packages/tui/src/workflow-task-surface.ts",
+    "packages/tui/src/workflow-agent-runtime-bridge.ts",
+  ]) {
+    const normalized = file.replace(/\\/g, "/");
+    if (!normalized.startsWith("packages/tui/src/")) continue;
+    if (!normalized.includes("workflow") && !normalized.endsWith("index.ts")) continue;
+    if (!/\.(?:ts|tsx|js|jsx)$/u.test(normalized)) continue;
+    files.add(normalized);
+  }
+  return Array.from(files).slice(0, WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT);
 }
 
 function getCurrentWorkflowStepRequest(
@@ -5225,7 +5370,9 @@ async function executePermissionApprove(
       context,
       approval.sessionId,
       output,
-      undefined,
+      approval.boundaryPreflight
+        ? formatBoundaryEditPreflightPrompt(approval.boundaryPreflight, context.language)
+        : undefined,
       approval.continuation?.reportWriteGuard,
     );
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
@@ -10183,6 +10330,32 @@ async function executeModelToolUse(
     await appendToolResultEvent(context, sessionId, toolCall.id, toolName, text, true, evidence.id);
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
+  const boundaryPreflight = await runBoundaryEditPreflight(toolCall, toolName, context);
+  if (boundaryPreflight.decision === "confirm") {
+    clearRequestActivity(context);
+    const prompt = formatBoundaryEditPreflightPrompt(boundaryPreflight, context.language);
+    if (!context.isInkSession) {
+      writeLine(output, prompt);
+    }
+    context.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolCall,
+      toolName,
+      sessionId,
+      continuation: continuation
+        ? createSingleToolCallContinuation(continuation, toolCall)
+        : undefined,
+      verdict: permission.verdict,
+      boundaryPreflight,
+    };
+    await appendSystemEvent(
+      context,
+      sessionId,
+      `architecture_boundary_preflight_confirm: tool=${toolName} path=${boundaryPreflight.path} lines=${boundaryPreflight.lineCount} added=${boundaryPreflight.estimatedAddedLines}`,
+      "warning",
+    );
+    return { ok: false, tool: toolName, text: boundaryPreflight.reason, pendingApproval: true };
+  }
   return executeApprovedModelToolUse(
     toolCall,
     toolName,
@@ -10192,6 +10365,61 @@ async function executeModelToolUse(
     permission.preflight,
     continuation?.reportWriteGuard,
   );
+}
+
+async function runBoundaryEditPreflight(
+  toolCall: ModelToolCall,
+  toolName: ToolName,
+  context: TuiContext,
+): Promise<BoundaryEditPreflightResult> {
+  if (toolName !== "Write" && toolName !== "Edit" && toolName !== "MultiEdit") {
+    return { decision: "allow", reason: "not an edit tool" };
+  }
+  const [path] = collectInputFiles(toolCall.input);
+  if (!path || isReportArtifactPath(path)) {
+    return { decision: "allow", reason: "no path or report artifact" };
+  }
+  const absolutePath = resolve(context.projectPath, path);
+  try {
+    const source = await readFile(absolutePath, "utf8");
+    return checkBoundaryEditPreflight({
+      toolName,
+      path,
+      existingSource: source,
+      targetExists: true,
+      input: toolCall.input,
+      reportArtifact: false,
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { decision: "allow", reason: "target does not exist" };
+    }
+    return { decision: "allow", reason: "target not readable by boundary preflight" };
+  }
+}
+
+function isReportArtifactPath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
+  const fileName = normalized.split("/").pop() ?? normalized;
+  return /\.md$/u.test(fileName) && (fileName === "report.md" || /report|报告/u.test(fileName));
+}
+
+function formatBoundaryEditPreflightPrompt(
+  preflight: BoundaryEditPreflightResult & { decision: "confirm" },
+  language: Language,
+): string {
+  if (language === "en-US") {
+    return [
+      `Architecture boundary check paused ${preflight.path}.`,
+      `Existing file has ${preflight.lineCount} lines; this edit appears to add about ${preflight.estimatedAddedLines} lines.`,
+      "Choose yes to continue this minimal local edit, or no to ask the assistant for a split plan.",
+    ].join("\n");
+  }
+  return [
+    `架构边界检查已暂停 ${preflight.path}。`,
+    `目标文件已有 ${preflight.lineCount} 行，本次看起来会新增约 ${preflight.estimatedAddedLines} 行。`,
+    "输入 yes 继续这次最小局部改动；输入 no 让模型改为拆分计划或更小改动。",
+  ].join("\n");
 }
 
 async function executeApprovedModelToolUse(
@@ -12139,8 +12367,9 @@ async function recordProviderFailureEvidence(
       ? error.code
       : "PROVIDER_ERROR";
   const message = error instanceof Error ? error.message : String(error);
-  const transitFailure = isProviderTransitFailure(code, message);
-  const summary = `${transitFailure ? "provider/transit failure" : "provider_failure"} code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
+  const failureKind = classifyProviderFailure(error);
+  const transitFailure = failureKind === "transit";
+  const summary = `provider_failure kind=${failureKind} code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
   const evidence = createEvidenceRecord(
     "command_output",
     summary,
@@ -12155,6 +12384,7 @@ async function recordProviderFailureEvidence(
   await appendSystemEvent(context, sessionId, summary, "warning");
   context.lastProviderFailure = {
     code,
+    kind: failureKind,
     provider: runtime.provider,
     model: runtime.model,
     endpointProfile: runtime.endpointProfile,
@@ -12166,7 +12396,7 @@ async function recordProviderFailureEvidence(
   // failureSummary 只含错误码与脱敏 message，relatedTarget 用错误码。
   await captureFailureLearning(context, sessionId, {
     category: "provider_failure",
-    failureSummary: `${transitFailure ? "provider/transit failure" : "provider request failed"} code=${code} message=${sanitizeProviderFailureText(message)}`,
+    failureSummary: `provider request failed kind=${failureKind} code=${code} message=${sanitizeProviderFailureText(message)}`,
     rootCauseGuess: transitFailure
       ? `provider/network transit failure with ${code}`
       : `model/provider request failed with ${code}`,
@@ -12180,17 +12410,6 @@ async function recordProviderFailureEvidence(
     severity: "high",
   });
   return evidence;
-}
-
-function isProviderTransitFailure(code: string, message: string): boolean {
-  return (
-    code === "PROVIDER_STREAM_ERROR" ||
-    code === "PROVIDER_STREAM_DECODE_ERROR" ||
-    code === "PROVIDER_RETRY_EXHAUSTED" ||
-    /crc|checksum|eventstream|event[-\s]?stream|stream\s*decode|decode\s*(?:error|failed|mismatch)|malformed\s*(?:sse|stream|chunk)|retry\s*exhausted|重试.*耗尽|流.*解码|解码.*失败|校验.*不一致/iu.test(
-      message,
-    )
-  );
 }
 
 function sanitizeProviderFailureError(error: unknown): unknown {

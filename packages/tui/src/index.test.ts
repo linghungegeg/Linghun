@@ -4668,6 +4668,12 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
+    await writeFile(
+      join(project, "packages", "tui", "src", "workflow-task-surface.ts"),
+      "export const workflowFixture = true;\n",
+      "utf8",
+    );
     const config: LinghunConfig = {
       ...defaultConfig,
       storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
@@ -4732,6 +4738,114 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
     expect(output.text).toContain("模型网关未就绪");
     expect(output.text).not.toContain("PASS：");
+  });
+
+  it("executes slice-architecture-review with boundary-check evidence instead of proposal-only state", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-arch-review-"));
+    await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
+    await writeFile(
+      join(project, "packages", "tui", "src", "workflow-task-surface.ts"),
+      Array.from(
+        { length: 1601 },
+        (_, index) => `export const workflowLine${index} = ${index};`,
+      ).join("\n"),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    const plan = normalizeWorkflowPlan({
+      id: "wf-architecture-review-test",
+      title: "Architecture review run test",
+      source: "manual",
+      createdAt: "2026-06-03T00:00:00.000Z",
+      permissionMode: "full-access",
+      currentPhaseId: "phase-1",
+      phases: [
+        {
+          id: "phase-1",
+          title: "Architecture phase",
+          status: "running",
+          stopPoint: {
+            required: true,
+            confirmationRequired: true,
+            reason: "confirmed in test",
+          },
+          slices: [
+            {
+              id: "slice-explore",
+              title: "Explore context",
+              role: "explorer",
+              status: "completed",
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+            },
+            {
+              id: "slice-architecture-review",
+              title: "Architecture review",
+              role: "planner",
+              status: "queued",
+              dependsOnSliceIds: ["slice-explore"],
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              evidence: [
+                {
+                  ref: "architecture-boundary-check",
+                  kind: "architecture",
+                  claim: "proposal ref must not be the only evidence",
+                  passEvidence: false,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      budget: { maxRunningAgents: 1 },
+      stopConditions: ["stop after phase"],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid architecture review plan");
+    const output = new MemoryOutput();
+
+    await __testRunWorkflowStepsWithPlan("architecture review risk", plan.plan, context, output);
+
+    const archStep = context.workflows.activeRun?.steps.find(
+      (step) => step.id === "slice-architecture-review",
+    );
+    expect(archStep?.status).toBe("blocked");
+    expect(archStep?.summary).toContain("architecture boundary check");
+    expect(archStep?.evidenceRefs).not.toEqual(["architecture-boundary-check"]);
+    const evidence = context.evidence.find((item) =>
+      item.supportsClaims.includes("architecture_boundary_check"),
+    );
+    expect(evidence).toBeDefined();
+    expect(evidence?.source).toContain("workflow-architecture-review");
+    expect(evidence?.summary).toContain("god-file");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "evidence_record" &&
+          event.supportsClaims.includes("architecture_boundary_check") &&
+          event.supportsClaims.includes("needs_review"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "workflow_step_result" &&
+          event.stepId === "slice-architecture-review" &&
+          event.status === "blocked" &&
+          event.summary.includes("architecture boundary check"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" &&
+          event.message.includes("workflow_architecture_review") &&
+          event.message.includes("status=blocked"),
+      ),
+    ).toBe(true);
   });
 
   it("workflow run blocks mutating worker steps when the real agent loop is unavailable", async () => {
@@ -8498,6 +8612,46 @@ describe("Phase 06 TUI slash commands", () => {
     await expect(readFile(join(project, "blocked.txt"), "utf8")).rejects.toThrow();
   });
 
+  it("preflights model Write to existing large files before auto-review can run it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-write-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-write-model",
+          },
+        },
+        permission: { defaultMode: "auto-review" },
+      }),
+      "utf8",
+    );
+    const original = Array.from(
+      { length: 900 },
+      (_, index) => `const value${index} = ${index};`,
+    ).join("\n");
+    await writeFile(join(project, "big.ts"), original, "utf8");
+    const next = `${original}\n${Array.from({ length: 45 }, (_, index) => `const added${index} = ${index};`).join("\n")}`;
+    mockOpenAiToolFetch("Write", { path: "big.ts", content: next });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请修改大文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("架构边界检查已暂停 big.ts");
+    expect(output.text).toContain("继续这次最小局部改动");
+    await expect(readFile(join(project, "big.ts"), "utf8")).resolves.toBe(original);
+  });
+
   it("formats report Write prompts with the actual pending target path", () => {
     for (const reportPath of ["report.md", "docs/deploy-report.md"] as const) {
       const prompt = formatModelToolPermissionPrompt(
@@ -11481,8 +11635,8 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
 
     expect(requests).toHaveLength(1);
-    expect(output.text).toContain("模型服务或网络传输问题");
-    expect(output.text).toContain("不是 Linghun 本地缺陷");
+    expect(output.text).toContain("模型服务返回额度、点数或账户余额不足");
+    expect(output.text).not.toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -11490,7 +11644,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(transcript).toContain("provider/transit failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain(
+      "provider_failure kind=quota_or_balance_exhausted code=PROVIDER_STREAM_ERROR",
+    );
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
   });
@@ -11538,8 +11694,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型服务或网络传输问题");
-    expect(output.text).toContain("不是 Linghun 本地缺陷");
+    expect(output.text).toContain("模型服务返回额度、点数或账户余额不足");
+    expect(output.text).not.toContain("不是 Linghun 本地缺陷");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("证据记录：");
     expect(output.text).not.toContain("tool_result");
@@ -11548,7 +11704,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toMatch(
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
-    expect(output.text).toContain("最近模型服务失败：类型=传输失败 code=PROVIDER_STREAM_ERROR");
+    expect(output.text).toContain(
+      "最近模型服务失败：类型=额度或余额不足 code=PROVIDER_STREAM_ERROR",
+    );
     expect(output.text).toContain("provider=openai-compatible model=failure-model");
     expect(output.text).toContain("endpointProfile=chat_completions");
     expect(output.text).toMatch(/details: \/details evidence|详情：\/details evidence/u);
@@ -11559,7 +11717,9 @@ describe("Phase 06 TUI slash commands", () => {
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    expect(transcript).toContain("provider/transit failure code=PROVIDER_STREAM_ERROR");
+    expect(transcript).toContain(
+      "provider_failure kind=quota_or_balance_exhausted code=PROVIDER_STREAM_ERROR",
+    );
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
     expect(transcript).not.toContain("sk-provider-secret");
@@ -14510,8 +14670,8 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("模型服务或网络传输问题");
-    expect(output.text).toContain("不是 Linghun 本地缺陷");
+    expect(output.text).toContain("模型服务返回额度、点数或账户余额不足");
+    expect(output.text).not.toContain("不是 Linghun 本地缺陷");
     expect(output.text).toContain("/model doctor");
     expect(output.text).not.toContain("quota exceeded");
     expect(output.text).not.toContain("Evidence:");
@@ -20382,25 +20542,24 @@ describe("D.13V-B/C source invariants", () => {
     expect(dangerousBash.decision).toBe("deny");
   });
 
-  // D.14A-R-Fix P1-7 — AntiCodeBlob 锁定为 prompt-only：它只出现在 prompt/directive，
-  // 不是 hard gate；architecture-boundary 检测器不接入 Write/Edit/MultiEdit/Bash 主链阻断。
-  it("source: AntiCodeBlob 是 prompt-only，不是 hard write gate", async () => {
+  // D.14A closure — AntiCodeBlob 仍不自动改文件；但 Write/Edit/MultiEdit 主链现在接入
+  // 保守的大文件 preflight，防止模型继续往既有大文件里堆新逻辑。
+  it("source: AntiCodeBlob has conservative large-file edit preflight without auto refactor", async () => {
     const promptSrc = await readFile(srcPath("model-prompt-runtime.ts"), "utf8");
     const archSrc = await readFile(srcPath("architecture-runtime.ts"), "utf8");
     // AntiCodeBlob/EngineeringStructure 仅作为 prompt/directive 文案存在
     expect(promptSrc).toContain("EngineeringStructure=");
     expect(archSrc).toContain("AntiCodeBlob=");
-    // directive 必须显式标注 prompt-only / 不是 hard gate
-    expect(archSrc).toContain("prompt-only");
-    expect(archSrc).toMatch(/不是 hard gate|不是.*pre-write|不会自动.*阻断/);
-    // 主链不得在写入前自动调用 architecture-boundary 检测器阻断
+    // 主链只允许接入 conservative preflight，不允许自动重构或扩大成全量边界阻断。
     const indexSrc = await readFile(srcPath("index.ts"), "utf8");
-    expect(indexSrc).not.toMatch(/checkBoundaries\(/);
+    expect(indexSrc).toContain("runBoundaryEditPreflight");
+    expect(indexSrc).toContain("checkBoundaryEditPreflight");
     expect(indexSrc).not.toMatch(/checkFileBoundaries\(/);
     expect(indexSrc).not.toMatch(/validateChangeDeclaration\(/);
-    // architecture-boundary.ts 自身声明只检测、不改文件
+    // architecture-boundary.ts 自身声明只检测/预检，不改文件。
     const boundarySrc = await readFile(srcPath("architecture-boundary.ts"), "utf8");
     expect(boundarySrc).toContain("Does NOT modify any files");
+    expect(boundarySrc).toContain("conservative edit preflight helper");
   });
 });
 

@@ -139,6 +139,19 @@ describe("model-loop-runtime", () => {
       expect(names.indexOf("RunWorkflow")).toBeLessThan(names.indexOf("CommandProposal"));
     });
 
+    it("keeps open object arguments explicit for Responses-compatible control tools", () => {
+      const defs = createModelToolDefinitions();
+      const executeSchema = defs.find((d) => d.name === "ExecuteExtraTool")?.inputSchema as {
+        properties?: { params?: { additionalProperties?: boolean } };
+      };
+      const workflowSchema = defs.find((d) => d.name === "RunWorkflow")?.inputSchema as {
+        properties?: { inputs?: { additionalProperties?: boolean } };
+      };
+
+      expect(executeSchema.properties?.params?.additionalProperties).toBe(true);
+      expect(workflowSchema.properties?.inputs?.additionalProperties).toBe(true);
+    });
+
     it("Mature UX Cutback: index tool descriptions match auto-review permission behavior", () => {
       const defs = createModelToolDefinitions();
       const refresh = defs.find((d) => d.name === "IndexRefresh")?.description ?? "";
