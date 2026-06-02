@@ -44,6 +44,7 @@ import {
   __testBuildToggleDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
+  __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
   addAllowRuleForTest,
   containsSecret,
@@ -137,6 +138,10 @@ class MemoryOutput extends Writable {
     this.text += chunk.toString();
     callback();
   }
+}
+
+class TtyOutput extends MemoryOutput {
+  isTTY = true;
 }
 
 class TtyInput extends PassThrough {
@@ -12410,6 +12415,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(settings).toContain('"workspaceTrust"');
     expect(settings).toContain('"level": "trusted"');
     expect(settings).toContain('"recorded": true');
+  });
+
+  it("redraws first-run choices in place for TTY output", () => {
+    const output = new TtyOutput();
+    __testRenderInteractiveChoiceLines(
+      output,
+      ["  ❯ [x] 中文 (zh-CN)", "    [ ] English (en-US)", "> "],
+      false,
+    );
+    __testRenderInteractiveChoiceLines(
+      output,
+      ["    [ ] 中文 (zh-CN)", "  ❯ [x] English (en-US)", "> "],
+      true,
+    );
+
+    expect(output.text).toContain("\u001b[2A");
+    expect(output.text).toContain("\u001b[1G\u001b[2K");
+    expect(output.text).not.toContain(
+      "  ❯ [x] 中文 (zh-CN)\n    [ ] English (en-US)\n> \n    [ ] 中文",
+    );
   });
 
   it("keeps Polish B light Workspace Trust restricted when first prompt is cancelled", async () => {

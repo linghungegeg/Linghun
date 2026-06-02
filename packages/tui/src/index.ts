@@ -9,7 +9,7 @@ import {
   stdin as defaultStdin,
   stdout as defaultStdout,
 } from "node:process";
-import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
+import { clearLine, cursorTo, emitKeypressEvents, moveCursor } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { type Readable, Writable } from "node:stream";
 import {
@@ -4573,13 +4573,16 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
   const wasRaw = rawInput.isRaw === true;
   let settled = false;
   let selectedIndex = 0; // 0 = zh-CN (default), 1 = en-US
+  let choicesRendered = false;
   const renderChoices = (): void => {
     const cursor = (active: boolean) => (active ? "❯" : " ");
     const choiceLines = [
       `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] 中文 (zh-CN)`,
       `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] English (en-US)`,
+      "> ",
     ];
-    output.write(`${choiceLines.join("\n")}\n`);
+    renderInteractiveChoiceLines(output, choiceLines, choicesRendered);
+    choicesRendered = true;
   };
   return await new Promise<Language>((resolveDecision) => {
     const finish = (language: Language) => {
@@ -4599,6 +4602,10 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
         finish("zh-CN");
         return;
       }
+      if (name === "return" || name === "enter") {
+        finish(selectedIndex === 0 ? "zh-CN" : "en-US");
+        return;
+      }
       if (name === "up" || name === "k") {
         if (selectedIndex !== 0) {
           selectedIndex = 0;
@@ -4613,7 +4620,7 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
         }
         return;
       }
-      // Enter handled by readline 'line' event; ignore other raw input here.
+      // Plain typed choices are handled by readline 'line'; ignore other raw input here.
       void str;
     };
     const onLine = (line: string) => {
@@ -4640,9 +4647,33 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
       rawInput.setRawMode(true);
     }
     renderChoices();
-    output.write("> ");
   });
 }
+
+function renderInteractiveChoiceLines(
+  output: Writable,
+  lines: string[],
+  replacePrevious: boolean,
+): void {
+  const isTtyOutput = (output as { isTTY?: boolean }).isTTY === true;
+  if (!isTtyOutput) {
+    output.write(`${lines.join("\n")}\n`);
+    return;
+  }
+  if (replacePrevious) {
+    moveCursor(output, 0, -(lines.length - 1));
+  }
+  lines.forEach((line, index) => {
+    cursorTo(output, 0);
+    clearLine(output, 0);
+    output.write(line);
+    if (index < lines.length - 1) {
+      output.write("\n");
+    }
+  });
+}
+
+export const __testRenderInteractiveChoiceLines = renderInteractiveChoiceLines;
 
 function shouldPromptForInitialWorkspaceTrust(input: Readable, context: TuiContext): boolean {
   return (input as { isTTY?: boolean }).isTTY === true && !context.config.workspaceTrust.recorded;
@@ -4703,6 +4734,7 @@ async function readInitialWorkspaceTrustDecision(
   const wasRaw = rawInput.isRaw === true;
   let settled = false;
   let selectedIndex = 0; // 0 = trust, 1 = restricted
+  let choicesRendered = false;
   const renderChoices = (): void => {
     const trustLabel = isEnglish ? "Trust this project (yes)" : "信任此项目 (yes)";
     const restrictedLabel = isEnglish ? "Keep restricted (no)" : "保持 restricted (no)";
@@ -4710,8 +4742,10 @@ async function readInitialWorkspaceTrustDecision(
     const lines = [
       `  ${cursor(selectedIndex === 0)} [${selectedIndex === 0 ? "x" : " "}] ${trustLabel}`,
       `  ${cursor(selectedIndex === 1)} [${selectedIndex === 1 ? "x" : " "}] ${restrictedLabel}`,
+      "> ",
     ];
-    output.write(`${lines.join("\n")}\n`);
+    renderInteractiveChoiceLines(output, lines, choicesRendered);
+    choicesRendered = true;
   };
   return await new Promise<boolean>((resolveDecision) => {
     const finish = (trusted: boolean) => {
@@ -4729,6 +4763,10 @@ async function readInitialWorkspaceTrustDecision(
       const name = key.name;
       if (name === "escape") {
         finish(false);
+        return;
+      }
+      if (name === "return" || name === "enter") {
+        finish(selectedIndex === 0);
         return;
       }
       if (name === "up" || name === "k") {
@@ -4753,7 +4791,7 @@ async function readInitialWorkspaceTrustDecision(
         finish(false);
         return;
       }
-      // Enter 由 readline 'line' 事件处理；此处忽略其他原始输入。
+      // 普通 yes/no 输入由 readline 'line' 事件处理；此处忽略其他原始输入。
       void str;
     };
     const onLine = (line: string) => {
@@ -4787,7 +4825,6 @@ async function readInitialWorkspaceTrustDecision(
       rawInput.setRawMode(true);
     }
     renderChoices();
-    output.write("> ");
   });
 }
 
