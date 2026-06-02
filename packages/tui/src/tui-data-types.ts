@@ -170,6 +170,7 @@ export type CacheState = {
   compacted: boolean;
   compactBoundaries: CompactBoundary[];
   compactProjection?: CompactProjection;
+  deepCompact?: DeepCompactPacket;
   compactPressure?: CompactPressureSnapshot;
   compactFailure?: CompactFailureState;
   compactCooldownUntil?: number;
@@ -188,6 +189,32 @@ export type CompactProjection = {
   toolPairingSafe: boolean;
   risks: string[];
   evidenceRefs: string[];
+};
+
+export type DeepCompactTrigger =
+  | "manual"
+  | "request"
+  | "continuation"
+  | "final"
+  | "agent-child"
+  | "workflow";
+
+export type DeepCompactPacket = {
+  id: string;
+  kind: "deep";
+  scope: "full transcript semantic compact";
+  summary: string;
+  preservedEvidenceRefs: string[];
+  preservedFiles: string[];
+  activeAgentsWorkflows: string[];
+  pendingItems: string[];
+  decisions: string[];
+  risks: string[];
+  createdAt: string;
+  model: string;
+  provider: string;
+  trigger: DeepCompactTrigger;
+  transcriptEventCount: number;
 };
 
 export type CompactPressureSnapshot = {

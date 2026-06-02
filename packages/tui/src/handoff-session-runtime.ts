@@ -9,6 +9,7 @@ import {
   createPhase15BetaVerdictScope,
 } from "./final-answer-gate.js";
 import type { TuiContext } from "./index.js";
+import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import type { CompactProjection, HandoffPacket, VerificationReport } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
@@ -45,6 +46,11 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   const handoff = [...transcript].reverse().find((event) => event.type === "handoff_packet");
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = handoff.packet;
+  }
+  const deepCompact = [...transcript].reverse().find((event) => event.type === "deep_compact_packet");
+  if (deepCompact?.type === "deep_compact_packet" && isDeepCompactPacket(deepCompact.packet)) {
+    context.cache.compacted = true;
+    context.cache.deepCompact = deepCompact.packet;
   }
   const compactEvent = [...transcript]
     .reverse()

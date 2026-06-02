@@ -8,6 +8,11 @@ import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { sanitizeDiagnosticText, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
 import {
+  injectDeepCompactSummary,
+  maybeRunDeepCompactBeforeProvider,
+  type DeepCompactRuntimeDeps,
+} from "./deep-compact-runtime.js";
+import {
   applyToolResultBudgetToMessages,
   type ToolResultBudgetRecord,
 } from "./tool-result-budget.js";
@@ -39,6 +44,7 @@ export type CompactPreflightDeps = {
     record: ToolResultBudgetRecord,
   ) => Promise<string | undefined>;
   refreshCacheFreshness: (context: TuiContext) => void;
+  runDeepCompact?: DeepCompactRuntimeDeps;
 };
 
 export type ProviderPreflightCompactResult =
@@ -79,7 +85,10 @@ export async function prepareMessagesForProviderPreflight(input: {
   const triggerChars = getAutoCompactTriggerChars(input.context, input.runtime);
   const currentChars = estimateModelMessageChars(budgeted);
   if (currentChars <= triggerChars) {
-    return { blocked: false, messages: budgeted };
+    const withDeep = injectDeepCompactSummary(budgeted, input.context.cache.deepCompact);
+    if (estimateModelMessageChars(withDeep) <= contextMaxChars) {
+      return { blocked: false, messages: withDeep };
+    }
   }
 
   const now = Date.now();
@@ -123,6 +132,26 @@ export async function prepareMessagesForProviderPreflight(input: {
   }
 
   try {
+    if (input.deps.runDeepCompact) {
+      const deep = await maybeRunDeepCompactBeforeProvider({
+        context: input.context,
+        sessionId: input.sessionId,
+        runtime: input.runtime,
+        trigger: input.trigger,
+        gateway: input.context.modelGateway,
+        deps: input.deps.runDeepCompact,
+      });
+      if (!deep.ok) {
+        await recordCompactFailure(
+          input.context,
+          input.sessionId,
+          `deep_compact_failed:${deep.message}`,
+          true,
+          input.deps,
+        );
+        return { blocked: true, messages: budgeted, message: deep.message };
+      }
+    }
     const compacted = compactMessagesToFit(budgeted, {
       maxChars: Math.max(1, triggerChars - COMPACT_SUMMARY_TARGET_RESERVE_CHARS),
       preserveRecentMessages: MAX_CONTEXT_MESSAGES,
@@ -140,7 +169,10 @@ export async function prepareMessagesForProviderPreflight(input: {
       trigger: input.trigger,
       pairingSafe: pairing.safe,
     });
-    const providerMessages = injectCompactProjectionMessage(compacted.messages, projection);
+    const providerMessages = injectDeepCompactSummary(
+      injectCompactProjectionMessage(compacted.messages, projection),
+      input.context.cache.deepCompact,
+    );
     if (estimateModelMessageChars(providerMessages) > contextMaxChars) {
       await recordCompactFailure(
         input.context,

@@ -109,23 +109,27 @@ export function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
   const pressure = context.cache.compactPressure;
   const projection = context.cache.compactProjection;
+  const deep = context.cache.deepCompact;
   const failure = context.cache.compactFailure;
   return [
     "Context Compact status",
-    "- scope: provider-visible recent context projection",
+    "- deep scope: full transcript semantic compact",
+    "- projection scope: provider-visible recent context projection",
     `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger=${pressure.triggerChars})` : "unknown"}`,
     `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
     `- boundaries: ${context.cache.compactBoundaries.length}`,
     `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
     `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}->${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
-    `- latest compact time: ${projection?.createdAt ?? latest?.createdAt ?? "none"}`,
-    `- retained summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
+    `- latest compact time: ${deep?.createdAt ?? projection?.createdAt ?? latest?.createdAt ?? "none"}`,
+    `- deep packet: ${deep ? `${deep.id}; trigger=${deep.trigger}; events=${deep.transcriptEventCount}` : "none"}`,
+    `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
+    `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
     `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldownUntil=${failure.cooldownUntil}` : "none"}`,
-    `- preserved evidence refs: ${latest?.preservedEvidenceRefs.length ?? 0}`,
-    `- preserved files: ${latest?.preservedFiles.length ?? 0}`,
-    "- boundary: summary is redacted; raw transcript, secrets, large tool results, and provider raw requests stay out of compact summary.",
+    `- preserved evidence refs: ${deep?.preservedEvidenceRefs.length ?? latest?.preservedEvidenceRefs.length ?? 0}`,
+    `- preserved files: ${deep?.preservedFiles.length ?? latest?.preservedFiles.length ?? 0}`,
+    "- boundary: deep summary and projection are redacted; raw transcript, secrets, large tool results, provider raw requests, and absolute paths stay out.",
   ].join("\n");
 }
 

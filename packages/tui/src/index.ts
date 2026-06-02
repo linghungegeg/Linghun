@@ -104,10 +104,7 @@ import {
   stableHash,
   stableStringify,
 } from "./cache-freshness.js";
-import {
-  compactBoundaryHash,
-  createManualCompactBoundary,
-} from "./compact-context.js";
+import { compactBoundaryHash } from "./compact-context.js";
 import {
   getAutoCompactTriggerChars,
   getProviderContextMaxChars,
@@ -115,7 +112,8 @@ import {
   prepareMessagesForProviderPreflight,
   recordCompactBoundary,
 } from "./compact-preflight-runtime.js";
-import { estimateModelMessageChars, estimateTranscriptContextChars } from "./context-estimator.js";
+import { estimateModelMessageChars } from "./context-estimator.js";
+import { runDeepCompact } from "./deep-compact-runtime.js";
 import {
   type DeferredToolDescriptor,
   type DeferredToolDiscoverySnapshot,
@@ -2846,6 +2844,7 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;
   cacheFreshnessHint?: string;
+  deepCompactRef?: { id: string; summary: string };
   indexStatusRef?: { status: string; projectName?: string; freshness?: string };
   architectureRef?: { target: string; summary: string };
 } {
@@ -2874,6 +2873,14 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
     ...(activeFailures.length > 0 ? { failureLearningRefs: activeFailures } : {}),
     ...(context.cache.lastFreshness
       ? { cacheFreshnessHint: summarizeWorkflowCacheFreshness(context.cache.lastFreshness) }
+      : {}),
+    ...(context.cache.deepCompact
+      ? {
+          deepCompactRef: {
+            id: context.cache.deepCompact.id,
+            summary: context.cache.deepCompact.summary,
+          },
+        }
       : {}),
     indexStatusRef: {
       status: context.index.status,
@@ -5835,23 +5842,31 @@ async function handleCompactCommand(
     writeLine(output, formatCompactStatus(context));
     return;
   }
-  if (action === "manual" || action === "run") {
+  if (action === "manual" || action === "run" || action === "deep") {
     const sessionId = await ensureSession(context);
     const resumed = await context.store.resume(sessionId);
-    const preChars = estimateTranscriptContextChars(resumed.transcript);
     const runtime = getSelectedModelRuntime(context);
-    const boundary = createManualCompactBoundary({
-      preCompactChars: preChars,
-      postCompactChars: Math.min(preChars, getProviderContextMaxChars(context, runtime)),
-      preservedEvidenceRefs: context.evidence.map((item) => item.id),
-      preservedFiles: context.recentlyMentionedFiles,
-      handoffPacketId: context.memory.lastHandoff?.id,
+    if (!context.modelGateway) {
+      writeLine(output, context.language === "en-US" ? "Deep compact unavailable: model gateway is not ready." : "Deep compact 不可用：模型网关尚未就绪。");
+      return;
+    }
+    const result = await runDeepCompact({
+      context,
+      sessionId,
+      transcript: resumed.transcript,
+      runtime,
+      trigger: "manual",
+      gateway: context.modelGateway,
+      deps: compactPreflightDeps.runDeepCompact,
     });
-    recordCompactBoundary(context, boundary);
-    refreshCacheFreshness(context);
+    if (!result.ok) {
+      writeLine(output, result.message);
+      writeStatus(output, context);
+      return;
+    }
     writeLine(
       output,
-      `Compact Lite manual boundary recorded: ${boundary.id}；不执行工具、不写项目文件、不写长期记忆、不启动后台任务。`,
+      `Deep compact completed: ${result.packet.id}；scope=full transcript semantic compact；tools disabled/toolChoice none；不写项目文件、不写长期记忆、不启动后台任务。`,
     );
     writeStatus(output, context);
     return;
@@ -5859,11 +5874,11 @@ async function handleCompactCommand(
   if (action === "auto") {
     writeLine(
       output,
-      "Compact Lite auto：受控最小实现仅在 provider 请求前自动瘦身历史上下文；无工具、无文件写入、无额外模型调用。",
+      "Compact auto：provider 压力触发时先尝试 deep compact agent（full transcript semantic compact，tools disabled/toolChoice none），再保留 provider-visible projection 作为 preflight safety layer。",
     );
     return;
   }
-  writeLine(output, "用法：/compact status | /compact manual | /compact auto");
+  writeLine(output, "用法：/compact status | /compact manual | /compact deep | /compact auto");
 }
 
 async function refreshCompactPressureSnapshot(context: TuiContext): Promise<void> {
@@ -6493,6 +6508,12 @@ const compactPreflightDeps = {
   captureFailureLearning,
   recordToolResultBudgetEvidence,
   refreshCacheFreshness,
+  runDeepCompact: {
+    appendSystemEvent,
+    captureFailureLearning,
+    refreshCacheFreshness,
+    recordCompactBoundary,
+  },
 };
 
 function normalizePath(path: string): string {
@@ -6590,6 +6611,7 @@ function getCurrentFreshness(context: TuiContext): CacheFreshness {
     compact: {
       compacted: context.cache.compacted,
       boundaryHash: compactBoundaryHash(context.cache.compactBoundaries),
+      deepCompactId: context.cache.deepCompact?.id ?? "none",
     },
     plugins: {
       ...createExtensionFreshnessSummary(context),

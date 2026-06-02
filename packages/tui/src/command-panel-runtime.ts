@@ -34,7 +34,9 @@ import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./start
 export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
   const isEn = context.language === "en-US";
   const hasOutput = Boolean(context.lastFullOutput);
-  const hasCompact = Boolean(context.cache.compactProjection || context.cache.compactFailure);
+  const hasCompact = Boolean(
+    context.cache.deepCompact || context.cache.compactProjection || context.cache.compactFailure,
+  );
   const evidenceCount = context.evidence.length;
   const backgroundCount = context.backgroundTasks.length;
   if (!hasOutput && !hasCompact && evidenceCount === 0 && backgroundCount === 0) {
@@ -138,6 +140,19 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
     });
     detailsParts.push("");
     detailsParts.push(isEn ? "## Context compact" : "## 上下文压缩");
+    if (context.cache.deepCompact) {
+      detailsParts.push(
+        [
+          `- deep: ${context.cache.deepCompact.id}`,
+          "- deep scope: full transcript semantic compact",
+          `- trigger: ${context.cache.deepCompact.trigger}`,
+          `- evidenceRefs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
+          `- files: ${context.cache.deepCompact.preservedFiles.join(", ") || "none"}`,
+          `- deep summary: ${sanitizeCompactDetailsText(context.cache.deepCompact.summary, context.projectPath)}`,
+          "- passEvidence: no; context continuity only",
+        ].join("\n"),
+      );
+    }
     if (projection) {
       detailsParts.push(
         [
@@ -155,6 +170,29 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
         `- failure: ${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactDetailsText(failure.reason, context.projectPath)}; cooldownUntil=${failure.cooldownUntil}`,
       );
     }
+  }
+  if (context.cache.deepCompact && !context.cache.compactProjection && !context.cache.compactFailure) {
+    sections.push({
+      title: isEn ? "Context compact" : "上下文压缩",
+      rows: [
+        isEn
+          ? `Deep compact ${context.cache.deepCompact.createdAt}; scope=full transcript semantic compact`
+          : `Deep compact ${context.cache.deepCompact.createdAt}；scope=full transcript semantic compact`,
+      ],
+    });
+    detailsParts.push("");
+    detailsParts.push(isEn ? "## Context compact" : "## 上下文压缩");
+    detailsParts.push(
+      [
+        `- deep: ${context.cache.deepCompact.id}`,
+        "- scope: full transcript semantic compact",
+        `- trigger: ${context.cache.deepCompact.trigger}`,
+        `- evidenceRefs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
+        `- files: ${context.cache.deepCompact.preservedFiles.join(", ") || "none"}`,
+        `- summary: ${sanitizeCompactDetailsText(context.cache.deepCompact.summary, context.projectPath)}`,
+        "- passEvidence: no; context continuity only",
+      ].join("\n"),
+    );
   }
 
   const summary: string[] = [];

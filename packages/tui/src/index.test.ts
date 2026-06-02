@@ -25,6 +25,7 @@ import {
   mergeFailureRecord,
 } from "./failure-learning-runtime.js";
 import {
+  createPhase15BetaVerdictScope,
   formatSolutionCompletenessReportBlock,
   needsSolutionCompletenessReportClosure,
 } from "./final-answer-gate.js";
@@ -108,6 +109,7 @@ import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
+import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
@@ -134,6 +136,14 @@ class TtyInput extends PassThrough {
     this.isRaw = enabled;
     return this;
   }
+}
+
+function isDeepCompactRequest(request: unknown): boolean {
+  return JSON.stringify(request).includes("deep context compact agent");
+}
+
+function nonDeepRequests<T>(requests: T[]): T[] {
+  return requests.filter((request) => !isDeepCompactRequest(request));
 }
 
 afterEach(() => {
@@ -384,12 +394,17 @@ function mockOpenAiLongHistoryThenToolFetch(): unknown[] {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
-      requests.push(JSON.parse(String(init.body)));
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      const isDeepCompact = isDeepCompactRequest(request);
+      const mainRequestCount = nonDeepRequests(requests).length;
       let body: string;
-      if (requests.length === 1) {
+      if (isDeepCompact) {
+        body = `data: ${JSON.stringify({ id: "chatcmpl-compact-deep", choices: [{ delta: { content: "Deep compact summary for tool pair context." } }] })}\n\ndata: [DONE]\n\n`;
+      } else if (mainRequestCount === 1) {
         const text = `RAW_TOOL_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
         body = `data: ${JSON.stringify({ id: "chatcmpl-compact-tool-1", choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
-      } else if (requests.length === 2) {
+      } else if (mainRequestCount === 2) {
         body = [
           `data: ${JSON.stringify({
             id: "chatcmpl-compact-tool-2",
@@ -423,15 +438,23 @@ function mockOpenAiResponsesLongHistoryThenToolFetch(): unknown[] {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_url: string, init: RequestInit) => {
-      requests.push(JSON.parse(String(init.body)));
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      const isDeepCompact = isDeepCompactRequest(request);
+      const mainRequestCount = nonDeepRequests(requests).length;
       let body: string;
-      if (requests.length === 1) {
+      if (isDeepCompact) {
+        body = [
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Deep compact summary for responses pair context." })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-deep", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
+        ].join("");
+      } else if (mainRequestCount === 1) {
         const text = `RAW_RESPONSES_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
         body = [
           `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\n`,
           `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-1", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
         ].join("");
-      } else if (requests.length === 2) {
+      } else if (mainRequestCount === 2) {
         body = [
           `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", call_id: "call-compact-bash", name: "Bash" } })}\n\n`,
           `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: JSON.stringify({ command: "node -e \"console.log('responses pair content')\"" }) })}\n\n`,
@@ -1840,18 +1863,63 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Terminal readiness doctor");
   });
 
-  it("reports Compact Lite boundaries without running tools or provider calls", async () => {
+  it("runs manual deep compact with tools disabled and records a full transcript packet", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
-    const session = await store.create({ model: "deepseek-v4-flash" });
+    const session = await store.create({ model: "deep-compact-model" });
     const output = new MemoryOutput();
-    const context = await createTestContext(project, store, session);
-    const originalFetch = globalThis.fetch;
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "deep-compact-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "deep-compact-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "deep-compact-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "deep-compact-model",
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    await store.appendEvent(session.id, {
+      type: "user_message",
+      id: "older-user",
+      text: `older goal uses full transcript marker RAW_OLDER_TRANSCRIPT_ONLY and ${project}`,
+      createdAt: new Date().toISOString(),
+    });
+    await store.appendEvent(session.id, {
+      type: "tool_result",
+      toolUseId: "older-tool",
+      toolName: "Read",
+      content: `raw oversized tool_result ${"x".repeat(20_000)} sk-secret-compact`,
+      createdAt: new Date().toISOString(),
+    });
+    const requests: unknown[] = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).includes("example.test")) {
-        return new Response("{}", { status: 200 });
+        requests.push(JSON.parse(String(init?.body ?? "{}")));
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-deep-compact", choices: [{ delta: { content: "User goal: preserve RAW_OLDER_TRANSCRIPT_ONLY. Files and evidence are summarized." } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }
-      return originalFetch(url, init);
+      return new Response("{}", { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
     context.evidence.push({
@@ -1866,21 +1934,210 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/compact status", context, output);
     await handleSlashCommand("/compact auto", context, output);
-    await handleSlashCommand("/compact manual", context, output);
+    await handleSlashCommand("/compact deep", context, output);
+    await handleSlashCommand("/compact status", context, output);
 
     const providerCalls = fetchMock.mock.calls.filter(([url]) =>
       String(url).includes("example.test"),
     );
-    expect(providerCalls).toHaveLength(0);
+    expect(providerCalls).toHaveLength(1);
+    const compactRequest = requests[0] as {
+      messages?: Array<{ role?: string; content?: string }>;
+      tools?: unknown[];
+      tool_choice?: string;
+      toolChoice?: string;
+    };
+    expect(compactRequest.tools).toBeUndefined();
+    expect(compactRequest.tool_choice ?? compactRequest.toolChoice).toBe("none");
+    const compactPrompt = JSON.stringify(compactRequest.messages ?? []);
+    expect(compactPrompt).toContain("RAW_OLDER_TRANSCRIPT_ONLY");
+    expect(compactPrompt).not.toContain(project);
+    expect(compactPrompt).not.toContain("sk-secret-compact");
+    expect(compactPrompt).not.toContain("x".repeat(1000));
     expect(output.text).toContain("Context Compact status");
-    expect(output.text).toContain("scope: provider-visible recent context projection");
-    expect(output.text).toContain("无工具、无文件写入、无额外模型调用");
-    expect(output.text).toContain("不执行工具、不写项目文件、不写长期记忆、不启动后台任务");
+    expect(output.text).toContain("deep scope: full transcript semantic compact");
+    expect(output.text).toContain("projection scope: provider-visible recent context projection");
+    expect(output.text).toContain("tools disabled/toolChoice none");
     expect(context.cache.compactBoundaries).toHaveLength(1);
     expect(context.cache.compactBoundaries[0]?.kind).toBe("manual");
     expect(context.cache.compactBoundaries[0]?.preservedEvidenceRefs).toEqual(["ev-compact"]);
     expect(context.cache.compactBoundaries[0]?.preservedFiles).toEqual(["README.md"]);
+    expect(context.cache.deepCompact?.scope).toBe("full transcript semantic compact");
+    expect(context.cache.deepCompact?.summary).toContain("RAW_OLDER_TRANSCRIPT_ONLY");
+    expect(context.cache.deepCompact?.summary).not.toContain(project);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "deep_compact_packet")).toBe(true);
+    const hydratedContext = await createTestContext(project, store, session, config);
+    hydrateResumeContext(hydratedContext, transcript);
+    expect(hydratedContext.cache.deepCompact?.scope).toBe("full transcript semantic compact");
+    expect(hydratedContext.cache.deepCompact?.summary).toContain("RAW_OLDER_TRANSCRIPT_ONLY");
+    const details = __testBuildToggleDetailsCommandPanel(context);
+    expect(details?.detailsText).toContain("scope: full transcript semantic compact");
     expect(context.permissionMode).toBe("default");
+  });
+
+  it("deep compact semantic outline includes early transcript events beyond the recent tail", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-full-transcript-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deep-compact-full-model" });
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "deep-compact-full-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "deep-compact-full-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "deep-compact-full-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "deep-compact-full-model",
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const marker = "EARLY_FULL_TRANSCRIPT_MARKER";
+    await store.appendEvent(session.id, {
+      type: "user_message",
+      id: "early-full-transcript",
+      text: `first user goal must survive semantic compact: ${marker}`,
+      createdAt: new Date().toISOString(),
+    });
+    for (let index = 0; index < 120; index += 1) {
+      if (index % 3 === 0) {
+        await store.appendEvent(session.id, {
+          type: "tool_result",
+          toolUseId: `tool-${index}`,
+          toolName: "Read",
+          content: `later tool result ${index}`,
+          isError: false,
+          createdAt: new Date().toISOString(),
+        });
+        continue;
+      }
+      await store.appendEvent(session.id, {
+        type: "assistant_text_delta",
+        id: `assistant-${index}`,
+        text: `later assistant decision ${index}: keep current task focused`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const request = JSON.parse(String(init.body));
+        requests.push(request);
+        const body = `data: ${JSON.stringify({ id: "chatcmpl-deep-full", choices: [{ delta: { content: `Summary preserved ${marker} from first user goal.` } }] })}\n\ndata: [DONE]\n\n`;
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    );
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/compact deep", context, output);
+
+    expect(requests).toHaveLength(1);
+    const request = requests[0] as {
+      messages?: Array<{ role?: string; content?: string }>;
+      tool_choice?: string;
+      toolChoice?: string;
+    };
+    expect(request.tool_choice ?? request.toolChoice).toBe("none");
+    const promptText = JSON.stringify(request.messages ?? []);
+    expect(promptText).toContain("Full transcript semantic outline");
+    expect(promptText).toContain("transcriptEventCount=122");
+    expect(promptText).toContain(marker);
+    expect(context.cache.deepCompact?.scope).toBe("full transcript semantic compact");
+    expect(context.cache.deepCompact?.summary).toContain(marker);
+    const hydratedContext = await createTestContext(project, store, session, config);
+    hydrateResumeContext(hydratedContext, (await store.resume(session.id)).transcript);
+    expect(hydratedContext.cache.deepCompact?.summary).toContain(marker);
+  });
+
+  it("blocks deep compact when compact agent returns tool_use and records cooldown", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-tool-use-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deep-compact-tool-use-model" });
+    const output = new MemoryOutput();
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      defaultModel: "deep-compact-tool-use-model",
+      providers: {
+        ...defaultConfig.providers,
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "deep-compact-tool-use-model",
+        },
+      },
+      modelRoutes: {
+        ...defaultConfig.modelRoutes,
+        defaultModel: "deep-compact-tool-use-model",
+        routes: defaultConfig.modelRoutes.routes.map((route) =>
+          route.role === "executor"
+            ? {
+                ...route,
+                provider: "openai-compatible",
+                primaryModel: "deep-compact-tool-use-model",
+              }
+            : route,
+        ),
+      },
+    };
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const body = [
+          `data: ${JSON.stringify({
+            id: "chatcmpl-deep-compact-tool",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      id: "call-compact-tool-use",
+                      type: "function",
+                      function: { name: "Read", arguments: JSON.stringify({ path: "README.md" }) },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+          "data: [DONE]\n\n",
+        ].join("");
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }),
+    );
+
+    await handleSlashCommand("/compact deep", context, output);
+
+    expect(output.text).toContain("Deep compact 失败");
+    expect(context.cache.deepCompact).toBeUndefined();
+    expect(context.cache.compactFailure?.blocked).toBe(true);
+    expect(context.cache.compactFailure?.reason).toContain("compact_agent_tool_use_blocked");
+    expect(context.cache.compactCooldownUntil).toBeGreaterThan(Date.now());
+    const transcript = JSON.stringify((await store.resume(session.id)).transcript);
+    expect(transcript).toContain("deep_compact_failed");
+    expect(transcript).not.toContain("deep_compact_packet");
   });
 
   it("redacts compact summary secrets in provider context, transcript projection, and status", async () => {
@@ -2067,8 +2324,11 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     const providerCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("example.test"));
-    expect(providerCalls).toHaveLength(0);
-    expect(`${output.text}\n${stderr.text}`).toContain("上下文压缩摘要后仍超过 provider 上限");
+    expect(providerCalls).toHaveLength(1);
+    expect(JSON.stringify(JSON.parse(String(providerCalls[0]?.[1]?.body ?? "{}")))).toContain(
+      "deep context compact agent",
+    );
+    expect(`${output.text}\n${stderr.text}`).toContain("Deep compact provider 请求失败");
     expect(output.text).toContain("上一次上下文压缩失败后仍在冷却中");
     const session = (
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
@@ -2076,6 +2336,64 @@ describe("Phase 06 TUI slash commands", () => {
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
     expect(transcript).toContain("context_compact_failed");
     expect(transcript).toContain("context_compact_cooldown_active");
+  });
+
+  it("injects deep compact into final preflight without treating it as PASS evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-final-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "final-compact-model" });
+    const context = await createTestContext(project, store, session);
+    context.cache.deepCompact = {
+      id: "deep-final-test",
+      kind: "deep",
+      scope: "full transcript semantic compact",
+      summary: "Deep compact continuity only; not engineering evidence.",
+      preservedEvidenceRefs: [],
+      preservedFiles: [],
+      activeAgentsWorkflows: [],
+      pendingItems: [],
+      decisions: [],
+      risks: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      model: "final-compact-model",
+      provider: "openai-compatible",
+      trigger: "final",
+      transcriptEventCount: 8,
+    };
+
+    const result = await prepareMessagesForProviderPreflight({
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "final answer request" },
+      ],
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "final-compact-model" },
+      trigger: "final",
+      deps: {
+        appendSystemEvent: async (ctx, id, message, level = "info") => {
+          await ctx.store.appendEvent(id, {
+            type: "system_event",
+            id: "compact-final-test-event",
+            level,
+            message,
+            createdAt: new Date().toISOString(),
+          });
+        },
+        captureFailureLearning: async () => undefined,
+        recordToolResultBudgetEvidence: async () => undefined,
+        refreshCacheFreshness: () => undefined,
+      },
+    });
+
+    expect(result.blocked).toBe(false);
+    const providerText = JSON.stringify(result.messages);
+    expect(providerText).toContain("[Deep compact deep-final-test]");
+    expect(providerText).toContain("scope=full transcript semantic compact");
+    expect(providerText).toContain("never treat it as PASS engineering evidence");
+    const verdict = createPhase15BetaVerdictScope(context.evidence, (await store.resume(session.id)).transcript);
+    expect(verdict.status).toBe("PARTIAL");
+    expect(verdict.evidenceRefs).toEqual([]);
   });
 
   it("resumes a previous session through structured handoff", async () => {
@@ -5917,6 +6235,23 @@ describe("Phase 06 TUI slash commands", () => {
       memoryHash: "memory",
       changedKeys: ["memoryHash", "modelProviderHash"],
     };
+    context.cache.deepCompact = {
+      id: "deep-workflow-test",
+      kind: "deep",
+      scope: "full transcript semantic compact",
+      summary: "Deep compact continuity summary for workflow planning.",
+      preservedEvidenceRefs: [],
+      preservedFiles: [],
+      activeAgentsWorkflows: [],
+      pendingItems: [],
+      decisions: [],
+      risks: [],
+      createdAt: "2026-06-01T00:00:00.000Z",
+      model: "deepseek-v4-flash",
+      provider: "deepseek",
+      trigger: "workflow",
+      transcriptEventCount: 12,
+    };
 
     const naturalOut = new MemoryOutput();
     const naturalResult = await handleNaturalInput(
@@ -5945,8 +6280,13 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(context.lastFullOutput).toContain(`provider_failure:${failure.id.slice(0, 8)}`);
     expect(context.lastFullOutput).toContain("architecture-boundary-check");
+    expect(context.lastFullOutput).toContain("deep-compact:deep-workflow-test");
+    expect(context.lastFullOutput).toContain(
+      "Deep compact continuity summary for workflow planning.",
+    );
     expect(context.lastFullOutput).not.toContain("provider-event-secret-source");
     expect(context.lastFullOutput).not.toContain("Candidate memory should not enter workflow.");
+    expect(context.lastFullOutput).not.toContain("passEvidence=true");
   });
 
   it("keeps ordinary report deploy feature and bug-fix requests on provider path", async () => {
@@ -6340,9 +6680,14 @@ describe("Phase 06 TUI slash commands", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
-        requests.push(JSON.parse(String(init.body)));
+        const request = JSON.parse(String(init.body));
+        requests.push(request);
+        const deepCompact = isDeepCompactRequest(request);
+        const mainRequestCount = nonDeepRequests(requests).length;
         const text =
-          requests.length === 1
+          deepCompact
+            ? "Deep compact summary from full transcript older events."
+            : mainRequestCount === 1
             ? `RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER\n${"旧输出\n".repeat(70_000)}`
             : "压缩后继续。";
         const body = `data: ${JSON.stringify({ id: `chatcmpl-compact-${requests.length}`, choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
@@ -6361,9 +6706,15 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(2);
-    const request = requests[1] as { messages?: Array<{ role?: string; content?: string }> };
+    const deepRequests = requests.filter(isDeepCompactRequest);
+    const mainRequests = nonDeepRequests(requests);
+    expect(deepRequests).toHaveLength(1);
+    expect(mainRequests).toHaveLength(2);
+    expect((deepRequests[0] as { tool_choice?: string; toolChoice?: string }).tool_choice).toBe("none");
+    const request = mainRequests[1] as { messages?: Array<{ role?: string; content?: string }> };
     const requestText = JSON.stringify(request.messages ?? []);
+    expect(requestText).toContain("[Deep compact");
+    expect(requestText).toContain("scope=full transcript semantic compact");
     expect(requestText).toContain("[Context compact boundary");
     expect(requestText).toContain("Linghun compact summary");
     expect(requestText).toContain("filesOrEvidenceRefs");
@@ -7896,9 +8247,12 @@ describe("Phase 06 TUI slash commands", () => {
           messages?: Array<{ role?: string; content?: string }>;
         };
         requests.push(request);
-        const childRequests = requests.length;
+        const deepCompact = isDeepCompactRequest(request);
+        const childRequests = nonDeepRequests(requests).length;
         const body =
-          childRequests <= 16
+          deepCompact
+            ? `data: ${JSON.stringify({ id: "chatcmpl-child-deep-compact", choices: [{ delta: { content: "Deep compact summary for child loop." } }] })}\n\ndata: [DONE]\n\n`
+            : childRequests <= 16
             ? [
                 `data: ${JSON.stringify({
                   id: `chatcmpl-child-compact-${childRequests}`,
@@ -7928,14 +8282,22 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/fork worker inspect a.txt", context, output);
 
-    expect(requests.length).toBeGreaterThan(2);
-    const compactedRequest = requests.find((request) =>
+    const deepRequests = requests.filter(isDeepCompactRequest);
+    const mainRequests = nonDeepRequests(requests);
+    expect(deepRequests.length).toBeGreaterThanOrEqual(1);
+    for (const request of deepRequests) {
+      expect((request as { tool_choice?: string; toolChoice?: string }).tool_choice).toBe("none");
+    }
+    expect(mainRequests.length).toBeGreaterThan(2);
+    const compactedRequest = mainRequests.find((request) =>
       JSON.stringify((request as { messages?: unknown[] }).messages ?? []).includes(
         "[Context compact boundary",
       ),
     );
     expect(compactedRequest).toBeTruthy();
     const requestText = JSON.stringify((compactedRequest as { messages?: unknown[] }).messages ?? []);
+    expect(requestText).toContain("[Deep compact");
+    expect(requestText).toContain("scope=full transcript semantic compact");
     expect(requestText).toContain("scope=provider-visible recent context projection");
     expect(context.cache.compactProjection?.summary).toContain(
       "scope=provider-visible recent context projection",
@@ -7980,14 +8342,22 @@ describe("Phase 06 TUI slash commands", () => {
     };
     const context = await createTestContext(project, store, session, config);
     context.modelGateway = createModelGateway(config);
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await handleSlashCommand(`/fork worker ${"oversized child task ".repeat(40)}`, context, output);
     await handleSlashCommand("/fork worker second child should hit cooldown", context, output);
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(output.text).toContain("上下文压缩摘要后仍超过 provider 上限");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const compactRequest = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}")) as {
+      tool_choice?: string;
+      toolChoice?: string;
+    };
+    expect(isDeepCompactRequest(compactRequest)).toBe(true);
+    expect(compactRequest.tool_choice ?? compactRequest.toolChoice).toBe("none");
+    expect(output.text).toContain("Deep compact provider 请求失败");
     expect(output.text).toContain("上一次上下文压缩失败后仍在冷却中");
     expect(context.agents[0]?.status).toBe("blocked");
     expect(context.agents[1]?.status).toBe("blocked");
@@ -8378,11 +8748,16 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(3);
-    const secondText = JSON.stringify((requests[1] as { messages?: unknown[] }).messages ?? []);
+    const deepRequests = requests.filter(isDeepCompactRequest);
+    const mainRequests = nonDeepRequests(requests);
+    expect(deepRequests).toHaveLength(1);
+    expect(mainRequests).toHaveLength(3);
+    const secondText = JSON.stringify((mainRequests[1] as { messages?: unknown[] }).messages ?? []);
+    expect(secondText).toContain("[Deep compact");
+    expect(secondText).toContain("scope=full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_TOOL_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
-    const third = requests[2] as {
+    const third = mainRequests[2] as {
       messages?: Array<{ role?: string; tool_call_id?: string; content?: string }>;
     };
     const toolMessage = (third.messages ?? []).find((message) => message.role === "tool");
@@ -8434,12 +8809,17 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(3);
-    const secondText = JSON.stringify((requests[1] as { input?: unknown[] }).input ?? []);
+    const deepRequests = requests.filter(isDeepCompactRequest);
+    const mainRequests = nonDeepRequests(requests);
+    expect(deepRequests).toHaveLength(1);
+    expect(mainRequests).toHaveLength(3);
+    const secondText = JSON.stringify((mainRequests[1] as { input?: unknown[] }).input ?? []);
+    expect(secondText).toContain("[Deep compact");
+    expect(secondText).toContain("scope=full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_RESPONSES_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
     const thirdInput =
-      (requests[2] as { input?: Array<{ type?: string; call_id?: string; output?: string }> })
+      (mainRequests[2] as { input?: Array<{ type?: string; call_id?: string; output?: string }> })
         .input ?? [];
     expect(
       thirdInput.some(
@@ -8504,9 +8884,20 @@ describe("Phase 06 TUI slash commands", () => {
           tools?: unknown[];
         };
         requests.push({ url: String(url), body });
+        const deepCompact = isDeepCompactRequest(body);
+        const mainRequestCount = nonDeepRequests(requests).length;
         const encoder = new TextEncoder();
         let chunks: string[];
-        if (requests.length === 1) {
+        if (deepCompact) {
+          chunks = [
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-deep","usage":{"input_tokens":10}}}\n\n',
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Deep compact summary for anthropic pair context."}}\n\n',
+            'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+          ];
+        } else if (mainRequestCount === 1) {
           const text = `RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER\n${"旧上下文\n".repeat(60_000)}`;
           chunks = [
             'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-1","usage":{"input_tokens":10}}}\n\n',
@@ -8516,7 +8907,7 @@ describe("Phase 06 TUI slash commands", () => {
             'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n',
             'event: message_stop\ndata: {"type":"message_stop"}\n\n',
           ];
-        } else if (requests.length === 2) {
+        } else if (mainRequestCount === 2) {
           chunks = [
             'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-compact-2","usage":{"input_tokens":10}}}\n\n',
             'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_compact_read","name":"Read"}}\n\n',
@@ -8556,14 +8947,19 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(3);
+    const deepRequests = requests.filter(isDeepCompactRequest);
+    const mainRequests = nonDeepRequests(requests);
+    expect(deepRequests).toHaveLength(1);
+    expect(mainRequests).toHaveLength(3);
     for (const request of requests) {
       expect(request.url).toBe("https://relay.example.com/v1/messages");
     }
-    const secondText = JSON.stringify(requests[1]?.body.messages ?? []);
+    const secondText = JSON.stringify(mainRequests[1]?.body.messages ?? []);
+    expect(secondText).toContain("[Deep compact");
+    expect(secondText).toContain("scope=full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
-    const thirdBlocks = (requests[2]?.body.messages ?? []).flatMap((message) =>
+    const thirdBlocks = (mainRequests[2]?.body.messages ?? []).flatMap((message) =>
       Array.isArray(message.content)
         ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string; content?: string }>)
         : [],

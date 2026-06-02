@@ -37,6 +37,7 @@ export type WorkflowPlannerGoal = {
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;
   cacheFreshnessHint?: string;
+  deepCompactRef?: { id: string; summary: string };
   indexStatusRef?: { status: string; projectName?: string; freshness?: string };
   architectureRef?: { target: string; summary: string };
 };
@@ -77,6 +78,7 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
     selfLearningHints,
     failureLearningRefs,
     cacheFreshnessHint,
+    deepCompactRef,
     indexStatusRef,
     architectureRef,
   } = input;
@@ -121,6 +123,14 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
       kind: "workspace_cache",
       ref: "cache-freshness-hint",
       summary: sanitizeRefText(cacheFreshnessHint).slice(0, 200),
+    });
+  }
+
+  if (deepCompactRef) {
+    references.push({
+      kind: "transcript",
+      ref: `deep-compact:${sanitizeRefText(deepCompactRef.id).slice(0, 80)}`,
+      summary: sanitizeRefText(deepCompactRef.summary).slice(0, 500),
     });
   }
 

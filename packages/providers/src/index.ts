@@ -1275,7 +1275,11 @@ function createChatProfileRequest(
     messages: repaired.messages.map(toOpenAiMessage),
     stream: true,
     ...createOptionalMaxTokens("max_tokens", request, config),
-    ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
+    ...(tools && tools.length > 0
+      ? { tools, tool_choice: request.toolChoice ?? "auto" }
+      : request.toolChoice === "none"
+        ? { tool_choice: "none" as const }
+        : {}),
     ...(contract.sendReasoning
       ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
       : {}),
@@ -1304,7 +1308,11 @@ function createResponsesProfileRequest(
     input: repaired.messages.flatMap(toOpenAiResponsesInputItem),
     stream: true,
     ...createOptionalMaxTokens("max_output_tokens", request, config),
-    ...(tools && tools.length > 0 ? { tools, tool_choice: request.toolChoice ?? "auto" } : {}),
+    ...(tools && tools.length > 0
+      ? { tools, tool_choice: request.toolChoice ?? "auto" }
+      : request.toolChoice === "none"
+        ? { tool_choice: "none" as const }
+        : {}),
     ...(contract.sendReasoning
       ? createReasoningPayload(request.reasoningLevel ?? config.reasoningLevel)
       : {}),
