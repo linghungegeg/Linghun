@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "@linghun/config";
+import { getProviderEnvPath } from "@linghun/config";
 import type { LinghunConfig, RoleModelRoute } from "@linghun/config";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { breakCacheTestHooks } from "./index.js";
 import {
   diagnoseConcreteRoute,
@@ -23,6 +24,7 @@ import {
   isDefaultExecutorRoute,
   isModelRole,
   maskSecret,
+  readProviderEnvApiKeyProviders,
   routeSupportsCapability,
 } from "./model-doctor-runtime.js";
 
@@ -120,6 +122,29 @@ describe("model-doctor-runtime", () => {
       delete (process.env as Record<string, string | undefined>)[envKey];
       expect(getProviderKeySource("deepseek", new Set(), new Set())).toBe("merged-config");
     });
+  });
+
+  it("detects provider.env API key source for both OpenAI-compatible and DeepSeek", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-doctor-home-"));
+    try {
+      vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+      await mkdir(join(home, ".linghun"), { recursive: true });
+      await writeFile(
+        getProviderEnvPath(home),
+        [
+          "LINGHUN_OPENAI_API_KEY=sk-openai-secret",
+          "LINGHUN_DEEPSEEK_API_KEY=sk-deepseek-secret",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const providers = await readProviderEnvApiKeyProviders();
+
+      expect(providers.has("openai-compatible")).toBe(true);
+      expect(providers.has("deepseek")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   describe("isModelRole", () => {

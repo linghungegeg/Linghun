@@ -311,7 +311,10 @@ async function readProviderEnvApiKeyProviders(
 ): Promise<Set<string>> {
   try {
     const values = await readProviderEnvValues();
-    return new Set(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []);
+    return new Set([
+      ...(values.LINGHUN_OPENAI_API_KEY ? ["openai-compatible"] : []),
+      ...(values.LINGHUN_DEEPSEEK_API_KEY ? ["deepseek"] : []),
+    ]);
   } catch {
     return new Set();
   }

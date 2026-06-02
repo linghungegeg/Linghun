@@ -507,6 +507,14 @@ describe("config directories", () => {
     const path = await envEnsureProviderEnvTemplate(home);
     expect(path).toBe(envGetProviderEnvPath(home));
     expect(await envProviderEnvExists(home)).toBe(true);
+    const template = await readFile(path, "utf8");
+    expect(template).toContain("#   LINGHUN_OPENAI_BASE_URL=https://hk.geek2api.com");
+    expect(template).toContain("#   LINGHUN_OPENAI_MODEL=gpt-5.5");
+    expect(template).toContain("LINGHUN_OPENAI_ENDPOINT_PROFILE=responses");
+    expect(template).toContain("LINGHUN_INFERENCE_LEVEL=High");
+    expect(template).toContain("# LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1");
+    expect(template).toContain("# LINGHUN_DEEPSEEK_MODEL=deepseek-chat");
+    expect(template).toContain("LINGHUN_AUX_MODEL=");
 
     await envSaveProviderEnvSetup(
       {
@@ -523,6 +531,36 @@ describe("config directories", () => {
     expect(raw).toContain("LINGHUN_OPENAI_BASE_URL=https://provider.invalid/v1");
     expect(raw).toContain("LINGHUN_INFERENCE_LEVEL=Medium");
     expect(values.LINGHUN_OPENAI_API_KEY).toBe("sk-provider-secret");
+  });
+
+  it("loads supported DeepSeek fields from provider.env", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.resetModules();
+    const { getProviderEnvPath: envGetProviderEnvPath, loadConfig: envLoadConfig } = await import(
+      "./index.js"
+    );
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      envGetProviderEnvPath(home),
+      [
+        "LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1",
+        "LINGHUN_DEEPSEEK_API_KEY=sk-deepseek-secret",
+        "LINGHUN_DEEPSEEK_MODEL=deepseek-chat",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+
+    expect(config.providers.deepseek.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(config.providers.deepseek.apiKey).toBe("sk-deepseek-secret");
+    expect(config.providers.deepseek.model).toBe("deepseek-chat");
+    expect(config.defaultModel).toBe("deepseek-chat");
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
+      "deepseek",
+    );
   });
 
   it("Run 2 Closure: concurrent provider.env writes do not collide on temp path", async () => {

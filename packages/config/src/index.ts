@@ -363,19 +363,36 @@ const providerEnvKeys = new Set([
   "LINGHUN_OPENAI_MODEL",
   "LINGHUN_OPENAI_ENDPOINT_PROFILE",
   "LINGHUN_OPENAI_INCLUDE_USAGE",
+  "LINGHUN_DEEPSEEK_BASE_URL",
+  "LINGHUN_DEEPSEEK_API_KEY",
+  "LINGHUN_DEEPSEEK_MODEL",
   "LINGHUN_INFERENCE_LEVEL",
   "LINGHUN_AUX_MODEL",
 ]);
 
 export const providerEnvTemplate = `# Linghun private provider config. Do not commit this file.
 # Shell env variables with the same names have higher priority.
-# Fill these values with your OpenAI-compatible provider details.
+# Standard OpenAI-compatible / Responses setup.
+# Use the root API base URL; do not append /v1/chat/completions or /responses.
+# Example:
+#   LINGHUN_OPENAI_BASE_URL=https://hk.geek2api.com
+#   LINGHUN_OPENAI_MODEL=gpt-5.5
 LINGHUN_OPENAI_BASE_URL=
 LINGHUN_OPENAI_API_KEY=
 LINGHUN_OPENAI_MODEL=
-LINGHUN_OPENAI_ENDPOINT_PROFILE=chat_completions
+# Supported: chat_completions, responses, anthropic_messages.
+LINGHUN_OPENAI_ENDPOINT_PROFILE=responses
+# Set true only when your gateway returns usage in stream chunks.
 LINGHUN_OPENAI_INCLUDE_USAGE=false
-LINGHUN_INFERENCE_LEVEL=Medium
+
+# Optional DeepSeek official provider fallback.
+# Uncomment and fill these if you want deepseek as the active provider instead.
+# LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+# LINGHUN_DEEPSEEK_API_KEY=
+# LINGHUN_DEEPSEEK_MODEL=deepseek-chat
+
+# Supported reasoning levels: Low, Medium, High.
+LINGHUN_INFERENCE_LEVEL=High
 # Optional: leave empty to let helper roles follow the main model.
 LINGHUN_AUX_MODEL=
 `;
@@ -966,40 +983,67 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
   const hasMainProviderValue = Boolean(
     values.LINGHUN_OPENAI_BASE_URL || values.LINGHUN_OPENAI_API_KEY || values.LINGHUN_OPENAI_MODEL,
   );
-  if (!hasMainProviderValue) {
+  const hasDeepSeekProviderValue = Boolean(
+    values.LINGHUN_DEEPSEEK_BASE_URL ||
+      values.LINGHUN_DEEPSEEK_API_KEY ||
+      values.LINGHUN_DEEPSEEK_MODEL,
+  );
+  if (!hasMainProviderValue && !hasDeepSeekProviderValue) {
     return {};
   }
-  validateProviderEnvSetup({
-    baseUrl: process.env.LINGHUN_OPENAI_BASE_URL ?? values.LINGHUN_OPENAI_BASE_URL ?? "",
-    apiKey: process.env.LINGHUN_OPENAI_API_KEY ?? values.LINGHUN_OPENAI_API_KEY ?? "",
-    model: process.env.LINGHUN_OPENAI_MODEL ?? values.LINGHUN_OPENAI_MODEL ?? "",
-    reasoningLevel: values.LINGHUN_INFERENCE_LEVEL
-      ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
-      : "Medium",
-  });
+  const providerConfig: Record<string, ProviderConfig> = {};
   const openAiProvider: Partial<ProviderConfig> = {};
-  if (values.LINGHUN_OPENAI_BASE_URL) openAiProvider.baseUrl = values.LINGHUN_OPENAI_BASE_URL;
-  if (values.LINGHUN_OPENAI_API_KEY) openAiProvider.apiKey = values.LINGHUN_OPENAI_API_KEY;
-  if (values.LINGHUN_OPENAI_MODEL) openAiProvider.model = values.LINGHUN_OPENAI_MODEL;
-  openAiProvider.endpointProfile = values.LINGHUN_OPENAI_ENDPOINT_PROFILE
-    ? normalizeEndpointProfile(values.LINGHUN_OPENAI_ENDPOINT_PROFILE)
-    : "chat_completions";
-  if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
-    openAiProvider.includeUsage = parseEnvBoolean(values.LINGHUN_OPENAI_INCLUDE_USAGE);
+  if (hasMainProviderValue) {
+    validateProviderEnvSetup({
+      baseUrl: process.env.LINGHUN_OPENAI_BASE_URL ?? values.LINGHUN_OPENAI_BASE_URL ?? "",
+      apiKey: process.env.LINGHUN_OPENAI_API_KEY ?? values.LINGHUN_OPENAI_API_KEY ?? "",
+      model: process.env.LINGHUN_OPENAI_MODEL ?? values.LINGHUN_OPENAI_MODEL ?? "",
+      reasoningLevel: values.LINGHUN_INFERENCE_LEVEL
+        ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
+        : "Medium",
+    });
+    if (values.LINGHUN_OPENAI_BASE_URL) openAiProvider.baseUrl = values.LINGHUN_OPENAI_BASE_URL;
+    if (values.LINGHUN_OPENAI_API_KEY) openAiProvider.apiKey = values.LINGHUN_OPENAI_API_KEY;
+    if (values.LINGHUN_OPENAI_MODEL) openAiProvider.model = values.LINGHUN_OPENAI_MODEL;
+    openAiProvider.endpointProfile = values.LINGHUN_OPENAI_ENDPOINT_PROFILE
+      ? normalizeEndpointProfile(values.LINGHUN_OPENAI_ENDPOINT_PROFILE)
+      : "chat_completions";
+    if (values.LINGHUN_OPENAI_INCLUDE_USAGE) {
+      openAiProvider.includeUsage = parseEnvBoolean(values.LINGHUN_OPENAI_INCLUDE_USAGE);
+    }
+    openAiProvider.reasoningLevel = values.LINGHUN_INFERENCE_LEVEL
+      ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
+      : "Medium";
+    providerConfig["openai-compatible"] = {
+      type: "openai-compatible",
+      model:
+        process.env.LINGHUN_OPENAI_MODEL ??
+        openAiProvider.model ??
+        openAiCompatibleModelPlaceholder,
+      ...openAiProvider,
+    };
   }
-  openAiProvider.reasoningLevel = values.LINGHUN_INFERENCE_LEVEL
-    ? normalizeReasoningLevel(values.LINGHUN_INFERENCE_LEVEL)
-    : "Medium";
-  const model = process.env.LINGHUN_OPENAI_MODEL ?? openAiProvider.model;
+  const deepSeekProvider: Partial<ProviderConfig> = {};
+  if (hasDeepSeekProviderValue) {
+    if (values.LINGHUN_DEEPSEEK_BASE_URL)
+      deepSeekProvider.baseUrl = values.LINGHUN_DEEPSEEK_BASE_URL;
+    if (values.LINGHUN_DEEPSEEK_API_KEY) deepSeekProvider.apiKey = values.LINGHUN_DEEPSEEK_API_KEY;
+    if (values.LINGHUN_DEEPSEEK_MODEL) deepSeekProvider.model = values.LINGHUN_DEEPSEEK_MODEL;
+    providerConfig.deepseek = {
+      type: "deepseek",
+      model: process.env.LINGHUN_DEEPSEEK_MODEL ?? deepSeekProvider.model ?? defaultDeepSeekModel,
+      ...deepSeekProvider,
+    };
+  }
+  const model =
+    process.env.LINGHUN_OPENAI_MODEL ??
+    openAiProvider.model ??
+    process.env.LINGHUN_DEEPSEEK_MODEL ??
+    deepSeekProvider.model;
+  const routeProvider = hasMainProviderValue ? "openai-compatible" : "deepseek";
   return {
     ...(model ? { defaultModel: model } : {}),
-    providers: {
-      "openai-compatible": {
-        type: "openai-compatible",
-        model: model ?? openAiCompatibleModelPlaceholder,
-        ...openAiProvider,
-      },
-    },
+    providers: providerConfig,
     modelRoutes: model
       ? {
           defaultModel: model,
@@ -1007,7 +1051,7 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
             route.requiredCapabilities.includes("text")
               ? {
                   ...route,
-                  provider: "openai-compatible",
+                  provider: routeProvider,
                   primaryModel: model,
                   fallbackModels: [],
                 }

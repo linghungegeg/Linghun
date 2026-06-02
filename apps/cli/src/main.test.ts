@@ -262,6 +262,29 @@ describe("CLI", () => {
     }
   });
 
+  it("shows provider.env source for headless DeepSeek model doctor", async () => {
+    await withIsolatedCliConfig(async ({ home }) => {
+      await writeFile(
+        getProviderEnvPath(home),
+        [
+          "LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1",
+          "LINGHUN_DEEPSEEK_API_KEY=sk-cli-deepseek-secret",
+          "LINGHUN_DEEPSEEK_MODEL=deepseek-chat",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const doctor = await runCli(["model", "doctor"]);
+
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-chat");
+      expect(doctor.stdout).toContain("apiKey=present source=user-provider-env");
+      expect(doctor.stdout).toContain("masked=sk-…cret");
+      expect(doctor.stdout).not.toContain("sk-cli-deepseek-secret");
+      expect(doctor.exitCode).toBe(0);
+    });
+  });
+
   it("shows the real headless openai-compatible model without DeepSeek fallback", async () => {
     await withIsolatedCliConfig(async ({ home, project }) => {
       await writeFile(
