@@ -1627,7 +1627,9 @@ export function repairToolMessagePairing(messages: ModelMessage[]): ToolMessageP
         toolCalls.push(toolCall);
       }
       repaired.push(
-        toolCalls.length > 0 ? { ...message, toolCalls } : { role: "assistant", content: message.content },
+        toolCalls.length > 0
+          ? { ...message, toolCalls }
+          : { role: "assistant", content: message.content },
       );
       continue;
     }

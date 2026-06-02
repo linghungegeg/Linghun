@@ -4,21 +4,25 @@ import type { ModelMessage } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
 import { type CompactBoundary, compactMessagesToFit } from "./compact-context.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
-import type { FailureLearningInput } from "./failure-learning-runtime.js";
-import { getRoleRoute } from "./model-doctor-runtime.js";
-import { sanitizeDiagnosticText, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
 import {
+  type DeepCompactRuntimeDeps,
   injectDeepCompactSummary,
   maybeRunDeepCompactBeforeProvider,
-  type DeepCompactRuntimeDeps,
 } from "./deep-compact-runtime.js";
+import type { FailureLearningInput } from "./failure-learning-runtime.js";
+import type { TuiContext } from "./index.js";
+import { getRoleRoute } from "./model-doctor-runtime.js";
 import {
-  applyToolResultBudgetToMessages,
+  sanitizeDiagnosticText,
+  sanitizeDisplayPaths,
+  truncateDisplay,
+} from "./startup-runtime.js";
+import {
   type ToolResultBudgetRecord,
+  applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 import type { CompactProjection } from "./tui-data-types.js";
-import type { TuiContext } from "./index.js";
 
 export type CompactPreflightRuntime = {
   role: ModelRole;
@@ -263,7 +267,8 @@ export function getAutoCompactTriggerChars(
   runtime: CompactPreflightRuntime,
 ): number {
   const maxChars = getProviderContextMaxChars(context, runtime);
-  const bufferChars = getAutoCompactBufferTokens(context, runtime) * CONTEXT_CHARS_PER_TOKEN_ESTIMATE;
+  const bufferChars =
+    getAutoCompactBufferTokens(context, runtime) * CONTEXT_CHARS_PER_TOKEN_ESTIMATE;
   return Math.max(1, maxChars - bufferChars);
 }
 
@@ -323,7 +328,10 @@ function createCompactProjection(
 ): CompactProjection {
   const preCompactChars = estimateModelMessageChars(input.originalMessages);
   const postCompactChars = estimateModelMessageChars(input.compactedMessages);
-  const removedMessages = Math.max(0, input.originalMessages.length - input.compactedMessages.length);
+  const removedMessages = Math.max(
+    0,
+    input.originalMessages.length - input.compactedMessages.length,
+  );
   const activeAgents = context.agents
     .filter((agent) => agent.status === "running" || agent.status === "stale")
     .slice(0, 5)
@@ -333,7 +341,9 @@ function createCompactProjection(
     );
   const activeWorkflows = context.backgroundTasks
     .filter((task) => task.kind === "job" || task.kind === "agent")
-    .filter((task) => task.status === "running" || task.status === "paused" || task.status === "stale")
+    .filter(
+      (task) => task.status === "running" || task.status === "paused" || task.status === "stale",
+    )
     .slice(0, 5)
     .map(
       (task) =>
@@ -346,7 +356,9 @@ function createCompactProjection(
   ].filter(Boolean);
   const failureLearning = context.failureLearning.records
     .slice(0, 3)
-    .map((record) => `${record.id}:${sanitizeCompactSummaryText(context, record.failureSummary, 100)}`);
+    .map(
+      (record) => `${record.id}:${sanitizeCompactSummaryText(context, record.failureSummary, 100)}`,
+    );
   const evidenceRefs = context.evidence.slice(0, 8).map((item) => item.id);
   const files = [
     ...new Set([
@@ -370,12 +382,20 @@ function createCompactProjection(
       `trigger=${input.trigger}`,
       `userGoal=${sanitizeCompactSummaryText(context, context.memory.lastHandoff?.goal ?? "current interactive coding task", 220)}`,
       `currentTask=${sanitizeCompactSummaryText(context, context.tools.todos.find((todo) => todo.status !== "completed")?.content ?? "continue the latest user request", 220)}`,
-      `decisions=${context.routeDecisions.slice(0, 3).map((item) => `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"}`).join("; ") || "none recorded"}`,
+      `decisions=${
+        context.routeDecisions
+          .slice(0, 3)
+          .map(
+            (item) =>
+              `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"}`,
+          )
+          .join("; ") || "none recorded"
+      }`,
       `filesOrEvidenceRefs=${[...files, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
       `activeAgentsWorkflows=${[...activeAgents, ...activeWorkflows].join("; ") || "none"}`,
       `pendingPermissionsToolCalls=${pending.join("; ") || "none"}`,
       `failureLearning=${failureLearning.join("; ") || "none"}`,
-      `antiHallucination=do not claim compact failure as PASS evidence; preserve evidence-bound claims only`,
+      "antiHallucination=do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
       `indexCacheMemoryFreshness=index:${context.index.status}; cacheFreshness:${context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown"}; memory:${context.memory.accepted.length} accepted`,
       `discardedScope=${risks.join("; ") || "older provider-visible recent context summarized"}`,
       `toolPairingSafe=${input.pairingSafe ? "yes" : "no"}`,
@@ -408,7 +428,10 @@ export function sanitizeCompactSummaryText(
 
 function redactCompactSecrets(value: string): string {
   return value
-    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      (_match, key: string, sep: string) => `${key}${sep}***`,
+    )
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }

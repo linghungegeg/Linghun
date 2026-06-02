@@ -68,7 +68,10 @@ describe("TUI Interaction Contract — 滚动语义", () => {
   });
 
   it("End 从任意位置回到底部", () => {
-    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), { type: "scroll", delta: 20 });
+    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "scroll",
+      delta: 20,
+    });
     const ended = reduceTranscriptScroll(up, { type: "end" });
     expect(ended.scrollOffset).toBe(0);
     expect(ended.stickToBottom).toBe(true);
@@ -97,7 +100,10 @@ describe("TUI Interaction Contract — 滚动语义", () => {
   });
 
   it("clamp 防止滚动超出内容范围", () => {
-    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), { type: "scroll", delta: 100 });
+    const up = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "scroll",
+      delta: 100,
+    });
     const clamped = clampTranscriptScroll(up, 15);
     expect(clamped.scrollOffset).toBe(15);
     expect(clamped.hasOverflow).toBe(true);

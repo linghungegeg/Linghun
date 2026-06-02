@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import {
   type LinghunConfig,
   defaultConfig,
@@ -19,6 +20,8 @@ import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
 import { createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { formatCompactStatus } from "./cache-command-runtime.js";
+import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import {
   buildFailureLearningSummaryForPrompt,
   loadFailureRecords,
@@ -29,6 +32,7 @@ import {
   formatSolutionCompletenessReportBlock,
   needsSolutionCompletenessReportClosure,
 } from "./final-answer-gate.js";
+import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
@@ -107,9 +111,6 @@ import {
 } from "./provider-circuit-breaker.js";
 import { configureRemoteCommandRuntime } from "./remote-command-runtime.js";
 import { formatProviderFailurePrimary } from "./request-lifecycle-presenter.js";
-import { formatCompactStatus } from "./cache-command-runtime.js";
-import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
-import { hydrateResumeContext } from "./handoff-session-runtime.js";
 import { formatFooterIndexLabel } from "./shell/models/footer-view.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock, mapPendingApprovalToPermission } from "./shell/view-model.js";
@@ -118,6 +119,11 @@ import {
   createReadinessItems,
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
+
+const __testDir = dirname(fileURLToPath(import.meta.url));
+function srcPath(relativePath: string): string {
+  return join(__testDir, relativePath);
+}
 
 class MemoryOutput extends Writable {
   text = "";
@@ -533,10 +539,7 @@ function mockOpenAiStartAgentChildToolSequence(
           };
           const childFinalOnly =
             childRequest.tool_choice === "none" || childRequest.toolChoice === "none";
-          return (
-            !childFinalOnly &&
-            isChildAgentRequest(childRequest)
-          );
+          return !childFinalOnly && isChildAgentRequest(childRequest);
         }).length;
         if (!finalOnly && childToolRequests <= childToolCount) {
           body = [
@@ -724,35 +727,36 @@ function mockOpenAiCustomStartAgentFetch(options: {
     vi.fn(async (_url: string, init: RequestInit) => {
       const request = JSON.parse(String(init.body));
       requests.push(request);
-      const body = requests.length === 1
-        ? [
-            `data: ${JSON.stringify({
-              id: "chatcmpl-custom-start-agent",
-              choices: [
-                {
-                  delta: {
-                    tool_calls: [
-                      {
-                        id: "call-custom-start-agent",
-                        type: "function",
-                        function: {
-                          name: "StartAgent",
-                          arguments: JSON.stringify({
-                            subagent_type: options.registryAgentId,
-                            task: options.task,
-                          }),
+      const body =
+        requests.length === 1
+          ? [
+              `data: ${JSON.stringify({
+                id: "chatcmpl-custom-start-agent",
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          id: "call-custom-start-agent",
+                          type: "function",
+                          function: {
+                            name: "StartAgent",
+                            arguments: JSON.stringify({
+                              subagent_type: options.registryAgentId,
+                              task: options.task,
+                            }),
+                          },
                         },
-                      },
-                    ],
+                      ],
+                    },
                   },
-                },
-              ],
-            })}\n\n`,
-            "data: [DONE]\n\n",
-          ].join("")
-        : isChildAgentRequest(request)
-          ? `data: ${JSON.stringify({ id: "chatcmpl-custom-child", choices: [{ delta: { content: options.childFinalText ?? "custom child done" } }] })}\n\ndata: [DONE]\n\n`
-          : `data: ${JSON.stringify({ id: "chatcmpl-custom-main-final", choices: [{ delta: { content: "custom StartAgent final" } }] })}\n\ndata: [DONE]\n\n`;
+                ],
+              })}\n\n`,
+              "data: [DONE]\n\n",
+            ].join("")
+          : isChildAgentRequest(request)
+            ? `data: ${JSON.stringify({ id: "chatcmpl-custom-child", choices: [{ delta: { content: options.childFinalText ?? "custom child done" } }] })}\n\ndata: [DONE]\n\n`
+            : `data: ${JSON.stringify({ id: "chatcmpl-custom-main-final", choices: [{ delta: { content: "custom StartAgent final" } }] })}\n\ndata: [DONE]\n\n`;
       return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     }),
   );
@@ -799,6 +803,21 @@ if (tool === "list_projects") {
       symbol: "main",
       raw_source: "RAW_SOURCE_HEAD " + "x".repeat(1000) + " RAW_SOURCE_TAIL_SHOULD_NOT_DUMP"
     }]
+  }));
+} else if (tool === "search_graph") {
+  console.log(JSON.stringify({
+    total: 7,
+    search_mode: "bm25",
+    results: [{
+      name: "main",
+      qualified_name: "test-project.src.入口.main",
+      label: "Function",
+      file_path: "src/入口.ts",
+      start_line: 1,
+      end_line: 10,
+      rank: -15.5
+    }],
+    has_more: false
   }));
 } else if (tool === "get_architecture") {
   console.log(JSON.stringify({
@@ -1176,8 +1195,12 @@ describe("Phase 06 TUI slash commands", () => {
     // persisted ~/.linghun/data/jobs leak into /job list and /background tests.
     vi.stubEnv("LINGHUN_DATA_DIR", join(home, ".linghun", "data"));
     for (const key of PHASE06_MODEL_ENV_KEYS) {
-      vi.stubEnv(key, undefined as unknown as string);
+      vi.stubEnv(key, undefined);
     }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("detects catalog drift against real user-visible slash dispatch", () => {
@@ -2241,7 +2264,10 @@ describe("Phase 06 TUI slash commands", () => {
           })}\n\n`,
           "data: [DONE]\n\n",
         ].join("");
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
 
@@ -2322,7 +2348,13 @@ describe("Phase 06 TUI slash commands", () => {
       mailbox: [],
       summary: `agent summary has ${rawApiKey} and ${rawApiKeyCamel}`,
       contextSummary: "summary",
-      cost: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCny: 0 },
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -2332,7 +2364,7 @@ describe("Phase 06 TUI slash commands", () => {
     const messages: ModelMessage[] = [
       { role: "system", content: "system" },
       ...Array.from({ length: 18 }, (_, index) => ({
-        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
         content: `old context ${index} ${"x".repeat(20_000)} ${index === 0 ? rawSk : ""}`,
       })),
       { role: "user", content: "latest request" },
@@ -2440,7 +2472,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr,
     });
 
-    const providerCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("example.test"));
+    const providerCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("example.test"),
+    );
     expect(providerCalls).toHaveLength(1);
     expect(JSON.stringify(JSON.parse(String(providerCalls[0]?.[1]?.body ?? "{}")))).toContain(
       "deep context compact agent",
@@ -2508,7 +2542,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(providerText).toContain("[Deep compact deep-final-test]");
     expect(providerText).toContain("scope=full transcript semantic compact");
     expect(providerText).toContain("never treat it as PASS engineering evidence");
-    const verdict = createPhase15BetaVerdictScope(context.evidence, (await store.resume(session.id)).transcript);
+    const verdict = createPhase15BetaVerdictScope(
+      context.evidence,
+      (await store.resume(session.id)).transcript,
+    );
     expect(verdict.status).toBe("PARTIAL");
     expect(verdict.evidenceRefs).toEqual([]);
   });
@@ -2574,7 +2611,8 @@ describe("Phase 06 TUI slash commands", () => {
 
       expect(output.text).not.toContain(home);
       expect(output.text).toContain("[user-home]");
-      expect(output.text).toContain(".linghun/memory");
+      // When LINGHUN_DATA_DIR is set, paths are isolated under data dir
+      expect(output.text).toContain("memory");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -2616,13 +2654,15 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    context.memory = await createMemoryState(context.config, project);
 
     await handleSlashCommand("/memory candidate 项目长期规则只保存稳定工程事实", context, output);
     const candidateId = context.memory.candidates[0]?.id;
     await handleSlashCommand(`/memory accept ${candidateId}`, context, output);
     await handleNaturalInput("yes", context, output);
 
-    const loaded = await createMemoryState(defaultConfig, project);
+    // Use the same config that was used during memory write to ensure consistent paths
+    const loaded = await createMemoryState(context.config, project);
     const reloadedContext = await createTestContext(project, store, session);
     reloadedContext.memory = loaded;
     await handleSlashCommand("/memory", reloadedContext, output);
@@ -2693,7 +2733,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleNaturalInput("yes", context, output);
     expect(context.memory.accepted).toHaveLength(0);
     await expect(
-      readFile(join(project, ".linghun", "memory", `${acceptedId}.json`), "utf8"),
+      readFile(
+        join(resolveStoragePaths(context.config, project).memoryProject, `${acceptedId}.json`),
+        "utf8",
+      ),
     ).rejects.toThrow();
 
     await handleSlashCommand(
@@ -3267,7 +3310,7 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("D.13U: source has no FreshnessLite gate restored and has Final Answer Gate wired", async () => {
     const fs = await import("node:fs/promises");
-    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    const indexSrc = await fs.readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
     expect(indexSrc).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
     expect(indexSrc).toContain("evaluateFinalAnswerClaims(assistantText, context.evidence)");
@@ -3684,8 +3727,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(background).toBeDefined();
     await completeAgent(agent, background as BackgroundTaskState, context, output);
     expect(agent?.mailbox[0]?.consumedAt).toBeDefined();
+    const config = await loadConfig(project);
+    const agentRunsDir = resolveStoragePaths(config, project).agentRuns;
     const persistedAgent = JSON.parse(
-      await readFile(join(project, ".linghun", "agent-runs", `${agent?.id}.json`), "utf8"),
+      await readFile(join(agentRunsDir, `${agent?.id}.json`), "utf8"),
     ) as { mailbox?: Array<{ consumedAt?: string }> };
     expect(persistedAgent.mailbox?.[0]?.consumedAt).toBeDefined();
     await handleSlashCommand(`/agents cancel ${agent?.id}`, context, output);
@@ -3710,6 +3755,163 @@ describe("Phase 06 TUI slash commands", () => {
     expect(staleContext.agents.find((item) => item.addressableName === "stale-one")?.status).toBe(
       "stale",
     );
+  });
+
+  it("hydratePersistentAgents restores all agent statuses correctly to background tasks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-status-restore-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4o" });
+    const { hydratePersistentAgents } = await import("./job-agent-command-runtime.js");
+
+    const context = await createTestContext(project, store, session);
+    const config = await loadConfig(project);
+    const agentRunsDir = resolveStoragePaths(config, project).agentRuns;
+    await mkdir(agentRunsDir, { recursive: true });
+
+    const now = new Date().toISOString();
+    const blockedAgent = {
+      id: "agent-blocked-01",
+      type: "worker",
+      status: "blocked",
+      task: "blocked task",
+      summary: "blocked by permission",
+      role: "executor",
+      transcriptPath: join(project, "agent-blocked-01.jsonl"),
+      transcriptSessionId: session.id,
+      startedAt: now,
+      updatedAt: now,
+    };
+    const cancelledAgent = {
+      id: "agent-cancelled-02",
+      type: "worker",
+      status: "cancelled",
+      task: "cancelled task",
+      summary: "user cancelled",
+      role: "executor",
+      transcriptPath: join(project, "agent-cancelled-02.jsonl"),
+      transcriptSessionId: session.id,
+      startedAt: now,
+      updatedAt: now,
+    };
+    const failedAgent = {
+      id: "agent-failed-03",
+      type: "worker",
+      status: "failed",
+      task: "failed task",
+      summary: "failed with error",
+      role: "executor",
+      transcriptPath: join(project, "agent-failed-03.jsonl"),
+      transcriptSessionId: session.id,
+      startedAt: now,
+      updatedAt: now,
+    };
+    const completedAgent = {
+      id: "agent-completed-04",
+      type: "worker",
+      status: "completed",
+      task: "completed task",
+      summary: "completed successfully",
+      role: "executor",
+      transcriptPath: join(project, "agent-completed-04.jsonl"),
+      transcriptSessionId: session.id,
+      startedAt: now,
+      updatedAt: now,
+    };
+    const runningAgent = {
+      id: "agent-running-05",
+      type: "worker",
+      status: "running",
+      task: "running task",
+      summary: "still running",
+      role: "executor",
+      transcriptPath: join(project, "agent-running-05.jsonl"),
+      transcriptSessionId: session.id,
+      startedAt: now,
+      updatedAt: now,
+    };
+
+    await writeFile(
+      join(agentRunsDir, "agent-blocked-01.json"),
+      JSON.stringify(blockedAgent, null, 2),
+    );
+    await writeFile(
+      join(agentRunsDir, "agent-cancelled-02.json"),
+      JSON.stringify(cancelledAgent, null, 2),
+    );
+    await writeFile(
+      join(agentRunsDir, "agent-failed-03.json"),
+      JSON.stringify(failedAgent, null, 2),
+    );
+    await writeFile(
+      join(agentRunsDir, "agent-completed-04.json"),
+      JSON.stringify(completedAgent, null, 2),
+    );
+    await writeFile(
+      join(agentRunsDir, "agent-running-05.json"),
+      JSON.stringify(runningAgent, null, 2),
+    );
+
+    await hydratePersistentAgents(context);
+
+    // Verify agent status restoration
+    const restoredBlocked = context.agents.find((a) => a.id === "agent-blocked-01");
+    const restoredCancelled = context.agents.find((a) => a.id === "agent-cancelled-02");
+    const restoredFailed = context.agents.find((a) => a.id === "agent-failed-03");
+    const restoredCompleted = context.agents.find((a) => a.id === "agent-completed-04");
+    const restoredRunning = context.agents.find((a) => a.id === "agent-running-05");
+
+    expect(restoredBlocked?.status).toBe("blocked");
+    expect(restoredCancelled?.status).toBe("cancelled");
+    expect(restoredFailed?.status).toBe("failed");
+    expect(restoredCompleted?.status).toBe("completed");
+    expect(restoredRunning?.status).toBe("stale"); // running -> stale on restore
+
+    // Verify background task restoration
+    const bgBlocked = context.backgroundTasks.find((t) => t.id === "agent-blocked-01");
+    const bgCancelled = context.backgroundTasks.find((t) => t.id === "agent-cancelled-02");
+    const bgFailed = context.backgroundTasks.find((t) => t.id === "agent-failed-03");
+    const bgCompleted = context.backgroundTasks.find((t) => t.id === "agent-completed-04");
+    const bgStale = context.backgroundTasks.find((t) => t.id === "agent-running-05");
+
+    // blocked: background status=failed, result=partial, not running
+    expect(bgBlocked?.status).toBe("failed");
+    expect(bgBlocked?.result).toBe("partial");
+    expect(bgBlocked?.currentStep).toBe("blocked");
+    expect(bgBlocked?.progress?.completed).toBe(1);
+    expect(bgBlocked?.progress?.total).toBe(1);
+    expect(bgBlocked?.userVisibleSummary).toBe("blocked by permission");
+
+    // cancelled: background status=completed, result=fail, not running
+    expect(bgCancelled?.status).toBe("completed");
+    expect(bgCancelled?.result).toBe("fail");
+    expect(bgCancelled?.currentStep).toBe("cancelled");
+    expect(bgCancelled?.progress?.completed).toBe(1);
+    expect(bgCancelled?.progress?.total).toBe(1);
+    expect(bgCancelled?.userVisibleSummary).toBe("user cancelled");
+
+    // failed: background status=completed, result=fail, not running
+    expect(bgFailed?.status).toBe("completed");
+    expect(bgFailed?.result).toBe("fail");
+    expect(bgFailed?.currentStep).toBe("failed");
+    expect(bgFailed?.progress?.completed).toBe(1);
+    expect(bgFailed?.progress?.total).toBe(1);
+    expect(bgFailed?.userVisibleSummary).toBe("failed with error");
+
+    // completed: background status=completed, result=partial, not running
+    expect(bgCompleted?.status).toBe("completed");
+    expect(bgCompleted?.result).toBe("partial");
+    expect(bgCompleted?.currentStep).toBe("completed");
+    expect(bgCompleted?.progress?.completed).toBe(1);
+    expect(bgCompleted?.progress?.total).toBe(1);
+    expect(bgCompleted?.userVisibleSummary).toBe("completed successfully");
+
+    // running->stale: background status=stale, result=partial, resumable
+    expect(bgStale?.status).toBe("stale");
+    expect(bgStale?.result).toBe("partial");
+    expect(bgStale?.currentStep).toBe("stale/resumable");
+    expect(bgStale?.progress?.completed).toBe(0);
+    expect(bgStale?.progress?.total).toBe(1);
+    expect(bgStale?.userVisibleSummary).toContain("stale/resumable");
   });
 
   it("keeps Polish D agent display names cosmetic, ASCII-safe, and bounded", async () => {
@@ -4026,7 +4228,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.workflows.activeRun?.planId).toBe("check");
     expect(context.workflows.activeRun?.status).toBe("completed");
     expect(context.workflows.activeRun?.result).toBe("partial");
-    expect(context.backgroundTasks.find((task) => task.title.includes("Workflow: check"))).toMatchObject({
+    expect(
+      context.backgroundTasks.find((task) => task.title.includes("Workflow: check")),
+    ).toMatchObject({
       kind: "job",
       result: "partial",
     });
@@ -4163,8 +4367,14 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/fork reviewer try forbidden bash", context, output);
 
-    expect(agentRegistry.errors.join("\n")).toContain("allowedTools contains invalid tool: NotATool");
-    expect((requests[0] as { tools?: Array<{ function?: { name?: string } }> }).tools?.map((tool) => tool.function?.name)).toEqual(["Read"]);
+    expect(agentRegistry.errors.join("\n")).toContain(
+      "allowedTools contains invalid tool: NotATool",
+    );
+    expect(
+      (requests[0] as { tools?: Array<{ function?: { name?: string } }> }).tools?.map(
+        (tool) => tool.function?.name,
+      ),
+    ).toEqual(["Read"]);
     expect(context.agents[0]?.status).toBe("blocked");
     expect(context.agents[0]?.summary).toContain("Tool Bash is not allowed");
     await expect(stat(blockedPath)).rejects.toThrow();
@@ -4214,15 +4424,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(childRequest?.model).toBe("custom-child-model");
     expect(childRequest?.tools?.map((tool) => tool.function?.name)).toEqual(["Read"]);
     expect(output.text).toContain("custom child completed");
+    const config = await loadConfig(project);
+    const agentRunsDir = resolveStoragePaths(config, project).agentRuns;
     const persistedAgent = JSON.parse(
       await readFile(
         join(
-          project,
-          ".linghun",
-          "agent-runs",
-          ((await readdir(join(project, ".linghun", "agent-runs"))).find((file) =>
-            file.endsWith(".json"),
-          ) ?? ""),
+          agentRunsDir,
+          (await readdir(agentRunsDir)).find((file) => file.endsWith(".json")) ?? "",
         ),
         "utf8",
       ),
@@ -4951,7 +5159,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(doctorOutput.text).toContain("Node fallback=available");
     expect(doctorOutput.text).toContain("present:linghun-native-runner-mock.cjs");
     expect(doctorOutput.text).not.toContain(project);
-    expect(output.text).not.toContain("[后台] Job: native runner tes · completed · worker step 1/1; agents 0/0; runner=");
+    expect(output.text).not.toContain(
+      "[后台] Job: native runner tes · completed · worker step 1/1; agents 0/0; runner=",
+    );
     expect(output.text).toContain("runner=native/running");
     expect(output.text).toContain("heartbeat=");
     expect(output.text).toContain(
@@ -4960,7 +5170,6 @@ describe("Phase 06 TUI slash commands", () => {
 
     await waitForTestMs(1400);
     await handleSlashCommand(`/job status ${jobId}`, context, output);
-    vi.unstubAllEnvs();
     const completed = JSON.parse(await readFile(statePath, "utf8")) as {
       runner?: { status?: string };
       result?: { status?: string };
@@ -5062,12 +5271,11 @@ describe("Phase 06 TUI slash commands", () => {
       mismatchContext,
       mismatchOutput,
     );
-    vi.unstubAllEnvs();
     const mismatchJobId = mismatchContext.backgroundTasks.find((task) => task.kind === "job")?.id;
     const mismatchState = JSON.parse(
       await readFile(
         join(
-          resolveStoragePaths(config, mismatchProject).jobs,
+          resolveStoragePaths(mismatchContext.config, mismatchProject).jobs,
           mismatchJobId ?? "missing",
           "state.json",
         ),
@@ -5087,6 +5295,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mismatchContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", undefined);
 
     const failedProject = await mkdtemp(join(tmpdir(), "linghun-runner-fail-"));
     const failedRunner = await createMockNativeRunner(failedProject);
@@ -5109,12 +5318,11 @@ describe("Phase 06 TUI slash commands", () => {
       failedContext,
       output,
     );
-    vi.unstubAllEnvs();
     const failedJobId = failedContext.backgroundTasks.find((task) => task.kind === "job")?.id;
     const failedState = JSON.parse(
       await readFile(
         join(
-          resolveStoragePaths(config, failedProject).jobs,
+          resolveStoragePaths(failedContext.config, failedProject).jobs,
           failedJobId ?? "missing",
           "state.json",
         ),
@@ -5133,6 +5341,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(failedContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
+    vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", undefined);
 
     const statusFailProject = await mkdtemp(join(tmpdir(), "linghun-runner-status-fail-"));
     const statusFailRunner = await createMockNativeRunner(statusFailProject);
@@ -5161,11 +5370,10 @@ describe("Phase 06 TUI slash commands", () => {
     )?.id;
     vi.stubEnv("LINGHUN_MOCK_RUNNER_MODE", "status-fail");
     await handleSlashCommand(`/job status ${statusFailJobId}`, statusFailContext, output);
-    vi.unstubAllEnvs();
     const statusFailState = JSON.parse(
       await readFile(
         join(
-          resolveStoragePaths(config, statusFailProject).jobs,
+          resolveStoragePaths(statusFailContext.config, statusFailProject).jobs,
           statusFailJobId ?? "missing",
           "state.json",
         ),
@@ -5288,7 +5496,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/image generate logo concept", context, output);
 
     expect(context.pendingLocalApproval?.kind).toBe("image_generation");
-    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    const pending =
+      context.pendingLocalApproval?.kind === "image_generation"
+        ? context.pendingLocalApproval
+        : undefined;
     expect(pending?.assetPath).toContain(join(".linghun", "assets"));
     await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
     let transcript = (await store.resume(session.id)).transcript;
@@ -5324,7 +5535,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/model route set image deepseek-image", context, output);
     await handleSlashCommand("/image generate logo concept", context, output);
 
-    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    const pending =
+      context.pendingLocalApproval?.kind === "image_generation"
+        ? context.pendingLocalApproval
+        : undefined;
     await handleNaturalInput("no", context, output);
 
     await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
@@ -5363,7 +5577,10 @@ describe("Phase 06 TUI slash commands", () => {
 
     context.permissionMode = "default";
     await handleSlashCommand("/image generate second concept", context, output);
-    const pending = context.pendingLocalApproval?.kind === "image_generation" ? context.pendingLocalApproval : undefined;
+    const pending =
+      context.pendingLocalApproval?.kind === "image_generation"
+        ? context.pendingLocalApproval
+        : undefined;
     await handleNaturalInput("cancel", context, output);
 
     await expect(readFile(pending?.assetPath ?? "", "utf8")).rejects.toThrow();
@@ -5393,8 +5610,8 @@ describe("Phase 06 TUI slash commands", () => {
     //
     // 这里通过源码扫描断言 gate 在主仓库源码里彻底不存在；不依赖 runTui 全流程，
     // 也不让 user provider.env 注入的 anthropic_messages provider 干扰断言。
-    const indexSrc = await readFile("src/index.ts", "utf8");
-    const loopSrc = await readFile("src/model-loop-runtime.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const loopSrc = await readFile(srcPath("model-loop-runtime.ts"), "utf8");
 
     // 1) 删除 FreshnessLite 关键词 gate 与 boundary 相关 helper
     expect(indexSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
@@ -6173,13 +6390,13 @@ describe("Phase 06 TUI slash commands", () => {
       "license/NOTICE: Linghun-managed codebase-memory must be shipped with license/NOTICE metadata",
     );
     expect(output.text).toContain("fast status：未运行 detect_changes");
-    expect(output.text).toContain("Index search（短摘要");
+    expect(output.text).toContain("Index search（语义符号搜索");
     expect(output.text).toContain("Index architecture（短摘要）");
     expect(output.text).toContain("nodes/edges: 12/8");
     expect(output.text).not.toContain("RAW_SOURCE_TAIL_SHOULD_NOT_DUMP");
     expect(output.text).not.toContain("FULL_GRAPH_SHOULD_NOT_DUMP");
     expect(await readMockCalls(callsPath)).toEqual(
-      expect.arrayContaining(["list_projects", "index_status", "search_code", "get_architecture"]),
+      expect.arrayContaining(["list_projects", "index_status", "search_graph", "get_architecture"]),
     );
     expect(await readMockCalls(callsPath)).not.toContain("detect_changes");
   });
@@ -6818,10 +7035,9 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(request);
         const deepCompact = isDeepCompactRequest(request);
         const mainRequestCount = nonDeepRequests(requests).length;
-        const text =
-          deepCompact
-            ? "Deep compact summary from full transcript older events."
-            : mainRequestCount === 1
+        const text = deepCompact
+          ? "Deep compact summary from full transcript older events."
+          : mainRequestCount === 1
             ? `RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER\n${"旧输出\n".repeat(70_000)}`
             : "压缩后继续。";
         const body = `data: ${JSON.stringify({ id: `chatcmpl-compact-${requests.length}`, choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`;
@@ -6844,7 +7060,9 @@ describe("Phase 06 TUI slash commands", () => {
     const mainRequests = nonDeepRequests(requests);
     expect(deepRequests).toHaveLength(1);
     expect(mainRequests).toHaveLength(2);
-    expect((deepRequests[0] as { tool_choice?: string; toolChoice?: string }).tool_choice).toBe("none");
+    expect((deepRequests[0] as { tool_choice?: string; toolChoice?: string }).tool_choice).toBe(
+      "none",
+    );
     const request = mainRequests[1] as { messages?: Array<{ role?: string; content?: string }> };
     const requestText = JSON.stringify(request.messages ?? []);
     expect(requestText).toContain("[Deep compact");
@@ -7117,9 +7335,9 @@ describe("Phase 06 TUI slash commands", () => {
   });
 
   it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
-    const budgetSrc = await readFile("src/runtime-budget.ts", "utf8");
-    const indexSrc = await readFile("src/index.ts", "utf8");
-    const agentSrc = await readFile("src/job-agent-command-runtime.ts", "utf8");
+    const budgetSrc = await readFile(srcPath("runtime-budget.ts"), "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const agentSrc = await readFile(srcPath("job-agent-command-runtime.ts"), "utf8");
 
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENTIC_TURNS = 100");
     expect(budgetSrc).toContain("LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS = 40");
@@ -7127,16 +7345,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS = 40");
     expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_TOKENS = 100_000");
     expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_BYTES");
-    expect(indexSrc).toContain(
-      "const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS",
-    );
+    expect(indexSrc).toContain("const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS");
     expect(indexSrc).not.toContain(
       "const MAX_MODEL_TOOL_ROUNDS = LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS",
     );
     expect(indexSrc).not.toContain("reachedEvidenceLimit");
-    expect(agentSrc).toContain(
-      "const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS",
-    );
+    expect(agentSrc).toContain("const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS");
     expect(agentSrc).not.toContain(
       "const AGENT_MAX_TOOL_ROUNDS = LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS",
     );
@@ -8243,11 +8457,7 @@ describe("Phase 06 TUI slash commands", () => {
         "StartAgent",
         '{"role":"planner","task":"拆分验证工作并记录 Todo"}',
       ),
-      toolUseStream(
-        "toolu_child_todo_1",
-        "Todo",
-        '{"action":"add","content":"记录验证点"}',
-      ),
+      toolUseStream("toolu_child_todo_1", "Todo", '{"action":"add","content":"记录验证点"}'),
       textStream("msg-child-final", "子 agent 已完成真实 Todo 工具调用。"),
       textStream("msg-main-final", "已通过真实 StartAgent 完成多智能体任务。"),
     ];
@@ -8290,7 +8500,12 @@ describe("Phase 06 TUI slash commands", () => {
     const mainContinuation = requests[3]?.body.messages ?? [];
     const mainBlocks = mainContinuation.flatMap((message) =>
       Array.isArray(message.content)
-        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string }>)
+        ? (message.content as Array<{
+            type?: string;
+            id?: string;
+            tool_use_id?: string;
+            name?: string;
+          }>)
         : [],
     );
     expect(
@@ -8309,15 +8524,18 @@ describe("Phase 06 TUI slash commands", () => {
     const childContinuation = requests[2]?.body.messages ?? [];
     const childBlocks = childContinuation.flatMap((message) =>
       Array.isArray(message.content)
-        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string }>)
+        ? (message.content as Array<{
+            type?: string;
+            id?: string;
+            tool_use_id?: string;
+            name?: string;
+          }>)
         : [],
     );
     expect(
       childBlocks.some(
         (block) =>
-          block.type === "tool_use" &&
-          block.id === "toolu_child_todo_1" &&
-          block.name === "Todo",
+          block.type === "tool_use" && block.id === "toolu_child_todo_1" && block.name === "Todo",
       ),
     ).toBe(true);
     expect(
@@ -8339,7 +8557,11 @@ describe("Phase 06 TUI slash commands", () => {
   it("StartAgent child loop oversized context triggers compact projection in child provider requests", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-child-compact-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
-    await writeFile(join(project, "a.txt"), `RAW_CHILD_CONTEXT_MARKER\n${"a".repeat(20_000)}`, "utf8");
+    await writeFile(
+      join(project, "a.txt"),
+      `RAW_CHILD_CONTEXT_MARKER\n${"a".repeat(20_000)}`,
+      "utf8",
+    );
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "child-compact-model" });
     const output = new MemoryOutput();
@@ -8383,10 +8605,9 @@ describe("Phase 06 TUI slash commands", () => {
         requests.push(request);
         const deepCompact = isDeepCompactRequest(request);
         const childRequests = nonDeepRequests(requests).length;
-        const body =
-          deepCompact
-            ? `data: ${JSON.stringify({ id: "chatcmpl-child-deep-compact", choices: [{ delta: { content: "Deep compact summary for child loop." } }] })}\n\ndata: [DONE]\n\n`
-            : childRequests <= 16
+        const body = deepCompact
+          ? `data: ${JSON.stringify({ id: "chatcmpl-child-deep-compact", choices: [{ delta: { content: "Deep compact summary for child loop." } }] })}\n\ndata: [DONE]\n\n`
+          : childRequests <= 16
             ? [
                 `data: ${JSON.stringify({
                   id: `chatcmpl-child-compact-${childRequests}`,
@@ -8410,7 +8631,10 @@ describe("Phase 06 TUI slash commands", () => {
                 "data: [DONE]\n\n",
               ].join("")
             : `data: ${JSON.stringify({ id: "chatcmpl-child-final", choices: [{ delta: { content: "child compact done" } }] })}\n\ndata: [DONE]\n\n`;
-        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
       }),
     );
 
@@ -8429,14 +8653,18 @@ describe("Phase 06 TUI slash commands", () => {
       ),
     );
     expect(compactedRequest).toBeTruthy();
-    const requestText = JSON.stringify((compactedRequest as { messages?: unknown[] }).messages ?? []);
+    const requestText = JSON.stringify(
+      (compactedRequest as { messages?: unknown[] }).messages ?? [],
+    );
     expect(requestText).toContain("[Deep compact");
     expect(requestText).toContain("scope=full transcript semantic compact");
     expect(requestText).toContain("scope=provider-visible recent context projection");
     expect(context.cache.compactProjection?.summary).toContain(
       "scope=provider-visible recent context projection",
     );
-    const childTranscript = JSON.stringify((await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript);
+    const childTranscript = JSON.stringify(
+      (await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript,
+    );
     expect(childTranscript).toContain("compact_projection:");
     expect(context.agents[0]?.status).toBe("completed");
   });
@@ -8476,8 +8704,9 @@ describe("Phase 06 TUI slash commands", () => {
     };
     const context = await createTestContext(project, store, session, config);
     context.modelGateway = createModelGateway(config);
-    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
-      new Response("{}", { status: 200 }),
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response("{}", { status: 200 }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -8534,7 +8763,7 @@ describe("Phase 06 TUI slash commands", () => {
       { role: "system", content: "child system" },
       {
         role: "assistant",
-        content: "unfinished child tool pair " + "x".repeat(2_000),
+        content: `unfinished child tool pair ${"x".repeat(2_000)}`,
         toolCalls: [{ id: "call-unfinished-child", name: "Read", input: { path: "a.txt" } }],
       },
     ];
@@ -8561,7 +8790,8 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(result.blocked).toBe(true);
-    if (!result.blocked) throw new Error("expected compact preflight to block unfinished child tool pair");
+    if (!result.blocked)
+      throw new Error("expected compact preflight to block unfinished child tool pair");
     expect(result.message).toContain("未闭合 tool pair");
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     expect(transcript).toContain("context_compact_skipped_tool_pairing");
@@ -8587,10 +8817,7 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
-    const requests = mockOpenAiStartAgentChildToolSequence(
-      41,
-      "子 agent 已完成 41 轮读取并总结。",
-    );
+    const requests = mockOpenAiStartAgentChildToolSequence(41, "子 agent 已完成 41 轮读取并总结。");
     const output = new MemoryOutput();
 
     await runTui({
@@ -8668,7 +8895,10 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       "utf8",
     );
-    const requests: Array<{ url: string; body: { messages?: Array<{ role: string; content: unknown }> } }> = [];
+    const requests: Array<{
+      url: string;
+      body: { messages?: Array<{ role: string; content: unknown }> };
+    }> = [];
     const encoder = new TextEncoder();
     const sse = (chunks: string[]) =>
       new ReadableStream<Uint8Array>({
@@ -8776,16 +9006,20 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.agents[0]?.model).toBe("child-fallback-model");
 
     const persistedAgent = JSON.parse(
-      await readFile(join(project, ".linghun", "agent-runs", `${context.agents[0]?.id}.json`), "utf8"),
+      await readFile(
+        join(
+          resolveStoragePaths(context.config, project).agentRuns,
+          `${context.agents[0]?.id}.json`,
+        ),
+        "utf8",
+      ),
     ) as { provider?: string; model?: string };
     expect(persistedAgent.provider).toBe("openai-compatible");
     expect(persistedAgent.model).toBe("child-fallback-model");
 
     const showOutput = new MemoryOutput();
     await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, showOutput);
-    expect(showOutput.text).toContain(
-      "- provider/model: openai-compatible / child-fallback-model",
-    );
+    expect(showOutput.text).toContain("- provider/model: openai-compatible / child-fallback-model");
     expect(showOutput.text).not.toContain(
       "- provider/model: openai-compatible / child-primary-model",
     );
@@ -9010,7 +9244,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests).toHaveLength(2);
-    const second = requests[1] as { messages?: Array<{ role?: string; tool_call_id?: string; content?: string }> };
+    const second = requests[1] as {
+      messages?: Array<{ role?: string; tool_call_id?: string; content?: string }>;
+    };
     const toolMessage = (second.messages ?? []).find((message) => message.role === "tool");
     expect(toolMessage?.tool_call_id).toBe("call-1");
     expect(toolMessage?.content).not.toContain("<persisted-tool-result>");
@@ -9282,15 +9518,19 @@ describe("Phase 06 TUI slash commands", () => {
     expect(secondText).not.toContain("RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
     const thirdBlocks = (mainRequests[2]?.body.messages ?? []).flatMap((message) =>
       Array.isArray(message.content)
-        ? (message.content as Array<{ type?: string; id?: string; tool_use_id?: string; name?: string; content?: string }>)
+        ? (message.content as Array<{
+            type?: string;
+            id?: string;
+            tool_use_id?: string;
+            name?: string;
+            content?: string;
+          }>)
         : [],
     );
     expect(
       thirdBlocks.some(
         (block) =>
-          block.type === "tool_use" &&
-          block.id === "toolu_compact_read" &&
-          block.name === "Read",
+          block.type === "tool_use" && block.id === "toolu_compact_read" && block.name === "Read",
       ),
     ).toBe(true);
     const toolResult = thirdBlocks.find(
@@ -9320,7 +9560,10 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const requests = mockOpenAiToolFetch(
       "Bash",
-      { command: 'node -e "console.log(\'BASH_BUDGET_START\'); console.log(\'y\'.repeat(60000)); console.log(\'BASH_BUDGET_END_SHOULD_NOT_REACH_PROVIDER\')"' },
+      {
+        command:
+          "node -e \"console.log('BASH_BUDGET_START'); console.log('y'.repeat(60000)); console.log('BASH_BUDGET_END_SHOULD_NOT_REACH_PROVIDER')\"",
+      },
       "Bash 完成。",
     );
     const output = new MemoryOutput();
@@ -9335,10 +9578,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(2);
     const toolContent = toolMessageContents(requests[1])[0] ?? "";
     expect(toolContent).not.toContain("<persisted-tool-result>");
-    const input = (requests[1] as { input?: Array<{ type?: string; call_id?: string }> }).input ?? [];
-    expect(input.some((item) => item.type === "function_call_output" && item.call_id === "call-1")).toBe(
-      true,
-    );
+    const input =
+      (requests[1] as { input?: Array<{ type?: string; call_id?: string }> }).input ?? [];
+    expect(
+      input.some((item) => item.type === "function_call_output" && item.call_id === "call-1"),
+    ).toBe(true);
     expect(output.text).not.toContain("raw budget");
   });
 
@@ -9513,9 +9757,11 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/index init fast", context, output);
 
     expect(context.pendingLocalApproval?.kind).toBe("index_tool");
-    expect(context.pendingLocalApproval?.kind === "index_tool" ? context.pendingLocalApproval.indexAction : "").toBe(
-      "init fast",
-    );
+    expect(
+      context.pendingLocalApproval?.kind === "index_tool"
+        ? context.pendingLocalApproval.indexAction
+        : "",
+    ).toBe("init fast");
     expect(await readMockCalls(callsPath)).not.toContain("index_repository");
     let transcript = (await store.resume(session.id)).transcript;
     expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
@@ -9528,8 +9774,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some(
         (event) =>
-          event.type === "evidence_record" &&
-          event.supportsClaims.includes("index_init_fast"),
+          event.type === "evidence_record" && event.supportsClaims.includes("index_init_fast"),
       ),
     ).toBe(true);
   });
@@ -10395,7 +10640,8 @@ describe("Phase 06 TUI slash commands", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string | URL | Request, init: RequestInit) => {
-        const target = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+        const target =
+          typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
         if (!target.startsWith("https://example.test")) {
           return realFetch(url, init);
         }
@@ -10850,8 +11096,7 @@ describe("Phase 06 TUI slash commands", () => {
     transcript = (await store.resume(session.id)).transcript;
     expect(
       transcript.some(
-        (event) =>
-          event.type === "evidence_record" && event.supportsClaims.includes("memory_init"),
+        (event) => event.type === "evidence_record" && event.supportsClaims.includes("memory_init"),
       ),
     ).toBe(true);
 
@@ -10871,7 +11116,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/break-cache once", context, output);
 
     expect(context.pendingLocalApproval?.kind).toBe("break_cache_mutation");
-    await expect(readFile(join(project, ".linghun", ".break-cache-once"), "utf8")).rejects.toThrow();
+    await expect(
+      readFile(join(project, ".linghun", ".break-cache-once"), "utf8"),
+    ).rejects.toThrow();
     let transcript = (await store.resume(session.id)).transcript;
     expect(transcript.some((event) => event.type === "permission_request")).toBe(true);
     expect(transcript.some((event) => event.type === "permission_result")).toBe(true);
@@ -10883,8 +11130,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some(
         (event) =>
-          event.type === "evidence_record" &&
-          event.supportsClaims.includes("break_cache_once"),
+          event.type === "evidence_record" && event.supportsClaims.includes("break_cache_once"),
       ),
     ).toBe(true);
   });
@@ -11648,8 +11894,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some(
         (event) =>
-          event.type === "evidence_record" &&
-          event.supportsClaims.includes("checkpoint_restore"),
+          event.type === "evidence_record" && event.supportsClaims.includes("checkpoint_restore"),
       ),
     ).toBe(true);
   });
@@ -11681,8 +11926,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some(
         (event) =>
-          event.type === "evidence_record" &&
-          event.supportsClaims.includes("tool_failure"),
+          event.type === "evidence_record" && event.supportsClaims.includes("tool_failure"),
       ),
     ).toBe(true);
   });
@@ -12725,8 +12969,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some(
         (event) =>
-          event.type === "evidence_record" &&
-          event.supportsClaims.includes("cache_log_export"),
+          event.type === "evidence_record" && event.supportsClaims.includes("cache_log_export"),
       ),
     ).toBe(true);
   });
@@ -13973,6 +14216,47 @@ describe("Phase 06 TUI slash commands", () => {
     });
   });
 
+  it("handles empty skills/plugins state and contribution stable sorting", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun", "plugins"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "plugins", "sorted-plugin.json"),
+      JSON.stringify({
+        id: "sorted-plugin",
+        name: "Sorted Plugin",
+        version: "1.0.0",
+        description: "Test stable sorting",
+        permissions: [],
+        source: "official",
+        contributions: {
+          commands: ["/z-cmd", "/a-cmd", "/m-cmd"],
+          hooks: ["Workflow", "Stop", "Plugin", "PreToolUse"],
+          workflows: ["z-flow", "a-flow"],
+          skills: ["z-skill", "a-skill"],
+          mcpServers: ["z-server", "a-server"],
+          providers: ["z-provider", "a-provider"],
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/skills", context, output);
+    await handleSlashCommand("/plugins", context, output);
+    await handleSlashCommand("/skills doctor", context, output);
+    await handleSlashCommand("/plugins doctor", context, output);
+
+    expect(output.text).toContain("none：可运行 /skills add 查看注册路径");
+    expect(output.text).toContain("commands=/a-cmd,/m-cmd,/z-cmd");
+    expect(output.text).toContain("hooks=Plugin,PreToolUse,Stop,Workflow");
+    expect(output.text).toContain("workflows=a-flow,z-flow");
+    expect(output.text).toContain("skills=a-skill,z-skill");
+    expect(output.text).toContain("plugin 贡献项稳定排序");
+  });
+
   it("covers Phase 17B Remote Channels setup, doctor, redaction, and approval safety", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -14618,7 +14902,7 @@ describe("Phase 06 TUI slash commands", () => {
   });
 
   it("D.14E source invariant: remote inbound business logic lives in remote-command-runtime; index.ts only glues", async () => {
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     // index.ts wires the inbound glue and reuses the existing local resolvers / model chain.
     expect(indexSrc).toContain("export async function handleRemoteInboundMessage");
     expect(indexSrc).toContain("processRemoteInbound(context, message)");
@@ -14627,12 +14911,12 @@ describe("Phase 06 TUI slash commands", () => {
     // No second executor / keyword interception for remote natural language in index.ts.
     expect(indexSrc).not.toContain("routedText.includes(");
 
-    const runtimeSrc = await readFile("src/remote-command-runtime.ts", "utf8");
+    const runtimeSrc = await readFile(srcPath("remote-command-runtime.ts"), "utf8");
     expect(runtimeSrc).toContain("export function processRemoteInbound");
     expect(runtimeSrc).toContain("export async function sendRemoteEventReal");
     expect(runtimeSrc).toContain("export function verifyRemoteInboundSignature");
     // The transport never shell-concatenates; it builds an arg array.
-    const transportSrc = await readFile("src/remote-transport.ts", "utf8");
+    const transportSrc = await readFile(srcPath("remote-transport.ts"), "utf8");
     expect(transportSrc).toContain("execFile as nodeExecFile");
     expect(transportSrc).not.toContain("exec(`");
   });
@@ -14844,7 +15128,7 @@ describe("Phase 06 TUI slash commands", () => {
       channel: "wecom",
     });
 
-    const bridgeSrc = await readFile("src/remote-inbound-bridge-runtime.ts", "utf8");
+    const bridgeSrc = await readFile(srcPath("remote-inbound-bridge-runtime.ts"), "utf8");
     for (const forbidden of [
       "runTool(",
       "executeExtraTool(",
@@ -14899,13 +15183,13 @@ describe("Phase 06 TUI slash commands", () => {
   });
 
   it("D.14F bridge source invariant: runtime stays outside index.ts and adapters do not import executors", async () => {
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).toContain('from "./remote-inbound-bridge-runtime.js"');
     expect(indexSrc).not.toContain("function feishuBridgeAdapter");
     expect(indexSrc).not.toContain("function dingtalkBridgeAdapter");
     expect(indexSrc).not.toContain("function wecomBridgeAdapter");
 
-    const bridgeSrc = await readFile("src/remote-inbound-bridge-runtime.ts", "utf8");
+    const bridgeSrc = await readFile(srcPath("remote-inbound-bridge-runtime.ts"), "utf8");
     expect(bridgeSrc).toContain("export function feishuBridgeAdapter");
     expect(bridgeSrc).toContain("RemoteInboundMessage");
     expect(bridgeSrc).not.toContain("@linghun/tools");
@@ -17018,7 +17302,11 @@ console.log(JSON.stringify({ ok: true }));
         requests.push({ body });
         const tool =
           requests.length === 1
-            ? { id: "toolu_search_budget_1", name: "SearchExtraTools", input: '{"query":"list_projects"}' }
+            ? {
+                id: "toolu_search_budget_1",
+                name: "SearchExtraTools",
+                input: '{"query":"list_projects"}',
+              }
             : requests.length === 2
               ? {
                   id: "toolu_exec_budget_1",
@@ -18144,7 +18432,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
   });
 
   it("source invariant: handleNaturalInput main path does not call Natural Command Bridge", async () => {
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).not.toContain("routeNaturalIntent(");
   });
 
@@ -18474,7 +18762,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
 
   it("源码：streamFinalModelAnswerWithoutTools 复用外层 assistantStreamBlockId", async () => {
     const fs = await import("node:fs/promises");
-    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    const indexSrc = await fs.readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).toContain("reuseAssistantStreamBlockId");
     expect(indexSrc).toMatch(
       /assistantStreamBlockId\s*=\s*\n?\s*reuseAssistantStreamBlockId\s*\?\?/,
@@ -18486,7 +18774,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
 
   it("源码：sendMessage / continueModelAfterToolResults 在 retry 后调 discardAssistantBlock", async () => {
     const fs = await import("node:fs/promises");
-    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    const indexSrc = await fs.readFile(srcPath("index.ts"), "utf8");
     const occurrences = indexSrc.match(/discardAssistantBlock\(output, assistantStreamBlockId\)/g);
     expect(occurrences?.length).toBeGreaterThanOrEqual(2);
     const downgrade = indexSrc.match(
@@ -18686,7 +18974,7 @@ describe("D.13V-A item 2: createVerificationLevelForReadiness routes through cla
 
   it("源码：createVerificationLevelForReadiness 调用 classifyVerificationLevel", async () => {
     const fs = await import("node:fs/promises");
-    const indexSrc = await fs.readFile("src/index.ts", "utf8");
+    const indexSrc = await fs.readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).toMatch(
       /createVerificationLevelForReadiness[\s\S]{0,5000}classifyVerificationLevel\(/,
     );
@@ -18752,9 +19040,9 @@ describe("D.13V-A item 2: createVerificationLevelForReadiness routes through cla
 
   it("源码：/verify 合成 smoke 标记 synthetic=true，readiness 据此拒绝升级", async () => {
     const fs = await import("node:fs/promises");
-    const planSrc = await fs.readFile("src/verification-command-runtime.ts", "utf8");
+    const planSrc = await fs.readFile(srcPath("verification-command-runtime.ts"), "utf8");
     expect(planSrc).toContain("synthetic: true");
-    const readinessSrc = await fs.readFile("src/terminal-readiness-runtime.ts", "utf8");
+    const readinessSrc = await fs.readFile(srcPath("terminal-readiness-runtime.ts"), "utf8");
     expect(readinessSrc).toMatch(/c\.synthetic\s*!==\s*true/);
   });
 });
@@ -19033,14 +19321,14 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
 // `controller.signal.aborted` 的早返回守卫。这是 invariant test，不是镜像。
 describe("D.13O safety boundary — provider abort early-return guard", () => {
   it("source: sendMessage main loop has aborted early-return", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     // 主流定位：`controller.signal.aborted` + `t(context, "toolInterrupted")`
     expect(text).toContain("if (controller.signal.aborted) {");
     expect(text).toMatch(/D\.13O[\s\S]*abort[\s\S]*continuation/iu);
   });
 
   it("source: continueModelAfterToolResults has aborted early-return", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     const continuationStart = text.indexOf("async function continueModelAfterToolResults");
     expect(continuationStart).toBeGreaterThan(-1);
     const continuationBody = text.slice(continuationStart, continuationStart + 4000);
@@ -19054,7 +19342,7 @@ describe("D.13O safety boundary — provider abort early-return guard", () => {
 // permission-continuation-runtime.test.ts 里有更细粒度的单元覆盖。
 describe("D.13O safety boundary — UNC/WebDAV hard deny", () => {
   it("source: getHardDenyReason rejects UNC backslash form", async () => {
-    const text = await readFile("src/permission-continuation-runtime.ts", "utf8");
+    const text = await readFile(srcPath("permission-continuation-runtime.ts"), "utf8");
     expect(text).toContain('startsWith("\\\\\\\\")');
     expect(text).toContain('startsWith("//")');
     expect(text).toMatch(/UNC|WebDAV/iu);
@@ -19066,11 +19354,11 @@ describe("D.13O safety boundary — UNC/WebDAV hard deny", () => {
 // 这里只锁定接入点位与降噪点位不被悄悄回退。
 describe("D.13V-B/C source invariants", () => {
   it("source: sendMessage 接入 architecture/completeness final gate", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     expect(text).toContain("runArchitectureAndCompletenessFinalGate");
     // D.14A-2：gate 判定核心移至 final-answer-gate.ts（行为不变）；
     // index.ts 仍负责把 runArchitectureAndCompletenessFinalGate 接入主链。
-    const gate = await readFile("src/final-answer-gate.ts", "utf8");
+    const gate = await readFile(srcPath("final-answer-gate.ts"), "utf8");
     expect(gate).toContain("runArchitectureAndCompletenessFinalGate");
     expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");
     expect(text).toContain("createExtendedFinalAnswerReminder");
@@ -19082,7 +19370,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: continueModelAfterToolResults 镜像同一 gate", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
@@ -19094,7 +19382,7 @@ describe("D.13V-B/C source invariants", () => {
   // 与 sendMessage 路径一致；且 closure 必须在安全 final answer 入 transcript 之后，
   // 不得位于 D.13U/D.13V retry/downgrade 之前（否则违规原文会先进 transcript）。
   it("source: continueModelAfterToolResults 镜像 Solution Completeness closure", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
@@ -19140,7 +19428,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: createModelSystemPrompt 用 projectRuntimeStatusForPrompt 投影 runtimeStatus", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     expect(text).toContain("projectRuntimeStatusForPrompt(runtimeStatus)");
     // RuntimeIdentityRule 不再依赖软约束：硬声明 RuntimeStatusForModel 不含 provider
     expect(text).toMatch(
@@ -19149,7 +19437,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: deferred tool 主屏 writeLine 走 sanitizeDeferredToolPrimaryText", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     // executeDeferredDispatchToolUse 不应再出现 `writeLine(output, result.text)`
     // 直接传 raw text 的写法（这会泄漏 SearchExtraTools/ExecuteExtraTool 字面）。
     const dispatchStart = text.indexOf("async function executeDeferredDispatchToolUse");
@@ -19162,7 +19450,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: resource guard 文案标注 concurrency cap，不是权限拒绝", async () => {
-    const text = await readFile("src/index.ts", "utf8");
+    const text = await readFile(srcPath("index.ts"), "utf8");
     expect(text).toContain("RESOURCE_GUARD_KIND");
     // checkResourceGuard 的所有用户可见返回都应明确"并发上限/不是权限拒绝"。
     const guardStart = text.indexOf("function checkResourceGuard");
@@ -19175,7 +19463,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: permission 仍然只有 default/auto-review/plan/full-access 四档", async () => {
-    const text = await readFile("src/runtime-status-presenter.ts", "utf8");
+    const text = await readFile(srcPath("runtime-status-presenter.ts"), "utf8");
     // formatPermissionModeLabel 必须保持四档；新增第五种会破坏分支
     expect(text).toMatch(/default:\s*"default mode"/);
     expect(text).toMatch(/"auto-review":\s*"auto mode"/);
@@ -19218,8 +19506,8 @@ describe("D.13V-B/C source invariants", () => {
   // D.14A-R-Fix P1-7 — AntiCodeBlob 锁定为 prompt-only：它只出现在 prompt/directive，
   // 不是 hard gate；architecture-boundary 检测器不接入 Write/Edit/MultiEdit/Bash 主链阻断。
   it("source: AntiCodeBlob 是 prompt-only，不是 hard write gate", async () => {
-    const promptSrc = await readFile("src/model-prompt-runtime.ts", "utf8");
-    const archSrc = await readFile("src/architecture-runtime.ts", "utf8");
+    const promptSrc = await readFile(srcPath("model-prompt-runtime.ts"), "utf8");
+    const archSrc = await readFile(srcPath("architecture-runtime.ts"), "utf8");
     // AntiCodeBlob/EngineeringStructure 仅作为 prompt/directive 文案存在
     expect(promptSrc).toContain("EngineeringStructure=");
     expect(archSrc).toContain("AntiCodeBlob=");
@@ -19227,12 +19515,12 @@ describe("D.13V-B/C source invariants", () => {
     expect(archSrc).toContain("prompt-only");
     expect(archSrc).toMatch(/不是 hard gate|不是.*pre-write|不会自动.*阻断/);
     // 主链不得在写入前自动调用 architecture-boundary 检测器阻断
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).not.toMatch(/checkBoundaries\(/);
     expect(indexSrc).not.toMatch(/checkFileBoundaries\(/);
     expect(indexSrc).not.toMatch(/validateChangeDeclaration\(/);
     // architecture-boundary.ts 自身声明只检测、不改文件
-    const boundarySrc = await readFile("src/architecture-boundary.ts", "utf8");
+    const boundarySrc = await readFile(srcPath("architecture-boundary.ts"), "utf8");
     expect(boundarySrc).toContain("Does NOT modify any files");
   });
 });
@@ -20107,7 +20395,7 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
   });
 
   it("D.14B source invariant: business logic lives in failure-learning modules, index.ts only glues", async () => {
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     // index.ts 只接线：调用 captureFailureLearning / 投影 summary / dispatch slash。
     expect(indexSrc).toContain("captureFailureLearning(context, sessionId");
     expect(indexSrc).toContain("buildFailureLearningSummaryForPrompt(context.failureLearning)");
@@ -20117,7 +20405,7 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(indexSrc).not.toContain("function failureDedupeHash");
     expect(indexSrc).not.toContain("function buildFailureLearningSummaryForPrompt");
 
-    const runtimeSrc = await readFile("src/failure-learning-runtime.ts", "utf8");
+    const runtimeSrc = await readFile(srcPath("failure-learning-runtime.ts"), "utf8");
     expect(runtimeSrc).toContain("export function sanitizeFailureText");
     expect(runtimeSrc).toContain("export function failureDedupeHash");
     expect(runtimeSrc).toContain("export function buildFailureLearningSummaryForPrompt");
@@ -20243,7 +20531,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
   });
 
   it("D.14C source invariant: agent business logic lives in job-agent-command-runtime, index.ts only glues", async () => {
-    const indexSrc = await readFile("src/index.ts", "utf8");
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     // index.ts 只接线：dispatch /agents、/fork，并把 captureFailureLearning 注入运行时。
     expect(indexSrc).toContain("handleAgentsCommand(rest, context, output)");
     expect(indexSrc).toContain("handleForkCommand(rest, context, output)");
@@ -20255,7 +20543,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(indexSrc).not.toContain("async function failAgent");
     expect(indexSrc).not.toContain("async function cancelAgent");
 
-    const agentSrc = await readFile("src/job-agent-command-runtime.ts", "utf8");
+    const agentSrc = await readFile(srcPath("job-agent-command-runtime.ts"), "utf8");
     expect(agentSrc).toContain("export async function completeAgent");
     expect(agentSrc).toContain("export async function runAgentWork");
     expect(agentSrc).toContain("export async function cancelAgent");

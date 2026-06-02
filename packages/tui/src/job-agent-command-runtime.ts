@@ -1,21 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { resolve, relative } from "node:path";
+import { relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
-import type { ModelRole, RoleModelRoute } from "@linghun/config";
+import { type ModelRole, type RoleModelRoute, resolveStoragePaths } from "@linghun/config";
 import type { TranscriptEvent } from "@linghun/core";
-import type { EndpointProfile, ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
+import type {
+  EndpointProfile,
+  ModelGateway,
+  ModelMessage,
+  ModelToolCall,
+} from "@linghun/providers";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
-import { createManagedWorktree } from "./git-operation-runtime.js";
-import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
-import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type {
   CompactPreflightRuntime,
   ProviderPreflightCompactResult,
 } from "./compact-preflight-runtime.js";
+import type { FailureLearningInput } from "./failure-learning-runtime.js";
+import { createManagedWorktree } from "./git-operation-runtime.js";
+import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
@@ -46,6 +50,7 @@ import {
 } from "./job-runtime.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
 import { inferProviderForRouteModel } from "./model-doctor-runtime.js";
+import { createModelToolDefinitionsForTools } from "./model-loop-runtime.js";
 import {
   checkProviderCooldown,
   clearProviderBreaker,
@@ -53,10 +58,10 @@ import {
   recordProviderFailure,
 } from "./provider-circuit-breaker.js";
 import {
-  classifyProviderFailure,
-  formatProviderFallbackAttemptSummary,
-  formatProviderFailureKindLabel,
   type ProviderFailureKind,
+  classifyProviderFailure,
+  formatProviderFailureKindLabel,
+  formatProviderFallbackAttemptSummary,
 } from "./request-lifecycle-presenter.js";
 import {
   type RunnerContext,
@@ -66,7 +71,9 @@ import {
   startRunnerForDurableJob as startRunnerForDurableJobImpl,
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
+import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import type { ToolResultBudgetRecord } from "./tool-result-budget.js";
 import {
   createAgentBackgroundTask,
   createAgentContextSummary,
@@ -85,14 +92,14 @@ import {
   isAgentType,
   listDurableJobs,
   mapAgentBackgroundResult,
-  rememberBackgroundTask,
   registerBackgroundAbortController,
+  rememberBackgroundTask,
   toJobContext,
   upsertJobBackgroundTask,
 } from "./tui-agent-job-runtime.js";
 import type {
-  AgentRun,
   AgentMailboxMessage,
+  AgentRun,
   AgentType,
   BackgroundTaskState,
   DurableJobState,
@@ -104,8 +111,6 @@ import type {
 import { formatAgentDetails } from "./tui-details-runtime.js";
 import { formatRoutePauseMessage, resolveRoleRoute } from "./tui-model-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
-import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
-import type { ToolResultBudgetRecord } from "./tool-result-budget.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
@@ -116,7 +121,10 @@ type AgentWorkResult = {
 };
 
 const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS;
-const AGENT_RUNS_DIR = ".linghun/agent-runs";
+
+function getAgentRunsDir(context: TuiContext): string {
+  return resolveStoragePaths(context.config, context.projectPath).agentRuns;
+}
 
 export type JobAgentCommandRuntimeDeps = {
   addRoleUsage: (
@@ -319,7 +327,9 @@ function buildBackgroundPanelSections(
     });
     const hidden = grouped.length - 4;
     if (hidden > 0) {
-      sections[sections.length - 1]?.rows.push(isEn ? `+${hidden} folded` : `另有 ${hidden} 项已折叠`);
+      sections[sections.length - 1]?.rows.push(
+        isEn ? `+${hidden} folded` : `另有 ${hidden} 项已折叠`,
+      );
     }
   }
   const other = tasks.filter((task) => !used.has(task.id));
@@ -1066,7 +1076,10 @@ export async function handleAgentsCommand(
     await cancelAgent(agent, context, output);
     return;
   }
-  writeLine(output, "用法：/agents | /agents registry | /agents show <id> | /agents cancel <id> | /agents send <id|name|team> <message>");
+  writeLine(
+    output,
+    "用法：/agents | /agents registry | /agents show <id> | /agents cancel <id> | /agents send <id|name|team> <message>",
+  );
 }
 
 export async function handleForkCommand(
@@ -1079,7 +1092,10 @@ export async function handleForkCommand(
   const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
   const task = options.task;
   if (!type || !isAgentType(type) || !task) {
-    writeLine(output, "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]");
+    writeLine(
+      output,
+      "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]",
+    );
     return;
   }
   const workflowTaskId =
@@ -1106,9 +1122,7 @@ export async function handleForkCommand(
     return;
   }
   const role = getAgentRole(type);
-  const effectiveTask = registryAgent
-    ? `${registryAgent.prompt}\n\nTask: ${task}`
-    : task;
+  const effectiveTask = registryAgent ? `${registryAgent.prompt}\n\nTask: ${task}` : task;
   const resolved = resolveRoleRoute(context, role, `/fork ${type}`);
   await deps().appendRouteDecisionEvent(context, parentSessionId, resolved.decision);
   if (!resolved.usable) {
@@ -1234,27 +1248,7 @@ export async function completeAgent(
   context.roleHandoffs.unshift(
     deps().createRoleHandoff("executor", agent.role, agent.id, result.summary, context),
   );
-  const verifierStatus = agent.type === "verifier" ? context.lastVerification?.status : undefined;
-  task.status = result.status === "completed" ? "completed" : "failed";
-  task.result =
-    result.status === "completed"
-      ? mapAgentBackgroundResult(agent, verifierStatus)
-      : result.status === "blocked"
-        ? "partial"
-        : "fail";
-  task.currentStep =
-    result.status === "completed"
-      ? context.language === "en-US"
-        ? "summary ready"
-        : "摘要已生成"
-      : result.status === "blocked"
-        ? context.language === "en-US"
-          ? "blocked"
-          : "已阻塞"
-        : context.language === "en-US"
-          ? "failed"
-          : "已失败";
-  task.progress = { completed: 1, total: 1, label: agent.type };
+  syncBackgroundWithAgentStatus(task, agent);
   task.updatedAt = now;
   task.lastOutputAt = now;
   task.nextAction =
@@ -1304,9 +1298,7 @@ async function failAgent(
   agent.status = "failed";
   agent.summary = `agent ${agent.id} 执行失败：${truncateDisplay(message, 160)}`;
   agent.updatedAt = now;
-  task.status = "failed";
-  task.result = "fail";
-  task.currentStep = context.language === "en-US" ? "failed" : "已失败";
+  syncBackgroundWithAgentStatus(task, agent);
   task.updatedAt = now;
   task.lastOutputAt = now;
   task.nextAction =
@@ -1666,7 +1658,12 @@ export async function runModelBackedAgent(
         if (event.type === "error") {
           const code = event.error.code ?? "PROVIDER_ERROR";
           const kind = classifyProviderFailure(event.error);
-          recordProviderFailure(context.providerBreaker, currentRuntime.provider, currentRuntime.model, code);
+          recordProviderFailure(
+            context.providerBreaker,
+            currentRuntime.provider,
+            currentRuntime.model,
+            code,
+          );
           await context.store.appendEvent(agent.transcriptSessionId, {
             type: "system_event",
             id: randomUUID(),
@@ -1758,14 +1755,13 @@ export async function runModelBackedAgent(
       if (!retryWithFallback) {
         providerRequestCompleted = true;
         if (activeFallback) {
-          syncAgentRuntimeFallbackMetadata(
-            context,
-            agent,
-            activeFallback.from,
-            activeFallback.to,
-          );
+          syncAgentRuntimeFallbackMetadata(context, agent, activeFallback.from, activeFallback.to);
           await persistAgentRun(context, agent);
-          clearProviderBreaker(context.providerBreaker, currentRuntime.provider, currentRuntime.model);
+          clearProviderBreaker(
+            context.providerBreaker,
+            currentRuntime.provider,
+            currentRuntime.model,
+          );
           await recordAgentProviderFallbackAttempt(context, agent.transcriptSessionId, {
             ...activeFallback,
             status: "succeeded",
@@ -1932,7 +1928,9 @@ function consumeAgentMailbox(agent: AgentRun): AgentMailboxMessage[] {
 
 function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
   if (agent.allowedTools) {
-    return normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? [];
+    return (
+      normalizeRegistryAllowedTools(agent.allowedTools)?.map((name) => builtInTools[name]) ?? []
+    );
   }
   const readOnly = [builtInTools.Read, builtInTools.Grep, builtInTools.Glob, builtInTools.Todo];
   if (agent.type === "explorer" || agent.type === "planner") return readOnly;
@@ -2026,10 +2024,8 @@ export async function cancelAgent(
   agent.updatedAt = now;
   const background = context.backgroundTasks.find((task) => task.id === agent.id);
   if (background) {
-    background.status = "cancelled";
-    background.result = "cancelled";
+    syncBackgroundWithAgentStatus(background, agent);
     background.updatedAt = now;
-    background.currentStep = context.language === "en-US" ? "cancelled" : "已取消";
   }
   context.backgroundAbortControllers?.get(agent.id)?.abort();
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
@@ -2048,17 +2044,55 @@ export async function cancelAgent(
   deps().writeStatus(output, context);
 }
 
+const TERMINAL_AGENT_STATUSES = new Set(["blocked", "cancelled", "failed", "completed"]);
+
+export function syncBackgroundWithAgentStatus(
+  background: BackgroundTaskState,
+  agent: AgentRun,
+): void {
+  if (TERMINAL_AGENT_STATUSES.has(agent.status)) {
+    background.status = agent.status === "blocked" ? "failed" : "completed";
+    background.currentStep = `${agent.status}`;
+    background.result =
+      agent.status === "completed"
+        ? mapAgentBackgroundResult(agent, undefined)
+        : agent.status === "blocked"
+          ? "partial"
+          : "fail";
+    background.progress = {
+      completed: 1,
+      total: 1,
+      label: background.progress?.label ?? agent.type,
+    };
+  } else if (agent.status === "stale") {
+    background.status = "stale";
+    background.currentStep = "stale/resumable";
+    background.result = "partial";
+    background.progress = {
+      completed: 0,
+      total: 1,
+      label: background.progress?.label ?? agent.type,
+    };
+  } else if (agent.status === "running") {
+    background.status = "running";
+    background.currentStep = `running ${agent.type}`;
+    background.result = undefined;
+  }
+  background.userVisibleSummary = agent.summary;
+  background.updatedAt = agent.updatedAt;
+}
+
 export async function hydratePersistentAgents(context: TuiContext): Promise<void> {
   let files: string[];
   try {
-    files = await readdir(resolve(context.projectPath, AGENT_RUNS_DIR));
+    files = await readdir(getAgentRunsDir(context));
   } catch {
     return;
   }
   const existing = new Set(context.agents.map((agent) => agent.id));
   for (const file of files.filter((name) => name.endsWith(".json")).sort()) {
     try {
-      const raw = await readFile(resolve(context.projectPath, AGENT_RUNS_DIR, file), "utf8");
+      const raw = await readFile(resolve(getAgentRunsDir(context), file), "utf8");
       const parsed = JSON.parse(raw) as AgentRun;
       if (!parsed.id || existing.has(parsed.id)) continue;
       const now = new Date().toISOString();
@@ -2078,19 +2112,14 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       };
       context.agents.push(agent);
       const background = createAgentBackgroundTask(agent, context);
-      background.status = agent.status === "stale" ? "stale" : background.status;
-      background.currentStep = agent.status === "stale" ? "stale/resumable" : background.currentStep;
-      background.result = agent.status === "stale" ? "partial" : background.result;
-      background.userVisibleSummary = agent.summary;
+      syncBackgroundWithAgentStatus(background, agent);
       rememberBackgroundTask(context, background);
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 }
 
 async function persistAgentRun(context: TuiContext, agent: AgentRun): Promise<void> {
-  const dir = resolve(context.projectPath, AGENT_RUNS_DIR);
+  const dir = getAgentRunsDir(context);
   await mkdir(dir, { recursive: true });
   await writeFile(resolve(dir, `${agent.id}.json`), `${JSON.stringify(agent, null, 2)}\n`, "utf8");
 }
@@ -2114,7 +2143,11 @@ export async function sendAgentMessage(
   }
   const targets = findMessageTargets(context, target);
   if (targets.length === 0) {
-    return { ok: false, text: `SendMessage failed: no running agent/team found for "${target}".`, delivered: [] };
+    return {
+      ok: false,
+      text: `SendMessage failed: no running agent/team found for "${target}".`,
+      delivered: [],
+    };
   }
   const now = new Date().toISOString();
   for (const agent of targets) {
@@ -2152,9 +2185,14 @@ function formatAgentsList(context: TuiContext): string {
   }
   const lines = [context.language === "en-US" ? "Agents:" : "Agents："];
   for (const agent of context.agents) {
-    const label = truncateDisplay(agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task), 30);
+    const label = truncateDisplay(
+      agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task),
+      30,
+    );
     const pending = countPendingMailbox(agent);
-    const cwd = agent.cwd ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18) : ".";
+    const cwd = agent.cwd
+      ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18)
+      : ".";
     lines.push(
       `${agent.id}  ${label}  status=${agent.status}  type=${agent.type}  role=${agent.role}  name=${agent.addressableName ?? "-"}  team=${agent.teamName ?? "-"}  pending=${pending}  cwd=${cwd}`,
     );
@@ -2228,7 +2266,14 @@ function parseForkCommandArgs(args: string[]): ForkCommandOptions {
       options.runInBackground = true;
       continue;
     }
-    if ((arg === "--name" || arg === "--team" || arg === "--team-name" || arg === "--cwd" || arg === "--isolation") && args[index + 1]) {
+    if (
+      (arg === "--name" ||
+        arg === "--team" ||
+        arg === "--team-name" ||
+        arg === "--cwd" ||
+        arg === "--isolation") &&
+      args[index + 1]
+    ) {
       const value = args[index + 1];
       index += 1;
       if (arg === "--name") options.name = value;
@@ -2248,13 +2293,15 @@ function resolveForkRegistryAgent(
   rawType: string | undefined,
 ): TuiContext["agentRegistry"]["agents"][number] | undefined {
   if (!rawType) return undefined;
-  return context.agentRegistry.agents.find((agent) => agent.id === rawType || agent.name === rawType);
+  return context.agentRegistry.agents.find(
+    (agent) => agent.id === rawType || agent.name === rawType,
+  );
 }
 
-function mapRegistryAgentType(
-  agent: TuiContext["agentRegistry"]["agents"][number],
-): AgentType {
-  return agent.allowedTools?.some((tool) => tool === "Write" || tool === "Edit" || tool === "MultiEdit" || tool === "Bash")
+function mapRegistryAgentType(agent: TuiContext["agentRegistry"]["agents"][number]): AgentType {
+  return agent.allowedTools?.some(
+    (tool) => tool === "Write" || tool === "Edit" || tool === "MultiEdit" || tool === "Bash",
+  )
     ? "worker"
     : "planner";
 }
@@ -2262,7 +2309,10 @@ function mapRegistryAgentType(
 async function resolveAgentCwd(
   context: TuiContext,
   options: ForkCommandOptions,
-): Promise<{ ok: true; cwd: string; isolation?: "worktree"; evidenceText?: string } | { ok: false; text: string }> {
+): Promise<
+  | { ok: true; cwd: string; isolation?: "worktree"; evidenceText?: string }
+  | { ok: false; text: string }
+> {
   if (options.cwd && options.isolation === "worktree") {
     return { ok: false, text: "agent cwd and isolation=worktree are mutually exclusive." };
   }
@@ -2296,7 +2346,11 @@ async function resolveAgentCwd(
 function isSafeAgentCwd(projectPath: string, cwd: string): boolean {
   const project = resolve(projectPath);
   const normalized = resolve(cwd);
-  return normalized === project || normalized.startsWith(`${project}\\`) || normalized.startsWith(`${project}/`);
+  return (
+    normalized === project ||
+    normalized.startsWith(`${project}\\`) ||
+    normalized.startsWith(`${project}/`)
+  );
 }
 
 async function runAgentToolInCwd(
@@ -2313,7 +2367,11 @@ async function runAgentToolInCwd(
   scoped.abortSignal = previousSignal;
   scoped.todos = context.tools.todos;
   const result = await runTool(toolName, input, scoped);
-  context.tools.changedFiles.push(...scoped.changedFiles.map((file) => relative(context.projectPath, resolve(agent.cwd ?? context.projectPath, file))));
+  context.tools.changedFiles.push(
+    ...scoped.changedFiles.map((file) =>
+      relative(context.projectPath, resolve(agent.cwd ?? context.projectPath, file)),
+    ),
+  );
   return result;
 }
 

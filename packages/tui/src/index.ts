@@ -11,7 +11,7 @@ import {
 } from "node:process";
 import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
-import { Writable, type Readable } from "node:stream";
+import { type Readable, Writable } from "node:stream";
 import {
   type LinghunConfig,
   type McpServerConfig,
@@ -70,12 +70,12 @@ import {
   runTool,
 } from "@linghun/tools";
 import {
+  type RegistryAgentDefinition,
+  type RegistryWorkflowDefinition,
   loadAgentRegistry,
   loadWorkflowRegistry,
   registryAgentToWorkflowTemplate,
   registryWorkflowToTemplate,
-  type RegistryAgentDefinition,
-  type RegistryWorkflowDefinition,
 } from "./agent-workflow-registry.js";
 import {
   type ArchitectureCard,
@@ -232,10 +232,10 @@ import {
   SEARCH_EXTRA_TOOLS_NAME,
   SEND_MESSAGE_TOOL_NAME,
   START_AGENT_TOOL_NAME,
-  WRITE_REPORT_TOOL_NAME,
   type SolutionCompletenessClassification,
   type SolutionCompletenessSeverity,
   type SolutionCompletenessStatus,
+  WRITE_REPORT_TOOL_NAME,
   buildDowngradedFinalAnswer,
   buildExtendedDowngradedFinalAnswer,
   createDeferredToolDispatchDefinitions,
@@ -433,8 +433,8 @@ import {
   handleBackgroundCommand,
   handleForkCommand,
   handleJobCommand,
-  hydratePersistentAgents,
   hydrateDurableJobBackgroundTasks,
+  hydratePersistentAgents,
   sendAgentMessage,
 } from "./job-agent-command-runtime.js";
 import {
@@ -450,13 +450,13 @@ import {
   formatWorkspaceTrustStatus,
 } from "./pending-details-presenter.js";
 import {
-  classifyProviderFailure,
   type ProviderFailureKind,
   type RequestActivityPhase,
-  formatProviderFallbackAttemptSummary,
+  classifyProviderFailure,
   formatProviderEmptyResponsePrimary,
-  formatProviderFailurePrimary,
   formatProviderFailureKindLabel,
+  formatProviderFailurePrimary,
+  formatProviderFallbackAttemptSummary,
   formatProviderThinkingOnlyResponsePrimary,
   formatReportEvidenceRequired,
   formatReportIncompletePrimary,
@@ -473,6 +473,20 @@ import {
   startRunnerForDurableJob as startRunnerForDurableJobImpl,
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
+import {
+  LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
+  LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
+  LINGHUN_BYTES_PER_TOKEN,
+  LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
+  LINGHUN_MAX_AGENTIC_TURNS,
+  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
+  LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
+  LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+  LINGHUN_MAX_TOOL_RESULT_BYTES,
+  LINGHUN_MAX_TOOL_RESULT_TOKENS,
+  LINGHUN_TASK_MAX_OUTPUT_DEFAULT,
+  LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
+} from "./runtime-budget.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import {
@@ -500,6 +514,7 @@ import {
 } from "./slash-dispatch.js";
 import {
   createShellLimitations,
+  formatDisplayPath,
   formatError,
   formatProjectRouteProblem,
   formatProviderEnvWarning,
@@ -513,7 +528,6 @@ import {
   shouldEnterProductShellCandidate,
   stripAnsi,
   truncateDisplay,
-  formatDisplayPath,
   uniqueStrings,
   writeLine,
 } from "./startup-runtime.js";
@@ -530,24 +544,10 @@ import {
   formatToolStart,
 } from "./tool-output-presenter.js";
 import {
+  type ToolResultBudgetRecord,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
-  type ToolResultBudgetRecord,
 } from "./tool-result-budget.js";
-import {
-  LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
-  LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
-  LINGHUN_BYTES_PER_TOKEN,
-  LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
-  LINGHUN_MAX_AGENTIC_TURNS,
-  LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
-  LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
-  LINGHUN_MAX_TOOL_RESULT_BYTES,
-  LINGHUN_MAX_TOOL_RESULT_TOKENS,
-  LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
-  LINGHUN_TASK_MAX_OUTPUT_DEFAULT,
-  LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
-} from "./runtime-budget.js";
 export {
   LINGHUN_BASH_MAX_OUTPUT_DEFAULT,
   LINGHUN_BASH_MAX_OUTPUT_UPPER_LIMIT,
@@ -664,10 +664,10 @@ import {
 } from "./cache-command-runtime.js";
 export { writeLightHintsForTest } from "./cache-command-runtime.js";
 import {
+  type MemoryMutation,
   configureMemoryCommandRuntime,
   executeMemoryMutation,
   handleMemoryCommand,
-  type MemoryMutation,
   resumeSessionWithHandoff,
   runAutoLearningOnTurnEnd,
 } from "./memory-command-runtime.js";
@@ -841,10 +841,10 @@ import type {
   NativeRunnerLifecycleStatus,
   NativeRunnerResolutionStatus,
   PlanProposal,
-  ProviderFallbackAttemptSummary,
   PluginState,
   PluginSummary,
   ProviderFailureSummary,
+  ProviderFallbackAttemptSummary,
   RemoteApprovalDecision,
   RemoteApprovalMessage,
   RemoteChannelRuntimeStatus,
@@ -878,8 +878,8 @@ import {
   type WorkflowBridgeRequestProposal,
   bridgeWorkflowPlanToMainChainRequests,
 } from "./workflow-agent-runtime-bridge.js";
-import type { WorkflowPlannerEntryResult } from "./workflow-planner-entry.js";
 import type { NormalizedWorkflowPlan } from "./workflow-plan-schema.js";
+import type { WorkflowPlannerEntryResult } from "./workflow-planner-entry.js";
 export type {
   AgentRun,
   AgentType,
@@ -1273,11 +1273,20 @@ function checkAndWriteProviderCooldown(
   runtime: SelectedModelRuntime,
   output: Writable,
 ): boolean {
-  const cooldownCheck = checkProviderCooldown(context.providerBreaker, runtime.provider, runtime.model);
+  const cooldownCheck = checkProviderCooldown(
+    context.providerBreaker,
+    runtime.provider,
+    runtime.model,
+  );
   if (!cooldownCheck.blocked) return false;
   writeLine(
     output,
-    formatCooldownMessage(runtime.provider, runtime.model, cooldownCheck.remainingMs, context.language),
+    formatCooldownMessage(
+      runtime.provider,
+      runtime.model,
+      cooldownCheck.remainingMs,
+      context.language,
+    ),
   );
   return true;
 }
@@ -1578,9 +1587,7 @@ import {
   summarizeProjectRules,
 } from "./tui-state-runtime.js";
 
-async function createAgentRegistryState(
-  projectPath: string,
-): Promise<TuiContext["agentRegistry"]> {
+async function createAgentRegistryState(projectPath: string): Promise<TuiContext["agentRegistry"]> {
   const result = await loadAgentRegistry(projectPath);
   return { agents: result.items, errors: result.errors };
 }
@@ -1627,7 +1634,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
-    failureLearning: createFailureLearningState(projectPath),
+    failureLearning: createFailureLearningState(projectPath, config),
     skills: await createSkillState(config, projectPath),
     workflows: createWorkflowState(config),
     agentRegistry: await createAgentRegistryState(projectPath),
@@ -2860,14 +2867,33 @@ export async function handleSlashCommand(
       writeLine(output, t(context, "noSessions"));
       return "handled";
     }
-    writeLine(output, t(context, "sessionHeader"));
-    for (const session of sessions) {
-      const marker = session.id === context.sessionId ? "*" : " ";
-      writeLine(
-        output,
-        `${marker} ${session.id}  ${session.updatedAt}  ${session.summary ?? t(context, "noSummary")}`,
-      );
+    // D.14E+ — plain TUI 也用 CommandPanel 避免刷屏：主屏显示总数+最近 5 个，
+    // 完整列表进 detailsText（Ctrl+O 展开或 /details sessions）。
+    const recentSessions = sessions.slice(0, 5);
+    const summaryLines = [
+      t(context, "sessionHeader"),
+      ...recentSessions.map((s) => {
+        const marker = s.id === context.sessionId ? "*" : " ";
+        return `${marker} ${s.id}  ${s.updatedAt}  ${s.summary ?? t(context, "noSummary")}`;
+      }),
+    ];
+    if (sessions.length > 5) {
+      summaryLines.push(`... 另有 ${sessions.length - 5} 个 session（完整列表见 details）`);
     }
+    const detailsText = [
+      t(context, "sessionHeader"),
+      ...sessions.map((s) => {
+        const marker = s.id === context.sessionId ? "*" : " ";
+        return `${marker} ${s.id}  ${s.updatedAt}  ${s.summary ?? t(context, "noSummary")}`;
+      }),
+    ].join("\n");
+    showCommandPanel(context, output, {
+      title: "/sessions",
+      tone: "neutral",
+      summary: summaryLines,
+      actions: ["/sessions resume <id>"],
+      detailsText,
+    });
     return "handled";
   }
   const toolName = slashCommandToTool(command);
@@ -3035,7 +3061,9 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
     indexStatusRef: {
       status: context.index.status,
       projectName: context.index.projectName,
-      freshness: context.index.staleHint ? `staleHint=${context.index.staleHint}` : "freshness=not_checked",
+      freshness: context.index.staleHint
+        ? `staleHint=${context.index.staleHint}`
+        : "freshness=not_checked",
     },
     ...(context.currentArchitectureCard
       ? {
@@ -3172,7 +3200,14 @@ async function runWorkflowSteps(
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
     if (result.status !== "completed") {
-      await finishWorkflowRun(runId, result.status, result.summary, context, sessionId, workflowTask);
+      await finishWorkflowRun(
+        runId,
+        result.status,
+        result.summary,
+        context,
+        sessionId,
+        workflowTask,
+      );
       return;
     }
   }
@@ -3196,7 +3231,10 @@ function formatWorkflowRegistryList(context: TuiContext): string {
       lines.push(`  - ${error}`);
     }
   }
-  if (context.workflowRegistry.workflows.length === 0 && context.agentRegistry.agents.length === 0) {
+  if (
+    context.workflowRegistry.workflows.length === 0 &&
+    context.agentRegistry.agents.length === 0
+  ) {
     lines.push(
       context.language === "en-US"
         ? "- no custom agents/workflows found under .linghun/agents or .linghun/workflows"
@@ -3227,7 +3265,9 @@ function findRegistryAgentWorkflow(
 ): RegistryAgentDefinition | undefined {
   if (!id?.startsWith("agent:")) return undefined;
   const agentId = id.slice("agent:".length);
-  return context.agentRegistry.agents.find((agent) => agent.id === agentId || agent.name === agentId);
+  return context.agentRegistry.agents.find(
+    (agent) => agent.id === agentId || agent.name === agentId,
+  );
 }
 
 async function runRegistryAgentWorkflow(
@@ -3259,7 +3299,12 @@ async function runRegistryWorkflow(
     id: step.id,
     title: `${step.action}:${step.id}`,
     status: "queued",
-    runtime: step.action === "verification" ? "verification" : step.action === "details" ? "details" : "agent",
+    runtime:
+      step.action === "verification"
+        ? "verification"
+        : step.action === "details"
+          ? "details"
+          : "agent",
     evidenceRefs: [],
   }));
   const task: BackgroundTaskState = {
@@ -3290,7 +3335,12 @@ async function runRegistryWorkflow(
   rememberBackgroundTask(context, task);
   await context.store.appendEvent(sessionId, {
     type: "workflow_start",
-    workflow: { id: runId, goal: goal || workflow.description, planId: workflow.id, steps: stepStates },
+    workflow: {
+      id: runId,
+      goal: goal || workflow.description,
+      planId: workflow.id,
+      steps: stepStates,
+    },
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, task);
@@ -3327,7 +3377,16 @@ async function runRegistryWorkflow(
     return;
   }
 
-  await executeRegistryWorkflowRun(workflow, goal, runId, stepStates, task, context, sessionId, output);
+  await executeRegistryWorkflowRun(
+    workflow,
+    goal,
+    runId,
+    stepStates,
+    task,
+    context,
+    sessionId,
+    output,
+  );
 }
 
 async function executeRegistryWorkflowRun(
@@ -3388,7 +3447,11 @@ async function executeRegistryWorkflowStep(
   goal: string,
   context: TuiContext,
   output: Writable,
-): Promise<{ status: "completed" | "failed" | "blocked"; summary: string; evidenceRefs: string[] }> {
+): Promise<{
+  status: "completed" | "failed" | "blocked";
+  summary: string;
+  evidenceRefs: string[];
+}> {
   const beforeEvidence = context.evidence.map((item) => item.id);
   try {
     if (step.action === "agent") {
@@ -3402,7 +3465,12 @@ async function executeRegistryWorkflowStep(
     } else if (step.action === "index") {
       await handleSlashCommand("/index status", context, output);
     } else if (step.action === "bash") {
-      if (!step.command) return { status: "blocked", summary: `workflow step ${step.id} blocked: missing command`, evidenceRefs: [] };
+      if (!step.command)
+        return {
+          status: "blocked",
+          summary: `workflow step ${step.id} blocked: missing command`,
+          evidenceRefs: [],
+        };
       await handleToolCommand("Bash", [step.command], context, output);
     } else if (step.action === "write") {
       return {
@@ -3531,9 +3599,7 @@ async function executeWorkflowStep(
       const summary = formatWorkflowStepSummary(
         request.sliceId,
         "blocked",
-        context.language === "en-US"
-          ? "unsupported nested job request"
-          : "不支持嵌套 job 请求",
+        context.language === "en-US" ? "unsupported nested job request" : "不支持嵌套 job 请求",
         context.language,
       );
       await captureWorkflowFailureLearning(request, summary, context);
@@ -5171,7 +5237,31 @@ async function handlePermissionsCommand(
       );
       return;
     }
-    writeLine(output, formatRecentDenied(context.permissions));
+    // D.14E+ — /permissions recent 走 CommandPanel 避免刷屏：
+    // 主屏显示总数+最近 5 条，完整列表进 detailsText。
+    const denied = context.permissions.recentDenied;
+    if (denied.length === 0) {
+      writeLine(output, "最近没有拒绝记录。");
+      return;
+    }
+    const recent = denied.slice(0, 5);
+    const summaryLines = [
+      `最近拒绝记录（共 ${denied.length} 条，显示最近 5 条）：`,
+      ...recent.map((item) => `${item.createdAt}  ${item.toolName}  ${item.mode}  ${item.reason}`),
+    ];
+    if (denied.length > 5) {
+      summaryLines.push(`... 另有 ${denied.length - 5} 条（完整列表见 details）`);
+    }
+    const detailsText = denied
+      .map((item) => `${item.createdAt}  ${item.toolName}  ${item.mode}  ${item.reason}`)
+      .join("\n");
+    showCommandPanel(context, output, {
+      title: "/permissions recent",
+      tone: "neutral",
+      summary: summaryLines,
+      actions: ["/permissions recent clear", "/permissions recent delete <id>"],
+      detailsText,
+    });
     return;
   }
   if (action === "add") {
@@ -6066,7 +6156,12 @@ async function handleCompactCommand(
     const resumed = await context.store.resume(sessionId);
     const runtime = getSelectedModelRuntime(context);
     if (!context.modelGateway) {
-      writeLine(output, context.language === "en-US" ? "Deep compact unavailable: model gateway is not ready." : "Deep compact 不可用：模型网关尚未就绪。");
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? "Deep compact unavailable: model gateway is not ready."
+          : "Deep compact 不可用：模型网关尚未就绪。",
+      );
       return;
     }
     const result = await runDeepCompact({
@@ -6618,12 +6713,11 @@ async function recordMemoryMutationEvidence(
       ? "memory_mutation init: generated LINGHUN.md"
       : `memory_mutation ${action}: scope=${memory.scope} id=${memory.id} status=${memory.status}`;
   const source = action === "init" ? "memory:init:LINGHUN.md" : `memory:${action}:${memory.id}`;
-  const evidence = createEvidenceRecord(
-    "command_output",
-    summary,
-    source,
-    ["memory_mutation", `memory_${action}`, "Write"],
-  );
+  const evidence = createEvidenceRecord("command_output", summary, source, [
+    "memory_mutation",
+    `memory_${action}`,
+    "Write",
+  ]);
   rememberEvidence(context, evidence);
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
 }
@@ -6934,16 +7028,29 @@ async function handleVerifyCommand(
     return;
   }
 
-  const plan = await createVerificationPlan(
-    context.projectPath,
-    action === "smoke" ? "smoke" : "default",
-  );
+  let plan: Awaited<ReturnType<typeof createVerificationPlan>>;
+  if (action === "typecheck") {
+    const defaultPlan = await createVerificationPlan(context.projectPath, "default");
+    plan = defaultPlan.filter((step) => step.kind === "typecheck");
+    if (plan.length === 0) {
+      plan = await createVerificationPlan(context.projectPath, "smoke");
+    }
+  } else {
+    plan = await createVerificationPlan(
+      context.projectPath,
+      action === "smoke" ? "smoke" : "default",
+    );
+  }
+
   if (action === "plan") {
     writeLine(output, formatVerificationPlan(plan, context.language));
     return;
   }
-  if (action && action !== "smoke") {
-    writeLine(output, "用法：/verify | /verify plan | /verify last | /verify smoke");
+  if (action && action !== "smoke" && action !== "typecheck") {
+    writeLine(
+      output,
+      "用法：/verify | /verify plan | /verify last | /verify smoke | /verify typecheck",
+    );
     return;
   }
 
@@ -7167,7 +7274,9 @@ async function executeImageGeneration(
     id: approval.id,
     provider: approval.provider,
     model: approval.model,
-    images: [{ path: approval.assetPath, mimeType: "application/json", revisedPrompt: approval.prompt }],
+    images: [
+      { path: approval.assetPath, mimeType: "application/json", revisedPrompt: approval.prompt },
+    ],
     evidenceRefs: [],
     createdAt: now,
   };
@@ -8509,16 +8618,24 @@ async function sendMessage(
         // 避免主屏 / Ctrl+O / details 仍展示原始违规文本。
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         // D.14B — final answer gate 降级是真实失败：模型空口声称未被 evidence 支持。
-        await captureFailureLearning(context, sessionId, {
-          category: "final_gate_downgrade",
-          failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
-          rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
-          avoidNextTime:
-            "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
-          sourceRef: "event:final_answer_claim_gate",
-          relatedTarget: verdict.unsupportedKinds.join(","),
-          severity: "high",
-        });
+        // D.14E+ — 避免把 benign secret-safety answer 误记为 code_fact failure：
+        // 如果回答包含明显的 secret/key/安全拒答关键词，且不是真实的 code_fact 声称，跳过记录。
+        const isBenignSecretSafety =
+          (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
+            !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
+          verdict.unsupportedKinds.length === 0;
+        if (!isBenignSecretSafety) {
+          await captureFailureLearning(context, sessionId, {
+            category: "final_gate_downgrade",
+            failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
+            rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
+            avoidNextTime:
+              "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+            sourceRef: "event:final_answer_claim_gate",
+            relatedTarget: verdict.unsupportedKinds.join(","),
+            severity: "high",
+          });
+        }
       }
       // D.13V-B — Architecture / Completeness 降级（与 D.13U 共享 retry 预算）
       const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
@@ -8855,12 +8972,7 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "error") {
       clearRequestActivity(context);
       const currentRuntime = runtimeFromContinuation(continuation);
-      await recordProviderFailureEvidence(
-        context,
-        sessionId,
-        event.error,
-        currentRuntime,
-      );
+      await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
       recordProviderFailure(
         context.providerBreaker,
         continuation.provider,
@@ -9069,12 +9181,7 @@ async function continueModelAfterToolResults(
         if (event.type === "error") {
           clearRequestActivity(context);
           const currentRuntime = runtimeFromContinuation(continuation);
-          await recordProviderFailureEvidence(
-            context,
-            sessionId,
-            event.error,
-            currentRuntime,
-          );
+          await recordProviderFailureEvidence(context, sessionId, event.error, currentRuntime);
           recordProviderFailure(
             context.providerBreaker,
             continuation.provider,
@@ -9307,16 +9414,23 @@ async function continueModelAfterToolResults(
           // D.13V — 同步替换 continuation streaming block 与 lastFullOutput。
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
           // D.14B — continuation 路径的 final gate 降级镜像。
-          await captureFailureLearning(context, sessionId, {
-            category: "final_gate_downgrade",
-            failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
-            rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
-            avoidNextTime:
-              "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
-            sourceRef: "event:final_answer_claim_gate",
-            relatedTarget: verdict.unsupportedKinds.join(","),
-            severity: "high",
-          });
+          // D.14E+ — 避免把 benign secret-safety answer 误记为 code_fact failure。
+          const isBenignSecretSafety =
+            (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
+              !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
+            verdict.unsupportedKinds.length === 0;
+          if (!isBenignSecretSafety) {
+            await captureFailureLearning(context, sessionId, {
+              category: "final_gate_downgrade",
+              failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
+              rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
+              avoidNextTime:
+                "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+              sourceRef: "event:final_answer_claim_gate",
+              relatedTarget: verdict.unsupportedKinds.join(","),
+              severity: "high",
+            });
+          }
         }
         // D.13V-B — Architecture / Completeness 降级（continuation 镜像）
         const extended = runArchitectureAndCompletenessFinalGate(context, assistantText);
@@ -10088,7 +10202,8 @@ async function executeLinghunControlToolUse(
   try {
     if (toolCall.name === START_AGENT_TOOL_NAME) {
       const input = parseStartAgentToolInput(toolCall.input, context);
-      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       const before = new Set(context.agents.map((agent) => agent.id));
       await handleForkCommand(buildForkArgsFromStartAgentInput(input, context), context, output);
       const agent = context.agents.find((item) => !before.has(item.id));
@@ -10103,32 +10218,55 @@ async function executeLinghunControlToolUse(
     }
     if (toolCall.name === SEND_MESSAGE_TOOL_NAME) {
       const input = parseSendMessageToolInput(toolCall.input);
-      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       const result = await sendAgentMessage(context, { ...input, from: "model" });
-      return await finishControlToolResult(toolCall, context, sessionId, output, result.text, !result.ok, {
-        delivered: result.delivered,
-      });
+      return await finishControlToolResult(
+        toolCall,
+        context,
+        sessionId,
+        output,
+        result.text,
+        !result.ok,
+        {
+          delivered: result.delivered,
+        },
+      );
     }
     if (toolCall.name === RUN_WORKFLOW_TOOL_NAME) {
       const input = parseRunWorkflowToolInput(toolCall.input);
-      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       if (input.workflowId) {
         const registry = findRegistryWorkflow(context, input.workflowId);
         const registryAgent = findRegistryAgentWorkflow(context, input.workflowId);
         if (!registry && !registryAgent) {
-          return await finishControlToolFailure(toolCall, context, sessionId, output, `Unknown workflowId: ${input.workflowId}`);
+          return await finishControlToolFailure(
+            toolCall,
+            context,
+            sessionId,
+            output,
+            `Unknown workflowId: ${input.workflowId}`,
+          );
         }
         const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
         if (registry) {
           await runRegistryWorkflow(registry, workflowGoal, input.runInBackground, context, output);
         } else if (registryAgent) {
-          await runRegistryAgentWorkflow(registryAgent, workflowGoal, input.runInBackground, context, output);
+          await runRegistryAgentWorkflow(
+            registryAgent,
+            workflowGoal,
+            input.runInBackground,
+            context,
+            output,
+          );
         }
       } else {
         await runWorkflowSteps(input.goal ?? "", context, output);
       }
       const run = context.workflows.activeRun;
-      const ok = run?.status === "completed" || (input.runInBackground && run?.status === "running");
+      const ok =
+        run?.status === "completed" || (input.runInBackground && run?.status === "running");
       const text = run
         ? `Workflow ${run.id} ${run.status}; result=${run.result}.`
         : "Workflow runtime did not start.";
@@ -10140,7 +10278,8 @@ async function executeLinghunControlToolUse(
     }
     if (toolCall.name === INDEX_OPERATION_TOOL_NAME) {
       const input = parseIndexOperationToolInput(toolCall.input);
-      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       const mappedName =
         input.action === "inspect"
           ? INDEX_STATUS_INSPECT
@@ -10162,7 +10301,8 @@ async function executeLinghunControlToolUse(
     }
     if (toolCall.name === RUN_VERIFICATION_TOOL_NAME) {
       const input = parseVerificationToolInput(toolCall.input);
-      if (!input.ok) return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       await runWorkflowVerificationStep(input.level, context, output);
       const report = context.lastVerification;
       const ok = report?.status === "pass";
@@ -10202,7 +10342,10 @@ function executableCommandProposalTool(command: string): string | undefined {
   return undefined;
 }
 
-function parseStartAgentToolInput(input: unknown, context: TuiContext):
+function parseStartAgentToolInput(
+  input: unknown,
+  context: TuiContext,
+):
   | {
       ok: true;
       role: AgentType;
@@ -10215,8 +10358,16 @@ function parseStartAgentToolInput(input: unknown, context: TuiContext):
       registryAgentId?: string;
     }
   | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
-  const rawRole = typeof obj.role === "string" ? obj.role : typeof obj.subagent_type === "string" ? obj.subagent_type : "";
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const rawRole =
+    typeof obj.role === "string"
+      ? obj.role
+      : typeof obj.subagent_type === "string"
+        ? obj.subagent_type
+        : "";
   const task = obj.task;
   const registryAgent = !isAgentType(rawRole)
     ? context.agentRegistry.agents.find((agent) => agent.id === rawRole || agent.name === rawRole)
@@ -10227,7 +10378,10 @@ function parseStartAgentToolInput(input: unknown, context: TuiContext):
       ? inferRegistryAgentRole(registryAgent)
       : undefined;
   if (!role || typeof task !== "string" || !task.trim()) {
-    return { ok: false, text: "StartAgent requires role/subagent_type explorer|planner|worker|verifier and task." };
+    return {
+      ok: false,
+      text: "StartAgent requires role/subagent_type explorer|planner|worker|verifier and task.",
+    };
   }
   const isolation = obj.isolation === "worktree" ? "worktree" : undefined;
   return {
@@ -10267,9 +10421,20 @@ function buildForkArgsFromStartAgentInput(
 }
 
 function parseSendMessageToolInput(input: unknown):
-  | { ok: true; to?: string; name?: string; team?: string; teamName?: string; team_name?: string; message: string }
+  | {
+      ok: true;
+      to?: string;
+      name?: string;
+      team?: string;
+      teamName?: string;
+      team_name?: string;
+      message: string;
+    }
   | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
   const message = obj.message;
   if (typeof message !== "string" || !message.trim()) {
     return { ok: false, text: "SendMessage requires message." };
@@ -10279,16 +10444,29 @@ function parseSendMessageToolInput(input: unknown):
     ...(typeof obj.to === "string" && obj.to.trim() ? { to: obj.to.trim() } : {}),
     ...(typeof obj.name === "string" && obj.name.trim() ? { name: obj.name.trim() } : {}),
     ...(typeof obj.team === "string" && obj.team.trim() ? { team: obj.team.trim() } : {}),
-    ...(typeof obj.teamName === "string" && obj.teamName.trim() ? { teamName: obj.teamName.trim() } : {}),
-    ...(typeof obj.team_name === "string" && obj.team_name.trim() ? { team_name: obj.team_name.trim() } : {}),
+    ...(typeof obj.teamName === "string" && obj.teamName.trim()
+      ? { teamName: obj.teamName.trim() }
+      : {}),
+    ...(typeof obj.team_name === "string" && obj.team_name.trim()
+      ? { team_name: obj.team_name.trim() }
+      : {}),
     message: message.trim(),
   };
 }
 
 function parseRunWorkflowToolInput(input: unknown):
-  | { ok: true; goal?: string; workflowId?: string; inputs?: Record<string, unknown>; runInBackground: boolean }
+  | {
+      ok: true;
+      goal?: string;
+      workflowId?: string;
+      inputs?: Record<string, unknown>;
+      runInBackground: boolean;
+    }
   | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
   const goal = typeof obj.goal === "string" && obj.goal.trim() ? obj.goal.trim() : undefined;
   const workflowId =
     typeof obj.workflowId === "string" && obj.workflowId.trim()
@@ -10314,7 +10492,10 @@ function parseStringFieldToolInput(
   input: unknown,
   field: string,
 ): { ok: true; value: string } | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
   const value = obj[field];
   if (typeof value !== "string" || !value.trim()) {
     return { ok: false, text: `${field} must be a non-empty string.` };
@@ -10322,21 +10503,36 @@ function parseStringFieldToolInput(
   return { ok: true, value: value.trim() };
 }
 
-function parseIndexOperationToolInput(input: unknown):
+function parseIndexOperationToolInput(
+  input: unknown,
+):
   | { ok: true; action: "inspect" | "refresh" | "init_fast" | "repair"; force?: boolean }
   | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
   const action = obj.action;
-  if (action !== "inspect" && action !== "refresh" && action !== "init_fast" && action !== "repair") {
+  if (
+    action !== "inspect" &&
+    action !== "refresh" &&
+    action !== "init_fast" &&
+    action !== "repair"
+  ) {
     return { ok: false, text: "IndexOperation requires action inspect|refresh|init_fast|repair." };
   }
   return { ok: true, action, force: typeof obj.force === "boolean" ? obj.force : undefined };
 }
 
-function parseVerificationToolInput(input: unknown):
+function parseVerificationToolInput(
+  input: unknown,
+):
   | { ok: true; level: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint" }
   | { ok: false; text: string } {
-  const obj = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
   const level = obj.level;
   if (
     level !== "smoke" &&
@@ -10747,12 +10943,12 @@ async function executeApprovedIndexToolUse(
   if (action !== "repair") {
     const guard = checkBackgroundStartGuard(context, "index", true);
     if (guard) {
-    const evidence = await recordToolFailureEvidence(
-      context,
-      sessionId,
-      "Write",
-      `index ${action} resource guard: ${guard}`,
-    );
+      const evidence = await recordToolFailureEvidence(
+        context,
+        sessionId,
+        "Write",
+        `index ${action} resource guard: ${guard}`,
+      );
       await appendDeferredToolResultEvent(
         context,
         sessionId,

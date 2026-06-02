@@ -145,8 +145,11 @@ describe("Feishu real inbound adapter", () => {
   });
 
   it("keeps fixture/mock origins out of real mobile inbound claims", async () => {
+    const { dirname, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const here = dirname(fileURLToPath(import.meta.url));
     const bridgeSrc = await import("node:fs/promises").then((fs) =>
-      fs.readFile("src/remote-inbound-bridge-runtime.ts", "utf8"),
+      fs.readFile(join(here, "remote-inbound-bridge-runtime.ts"), "utf8"),
     );
     expect(bridgeSrc).toContain('origin: "fixture"');
     expect(bridgeSrc).toContain('origin: "adapter"');

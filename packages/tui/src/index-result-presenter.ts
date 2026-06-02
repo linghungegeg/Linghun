@@ -41,7 +41,7 @@ function normalizePath(path: string): string {
 }
 
 export function summarizeIndexResult(
-  tool: "search_code" | "get_architecture",
+  tool: "search_code" | "search_graph" | "get_architecture",
   data: unknown,
 ): string {
   if (tool === "get_architecture" && isRecord(data)) {
@@ -51,6 +51,21 @@ export function summarizeIndexResult(
       `- nodes/edges: ${String(data.total_nodes ?? "-")}/${String(data.total_edges ?? "-")}`,
       `- node labels: ${summarizeNamedCounts(data.node_labels)}`,
       `- edge types: ${summarizeNamedCounts(data.edge_types)}`,
+    ].join("\n");
+  }
+  if (tool === "search_graph" && isRecord(data)) {
+    const raw = Array.isArray(data.results) ? data.results : [];
+    const matches = raw
+      .slice(0, 5)
+      .map((item, index) => `- #${index + 1} ${summarizeIndexSearchItem(item)}`);
+    return [
+      "Index search（语义符号搜索，最多 5 条）",
+      `- total: ${String(data.total ?? raw.length)}`,
+      `- search_mode: ${String(data.search_mode ?? "bm25")}`,
+      ...matches,
+      matches.length === 0
+        ? "- no matches"
+        : "- source: codebase-memory search_graph (semantic symbol search)",
     ].join("\n");
   }
   if (isRecord(data)) {

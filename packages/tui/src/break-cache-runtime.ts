@@ -14,6 +14,8 @@ const BREAK_CACHE_ONCE_FILENAME = ".break-cache-once";
 const BREAK_CACHE_ALWAYS_FILENAME = ".break-cache-always";
 const BREAK_CACHE_EVENTS_FILENAME = "break-cache-events.jsonl";
 const BREAK_CACHE_EVENTS_MAX_LINES = 200;
+const BREAK_CACHE_EVENTS_TRIM_BATCH = 25;
+const breakCacheEventLineCounts = new Map<string, number>();
 
 function getBreakCacheDir(context: TuiContext): string {
   return join(context.projectPath, ".linghun");
@@ -75,21 +77,45 @@ function readRecentBreakCacheEventsSync(context: TuiContext, limit: number): Bre
 }
 
 export async function appendBreakCacheEvent(context: TuiContext, action: string): Promise<void> {
-  // 有界 jsonl：先 append，再按 200 行截断重写。失败不抛，避免破坏主流程。
+  // 有界 jsonl：缓存当前进程写入的行数；只有超过上限时才读取并截断，避免高频事件反复重写整文件。
   try {
     await mkdir(getBreakCacheDir(context), { recursive: true });
     const path = getBreakCacheEventsPath(context);
+    const currentCount = await getBreakCacheEventLineCount(path);
     const event: BreakCacheEvent = { action, createdAt: new Date().toISOString() };
     await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
-    const raw = await readFile(path, "utf8").catch(() => "");
-    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
-    if (lines.length > BREAK_CACHE_EVENTS_MAX_LINES) {
-      const trimmed = lines.slice(-BREAK_CACHE_EVENTS_MAX_LINES).join("\n");
-      await writeFile(path, `${trimmed}\n`, "utf8");
-    }
+    breakCacheEventLineCounts.set(path, currentCount + 1);
+    await truncateBreakCacheEventsIfNeeded(path);
   } catch {
     // ignore
   }
+}
+
+async function getBreakCacheEventLineCount(path: string): Promise<number> {
+  const cached = breakCacheEventLineCounts.get(path);
+  if (typeof cached === "number") {
+    return cached;
+  }
+  const raw = await readFile(path, "utf8").catch(() => "");
+  const count = raw.split(/\r?\n/).filter((line) => line.length > 0).length;
+  breakCacheEventLineCounts.set(path, count);
+  return count;
+}
+
+async function truncateBreakCacheEventsIfNeeded(path: string): Promise<void> {
+  const currentCount = breakCacheEventLineCounts.get(path) ?? 0;
+  if (currentCount < BREAK_CACHE_EVENTS_MAX_LINES + BREAK_CACHE_EVENTS_TRIM_BATCH) {
+    return;
+  }
+  const raw = await readFile(path, "utf8").catch(() => "");
+  const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+  if (lines.length <= BREAK_CACHE_EVENTS_MAX_LINES) {
+    breakCacheEventLineCounts.set(path, lines.length);
+    return;
+  }
+  const trimmed = lines.slice(-BREAK_CACHE_EVENTS_MAX_LINES).join("\n");
+  await writeFile(path, `${trimmed}\n`, "utf8");
+  breakCacheEventLineCounts.set(path, BREAK_CACHE_EVENTS_MAX_LINES);
 }
 
 export async function writeBreakCacheMarker(

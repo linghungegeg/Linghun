@@ -270,12 +270,19 @@ export async function handleIndexCommand(
       writeLine(output, "用法：/index search <query>");
       return;
     }
-    const result = await runIndexQuery(context, "search_code", { pattern: query, limit: 5 });
+    // P2.4 fix: search_code 在 codebase-memory 0.6.1 中存在路径解析问题，始终返回 0 结果。
+    // 优先使用 search_graph（语义符号搜索），它在所有测试场景下都能正常工作。
+    const result = await runIndexQuery(context, "search_graph", { query, limit: 5 });
     await recordIndexEvidence(context, `search ${query}`, result.summary);
     // D.14D-E — /index search 短摘要走降噪 CommandPanel；进度/错误不走面板。
     showCommandPanel(context, output, {
       title: "/index search",
-      tone: "neutral",
+      tone:
+        result.summary.includes("no matches") &&
+        context.index.nodes !== undefined &&
+        context.index.nodes > 0
+          ? "warning"
+          : "neutral",
       summary: [
         context.language === "en-US"
           ? "Index search result — Ctrl+O for details."
@@ -1042,7 +1049,7 @@ export async function runIndexRepository(
 
 export async function runIndexQuery(
   context: TuiContext,
-  tool: "search_code" | "get_architecture",
+  tool: "search_code" | "search_graph" | "get_architecture",
   input: Record<string, unknown>,
 ): Promise<{ summary: string }> {
   await refreshIndexStatus(context);
@@ -1062,7 +1069,10 @@ export async function runIndexQuery(
     return { summary: formatIndexStatus(context) };
   }
   const summary = summarizeIndexResult(tool, result.data);
-  context.index.lastQuery = tool === "search_code" ? String(input.pattern ?? "") : "architecture";
+  context.index.lastQuery =
+    tool === "search_code" || tool === "search_graph"
+      ? String(input.pattern ?? input.query ?? "")
+      : "architecture";
   context.index.lastSummary = summary;
   return { summary };
 }

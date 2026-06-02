@@ -3,13 +3,13 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
+import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import {
   createHandoffPendingItems,
   createHandoffRiskItems,
   createPhase15BetaVerdictScope,
 } from "./final-answer-gate.js";
 import type { TuiContext } from "./index.js";
-import { isDeepCompactPacket } from "./deep-compact-runtime.js";
 import type { CompactProjection, HandoffPacket, VerificationReport } from "./tui-data-types.js";
 import { formatProjectRulesContext } from "./tui-memory-runtime.js";
 import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
@@ -47,7 +47,9 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
     context.memory.lastHandoff = handoff.packet;
   }
-  const deepCompact = [...transcript].reverse().find((event) => event.type === "deep_compact_packet");
+  const deepCompact = [...transcript]
+    .reverse()
+    .find((event) => event.type === "deep_compact_packet");
   if (deepCompact?.type === "deep_compact_packet" && isDeepCompactPacket(deepCompact.packet)) {
     context.cache.compacted = true;
     context.cache.deepCompact = deepCompact.packet;
@@ -56,15 +58,16 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
     .reverse()
     .find(
       (event) =>
-        event.type === "system_event" &&
-        event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX),
+        event.type === "system_event" && event.message.startsWith(COMPACT_PROJECTION_EVENT_PREFIX),
     );
   if (compactEvent?.type === "system_event") {
     const projection = parseCompactProjectionEvent(compactEvent.message);
     if (projection) {
       context.cache.compacted = true;
       context.cache.compactProjection = projection;
-      if (!context.cache.compactBoundaries.some((boundary) => boundary.id === projection.boundaryId)) {
+      if (
+        !context.cache.compactBoundaries.some((boundary) => boundary.id === projection.boundaryId)
+      ) {
         context.cache.compactBoundaries.push({
           id: projection.boundaryId,
           kind: "micro",

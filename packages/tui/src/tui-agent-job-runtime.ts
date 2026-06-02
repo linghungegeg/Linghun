@@ -131,27 +131,61 @@ export function createAgentBackgroundTask(
   context: TuiContext,
 ): BackgroundTaskState {
   const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
+  const isEn = context.language === "en-US";
+  const isTerminal =
+    agent.status === "blocked" ||
+    agent.status === "cancelled" ||
+    agent.status === "failed" ||
+    agent.status === "completed";
+  const backgroundStatus: BackgroundTaskState["status"] = isTerminal
+    ? agent.status === "blocked"
+      ? "failed"
+      : "completed"
+    : agent.status === "stale"
+      ? "stale"
+      : "running";
+  const backgroundResult: BackgroundTaskState["result"] = isTerminal
+    ? agent.status === "completed"
+      ? mapAgentBackgroundResult(agent, undefined)
+      : "fail"
+    : agent.status === "stale"
+      ? "partial"
+      : undefined;
+  const currentStep = isTerminal
+    ? agent.status
+    : agent.status === "stale"
+      ? "stale/resumable"
+      : isEn
+        ? `running ${agent.type}`
+        : `正在运行 ${agent.type}`;
+  const progress = isTerminal
+    ? { completed: 1, total: 1, label }
+    : { completed: 0, total: 1, label };
+  const userVisibleSummary = isTerminal
+    ? agent.summary
+    : agent.status === "stale"
+      ? agent.summary
+      : isEn
+        ? `Started ${label}. Use /agents show ${agent.id}.`
+        : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`;
   return {
     id: agent.id,
     kind: "agent",
     title: `Agent ${label}`,
-    status: "running",
-    currentStep: context.language === "en-US" ? `running ${agent.type}` : `正在运行 ${agent.type}`,
-    progress: { completed: 0, total: 1, label },
+    status: backgroundStatus,
+    currentStep,
+    progress,
+    result: backgroundResult,
     startedAt: agent.startedAt,
     updatedAt: agent.updatedAt,
     heartbeatIntervalMs: 30_000,
     staleAfterMs: 120_000,
     outputPath: agent.transcriptPath,
     hasOutput: true,
-    userVisibleSummary:
-      context.language === "en-US"
-        ? `Started ${label}. Use /agents show ${agent.id}.`
-        : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`,
-    nextAction:
-      context.language === "en-US"
-        ? `Use /agents cancel ${agent.id} to interrupt.`
-        : `可用 /agents cancel ${agent.id} 中断。`,
+    userVisibleSummary,
+    nextAction: isEn
+      ? `Use /agents cancel ${agent.id} to interrupt.`
+      : `可用 /agents cancel ${agent.id} 中断。`,
   };
 }
 

@@ -1089,4 +1089,80 @@ describe("config directories", () => {
     // provider.env 接管 defaultModel 时，不再保留占位
     expect(config.defaultModel).toBe("gpt-test");
   });
+
+  describe("LINGHUN_DATA_DIR isolation", () => {
+    it("isolates project-scoped runtime data under LINGHUN_DATA_DIR", async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-iso-proj-"));
+      const isolatedDataDir = await mkdtemp(join(tmpdir(), "linghun-iso-data-"));
+
+      vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+      const config = await loadConfig(project);
+      const paths = resolveStoragePaths(config, project);
+
+      expect(paths.agentRuns).toContain(isolatedDataDir);
+      expect(paths.agentRuns).not.toContain(join(project, ".linghun"));
+      expect(paths.failures).toContain(isolatedDataDir);
+      expect(paths.failures).not.toContain(join(project, ".linghun"));
+      expect(paths.memorySession).toContain(isolatedDataDir);
+      expect(paths.memorySession).not.toContain(join(project, ".linghun"));
+      expect(paths.jobs).toContain(isolatedDataDir);
+      expect(paths.logs).toContain(isolatedDataDir);
+      expect(paths.cache).toContain(isolatedDataDir);
+    });
+
+    it("still uses project .linghun for config/settings when LINGHUN_DATA_DIR is set", async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-iso-cfg-"));
+      const isolatedDataDir = await mkdtemp(join(tmpdir(), "linghun-iso-cfg-data-"));
+
+      vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+      const settingsPath = getProjectSettingsPath(project);
+      expect(settingsPath).toBe(join(project, ".linghun", "settings.json"));
+      expect(settingsPath).not.toContain(isolatedDataDir);
+    });
+
+    it("uses project namespace under LINGHUN_DATA_DIR to avoid collision", async () => {
+      const project1 = await mkdtemp(join(tmpdir(), "linghun-proj1-"));
+      const project2 = await mkdtemp(join(tmpdir(), "linghun-proj2-"));
+      const isolatedDataDir = await mkdtemp(join(tmpdir(), "linghun-shared-data-"));
+
+      vi.stubEnv("LINGHUN_DATA_DIR", isolatedDataDir);
+
+      const config1 = await loadConfig(project1);
+      const config2 = await loadConfig(project2);
+
+      const paths1 = resolveStoragePaths(config1, project1);
+      const paths2 = resolveStoragePaths(config2, project2);
+
+      expect(paths1.agentRuns).not.toBe(paths2.agentRuns);
+      expect(paths1.failures).not.toBe(paths2.failures);
+      expect(paths1.memorySession).not.toBe(paths2.memorySession);
+
+      await mkdir(paths1.agentRuns, { recursive: true });
+      await writeFile(join(paths1.agentRuns, "agent1.json"), "{}", "utf8");
+
+      await mkdir(paths2.agentRuns, { recursive: true });
+      await writeFile(join(paths2.agentRuns, "agent2.json"), "{}", "utf8");
+
+      const files1 = await readdir(paths1.agentRuns);
+      const files2 = await readdir(paths2.agentRuns);
+
+      expect(files1).toEqual(["agent1.json"]);
+      expect(files2).toEqual(["agent2.json"]);
+    });
+
+    it("does not isolate when LINGHUN_DATA_DIR is not set", async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-no-iso-"));
+
+      vi.stubEnv("LINGHUN_DATA_DIR", undefined);
+
+      const config = await loadConfig(project);
+      const paths = resolveStoragePaths(config, project);
+
+      expect(paths.agentRuns).toBe(join(project, ".linghun", "agent-runs"));
+      expect(paths.failures).toBe(join(project, ".linghun", "failures"));
+      expect(paths.memorySession).toBe(join(project, ".linghun", "memory", "session"));
+    });
+  });
 });

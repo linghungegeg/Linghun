@@ -158,7 +158,7 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
         [
           `- boundary: ${projection.boundaryId}`,
           `- pressure: ${projection.pressureRatio}`,
-          `- scope: provider-visible recent context projection`,
+          "- scope: provider-visible recent context projection",
           `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
           `- evidenceRefs: ${projection.evidenceRefs.join(", ") || "none"}`,
           `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
@@ -171,7 +171,11 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
       );
     }
   }
-  if (context.cache.deepCompact && !context.cache.compactProjection && !context.cache.compactFailure) {
+  if (
+    context.cache.deepCompact &&
+    !context.cache.compactProjection &&
+    !context.cache.compactFailure
+  ) {
     sections.push({
       title: isEn ? "Context compact" : "上下文压缩",
       rows: [
@@ -236,7 +240,10 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
 
 function sanitizeCompactDetailsText(value: string, projectPath: string): string {
   return sanitizeDiagnosticText(sanitizeDisplayPaths(value, projectPath))
-    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      (_match, key: string, sep: string) => `${key}${sep}***`,
+    )
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }

@@ -260,7 +260,10 @@ function normalizePanelStatus(status: BackgroundTaskState["status"], language: L
 
 function cleanPanelText(value: string, fallback: string): string {
   const cleaned = value
-    .replace(/\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu, "")
+    .replace(
+      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu,
+      "",
+    )
     .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;

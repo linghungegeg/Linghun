@@ -261,7 +261,9 @@ function deriveNextAction(
     return isZh ? "先处理受阻任务，再继续推进。" : "Resolve blocked slices before proceeding.";
   }
   if (bridgeResult.summary.startGateNeeded > 0) {
-    return isZh ? "确认阶段检查点后再开始执行。" : (phaseStopReason ?? "Confirm phase stop point before execution.");
+    return isZh
+      ? "确认阶段检查点后再开始执行。"
+      : (phaseStopReason ?? "Confirm phase stop point before execution.");
   }
   if (bridgeResult.summary.runnable > 0) {
     return isZh
@@ -271,7 +273,9 @@ function deriveNextAction(
   if (bridgeResult.summary.queued > 0) {
     return isZh ? "部分任务在排队等待执行窗口。" : "Queued slices waiting for running slots.";
   }
-  return isZh ? "先检查工作流计划，再决定是否执行。" : (phaseStopReason ?? "Review workflow plan before execution.");
+  return isZh
+    ? "先检查工作流计划，再决定是否执行。"
+    : (phaseStopReason ?? "Review workflow plan before execution.");
 }
 
 function buildSummaryText(

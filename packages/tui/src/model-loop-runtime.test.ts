@@ -1182,7 +1182,10 @@ describe("model-loop-runtime", () => {
   describe("D.13U FreshnessLite is not restored", () => {
     it("source has no FreshnessLite function definitions or call sites", async () => {
       const fs = await import("node:fs/promises");
-      const src = await fs.readFile("src/model-loop-runtime.ts", "utf8");
+      const { dirname, join } = await import("node:path");
+      const { fileURLToPath } = await import("node:url");
+      const here = dirname(fileURLToPath(import.meta.url));
+      const src = await fs.readFile(join(here, "model-loop-runtime.ts"), "utf8");
       // 注释/comment 中的字面量允许（D.13Q-UX 的删除说明），但不允许实际定义或调用。
       expect(src).not.toMatch(/export function needsFreshnessLiteBoundary/);
       expect(src).not.toMatch(/function formatFreshnessLitePrimaryWarning/);

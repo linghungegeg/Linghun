@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { join } from "node:path";
-import { getProjectConfigDir } from "@linghun/config";
+import { type LinghunConfig, resolveStoragePaths } from "@linghun/config";
 import { stableHash } from "./cache-freshness.js";
 import type {
   FailureLearningCategory,
@@ -85,8 +85,8 @@ export function resolveFailureProjectScope(projectPath: string): string {
   return base ? sanitizeFailureText(base).slice(0, 48) || "project" : "project";
 }
 
-export function getFailureLearningDirectory(projectPath: string): string {
-  return join(getProjectConfigDir(projectPath), "failures");
+export function getFailureLearningDirectory(projectPath: string, config?: LinghunConfig): string {
+  return resolveStoragePaths(config, projectPath).failures;
 }
 
 // 去重 hash：脱敏后的 category + source/target + 归一化 message（小写、压空白、去数字串）。
@@ -121,9 +121,12 @@ export type FailureLearningInput = {
   severity?: FailureLearningSeverity;
 };
 
-export function createFailureLearningState(projectPath: string): FailureLearningState {
+export function createFailureLearningState(
+  projectPath: string,
+  config?: LinghunConfig,
+): FailureLearningState {
   return {
-    directory: getFailureLearningDirectory(projectPath),
+    directory: getFailureLearningDirectory(projectPath, config),
     projectScope: resolveFailureProjectScope(projectPath),
     records: [],
   };

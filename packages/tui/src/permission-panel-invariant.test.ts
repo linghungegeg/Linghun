@@ -31,12 +31,15 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
     // The formatModelToolPermissionPrompt writeLine must be reachable only when
     // NOT an ink session; ink mode renders the PermissionPanel instead.
     expect(src).toContain("if (!(context.isInkSession && isAskWithPanel)) {");
-    // Guard precedes the writeLine(formatModelToolPermissionPrompt) call.
+    // Guard precedes the writeLine(formatModelToolPermissionPrompt) call in the model-tool path.
+    // We need to find the occurrence that has isAskWithPanel in context.
     const guardIdx = src.indexOf("if (!(context.isInkSession && isAskWithPanel)) {");
+    expect(guardIdx).toBeGreaterThan(0);
+    // Find the next formatModelToolPermissionPrompt after the guard.
     const promptIdx = src.indexOf(
       "formatModelToolPermissionPrompt(toPermissionPromptView(permission)",
+      guardIdx,
     );
-    expect(guardIdx).toBeGreaterThan(0);
     expect(promptIdx).toBeGreaterThan(guardIdx);
   });
 

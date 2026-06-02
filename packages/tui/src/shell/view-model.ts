@@ -607,9 +607,9 @@ function withPermissionActions(
               ? language === "zh-CN"
                 ? "详情"
                 : "Details"
-            : language === "zh-CN"
-              ? "否"
-              : "No",
+              : language === "zh-CN"
+                ? "否"
+                : "No",
       shortcut: o.shortcut,
     }));
   return { ...permission, actions };
@@ -845,14 +845,19 @@ export function mapPendingApprovalToPermission(
         ? "Repair and refresh the codebase index"
         : action === "init fast"
           ? "Initialize the codebase index in fast mode"
-        : "Refresh (rebuild) the codebase index"
+          : "Refresh (rebuild) the codebase index"
       : action === "repair"
         ? "修复并刷新代码索引"
         : action === "init fast"
           ? "快速初始化代码索引"
-        : "刷新（重建）代码索引";
+          : "刷新（重建）代码索引";
     return {
-      toolName: action === "repair" ? "修复代码索引" : action === "init fast" ? "初始化代码索引" : "刷新代码索引",
+      toolName:
+        action === "repair"
+          ? "修复代码索引"
+          : action === "init fast"
+            ? "初始化代码索引"
+            : "刷新代码索引",
       reason: "",
       risk: "medium",
       scope: [],
@@ -887,7 +892,9 @@ export function mapPendingApprovalToPermission(
       risk: "medium",
       scope: [".linghun/break-cache"],
       hint: "",
-      actionSummary: isEn ? `Update break-cache marker: ${action}` : `更新 break-cache marker：${action}`,
+      actionSummary: isEn
+        ? `Update break-cache marker: ${action}`
+        : `更新 break-cache marker：${action}`,
       actions: [],
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
@@ -1141,7 +1148,10 @@ function formatBackgroundProgress(
 
 function cleanBackgroundDisplayText(value: string, fallback: string): string {
   const cleaned = String(value || "")
-    .replace(/\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu, "")
+    .replace(
+      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu,
+      "",
+    )
     .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;

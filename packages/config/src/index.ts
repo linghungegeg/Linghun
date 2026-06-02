@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type Language,
   type PermissionMode,
@@ -598,6 +598,8 @@ export type ResolvedStoragePaths = {
   logs: string;
   jobs: string;
   cache: string;
+  agentRuns: string;
+  failures: string;
 };
 
 export function resolveStoragePaths(
@@ -628,6 +630,8 @@ export function resolveStoragePaths(
     logs: resolveStorageLocation(config.storage.logs, projectPath, home, "logs"),
     jobs: resolveStorageLocation(config.storage.jobs, projectPath, home, "jobs"),
     cache: resolveStorageLocation(config.storage.cache, projectPath, home, "cache"),
+    agentRuns: resolveStorageLocation({ scope: "project" }, projectPath, home, "agent-runs"),
+    failures: resolveStorageLocation({ scope: "project" }, projectPath, home, "failures"),
   };
 }
 
@@ -640,6 +644,20 @@ function resolveStorageLocation(
   if (location.scope === "custom" && location.path) {
     return location.path;
   }
+
+  // When LINGHUN_DATA_DIR is set and scope is "project", use a project-namespaced
+  // subdirectory under the isolated data dir instead of writing to .linghun in the
+  // project source directory. This ensures full runtime data isolation for testing,
+  // multi-window, and development scenarios.
+  const dataRoot = process.env.LINGHUN_DATA_DIR;
+  if (location.scope === "project" && dataRoot) {
+    const projectName = basename(projectPath) || "project";
+    const projectNamespace = `projects/${projectName}`;
+    return defaultSubdir
+      ? join(dataRoot, projectNamespace, defaultSubdir)
+      : join(dataRoot, projectNamespace);
+  }
+
   const root =
     location.scope === "project" ? getProjectConfigDir(projectPath) : getUserDataDir(home);
   return defaultSubdir ? join(root, defaultSubdir) : root;

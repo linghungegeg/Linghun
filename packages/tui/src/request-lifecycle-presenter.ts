@@ -120,7 +120,13 @@ export function formatProviderFailurePrimary(error: unknown, language: Language)
 }
 
 export function formatProviderFallbackAttemptSummary(
-  input: { fromProvider: string; fromModel: string; toProvider: string; toModel: string; reasonKind: ProviderFailureKind },
+  input: {
+    fromProvider: string;
+    fromModel: string;
+    toProvider: string;
+    toModel: string;
+    reasonKind: ProviderFailureKind;
+  },
   language: Language,
 ): string {
   if (language === "en-US") {
@@ -129,7 +135,10 @@ export function formatProviderFallbackAttemptSummary(
   return `正在尝试备用模型：${input.fromProvider}/${input.fromModel} 因${formatProviderFailureKindLabel(input.reasonKind, language)}失败，改用 ${input.toProvider}/${input.toModel}。`;
 }
 
-export function formatProviderFailureKindLabel(kind: ProviderFailureKind, language: Language): string {
+export function formatProviderFailureKindLabel(
+  kind: ProviderFailureKind,
+  language: Language,
+): string {
   const labels: Record<ProviderFailureKind, { zh: string; en: string }> = {
     rate_limit: { zh: "限流", en: "rate limit" },
     quota_or_balance_exhausted: { zh: "额度或余额不足", en: "quota or balance exhausted" },
@@ -211,7 +220,11 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   ) {
     return "quota_or_balance_exhausted";
   }
-  if (code === "PROVIDER_RATE_LIMITED" || status === 429 || /\brate\s*limit(?:ed)?\b|too many requests|请求过快|限流/iu.test(text)) {
+  if (
+    code === "PROVIDER_RATE_LIMITED" ||
+    status === 429 ||
+    /\brate\s*limit(?:ed)?\b|too many requests|请求过快|限流/iu.test(text)
+  ) {
     return "rate_limit";
   }
   // 推理参数不被网关/模型接受 —— 必须在 schema 之前分流，否则会被 schema 吞掉。

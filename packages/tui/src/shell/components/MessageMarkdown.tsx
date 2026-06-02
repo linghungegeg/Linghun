@@ -167,7 +167,7 @@ function CodeLine({
       ? (theme.success ?? theme.status.pass)
       : isDiff && line.startsWith("-") && !line.startsWith("---")
         ? (theme.error ?? theme.status.fail)
-        : theme.diagnostic ?? theme.accent;
+        : (theme.diagnostic ?? theme.accent);
   const dimLine = dim || (isDiff && !line.startsWith("+") && !line.startsWith("-"));
   return (
     <Text color={color} dimColor={dimLine}>

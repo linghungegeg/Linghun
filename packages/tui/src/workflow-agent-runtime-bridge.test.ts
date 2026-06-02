@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { HandoffPacket, TuiContext } from "./index.js";
+import { createAgentContextSummary } from "./tui-agent-job-runtime.js";
 import {
   type WorkflowBridgeRequestProposal,
   bridgeWorkflowPlanToMainChainRequests,
@@ -9,8 +11,6 @@ import {
   type WorkflowPlan,
   normalizeWorkflowPlan,
 } from "./workflow-plan-schema.js";
-import { createAgentContextSummary } from "./tui-agent-job-runtime.js";
-import type { HandoffPacket, TuiContext } from "./index.js";
 
 function createPlan(overrides: Partial<WorkflowPlan> = {}): WorkflowPlan {
   return {

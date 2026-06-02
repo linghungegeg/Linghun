@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelGateway, ModelMessage } from "@linghun/providers";
-import { createManualCompactBoundary, type CompactBoundary } from "./compact-context.js";
-import { estimateTranscriptContextChars } from "./context-estimator.js";
-import type {
-  DeepCompactPacket,
-  DeepCompactTrigger,
-} from "./tui-data-types.js";
-import type { TuiContext } from "./index.js";
-import { sanitizeDiagnosticText, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
+import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
+import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
+import type { TuiContext } from "./index.js";
+import {
+  sanitizeDiagnosticText,
+  sanitizeDisplayPaths,
+  truncateDisplay,
+} from "./startup-runtime.js";
+import type { DeepCompactPacket, DeepCompactTrigger } from "./tui-data-types.js";
 
 export type DeepCompactRuntimeDeps = {
   appendSystemEvent: (
@@ -82,7 +83,11 @@ export async function runDeepCompact(input: {
   }
 
   const controller = new AbortController();
-  const requestMessages = buildDeepCompactRequestMessages(input.context, input.transcript, input.trigger);
+  const requestMessages = buildDeepCompactRequestMessages(
+    input.context,
+    input.transcript,
+    input.trigger,
+  );
   let summary = "";
   try {
     for await (const event of input.gateway.stream(
@@ -177,13 +182,16 @@ export function shouldRunDeepCompact(
         break;
       }
     }
-    const laterEvents = latestCompactIndex >= 0 ? transcript.length - latestCompactIndex - 1 : transcript.length;
+    const laterEvents =
+      latestCompactIndex >= 0 ? transcript.length - latestCompactIndex - 1 : transcript.length;
     return laterEvents > DEEP_COMPACT_RERUN_EVENT_THRESHOLD;
   }
   return true;
 }
 
-export function formatDeepCompactPromptSummary(packet: DeepCompactPacket | undefined): string | undefined {
+export function formatDeepCompactPromptSummary(
+  packet: DeepCompactPacket | undefined,
+): string | undefined {
   if (!packet) return undefined;
   return [
     `[Deep compact ${packet.id}]`,
@@ -241,7 +249,9 @@ export function createDeepCompactPacket(input: {
     preservedFiles: unique([
       ...context.recentlyMentionedFiles,
       ...context.tools.changedFiles,
-      ...context.evidence.map((item) => item.source).filter((source) => source.includes(".") || source.includes("/")),
+      ...context.evidence
+        .map((item) => item.source)
+        .filter((source) => source.includes(".") || source.includes("/")),
     ])
       .map((file) => sanitizeDeepCompactText(context, file, 180))
       .slice(0, 20),
@@ -291,7 +301,12 @@ function buildDeepCompactRequestMessages(
     `index=${context.index.status}:${context.index.projectName ?? "unknown"} stale=${context.index.staleHint ?? "none"}`,
     `cacheFreshness=${context.cache.lastFreshness?.changedKeys.join(",") || "stable-or-unknown"}`,
     `memoryAccepted=${context.memory.accepted.length}`,
-    `failureLearning=${context.failureLearning.records.slice(0, 5).map((item) => sanitizeDeepCompactText(context, item.avoidNextTime, 180)).join("; ") || "none"}`,
+    `failureLearning=${
+      context.failureLearning.records
+        .slice(0, 5)
+        .map((item) => sanitizeDeepCompactText(context, item.avoidNextTime, 180))
+        .join("; ") || "none"
+    }`,
   ];
   return [
     {
@@ -331,20 +346,16 @@ function buildFullTranscriptSemanticOutline(
 
   for (const event of transcript) {
     eventTypeCounts.set(event.type, (eventTypeCounts.get(event.type) ?? 0) + 1);
-    collectOutlineEvent(
-      context,
-      event,
-      {
-        userMessages,
-        assistantDecisions,
-        toolSummaries,
-        evidenceRefs,
-        changedOrPreservedFiles,
-        agentWorkflowEvents,
-        verificationFailures,
-        permissionsTodos,
-      },
-    );
+    collectOutlineEvent(context, event, {
+      userMessages,
+      assistantDecisions,
+      toolSummaries,
+      evidenceRefs,
+      changedOrPreservedFiles,
+      agentWorkflowEvents,
+      verificationFailures,
+      permissionsTodos,
+    });
   }
 
   const firstUser = transcript.find((event) => event.type === "user_message");
@@ -386,15 +397,24 @@ function collectOutlineEvent(
 ): void {
   switch (event.type) {
     case "user_message":
-      pushEarlyAndRecent(buckets.userMessages, `user:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`);
+      pushEarlyAndRecent(
+        buckets.userMessages,
+        `user:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`,
+      );
       break;
     case "assistant_text_delta":
       if (looksLikeDecision(event.text)) {
-        pushEarlyAndRecent(buckets.assistantDecisions, `assistant:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`);
+        pushEarlyAndRecent(
+          buckets.assistantDecisions,
+          `assistant:${sanitizeDeepCompactText(context, event.text, EVENT_TEXT_LIMIT)}`,
+        );
       }
       break;
     case "tool_call_start":
-      pushEarlyAndRecent(buckets.toolSummaries, `tool_start:${event.name}:${sanitizeDeepCompactText(context, JSON.stringify(event.input), 220)}`);
+      pushEarlyAndRecent(
+        buckets.toolSummaries,
+        `tool_start:${event.name}:${sanitizeDeepCompactText(context, JSON.stringify(event.input), 220)}`,
+      );
       break;
     case "tool_result":
       pushEarlyAndRecent(buckets.toolSummaries, summarizeTranscriptEvent(context, event));
@@ -408,7 +428,10 @@ function collectOutlineEvent(
         pushEarlyAndRecent(buckets.changedOrPreservedFiles, "tool_output_artifact:[artifact]");
       }
       for (const file of event.output.changedFiles ?? []) {
-        pushEarlyAndRecent(buckets.changedOrPreservedFiles, sanitizeDeepCompactText(context, file, 180));
+        pushEarlyAndRecent(
+          buckets.changedOrPreservedFiles,
+          sanitizeDeepCompactText(context, file, 180),
+        );
       }
       break;
     case "evidence_record":
@@ -416,7 +439,10 @@ function collectOutlineEvent(
         buckets.evidenceRefs,
         `${event.id}:${event.kind}:${sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT)}`,
       );
-      pushEarlyAndRecent(buckets.changedOrPreservedFiles, sanitizeDeepCompactText(context, event.source, 180));
+      pushEarlyAndRecent(
+        buckets.changedOrPreservedFiles,
+        sanitizeDeepCompactText(context, event.source, 180),
+      );
       break;
     case "agent_start":
     case "agent_end":
@@ -429,7 +455,11 @@ function collectOutlineEvent(
       pushEarlyAndRecent(buckets.verificationFailures, summarizeTranscriptEvent(context, event));
       break;
     case "system_event":
-      if (/fail|failure|failed|compact|cooldown|risk|decision|scope|blocked|失败|风险|阻断/iu.test(event.message)) {
+      if (
+        /fail|failure|failed|compact|cooldown|risk|decision|scope|blocked|失败|风险|阻断/iu.test(
+          event.message,
+        )
+      ) {
         pushEarlyAndRecent(buckets.verificationFailures, summarizeTranscriptEvent(context, event));
       }
       break;
@@ -475,7 +505,9 @@ function findLatestEvent<T extends TranscriptEvent["type"]>(
 }
 
 function looksLikeDecision(text: string): boolean {
-  return /decid|decision|choose|chosen|plan|will|must|should|done|fixed|blocked|risk|决定|选择|计划|必须|应该|已|阻断|风险/iu.test(text);
+  return /decid|decision|choose|chosen|plan|will|must|should|done|fixed|blocked|risk|决定|选择|计划|必须|应该|已|阻断|风险/iu.test(
+    text,
+  );
 }
 
 function summarizeTranscriptEvent(context: TuiContext, event: TranscriptEvent): string {
@@ -526,8 +558,13 @@ function summarizeToolResultContent(content: unknown): string {
 
 function synthesizeFallbackSummary(context: TuiContext, transcript: TranscriptEvent[]): string {
   const latestUser = [...transcript].reverse().find((event) => event.type === "user_message");
-  const latestAssistant = [...transcript].reverse().find((event) => event.type === "assistant_text_delta");
-  const evidence = context.evidence.slice(0, 5).map((item) => `${item.id}:${item.summary}`).join("; ");
+  const latestAssistant = [...transcript]
+    .reverse()
+    .find((event) => event.type === "assistant_text_delta");
+  const evidence = context.evidence
+    .slice(0, 5)
+    .map((item) => `${item.id}:${item.summary}`)
+    .join("; ");
   return [
     `User goal/latest task: ${latestUser?.type === "user_message" ? latestUser.text : "continue current coding task"}`,
     `Latest assistant state: ${latestAssistant?.type === "assistant_text_delta" ? latestAssistant.text : "none"}`,
@@ -542,39 +579,60 @@ export function sanitizeDeepCompactText(
 ): string {
   const singleLine = value.replace(/\s+/g, " ");
   const redacted = singleLine
-    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      (_match, key: string, sep: string) => `${key}${sep}***`,
+    )
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***")
     .replace(/[A-Z]:[\\/][^\s"')\]}]+/gu, "[local-path]");
-  return truncateDisplay(sanitizeDisplayPaths(sanitizeDiagnosticText(redacted), context.projectPath), maxChars);
+  return truncateDisplay(
+    sanitizeDisplayPaths(sanitizeDiagnosticText(redacted), context.projectPath),
+    maxChars,
+  );
 }
 
 function collectActiveAgentsWorkflows(context: TuiContext): string[] {
   return [
     ...context.agents
       .filter((agent) => agent.status === "running" || agent.status === "stale")
-      .map((agent) => `agent:${agent.id}:${agent.status}:${sanitizeDeepCompactText(context, agent.summary || agent.task, 140)}`),
+      .map(
+        (agent) =>
+          `agent:${agent.id}:${agent.status}:${sanitizeDeepCompactText(context, agent.summary || agent.task, 140)}`,
+      ),
     ...context.backgroundTasks
-      .filter((task) => task.status === "running" || task.status === "paused" || task.status === "stale")
-      .map((task) => `${task.kind}:${task.id}:${task.status}:${sanitizeDeepCompactText(context, task.userVisibleSummary, 140)}`),
+      .filter(
+        (task) => task.status === "running" || task.status === "paused" || task.status === "stale",
+      )
+      .map(
+        (task) =>
+          `${task.kind}:${task.id}:${task.status}:${sanitizeDeepCompactText(context, task.userVisibleSummary, 140)}`,
+      ),
   ].slice(0, 12);
 }
 
 function collectPendingItems(context: TuiContext): string[] {
   return [
-    context.pendingLocalApproval ? `pending local approval:${context.pendingLocalApproval.kind}` : "",
+    context.pendingLocalApproval
+      ? `pending local approval:${context.pendingLocalApproval.kind}`
+      : "",
     context.pendingNaturalCommand ? "pending natural command" : "",
     context.pendingAutopilot ? "pending autopilot" : "",
     ...context.tools.todos
       .filter((todo) => todo.status !== "completed")
       .map((todo) => `todo:${todo.status}:${sanitizeDeepCompactText(context, todo.content, 140)}`),
-  ].filter(Boolean).slice(0, 16);
+  ]
+    .filter(Boolean)
+    .slice(0, 16);
 }
 
 function collectDecisions(context: TuiContext): string[] {
   return context.routeDecisions
     .slice(0, 8)
-    .map((item) => `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"} fallback=${item.fallbackUsed ? "yes" : "no"}`);
+    .map(
+      (item) =>
+        `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"} fallback=${item.fallbackUsed ? "yes" : "no"}`,
+    );
 }
 
 function collectRisks(context: TuiContext): string[] {
@@ -584,7 +642,9 @@ function collectRisks(context: TuiContext): string[] {
     ...context.failureLearning.records
       .filter((item) => item.status === "active")
       .slice(0, 5)
-      .map((item) => `${item.category}:${sanitizeDeepCompactText(context, item.avoidNextTime, 160)}`),
+      .map(
+        (item) => `${item.category}:${sanitizeDeepCompactText(context, item.avoidNextTime, 160)}`,
+      ),
   ].filter(Boolean);
 }
 
@@ -627,12 +687,27 @@ function failMessage(context: TuiContext, english: string): DeepCompactRunResult
       context.language === "en-US"
         ? english
         : english
-            .replace("Deep compact unavailable: model gateway is not ready.", "Deep compact 不可用：模型网关尚未就绪。")
-            .replace("Deep compact skipped: transcript pressure is below trigger.", "Deep compact 已跳过：transcript 压力未达到触发线。")
-            .replace("Deep compact is cooling down after a previous compact failure.", "上一次 deep compact 失败后仍在冷却中。")
-            .replace("Deep compact failed because compact agent attempted tool_use while tools are disabled.", "Deep compact 失败：compact agent 在禁用工具时尝试了 tool_use。")
+            .replace(
+              "Deep compact unavailable: model gateway is not ready.",
+              "Deep compact 不可用：模型网关尚未就绪。",
+            )
+            .replace(
+              "Deep compact skipped: transcript pressure is below trigger.",
+              "Deep compact 已跳过：transcript 压力未达到触发线。",
+            )
+            .replace(
+              "Deep compact is cooling down after a previous compact failure.",
+              "上一次 deep compact 失败后仍在冷却中。",
+            )
+            .replace(
+              "Deep compact failed because compact agent attempted tool_use while tools are disabled.",
+              "Deep compact 失败：compact agent 在禁用工具时尝试了 tool_use。",
+            )
             .replace("Deep compact provider request failed.", "Deep compact provider 请求失败。")
-            .replace("Deep compact failed before provider request.", "Deep compact 在 provider 请求前失败。"),
+            .replace(
+              "Deep compact failed before provider request.",
+              "Deep compact 在 provider 请求前失败。",
+            ),
   };
 }
 

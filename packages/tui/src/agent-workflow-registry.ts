@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { extname, join } from "node:path";
-import { builtInTools, type ToolName } from "@linghun/tools";
+import { type ToolName, builtInTools } from "@linghun/tools";
 import type { AgentType, WorkflowTemplate } from "./tui-data-types.js";
 
 export type RegistryAgentDefinition = {
@@ -37,11 +37,15 @@ export type RegistryLoadResult<T> =
   | { ok: true; items: T[]; errors: string[] }
   | { ok: false; items: T[]; errors: string[] };
 
-export async function loadAgentRegistry(projectPath: string): Promise<RegistryLoadResult<RegistryAgentDefinition>> {
+export async function loadAgentRegistry(
+  projectPath: string,
+): Promise<RegistryLoadResult<RegistryAgentDefinition>> {
   return loadRegistryDir(join(projectPath, ".linghun", "agents"), parseAgentDefinition);
 }
 
-export async function loadWorkflowRegistry(projectPath: string): Promise<RegistryLoadResult<RegistryWorkflowDefinition>> {
+export async function loadWorkflowRegistry(
+  projectPath: string,
+): Promise<RegistryLoadResult<RegistryWorkflowDefinition>> {
   return loadRegistryDir(join(projectPath, ".linghun", "workflows"), parseWorkflowDefinition);
 }
 
@@ -50,7 +54,9 @@ export function registryAgentToWorkflowTemplate(agent: RegistryAgentDefinition):
     id: `agent:${agent.id}`,
     purpose: agent.description,
     risk: "medium",
-    writesFiles: (agent.allowedTools ?? []).some((tool) => ["Write", "Edit", "MultiEdit", "Bash"].includes(tool)),
+    writesFiles: (agent.allowedTools ?? []).some((tool) =>
+      ["Write", "Edit", "MultiEdit", "Bash"].includes(tool),
+    ),
     recommendedValidation: [],
     steps: [`agent ${agent.id}: ${agent.prompt}`],
   };
@@ -60,7 +66,9 @@ export function registryWorkflowToTemplate(workflow: RegistryWorkflowDefinition)
   return {
     id: workflow.id,
     purpose: workflow.description,
-    risk: workflow.steps.some((step) => step.action === "bash" || step.action === "write") ? "high" : "medium",
+    risk: workflow.steps.some((step) => step.action === "bash" || step.action === "write")
+      ? "high"
+      : "medium",
     writesFiles: workflow.steps.some((step) => step.action === "write"),
     recommendedValidation: workflow.steps
       .filter((step) => step.action === "verification" && step.level)

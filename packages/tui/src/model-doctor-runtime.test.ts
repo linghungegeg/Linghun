@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -934,11 +934,14 @@ describe("model-doctor-runtime", () => {
       const dir = await makeProject();
       const max = breakCacheTestHooks.eventsMaxLines;
       expect(max).toBe(200);
-      // 写入 max + 25 条事件
-      for (let i = 0; i < max + 25; i++) {
-        await breakCacheTestHooks.appendEvent(dir, `bulk_${i}`);
-      }
-      const raw = await readFile(breakCacheTestHooks.paths(dir).eventsLog, "utf8");
+      const oldLines = Array.from({ length: max + 24 }, (_, i) =>
+        JSON.stringify({ action: `bulk_${i}`, createdAt: "2026-01-01T00:00:00.000Z" }),
+      );
+      const eventsLogPath = breakCacheTestHooks.paths(dir).eventsLog;
+      mkdirSync(join(dir, ".linghun"), { recursive: true });
+      await writeFile(eventsLogPath, `${oldLines.join("\n")}\n`, "utf8");
+      await breakCacheTestHooks.appendEvent(dir, `bulk_${max + 24}`);
+      const raw = await readFile(eventsLogPath, "utf8");
       const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
       expect(lines.length).toBeLessThanOrEqual(max);
       // 应保留最近的事件（bulk_<max+24>），裁掉早期的（bulk_0）
@@ -1111,6 +1114,33 @@ describe("model-doctor-runtime", () => {
         else process.env.USERPROFILE = originalUserProfile;
         await rm(projectPath, { recursive: true, force: true });
         await rm(homePath, { recursive: true, force: true });
+      }
+    });
+
+    it("P2.7: provider.env 文案不诱导用户泄露凭据（不建议 cat/type）", async () => {
+      const projectPath = await mkdtemp(join(tmpdir(), "linghun-doctor-p27-"));
+      try {
+        // 直接测试 formatModelRouteDoctor 输出中有 applied=yes 的文案
+        // 通过导入时已有的 lastProviderEnvMerge 状态（其他测试或真实环境可能设置过）
+        const text = await formatModelRouteDoctor({
+          config: baseConfig,
+          projectPath,
+          language: "zh-CN" as const,
+          routeDecisions: [],
+        });
+        // 如果文本包含 provider.env merge: applied=yes，必须同时包含安全提示
+        if (text.includes("provider.env merge: applied=yes")) {
+          expect(text).toContain("安全提示");
+          expect(text).toContain("不要 cat/type");
+          expect(text).toContain("含敏感凭据");
+        }
+        // 无论是否 applied，都禁止建议用户直接打印文件内容
+        expect(text).not.toContain("cat ~/.linghun/provider.env");
+        expect(text).not.toContain("type ~/.linghun/provider.env");
+        expect(text).not.toContain("cat provider.env");
+        expect(text).not.toContain("type provider.env");
+      } finally {
+        await rm(projectPath, { recursive: true, force: true });
       }
     });
   });

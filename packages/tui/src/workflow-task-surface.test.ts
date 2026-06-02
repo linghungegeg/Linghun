@@ -141,7 +141,9 @@ describe("D.14H-D workflow task surface + evidence merge", () => {
     expect(result.summaryText).toContain("影响：");
     expect(result.summaryText).toContain("下一步：");
     expect(result.summaryText).not.toMatch(/\bResult:|\bImpact:|\bNext:/u);
-    expect(result.summaryText).not.toMatch(/start_gate|passEvidence|raw evidence|sourceRef|merge/iu);
+    expect(result.summaryText).not.toMatch(
+      /start_gate|passEvidence|raw evidence|sourceRef|merge/iu,
+    );
     expect(result.mobileSummary).toContain("工作流：");
     expect(result.mobileSummary).toContain("下一步：");
     expect(result.mobileSummary).not.toMatch(/\bResult:|\bImpact:|\bNext:/u);

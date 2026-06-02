@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { applyToolResultBudgetToMessages } from "./tool-result-budget.js";
 
@@ -79,9 +79,9 @@ describe("tool_result budget", () => {
     ]);
     expect(result.records.every((record) => record.reason === "aggregate_message")).toBe(true);
     expect(result.records.length).toBeGreaterThanOrEqual(1);
-    expect(tools.some((message) => message.role === "tool" && message.content.includes("artifactPath:"))).toBe(
-      true,
-    );
+    expect(
+      tools.some((message) => message.role === "tool" && message.content.includes("artifactPath:")),
+    ).toBe(true);
     for (const record of result.records) {
       await expect(readFile(record.artifact.path, "utf8")).resolves.toMatch(/^[A-Z]+_AGG:/u);
     }

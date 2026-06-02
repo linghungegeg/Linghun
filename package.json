@@ -20,6 +20,8 @@
     "smoke:live-provider": "node scripts/live-provider-smoke.mjs",
     "smoke:tui-stdin": "printf '帮我分析一下这个项目怎么部署，并生成报告在根目录下\\n/exit\\n' | corepack pnpm exec linghun",
     "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
     "typecheck": "tsc -b tsconfig.json"
   },
   "dependencies": {

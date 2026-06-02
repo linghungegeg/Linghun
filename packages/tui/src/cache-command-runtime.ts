@@ -135,7 +135,10 @@ export function formatCompactStatus(context: TuiContext): string {
 
 function sanitizeCompactStatusText(value: string): string {
   return sanitizeDiagnosticText(value)
-    .replace(/(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu, (_match, key: string, sep: string) => `${key}${sep}***`)
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      (_match, key: string, sep: string) => `${key}${sep}***`,
+    )
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
     .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }

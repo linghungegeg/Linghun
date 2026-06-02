@@ -1,6 +1,7 @@
 import type { Writable } from "node:stream";
 import {
   type ModelRole,
+  type ProviderConfig,
   type ProviderEnvSetup,
   ensureProviderEnvTemplate,
   getProviderEnvPath,
@@ -54,6 +55,24 @@ function deps(): ModelCommandRuntimeDeps {
   return runtimeDeps;
 }
 
+function findProviderForModel(
+  model: string,
+  providers: Record<string, ProviderConfig>,
+): string | undefined {
+  // First, check if any provider explicitly has this model configured
+  for (const [providerId, provider] of Object.entries(providers)) {
+    if (provider.model === model) {
+      return providerId;
+    }
+  }
+  // For deepseek- prefix models, only allow if deepseek provider exists
+  if (model.startsWith("deepseek-")) {
+    return providers.deepseek ? "deepseek" : undefined;
+  }
+  // No automatic fallback to openai-compatible for unknown models
+  return undefined;
+}
+
 export async function handleModelCommand(
   args: string[],
   context: TuiContext,
@@ -86,6 +105,31 @@ export async function handleModelCommand(
         discoveredDeferredToolsSummary: snapshotDiscoveredDeferredToolsSummary(context),
       }),
     });
+    return;
+  }
+  if (action === "set") {
+    const model = args[1];
+    if (!model) {
+      writeLine(output, "用法：/model set <model>");
+      return;
+    }
+    // Validate model exists in configured providers
+    const provider = findProviderForModel(model, context.config.providers);
+    if (!provider) {
+      writeLine(output, `错误：未找到模型 "${model}"。请先配置对应 provider 或运行 /model setup。`);
+      return;
+    }
+    // Set executor role and update defaultModel
+    context.config = await saveModelRoute("executor", model, context.projectPath);
+    context.model = model;
+    const route = getRoleRoute(context.config, "executor");
+    writeLine(output, `已设置默认模型为 ${model}（provider=${route.provider}，role=executor）`);
+    if (context.config.defaultModel !== model) {
+      writeLine(
+        output,
+        `说明：executor role 已设置为 ${model}，defaultModel=${context.config.defaultModel}`,
+      );
+    }
     return;
   }
   const runtime = getSelectedModelRuntime(context);

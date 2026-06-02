@@ -1124,7 +1124,7 @@ export function buildDowngradedFinalAnswer(
   const notice =
     language === "en-US"
       ? "\nI can only state this as unverified because matching evidence is missing."
-      : "\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u8bc1\u636e\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309\"\u672a\u9a8c\u8bc1\"\u8868\u8ff0\u3002";
+      : '\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u8bc1\u636e\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002';
   return safeText + notice;
 }
 
@@ -1290,7 +1290,7 @@ export function buildExtendedDowngradedFinalAnswer(
   const notice =
     language === "en-US"
       ? "\nI can only state this as unverified because matching support is missing."
-      : "\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u652f\u6491\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309\"\u672a\u9a8c\u8bc1\"\u8868\u8ff0\u3002";
+      : '\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u652f\u6491\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002';
   return safeText + notice;
 }
 

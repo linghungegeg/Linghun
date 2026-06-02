@@ -281,7 +281,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   if (lastProviderEnvMerge?.applied) {
     const ids = lastProviderEnvMerge.providerIds;
     lines.push(
-      `- provider.env merge: applied=yes overrodeModelRoutes=${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"} overrodeDefaultModel=${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"} providers=${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请先 cat 确认或临时改名该文件)`,
+      `- provider.env merge: applied=yes overrodeModelRoutes=${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"} overrodeDefaultModel=${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"} providers=${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请检查该文件是否存在、确认 provider id、或临时改名。安全提示：provider.env 含敏感凭据，不要 cat/type 到主屏、日志或报告)`,
     );
   } else if (lastProviderEnvMerge && !lastProviderEnvMerge.applied) {
     lines.push(

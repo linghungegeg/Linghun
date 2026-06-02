@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
+import { resolveStoragePaths } from "@linghun/config";
 import type { Language } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import { formatBackgroundTask } from "./job-runner-presenter.js";
@@ -84,7 +85,10 @@ export async function runVerificationPlan(
 ): Promise<VerificationReport> {
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
-  const logRoot = join(context.projectPath, ".linghun", "logs", "verification");
+  const logRoot = join(
+    resolveStoragePaths(context.config, context.projectPath).logs,
+    "verification",
+  );
   await mkdir(logRoot, { recursive: true });
   const controller = new AbortController();
   context.activeVerificationAbortController = controller;

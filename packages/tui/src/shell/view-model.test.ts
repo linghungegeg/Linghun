@@ -3911,7 +3911,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
   });
 
   it("code fence 在 plain renderer 中保留缩进和代码块层级", () => {
-    const block = createOutputBlock("说明\n```ts\nfunction x() {\n  return 1;\n}\n```", "zh-CN", "out-code");
+    const block = createOutputBlock(
+      "说明\n```ts\nfunction x() {\n  return 1;\n}\n```",
+      "zh-CN",
+      "out-code",
+    );
     const view = createShellViewModel(createContext(), {
       noColor: true,
       outputBlocks: [block],
@@ -4220,9 +4224,7 @@ describe("D.13Q-UX Real Smoke Fix v2 — F. permission 主屏降噪", () => {
     const composerSource = fs.readFileSync(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     // 主屏 PermissionControl 不再渲染 explanationLines.map（除了 SlashSuggestions 等不相关 map）
     // 锚定 Enter/Tab/d/Esc 提示出现在源码中
-    expect(composerSource).toMatch(
-      /Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*d\s*详情\s*·\s*Esc\s*取消/,
-    );
+    expect(composerSource).toMatch(/Enter\s*确认\s*·\s*Tab\s*切换\s*·\s*d\s*详情\s*·\s*Esc\s*取消/);
     // 旧的"查看详情"提示已替换为更短的"详情"
     expect(composerSource).not.toMatch(/Esc\s*取消\s*·\s*d\s*查看详情/);
   });
@@ -4572,7 +4574,9 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
     const output = __testCreateShellBlockOutput(ctx, blocks) as unknown as {
       writeLocalCommandOutputLine?: (text: string) => void;
     };
-    output.writeLocalCommandOutputLine?.("Tool Bash completed\n- 40 行\n- 输出已折叠，按 Ctrl+O 展开。");
+    output.writeLocalCommandOutputLine?.(
+      "Tool Bash completed\n- 40 行\n- 输出已折叠，按 Ctrl+O 展开。",
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.messageKind).toBe("local_command_output");

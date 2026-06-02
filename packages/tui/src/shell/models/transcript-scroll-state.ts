@@ -74,7 +74,8 @@ function maxScrollOffset(state: TranscriptScrollView): number | undefined {
 
 function pageSize(state: TranscriptScrollView, factor: number): number {
   const fallback = factor >= 1 ? 10 : 5;
-  const viewport = state.viewportHeight && state.viewportHeight > 0 ? state.viewportHeight : fallback;
+  const viewport =
+    state.viewportHeight && state.viewportHeight > 0 ? state.viewportHeight : fallback;
   return Math.max(1, Math.floor(viewport * factor));
 }
 

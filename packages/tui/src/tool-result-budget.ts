@@ -4,8 +4,8 @@ import { basename, join, relative } from "node:path";
 import type { ModelMessage } from "@linghun/providers";
 import {
   LINGHUN_DEFAULT_TOOL_RESULT_CHARS,
-  LINGHUN_MAX_TOOL_RESULT_BYTES,
   LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+  LINGHUN_MAX_TOOL_RESULT_BYTES,
 } from "./runtime-budget.js";
 
 export type ToolResultBudgetArtifact = {
@@ -58,7 +58,10 @@ export async function applyToolResultBudgetToMessages(
 
   const selected = new Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>();
   for (const candidate of candidates) {
-    if (candidate.chars > LINGHUN_DEFAULT_TOOL_RESULT_CHARS || candidate.bytes > LINGHUN_MAX_TOOL_RESULT_BYTES) {
+    if (
+      candidate.chars > LINGHUN_DEFAULT_TOOL_RESULT_CHARS ||
+      candidate.bytes > LINGHUN_MAX_TOOL_RESULT_BYTES
+    ) {
       selected.set(candidate.toolUseId, { ...candidate, reason: "single_result" });
     }
   }
@@ -120,7 +123,9 @@ function groupCandidatesByAssistantToolUse(
   messages: ModelMessage[],
   candidates: Candidate[],
 ): Candidate[][] {
-  const byMessageIndex = new Map(candidates.map((candidate) => [candidate.messageIndex, candidate]));
+  const byMessageIndex = new Map(
+    candidates.map((candidate) => [candidate.messageIndex, candidate]),
+  );
   const groups: Candidate[][] = [];
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
