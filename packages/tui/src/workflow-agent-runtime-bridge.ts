@@ -702,9 +702,10 @@ function getBlockedReason(
     return `phase dependency not satisfied: ${unsatisfiedPhaseDep}`;
   }
   const allSlices = new Map(phases.flatMap((item) => item.slices.map((s) => [s.id, s])));
-  const unsatisfiedSliceDep = (slice.dependsOnSliceIds ?? []).find(
-    (depId) => allSlices.get(depId)?.status !== "completed",
-  );
+  const unsatisfiedSliceDep = (slice.dependsOnSliceIds ?? []).find((depId) => {
+    const status = allSlices.get(depId)?.status;
+    return status !== "completed" && status !== "partial";
+  });
   return unsatisfiedSliceDep ? `slice dependency not satisfied: ${unsatisfiedSliceDep}` : null;
 }
 

@@ -252,6 +252,23 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     expect(archIdx).toBeLessThan(implIdx);
   });
 
+  it("does not generate mutating implement slice for explicit readonly audit goals", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        goal: "只读审计当前项目源码，不看文档，不修改代码，找过度设计和主链风险",
+        permissionMode: "full-access",
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const slices = result.plan.phases[0].slices;
+    expect(slices.some((s) => s.id === "slice-implement")).toBe(false);
+    expect(slices.find((s) => s.id === "slice-stable-point")?.dependsOnSliceIds).toEqual([
+      "slice-architecture-review",
+    ]);
+    expect(result.bridgeResult.requests.some((request) => request.safety.mutating)).toBe(false);
+  });
+
   it("architecture-review slice exists in all permission modes", () => {
     for (const mode of ["plan", "default", "auto-review", "full-access"] as const) {
       const result = generateWorkflowPlanPreview(goal({ permissionMode: mode }));

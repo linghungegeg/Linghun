@@ -2255,6 +2255,7 @@ function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): stri
     `Permission mode: ${agent.permissionMode}`,
     `Pending mailbox messages: ${countPendingMailbox(agent)}`,
     "Use structured tools only; never write raw tool_use/tool_result protocol as text.",
+    "Respect the actual OS/shell before Bash. On Windows/PowerShell, prefer PowerShell cmdlets or Node one-liners; avoid Unix-only find|sed|head pipelines unless verified available.",
     "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
   ].join("\n");
 }

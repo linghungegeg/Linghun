@@ -44,6 +44,7 @@ import {
   __testBuildToggleDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
+  __testFormatStartAgentDidNotStartMessage,
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
   addAllowRuleForTest,
@@ -91,6 +92,7 @@ import {
   runTui,
   runVerificationCommandForTest,
   sanitizeDiscoveredDeferredToolName,
+  sanitizeMainScreenLeakage,
   searchDeferredTools,
   sendRemoteEventReal,
   snapshotDeferredTools,
@@ -3920,6 +3922,27 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("不是授权大重构");
   });
 
+  it("includes Windows-safe shell guidance in system prompt and sanitizes its label", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-shell-env-prompt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt("审计项目源码", context, {
+      model: { provider: "deepseek", name: "deepseek-v4-flash" },
+    });
+
+    expect(prompt).toContain("ShellEnvironment=");
+    expect(prompt).toContain("Windows/PowerShell");
+    expect(prompt).toContain("find|sed|head");
+    const cleaned = sanitizeMainScreenLeakage(
+      "ShellEnvironment=Windows/PowerShell 下优先使用 PowerShell cmdlet",
+      "zh-CN",
+    );
+    expect(cleaned).not.toContain("ShellEnvironment");
+    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+  });
+
   it("includes engineering structure constraints in en-US system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -4816,8 +4839,8 @@ describe("Phase 06 TUI slash commands", () => {
     const archStep = context.workflows.activeRun?.steps.find(
       (step) => step.id === "slice-architecture-review",
     );
-    expect(archStep?.status).toBe("blocked");
-    expect(archStep?.summary).toContain("architecture boundary check");
+    expect(archStep?.status).toBe("partial");
+    expect(archStep?.summary).toContain("architecture boundary risks found");
     expect(archStep?.evidenceRefs).not.toEqual(["architecture-boundary-check"]);
     const evidence = context.evidence.find((item) =>
       item.supportsClaims.includes("architecture_boundary_check"),
@@ -4839,8 +4862,8 @@ describe("Phase 06 TUI slash commands", () => {
         (event) =>
           event.type === "workflow_step_result" &&
           event.stepId === "slice-architecture-review" &&
-          event.status === "blocked" &&
-          event.summary.includes("architecture boundary check"),
+          event.status === "partial" &&
+          event.summary.includes("architecture boundary risks found"),
       ),
     ).toBe(true);
     expect(
@@ -4848,9 +4871,52 @@ describe("Phase 06 TUI slash commands", () => {
         (event) =>
           event.type === "system_event" &&
           event.message.includes("workflow_architecture_review") &&
-          event.message.includes("status=blocked"),
+          event.message.includes("status=partial"),
       ),
     ).toBe(true);
+  });
+
+  it("continues readonly audit workflow when architecture review finds code-blob risks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-readonly-audit-workflow-"));
+    await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
+    await writeFile(
+      join(project, "packages", "tui", "src", "index.ts"),
+      Array.from({ length: 1601 }, (_, index) => `export const line${index} = ${index};`).join(
+        "\n",
+      ),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { typecheck: "echo typecheck" } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(
+      "/workflows run 只读审计当前项目源码，不看文档，不修改代码，找主链和过度设计",
+      context,
+      output,
+    );
+
+    const run = context.workflows.activeRun;
+    const archStep = run?.steps.find((step) => step.id === "slice-architecture-review");
+    expect(archStep?.status).toBe("partial");
+    expect(run?.steps.some((step) => step.id === "slice-implement")).toBe(false);
+    expect(run?.steps.find((step) => step.id === "slice-stable-point")?.status).not.toBe("queued");
+    expect(run?.steps.some((step) => step.status !== "queued" && step.id !== "slice-explore")).toBe(
+      true,
+    );
+    expect(run?.steps.find((step) => step.status === "blocked")?.id).not.toBe(
+      "slice-architecture-review",
+    );
+    expect(context.backgroundTasks.find((task) => task.id === run?.id)?.currentStep).not.toContain(
+      "architecture boundary risks found",
+    );
   });
 
   it("workflow run blocks mutating worker steps when the real agent loop is unavailable", async () => {
@@ -5393,6 +5459,46 @@ describe("Phase 06 TUI slash commands", () => {
     });
     expect(persistedAgent.task).toContain("Review through the custom registry prompt.");
     expect(persistedAgent.task).toContain("inspect custom runtime");
+  });
+
+  it("formats StartAgent non-start as actionable runtime state, not a vague blocked line", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-startagent-not-started-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks.push({
+      id: "bash-heavy",
+      kind: "bash",
+      title: "Bash heavy task",
+      status: "running",
+      currentStep: "running",
+      progress: { completed: 0, total: 1, label: "Bash" },
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: false,
+      userVisibleSummary: "heavy task running",
+      nextAction: "wait",
+    });
+
+    const text = __testFormatStartAgentDidNotStartMessage(
+      {
+        ok: true,
+        role: "planner",
+        task: "inspect runtime while another heavy task is active",
+        runInBackground: true,
+        cwd: ".",
+        isolation: "worktree",
+      },
+      context,
+    );
+
+    expect(text).toContain("Agent runtime 未启动");
+    expect(text).toContain("没有持久化任何 AgentRun");
+    expect(text).toContain("resource=");
+    expect(text).toContain("/background");
+    expect(text).toContain("/model doctor");
   });
 
   it("recovers Phase 17A durable jobs into background and marks missing owner heartbeat stale", async () => {

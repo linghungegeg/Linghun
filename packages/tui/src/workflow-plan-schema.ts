@@ -11,6 +11,7 @@ export type WorkflowSliceStatus =
   | "sleeping"
   | "blocked"
   | "running"
+  | "partial"
   | "completed"
   | "failed";
 
@@ -689,5 +690,6 @@ export function mapWorkflowSliceStatusToDurableJobAgentStatus(
   if (status === "blocked") return "blocked";
   if (status === "running") return "running";
   if (status === "completed") return "completed";
+  if (status === "partial") return "created";
   return "failed";
 }

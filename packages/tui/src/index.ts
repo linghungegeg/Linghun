@@ -604,7 +604,7 @@ import {
   runVerificationCommand,
   runVerificationPlan,
 } from "./verification-command-runtime.js";
-export { createModelSystemPrompt } from "./model-prompt-runtime.js";
+export { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 // D.14A-3 source anchors for source-level D.13 tests after modular split:
 // createVerificationLevelForReadiness -> classifyVerificationLevel(...); createModelSystemPrompt still projects with projectRuntimeStatusForPrompt(runtimeStatus).
 // FreshnessRule= WebSearch/WebFetch unverified; RuntimeIdentityRule= Do not include provider, endpointProfile, route role, baseUrl; "(provider: ...)" openai-compatible.
@@ -3386,7 +3386,7 @@ async function runWorkflowPlanSteps(
     step.summary = result.summary;
     step.evidenceRefs = result.evidenceRefs;
     step.endedAt = stepEndedAt;
-    if (result.status === "completed") completed += 1;
+    if (result.status === "completed" || result.status === "partial") completed += 1;
     workflowTask.currentStep = result.summary;
     workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
     workflowTask.updatedAt = stepEndedAt;
@@ -3404,7 +3404,7 @@ async function runWorkflowPlanSteps(
     });
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
-    if (result.status !== "completed") {
+    if (result.status !== "completed" && result.status !== "partial") {
       await finishWorkflowRun(
         runId,
         result.status,
@@ -4078,11 +4078,7 @@ async function executeWorkflowArchitectureReviewStep(
   }
 
   const check = checkBoundaries(metrics);
-  const status: WorkflowStepTerminalStatus = check.hasBlocking
-    ? "blocked"
-    : check.violations.length > 0
-      ? "partial"
-      : "completed";
+  const status: WorkflowStepTerminalStatus = check.violations.length > 0 ? "partial" : "completed";
   const riskKinds = Array.from(new Set(check.violations.map((item) => item.kind)));
   const evidence = createEvidenceRecord(
     "command_output",
@@ -4109,7 +4105,9 @@ async function executeWorkflowArchitectureReviewStep(
     summary: formatWorkflowStepSummary(
       request.sliceId,
       status,
-      `architecture boundary check ${check.summary}; evidence=${evidence.id}`,
+      status === "partial"
+        ? `architecture boundary risks found (${check.summary}); continue readonly workflow with evidence=${evidence.id}`
+        : `architecture boundary check ${check.summary}; evidence=${evidence.id}`,
       context.language,
     ),
     evidenceRefs: [evidence.id],
@@ -10894,7 +10892,7 @@ async function executeLinghunControlToolUse(
       const ok = agent?.status === "completed" || agent?.status === "running";
       const text = agent
         ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
-        : "Agent runtime did not start.";
+        : formatStartAgentDidNotStartMessage(input, context);
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         agentId: agent?.id,
         status: agent?.status ?? "blocked",
@@ -11089,6 +11087,35 @@ function inferRegistryAgentRole(agent: RegistryAgentDefinition): AgentType {
   const tools = agent.allowedTools ?? [];
   if (tools.some((tool) => ["Write", "Edit", "MultiEdit", "Bash"].includes(tool))) return "worker";
   return "planner";
+}
+
+export function __testFormatStartAgentDidNotStartMessage(
+  input: Extract<ReturnType<typeof parseStartAgentToolInput>, { ok: true }>,
+  context: TuiContext,
+): string {
+  return formatStartAgentDidNotStartMessage(input, context);
+}
+
+function formatStartAgentDidNotStartMessage(
+  input: Extract<ReturnType<typeof parseStartAgentToolInput>, { ok: true }>,
+  context: TuiContext,
+): string {
+  const workflowTaskId =
+    context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined;
+  const guard = checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
+  const route = resolveRoleRoute(context, getAgentRole(input.role), "StartAgent");
+  const hints = [
+    guard ? `resource=${guard}` : undefined,
+    !route.usable
+      ? `route=${formatRoutePauseMessage(getAgentRole(input.role), route.decision)}`
+      : undefined,
+    input.cwd ? `cwd=${input.cwd}` : undefined,
+    input.isolation ? `isolation=${input.isolation}` : undefined,
+  ].filter((item): item is string => Boolean(item));
+  const suffix = hints.length > 0 ? ` ${hints.join(" | ")}` : "";
+  return context.language === "en-US"
+    ? `Agent runtime did not start: no AgentRun was persisted after StartAgent.${suffix} Check /background and /model doctor, then retry or run /fork manually.`
+    : `Agent runtime 未启动：StartAgent 后没有持久化任何 AgentRun。${suffix} 请先查看 /background 和 /model doctor，必要时手动运行 /fork 重试。`;
 }
 
 function buildForkArgsFromStartAgentInput(

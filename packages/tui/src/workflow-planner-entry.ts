@@ -222,7 +222,8 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     },
   ];
 
-  if (permissionMode !== "plan") {
+  const readonlyAuditGoal = isReadonlyAuditGoal(goal);
+  if (permissionMode !== "plan" && !readonlyAuditGoal) {
     slices.push({
       id: "slice-implement",
       title: "Implement changes",
@@ -237,7 +238,9 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
   }
 
   const lastExecutionSlice =
-    permissionMode === "plan" ? "slice-architecture-review" : "slice-implement";
+    permissionMode === "plan" || readonlyAuditGoal
+      ? "slice-architecture-review"
+      : "slice-implement";
 
   slices.push({
     id: "slice-stable-point",
@@ -260,11 +263,25 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     status: "queued",
     dependsOnSliceIds: ["slice-stable-point"],
     targetRuntime: { kind: "verification", level: "typecheck", mutating: false },
-    acceptanceCriteria: ["run typecheck/tests after execution"],
-    nextAction: "Run typecheck and tests after execution.",
+    acceptanceCriteria: readonlyAuditGoal
+      ? ["run lightweight verification after readonly audit"]
+      : ["run typecheck/tests after execution"],
+    nextAction: readonlyAuditGoal
+      ? "Run lightweight verification after readonly audit."
+      : "Run typecheck and tests after execution.",
   });
 
   return slices;
+}
+
+function isReadonlyAuditGoal(goal: string): boolean {
+  const normalized = goal.toLowerCase();
+  return (
+    /(审计|检查|评估|分析|review|audit|inspect|analy[sz]e)/iu.test(goal) &&
+    /(不要修改|不修改|只读|不写|no\s+(?:code\s+)?changes|read[-\s]?only|do\s+not\s+(?:edit|modify|write))/iu.test(
+      normalized,
+    )
+  );
 }
 
 function sanitizeGoalText(goal: string): string {
