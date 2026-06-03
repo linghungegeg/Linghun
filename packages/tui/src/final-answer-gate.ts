@@ -5,6 +5,7 @@ import type { TuiContext } from "./index.js";
 import {
   evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
+  extractStructuredFinalAnswerClaims,
   finalAnswerHasCompletenessClassification,
   hasArchitectureEvidenceForClaims,
 } from "./model-loop-runtime.js";
@@ -163,7 +164,7 @@ export function createPhase15BetaVerdictScope(
     nextAction:
       uncoveredItems.length === 0
         ? "All required Beta readiness evidence is present. User confirmation is still required before Beta."
-        : "Fix or re-smoke the real provider + real TUI report-generation path before any Beta readiness PASS claim.",
+        : "Fix or re-smoke the real provider + real TUI report-generation path before declaring Beta readiness.",
   };
 }
 
@@ -232,61 +233,43 @@ function isBetaVerdictEvidence(item: EvidenceRecord): boolean {
   );
 }
 
-export function isBetaReadinessClaim(normalizedClaim: string): boolean {
-  return (
-    normalizedClaim.includes("beta") &&
-    (normalizedClaim.includes("ready") ||
-      normalizedClaim.includes("readiness") ||
-      normalizedClaim.includes("pass") ||
-      normalizedClaim.includes("完成") ||
-      normalizedClaim.includes("就绪") ||
-      normalizedClaim.includes("通过"))
-  );
-}
-
 export function checkClaimSupport(claim: string, context: TuiContext): ClaimCheck {
-  const normalizedClaim = claim.toLowerCase();
-  if (isBetaReadinessClaim(normalizedClaim)) {
+  // D.13U：只接受模型声明的结构化 claim 契约；不再维护自然语言短语表。
+  const structuredClaims = extractStructuredFinalAnswerClaims(claim);
+  if (structuredClaims.some((item) => item.kind === "beta_readiness")) {
     return {
       status: "needs_disclaimer",
-      unsupportedClaims: ["Beta readiness PASS"],
+      unsupportedClaims: structuredClaims
+        .filter((item) => item.kind === "beta_readiness")
+        .map((item) => item.phrase),
       verdict: createPhase15BetaVerdictScope(context.evidence),
     };
   }
 
-  // D.13U：复用 evaluateFinalAnswerClaims，按 claim 类型匹配 evidence 类型。
-  // 任意 evidence > 0 不再当通行证；保留固定中英 phrase 列表用于 unsupportedClaims 文案。
-  const highRisk = [
-    "已完成",
-    "已修复",
-    "已验证",
-    "无风险",
-    "等于 ccb",
-    "成熟工具",
-    "可以进入 beta",
-    "测试通过",
-    "代码里",
-    "调用链是",
-    "不会影响",
-    "completed",
-    "fixed",
-    "verified",
-    "no risk",
-    "ccb parity",
-    "ready for beta",
-    "release ready",
-    "tests passed",
-    "in the code",
-  ];
-  const unsupportedClaims = highRisk.filter((item) => normalizedClaim.includes(item.toLowerCase()));
-  if (unsupportedClaims.length === 0) {
+  if (structuredClaims.length === 0) {
     return { status: "passed", unsupportedClaims: [] };
+  }
+  if (
+    structuredClaims.some(
+      (item) => item.kind === "architecture_boundary" || item.kind === "completeness",
+    )
+  ) {
+    const extended = runArchitectureAndCompletenessFinalGate(context, claim);
+    if (extended.status === "needs_disclaimer") {
+      return {
+        status: "needs_disclaimer",
+        unsupportedClaims: extended.verdict.matchedClaims.map((item) => item.phrase),
+      };
+    }
   }
   const verdict = evaluateFinalAnswerClaims(claim, context.evidence);
   if (verdict.status === "passed") {
     return { status: "passed", unsupportedClaims: [] };
   }
-  return { status: "needs_disclaimer", unsupportedClaims };
+  return {
+    status: "needs_disclaimer",
+    unsupportedClaims: structuredClaims.map((item) => item.phrase),
+  };
 }
 
 export function formatClaimCheck(result: ClaimCheck, language: Language): string {
@@ -318,6 +301,6 @@ export function formatClaimCheck(result: ClaimCheck, language: Language): string
   }
   const claims = result.unsupportedClaims.join(", ");
   return language === "en-US"
-    ? `Claim needs disclaimer: ${claims}. Use unverified / pending confirmation wording.`
-    : `Claim Checker：缺少证据，需降级表述：${claims}。请改写为“未验证 / 待确认”。`;
+    ? `Claim lacks evidence: ${claims}. Gather matching evidence or remove the claim.`
+    : `Claim Checker：缺少证据：${claims}。请补齐匹配证据或移除该声明。`;
 }

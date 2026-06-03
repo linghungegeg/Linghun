@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  type FinalAnswerClaimMatch,
   type SolutionCompletenessStatus,
   buildDowngradedFinalAnswer,
   createFinalAnswerClaimReminder,
@@ -14,7 +15,6 @@ import {
   evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
-  extractLegacyTextRiskClaims,
   extractNaturalReadPath,
   extractStructuredFinalAnswerClaims,
   formatFileCandidates,
@@ -544,6 +544,10 @@ describe("model-loop-runtime", () => {
     };
   }
 
+  function withClaims(text: string, claims: FinalAnswerClaimMatch[]): string {
+    return `${text}\nLinghunFinalAnswerClaims: ${JSON.stringify({ claims })}`;
+  }
+
   describe("D.13U final answer claim extraction", () => {
     it("uses explicit structured claim metadata as the typed path", () => {
       const matches = extractStructuredFinalAnswerClaims(
@@ -554,7 +558,7 @@ describe("model-loop-runtime", () => {
 
     it("does not treat legacy natural-language phrases as structured claims", () => {
       expect(extractStructuredFinalAnswerClaims("已完成，测试通过，PASS。")).toEqual([]);
-      expect(extractLegacyTextRiskClaims("已完成，测试通过，PASS。")).not.toEqual([]);
+      expect(detectHighRiskClaims("已完成，测试通过，PASS。")).toEqual([]);
     });
 
     it("strips structured claim metadata from visible final answer text", () => {
@@ -571,14 +575,24 @@ describe("model-loop-runtime", () => {
       expect(detectHighRiskClaims("Hello, how can I help?")).toEqual([]);
     });
 
-    it("flags completion / PASS phrases", () => {
-      const matches = detectHighRiskClaims("已完成，测试通过，PASS。");
-      expect(matches.some((m) => m.kind === "completion_pass")).toBe(true);
+    it("flags only model-declared structured completion / PASS claims", () => {
+      const matches = detectHighRiskClaims(
+        withClaims("已完成，测试通过，PASS。", [
+          { kind: "completion_pass", phrase: "测试通过" },
+        ]),
+      );
+      expect(matches).toEqual([{ kind: "completion_pass", phrase: "测试通过" }]);
     });
 
-    it("flags external current fact phrases (today / latest)", () => {
-      const matches = detectHighRiskClaims("今天 OpenAI 最新模型是 GPT-X，价格 $0.01。");
-      expect(matches.some((m) => m.kind === "external_current_fact")).toBe(true);
+    it("flags only model-declared structured external current fact claims", () => {
+      const matches = detectHighRiskClaims(
+        withClaims("今天 OpenAI 最新模型是 GPT-X，价格 $0.01。", [
+          { kind: "external_current_fact", phrase: "今天 OpenAI 最新模型" },
+        ]),
+      );
+      expect(matches).toEqual([
+        { kind: "external_current_fact", phrase: "今天 OpenAI 最新模型" },
+      ]);
     });
 
     it("does NOT flag local current branch / dir as external_current_fact", () => {
@@ -586,77 +600,53 @@ describe("model-loop-runtime", () => {
       expect(matches.some((m) => m.kind === "external_current_fact")).toBe(false);
     });
 
-    it("flags code-fact phrases", () => {
-      const matches = detectHighRiskClaims("代码里已经实现 X，调用链是 A→B。");
-      expect(matches.some((m) => m.kind === "code_fact")).toBe(true);
-    });
-
-    it("flags ccb parity / production-ready", () => {
-      expect(detectHighRiskClaims("现在等于 CCB 了").some((m) => m.kind === "ccb_parity")).toBe(
-        true,
+    it("flags only model-declared structured code-fact claims", () => {
+      const matches = detectHighRiskClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
       );
-      expect(
-        detectHighRiskClaims("This is production-ready").some((m) => m.kind === "ccb_parity"),
-      ).toBe(true);
+      expect(matches).toEqual([{ kind: "code_fact", phrase: "调用链是 A→B" }]);
     });
 
-    it("does NOT flag meta discussion about the anti-hallucination system", () => {
+    it("flags only model-declared structured ccb parity / production-ready claims", () => {
       expect(
         detectHighRiskClaims(
-          "反幻觉系统会检测'已完成'、'测试通过'、'已验证'等高风险声明，如果缺少证据就会触发降级。",
-        ).some((m) => m.kind === "completion_pass"),
-      ).toBe(false);
-      expect(
-        detectHighRiskClaims(
-          "是的，反幻觉系统在约束我，不让我说'已完成'或'测试通过'这类话，除非有证据支撑。",
-        ).some((m) => m.kind === "completion_pass"),
-      ).toBe(false);
-      expect(
-        detectHighRiskClaims(
-          "反幻觉系统会识别'代码里已经实现 X'、'调用链是 A→B'这类源码事实声明。",
-        ).some((m) => m.kind === "code_fact"),
-      ).toBe(false);
-      expect(
-        detectHighRiskClaims(
-          "The final answer gate detects phrases like 'completed', 'tests passed', 'verified' and requires evidence.",
-        ).some((m) => m.kind === "completion_pass"),
-      ).toBe(false);
-      expect(
-        detectHighRiskClaims("不能说'索引已刷新'，除非本轮有真实刷新证据。").some(
-          (m) => m.kind === "action_executed",
+          withClaims("现在等于 CCB 了", [{ kind: "ccb_parity", phrase: "等于 CCB" }]),
         ),
-      ).toBe(false);
+      ).toEqual([{ kind: "ccb_parity", phrase: "等于 CCB" }]);
       expect(
         detectHighRiskClaims(
-          "反幻觉系统会检测'已写入文件、索引已刷新、命令已执行'这类动作声明。",
-        ).some((m) => m.kind === "action_executed"),
-      ).toBe(false);
+          withClaims("This is production-ready", [
+            { kind: "ccb_parity", phrase: "production-ready" },
+          ]),
+        ),
+      ).toEqual([{ kind: "ccb_parity", phrase: "production-ready" }]);
     });
 
-    it("still flags real completion claims even when mentioning the system", () => {
+    it("ordinary real-looking claims do not trigger without the structured contract", () => {
+      expect(detectHighRiskClaims("我已完成了所有修改，测试通过。")).toEqual([]);
+      expect(detectHighRiskClaims("All tests passed, the fix is verified.")).toEqual([]);
+      expect(detectHighRiskClaims("索引已刷新。")).toEqual([]);
+      expect(detectHighRiskClaims("今天 OpenAI 最新价格是 $0.01。")).toEqual([]);
+      expect(detectHighRiskClaims("代码里已经实现 X，调用链是 A→B。")).toEqual([]);
+    });
+
+    it("still flags structured real completion claims even when mentioning the system", () => {
       expect(
-        detectHighRiskClaims("我已完成了所有修改，测试通过。").some(
-          (m) => m.kind === "completion_pass",
-        ),
+        detectHighRiskClaims(
+          withClaims("反幻觉系统前面触发了吗？另外我已完成了所有修改，测试通过。", [
+            { kind: "completion_pass", phrase: "测试通过" },
+          ]),
+        ).some((m) => m.kind === "completion_pass"),
       ).toBe(true);
       expect(
-        detectHighRiskClaims("All tests passed, the fix is verified.").some(
-          (m) => m.kind === "completion_pass",
+        detectHighRiskClaims(
+          withClaims("反幻觉系统会约束成功声明；索引已刷新。", [
+            { kind: "action_executed", phrase: "索引已刷新" },
+          ]),
         ),
-      ).toBe(true);
-      expect(
-        detectHighRiskClaims("反幻觉系统前面触发了吗？另外我已完成了所有修改，测试通过。").some(
-          (m) => m.kind === "completion_pass",
-        ),
-      ).toBe(true);
-      expect(
-        detectHighRiskClaims("反幻觉系统会约束成功声明；索引已刷新。").some(
-          (m) => m.kind === "action_executed",
-        ),
-      ).toBe(true);
-      expect(detectHighRiskClaims("索引已刷新。").some((m) => m.kind === "action_executed")).toBe(
-        true,
-      );
+      ).toEqual([{ kind: "action_executed", phrase: "索引已刷新" }]);
     });
   });
 
@@ -684,7 +674,12 @@ describe("model-loop-runtime", () => {
           summary: "Bash: echo hello",
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过，PASS。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过，PASS。", [
+          { kind: "completion_pass", phrase: "测试通过" },
+        ]),
+        evidence,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
@@ -697,57 +692,78 @@ describe("model-loop-runtime", () => {
           summary: "Bash: vitest --run all green",
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("blocks overall completion when only typecheck PASS evidence exists", () => {
-      const verdict = evaluateFinalAnswerClaims("已完成，PASS，无问题。", [
-        makeEvidence({
-          kind: "command_output",
-          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
-          summary: "Bash: tsc --noEmit exited 0",
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，PASS，无问题。", [{ kind: "completion_pass", phrase: "已完成" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
+            summary: "Bash: tsc --noEmit exited 0",
+          }),
+        ],
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
 
     it("passes overall completion only with task completion scope validation and remaining risk evidence", () => {
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", [
-        makeEvidence({
-          kind: "command_output",
-          supportsClaims: [
-            "task_completed",
-            "scope:packages/tui/src/model-loop-runtime.ts",
-            "validation:focused vitest",
-            "remaining_risk:none",
-          ],
-          summary: "task_completed scope=claim-check validation=focused vitest remaining_risk=none",
-        }),
-        makeEvidence({
-          kind: "command_output",
-          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
-          summary: "Bash: vitest --run model-loop-runtime.test.ts exited 0",
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过。", [
+          { kind: "completion_pass", phrase: "已完成" },
+          { kind: "completion_pass", phrase: "测试通过" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            supportsClaims: [
+              "task_completed",
+              "scope:packages/tui/src/model-loop-runtime.ts",
+              "validation:focused vitest",
+              "remaining_risk:none",
+            ],
+            summary:
+              "task_completed scope=claim-check validation=focused vitest remaining_risk=none",
+          }),
+          makeEvidence({
+            kind: "command_output",
+            supportsClaims: ["Bash", "command_ran", "bash_exit_0", "test_passed"],
+            summary: "Bash: vitest --run model-loop-runtime.test.ts exited 0",
+          }),
+        ],
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("does not let typecheck PASS support test PASS claim", () => {
-      const verdict = evaluateFinalAnswerClaims("测试通过。", [
-        makeEvidence({
-          kind: "command_output",
-          supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
-          summary: "Bash: tsc --noEmit exited 0",
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            supportsClaims: ["Bash", "command_ran", "bash_exit_0", "typecheck_passed"],
+            summary: "Bash: tsc --noEmit exited 0",
+          }),
+        ],
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
     });
 
     it("blocks code-fact claims when no Read/Grep/index evidence", () => {
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", []);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        [],
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("code_fact");
     });
@@ -756,45 +772,65 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({ kind: "grep_result", supportsClaims: ["Grep", "local_read"] }),
       ];
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        evidence,
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("does not let index status/missing/stale records support code facts", () => {
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
-        makeEvidence({
-          kind: "index_query",
-          source: "codebase-memory:F-Linghun:status",
-          summary: "Index status: stale; project=F-Linghun",
-          supportsClaims: ["index_query", "status"],
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        [
+          makeEvidence({
+            kind: "index_query",
+            source: "codebase-memory:F-Linghun:status",
+            summary: "Index status: stale; project=F-Linghun",
+            supportsClaims: ["index_query", "status"],
+          }),
+        ],
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("code_fact");
     });
 
     it("allows ready index search evidence with real symbol/path to support code facts", () => {
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
-        makeEvidence({
-          kind: "index_query",
-          source: "codebase-memory:F-Linghun:search X",
-          summary: "Index search - #1 path=packages/tui/src/model-loop-runtime.ts symbol=X",
-          supportsClaims: ["index_query", "index_code_fact", "search X"],
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        [
+          makeEvidence({
+            kind: "index_query",
+            source: "codebase-memory:F-Linghun:search X",
+            summary: "Index search - #1 path=packages/tui/src/model-loop-runtime.ts symbol=X",
+            supportsClaims: ["index_query", "index_code_fact", "search X"],
+          }),
+        ],
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("does not let architecture aggregate index evidence support code facts", () => {
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", [
-        makeEvidence({
-          kind: "index_query",
-          source: "codebase-memory:F-Linghun:architecture",
-          summary:
-            "Index architecture - nodes/edges: 3725/8068 - node labels: Class=100, Function=500",
-          supportsClaims: ["index_query", "index_code_fact", "architecture"],
-        }),
-      ]);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        [
+          makeEvidence({
+            kind: "index_query",
+            source: "codebase-memory:F-Linghun:architecture",
+            summary:
+              "Index architecture - nodes/edges: 3725/8068 - node labels: Class=100, Function=500",
+            supportsClaims: ["index_query", "index_code_fact", "architecture"],
+          }),
+        ],
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("code_fact");
     });
@@ -803,7 +839,12 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
       ];
-      const verdict = evaluateFinalAnswerClaims("今天最新价格是 $0.01。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("今天最新价格是 $0.01。", [
+          { kind: "external_current_fact", phrase: "今天最新价格" },
+        ]),
+        evidence,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("external_current_fact");
     });
@@ -816,7 +857,12 @@ describe("model-loop-runtime", () => {
           source: "https://openai.com/pricing",
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("今天 OpenAI 最新价格是 $0.01。", [
+          { kind: "external_current_fact", phrase: "今天 OpenAI 最新价格" },
+        ]),
+        evidence,
+      );
       expect(verdict.status).toBe("passed");
     });
 
@@ -836,40 +882,61 @@ describe("model-loop-runtime", () => {
       const evidence: EvidenceRecord[] = [
         makeEvidence({ kind: "file_read", supportsClaims: ["Read", "local_read"] }),
       ];
-      const verdict = evaluateFinalAnswerClaims("Beta ready 了。", evidence);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("Beta ready 了。", [{ kind: "beta_readiness", phrase: "Beta ready" }]),
+        evidence,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("beta_readiness");
     });
 
     it("D.14G: git_operation claim needs git_operation evidence", () => {
       // 模型空口声称“已建立稳定点”，没有 git_operation evidence → 拦截。
-      const noEvidence = evaluateFinalAnswerClaims("已建立稳定点，代码已保存。", []);
+      const noEvidence = evaluateFinalAnswerClaims(
+        withClaims("已建立稳定点，代码已保存。", [
+          { kind: "git_operation", phrase: "已建立稳定点" },
+        ]),
+        [],
+      );
       expect(noEvidence.status).toBe("needs_disclaimer");
       expect(noEvidence.unsupportedKinds).toContain("git_operation");
 
       // 有真实 stable_point_created evidence → 放行。
-      const withEvidence = evaluateFinalAnswerClaims("已建立稳定点。", [
-        makeEvidence({
-          kind: "command_output",
-          source: "git-operation:stable_point_created",
-          supportsClaims: ["git_operation", "stable_point_created"],
-        }),
-      ]);
+      const withEvidence = evaluateFinalAnswerClaims(
+        withClaims("已建立稳定点。", [{ kind: "git_operation", phrase: "已建立稳定点" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "git-operation:stable_point_created",
+            supportsClaims: ["git_operation", "stable_point_created"],
+          }),
+        ],
+      );
       expect(withEvidence.status).toBe("passed");
     });
 
     it("D.14G: worktree created/removed claims gated on worktree evidence", () => {
-      const created = evaluateFinalAnswerClaims("已创建 worktree d14b。", []);
+      const created = evaluateFinalAnswerClaims(
+        withClaims("已创建 worktree d14b。", [
+          { kind: "git_operation", phrase: "已创建 worktree" },
+        ]),
+        [],
+      );
       expect(created.status).toBe("needs_disclaimer");
       expect(created.unsupportedKinds).toContain("git_operation");
 
-      const ok = evaluateFinalAnswerClaims("已删除 worktree d14b。", [
-        makeEvidence({
-          kind: "command_output",
-          source: "git-operation:worktree_removed",
-          supportsClaims: ["git_operation", "worktree_removed"],
-        }),
-      ]);
+      const ok = evaluateFinalAnswerClaims(
+        withClaims("已删除 worktree d14b。", [
+          { kind: "git_operation", phrase: "已删除 worktree" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "git-operation:worktree_removed",
+            supportsClaims: ["git_operation", "worktree_removed"],
+          }),
+        ],
+      );
       expect(ok.status).toBe("passed");
     });
 
@@ -883,112 +950,151 @@ describe("model-loop-runtime", () => {
     });
 
     it("Run 2 Closure: denied or cancelled actions do not support final success claims", () => {
-      const denied = evaluateFinalAnswerClaims("已安装依赖，命令已成功执行。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "permission denied; command was not executed",
-          supportsClaims: ["tool_failure", "permission_denied"],
-        }),
-      ]);
+      const denied = evaluateFinalAnswerClaims(
+        withClaims("已安装依赖，命令已成功执行。", [
+          { kind: "action_executed", phrase: "命令已成功执行" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "permission denied; command was not executed",
+            supportsClaims: ["tool_failure", "permission_denied"],
+          }),
+        ],
+      );
       expect(denied.status).toBe("needs_disclaimer");
       expect(denied.unsupportedKinds).toContain("action_executed");
 
-      const cancelled = evaluateFinalAnswerClaims("索引已刷新。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "cancelled by user",
-          supportsClaims: ["tool_failure", "user_cancelled"],
-        }),
-      ]);
+      const cancelled = evaluateFinalAnswerClaims(
+        withClaims("索引已刷新。", [{ kind: "action_executed", phrase: "索引已刷新" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "cancelled by user",
+            supportsClaims: ["tool_failure", "user_cancelled"],
+          }),
+        ],
+      );
       expect(cancelled.status).toBe("needs_disclaimer");
       expect(cancelled.unsupportedKinds).toContain("action_executed");
 
-      const ok = evaluateFinalAnswerClaims("命令已成功执行。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "Bash: npm install exited 0",
-          supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
-        }),
-      ]);
+      const ok = evaluateFinalAnswerClaims(
+        withClaims("命令已成功执行。", [{ kind: "action_executed", phrase: "命令已成功执行" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "Bash: npm install exited 0",
+            supportsClaims: ["Bash", "command_ran", "bash_exit_0"],
+          }),
+        ],
+      );
       expect(ok.status).toBe("passed");
     });
 
     it("Run 2 Closure addendum: successful index evidence supports refresh/rebuild claims", () => {
-      const refreshed = evaluateFinalAnswerClaims("索引已刷新。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "IndexRefresh completed",
-          source: "index:refresh",
-          supportsClaims: ["index_operation", "index_refresh"],
-        }),
-      ]);
+      const refreshed = evaluateFinalAnswerClaims(
+        withClaims("索引已刷新。", [{ kind: "action_executed", phrase: "索引已刷新" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "IndexRefresh completed",
+            source: "index:refresh",
+            supportsClaims: ["index_operation", "index_refresh"],
+          }),
+        ],
+      );
       expect(refreshed.status).toBe("passed");
 
-      const repaired = evaluateFinalAnswerClaims("索引已重建。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "IndexRepair completed",
-          source: "index:repair",
-          supportsClaims: ["index_operation", "index_repair"],
-        }),
-      ]);
+      const repaired = evaluateFinalAnswerClaims(
+        withClaims("索引已重建。", [{ kind: "action_executed", phrase: "索引已重建" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "IndexRepair completed",
+            source: "index:repair",
+            supportsClaims: ["index_operation", "index_repair"],
+          }),
+        ],
+      );
       expect(repaired.status).toBe("passed");
 
-      const initialized = evaluateFinalAnswerClaims("索引已刷新。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "index_operation init fast: ready",
-          source: "index-operation:init fast",
-          supportsClaims: ["index_operation", "index_init_fast"],
-        }),
-      ]);
+      const initialized = evaluateFinalAnswerClaims(
+        withClaims("索引已刷新。", [{ kind: "action_executed", phrase: "索引已刷新" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "index_operation init fast: ready",
+            source: "index-operation:init fast",
+            supportsClaims: ["index_operation", "index_init_fast"],
+          }),
+        ],
+      );
       expect(initialized.status).toBe("passed");
     });
 
     it("Run 2 Closure addendum: denied or cancelled index evidence still cannot support refresh claims", () => {
-      const denied = evaluateFinalAnswerClaims("索引已刷新。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "permission denied; IndexRefresh was not executed",
-          supportsClaims: ["tool_failure", "index_refresh", "permission_denied"],
-        }),
-      ]);
+      const denied = evaluateFinalAnswerClaims(
+        withClaims("索引已刷新。", [{ kind: "action_executed", phrase: "索引已刷新" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "permission denied; IndexRefresh was not executed",
+            supportsClaims: ["tool_failure", "index_refresh", "permission_denied"],
+          }),
+        ],
+      );
       expect(denied.status).toBe("needs_disclaimer");
       expect(denied.unsupportedKinds).toContain("action_executed");
 
-      const cancelled = evaluateFinalAnswerClaims("索引已刷新。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "cancelled by user; IndexRefresh was not executed",
-          supportsClaims: ["tool_failure", "index_refresh", "user_cancelled"],
-        }),
-      ]);
+      const cancelled = evaluateFinalAnswerClaims(
+        withClaims("索引已刷新。", [{ kind: "action_executed", phrase: "索引已刷新" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "cancelled by user; IndexRefresh was not executed",
+            supportsClaims: ["tool_failure", "index_refresh", "user_cancelled"],
+          }),
+        ],
+      );
       expect(cancelled.status).toBe("needs_disclaimer");
       expect(cancelled.unsupportedKinds).toContain("action_executed");
     });
 
     it("image generated claims require image_result evidence", () => {
-      const missing = evaluateFinalAnswerClaims("image result generated.", []);
+      const missing = evaluateFinalAnswerClaims(
+        withClaims("image result generated.", [
+          { kind: "action_executed", phrase: "image result generated" },
+        ]),
+        [],
+      );
       expect(missing.status).toBe("needs_disclaimer");
       expect(missing.unsupportedKinds).toContain("action_executed");
 
-      const ok = evaluateFinalAnswerClaims("image result generated.", [
-        makeEvidence({
-          kind: "image_result",
-          summary: "ImageGenerationResult image-123 saved",
-          source: ".linghun/assets/image-123.json",
-          supportsClaims: ["image_result", "image generated"],
-        }),
-      ]);
+      const ok = evaluateFinalAnswerClaims(
+        withClaims("image result generated.", [
+          { kind: "action_executed", phrase: "image result generated" },
+        ]),
+        [
+          makeEvidence({
+            kind: "image_result",
+            summary: "ImageGenerationResult image-123 saved",
+            source: ".linghun/assets/image-123.json",
+            supportsClaims: ["image_result", "image generated"],
+          }),
+        ],
+      );
       expect(ok.status).toBe("passed");
 
-      const denied = evaluateFinalAnswerClaims("生图结果已落盘。", [
-        makeEvidence({
-          kind: "command_output",
-          summary: "Write failure: permission denied; image metadata was not written",
-          supportsClaims: ["tool_failure", "image_result"],
-        }),
-      ]);
+      const denied = evaluateFinalAnswerClaims(
+        withClaims("生图结果已落盘。", [{ kind: "action_executed", phrase: "生图结果已落盘" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            summary: "Write failure: permission denied; image metadata was not written",
+            supportsClaims: ["tool_failure", "image_result"],
+          }),
+        ],
+      );
       expect(denied.status).toBe("needs_disclaimer");
       expect(denied.unsupportedKinds).toContain("action_executed");
     });
@@ -1083,10 +1189,13 @@ describe("model-loop-runtime", () => {
 
   describe("D.13U Final Answer reminder/downgrade text", () => {
     it("createFinalAnswerClaimReminder lists kinds and phrases", () => {
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        [],
+      );
       const text = createFinalAnswerClaimReminder(verdict, "zh-CN");
       expect(text).toContain("高风险声明");
-      expect(text).toContain("已完成");
+      expect(text).toContain("测试通过");
       expect(text).toContain("缺：");
       expect(text).toContain("仅本轮一次修正机会");
       expect(text).not.toContain("FinalAnswerClaimGate");
@@ -1094,11 +1203,17 @@ describe("model-loop-runtime", () => {
       expect(text).not.toContain("validator");
     });
 
-    it("buildDowngradedFinalAnswer replaces claim phrases with [未验证] and appends notice", () => {
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", []);
+    it("buildDowngradedFinalAnswer discards the invalid draft and returns a safe boundary answer", () => {
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        [],
+      );
       const downgraded = buildDowngradedFinalAnswer("已完成，测试通过。", verdict, "zh-CN");
-      expect(downgraded).toContain("[未验证]");
-      expect(downgraded).toContain("缺少匹配证据");
+      expect(downgraded).toContain("当前证据不足");
+      expect(downgraded).toContain("缺少证据");
+      expect(downgraded).toContain("被拦截的声明类型");
+      expect(downgraded).not.toContain("已完成，测试通过");
+      expect(downgraded).not.toContain("[未验证]");
       expect(downgraded).not.toContain("FinalAnswerClaimGate");
       expect(downgraded).not.toContain("evidence_id");
       expect(downgraded).not.toContain("test_passed");
@@ -1108,10 +1223,16 @@ describe("model-loop-runtime", () => {
     });
 
     it("buildDowngradedFinalAnswer English surface hides internal gate fields", () => {
-      const verdict = evaluateFinalAnswerClaims("Done, tests passed.", []);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("Done, tests passed.", [{ kind: "completion_pass", phrase: "tests passed" }]),
+        [],
+      );
       const downgraded = buildDowngradedFinalAnswer("Done, tests passed.", verdict, "en-US");
-      expect(downgraded).toContain("[unverified]");
-      expect(downgraded).toContain("matching evidence is missing");
+      expect(downgraded).toContain("I cannot provide a verified final claim");
+      expect(downgraded).toContain("Missing evidence");
+      expect(downgraded).toContain("Blocked claim types");
+      expect(downgraded).not.toContain("Done, tests passed");
+      expect(downgraded).not.toContain("[unverified]");
       expect(downgraded).not.toContain("test_passed");
       expect(downgraded).not.toContain("action_executed");
       expect(downgraded).not.toContain("sourceRef");
@@ -1133,7 +1254,11 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(10),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("passed");
     });
 
@@ -1146,7 +1271,11 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(45),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
       expect(verdict.staleKinds ?? []).toContain("completion_pass");
@@ -1160,7 +1289,13 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(20),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("passed");
     });
 
@@ -1172,7 +1307,13 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(90),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("代码里已经实现 X，调用链是 A→B。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("代码里已经实现 X，调用链是 A→B。", [
+          { kind: "code_fact", phrase: "调用链是 A→B" },
+        ]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("code_fact");
       expect(verdict.staleKinds ?? []).toContain("code_fact");
@@ -1187,7 +1328,13 @@ describe("model-loop-runtime", () => {
           createdAt: hoursAgo(2),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("今天 OpenAI 最新价格是 $0.01。", [
+          { kind: "external_current_fact", phrase: "今天 OpenAI 最新价格" },
+        ]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("passed");
     });
 
@@ -1200,7 +1347,13 @@ describe("model-loop-runtime", () => {
           createdAt: hoursAgo(48),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("今天 OpenAI 最新价格是 $0.01。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("今天 OpenAI 最新价格是 $0.01。", [
+          { kind: "external_current_fact", phrase: "今天 OpenAI 最新价格" },
+        ]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("external_current_fact");
       expect(verdict.staleKinds ?? []).toContain("external_current_fact");
@@ -1216,13 +1369,16 @@ describe("model-loop-runtime", () => {
           createdAt: hoursAgo(72),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("现在等于 CCB 了", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("现在等于 CCB 了", [{ kind: "ccb_parity", phrase: "等于 CCB" }]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("local 'current branch' query passes even when all evidence is stale", () => {
-      // 当前分支白名单使 detectHighRiskClaims 不命中 external_current_fact，
-      // 因此即便所有 evidence 都过期，也仍然 pass（保持 D.13U 行为）。
+      // 没有结构化 LinghunFinalAnswerClaims 的本地状态描述不进入 final-claim gate。
       const evidence: EvidenceRecord[] = [
         makeEvidence({
           kind: "command_output",
@@ -1252,12 +1408,20 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(5),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+        NOW,
+      );
       expect(verdict.status).toBe("passed");
     });
 
     it("staleKinds is omitted when no matching evidence existed at all", () => {
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", [], NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        [],
+        NOW,
+      );
       expect(verdict.status).toBe("needs_disclaimer");
       expect(verdict.unsupportedKinds).toContain("completion_pass");
       expect(verdict.staleKinds ?? []).not.toContain("completion_pass");
@@ -1295,7 +1459,11 @@ describe("model-loop-runtime", () => {
           createdAt: minutesAgo(120),
         }),
       ];
-      const verdict = evaluateFinalAnswerClaims("已完成，测试通过。", evidence, NOW);
+      const verdict = evaluateFinalAnswerClaims(
+        withClaims("已完成，测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
+        evidence,
+        NOW,
+      );
       const text = createFinalAnswerClaimReminder(verdict, "zh-CN");
       expect(text).toContain("已过期");
     });
@@ -1328,10 +1496,12 @@ describe("model-loop-runtime", () => {
       expect(v.matchedClaims).toHaveLength(0);
     });
 
-    it("声称符合架构边界但无 active card → needs_disclaimer", async () => {
+    it("结构化声称符合架构边界但无 active card → needs_disclaimer", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        "本次改动符合架构边界，没有架构漂移。",
+        withClaims("本次改动符合架构边界，没有架构漂移。", [
+          { kind: "architecture_boundary", phrase: "符合架构边界" },
+        ]),
         { hasActiveCard: false },
         { classificationRequired: false, classification: "unknown", textHasClassification: false },
       );
@@ -1339,10 +1509,10 @@ describe("model-loop-runtime", () => {
       expect(v.unsupportedKinds).toContain("architecture_boundary");
     });
 
-    it("声称架构闭合 + 有 card 但 driftWarnings 非空 → needs_disclaimer", async () => {
+    it("结构化声称架构闭合 + 有 card 但 driftWarnings 非空 → needs_disclaimer", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        "架构已闭合。",
+        withClaims("架构已闭合。", [{ kind: "architecture_boundary", phrase: "架构已闭合" }]),
         {
           hasActiveCard: true,
           driftWarnings: ["Architecture drift: scope expanded (foo.ts)."],
@@ -1354,10 +1524,10 @@ describe("model-loop-runtime", () => {
       expect(v.unsupportedKinds).toContain("architecture_boundary");
     });
 
-    it("声称架构闭合 + card + 无 drift + 有 evidence → passed", async () => {
+    it("结构化声称架构闭合 + card + 无 drift + 有 evidence → passed", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        "架构已闭合。",
+        withClaims("架构已闭合。", [{ kind: "architecture_boundary", phrase: "架构已闭合" }]),
         {
           hasActiveCard: true,
           driftWarnings: [],
@@ -1368,21 +1538,23 @@ describe("model-loop-runtime", () => {
       expect(v.status).toBe("passed");
     });
 
-    it("英文 'no architecture drift' 也命中", async () => {
+    it("英文裸文本 'no architecture drift' 不再靠短语命中", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
         "There is no architecture drift in this change.",
         { hasActiveCard: false },
         { classificationRequired: false, classification: "unknown", textHasClassification: false },
       );
-      expect(v.status).toBe("needs_disclaimer");
-      expect(v.matchedClaims.some((m) => m.kind === "architecture_boundary")).toBe(true);
+      expect(v.status).toBe("passed");
+      expect(v.matchedClaims).toHaveLength(0);
     });
 
-    it("声称没有遗漏 + classificationRequired + 未给分类 → needs_disclaimer", async () => {
+    it("结构化声称没有遗漏 + classificationRequired + 未给分类 → needs_disclaimer", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        "所有任务完整完成，没有遗漏。",
+        withClaims("所有任务完整完成，没有遗漏。", [
+          { kind: "completeness", phrase: "没有遗漏" },
+        ]),
         { hasActiveCard: false },
         {
           classificationRequired: true,
@@ -1394,10 +1566,12 @@ describe("model-loop-runtime", () => {
       expect(v.unsupportedKinds).toContain("completeness");
     });
 
-    it("声称没有遗漏 + 已给 classification + textHasClassification → passed", async () => {
+    it("结构化声称没有遗漏 + 已给 classification + textHasClassification → passed", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        "本次属于 single_issue，没有遗漏。",
+        withClaims("本次属于 single_issue，没有遗漏。", [
+          { kind: "completeness", phrase: "没有遗漏" },
+        ]),
         { hasActiveCard: false },
         {
           classificationRequired: true,
@@ -1453,7 +1627,7 @@ describe("model-loop-runtime", () => {
       expect(reminder).not.toContain("evaluateArchitectureAndCompletenessClaims");
     });
 
-    it("buildExtendedDowngradedFinalAnswer 把声明替换为 [未验证]，并附人话提示", async () => {
+    it("buildExtendedDowngradedFinalAnswer 丢弃原草稿并返回安全边界答案", async () => {
       const { buildExtendedDowngradedFinalAnswer } = await import("./model-loop-runtime.js");
       const out = buildExtendedDowngradedFinalAnswer(
         "本次改动符合架构边界，没有架构漂移。",
@@ -1468,11 +1642,12 @@ describe("model-loop-runtime", () => {
         },
         "zh-CN",
       );
-      expect(out).toContain("[未验证]");
+      expect(out).toContain("当前证据不足");
+      expect(out).toContain("缺少支撑");
+      expect(out).toContain("被拦截的声明类型");
       expect(out).not.toContain("符合架构边界");
       expect(out).not.toContain("没有架构漂移");
-      expect(out).toContain("未验证");
-      expect(out).not.toContain("Architecture Card 与 drift check");
+      expect(out).not.toContain("[未验证]");
       expect(out).not.toMatch(/retry|downgrade|kinds|sourceRef|修正版回答如下/iu);
     });
   });

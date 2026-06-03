@@ -81,7 +81,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     btwPrefix: "临时插问",
     evidenceBlocked:
       "尚未确认，需要先检查。涉及代码事实的结论必须先通过 /read、/grep、索引查询或命令输出获得证据。",
-    claimNeedsDisclaimer: "缺少证据，必须降级为未验证或待确认表述。",
+    claimNeedsDisclaimer: "缺少证据，请补齐匹配证据或移除该声明。",
     projectRulesMissingHint:
       "[hint:info] 缺少 LINGHUN.md 项目规则；如需基础模板，可运行 /memory init。不会自动生成或打断输入。",
     toolInterrupted: "当前模型响应或工具调用已取消；可以继续输入。",
@@ -129,8 +129,7 @@ export const messages: Record<Language, Record<MessageKey, string>> = {
     btwPrefix: "Temporary question",
     evidenceBlocked:
       "Not confirmed yet; evidence is required first. Use /read, /grep, index query, or command output before code-fact claims.",
-    claimNeedsDisclaimer:
-      "Evidence is missing; downgrade to unverified or pending confirmation wording.",
+    claimNeedsDisclaimer: "Evidence is missing; gather matching evidence or remove the claim.",
     projectRulesMissingHint:
       "[hint:info] LINGHUN.md project rules are missing. To create a basic template, run /memory init. I will not generate it automatically or interrupt input.",
     toolInterrupted: "The current model response or tool call was cancelled; input is ready again.",

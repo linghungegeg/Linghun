@@ -3740,7 +3740,11 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand("/claim-check Beta readiness is PASS", context, output);
+    await handleSlashCommand(
+      '/claim-check Beta readiness is PASS LinghunFinalAnswerClaims: {"claims":[{"kind":"beta_readiness","phrase":"Beta readiness is PASS"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("verdict=PARTIAL");
     expect(output.text).toContain("scope=beta");
@@ -3764,7 +3768,11 @@ describe("Phase 06 TUI slash commands", () => {
       createdAt: new Date().toISOString(),
     });
 
-    await handleSlashCommand("/claim-check Beta readiness is PASS", context, output);
+    await handleSlashCommand(
+      '/claim-check Beta readiness is PASS LinghunFinalAnswerClaims: {"claims":[{"kind":"beta_readiness","phrase":"Beta readiness is PASS"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("verdict=PARTIAL");
     expect(output.text).toContain("证据已记录；详情用 /details evidence。");
@@ -3801,13 +3809,13 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand(
-      "/claim-check focused tests PASS，mock provider PASS，所以已完成",
+      '/claim-check focused tests PASS，mock provider PASS，所以已完成 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"focused tests PASS"}]}',
       context,
       output,
     );
 
     expect(output.text).toContain("缺少证据");
-    expect(output.text).toContain("已完成");
+    expect(output.text).toContain("focused tests PASS");
     expect(output.text).not.toContain("Claim Checker：通过");
   });
 
@@ -3832,7 +3840,11 @@ describe("Phase 06 TUI slash commands", () => {
       createdAt: new Date().toISOString(),
     });
 
-    await handleSlashCommand("/claim-check 已完成，测试通过，PASS。", context, output);
+    await handleSlashCommand(
+      '/claim-check 已完成，测试通过，PASS。 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("缺少证据");
     expect(output.text).not.toContain("Claim Checker：通过");
@@ -3853,7 +3865,11 @@ describe("Phase 06 TUI slash commands", () => {
       createdAt: new Date().toISOString(),
     });
 
-    await handleSlashCommand("/claim-check 测试通过", context, output);
+    await handleSlashCommand(
+      '/claim-check 测试通过 LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("Claim Checker：通过");
     expect(output.text).not.toContain("缺少证据");
@@ -8789,7 +8805,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const requests = mockOpenAiToolSequenceWithFinalCalls(
       Array.from({ length: 100 }, () => ({ toolName: "Read", input: { path: "a.txt" } })),
-      "已完成，测试通过，PASS。",
+      '已完成，测试通过，PASS。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
     );
     const output = new MemoryOutput();
 
@@ -8801,7 +8817,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
-    expect(output.text).toContain("[未验证]");
+    expect(output.text).toContain("当前证据不足");
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).not.toContain("[未验证]");
     expect(output.text).not.toContain("已完成，测试通过，PASS。");
     expect(requests.length).toBeGreaterThanOrEqual(101);
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -8809,7 +8827,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(session).toBeTruthy();
     const transcript = (await store.resume(session?.id ?? "")).transcript;
     expect(JSON.stringify(transcript)).toContain("final_answer_claim_gate downgrade");
-    expect(JSON.stringify(transcript)).toContain("[未验证]");
+    expect(JSON.stringify(transcript)).toContain("当前证据不足");
+    expect(JSON.stringify(transcript)).not.toContain("[未验证]");
     expect(JSON.stringify(transcript)).not.toContain("已完成，测试通过，PASS。");
   });
 
@@ -10054,6 +10073,10 @@ describe("Phase 06 TUI slash commands", () => {
   it("StartAgent child loop on Claude uses anthropic_messages tool_use/tool_result continuation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-claude-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
+    const home = await mkdtemp(join(tmpdir(), "linghun-tui-agent-claude-home-"));
+    const configDir = join(home, ".linghun");
+    await mkdir(configDir, { recursive: true });
+    vi.stubEnv("LINGHUN_CONFIG_DIR", configDir);
     vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://relay.example.com/v1");
     vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-test");
     vi.stubEnv("LINGHUN_OPENAI_MODEL", "claude-3-5-sonnet-latest");
@@ -10072,7 +10095,30 @@ describe("Phase 06 TUI slash commands", () => {
             endpointProfile: "chat_completions",
           },
         },
+        modelRoutes: {
+          ...defaultConfig.modelRoutes,
+          routes: defaultConfig.modelRoutes.routes.map((route) =>
+            route.role === "planner" || route.role === "executor"
+              ? {
+                  ...route,
+                  provider: "openai-compatible",
+                  primaryModel: "claude-3-5-sonnet-latest",
+                  fallbackModels: [],
+                }
+              : route,
+          ),
+        },
       }),
+      "utf8",
+    );
+    await writeFile(
+      join(configDir, "provider.env"),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://relay.example.com/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-test",
+        "LINGHUN_OPENAI_MODEL=claude-3-5-sonnet-latest",
+        "LINGHUN_OPENAI_ENDPOINT_PROFILE=chat_completions",
+      ].join("\n"),
       "utf8",
     );
     const requests: Array<{
@@ -13861,11 +13907,15 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/claim-check", context, output);
-    await handleSlashCommand("/claim-check 已修复并已验证", context, output);
+    await handleSlashCommand(
+      '/claim-check 已修复并已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("用法：/claim-check <claim>");
     expect(output.text).toContain("缺少证据");
-    expect(output.text).toContain("未验证 / 待确认");
+    expect(output.text).toContain("补齐匹配证据");
   });
 
   it("D.14D-R2 P3-1: from-scratch '写一个 add 函数' reaches the model (no code-fact pre-gate)", async () => {
@@ -14847,7 +14897,11 @@ describe("Phase 06 TUI slash commands", () => {
     for (const status of ["fail", "partial", "cancelled", "timeout", "stale"] as const) {
       context.lastVerification = createVerificationReportFixture(status);
       await handleSlashCommand("/review", context, output);
-      await handleSlashCommand("/claim-check 已验证", context, output);
+      await handleSlashCommand(
+        '/claim-check 已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+        context,
+        output,
+      );
       expect(output.text).toContain("CONSERVATIVE_NO_PASS");
       expect(output.text).toContain("缺少证据");
     }
@@ -14973,17 +15027,29 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand("/claim-check 已验证", context, output);
+    await handleSlashCommand(
+      '/claim-check 已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+      context,
+      output,
+    );
     await handleSlashCommand("/verify smoke", context, output);
     await handleSlashCommand("/review", context, output);
-    await handleSlashCommand("/claim-check 已验证", context, output);
-    await handleSlashCommand("/claim-check smoke 验证通过", context, output);
+    await handleSlashCommand(
+      '/claim-check 已验证 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"已验证"}]}',
+      context,
+      output,
+    );
+    await handleSlashCommand(
+      '/claim-check smoke 验证通过 LinghunFinalAnswerClaims: {"claims":[{"kind":"verification_claim","phrase":"smoke 验证通过"}]}',
+      context,
+      output,
+    );
 
     expect(output.text).toContain("缺少证据");
     expect(output.text).toContain("Review Report");
     expect(output.text).toContain("Priority");
     expect(output.text).toContain("Suggestion");
-    expect(output.text).toContain("Claim Checker：缺少证据，需降级表述：已验证");
+    expect(output.text).toContain("Claim Checker：缺少证据：已验证");
     expect(output.text).toContain("Claim Checker：通过");
   });
 
@@ -15927,9 +15993,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    // D.13V architecture/completeness gate adds one deterministic retry on the
-    // systemic input (#1 "加一个导出报表功能") before the small-task Write turn.
-    expect(requests).toHaveLength(4);
+    // Architecture/completeness closure claims are now model-declared via
+    // LinghunFinalAnswerClaims; this mock final text has no structured closure claim.
+    expect(requests).toHaveLength(3);
     expect(output.text).not.toContain("Architecture drift");
     expect(output.text).toContain("Linghun 想执行 Write packages/other/src/small.ts。");
     expect(output.text).toContain("允许本次执行？yes / no");
@@ -20987,10 +21053,10 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks[0]?.fullText).toContain("测试已通过");
     expect(ctx.lastFullOutput).toContain("测试已通过");
 
-    const downgraded = "[未验证] 测试已通过，可以发布。\n（缺少 test_passed 证据。）";
+    const downgraded = "当前证据不足，不能给出已验证的最终结论。\n缺少证据：test/build/typecheck/diff-check/smoke。";
     output.replaceAssistantBlockContent(id, downgraded);
     expect(blocks[0]?.fullText).toBe(downgraded);
-    expect(blocks[0]?.summary).toContain("[未验证]");
+    expect(blocks[0]?.summary).toContain("当前证据不足");
     expect(ctx.lastFullOutput).toBe(downgraded);
   });
 
@@ -21028,7 +21094,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     output.discardAssistantBlock(id);
     expect(ctx.lastFullOutput).toBe("preserved");
 
-    output.replaceAssistantBlockContent(id, "[未验证] downgrade");
+    output.replaceAssistantBlockContent(id, "当前证据不足，不能给出已验证的最终结论。");
     expect(ctx.lastFullOutput).toBe("preserved");
   });
 
@@ -22375,8 +22441,11 @@ describe("D.14G git stable point / managed worktree product closure", () => {
         "utf8",
       );
       const output = new MemoryOutput();
-      // 模型不调用工具，两轮都空口声称已建立稳定点。
-      mockSseToolSequence([], "已建立稳定点，当前状态已保存。");
+      // 模型不调用工具，两轮都用结构化契约声称已建立稳定点。
+      mockSseToolSequence(
+        [],
+        '已建立稳定点，当前状态已保存。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"git_operation","phrase":"已建立稳定点"}]}',
+      );
 
       await runTui({
         projectPath: project,
@@ -22441,13 +22510,15 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     vi.unstubAllEnvs();
   });
 
-  function mockSseFinalText(finalText: string): unknown[] {
+  function mockSseFinalText(finalText: string | string[]): unknown[] {
     const requests: unknown[] = [];
+    const finalTexts = Array.isArray(finalText) ? finalText : [finalText];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
         requests.push(JSON.parse(String(init.body)));
-        const body = `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+        const content = finalTexts[Math.min(requests.length - 1, finalTexts.length - 1)] ?? "";
+        const body = `data: ${JSON.stringify({ id: `c${requests.length}`, choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`;
         return new Response(body, {
           status: 200,
           headers: { "content-type": "text/event-stream" },
@@ -22634,9 +22705,12 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
       }),
       "utf8",
     );
-    // 模型空口声称"已完成、测试通过"，无 evidence → final gate 降级 → failure learning。
+    // 模型用结构化契约声明"已完成、测试通过"，无 evidence → final gate 拦截 → failure learning。
     // 输入本身不含代码事实关键词，避免命中输入侧 evidence gate；违规声明出现在模型回答里。
-    mockSseFinalText("已完成，测试通过，PASS，一切就绪。");
+    mockSseFinalText([
+      '已完成，测试通过，PASS，一切就绪。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      '已完成，测试通过，PASS，一切就绪。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+    ]);
 
     await runTui({
       projectPath: project,

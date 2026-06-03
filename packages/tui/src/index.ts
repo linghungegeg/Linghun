@@ -9458,17 +9458,6 @@ async function sendMessage(
   }
 
   if (assistantText) {
-    // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
-    // （RuntimeStatusForModel= / ControlledMemorySummary= / MemoryBoundary= /
-    // EvidenceSummary= / CommandCapabilitySummary= 等）原样复述，进主屏前清掉，
-    // 避免内部运行时 token 泄漏。doctor/details 诊断能力不受影响。
-    {
-      const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
-      if (sanitized !== assistantText) {
-        assistantText = sanitized;
-        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-      }
-    }
     // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
     // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
     {
@@ -9501,6 +9490,18 @@ async function sendMessage(
       const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
       if (visibleAssistantText !== assistantText) {
         assistantText = visibleAssistantText;
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      }
+    }
+    // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
+    // （RuntimeStatusForModel= / ControlledMemorySummary= / MemoryBoundary= /
+    // EvidenceSummary= / CommandCapabilitySummary= 等）原样复述，进主屏前清掉，
+    // 避免内部运行时 token 泄漏。doctor/details 诊断能力不受影响。必须在
+    // final-answer gate 之后执行，避免提前移除 LinghunFinalAnswerClaims 契约。
+    {
+      const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
+      if (sanitized !== assistantText) {
+        assistantText = sanitized;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
@@ -9973,8 +9974,8 @@ async function downgradeUnsupportedFinalAnswer(
   const downgraded = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
   replaceAssistantBlockContent(output, assistantStreamBlockId, downgraded);
   const isBenignSecretSafety =
-    (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(downgraded) &&
-      !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(downgraded)) ||
+    (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
+      !/代码里|调用链是|\bin\s+the\s+code\b|\bcall\s+chain\s+is\b/iu.test(assistantText)) ||
     verdict.unsupportedKinds.length === 0;
   if (!isBenignSecretSafety) {
     await captureFailureLearning(context, sessionId, {
@@ -9982,7 +9983,7 @@ async function downgradeUnsupportedFinalAnswer(
       failureSummary: `final answer downgraded: unsupported claim kinds=${verdict.unsupportedKinds.join(",")}`,
       rootCauseGuess: "claimed completion/verification/fact without supporting evidence",
       avoidNextTime:
-        "Only claim completion/verification/fixed when matching evidence exists; otherwise mark as unverified",
+        "Only declare completion/verification/fixed when matching evidence exists; otherwise remove the claim or gather evidence first",
       sourceRef: "event:final_answer_claim_gate",
       relatedTarget: verdict.unsupportedKinds.join(","),
       severity: "high",
@@ -10307,15 +10308,6 @@ async function continueModelAfterToolResults(
       }
     }
     if (assistantText) {
-      // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
-      // 同样在 assistant 文本进主屏前清掉内部 system-prompt 字段复述。
-      {
-        const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
-        if (sanitized !== assistantText) {
-          assistantText = sanitized;
-          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        }
-      }
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
       {
@@ -10348,6 +10340,16 @@ async function continueModelAfterToolResults(
         const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
         if (visibleAssistantText !== assistantText) {
           assistantText = visibleAssistantText;
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        }
+      }
+      // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
+      // 同样在 assistant 文本进主屏前清掉内部 system-prompt 字段复述；必须在
+      // final-answer gate 之后执行，避免提前移除 LinghunFinalAnswerClaims 契约。
+      {
+        const sanitized = sanitizeMainScreenLeakage(assistantText, context.language);
+        if (sanitized !== assistantText) {
+          assistantText = sanitized;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }

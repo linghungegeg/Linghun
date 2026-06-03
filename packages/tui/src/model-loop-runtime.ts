@@ -706,7 +706,9 @@ export type FinalAnswerClaimKind =
   | "ccb_parity"
   | "beta_readiness"
   | "git_operation"
-  | "action_executed";
+  | "action_executed"
+  | "architecture_boundary"
+  | "completeness";
 
 export type FinalAnswerClaimMatch = {
   kind: FinalAnswerClaimKind;
@@ -749,6 +751,8 @@ const STALE_THRESHOLDS_MS: Record<FinalAnswerClaimKind, number | null> = {
   // Run 2 P1-2：mutating 动作（install/Bash/Write/Edit/index refresh）的"已执行成功"声明，
   // 绑定到本会话真实成功 evidence；执行成功通常 30 分钟内有效，超时按需重新验证。
   action_executed: 30 * 60 * 1000,
+  architecture_boundary: null,
+  completeness: null,
 };
 
 export function isEvidenceStaleForClaim(
@@ -762,12 +766,6 @@ export function isEvidenceStaleForClaim(
   if (Number.isNaN(created)) return false;
   return now.getTime() - created > threshold;
 }
-
-type ClaimPhraseSpec = {
-  kind: FinalAnswerClaimKind;
-  phrase: string;
-  aliases?: FinalAnswerClaimKind[];
-};
 
 const FINAL_ANSWER_CLAIM_KINDS: readonly FinalAnswerClaimKind[] = [
   "completion_claim",
@@ -783,165 +781,9 @@ const FINAL_ANSWER_CLAIM_KINDS: readonly FinalAnswerClaimKind[] = [
   "beta_readiness",
   "git_operation",
   "action_executed",
+  "architecture_boundary",
+  "completeness",
 ];
-
-const LEGACY_TEXT_CLAIM_PHRASES: ClaimPhraseSpec[] = [
-  { kind: "completion_claim", phrase: "\u5df2\u5b8c\u6210", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "\u5168\u90e8\u5b8c\u6210", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "\u5df2\u4fee\u590d", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "completed", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "fixed", aliases: ["completion_pass"] },
-  { kind: "test_claim", phrase: "\u6d4b\u8bd5\u901a\u8fc7", aliases: ["completion_pass"] },
-  { kind: "test_claim", phrase: "tests passed", aliases: ["completion_pass"] },
-  { kind: "test_claim", phrase: "test passed", aliases: ["completion_pass"] },
-  { kind: "test_claim", phrase: "PASS", aliases: ["completion_pass"] },
-  { kind: "verification_claim", phrase: "\u5df2\u9a8c\u8bc1", aliases: ["completion_pass"] },
-  { kind: "verification_claim", phrase: "verified", aliases: ["completion_pass"] },
-  {
-    kind: "completion_claim",
-    phrase: "\u6210\u719f\u53ef\u53d1\u5e03",
-    aliases: ["completion_pass"],
-  },
-  { kind: "completion_claim", phrase: "\u65e0\u98ce\u9669", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "\u65e0\u95ee\u9898", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "\u6ca1\u95ee\u9898", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "build passed", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "tsc passed", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "diff-check passed", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "diff check passed", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "smoke-ready", aliases: ["completion_pass"] },
-  { kind: "completion_claim", phrase: "release-ready", aliases: ["completion_pass"] },
-  {
-    kind: "completion_claim",
-    phrase: "production-ready",
-    aliases: ["completion_pass", "ccb_parity"],
-  },
-  { kind: "code_fact", phrase: "\u4ee3\u7801\u91cc" },
-  { kind: "code_fact", phrase: "\u8c03\u7528\u94fe\u662f" },
-  { kind: "code_fact", phrase: "\u5f53\u524d\u5b9e\u73b0\u662f" },
-  { kind: "code_fact", phrase: "\u914d\u7f6e\u662f" },
-  { kind: "code_fact", phrase: "in the code" },
-  { kind: "code_fact", phrase: "call chain is" },
-  { kind: "code_fact", phrase: "the config is" },
-  { kind: "external_current_fact", phrase: "\u4eca\u5929" },
-  { kind: "external_current_fact", phrase: "\u6700\u65b0\u7248\u672c" },
-  { kind: "external_current_fact", phrase: "\u6700\u65b0\u6a21\u578b" },
-  { kind: "external_current_fact", phrase: "\u5f53\u524d\u5b98\u7f51" },
-  { kind: "external_current_fact", phrase: "\u5f53\u524d\u4ef7\u683c" },
-  { kind: "external_current_fact", phrase: "\u6700\u65b0\u4ef7\u683c" },
-  { kind: "external_current_fact", phrase: "today's" },
-  { kind: "external_current_fact", phrase: "current price" },
-  { kind: "external_current_fact", phrase: "current version" },
-  { kind: "external_current_fact", phrase: "current api" },
-  { kind: "external_current_fact", phrase: "current website" },
-  { kind: "external_current_fact", phrase: "latest price" },
-  { kind: "external_current_fact", phrase: "latest version" },
-  { kind: "external_current_fact", phrase: "latest model" },
-  { kind: "external_current_fact", phrase: "latest release" },
-  { kind: "ccb_parity", phrase: "\u7b49\u4e8e ccb" },
-  { kind: "ccb_parity", phrase: "\u4e0e ccb \u4e00\u81f4" },
-  { kind: "ccb_parity", phrase: "\u4e0e ccb \u5bf9\u9f50" },
-  { kind: "ccb_parity", phrase: "ccb parity" },
-  { kind: "beta_readiness", phrase: "beta ready" },
-  { kind: "beta_readiness", phrase: "beta readiness" },
-  { kind: "beta_readiness", phrase: "beta pass" },
-  { kind: "beta_readiness", phrase: "beta completed" },
-  { kind: "beta_readiness", phrase: "\u8fdb\u5165 beta" },
-  { kind: "git_operation", phrase: "\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9" },
-  { kind: "git_operation", phrase: "\u5df2\u521b\u5efa\u7a33\u5b9a\u70b9" },
-  { kind: "git_operation", phrase: "\u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001" },
-  { kind: "git_operation", phrase: "\u5df2\u521b\u5efa worktree" },
-  { kind: "git_operation", phrase: "\u5df2\u751f\u6210 worktree" },
-  { kind: "git_operation", phrase: "\u5df2\u5220\u9664 worktree" },
-  { kind: "git_operation", phrase: "worktree created" },
-  { kind: "git_operation", phrase: "worktree removed" },
-  { kind: "git_operation", phrase: "worktree deleted" },
-  { kind: "git_operation", phrase: "stable point created" },
-  { kind: "git_operation", phrase: "stable point saved" },
-  {
-    kind: "file_change_claim",
-    phrase: "\u5df2\u6210\u529f\u5199\u5165",
-    aliases: ["action_executed"],
-  },
-  {
-    kind: "file_change_claim",
-    phrase: "\u5df2\u5199\u5165\u6587\u4ef6",
-    aliases: ["action_executed"],
-  },
-  {
-    kind: "file_change_claim",
-    phrase: "\u6587\u4ef6\u5df2\u4fee\u6539",
-    aliases: ["action_executed"],
-  },
-  { kind: "file_change_claim", phrase: "file changed", aliases: ["action_executed"] },
-  { kind: "file_change_claim", phrase: "file modified", aliases: ["action_executed"] },
-  { kind: "file_change_claim", phrase: "file written", aliases: ["action_executed"] },
-  { kind: "action_executed", phrase: "\u5df2\u5b89\u88c5" },
-  { kind: "action_executed", phrase: "\u5df2\u6210\u529f\u5b89\u88c5" },
-  { kind: "action_executed", phrase: "\u5b89\u88c5\u6210\u529f" },
-  { kind: "action_executed", phrase: "\u5b89\u88c5\u5b8c\u6210" },
-  { kind: "action_executed", phrase: "\u4f9d\u8d56\u5df2\u5b89\u88c5" },
-  { kind: "action_executed", phrase: "\u5df2\u6267\u884c" },
-  { kind: "action_executed", phrase: "\u5df2\u6210\u529f\u6267\u884c" },
-  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6267\u884c" },
-  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6210\u529f\u6267\u884c" },
-  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u8fd0\u884c" },
-  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6210\u529f\u8fd0\u884c" },
-  { kind: "action_executed", phrase: "\u7d22\u5f15\u5df2\u5237\u65b0" },
-  { kind: "action_executed", phrase: "\u7d22\u5f15\u5df2\u91cd\u5efa" },
-  { kind: "action_executed", phrase: "\u5df2\u5237\u65b0\u7d22\u5f15" },
-  { kind: "action_executed", phrase: "\u5df2\u91cd\u5efa\u7d22\u5f15" },
-  { kind: "action_executed", phrase: "\u751f\u56fe\u7ed3\u679c\u5df2\u843d\u76d8" },
-  { kind: "action_executed", phrase: "\u56fe\u7247\u7ed3\u679c\u5df2\u751f\u6210" },
-  { kind: "action_executed", phrase: "image result generated" },
-  { kind: "action_executed", phrase: "image result saved" },
-  { kind: "action_executed", phrase: "successfully installed" },
-  { kind: "action_executed", phrase: "successfully ran" },
-  { kind: "action_executed", phrase: "successfully executed" },
-  { kind: "action_executed", phrase: "index refreshed" },
-  { kind: "action_executed", phrase: "index rebuilt" },
-  { kind: "workflow_status_claim", phrase: "workflow completed" },
-  { kind: "workflow_status_claim", phrase: "workflow done" },
-  { kind: "workflow_status_claim", phrase: "\u5de5\u4f5c\u6d41\u5df2\u5b8c\u6210" },
-  { kind: "agent_status_claim", phrase: "agent completed" },
-  { kind: "agent_status_claim", phrase: "agents completed" },
-  { kind: "agent_status_claim", phrase: "multi-agent completed" },
-  { kind: "agent_status_claim", phrase: "\u591a agent \u5df2\u5b8c\u6210" },
-  { kind: "agent_status_claim", phrase: "\u591a\u667a\u80fd\u4f53\u5df2\u5b8c\u6210" },
-];
-
-const LOCAL_CURRENT_PHRASES = [
-  "\u5f53\u524d\u5206\u652f",
-  "\u5f53\u524d\u76ee\u5f55",
-  "\u5f53\u524d\u6587\u4ef6",
-  "\u5f53\u524d\u4f1a\u8bdd",
-  "\u5f53\u524d\u9879\u76ee",
-  "\u5f53\u524d\u5de5\u4f5c\u76ee\u5f55",
-  "\u5f53\u524d\u6a21\u5f0f",
-  "\u5f53\u524d\u7ec4\u4ef6",
-  "\u5f53\u524d\u5b9e\u73b0\u662f",
-];
-
-function normalizedClaimText(text: string): string {
-  return text.toLocaleLowerCase().replace(/\s+/gu, " ").trim();
-}
-
-function findPhraseIndex(text: string, phrase: string): number {
-  if (phrase === "PASS") {
-    const index = text.indexOf("PASS");
-    if (index < 0) return -1;
-    const before = text[index - 1] ?? " ";
-    const after = text[index + phrase.length] ?? " ";
-    if (isAsciiLetterOrDigit(before) || isAsciiLetterOrDigit(after)) return -1;
-    return index;
-  }
-  return normalizedClaimText(text).indexOf(normalizedClaimText(phrase));
-}
-
-function isAsciiLetterOrDigit(value: string): boolean {
-  const code = value.charCodeAt(0);
-  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-}
 
 function pushStructuredClaim(
   out: FinalAnswerClaimMatch[],
@@ -955,88 +797,12 @@ function pushStructuredClaim(
   out.push({ kind, phrase });
 }
 
-// 元讨论检测：文本在解释/讨论系统机制本身（反幻觉、gate、evidence、验证系统等），
-// 而非对当前任务做事实声明时，不应触发 completion/code/action 类 claim。
-function isMetaDiscussion(text: string): boolean {
-  const lowered = normalizedClaimText(text);
-  return [
-    "\u53cd\u5e7b\u89c9\u7cfb\u7edf",
-    "final answer gate",
-    "claim gate",
-    "evidence",
-    "\u8bc1\u636e\u673a\u5236",
-    "\u9a8c\u8bc1\u7cfb\u7edf",
-    "\u4e0d\u80fd\u8bf4",
-    "\u4e0d\u8ba9\u4f60\u8bf4",
-    "\u4f1a\u88ab\u62e6\u622a",
-    "\u88ab\u964d\u7ea7",
-  ].some((phrase) => lowered.includes(normalizedClaimText(phrase)));
-}
-
-function isQuotedExample(text: string, index: number, phrase: string): boolean {
-  const before = text[index - 1];
-  const after = text[index + phrase.length];
-  return (
-    (before === "'" && after === "'") ||
-    (before === '"' && after === '"') ||
-    (before === "\u201c" && after === "\u201d") ||
-    (before === "\u2018" && after === "\u2019")
-  );
-}
-
-function isMetaDiscussionExampleMatch(text: string, match: FinalAnswerClaimMatch): boolean {
-  if (!isMetaDiscussion(text)) return false;
-  const index = text.indexOf(match.phrase);
-  if (index < 0) return false;
-  const window = text.slice(Math.max(0, index - 60), index + match.phrase.length + 60);
-  if (isQuotedExample(text, index, match.phrase)) return true;
-  const before = text.slice(Math.max(0, index - 60), index);
-  return [
-    "\u4f1a\u68c0\u6d4b",
-    "\u68c0\u6d4b",
-    "\u8bc6\u522b",
-    "\u547d\u4e2d",
-    "\u62e6\u622a",
-    "\u964d\u7ea7",
-    "\u4e0d\u80fd\u8bf4",
-    "\u4e0d\u8ba9\u4f60\u8bf4",
-    "phrases like",
-    "detects phrases",
-    "detect phrases",
-    "requires evidence",
-  ].some((phrase) => normalizedClaimText(before).includes(phrase));
-}
-
 export function extractStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
   return parseStructuredFinalAnswerClaims(text);
 }
 
-export function extractLegacyTextRiskClaims(text: string): FinalAnswerClaimMatch[] {
-  if (!text) return [];
-  const matches: FinalAnswerClaimMatch[] = [];
-  const seen = new Set<string>();
-  const localCurrentOnly = LOCAL_CURRENT_PHRASES.some((phrase) =>
-    normalizedClaimText(text).includes(normalizedClaimText(phrase)),
-  );
-  for (const spec of LEGACY_TEXT_CLAIM_PHRASES) {
-    if (spec.kind === "external_current_fact" && localCurrentOnly) continue;
-    const phraseIndex = findPhraseIndex(text, spec.phrase);
-    if (phraseIndex < 0) continue;
-    const match = {
-      kind: spec.kind,
-      phrase: text.slice(phraseIndex, phraseIndex + spec.phrase.length),
-    };
-    if (isMetaDiscussionExampleMatch(text, match)) continue;
-    pushStructuredClaim(matches, seen, spec.kind, match.phrase);
-    for (const alias of spec.aliases ?? []) {
-      pushStructuredClaim(matches, seen, alias, match.phrase);
-    }
-  }
-  return matches;
-}
-
 export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
-  return extractLegacyTextRiskClaims(text);
+  return extractStructuredFinalAnswerClaims(text);
 }
 
 function parseStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
@@ -1044,9 +810,10 @@ function parseStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[]
   const line = text
     .split(/\r?\n/u)
     .map((item) => item.trim())
-    .find((item) => item.startsWith(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX));
+    .find((item) => item.includes(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX));
   if (!line) return [];
-  const payload = line.slice(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX.length).trim();
+  const prefixIndex = line.indexOf(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX);
+  const payload = line.slice(prefixIndex + STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX.length).trim();
   if (!payload) return [];
   try {
     const parsed: unknown = JSON.parse(payload);
@@ -1356,6 +1123,8 @@ const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
   beta_readiness: "Beta readiness verdict (real-tui report-generation PASS)",
   git_operation: "git_operation evidence (real stable point / worktree create / worktree remove)",
   action_executed: "real successful command_output (install / Bash / Write / index refresh)",
+  architecture_boundary: "Architecture Card 与 drift check",
+  completeness: "Solution Completeness classification (single_issue / systemic_gap)",
 };
 
 export function evaluateFinalAnswerClaims(
@@ -1363,13 +1132,10 @@ export function evaluateFinalAnswerClaims(
   evidence: EvidenceRecord[],
   now: Date = new Date(),
 ): FinalAnswerClaimVerdict {
-  const structured = extractStructuredFinalAnswerClaims(text);
-  return evaluateStructuredFinalAnswerClaims(
-    structured.length > 0 ? structured : extractLegacyTextRiskClaims(text),
-    evidence,
-    now,
-    text,
+  const structured = extractStructuredFinalAnswerClaims(text).filter(
+    (claim) => claim.kind !== "architecture_boundary" && claim.kind !== "completeness",
   );
+  return evaluateStructuredFinalAnswerClaims(structured, evidence, now, text);
 }
 
 export function evaluateStructuredFinalAnswerClaims(
@@ -1465,7 +1231,7 @@ export function evaluateStructuredFinalAnswerClaims(
     } else if (kind === "action_executed") {
       supporter = evidenceSupportsActionExecuted;
     } else {
-      // beta_readiness \u7531 createPhase15BetaVerdictScope \u4e3b\u7ba1\uff0cevaluator \u6c38\u8fdc\u4e0d\u653e\u884c\u3002
+      // beta_readiness / architecture_boundary / completeness 由专门 gate 主管，primary evaluator 不放行。
       supporter = () => false;
     }
     const matching = evidence.filter(supporter);
@@ -1512,40 +1278,38 @@ export function createFinalAnswerClaimReminder(
     const stalePart = hasStale
       ? " Some prior evidence was ignored because it is too old to support these claims."
       : "";
-    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}).${stalePart} Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or call a tool first to gather evidence. You have only one rewrite chance.`;
+    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching evidence (missing: ${kinds}).${stalePart} Rewrite the reply using only evidence-backed claims, or call a tool first to gather evidence. Keep LinghunFinalAnswerClaims aligned with the rewritten answer. You have only one rewrite chance.`;
   }
   const stalePart = hasStale
     ? "\u90e8\u5206\u65e9\u671f\u8bc1\u636e\u5df2\u8fc7\u671f\u88ab\u5ffd\u7565\u3002"
     : "";
-  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002${stalePart}\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
+  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u7c7b\u578b\u7684\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002${stalePart}\u8bf7\u57fa\u4e8e\u5df2\u6709\u8bc1\u636e\u91cd\u5199\u56de\u7b54\uff1b\u82e5\u8bc1\u636e\u4e0d\u8db3\uff0c\u5148\u8c03\u7528\u5de5\u5177\u8865\u8bc1\u636e\u6216\u79fb\u9664\u8be5\u58f0\u660e\u3002LinghunFinalAnswerClaims \u5fc5\u987b\u4e0e\u91cd\u5199\u540e\u7684\u7b54\u6848\u4fdd\u6301\u4e00\u81f4\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
 }
 
-// \u4fee\u6b63\u5931\u8d25\u540e\u672c\u5730\u964d\u7ea7\uff1a\u628a\u8fdd\u89c4 phrase \u4ece\u539f\u6587\u66ff\u6362\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u5e76\u8ffd\u52a0\u4e00\u6bb5\u4eba\u8bdd\u77ed\u63d0\u793a\u3002
-// \u4e0d\u66b4\u9732 internal validator id / FinalAnswerClaimGate / EvidenceSummary \u7b49\u5185\u90e8\u8bcd\u3002
+// 修正失败后本地生成安全边界答案：丢弃未通过 gate 的 draft，不再做用户正文字符串替换。
+// 用户看到的是底层 evidence verdict 生成的 answer，而不是补丁化的原文。
 export function buildDowngradedFinalAnswer(
   originalText: string,
   verdict: FinalAnswerClaimVerdict,
   language: Language,
 ): string {
-  let safeText = stripStructuredFinalAnswerClaims(originalText);
-  for (const match of verdict.matchedClaims) {
-    if (verdict.unsupportedKinds.includes(match.kind)) {
-      const re = new RegExp(escapeRegExp(match.phrase), "giu");
-      safeText = safeText.replace(
-        re,
-        language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]",
-      );
-    }
-  }
-  const notice =
-    language === "en-US"
-      ? "\nI can only state this as unverified because matching evidence is missing."
-      : '\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u8bc1\u636e\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002';
-  return safeText + notice;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  void originalText;
+  const missing =
+    Array.from(new Set(verdict.missingEvidenceKinds)).join(', ') || 'matching evidence';
+  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(', ') || 'claim';
+  return language === 'en-US'
+    ? [
+        'I cannot provide a verified final claim from the current evidence.',
+        `Missing evidence: ${missing}.`,
+        `Blocked claim types: ${kinds}.`,
+        'I can continue by gathering evidence with tools, or give a limited answer that avoids verified-completion claims.',
+      ].join('\n')
+    : [
+        '当前证据不足，不能给出已验证的最终结论。',
+        `缺少证据：${missing}。`,
+        `被拦截的声明类型：${kinds}。`,
+        '我可以继续调用工具补齐证据，或只给出不包含已验证完成声明的有限结论。',
+      ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,38 +1318,12 @@ function escapeRegExp(value: string): string {
 //
 // \u8bbe\u8ba1\u539f\u5219\uff1a
 // - \u4e0d\u91cd\u5199 evaluateFinalAnswerClaims\uff1b\u4ec5\u4f5c\u4e3a\u989d\u5916\u7684 final-answer hook \u4e0e D.13U \u5e76\u8054\u3002
-// - \u4e0d\u5728\u666e\u901a\u8f93\u5165\u4fa7\u505a\u5173\u952e\u8bcd\u62e6\u622a\uff1b\u53ea\u5728 final answer \u51fa\u73b0"\u58f0\u79f0\u7b26\u5408\u67b6\u6784\u8fb9\u754c / \u6ca1\u6709\u67b6\u6784\u6f02\u79fb
-//   / \u5168\u90e8\u5b8c\u6210\u3001\u6ca1\u6709\u9057\u6f0f"\u7b49\u9ad8\u98ce\u9669\u7ed3\u8bba\u65f6\u68c0\u67e5\u3002
+// - \u4e0d\u5728\u666e\u901a\u8f93\u5165\u4fa7\u505a\u5173\u952e\u8bcd\u62e6\u622a\uff1b\u53ea\u68c0\u67e5\u6a21\u578b\u663e\u5f0f\u58f0\u660e\u7684
+//   LinghunFinalAnswerClaims \u7ed3\u6784\u5316\u5951\u7ea6\u3002
 // - \u6ca1\u6709 architecture card / drift \u68c0\u67e5 / completeness \u5206\u7c7b\u65f6\uff0c\u76f8\u5e94 claim \u88ab\u6807\u8bb0\u4e3a
 //   needs_disclaimer\uff0c\u89e6\u53d1 retry \u6216\u672c\u5730\u964d\u7ea7\u3002
 // - \u590d\u7528\u73b0\u6709 architecture-runtime \u7684 detectArchitectureDrift / architecture-boundary \u7684
 //   validateChangeDeclaration \u80fd\u529b\uff0c\u4e0d\u65b0\u5efa\u7b2c\u4e8c\u5957\u7cfb\u7edf\u3002
-
-const ARCHITECTURE_BOUNDARY_CLAIM_PATTERNS: RegExp[] = [
-  /\u7b26\u5408\u67b6\u6784\u8fb9\u754c/u, // \u7b26\u5408\u67b6\u6784\u8fb9\u754c
-  /\u67b6\u6784\u5df2\u95ed\u5408/u, // \u67b6\u6784\u5df2\u95ed\u5408
-  /\u67b6\u6784\u8fb9\u754c\u5df2\u95ed\u5408/u, // \u67b6\u6784\u8fb9\u754c\u5df2\u95ed\u5408
-  /\u6ca1\u6709\u67b6\u6784\u6f02\u79fb/u, // \u6ca1\u6709\u67b6\u6784\u6f02\u79fb
-  /\u67b6\u6784\u6ca1\u6709\u6f02\u79fb/u, // \u67b6\u6784\u6ca1\u6709\u6f02\u79fb
-  /\u67b6\u6784\u4e0d\u4f1a\u6f02\u79fb/u, // \u67b6\u6784\u4e0d\u4f1a\u6f02\u79fb
-  /\bno\s+architecture\s+drift\b/iu,
-  /\barchitecture\s+(?:is\s+)?(?:closed|aligned|clean|consistent)\b/iu,
-  /\barchitecture\s+boundaries?\s+(?:closed|clean|respected)\b/iu,
-  /\bboundaries?\s+(?:are\s+)?(?:respected|honored|clean)\b/iu,
-];
-
-const COMPLETENESS_CLAIM_PATTERNS: RegExp[] = [
-  /\u6240\u6709\u4efb\u52a1\u5b8c\u6574\u5b8c\u6210/u, // \u6240\u6709\u4efb\u52a1\u5b8c\u6574\u5b8c\u6210
-  /\u6240\u6709\u95ee\u9898\u90fd\u5df2\u89e3\u51b3/u, // \u6240\u6709\u95ee\u9898\u90fd\u5df2\u89e3\u51b3
-  /\u6ca1\u6709\u9057\u6f0f/u, // \u6ca1\u6709\u9057\u6f0f
-  /\u4e00\u4e2a\u90fd\u4e0d\u5c11/u, // \u4e00\u4e2a\u90fd\u4e0d\u5c11
-  /\u5168\u90e8\u5b8c\u6574/u, // \u5168\u90e8\u5b8c\u6574
-  /\u5168\u9762\u8986\u76d6/u, // \u5168\u9762\u8986\u76d6
-  /\b(?:no|zero)\s+omissions?\b/iu,
-  /\bnothing\s+left\s+behind\b/iu,
-  /\ball\s+(?:tasks|items|issues)\s+(?:are\s+)?(?:complete|completed|resolved)\b/iu,
-  /\bfull(?:ly)?\s+(?:complete|comprehensive|covered)\b/iu,
-];
 
 export type FinalAnswerArchitectureCheckInput = {
   hasActiveCard: boolean;
@@ -1616,19 +1354,11 @@ export function evaluateArchitectureAndCompletenessClaims(
   architecture: FinalAnswerArchitectureCheckInput,
   completeness: FinalAnswerCompletenessCheckInput,
 ): FinalAnswerExtendedVerdict {
-  const matched: { kind: FinalAnswerExtendedClaimKind; phrase: string }[] = [];
-  for (const re of ARCHITECTURE_BOUNDARY_CLAIM_PATTERNS) {
-    const match = re.exec(text);
-    if (match) {
-      matched.push({ kind: "architecture_boundary", phrase: match[0] });
-    }
-  }
-  for (const re of COMPLETENESS_CLAIM_PATTERNS) {
-    const match = re.exec(text);
-    if (match) {
-      matched.push({ kind: "completeness", phrase: match[0] });
-    }
-  }
+  const matched = extractStructuredFinalAnswerClaims(text).flatMap((claim) =>
+    claim.kind === "architecture_boundary" || claim.kind === "completeness"
+      ? [{ kind: claim.kind, phrase: claim.phrase }]
+      : [],
+  );
   if (matched.length === 0) {
     return {
       status: "passed",
@@ -1683,9 +1413,9 @@ export function createExtendedFinalAnswerReminder(
   const phrases = Array.from(new Set(verdict.matchedClaims.map((m) => m.phrase))).slice(0, 6);
   const kinds = Array.from(new Set(verdict.missingEvidenceKinds)).join(", ");
   if (language === "en-US") {
-    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching support (missing: ${kinds}). Rewrite the reply: drop or downgrade unverified claims to "unverified / pending confirmation", or run a tool / call /claim-check to gather evidence first. You have only one rewrite chance.`;
+    return `Your last reply contains high-risk claims (${phrases.join(", ")}) but the session has no matching support (missing: ${kinds}). Rewrite the reply using only supported architecture/completeness claims, or run a tool / call /claim-check to gather support first. You have only one rewrite chance.`;
   }
-  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002\u8bf7\u91cd\u5199\u56de\u7b54\uff1a\u5220\u9664\u6216\u964d\u7ea7\u672a\u9a8c\u8bc1\u7684\u58f0\u660e\u4e3a"\u672a\u9a8c\u8bc1 / \u5f85\u786e\u8ba4"\uff0c\u6216\u5148\u8c03\u7528\u5de5\u5177 / \u5148\u8d70 /claim-check \u8865\u8bc1\u636e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
+  return `\u4f60\u4e0a\u6b21\u56de\u7b54\u91cc\u51fa\u73b0\u4e86\u9ad8\u98ce\u9669\u58f0\u660e\uff08${phrases.join(", ")}\uff09\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u6ca1\u6709\u5bf9\u5e94\u8bc1\u636e\uff08\u7f3a\uff1a${kinds}\uff09\u3002\u8bf7\u57fa\u4e8e\u5df2\u6709\u67b6\u6784 / \u5b8c\u6574\u6027\u652f\u6491\u91cd\u5199\u56de\u7b54\uff1b\u82e5\u652f\u6491\u4e0d\u8db3\uff0c\u5148\u8c03\u7528\u5de5\u5177 / \u5148\u8d70 /claim-check \u8865\u8bc1\u636e\u6216\u79fb\u9664\u8be5\u58f0\u660e\u3002\u4ec5\u672c\u8f6e\u4e00\u6b21\u4fee\u6b63\u673a\u4f1a\u3002`;
 }
 
 export function buildExtendedDowngradedFinalAnswer(
@@ -1693,21 +1423,23 @@ export function buildExtendedDowngradedFinalAnswer(
   verdict: FinalAnswerExtendedVerdict,
   language: Language,
 ): string {
-  let safeText = originalText;
-  for (const match of verdict.matchedClaims) {
-    if (verdict.unsupportedKinds.includes(match.kind)) {
-      const re = new RegExp(escapeRegExp(match.phrase), "giu");
-      safeText = safeText.replace(
-        re,
-        language === "en-US" ? "[unverified]" : "[\u672a\u9a8c\u8bc1]",
-      );
-    }
-  }
-  const notice =
-    language === "en-US"
-      ? "\nI can only state this as unverified because matching support is missing."
-      : '\n\u7531\u4e8e\u7f3a\u5c11\u5339\u914d\u652f\u6491\uff0c\u8fd9\u4e2a\u7ed3\u8bba\u53ea\u80fd\u6309"\u672a\u9a8c\u8bc1"\u8868\u8ff0\u3002';
-  return safeText + notice;
+  void originalText;
+  const missing =
+    Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching support";
+  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  return language === "en-US"
+    ? [
+        "I cannot provide a verified architecture or completeness claim from the current evidence.",
+        `Missing support: ${missing}.`,
+        `Blocked claim types: ${kinds}.`,
+        "I can continue by gathering support, or give a limited answer that avoids closure claims.",
+      ].join("\n")
+    : [
+        "当前证据不足，不能给出已验证的架构或完整性结论。",
+        `缺少支撑：${missing}。`,
+        `被拦截的声明类型：${kinds}。`,
+        "我可以继续补齐支撑，或只给出不包含闭合性声明的有限结论。",
+      ].join("\n");
 }
 
 export function finalAnswerHasCompletenessClassification(text: string): boolean {
