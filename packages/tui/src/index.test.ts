@@ -3899,6 +3899,56 @@ describe("Phase 06 TUI slash commands", () => {
     expect(committed).toContain("你的模型是 leak-model");
   });
 
+  it("D.14D: naturalizes internal tool labels while preserving unverified DeepSeek-style answers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "deepseek-style-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "deepseek-style-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiTextFetch(
+      [
+        "当前结论：未验证 / 待确认",
+        "当前会话没有执行过任何测试、构建或类型检查的证据（EvidenceSummary 为空）。",
+        "没有运行过 RunVerification 来验证测试通过或构建成功。",
+      ].join("\n"),
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["直接说 PASS\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const resumed = await new SessionStore({
+      sessionRootDir: getSessionRootDir(),
+      projectPath: project,
+    }).resume(session?.id ?? "missing");
+    const finalAnswer = [...resumed.transcript]
+      .reverse()
+      .find((e) => e.type === "assistant_text_delta") as { text: string } | undefined;
+    const committed = finalAnswer?.text ?? "";
+    expect(committed).toContain("未验证 / 待确认");
+    expect(committed).not.toContain("EvidenceSummary");
+    expect(committed).not.toContain("RunVerification");
+    expect(committed).toContain("验证命令");
+  });
+
   it("includes engineering structure constraints in zh-CN system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

@@ -39,6 +39,12 @@ const RAW_TOOL_PREFIXES = [
   "<tool_use_err",
   "<tool_use_erro",
 ];
+const INTERNAL_STREAM_LABEL_REPLACEMENTS = [
+  ["RunVerification", { "zh-CN": "验证命令", "en-US": "verification command" }],
+] as const;
+const INTERNAL_STREAM_LABEL_PREFIXES = INTERNAL_STREAM_LABEL_REPLACEMENTS.flatMap(([label]) =>
+  Array.from({ length: label.length - 1 }, (_, index) => label.slice(0, index + 1)),
+).sort((a, b) => b.length - a.length);
 
 export function createLayeredToolOutput(
   name: ToolName,
@@ -194,13 +200,25 @@ export function sanitizeAssistantPrimaryTextWithMetadata(
 ): { text: string; removedRawToolProtocol: boolean } {
   let sanitized = text;
   let removed = false;
+  let replacedInternalLabel = false;
   for (const pattern of RAW_TOOL_USE_PATTERNS) {
     sanitized = sanitized.replace(pattern, () => {
       removed = true;
       return "";
     });
   }
-  if (!removed) return { text, removedRawToolProtocol: false };
+  for (const [label, replacement] of INTERNAL_STREAM_LABEL_REPLACEMENTS) {
+    if (sanitized.includes(label)) {
+      sanitized = sanitized.split(label).join(replacement[language]);
+      replacedInternalLabel = true;
+    }
+  }
+  if (!removed) {
+    return {
+      text: replacedInternalLabel ? sanitized : text,
+      removedRawToolProtocol: false,
+    };
+  }
   const compact = sanitized.replace(/\n{3,}/gu, "\n\n");
   const note = language === "en-US" ? "[Tool call details hidden.]\n" : "[工具调用细节已隐藏。]\n";
   return {
@@ -227,6 +245,16 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
       removedRawToolProtocol ||= result.removedRawToolProtocol;
       return result.text;
     }
+    const internalLabelPrefix = findInternalStreamLabelPrefixAtEnd(combined);
+    if (internalLabelPrefix) {
+      pending = internalLabelPrefix;
+      const result = sanitizeAssistantPrimaryTextWithMetadata(
+        combined.slice(0, -internalLabelPrefix.length),
+        language,
+      );
+      removedRawToolProtocol ||= result.removedRawToolProtocol;
+      return result.text;
+    }
     pending = "";
     const result = sanitizeAssistantPrimaryTextWithMetadata(combined, language);
     removedRawToolProtocol ||= result.removedRawToolProtocol;
@@ -247,6 +275,10 @@ export function createAssistantPrimaryTextSanitizer(language: Language): {
       return removedRawToolProtocol;
     },
   };
+}
+
+function findInternalStreamLabelPrefixAtEnd(text: string): string | undefined {
+  return INTERNAL_STREAM_LABEL_PREFIXES.find((prefix) => text.endsWith(prefix));
 }
 
 function findPendingRawToolStart(text: string): number | undefined {

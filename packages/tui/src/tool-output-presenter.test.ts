@@ -9,6 +9,26 @@ import {
 } from "./tool-output-presenter.js";
 
 describe("tool-output-presenter", () => {
+  describe("assistant primary sanitizer", () => {
+    it("naturalizes internal tool labels in streaming output", () => {
+      const text = "没有运行过 RunVerification 来验证测试通过或构建成功。";
+      const out = sanitizeAssistantPrimaryText(text, "zh-CN");
+      expect(out).not.toContain("RunVerification");
+      expect(out).toContain("没有运行过 验证命令 来验证测试通过或构建成功。");
+    });
+
+    it("naturalizes internal tool labels across streamed chunks", () => {
+      const sanitizer = createAssistantPrimaryTextSanitizer("en-US");
+      const out = [
+        sanitizer.push("Run"),
+        sanitizer.push("Verification was not called."),
+        sanitizer.flush(),
+      ].join("");
+      expect(out).not.toContain("RunVerification");
+      expect(out).toContain("verification command was not called");
+    });
+  });
+
   describe("formatToolStart", () => {
     it("Bash 含 command 时输出 Bash(<command>)", () => {
       expect(formatToolStart("Bash", { command: "ls -la" })).toBe("Bash(ls -la)");

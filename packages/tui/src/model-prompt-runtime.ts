@@ -120,6 +120,10 @@ const INTERNAL_PROMPT_TOKENS = [
   "doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
 ] as const;
 
+const INTERNAL_TOOL_LABEL_REPLACEMENTS = [
+  ["RunVerification", { "zh-CN": "验证命令", "en-US": "verification command" }],
+] as const;
+
 /**
  * D.14D — main-screen prompt hygiene sanitizer。
  *
@@ -158,6 +162,12 @@ export function sanitizeMainScreenLeakage(
   for (const token of INTERNAL_PROMPT_TOKENS) {
     if (result.includes(token)) {
       result = result.split(token).join("");
+      redacted = true;
+    }
+  }
+  for (const [label, replacement] of INTERNAL_TOOL_LABEL_REPLACEMENTS) {
+    if (result.includes(label)) {
+      result = result.split(label).join(replacement[language]);
       redacted = true;
     }
   }

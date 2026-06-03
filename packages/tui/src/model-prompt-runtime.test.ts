@@ -39,10 +39,22 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).not.toContain("doNotWriteLongTermMemoryWithoutExplicitMemoryAccept");
   });
 
+  it("naturalizes internal tool labels without dropping the conservative conclusion", () => {
+    const text =
+      "没有查看过项目状态、代码变更或索引状态。\n没有运行过 RunVerification 来验证测试通过或构建成功。";
+    const result = sanitizeMainScreenLeakage(text, "zh-CN");
+    expect(result).not.toContain("RunVerification");
+    expect(result).toContain("没有运行过 验证命令 来验证测试通过或构建成功。");
+    expect(result).toContain("内部运行时上下文已从主屏省略");
+  });
+
   it("uses an English hint for en-US", () => {
-    const text = 'Status:\nRuntimeStatusForModel={"index":{"status":"ready"}}';
+    const text =
+      'Status:\nRuntimeStatusForModel={"index":{"status":"ready"}}\nRunVerification was not called.';
     const result = sanitizeMainScreenLeakage(text, "en-US");
     expect(result).not.toContain("RuntimeStatusForModel");
+    expect(result).not.toContain("RunVerification");
+    expect(result).toContain("verification command was not called");
     expect(result).toContain("Internal runtime context was omitted");
   });
 
