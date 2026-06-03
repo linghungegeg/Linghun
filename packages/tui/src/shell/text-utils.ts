@@ -16,6 +16,33 @@ export function fitText(value: string, max: number): string {
   return result;
 }
 
+export function wrapText(value: string, max: number): string[] {
+  if (max <= 0) return [""];
+  const normalized = value.replace(/\r/g, "");
+  const out: string[] = [];
+  for (const rawLine of normalized.split("\n")) {
+    if (rawLine.length === 0) {
+      out.push("");
+      continue;
+    }
+    let line = "";
+    let width = 0;
+    for (const char of Array.from(rawLine)) {
+      const nextWidth = charWidth(char);
+      if (width > 0 && width + nextWidth > max) {
+        out.push(line);
+        line = char;
+        width = nextWidth;
+        continue;
+      }
+      line += char;
+      width += nextWidth;
+    }
+    out.push(line);
+  }
+  return out.length > 0 ? out : [""];
+}
+
 export function charWidth(char: string): number {
   return /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(
     char,

@@ -143,13 +143,10 @@ import {
 } from "./deferred-tools-catalog.js";
 import {
   checkClaimSupport,
-  checkEvidenceGate,
   createHandoffPendingItems,
   createHandoffRiskItems,
   createPhase15BetaVerdictScope,
   formatClaimCheck,
-  formatSolutionCompletenessReportBlock,
-  needsSolutionCompletenessReportClosure,
   runArchitectureAndCompletenessFinalGate,
 } from "./final-answer-gate.js";
 import {
@@ -4139,8 +4136,10 @@ function getCurrentWorkflowStepRequest(
   steps: WorkflowStepState[],
   stepId: string,
 ): WorkflowBridgeRequestProposal {
-  const completed = new Set(
-    steps.filter((step) => step.status === "completed").map((step) => step.id),
+  const satisfied = new Map(
+    steps
+      .filter((step) => step.status === "completed" || step.status === "partial")
+      .map((step) => [step.id, step.status] as const),
   );
   const runningPlan: NormalizedWorkflowPlan = {
     ...plan,
@@ -4156,11 +4155,13 @@ function getCurrentWorkflowStepRequest(
         status:
           slice.id === stepId
             ? "queued"
-            : completed.has(slice.id)
-              ? "completed"
-              : slice.status === "blocked"
-                ? "queued"
-                : (slice.status ?? "queued"),
+            : satisfied.get(slice.id) === "partial"
+              ? "partial"
+              : satisfied.has(slice.id)
+                ? "completed"
+                : slice.status === "blocked"
+                  ? "queued"
+                  : (slice.status ?? "queued"),
       })),
     })),
   };
@@ -8692,13 +8693,6 @@ async function sendMessage(
   const sessionId = await ensureSession(context);
   context.sessionEnded = false;
   await context.store.appendEvent(sessionId, createUserMessageEvent(text));
-  const gate = checkEvidenceGate(text, context);
-  if (gate) {
-    await appendSystemEvent(context, sessionId, gate, "warning");
-    writeLine(output, gate);
-    writeStatus(output, context);
-    return;
-  }
   let selectedRuntime = getSelectedModelRuntime(context);
   context.model = selectedRuntime.model;
   let selectedTools = currentModelSupportsTools(context, selectedRuntime);
@@ -9224,11 +9218,6 @@ async function sendMessage(
       text: assistantText,
       createdAt: new Date().toISOString(),
     });
-    if (needsSolutionCompletenessReportClosure(context, assistantText)) {
-      const message = formatSolutionCompletenessReportBlock(context);
-      writeLine(output, message);
-      await appendSystemEvent(context, sessionId, message, "warning");
-    }
   }
   writeLightHints(output, context);
   writeStatus(output, context);
@@ -10057,15 +10046,6 @@ async function continueModelAfterToolResults(
         text: assistantText,
         createdAt: new Date().toISOString(),
       });
-      // D.14A-R-Fix P1-1 — continuation 镜像 sendMessage 的 Solution Completeness
-      // 收口：在安全 final answer 入 transcript 之后追加人话 closure block，与
-      // index.ts sendMessage 路径保持一致。closure 仅在 D.13U/D.13V gate 已放行/
-      // 降级后的 assistantText 上运行，不改变上面的 retry/downgrade 顺序。
-      if (needsSolutionCompletenessReportClosure(context, assistantText)) {
-        const message = formatSolutionCompletenessReportBlock(context);
-        writeLine(output, message);
-        await appendSystemEvent(context, sessionId, message, "warning");
-      }
     }
     clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
     if (

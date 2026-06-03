@@ -1237,115 +1237,71 @@ export function formatComposerRenderLines({
   const rawLines = displayText.split("\n");
   const { row: cursorLineIndex, col: cursorCharCol } = getCursorLinePosition(buffer);
 
-  // ─── Multi-line viewport: cursor-centered ────────────────────────────────
-  const totalLines = rawLines.length;
+  const composerWidth = Math.max(8, maxWidth ?? 80);
+  const softLines: Array<{
+    text: string;
+    rawLineIndex: number;
+    startChar: number;
+    endChar: number;
+    prompt: string;
+  }> = [];
+  let cursorSoftIndex = 0;
+  let cursorOutCol = displayWidthOf(PROMPT_MARKER);
+
+  for (let rawIndex = 0; rawIndex < rawLines.length; rawIndex++) {
+    const rawLine = rawLines[rawIndex] ?? "";
+    const chars = Array.from(masking ? "*".repeat(Array.from(rawLine).length) : rawLine);
+    const isFirstRawLine = rawIndex === 0;
+    let startChar = 0;
+    while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
+      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
+      const promptWidth = displayWidthOf(prompt);
+      const budget = Math.max(4, composerWidth - promptWidth);
+      let width = 0;
+      let endChar = startChar;
+      while (endChar < chars.length) {
+        const next = charWidth(chars[endChar] ?? "");
+        if (width > 0 && width + next > budget) break;
+        width += next;
+        endChar++;
+      }
+      if (endChar === startChar && chars.length > 0) endChar++;
+      const text = chars.slice(startChar, endChar).join("");
+      const softIndex = softLines.length;
+      softLines.push({ text, rawLineIndex: rawIndex, startChar, endChar, prompt });
+      if (rawIndex === cursorLineIndex && cursorCharCol >= startChar && cursorCharCol <= endChar) {
+        cursorSoftIndex = softIndex;
+        let cursorWidth = 0;
+        for (let i = startChar; i < cursorCharCol && i < chars.length; i++) {
+          cursorWidth += charWidth(chars[i] ?? "");
+        }
+        cursorOutCol = promptWidth + cursorWidth;
+      }
+      if (chars.length === 0) break;
+      startChar = endChar;
+    }
+  }
+
+  const totalLines = softLines.length;
   let startLine = 0;
   let endLineExclusive = totalLines;
   if (totalLines > COMPOSER_MAX_VISIBLE_LINES) {
     const half = Math.floor(COMPOSER_MAX_VISIBLE_LINES / 2);
-    startLine = Math.max(0, cursorLineIndex - half);
+    startLine = Math.max(0, cursorSoftIndex - half);
     endLineExclusive = startLine + COMPOSER_MAX_VISIBLE_LINES;
     if (endLineExclusive > totalLines) {
       endLineExclusive = totalLines;
-      startLine = endLineExclusive - COMPOSER_MAX_VISIBLE_LINES;
+      startLine = Math.max(0, endLineExclusive - COMPOSER_MAX_VISIBLE_LINES);
     }
   }
+  const renderedLines = softLines
+    .slice(startLine, endLineExclusive)
+    .map((line) => `${line.prompt}${line.text}`);
   const truncatedAbove = startLine;
   const truncatedBelow = totalLines - endLineExclusive;
-
-  const visibleLines = rawLines.slice(startLine, endLineExclusive);
-  const isFirstVisibleAtTop = startLine === 0;
-
-  // ─── Single-line horizontal viewport ─────────────────────────────────────
-  const composerWidth = Math.max(8, maxWidth ?? 80);
-  // Reserve room for the prompt marker on the cursor's line.
-  const promptForCursor =
-    cursorLineIndex === startLine && isFirstVisibleAtTop
-      ? PROMPT_MARKER
-      : PROMPT_MARKER_CONTINUATION;
-  const promptWidth = displayWidthOf(promptForCursor);
-  const lineBudget = Math.max(4, composerWidth - promptWidth);
-
-  // Compute display width of the cursor column on its raw line.
-  const cursorRawLineRaw = rawLines[cursorLineIndex] ?? "";
-  const cursorRawLineDisplay = masking ? "*".repeat(cursorRawLineRaw.length) : cursorRawLineRaw;
-  const cursorRawChars = Array.from(cursorRawLineDisplay);
-  let cursorDisplayCol = 0;
-  for (let i = 0; i < cursorCharCol && i < cursorRawChars.length; i++) {
-    cursorDisplayCol += charWidth(cursorRawChars[i] ?? "");
-  }
-
-  // Choose horizontal window per visible line. We only horizontally clip the
-  // cursor's line aggressively; non-cursor lines are clipped to the same
-  // budget but with a left-anchored window for a stable visual.
-  const ELLIPSIS = "…";
-  const ELLIPSIS_WIDTH = 1;
-
-  const renderedLines: string[] = [];
-  let cursorOutCol = 0;
-  for (let visibleIndex = 0; visibleIndex < visibleLines.length; visibleIndex++) {
-    const lineRaw = visibleLines[visibleIndex] ?? "";
-    const lineDisplay = masking ? "*".repeat(lineRaw.length) : lineRaw;
-    const isFirstLine = isFirstVisibleAtTop && visibleIndex === 0;
-    const linePrompt = isFirstLine ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
-    const linePromptWidth = displayWidthOf(linePrompt);
-    const budget = Math.max(4, composerWidth - linePromptWidth);
-    const isCursorLine = startLine + visibleIndex === cursorLineIndex;
-
-    if (displayWidthOf(lineDisplay) <= budget) {
-      renderedLines.push(`${linePrompt}${lineDisplay}`);
-      if (isCursorLine) {
-        cursorOutCol = linePromptWidth + cursorDisplayCol;
-      }
-      continue;
-    }
-
-    if (!isCursorLine) {
-      // Non-cursor line: left-anchored, right-ellipsis.
-      const sliced = sliceWidth(lineDisplay, budget - ELLIPSIS_WIDTH);
-      renderedLines.push(`${linePrompt}${sliced}${ELLIPSIS}`);
-      continue;
-    }
-
-    // Cursor line: cursor-centered horizontal viewport with side ellipses.
-    const lineWidth = displayWidthOf(lineDisplay);
-    const half = Math.max(2, Math.floor(budget / 2));
-    let windowStart = Math.max(0, cursorDisplayCol - half);
-    let windowEnd = windowStart + budget;
-    if (windowEnd > lineWidth) {
-      windowEnd = lineWidth;
-      windowStart = Math.max(0, windowEnd - budget);
-    }
-
-    let leftEllipsis = "";
-    let rightEllipsis = "";
-    let effectiveStart = windowStart;
-    let effectiveEnd = windowEnd;
-    if (windowStart > 0) {
-      leftEllipsis = ELLIPSIS;
-      effectiveStart += ELLIPSIS_WIDTH;
-    }
-    if (windowEnd < lineWidth) {
-      rightEllipsis = ELLIPSIS;
-      effectiveEnd -= ELLIPSIS_WIDTH;
-    }
-
-    const sliced = sliceWindow(
-      lineDisplay,
-      effectiveStart,
-      Math.max(0, effectiveEnd - effectiveStart),
-    );
-    renderedLines.push(`${linePrompt}${leftEllipsis}${sliced}${rightEllipsis}`);
-
-    // Map cursor column into the rendered window.
-    const cursorWithinWindow = cursorDisplayCol - effectiveStart;
-    const clamped = Math.max(0, Math.min(cursorWithinWindow, effectiveEnd - effectiveStart));
-    cursorOutCol = linePromptWidth + (leftEllipsis ? ELLIPSIS_WIDTH : 0) + clamped;
-  }
-
   const cursorVisibleRow = Math.max(
     0,
-    Math.min(cursorLineIndex - startLine, renderedLines.length - 1),
+    Math.min(cursorSoftIndex - startLine, renderedLines.length - 1),
   );
 
   return {

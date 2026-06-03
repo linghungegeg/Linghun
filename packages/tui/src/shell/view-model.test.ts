@@ -1128,7 +1128,7 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
 });
 
 describe("backgroundSummaries → blocks mapping", () => {
-  it("folds active background tasks into one summary pill", () => {
+  it("folds active background tasks into one footer-adjacent summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1144,17 +1144,16 @@ describe("backgroundSummaries → blocks mapping", () => {
         { id: "t2", title: "test suite", status: "completed", result: "pass" },
       ],
     });
-    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.id).toBe("bg-summary");
-    expect(bgBlocks[0]?.kind).toBe("run");
-    expect(bgBlocks[0]?.status).toBe("running");
-    expect(bgBlocks[0]?.title).toContain("运行中 1");
-    expect(bgBlocks[0]?.title).toContain("失败/阻塞 0");
-    expect(bgBlocks[0]?.summary).toContain("lint check");
-    expect(bgBlocks[0]?.summary).toContain("checking files");
-    expect(bgBlocks[0]?.summary).toContain("1/3 steps");
-    expect(bgBlocks[0]?.nextAction).toContain("/interrupt");
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
+    expect(view.taskRuntimeSummary?.kind).toBe("run");
+    expect(view.taskRuntimeSummary?.status).toBe("running");
+    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 0");
+    expect(view.taskRuntimeSummary?.summary).toContain("lint check");
+    expect(view.taskRuntimeSummary?.summary).toContain("checking files");
+    expect(view.taskRuntimeSummary?.summary).toContain("1/3 steps");
+    expect(view.taskRuntimeSummary?.nextAction).toContain("/interrupt");
   });
 
   it("counts blocked background statuses without exposing mechanism words", () => {
@@ -1172,11 +1171,10 @@ describe("backgroundSummaries → blocks mapping", () => {
         { id: "t4", title: "health check", status: "timeout" },
       ],
     });
-    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.status).toBe("blocked");
-    expect(bgBlocks[0]?.title).toContain("失败/阻塞 2");
-    const visible = `${bgBlocks[0]?.title}\n${bgBlocks[0]?.summary}\n${bgBlocks[0]?.nextAction}`;
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary?.status).toBe("blocked");
+    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 2");
+    const visible = `${view.taskRuntimeSummary?.title}\n${view.taskRuntimeSummary?.summary}\n${view.taskRuntimeSummary?.nextAction}`;
     expect(visible).not.toContain("sourceRef");
     expect(visible).not.toContain("schema");
     expect(visible).not.toContain("endpoint");
@@ -1189,9 +1187,9 @@ describe("backgroundSummaries → blocks mapping", () => {
       viewMode: "task",
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
-    const bgBlock = view.blocks.find((b) => b.id === "bg-summary");
-    expect(bgBlock?.title).toContain("Tasks: 1 running");
-    expect(bgBlock?.summary).toContain("build");
+    expect(view.blocks.find((b) => b.id === "bg-summary")).toBeUndefined();
+    expect(view.taskRuntimeSummary?.title).toContain("Tasks: 1 running");
+    expect(view.taskRuntimeSummary?.summary).toContain("build");
   });
 
   it("completed-only background tasks stay out of the task output", () => {
@@ -1524,11 +1522,10 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
         { id: "j4", title: "health", status: "stale" },
       ],
     });
-    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.status).toBe("blocked");
-    expect(bgBlocks[0]?.title).toContain("运行中 1");
-    expect(bgBlocks[0]?.title).toContain("失败/阻塞 2");
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary?.status).toBe("blocked");
+    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 2");
   });
 });
 
@@ -1638,6 +1635,19 @@ describe("D.12C — Composer cursor alignment closure", () => {
     // cursor at end of "> 修复光标" (2 + 4*2 = 10)
     expect(cursorRow).toBe(0);
     expect(cursorCol).toBe(10);
+  });
+
+  it("soft-wraps long single-line Composer input instead of horizontal ellipsis", () => {
+    const { lines, cursorRow } = formatComposerRenderLines({
+      buffer: createEditBuffer("abcdefghijklmnopqrstuvwxyz"),
+      placeholder: "我能帮您做点什么？",
+      masking: false,
+      noColor: false,
+      maxWidth: 12,
+    });
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.join("")).not.toContain("…");
+    expect(cursorRow).toBe(lines.length - 1);
   });
 
   it("multiline Composer render reports cursor on the last line", () => {
@@ -1923,11 +1933,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
         { id: "bg4", title: "old", status: "stale" },
       ],
     });
-    const bgBlocks = view.blocks.filter((b) => b.id.startsWith("bg-"));
-    expect(bgBlocks).toHaveLength(1);
-    expect(bgBlocks[0]?.status).toBe("blocked");
-    expect(bgBlocks[0]?.title).toContain("运行中 1");
-    expect(bgBlocks[0]?.title).toContain("失败/阻塞 3");
+    expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary?.status).toBe("blocked");
+    expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 3");
   });
 
   it("fail/blocking output prioritized over normal output", () => {

@@ -5,12 +5,10 @@ import type { TuiContext } from "./index.js";
 import {
   evaluateArchitectureAndCompletenessClaims,
   evaluateFinalAnswerClaims,
-  evidenceSupportsLocalCodeFact,
   finalAnswerHasCompletenessClassification,
   hasArchitectureEvidenceForClaims,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord, VerdictEvidenceScope } from "./tui-data-types.js";
-import { messages } from "./tui-messages.js";
 
 export function needsSolutionCompletenessReportClosure(
   context: TuiContext,
@@ -80,62 +78,6 @@ export function formatSolutionCompletenessReportBlock(context: TuiContext): stri
     "- phaseBoundary: stay in the current approved scope; do not enter Beta or later roadmap stages automatically.",
     "- validation: list focused tests/check/typecheck/build/diff-check before claiming closure.",
   ].join("\n");
-}
-
-export function checkEvidenceGate(text: string, context: TuiContext): string | null {
-  if (!isCurrentRepoFactClaimRequest(text)) {
-    return null;
-  }
-  // D.13U：不再"任意 evidence 即放行"。要求至少一条本地代码事实证据
-  // （file_read / grep_result / 精确 index_code_fact，或带 git_local_fact / local_read 标记）。
-  const hasLocalCodeEvidence = context.evidence.some(evidenceSupportsLocalCodeFact);
-  if (hasLocalCodeEvidence) {
-    return null;
-  }
-  return messages[context.language].evidenceBlocked;
-}
-
-// D.14D-R2 P3-1 — 收窄"代码事实前置 gate"的触发范围。
-//
-// 根因：旧 asksCodeFact 正则只要出现"代码/函数/code/function"就前置拦截，把
-// "写一个 add 函数 / write an add function"这类从零写新代码/教学请求也挡在模型
-// 之外，无法测试 code hygiene。
-//
-// 新规则：只有当用户要求对**当前仓库已有事实**下结论时才前置取证：
-//   - 询问/确认当前仓库里某实现/函数/调用链/测试是否已存在、是否通过、是否完成、
-//     是否已修复、是否已刷新、架构是否一致。
-// 对"从零写一个函数/示例/小组件/教学片段/新文件草稿"不前置取证（写入仍走权限）。
-// 对"修复/修改当前仓库文件"这类行动请求，也不在输入侧直接拦截；模型/工具路径仍必须
-// 通过 Read/Edit/Write 的 read-before-edit 与权限管道取得相关文件证据后才能写入。
-//
-// 注意：这不是恢复本地自然语言关键词截获——普通请求仍照常进模型，这里只决定是否
-// 在请求前要求先取证，不把自然语言转成本地命令意图。
-export function isCurrentRepoFactClaimRequest(text: string): boolean {
-  // 1) 显式"从零写新代码/教学"——明确放行（不前置取证）。
-  //    "写一个/写个/实现一个 add 函数"、"write an add function"、"give me an example"等。
-  const fromScratchAuthoring =
-    /(写一?个|写个|实现一?个|帮我写|来一?个|给我写|生成一?个|新增一?个|建一?个|做一?个|create|write|implement|generate|build|give\s+me|show\s+me|add)\b/iu.test(
-      text,
-    );
-
-  // 2) 对当前仓库已有事实下结论 / 确认状态的措辞。
-  //    注意：只认"事实断言/状态询问"措辞，不认裸的位置词（当前项目/这个仓库/repo），
-  //    因为"在当前项目里新增一个组件"是 authoring，不是事实声明。
-  const factClaimAboutCurrentState =
-    // 询问已有实现/状态：是否已实现/有没有/存在吗/实现了吗/跑通/测试通过/架构一致
-    /(已经?实现|实现了吗|有没有(实现|这个|相关)|是否(已|都|存在|实现|通过|完成|一致)|存在吗|已经?完成|完成了吗|已经?修复|修复了吗|已经?通过|通过了吗|测试.*通过|跑通|架构.*一致|无.*漂移|没有.*漂移|already (implemented|done|fixed|passing|exists)|tests?\s+(?:are\s+)?pass|no\s+(?:drift|regression)|architecture\s+(?:is\s+)?(?:consistent|aligned)|in the (?:code|repo|codebase))/iu.test(
-      text,
-    ) ||
-    // 高风险结论性断言（D.13U/D.13V 既有词表的事实声明侧）。
-    /(已完成|已修复|已验证|已刷新|已创建|完成了|修好了|验证过|确认.*(通过|完成|实现|无问题|没问题|无误)|confirm\s+(?:all|the|that)|verified|fixed|completed|refreshed)/iu.test(
-      text,
-    );
-
-  // 从零写新代码且不带事实声明 → 不前置取证。
-  if (fromScratchAuthoring && !factClaimAboutCurrentState) {
-    return false;
-  }
-  return factClaimAboutCurrentState;
 }
 
 export type ClaimCheck = {

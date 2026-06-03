@@ -1,6 +1,6 @@
 import type { Writable } from "node:stream";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
-import { charWidth, composerMaxWidth, taskComposerMaxWidth } from "./text-utils.js";
+import { charWidth, composerMaxWidth, taskComposerMaxWidth, wrapText } from "./text-utils.js";
 import { getStatusMarker } from "./theme.js";
 import type { ProductBlockStatus, ShellViewModel } from "./types.js";
 
@@ -138,18 +138,20 @@ function renderPlainMarkdownLines(
       continue;
     }
     if (!inCode) {
-      out.push(applyTone(raw));
+      out.push(...wrapText(raw, 100).map(applyTone));
       continue;
     }
 
     const isDiff = codeLang === "diff" || codeLang === "patch";
-    const body =
-      isDiff && raw.startsWith("+") && !raw.startsWith("+++")
-        ? colorGreen(raw.length === 0 ? " " : raw, noColor)
-        : isDiff && raw.startsWith("-") && !raw.startsWith("---")
-          ? colorRed(raw.length === 0 ? " " : raw, noColor)
-          : dim(raw.length === 0 ? " " : raw, noColor);
-    out.push(`${dim("  | ", noColor)}${body}`);
+    for (const wrapped of wrapText(raw.length === 0 ? " " : raw, 96)) {
+      const wrappedBody =
+        isDiff && wrapped.startsWith("+") && !wrapped.startsWith("+++")
+          ? colorGreen(wrapped, noColor)
+          : isDiff && wrapped.startsWith("-") && !wrapped.startsWith("---")
+            ? colorRed(wrapped, noColor)
+            : dim(wrapped, noColor);
+      out.push(`${dim("  | ", noColor)}${wrappedBody}`);
+    }
   }
   if (inCode) out.push(dim("  +", noColor));
   return out;
@@ -290,6 +292,9 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
   }
 
   // Bottom: just an empty line before real readline prompt (no separator)
+  if (view.taskRuntimeSummary) {
+    lines.push(...formatBlockLines({ ...view, blocks: [view.taskRuntimeSummary] }, noColor));
+  }
   lines.push("");
 
   return lines.join("\n");
@@ -307,6 +312,12 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       const isUserText = block.messageKind === "user_text";
       const marker = isUserText ? "\u203A" : "\u276F";
       const title = isUserText ? block.title : colorCyan(block.title, noColor);
+      if (isUserText) {
+        const body = block.fullText ?? block.title;
+        return wrapText(body, Math.max(8, view.width - 2)).map((line, index) =>
+          index === 0 ? `${dim(marker, noColor)} ${line}` : `  ${line}`,
+        );
+      }
       return [`${dim(marker, noColor)} ${title}`];
     }
 

@@ -320,6 +320,8 @@ export type ShellViewModel = {
   limitations: string[];
   /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */
   taskFooter?: TaskFooterView;
+  /** Footer-adjacent background/workflow summary; kept out of transcript blocks. */
+  taskRuntimeSummary?: ProductBlockViewModel;
   /**
    * D.13Q-UX — 轻提示队列。NotificationStack 右对齐渲染，单条主显，
    * 不进 transcript（与 blocks 隔离）。空数组时 ShellApp 不渲染。

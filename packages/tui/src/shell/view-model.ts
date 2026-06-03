@@ -243,19 +243,20 @@ export function createShellViewModel(
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
-  if (effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length) {
-    const focusBackgrounds = options.backgroundSummaries.filter(
-      (s) =>
-        s.status === "running" ||
-        s.status === "paused" ||
-        s.status === "failed" ||
-        s.status === "timeout" ||
-        s.status === "stale",
-    );
-    if (focusBackgrounds.length > 0) {
-      blocks.push(...mapBackgroundSummariesToBlocks(focusBackgrounds, language));
-    }
-  }
+  const taskRuntimeSummary =
+    effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
+      ? mapBackgroundSummariesToBlocks(
+          options.backgroundSummaries.filter(
+            (s) =>
+              s.status === "running" ||
+              s.status === "paused" ||
+              s.status === "failed" ||
+              s.status === "timeout" ||
+              s.status === "stale",
+          ),
+          language,
+        )[0]
+      : undefined;
   if (!options.permission && !setupActiveFlow) {
     const allOutputBlocks = options.outputBlocks ?? [];
     // D.13Q-UX Real Smoke Fix v3 — transcript 必须严格按 append 时间顺序排列。
@@ -470,6 +471,7 @@ export function createShellViewModel(
     blocks: fittedBlocks,
     limitations: options.limitations ?? [],
     taskFooter,
+    taskRuntimeSummary: taskRuntimeSummary ? fitBlockToWidth(taskRuntimeSummary, width) : undefined,
     taskSuggestions: taskSuggestions && taskSuggestions.length > 0 ? taskSuggestions : undefined,
     taskSuggestionCursor,
     configPanel,

@@ -300,6 +300,15 @@ function TaskLayout({
             cacheTone={view.taskFooter.cacheTone}
           />
         ) : null}
+        {view.taskRuntimeSummary ? (
+          <Box paddingX={2} paddingTop={0}>
+            <ProductBlock
+              block={view.taskRuntimeSummary}
+              theme={theme}
+              width={Math.max(20, view.width - 4)}
+            />
+          </Box>
+        ) : null}
 
         {/* D.13Q-UX：通知栈 — 右对齐，单条主显，绝不进 transcript。 */}
         <NotificationStack notifications={view.notifications} theme={theme} />

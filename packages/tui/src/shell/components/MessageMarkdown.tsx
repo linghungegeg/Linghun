@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { createContext, useContext } from "react";
 import type React from "react";
+import { wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 
 /**
@@ -46,6 +47,7 @@ export type MessageMarkdownProps = {
   dim?: boolean;
   /** 错误正文走 error 色而不是默认色。 */
   tone?: "default" | "error" | "diagnostic";
+  wrapWidth?: number;
 };
 
 type MdLine =
@@ -103,13 +105,15 @@ function InlineRow({
   theme,
   dim,
   tone,
+  wrapWidth,
 }: {
   value: string;
   theme: ShellTheme;
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
+  wrapWidth?: number;
 }): React.ReactNode {
-  const tokens = tokenizeInline(value);
+  const rows = wrapWidth ? wrapText(value, wrapWidth) : [value];
   const baseColor = dim
     ? theme.dim
     : tone === "error"
@@ -119,26 +123,33 @@ function InlineRow({
         : theme.assistantText;
   const codeColor = theme.diagnostic ?? theme.accent;
   return (
-    <Text color={baseColor} dimColor={dim}>
-      {tokens.map((token) => {
-        const key = `${token.kind}-${token.value}`;
-        if (token.kind === "code") {
-          return (
-            <Text key={key} color={codeColor} dimColor={dim}>
-              {token.value}
-            </Text>
-          );
-        }
-        if (token.kind === "bold") {
-          return (
-            <Text key={key} bold color={baseColor} dimColor={dim}>
-              {token.value}
-            </Text>
-          );
-        }
-        return <Text key={key}>{token.value}</Text>;
+    <Box flexDirection="column">
+      {rows.map((row, rowIndex) => {
+        const tokens = tokenizeInline(row);
+        return (
+          <Text key={`${rowIndex}-${row}`} color={baseColor} dimColor={dim}>
+            {tokens.map((token, tokenIndex) => {
+              const key = `${rowIndex}-${tokenIndex}-${token.kind}-${token.value}`;
+              if (token.kind === "code") {
+                return (
+                  <Text key={key} color={codeColor} dimColor={dim}>
+                    {token.value}
+                  </Text>
+                );
+              }
+              if (token.kind === "bold") {
+                return (
+                  <Text key={key} bold color={baseColor} dimColor={dim}>
+                    {token.value}
+                  </Text>
+                );
+              }
+              return <Text key={key}>{token.value}</Text>;
+            })}
+          </Text>
+        );
       })}
-    </Text>
+    </Box>
   );
 }
 
@@ -181,6 +192,7 @@ export function MessageMarkdown({
   theme,
   dim = false,
   tone = "default",
+  wrapWidth,
 }: MessageMarkdownProps): React.ReactNode {
   if (!text || text.length === 0) return null;
   const lines = text.replace(/\r/g, "").split("\n");
@@ -238,7 +250,13 @@ export function MessageMarkdown({
           <Text color={dim ? theme.dim : theme.muted} dimColor={dim}>
             {cls.bullet}{" "}
           </Text>
-          <InlineRow value={cls.rest} theme={theme} dim={dim} tone={tone} />
+          <InlineRow
+            value={cls.rest}
+            theme={theme}
+            dim={dim}
+            tone={tone}
+            wrapWidth={wrapWidth ? Math.max(8, wrapWidth - 2) : undefined}
+          />
         </Box>,
       );
       continue;
@@ -250,6 +268,7 @@ export function MessageMarkdown({
         theme={theme}
         dim={dim}
         tone={tone}
+        wrapWidth={wrapWidth}
       />,
     );
   }

@@ -5,8 +5,6 @@ import {
 import type { TuiContext } from "./index.js";
 import {
   createSolutionCompletenessStatus,
-  formatSolutionCompletenessTrigger,
-  inferSolutionCompletenessImpactAreas,
   projectRuntimeStatusForPrompt,
 } from "./model-loop-runtime.js";
 import { createModelCapabilitySummary } from "./natural-command-bridge.js";
@@ -75,15 +73,7 @@ export function createEvidenceSummaryForModel(context: TuiContext): string {
 }
 
 export function updateSolutionCompletenessGate(text: string, context: TuiContext): string {
-  const userRequestedGate =
-    /成品级|不要缝|不要补丁|不要只补|先看\s*ccb|参考\s*ccb|对照\s*ccb|对照成熟项目|全局|有没有漏|系统性|完整性|solution completeness/i.test(
-      text,
-    );
-  const smokeContamination = /smoke.*(污染|contaminat)|真实\s*smoke.*(污染|失真)/i.test(text);
-  const auditFinding =
-    /(verifier|审计|audit).*(文字补丁|regex|正则|只改文档)|文字补丁|regex\s*补丁|只改文档/i.test(
-      text,
-    );
+  void text;
   const repeatedDenial = hasRepeatedPermissionDenial(context.permissions.recentDenied);
   if (repeatedDenial) {
     context.solutionCompleteness = {
@@ -94,52 +84,10 @@ export function updateSolutionCompletenessGate(text: string, context: TuiContext
         "最近同类权限拒绝已记录；普通任务继续走 model/tool loop，必要时给短 hint 或让用户查看 /permissions recent。",
     };
   }
-  if (!userRequestedGate && !smokeContamination && !auditFinding) {
-    if (!repeatedDenial) {
-      context.solutionCompleteness = createSolutionCompletenessStatus();
-    }
-    return "";
+  if (!repeatedDenial) {
+    context.solutionCompleteness = createSolutionCompletenessStatus();
   }
-
-  const triggerReason = userRequestedGate
-    ? "user_request"
-    : smokeContamination
-      ? "smoke_contamination"
-      : "audit_finding";
-  const impactAreas = inferSolutionCompletenessImpactAreas(text, triggerReason);
-  const classification = "unknown";
-  const severity = "unknown";
-  const requiredBeforeAction = true;
-  const nextRequiredOutput =
-    "先给 single_issue/systemic_gap 判断；若 systemic_gap，再列影响面、P0/P1/P2、阶段边界、验证方式和当前阶段/后续登记。";
-  const warning = [
-    "SYSTEMIC_GAP_WARNING:",
-    formatSolutionCompletenessTrigger(triggerReason),
-    "回答或修复前必须先判断 single_issue / systemic_gap。",
-    `impactAreas=${impactAreas.join(",") || "unknown"}`,
-    `severity=${severity}`,
-    "必须列出：影响面、P0/P1/P2、阶段边界、验证方式。",
-    "若属于当前批准范围外内容，只登记到后续路线图或 not-do，不要扩大实现范围。",
-  ].join(" ");
-  context.solutionCompleteness = {
-    triggered: true,
-    triggerReason,
-    classificationRequired: true,
-    classification,
-    impactAreas,
-    severity,
-    requiredBeforeAction,
-    evidenceRefs: collectSolutionCompletenessEvidenceRefs(context),
-    sourceRefs: [
-      "LINGHUN_IMPLEMENTATION_SPEC.md#11.6",
-      "LINGHUN_CCB_MATURITY_COMPARISON_REPORT.md#14",
-      "docs/delivery/phase-15-natural-command-bridge.md",
-    ],
-    nextRequiredOutput,
-    checklist: ["single_issue/systemic_gap", "影响面", "P0/P1/P2", "阶段边界", "验证方式"],
-    lastWarning: warning,
-  };
-  return warning;
+  return "";
 }
 
 export function collectSolutionCompletenessEvidenceRefs(context: TuiContext): string[] {

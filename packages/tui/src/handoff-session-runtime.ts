@@ -4,11 +4,6 @@ import { join } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { isDeepCompactPacket } from "./deep-compact-runtime.js";
-import {
-  createHandoffPendingItems,
-  createHandoffRiskItems,
-  createPhase15BetaVerdictScope,
-} from "./final-answer-gate.js";
 import type { TuiContext } from "./index.js";
 import type {
   CompactProjection,
@@ -50,7 +45,7 @@ export function hydrateResumeContext(context: TuiContext, transcript: Transcript
   context.evidence = [...evidence.reverse(), ...context.evidence].slice(0, 20);
   const handoff = [...transcript].reverse().find((event) => event.type === "handoff_packet");
   if (handoff?.type === "handoff_packet" && isHandoffPacket(handoff.packet)) {
-    context.memory.lastHandoff = handoff.packet;
+    context.memory.lastHandoff = sanitizeHandoffPacket(handoff.packet);
   }
   restoreSessionAcceptedMemory(context, transcript);
   restorePendingMemoryCandidates(context, transcript);
@@ -279,9 +274,11 @@ export async function loadOrCreateHandoffPacket(
   sessionId = context.sessionId ?? "uncreated",
 ): Promise<HandoffPacket> {
   if (context.memory.lastHandoff) {
-    context.memory.lastHandoff.solutionCompleteness = context.solutionCompleteness;
-    await writeHandoffPacket(context, context.memory.lastHandoff);
-    return context.memory.lastHandoff;
+    const packet = sanitizeHandoffPacket(context.memory.lastHandoff);
+    packet.solutionCompleteness = context.solutionCompleteness;
+    context.memory.lastHandoff = packet;
+    await writeHandoffPacket(context, packet);
+    return packet;
   }
   const packet = createHandoffPacket(context, [], parentSessionId, sessionId);
   context.memory.lastHandoff = packet;
@@ -318,25 +315,13 @@ export function createHandoffPacket(
     sessionId,
     projectPath: context.projectPath,
     ...(parentSessionId ? { parentSessionId } : {}),
-    currentPhase: "Runtime readiness evidence guard",
-    nextPhase:
-      "Real-project Beta（blocked until explicit user confirmation and real TUI/provider evidence）",
-    phaseStatus: "blocked",
-    goal: "只关闭 readiness / verdict 结论层 evidence guard；不进入 Beta 或后续路线图阶段。",
-    completed: [
-      "runtime silent-failure guard is PASS for the tested runtime path",
-      "live provider basic text smoke is PASS for the temporary-env smoke only",
-      "verdict/readiness claims now require explicit scope, evidence, validation, uncovered paths, and risk",
-    ],
-    pending: createHandoffPendingItems(context.evidence),
-    mustNotDo: [
-      "不要进入 Beta，除非用户明确确认且 Beta readiness evidence guard 通过",
-      "不要进入后续路线图阶段",
-      "不要把 focused PASS、mock PASS、live text PASS、SKIPPED smoke 或 PARTIAL path 写成整体 ready",
-      "不要把 Linghun 写成等于 CCB / 成熟工具，除非附 scope/evidence/validation/uncovered/risk",
-      "不要复制 CCB / Claude Code / OpenCode 源码、内部 API 或专有实现",
-      "不要让 verdict gate / coverage matrix / systemic_gap 污染普通开发请求主输出",
-    ],
+    currentPhase: "Session handoff",
+    nextPhase: "Continue current user task",
+    phaseStatus: "in_progress",
+    goal: todos.find((item) => item.status !== "completed")?.content ?? "继续当前会话任务。",
+    completed: [],
+    pending: [],
+    mustNotDo: ["Do not claim completion, PASS, or verified results without recorded evidence."],
     todos,
     keyFiles: [
       "packages/tui/src/index.ts",
@@ -348,11 +333,9 @@ export function createHandoffPacket(
     ],
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
-    verdictEvidence: createPhase15BetaVerdictScope(context.evidence, transcript),
+    verdictEvidence: createEmptyVerdictEvidenceScope(),
     verification: context.lastVerification ?? null,
-    risks: context.lastVerification
-      ? context.lastVerification.risk
-      : createHandoffRiskItems(context.evidence),
+    risks: context.lastVerification ? context.lastVerification.risk : [],
     indexStatus: {
       projectName: context.index.projectName,
       status: context.index.status,
@@ -372,6 +355,40 @@ export function createHandoffPacket(
     ...(context.currentArchitectureCard
       ? { currentArchitectureCard: summarizeArchitectureCard(context.currentArchitectureCard) }
       : {}),
+  };
+}
+
+function sanitizeHandoffPacket(packet: HandoffPacket): HandoffPacket {
+  const legacyPattern =
+    /Runtime readiness evidence guard|Real-project Beta|Beta readiness|verdict gate|coverage matrix|systemic_gap|进入 Beta|后续路线图|readiness|blocked until explicit user confirmation/iu;
+  const sanitized: HandoffPacket = {
+    ...packet,
+    currentPhase: legacyPattern.test(packet.currentPhase) ? "Session handoff" : packet.currentPhase,
+    nextPhase: legacyPattern.test(packet.nextPhase)
+      ? "Continue current user task"
+      : packet.nextPhase,
+    phaseStatus: legacyPattern.test(packet.currentPhase) ? "in_progress" : packet.phaseStatus,
+    goal: legacyPattern.test(packet.goal) ? "继续当前会话任务。" : packet.goal,
+    completed: packet.completed.filter((item) => !legacyPattern.test(item)),
+    pending: packet.pending.filter((item) => !legacyPattern.test(item)),
+    mustNotDo: packet.mustNotDo.filter((item) => !legacyPattern.test(item)),
+    risks: packet.risks.filter((item) => !legacyPattern.test(item)),
+    verdictEvidence: legacyPattern.test(JSON.stringify(packet.verdictEvidence))
+      ? createEmptyVerdictEvidenceScope()
+      : packet.verdictEvidence,
+  };
+  return sanitized;
+}
+
+function createEmptyVerdictEvidenceScope(): HandoffPacket["verdictEvidence"] {
+  return {
+    scope: "beta",
+    status: "PARTIAL",
+    evidenceRefs: [],
+    validationCommands: [],
+    uncoveredItems: [],
+    residualRisks: [],
+    nextAction: "Continue from current task evidence and runtime state.",
   };
 }
 

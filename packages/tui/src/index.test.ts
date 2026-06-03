@@ -3569,7 +3569,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(`来源 session：${session.id}`);
   });
 
-  it("adds evidence-bound Beta readiness verdict to handoff packets", async () => {
+  it("keeps handoff packets neutral instead of injecting Beta readiness verdicts", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4.1" });
@@ -3584,15 +3584,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(verdict?.scope).toBe("beta");
     expect(verdict?.status).toBe("PARTIAL");
-    expect(verdict?.validationCommands).toEqual(
-      expect.arrayContaining([expect.stringContaining("pnpm test")]),
-    );
-    expect(verdict?.uncoveredItems).toEqual(
-      expect.arrayContaining([expect.stringContaining("real TUI report-generation")]),
-    );
-    expect(verdict?.residualRisks).toEqual(
-      expect.arrayContaining([expect.stringContaining("mock provider PASS")]),
-    );
+    expect(verdict?.validationCommands).toEqual([]);
+    expect(verdict?.uncoveredItems).toEqual([]);
+    expect(verdict?.residualRisks).toEqual([]);
     expect(output.text).not.toContain("Beta readiness PASS");
   });
 
@@ -3996,7 +3990,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.solutionCompleteness).toEqual(createSolutionCompletenessStatus());
   });
 
-  it("adds a short report block when triggered output omits classification", async () => {
+  it("does not trigger Solution Completeness from keyword-like user wording", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -4024,15 +4018,13 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("Solution Completeness Gate report");
-    expect(output.text).toContain("- classification: systemic_gap");
-    expect(output.text).toContain("- impactAreas: reference_parity, runtime_behavior");
-    expect(output.text).toContain("- phaseBoundary: stay in the current approved scope");
+    expect(output.text).not.toContain("Solution Completeness Gate report");
+    expect(output.text).not.toContain("SYSTEMIC_GAP_WARNING");
     expect(requests).toHaveLength(1);
-    expect(JSON.stringify(requests[0])).toContain("SYSTEMIC_GAP_WARNING");
+    expect(JSON.stringify(requests[0])).not.toContain("SYSTEMIC_GAP_WARNING");
   });
 
-  it("records Solution Completeness Gate decision in model prompt and handoff", async () => {
+  it("keeps keyword-like maturity wording as normal model input", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -4043,27 +4035,8 @@ describe("Phase 06 TUI slash commands", () => {
       model: { provider: "deepseek", name: "deepseek-v4-flash" },
     });
 
-    expect(prompt).toContain("SYSTEMIC_GAP_WARNING");
-    expect(prompt).toContain("single_issue / systemic_gap");
-    expect(prompt).toContain("impactAreas=reference_parity,runtime_behavior");
-    expect(prompt).toContain("P0/P1/P2");
-    expect(prompt).toContain("阶段边界");
-    expect(prompt).toContain("验证方式");
-    expect(context.solutionCompleteness).toMatchObject({
-      triggered: true,
-      triggerReason: "user_request",
-      classificationRequired: true,
-      classification: "unknown",
-      impactAreas: ["reference_parity", "runtime_behavior"],
-      severity: "unknown",
-      requiredBeforeAction: true,
-      sourceRefs: [
-        "LINGHUN_IMPLEMENTATION_SPEC.md#11.6",
-        "LINGHUN_CCB_MATURITY_COMPARISON_REPORT.md#14",
-        "docs/delivery/phase-15-natural-command-bridge.md",
-      ],
-    });
-    expect(context.solutionCompleteness.nextRequiredOutput).toContain("single_issue/systemic_gap");
+    expect(prompt).not.toContain("SYSTEMIC_GAP_WARNING");
+    expect(context.solutionCompleteness).toEqual(createSolutionCompletenessStatus());
 
     context.permissions.recentDenied = [
       {
@@ -4908,6 +4881,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(archStep?.status).toBe("partial");
     expect(run?.steps.some((step) => step.id === "slice-implement")).toBe(false);
     expect(run?.steps.find((step) => step.id === "slice-stable-point")?.status).not.toBe("queued");
+    expect(run?.steps.find((step) => step.id === "slice-stable-point")?.summary).not.toContain(
+      "slice dependency not satisfied",
+    );
+    expect(output.text).not.toContain("slice dependency not satisfied: slice-architecture-review");
     expect(run?.steps.some((step) => step.status !== "queued" && step.id !== "slice-explore")).toBe(
       true,
     );
@@ -13401,7 +13378,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("function add");
   });
 
-  it("D.14D-R2 P3-1: current-repo fact claim '这个仓库里 add 函数已经实现了吗' is pre-gated without evidence", async () => {
+  it("D.14D-R2 P3-1: current-repo fact claim reaches the model path instead of input pre-gate", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
     await writeFile(
@@ -13429,9 +13406,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    // 事实声明被前置取证拦截（无本地代码事实证据）；请求不发给模型。
-    expect(output.text).toContain("尚未确认，需要先检查");
-    expect(requests.length).toBe(0);
+    expect(output.text).not.toContain("尚未确认，需要先检查");
+    expect(requests.length).toBe(1);
+    expect(JSON.stringify(requests[0])).toContain("这个仓库里 add 函数已经实现了吗");
   });
 
   it("D.14D: /btw is model-backed but isolated from todo, plan, and checkpoints", async () => {
@@ -20548,24 +20525,13 @@ describe("D.13V-B/C source invariants", () => {
     expect(body).toContain("buildExtendedDowngradedFinalAnswer");
   });
 
-  // D.14A-R-Fix P1-1 — continuation 路径也要追加 Solution Completeness closure block，
-  // 与 sendMessage 路径一致；且 closure 必须在安全 final answer 入 transcript 之后，
-  // 不得位于 D.13U/D.13V retry/downgrade 之前（否则违规原文会先进 transcript）。
-  it("source: continueModelAfterToolResults 镜像 Solution Completeness closure", async () => {
+  it("source: continueModelAfterToolResults does not append keyword-driven closure blocks", async () => {
     const text = await readFile(srcPath("index.ts"), "utf8");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
-    expect(body).toContain("needsSolutionCompletenessReportClosure");
-    expect(body).toContain("formatSolutionCompletenessReportBlock");
-    // closure 必须在 assistant_text_delta append 之后（安全文本入 transcript 后才追加）
-    const appendIdx = body.indexOf('type: "assistant_text_delta"');
-    const closureIdx = body.indexOf("needsSolutionCompletenessReportClosure");
-    expect(appendIdx).toBeGreaterThan(-1);
-    expect(closureIdx).toBeGreaterThan(appendIdx);
-    // closure 必须在 downgrade gate（buildExtendedDowngradedFinalAnswer）之后
-    const downgradeIdx = body.lastIndexOf("buildExtendedDowngradedFinalAnswer");
-    expect(closureIdx).toBeGreaterThan(downgradeIdx);
+    expect(body).not.toContain("needsSolutionCompletenessReportClosure");
+    expect(body).not.toContain("formatSolutionCompletenessReportBlock");
   });
 
   // D.14A-R-Fix P1-1 — closure helper 行为锁定：classification 已给出时不追加，

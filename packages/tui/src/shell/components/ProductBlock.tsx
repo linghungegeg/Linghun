@@ -80,6 +80,16 @@ export function ProductBlock({
     // marker 用 dim，文本用默认色，避免被当成 highlight 命令；多行用户消息
     // title 已截到首行（createUserTextBlock）。
     const isUserText = block.messageKind === "user_text";
+    if (isUserText) {
+      const body = (block.fullText ?? block.title ?? "").trim();
+      if (!body) return null;
+      return (
+        <Box marginTop={1} marginBottom={0} flexDirection="row">
+          <Text color={theme.muted}>› </Text>
+          <MessageMarkdown text={body} theme={theme} wrapWidth={Math.max(8, width - 2)} />
+        </Box>
+      );
+    }
     const marker = isUserText ? "› " : "❯ ";
     const textColor = isUserText ? undefined : theme.accent;
     return (
@@ -116,10 +126,22 @@ export function ProductBlock({
             <Text color={theme.dim ?? theme.muted} dimColor>
               {"  ⎿  "}
             </Text>
-            <MessageMarkdown text={body} theme={theme} dim={dim} tone={tone} />
+            <MessageMarkdown
+              text={body}
+              theme={theme}
+              dim={dim}
+              tone={tone}
+              wrapWidth={Math.max(8, width - 6)}
+            />
           </Box>
         ) : (
-          <MessageMarkdown text={body} theme={theme} dim={dim} tone={tone} />
+          <MessageMarkdown
+            text={body}
+            theme={theme}
+            dim={dim}
+            tone={tone}
+            wrapWidth={Math.max(8, width)}
+          />
         )}
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
@@ -137,7 +159,7 @@ export function ProductBlock({
         <Text color={theme.dim ?? theme.muted} italic dimColor>
           {"∴ "}
         </Text>
-        <MessageMarkdown text={body} theme={theme} dim />
+        <MessageMarkdown text={body} theme={theme} dim wrapWidth={Math.max(8, width)} />
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
@@ -192,7 +214,9 @@ export function ProductBlock({
             <Text color={theme.error ?? theme.status.fail}>{block.title}</Text>
           </Text>
         ) : null}
-        {body ? <MessageMarkdown text={body} theme={theme} tone="error" /> : null}
+        {body ? (
+          <MessageMarkdown text={body} theme={theme} tone="error" wrapWidth={innerWidth} />
+        ) : null}
         {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
       </Box>
     );
