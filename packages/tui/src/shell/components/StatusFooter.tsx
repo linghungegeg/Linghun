@@ -70,11 +70,7 @@ export function StatusFooter({
             </Text>
           ))}
         </Text>
-        {footer.runtimeStatus ? (
-          <Text color={theme.dim ?? theme.muted} dimColor>
-            {fitText(footer.runtimeStatus, Math.max(20, width - 4))}
-          </Text>
-        ) : null}
+        <FooterDetailLines footer={footer} theme={theme} width={width} />
       </Box>
     );
   }
@@ -109,9 +105,32 @@ export function StatusFooter({
           </Text>
         </Box>
       </Box>
+      <FooterDetailLines footer={footer} theme={theme} width={width} />
+    </Box>
+  );
+}
+
+function FooterDetailLines({
+  footer,
+  theme,
+  width,
+}: {
+  footer: TaskFooterView;
+  theme: ShellTheme;
+  width: number;
+}): React.ReactNode {
+  const detailWidth = Math.max(20, width - 4);
+  if (!footer.workspaceStatus && !footer.runtimeStatus) return null;
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {footer.workspaceStatus ? (
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {fitText(footer.workspaceStatus, detailWidth)}
+        </Text>
+      ) : null}
       {footer.runtimeStatus ? (
         <Text color={theme.dim ?? theme.muted} dimColor>
-          {fitText(footer.runtimeStatus, Math.max(20, width - 4))}
+          {fitText(footer.runtimeStatus, detailWidth)}
         </Text>
       ) : null}
     </Box>

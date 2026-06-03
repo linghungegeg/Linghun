@@ -4102,6 +4102,8 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(prompt).toContain("EngineeringStructure=");
+    expect(prompt).toContain("你是 Linghun 工程型 AI 编程助手");
+    expect(prompt).not.toContain("工程型中文助手");
     expect(prompt).toContain("god file");
     expect(prompt).toContain("code blob");
     expect(prompt).toContain("超长函数");
@@ -4160,6 +4162,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(prompt).toContain("EngineeringStructure=");
+    expect(prompt).toContain("engineering AI coding assistant");
     expect(prompt).toContain("god files");
     expect(prompt).toContain("code blobs");
     expect(prompt).toContain("deep nesting");

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -1662,7 +1663,8 @@ describe("D.12B — P2-5: no-color does not force white", () => {
     });
     const rendered = renderPlainShell(view);
     expect(rendered).toContain("可恢复 1");
-    expect(rendered).toContain("上次会话恢复的后台任务");
+    expect(rendered).toContain("详情 /background");
+    expect(rendered).not.toContain("上次会话恢复的后台任务");
     expect(rendered).toContain("LingHun");
   });
 });
@@ -2933,6 +2935,26 @@ describe("D.13C — TUI Product Shell Final Maturity", () => {
     expect(cursorCol).toBe(4);
   });
 
+  it("Composer preserves continuation prefix spaces after multiline input", async () => {
+    const source = await readFile(join(SRC_ROOT, "shell", "components", "Composer.tsx"), "utf8");
+    expect(source).toContain("{sliceWidth(line, maxWidth)}");
+    expect(source).not.toContain("{fitText(line, maxWidth)}");
+
+    const buf = createEditBuffer("line1\nline2");
+    const { lines, cursorRow, cursorCol } = formatComposerRenderLines({
+      buffer: buf,
+      placeholder: "placeholder",
+      masking: false,
+      noColor: false,
+      maxWidth: 80,
+    });
+
+    expect(lines[0]).toBe("> line1");
+    expect(lines[1]).toBe("  line2");
+    expect(cursorRow).toBe(1);
+    expect(cursorCol).toBe(7);
+  });
+
   // =========================================================================
   // Task view maturity closure
   // =========================================================================
@@ -3501,6 +3523,38 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(Object.values(footer).join(" ")).not.toContain("正在运行 Bash");
   });
 
+  it("task footer shows workspace above a denoised background summary", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      backgroundSummaries: [
+        {
+          id: "task-724a5c-worker",
+          kind: "agent",
+          title: "Agent task-724a5c-worker",
+          status: "stale",
+          currentStep: "stale/resumable",
+          progress: { completed: 0, total: 1 },
+        },
+      ],
+    });
+
+    expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
+    expect(view.taskFooter?.runtimeStatus).toContain("后台任务：可恢复 1");
+    expect(view.taskFooter?.runtimeStatus).toContain("详情 /background");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("运行中 0");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("待确认 0");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("agent 1");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("task-724a5c-worker");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("stale/resumable");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("上次会话恢复的后台任务");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("0/1");
+
+    const rendered = renderPlainShell(view);
+    expect(rendered.indexOf("工作树：")).toBeGreaterThanOrEqual(0);
+    expect(rendered.indexOf("后台任务：")).toBeGreaterThan(rendered.indexOf("工作树："));
+  });
+
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
     // 显式注入 index.status="unknown"，确保 footer 走 unknown 分支。
     const zhView = createShellViewModel(
@@ -3535,6 +3589,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(cyclePermHintSnippet).not.toContain("theme.status.fail");
     // 右栏（model · cache · index · reasoning · hint）按顺序作为 segments 渲染。
     expect(source).toContain("rightSegments");
+    expect(source.indexOf("footer.workspaceStatus")).toBeLessThan(
+      source.indexOf("footer.runtimeStatus"),
+    );
+    expect(source).toContain("marginTop={1}");
     expect(source).not.toContain("footer.task");
     expect(source).not.toContain("footer.elapsed");
   });
@@ -3801,6 +3859,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
     expect(body).toContain("{composerRule}");
     expect(body).toContain("<Composer view={view}");
+    expect(body).toContain("<Box width={cw} paddingTop={1}>");
+    expect(body).toContain('<Box flexDirection="column" width={cw}>');
+    expect(body).not.toContain("width={cw} paddingX={1}");
     expect(body).not.toContain("view.taskRuntimeSummary");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
     expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
@@ -4187,7 +4248,8 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const text = output.text;
     const userIdx = text.indexOf("│ 请检查输出");
     const assistantIdx = text.indexOf("助手回复第一段");
-    const runtimeIdx = text.indexOf("上次会话恢复的后台任务");
+    const workspaceIdx = text.indexOf("工作树：");
+    const runtimeIdx = text.indexOf("详情 /background");
     const hintIdx = text.indexOf("最近缓存复用变低");
     const composerSeparatorIdx = text.indexOf("----------", hintIdx);
     const footerIdx = text.indexOf("Shift+Tab");
@@ -4197,9 +4259,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(hintIdx).toBeGreaterThan(assistantIdx);
     expect(composerSeparatorIdx).toBeGreaterThan(hintIdx);
     expect(footerIdx).toBeGreaterThan(composerSeparatorIdx);
+    expect(workspaceIdx).toBeGreaterThan(footerIdx);
     expect(runtimeIdx).toBeGreaterThan(footerIdx);
     expect(text).not.toContain("失败/阻塞 1");
     expect(text).not.toContain("Agent cli-tui-worker · blocked");
+    expect(text).not.toContain("上次会话恢复的后台任务");
   });
 
   it("local_command_output/Bash 从属输出使用 ⎿，普通成功结果不出现 bordered CommandPanel", () => {

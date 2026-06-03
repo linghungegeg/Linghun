@@ -291,6 +291,9 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
     lines.push(...view.limitations.map((item) => `  ${dim(item, noColor)}`));
   }
 
+  if (view.taskFooter?.workspaceStatus) {
+    lines.push(dim(view.taskFooter.workspaceStatus, noColor));
+  }
   if (view.taskFooter?.runtimeStatus) {
     lines.push(dim(view.taskFooter.runtimeStatus, noColor));
   }

@@ -427,7 +427,7 @@ export function isMultilineEnterSequence(input: string): boolean {
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
 const PROMPT_MARKER = "> ";
-const PROMPT_MARKER_CONTINUATION = "  ";
+const PROMPT_MARKER_CONTINUATION = " ".repeat(displayWidthOf(PROMPT_MARKER));
 
 const PERMISSION_ACTION_ORDER: PermissionActionId[] = [
   "allow_once",
@@ -1192,7 +1192,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         {lines.map((line, index) => {
           return (
             <Text key={`${index}-${line}`} color={color} bold={Boolean(text)}>
-              {fitText(line, maxWidth)}
+              {sliceWidth(line, maxWidth)}
             </Text>
           );
         })}

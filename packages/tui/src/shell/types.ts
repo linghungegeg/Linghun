@@ -225,6 +225,10 @@ export type TaskFooterView = {
    */
   cacheTone?: "default" | "warning" | "dim";
   /**
+   * Footer workspace/worktree line. Keep it short and above runtimeStatus.
+   */
+  workspaceStatus?: string;
+  /**
    * Footer 第二行：当前 active/resumable runtime 状态。历史 terminal 任务不进这里。
    */
   runtimeStatus?: string;

@@ -282,12 +282,12 @@ function TaskLayout({
         {/* D.13Q-UX：轻提示固定在 composer 上方，不和 footer/runtime summary 抢最底部。 */}
         <NotificationStack notifications={view.notifications} theme={theme} />
 
-        <Box width={cw} paddingX={1} paddingTop={1}>
+        <Box width={cw} paddingTop={1}>
           <Text color={theme.border ?? theme.muted} dimColor>
             {composerRule}
           </Text>
         </Box>
-        <Box flexDirection="column" width={cw} paddingX={1}>
+        <Box flexDirection="column" width={cw}>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
 

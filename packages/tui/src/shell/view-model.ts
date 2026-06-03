@@ -373,8 +373,13 @@ export function createShellViewModel(
             reasoningLevel: options.reasoningLevel,
             reasoningSent: options.reasoningSent,
           }).view,
+          workspaceStatus: formatFooterWorkspaceStatus(context, projectName, language),
           runtimeStatus: taskRuntimeSummary
-            ? formatFooterRuntimeStatus(taskRuntimeSummary, language)
+            ? formatFooterRuntimeStatus(
+                taskRuntimeSummary,
+                language,
+                options.backgroundSummaries ?? [],
+              )
             : undefined,
         };
 
@@ -1158,14 +1163,58 @@ function createBackgroundNextAction(
   return task.nextAction;
 }
 
-function formatFooterRuntimeStatus(block: ProductBlockViewModel, language: Language): string {
-  const title = cleanBackgroundDisplayText(
-    block.title,
-    language === "en-US" ? "Background" : "后台",
-  );
-  const summary = cleanBackgroundDisplayText(block.summary, "");
-  if (!summary) return title;
-  return `${title} · ${summary}`;
+function formatFooterRuntimeStatus(
+  block: ProductBlockViewModel,
+  language: Language,
+  summaries: BackgroundTaskSummary[],
+): string {
+  const zh = language === "zh-CN";
+  const running = summaries.filter((task) => task.status === "running").length;
+  const needConfirm = summaries.filter((task) => task.status === "paused").length;
+  const stale = summaries.filter((task) => task.status === "stale").length;
+  const total = summaries.length;
+  const agents = summaries.filter((task) => task.kind === "agent").length;
+  const jobs = summaries.filter((task) => task.kind === "job").length;
+  const titlePieces = [];
+  if (running > 0) {
+    titlePieces.push(zh ? `运行中 ${running}` : `${running} running`);
+  }
+  if (needConfirm > 0) {
+    titlePieces.push(zh ? `待确认 ${needConfirm}` : `${needConfirm} need attention`);
+  }
+  if (stale > 0) {
+    titlePieces.push(zh ? `可恢复 ${stale}` : `${stale} resumable`);
+  }
+
+  const title =
+    titlePieces.length > 0
+      ? zh
+        ? `后台任务：${titlePieces.join(" · ")}`
+        : `Background tasks: ${titlePieces.join(" · ")}`
+      : cleanBackgroundDisplayText(block.title, zh ? "后台任务" : "Background tasks");
+  const pieces = [title];
+  if (total > 1) {
+    pieces.push(zh ? `共 ${total}` : `${total} total`);
+  }
+  if (agents > 1 || (agents > 0 && agents < total)) {
+    pieces.push(zh ? `智能体 ${agents}` : `${agents} agent`);
+  }
+  if (jobs > 1 || (jobs > 0 && jobs < total)) {
+    pieces.push(zh ? `job ${jobs}` : `${jobs} job`);
+  }
+  pieces.push(zh ? "详情 /background" : "details /background");
+  return pieces.join(" · ");
+}
+
+function formatFooterWorkspaceStatus(
+  context: TuiContext,
+  projectName: string,
+  language: Language,
+): string {
+  const zh = language === "zh-CN";
+  const label = zh ? "工作树" : "Workspace";
+  const path = basename(context.projectPath) || projectName;
+  return `${label}：${truncateMiddle(path, 36)}`;
 }
 
 function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language): string {
