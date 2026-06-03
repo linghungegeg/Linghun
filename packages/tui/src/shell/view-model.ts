@@ -155,6 +155,8 @@ export type ShellViewModelOptions = {
   limitations?: string[];
   /** Set to true immediately after user submits input to prevent home flicker. */
   submitted?: boolean;
+  /** Stable start time for submitted fallback activity; avoids resetting elapsed on rerender. */
+  submittedStartedAt?: number;
   /** Denial/cancel feedback for the most recent permission action. */
   denialFeedback?: { toolName: string; kind: "denied" | "cancelled" };
   /**
@@ -224,6 +226,9 @@ export function createShellViewModel(
       ? {
           phase: "thinking",
           text: language === "en-US" ? "Thinking…" : "正在思考…",
+          elapsed: formatElapsedSince(
+            new Date(options.submittedStartedAt ?? Date.now()).toISOString(),
+          ),
         }
       : undefined);
 

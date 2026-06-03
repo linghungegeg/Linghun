@@ -313,6 +313,130 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     });
   });
 
+  it("continues readonly audit slices when architecture risk is present", () => {
+    const result = bridge(
+      createPlan({
+        references: [
+          {
+            kind: "architecture",
+            ref: "architecture-boundary-check",
+            summary: "architecture risk: god-file",
+          },
+        ],
+        phases: [
+          {
+            id: "phase-c",
+            title: "Runtime bridge",
+            status: "running",
+            stopPoint: { required: true, confirmationRequired: true, reason: "Confirm." },
+            slices: [
+              {
+                id: "slice-audit",
+                title: "Readonly audit",
+                role: "explorer",
+                status: "queued",
+                targetRuntime: { kind: "details", view: "evidence", mutating: false },
+                evidence: [
+                  {
+                    ref: "architecture-boundary-check",
+                    kind: "architecture",
+                    claim: "architecture risk: code-blob",
+                    passEvidence: false,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const audit = requestBySlice(result.requests, "slice-audit");
+    expect(audit.status).toBe("readonly");
+    expect(audit.executable).toBe(true);
+    expect(result.summary.blocked).toBe(0);
+  });
+
+  it("blocks mutating slices when architecture boundary risk is present", () => {
+    const result = bridge(
+      createPlan({
+        phases: [
+          {
+            id: "phase-c",
+            title: "Runtime bridge",
+            status: "running",
+            stopPoint: { required: true, confirmationRequired: true, reason: "Confirm." },
+            slices: [
+              {
+                id: "slice-write",
+                title: "Write after architecture risk",
+                role: "worker",
+                status: "queued",
+                targetRuntime: { kind: "slash", slash: "/fork", role: "worker", mutating: true },
+                evidence: [
+                  {
+                    ref: "architecture-boundary-check",
+                    kind: "architecture",
+                    claim: "architecture risk: god-file",
+                    passEvidence: false,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const write = requestBySlice(result.requests, "slice-write");
+    expect(write.status).toBe("blocked");
+    expect(write.executable).toBe(false);
+    expect(write.reason).toContain("architecture boundary risk");
+  });
+
+  it("does not block mutating slices for passed architecture no-risk evidence", () => {
+    const result = bridge(
+      createPlan({
+        references: [
+          {
+            kind: "architecture",
+            ref: "architecture-boundary-check",
+            summary: "architecture no risk passed",
+          },
+        ],
+        phases: [
+          {
+            id: "phase-c",
+            title: "Runtime bridge",
+            status: "running",
+            stopPoint: { required: true, confirmationRequired: true, reason: "Confirm." },
+            slices: [
+              {
+                id: "slice-write",
+                title: "Write after clean architecture check",
+                role: "worker",
+                status: "queued",
+                targetRuntime: { kind: "slash", slash: "/fork", role: "worker", mutating: true },
+                evidence: [
+                  {
+                    ref: "architecture-boundary-check",
+                    kind: "architecture",
+                    claim: "architecture boundary check passed with no risk",
+                    passEvidence: true,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const write = requestBySlice(result.requests, "slice-write");
+    expect(write.status).toBe("runnable");
+    expect(write.executable).toBe(true);
+  });
+
   it("rejects raw command strings even if they are forced into a normalized plan", () => {
     const plan = normalize(createPlan());
     const slice0 = plan.phases[0]?.slices[0];

@@ -708,6 +708,24 @@ export function markJobRunnerTerminal(
   reason: string,
 ): void {
   const now = new Date().toISOString();
+  const shouldSyncActiveJob =
+    job.status === "created" || job.status === "running" || job.status === "sleeping";
+  if (
+    shouldSyncActiveJob &&
+    (status === "cancelled" || status === "timeout" || status === "failed" || status === "stale")
+  ) {
+    job.status = status;
+    job.pauseReason = `runner_${status}`;
+    job.updatedAt = now;
+    job.endedAt = now;
+    job.result = {
+      status,
+      summary: `Native runner moved to ${status}; no PASS evidence generated.`,
+      facts: [sanitizeDiagnosticText(reason), formatJobRunnerInline(job)],
+      evidenceRefs: job.evidenceRefs.map((item) => item.id),
+      generatedAt: now,
+    };
+  }
   job.runner = {
     enabled: job.runner?.enabled ?? false,
     status,

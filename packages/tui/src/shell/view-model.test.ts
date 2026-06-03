@@ -930,6 +930,22 @@ describe("mapRequestActivityToView — real context field mapping", () => {
     expect(result?.elapsed).toBe("0s");
   });
 
+  it("submitted fallback activity carries elapsed", () => {
+    const view = createShellViewModel(createContext(), { submitted: true });
+    expect(view.activity?.phase).toBe("thinking");
+    expect(view.activity?.elapsed).toBeDefined();
+  });
+
+  it("submitted fallback activity uses stable submittedStartedAt for elapsed", () => {
+    const startedAt = Date.now() - 12_000;
+    const view = createShellViewModel(createContext(), {
+      submitted: true,
+      submittedStartedAt: startedAt,
+    });
+    expect(view.activity?.phase).toBe("thinking");
+    expect(view.activity?.elapsed).toBe("12s");
+  });
+
   it("maps tool_running with toolName to tool_running phase", () => {
     const startedAt = Date.now() - 65_000;
     const ctx = createContext({

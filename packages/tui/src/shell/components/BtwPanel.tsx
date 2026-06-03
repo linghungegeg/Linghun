@@ -62,25 +62,16 @@ export function BtwPanel({
   });
 
   const cardWidth = Math.min(width, 84);
-  const innerWidth = Math.max(20, cardWidth - 4);
+  const innerWidth = Math.max(20, cardWidth - 2);
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="single"
-      borderColor={theme.warning ?? theme.border}
-      paddingX={1}
-      marginTop={1}
-      width={cardWidth}
-    >
-      <Text color={theme.warning ?? theme.accent} bold>
-        {fitText(`${hint.title} ${panel.question}`, innerWidth)}
+    <Box flexDirection="column" marginTop={1} width={cardWidth}>
+      <Text>
+        <Text color={theme.warning ?? theme.accent}>{hint.title}</Text>{" "}
+        <Text>{fitText(panel.question, Math.max(8, innerWidth - hint.title.length - 1))}</Text>
       </Text>
       <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(hint.subtitle, innerWidth)}
-      </Text>
-      <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(hint.nav, innerWidth)}
+        {fitText(`${hint.subtitle} · ${hint.nav}`, innerWidth)}
       </Text>
       {panel.phase === "loading" ? (
         <Text color={theme.status.running ?? theme.accent}>

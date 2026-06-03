@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createToolContext, runTool } from "./index.js";
+import { adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
 
 describe("Phase 05 core tools", () => {
   it("reads, searches, edits, tracks todo, runs bash, and summarizes diff", async () => {
@@ -291,5 +291,39 @@ describe("Phase 05 core tools", () => {
     expect(read.output.truncated).toBe(true);
     expect(read.output.text.length).toBeLessThan(read.output.details?.length ?? 0);
     expect(read.output.details).toContain("x".repeat(100));
+  });
+
+  it("adapts obvious Unix find|sed/head pipelines for Windows PowerShell", () => {
+    const adapted = adaptShellCommandForPlatform("find . -type f | sed -n '1,5p'", "win32");
+    expect(adapted.adapter).toBe("powershell-adapted");
+    expect(adapted.command).toContain("powershell.exe");
+    expect(adapted.command).toContain("Get-ChildItem");
+    expect(adapted.command).toContain("Select-Object -First 5");
+
+    const head = adaptShellCommandForPlatform("find . | head -n 3", "win32");
+    expect(head.adapter).toBe("powershell-adapted");
+    expect(head.command).toContain("Select-Object -First 3");
+
+    const spacedPath = adaptShellCommandForPlatform("find 'src files' | head -n 2", "win32");
+    expect(spacedPath.adapter).toBe("powershell-adapted");
+    expect(spacedPath.command).toContain("Get-ChildItem");
+    expect(spacedPath.command).toContain("'src files'");
+    expect(spacedPath.command).not.toContain("| |");
+
+    const headFile = adaptShellCommandForPlatform("head -n 4 'notes file.txt'", "win32");
+    expect(headFile.adapter).toBe("powershell-adapted");
+    expect(headFile.command).toContain("Get-Content");
+    expect(headFile.command).toContain("TotalCount 4");
+    expect(headFile.command).toContain("'notes file.txt'");
+
+    const blocked = adaptShellCommandForPlatform("find . -type f | sed 's/a/b/'", "win32");
+    expect(blocked.adapter).toBe("blocked");
+    expect(blocked.command).toContain("Unsupported Unix pipeline");
+
+    const unsupportedFindPredicate = adaptShellCommandForPlatform(
+      "find . -name '*.ts' | head -n 5",
+      "win32",
+    );
+    expect(unsupportedFindPredicate.adapter).toBe("blocked");
   });
 });

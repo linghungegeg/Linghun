@@ -257,4 +257,70 @@ describe("Ink TTY interaction smoke", () => {
 
     shell.unmount();
   });
+
+  it("keeps fallback newline keys in the editor while ordinary Enter submits", async () => {
+    const view: ShellViewModel = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      activity: undefined,
+      blocks: [],
+      taskSuggestions: undefined,
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    for (const ch of "plain") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({ type: "submit", text: "plain" });
+
+    events.length = 0;
+    for (const ch of "foo\\") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    for (const ch of "bar") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({ type: "submit", text: "foo\nbar" });
+
+    events.length = 0;
+    for (const ch of "baz") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\x0a");
+    await shell.waitUntilRenderFlush();
+    for (const ch of "qux") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({ type: "submit", text: "baz\nqux" });
+
+    events.length = 0;
+    for (const ch of "csi") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\x1b[13;2u");
+    await shell.waitUntilRenderFlush();
+    for (const ch of "enter") {
+      input.write(ch);
+      await shell.waitUntilRenderFlush();
+    }
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    expect(events).toContainEqual({ type: "submit", text: "csi\nenter" });
+
+    shell.unmount();
+  });
 });

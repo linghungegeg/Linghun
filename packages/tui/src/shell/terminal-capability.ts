@@ -31,6 +31,12 @@ export type TerminalCapability = {
   alternateScreen: boolean;
   /** Whether the terminal supports cursor positioning reliably. */
   cursorPositioning: boolean;
+  /** Whether Shift+Enter is expected to arrive as a distinguishable key event. */
+  shiftEnter: boolean;
+  /** Fallback key chords that the editor treats as newline insertion. */
+  multilineFallbacks: Array<"ctrl-j" | "alt-enter" | "backslash-enter">;
+  /** Keyboard enhancement protocols that are likely available or auto-enabled by Ink. */
+  keyboardProtocols: Array<"kitty" | "csi-u" | "modifyOtherKeys">;
 };
 
 let cachedCapability: TerminalCapability | undefined;
@@ -69,16 +75,32 @@ function detectTerminalCapabilityUncached(): TerminalCapability {
 
 function detectWindowsTerminal(env: NodeJS.ProcessEnv): TerminalCapability {
   // Windows Terminal (modern conpty-based)
-  if (env.WT_SESSION) return modernCapability();
+  if (env.WT_SESSION) {
+    return {
+      ...modernCapability(),
+      shiftEnter: true,
+      keyboardProtocols: ["csi-u", "modifyOtherKeys"],
+    };
+  }
 
   // VS Code integrated terminal
-  if (env.TERM_PROGRAM === "vscode") return modernCapability();
+  if (env.TERM_PROGRAM === "vscode") {
+    return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };
+  }
 
   // WezTerm
-  if (env.TERM_PROGRAM === "WezTerm") return modernCapability();
+  if (env.TERM_PROGRAM === "WezTerm") {
+    return {
+      ...modernCapability(),
+      shiftEnter: true,
+      keyboardProtocols: ["csi-u", "modifyOtherKeys"],
+    };
+  }
 
   // Alacritty on Windows
-  if (env.TERM_PROGRAM === "alacritty" || env.ALACRITTY_WINDOW_ID) return modernCapability();
+  if (env.TERM_PROGRAM === "alacritty" || env.ALACRITTY_WINDOW_ID) {
+    return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };
+  }
 
   // ConEmu / Cmder
   if (env.ConEmuPID || env.CONEMUDIR) return basicCapability();
@@ -120,11 +142,22 @@ function detectUnixTerminal(env: NodeJS.ProcessEnv): TerminalCapability {
   if (termProgram === "WezTerm") return modernCapability();
   if (termProgram === "alacritty" || env.ALACRITTY_WINDOW_ID) return modernCapability();
   if (termProgram === "kitty" || env.KITTY_WINDOW_ID) {
-    return { ...modernCapability(), kittyKeyboard: true };
+    return {
+      ...modernCapability(),
+      kittyKeyboard: true,
+      shiftEnter: true,
+      keyboardProtocols: ["kitty", "csi-u"],
+    };
   }
-  if (termProgram === "vscode") return modernCapability();
-  if (termProgram === "ghostty") return modernCapability();
-  if (termProgram === "rio") return modernCapability();
+  if (termProgram === "vscode") {
+    return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };
+  }
+  if (termProgram === "ghostty") {
+    return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };
+  }
+  if (termProgram === "rio") {
+    return { ...modernCapability(), shiftEnter: true, keyboardProtocols: ["csi-u"] };
+  }
 
   // tmux/screen — generally modern enough
   if (env.TMUX || env.TERM?.startsWith("screen")) return basicCapability();
@@ -150,6 +183,9 @@ function modernCapability(): TerminalCapability {
     kittyKeyboard: false,
     alternateScreen: true,
     cursorPositioning: true,
+    shiftEnter: true,
+    multilineFallbacks: ["ctrl-j", "alt-enter", "backslash-enter"],
+    keyboardProtocols: ["csi-u"],
   };
 }
 
@@ -162,6 +198,9 @@ function basicCapability(): TerminalCapability {
     kittyKeyboard: false,
     alternateScreen: true,
     cursorPositioning: true,
+    shiftEnter: false,
+    multilineFallbacks: ["ctrl-j", "alt-enter", "backslash-enter"],
+    keyboardProtocols: [],
   };
 }
 
@@ -174,5 +213,8 @@ function legacyCapability(): TerminalCapability {
     kittyKeyboard: false,
     alternateScreen: false,
     cursorPositioning: false,
+    shiftEnter: false,
+    multilineFallbacks: ["ctrl-j", "alt-enter", "backslash-enter"],
+    keyboardProtocols: [],
   };
 }

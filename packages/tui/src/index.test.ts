@@ -75,6 +75,7 @@ import {
   findDeferredTool,
   formatDeferredToolsSystemReminder,
   getCodebaseMemoryToolRisk,
+  getDurableJobPaths,
   getRemoteBridgeDoctor,
   handleNaturalInput,
   handleRemoteInboundMessage,
@@ -105,7 +106,12 @@ import {
   wecomBridgeAdapter,
   writeLightHintsForTest,
 } from "./index.js";
-import { listDurableJobs as listDurableJobsFromRuntime, persistDurableJob } from "./job-runtime.js";
+import {
+  getDurableJobStatePath,
+  listDurableJobs as listDurableJobsFromRuntime,
+  persistDurableJob,
+  readDurableJobState,
+} from "./job-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -1937,6 +1943,10 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
+    context.config = {
+      ...context.config,
+      storage: { ...context.config.storage, jobs: { scope: "project" } },
+    };
 
     await handleSlashCommand("/help", context, output);
 
@@ -4944,6 +4954,58 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks.find((task) => task.id === run?.id)?.currentStep).not.toContain(
       "architecture boundary risks found",
     );
+  });
+
+  it("workflow readonly details step executes the requested evidence ref", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-details-ref-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    context.evidence.push({
+      id: "ev-target",
+      kind: "command_output",
+      summary: "target evidence summary",
+      source: "test",
+      supportsClaims: ["target-claim"],
+      createdAt: new Date().toISOString(),
+    });
+    const plan = normalizeWorkflowPlan({
+      id: "wf-details-ref",
+      title: "Workflow details ref",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-c",
+      references: [],
+      evidence: [],
+      phases: [
+        {
+          id: "phase-c",
+          title: "Runtime bridge",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed in test" },
+          slices: [
+            {
+              id: "slice-details-ref",
+              title: "Show target evidence",
+              role: "explorer",
+              status: "queued",
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              references: [{ kind: "evidence", ref: "ev-target", summary: "target ref" }],
+            },
+          ],
+        },
+      ],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid details plan");
+
+    await __testRunWorkflowStepsWithPlan("details target ref", plan.plan, context, output);
+
+    expect(context.workflows.activeRun?.steps[0]?.status).toBe("completed");
+    expect(output.text).toContain("Evidence ev-target");
+    expect(output.text).toContain("target evidence summary");
   });
 
   it("workflow run blocks mutating worker steps when the real agent loop is unavailable", async () => {
@@ -13560,6 +13622,60 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
+  it("D.14D: closing a loading /btw panel keeps the answer out of the main task surface", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "btw-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "btw-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "btw-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.isInkSession = true;
+    context.modelGateway = createModelGateway(config);
+    let resolveFetch: (value: Response) => void = () => undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return await new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        });
+      }),
+    );
+
+    const running = handleSlashCommand("/btw 临时解释一下", context, output);
+    await waitForTestCondition(() => context.btwPanelState?.phase === "loading");
+    context.btwPanelState = undefined;
+    resolveFetch(
+      new Response(
+        `data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: "迟到的侧问答案" } }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    await running;
+
+    expect(context.btwPanelState).toBeUndefined();
+    expect(output.text).toBe("");
+    expect(context.evidence).toHaveLength(0);
+    const resumed = await store.resume(session.id);
+    expect(resumed.transcript.some((e) => e.type === "btw_question")).toBe(true);
+    expect(JSON.stringify(resumed.transcript)).not.toContain("EvidenceSummary");
+    expect(JSON.stringify(resumed.transcript)).not.toContain("gate");
+  });
+
   it("D.14D: /btw shows a visible error when the provider fails, without polluting evidence or gates", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -13736,7 +13852,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
     await running;
 
-    expect(output.text).toContain("已发送 AbortSignal");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=1，marked=0。");
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
@@ -13752,9 +13868,125 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("未找到可用 AbortSignal，仅标记状态");
-    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
-    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(context.backgroundTasks[0]?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.result).toBe("partial");
+  });
+
+  it("/interrupt persists durable job background state as stale when no controller exists", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.config = {
+      ...context.config,
+      storage: { ...context.config.storage, jobs: { scope: "project" } },
+    };
+    const now = new Date().toISOString();
+    const jobPaths = getDurableJobPaths(context, "job-interrupt-stale");
+    const job = {
+      id: "job-interrupt-stale",
+      goal: "durable job interrupt",
+      projectPath: project,
+      status: "running",
+      phase: "test",
+      target: "test",
+      plan: ["step"],
+      agents: [],
+      budget: { maxTokens: 1000, maxRunningAgents: 1, maxSteps: 1, note: "test budget" },
+      timeoutMs: 60_000,
+      permissionPolicy: "default",
+      allowEdit: false,
+      allowBash: false,
+      allowMultiAgent: false,
+      evidenceRefs: [],
+      adoptedConclusions: [],
+      rejectedConclusions: [],
+      createdAt: now,
+      updatedAt: now,
+      logPath: jobPaths.logPath,
+      reportPath: jobPaths.reportPath,
+      fullOutputPath: jobPaths.fullOutputPath,
+    } as DurableJobState;
+    await persistDurableJob(job);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("job", {
+        id: job.id,
+        title: "Job: durable job interrupt",
+      }),
+    ];
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(context.backgroundTasks[0]?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.result).toBe("stale");
+    const persisted = await readDurableJobState(getDurableJobStatePath(job));
+    expect(persisted?.status).toBe("stale");
+    expect(persisted?.result?.status).toBe("stale");
+    expect(persisted?.result?.summary).toContain("no PASS evidence");
+  });
+
+  it("/interrupt persists running agents as stale without double-counting their background task", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const startedAt = new Date().toISOString();
+    const controller = new AbortController();
+    const agent = {
+      id: "agent-interrupt-stale",
+      type: "worker" as const,
+      role: "executor" as const,
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "keep running until interrupted",
+      model: "deepseek-v4-flash",
+      permissionMode: "default" as const,
+      status: "running" as const,
+      transcriptPath: join(project, "agent-interrupt-stale.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: "agent running",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    context.agents = [agent];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: agent.id,
+        title: "Agent: worker",
+      }),
+    ];
+    context.backgroundAbortControllers = new Map([[agent.id, controller]]);
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=1，marked=0。");
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.backgroundAbortControllers?.has(agent.id)).toBe(false);
+    expect(context.agents[0]?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.status).toBe("stale");
+    expect(context.backgroundTasks[0]?.result).toBe("partial");
+    const persisted = JSON.parse(
+      await readFile(
+        join(resolveStoragePaths(context.config, project).agentRuns, `${agent.id}.json`),
+        "utf8",
+      ),
+    ) as { status?: string; staleReason?: string; summary?: string };
+    expect(persisted.status).toBe("stale");
+    expect(persisted.staleReason).toBe("interrupted_abort_signal_sent");
+    expect(persisted.summary).toContain("no completion was claimed");
   });
 
   it("verification cancel uses process guard and remains non-PASS", async () => {
@@ -13857,6 +14089,146 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.evidence[0]?.supportsClaims).toContain("verification:cancelled");
     expect(output.text).toContain("CANCELLED");
     expect(output.text).toContain("未生成 PASS 证据");
+  });
+
+  it("/interrupt cancels active workflow state, background, and persisted run consistently", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const startedAt = new Date().toISOString();
+    const runId = "workflow-interrupt-test";
+    context.workflows.activeRun = {
+      id: runId,
+      goal: "interrupt workflow",
+      planId: "wf-interrupt",
+      status: "running",
+      startedAt,
+      result: "partial",
+      steps: [
+        {
+          id: "step-running",
+          title: "running step",
+          status: "running",
+          runtime: "agent",
+          evidenceRefs: [],
+          startedAt,
+        },
+      ],
+    };
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("job", {
+        id: runId,
+        title: "Workflow: interrupt workflow",
+      }),
+    ];
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    const task = context.backgroundTasks.find((item) => item.id === runId);
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(context.workflows.activeRun.status).toBe("cancelled");
+    expect(context.workflows.activeRun.result).toBe("cancelled");
+    expect(task?.status).toBe("cancelled");
+    expect(task?.result).toBe("cancelled");
+    const statePath = join(
+      dirname(resolveStoragePaths(config, project).jobs),
+      "workflows",
+      runId,
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      status: string;
+      result: string;
+      steps?: Array<{ status?: string }>;
+      backgroundTask?: { status?: string; result?: string };
+    };
+    expect(state.status).toBe("cancelled");
+    expect(state.result).toBe("cancelled");
+    expect(state.steps?.some((step) => step.status === "running")).toBe(false);
+    expect(state.backgroundTask?.status).toBe("cancelled");
+    expect(state.backgroundTask?.result).toBe("cancelled");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "workflow_end" &&
+          event.workflowId === runId &&
+          event.status === "cancelled",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(transcript)).not.toContain("failure_learning");
+  });
+
+  it("/interrupt persists active workflow cancellation when background state is missing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const startedAt = new Date().toISOString();
+    const runId = "workflow-interrupt-missing-background";
+    context.workflows.activeRun = {
+      id: runId,
+      goal: "interrupt workflow without background",
+      planId: "wf-interrupt-missing-background",
+      status: "running",
+      startedAt,
+      result: "partial",
+      steps: [
+        {
+          id: "step-running",
+          title: "running step",
+          status: "running",
+          runtime: "agent",
+          evidenceRefs: [],
+          startedAt,
+        },
+      ],
+    };
+    context.backgroundTasks = [];
+
+    await handleSlashCommand("/interrupt", context, output);
+
+    const task = context.backgroundTasks.find((item) => item.id === runId);
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(task?.status).toBe("cancelled");
+    expect(task?.result).toBe("cancelled");
+    const statePath = join(
+      dirname(resolveStoragePaths(config, project).jobs),
+      "workflows",
+      runId,
+      "state.json",
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      result?: string;
+      steps?: Array<{ status?: string }>;
+      backgroundTask?: { status?: string; result?: string };
+    };
+    expect(state.status).toBe("cancelled");
+    expect(state.result).toBe("cancelled");
+    expect(state.steps?.some((step) => step.status === "running")).toBe(false);
+    expect(state.backgroundTask?.status).toBe("cancelled");
+    expect(state.backgroundTask?.result).toBe("cancelled");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "workflow_end" &&
+          event.workflowId === runId &&
+          event.status === "cancelled",
+      ),
+    ).toBe(true);
   });
 
   it("keeps stale verification conservative even if the command later succeeds", async () => {

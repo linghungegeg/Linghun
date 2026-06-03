@@ -155,7 +155,6 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
-  const composerLine = lineChar(noColor, capability).repeat(cw);
   // Main transcript scroll：任务页主输出统一走 transcript viewport；composer 固定底部。
   // C1：原来在 output 区与 composer 之间常驻的滚动提示行已删除（噪音），
   // footer 已承载状态；如需 hint 只在 footer/help 区，不在主流。
@@ -279,10 +278,8 @@ function TaskLayout({
           Border-color rules use theme.border (muted) instead of theme.accent
           so the lines don't compete with content. */}
       <Box flexShrink={0} flexDirection="column">
-        <Box flexDirection="column" width={cw}>
-          <Text color={theme.border}>{composerLine}</Text>
+        <Box flexDirection="column" width={cw} paddingX={1}>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
-          <Text color={theme.border}>{composerLine}</Text>
         </Box>
 
         {/* Task footer — minimal status line: permission mode · index. NOT the
@@ -302,11 +299,12 @@ function TaskLayout({
         ) : null}
         {view.taskRuntimeSummary ? (
           <Box paddingX={2} paddingTop={0}>
-            <ProductBlock
-              block={view.taskRuntimeSummary}
-              theme={theme}
-              width={Math.max(20, view.width - 4)}
-            />
+            <Text color={theme.muted} dimColor>
+              {fitText(
+                `${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`,
+                Math.max(20, view.width - 4),
+              )}
+            </Text>
           </Box>
         ) : null}
 

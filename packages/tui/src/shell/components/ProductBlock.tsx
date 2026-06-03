@@ -177,7 +177,6 @@ export function ProductBlock({
     block.kind === "permission" ||
     block.kind === "error" ||
     block.status === "fail" ||
-    block.status === "blocked" ||
     block.messageKind === "tool_result_error";
   const emphasized = isAlert && !compact;
   // permission 卡保持中性 border 色（与 P0-1 锚定问题行配色一致）；

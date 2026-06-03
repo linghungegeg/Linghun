@@ -695,14 +695,26 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   await mkdir(logRoot, { recursive: true });
   const fullOutputPath = join(logRoot, `bash-${Date.now()}-${randomUUID()}.log`);
   const timeoutMs = input.timeoutMs ?? BASH_TIMEOUT_MS;
+  const adapted = adaptShellCommand(input.command);
   const result = await runShell(
-    input.command,
+    adapted.command,
     context.workspaceRoot,
     timeoutMs,
     context.abortSignal,
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
   );
-  const fullText = `$ ${input.command}\nexitCode=${result.exitCode}\noutcome=${result.outcome}\n\n${result.output}`;
+  const adapterLines =
+    adapted.command === input.command
+      ? []
+      : [`adapter=${adapted.adapter}`, `originalCommand=${input.command}`];
+  const fullText = [
+    `$ ${adapted.command}`,
+    ...adapterLines,
+    `exitCode=${result.exitCode}`,
+    `outcome=${result.outcome}`,
+    "",
+    result.output,
+  ].join("\n");
   await writeFile(fullOutputPath, fullText, "utf8");
   const truncated = fullText.length > BASH_PREVIEW_LIMIT;
   const preview = truncated
@@ -710,10 +722,128 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     : fullText;
   return {
     text: preview,
-    data: { exitCode: result.exitCode, outcome: result.outcome },
+    data:
+      adapted.adapter === "native"
+        ? { exitCode: result.exitCode, outcome: result.outcome }
+        : { exitCode: result.exitCode, outcome: result.outcome, adapter: adapted.adapter },
     truncated,
     fullOutputPath,
   };
+}
+
+type ShellCommandAdapter = {
+  command: string;
+  adapter: "native" | "powershell-adapted" | "blocked";
+};
+
+export function adaptShellCommand(command: string): ShellCommandAdapter {
+  return adaptShellCommandForPlatform(command, process.platform);
+}
+
+export function adaptShellCommandForPlatform(
+  command: string,
+  platform: NodeJS.Platform,
+): ShellCommandAdapter {
+  if (platform !== "win32") return { command, adapter: "native" };
+  const converted = convertUnixPipelineForPowerShell(command);
+  if (converted) return { command: converted, adapter: "powershell-adapted" };
+  if (looksLikeUnsupportedUnixPipeline(command)) {
+    const message =
+      "Unsupported Unix pipeline on Windows PowerShell; use PowerShell-safe commands or Node one-liners.";
+    return {
+      command: `powershell.exe -NoProfile -NonInteractive -Command "Write-Error ${quotePowerShellString(message)}; exit 1"`,
+      adapter: "blocked",
+    };
+  }
+  return { command, adapter: "native" };
+}
+
+function convertUnixPipelineForPowerShell(command: string): string | undefined {
+  const normalized = command.trim();
+  const findSed = normalized.match(
+    /^find\s+(.+?)\s+-type\s+f\s*\|\s*sed\s+-n\s+['"]?1,(\d+)p['"]?$/iu,
+  );
+  if (findSed) {
+    const root = stripShellQuotes(findSed[1] ?? ".");
+    const first = Number.parseInt(findSed[2] ?? "0", 10);
+    if (Number.isFinite(first) && first > 0) {
+      return [
+        "powershell.exe -NoProfile -NonInteractive -Command",
+        quoteCmdArg(
+          `$ErrorActionPreference='Stop'; Get-ChildItem -LiteralPath ${quotePowerShellString(root)} -File -Recurse | Select-Object -First ${first} | ForEach-Object { $_.FullName }`,
+        ),
+      ].join(" ");
+    }
+  }
+  const findHead = normalized.match(
+    /^find\s+((?:"[^"]+"|'[^']+'|[^\s|]+))(?:\s+-type\s+f)?\s*\|\s*head\s+-n\s+(\d+)$/iu,
+  );
+  if (findHead) {
+    const root = stripShellQuotes(findHead[1] ?? ".");
+    const first = Number.parseInt(findHead[2] ?? "0", 10);
+    if (Number.isFinite(first) && first > 0) {
+      return [
+        "powershell.exe -NoProfile -NonInteractive -Command",
+        quoteCmdArg(
+          `$ErrorActionPreference='Stop'; Get-ChildItem -LiteralPath ${quotePowerShellString(root)} -File -Recurse | Select-Object -First ${first} | ForEach-Object { $_.FullName }`,
+        ),
+      ].join(" ");
+    }
+  }
+  const sedHead = normalized.match(/^sed\s+-n\s+['"]?1,(\d+)p['"]?\s+(.+)$/iu);
+  if (sedHead) {
+    const first = Number.parseInt(sedHead[1] ?? "0", 10);
+    const file = stripShellQuotes(sedHead[2] ?? "");
+    if (Number.isFinite(first) && first > 0 && file) {
+      return [
+        "powershell.exe -NoProfile -NonInteractive -Command",
+        quoteCmdArg(
+          `$ErrorActionPreference='Stop'; Get-Content -LiteralPath ${quotePowerShellString(file)} -TotalCount ${first}`,
+        ),
+      ].join(" ");
+    }
+  }
+  const headFile = normalized.match(/^head\s+-n\s+(\d+)\s+(.+)$/iu);
+  if (headFile) {
+    const first = Number.parseInt(headFile[1] ?? "0", 10);
+    const file = stripShellQuotes(headFile[2] ?? "");
+    if (Number.isFinite(first) && first > 0 && file) {
+      return [
+        "powershell.exe -NoProfile -NonInteractive -Command",
+        quoteCmdArg(
+          `$ErrorActionPreference='Stop'; Get-Content -LiteralPath ${quotePowerShellString(file)} -TotalCount ${first}`,
+        ),
+      ].join(" ");
+    }
+  }
+  return undefined;
+}
+
+function looksLikeUnsupportedUnixPipeline(command: string): boolean {
+  return (
+    /\bfind\s+.+\|\s*(?:sed|head)\b/iu.test(command) ||
+    /\bsed\s+-n\b/iu.test(command) ||
+    /\bhead\s+-n\b/iu.test(command)
+  );
+}
+
+function stripShellQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function quotePowerShellString(value: string): string {
+  return `'${value.replace(/'/gu, "''")}'`;
+}
+
+function quoteCmdArg(value: string): string {
+  return `"${value.replace(/"/gu, '\\"')}"`;
 }
 
 async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOutput> {

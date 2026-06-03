@@ -1167,12 +1167,17 @@ export async function runDurableJobLiteTick(
     if (
       assignmentStatus === "blocked" ||
       assignmentStatus === "failed" ||
-      assignmentStatus === "cancelled"
+      assignmentStatus === "cancelled" ||
+      assignmentStatus === "stale"
     ) {
       await transitionDurableJob(
         job,
         context,
-        assignmentStatus === "cancelled" ? "cancelled" : "blocked",
+        assignmentStatus === "cancelled"
+          ? "cancelled"
+          : assignmentStatus === "stale"
+            ? "stale"
+            : "blocked",
         `agent_${assignmentStatus}:${agent.id}`,
       );
       return;
@@ -1572,10 +1577,15 @@ export async function completeAgent(
   try {
     result = await runAgentWork(agent, context, output);
   } catch (error) {
+    if (agent.status === "stale") {
+      await persistAgentRun(context, agent);
+      await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+      return;
+    }
     await failAgent(agent, task, context, output, parentSessionId, error);
     return;
   }
-  if (agent.status === "cancelled") {
+  if (agent.status === "cancelled" || agent.status === "stale") {
     await persistAgentRun(context, agent);
     return;
   }
@@ -2484,6 +2494,40 @@ export function syncBackgroundWithAgentStatus(
   }
   background.userVisibleSummary = agent.summary;
   background.updatedAt = agent.updatedAt;
+}
+
+export async function markRunningAgentsStaleForInterrupt(
+  context: TuiContext,
+  sessionId: string,
+): Promise<{ marked: number; aborted: number }> {
+  const now = new Date().toISOString();
+  let marked = 0;
+  let aborted = 0;
+  for (const agent of context.agents.filter((item) => item.status === "running")) {
+    const controller = context.backgroundAbortControllers?.get(agent.id);
+    agent.status = "stale";
+    agent.staleReason = controller
+      ? "interrupted_abort_signal_sent"
+      : "interrupted_without_abort_controller";
+    agent.updatedAt = now;
+    agent.summary = "Agent marked stale/resumable by interrupt; no completion was claimed.";
+    const background =
+      context.backgroundTasks.find((task) => task.id === agent.id) ??
+      createAgentBackgroundTask(agent, context);
+    if (!context.backgroundTasks.some((task) => task.id === background.id)) {
+      rememberBackgroundTask(context, background);
+    }
+    syncBackgroundWithAgentStatus(background, agent);
+    if (controller) {
+      controller.abort();
+      context.backgroundAbortControllers?.delete(agent.id);
+      aborted += 1;
+    }
+    await persistAgentRun(context, agent);
+    await deps().appendBackgroundTaskEvent(context, sessionId, background);
+    marked += 1;
+  }
+  return { marked, aborted };
 }
 
 export async function hydratePersistentAgents(context: TuiContext): Promise<void> {

@@ -415,6 +415,20 @@ export function bridgeWorkflowPlanToMainChainRequests(
       });
     }
 
+    if (target.mutating && hasArchitectureBoundaryRisk(plan, slice)) {
+      return createProposal(base, {
+        status: "blocked",
+        reason: "architecture boundary risk blocks mutating workflow step",
+        executable: false,
+        request: null,
+        safety,
+        phase: currentPhase.title,
+        sliceTitle: slice.title,
+        nextAction: "Review architecture findings before running the mutating step.",
+        contextRefs,
+      });
+    }
+
     if (target.mutating && runnableSlots <= 0) {
       return createProposal(base, {
         status: "queued",
@@ -615,6 +629,37 @@ function createSafety(
     requiredPermissionAction: inferPermissionAction(role, target),
     evidencePolicy: "neverTreatCompletionAsPass",
   };
+}
+
+function hasArchitectureBoundaryRisk(
+  plan: NormalizedWorkflowPlan,
+  slice: BridgeWorkflowSlice,
+): boolean {
+  if (
+    slice.evidence.some(
+      (item) =>
+        item.passEvidence === false &&
+        isArchitectureRiskText(`${item.kind} ${item.ref} ${item.claim}`),
+    )
+  ) {
+    return true;
+  }
+  return [...slice.references, ...(plan.references ?? [])].some((item) =>
+    isArchitectureRiskReference(`${item.kind} ${item.ref} ${item.summary ?? ""}`),
+  );
+}
+
+function isArchitectureRiskReference(value: string): boolean {
+  if (/\b(?:no architecture risk|no risk|passed|pass|clean|ok)\b/iu.test(value)) return false;
+  if (/无风险|已通过|通过|未发现(?:架构)?风险/u.test(value)) return false;
+  return isArchitectureRiskText(value);
+}
+
+function isArchitectureRiskText(value: string): boolean {
+  return (
+    /architecture/iu.test(value) &&
+    /\b(?:risk|violation|boundary|god-file|code-blob|large-file)\b/iu.test(value)
+  );
 }
 
 function inferPermissionAction(

@@ -164,6 +164,122 @@ export function bufferMoveDown(buf: EditBuffer): EditBuffer {
   return { ...buf, cursor: newCursor };
 }
 
+type VisualLine = {
+  rawLineIndex: number;
+  startChar: number;
+  endChar: number;
+  absoluteStart: number;
+  promptWidth: number;
+};
+
+/** Move cursor up one soft-wrapped visual row, preserving display column. */
+export function bufferMoveVisualUp(buf: EditBuffer, maxWidth?: number): EditBuffer {
+  return bufferMoveVisual(buf, maxWidth, -1);
+}
+
+/** Move cursor down one soft-wrapped visual row, preserving display column. */
+export function bufferMoveVisualDown(buf: EditBuffer, maxWidth?: number): EditBuffer {
+  return bufferMoveVisual(buf, maxWidth, 1);
+}
+
+function bufferMoveVisual(
+  buf: EditBuffer,
+  maxWidth: number | undefined,
+  delta: -1 | 1,
+): EditBuffer {
+  const visual = getVisualLinePosition(buf, maxWidth);
+  const target = visual.lines[visual.index + delta];
+  if (!target) return buf;
+  const cursorCol = Math.max(0, visual.cursorDisplayCol - visual.current.promptWidth);
+  const targetText = getRawLineText(buf, target.rawLineIndex);
+  const targetChars = Array.from(targetText).slice(target.startChar, target.endChar);
+  let used = 0;
+  let offset = 0;
+  for (; offset < targetChars.length; offset++) {
+    const next = charWidth(targetChars[offset] ?? "");
+    if (used + next > cursorCol) break;
+    used += next;
+  }
+  return { ...buf, cursor: target.absoluteStart + offset };
+}
+
+function getVisualLinePosition(
+  buf: EditBuffer,
+  maxWidth?: number,
+): { lines: VisualLine[]; index: number; current: VisualLine; cursorDisplayCol: number } {
+  const lines = buildVisualLines(buf, maxWidth);
+  const fallback = lines[0] ?? {
+    rawLineIndex: 0,
+    startChar: 0,
+    endChar: 0,
+    absoluteStart: 0,
+    promptWidth: displayWidthOf(PROMPT_MARKER),
+  };
+  let index = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? fallback;
+    const lineEnd = line.absoluteStart + line.endChar - line.startChar;
+    const nextLine = lines[i + 1];
+    const wrapsToNextVisualLine = nextLine?.rawLineIndex === line.rawLineIndex;
+    if (
+      buf.cursor >= line.absoluteStart &&
+      (wrapsToNextVisualLine ? buf.cursor < lineEnd : buf.cursor <= lineEnd)
+    ) {
+      index = i;
+      break;
+    }
+  }
+  const current = lines[index] ?? fallback;
+  let cursorDisplayCol = current.promptWidth;
+  const inLineOffset = Math.max(0, buf.cursor - current.absoluteStart);
+  const rawLine = getRawLineText(buf, current.rawLineIndex);
+  const chars = Array.from(rawLine).slice(current.startChar, current.startChar + inLineOffset);
+  for (const ch of chars) cursorDisplayCol += charWidth(ch);
+  return { lines, index, current, cursorDisplayCol };
+}
+
+function buildVisualLines(buf: EditBuffer, maxWidth?: number): VisualLine[] {
+  const rawLines = bufferToString(buf).split("\n");
+  const composerWidth = Math.max(8, maxWidth ?? 80);
+  const result: VisualLine[] = [];
+  let absoluteLineStart = 0;
+  for (let rawIndex = 0; rawIndex < rawLines.length; rawIndex++) {
+    const rawLine = rawLines[rawIndex] ?? "";
+    const chars = Array.from(rawLine);
+    const isFirstRawLine = rawIndex === 0;
+    let startChar = 0;
+    while (startChar < chars.length || (chars.length === 0 && startChar === 0)) {
+      const prompt = isFirstRawLine && startChar === 0 ? PROMPT_MARKER : PROMPT_MARKER_CONTINUATION;
+      const promptWidth = displayWidthOf(prompt);
+      const budget = Math.max(4, composerWidth - promptWidth);
+      let width = 0;
+      let endChar = startChar;
+      while (endChar < chars.length) {
+        const next = charWidth(chars[endChar] ?? "");
+        if (width > 0 && width + next > budget) break;
+        width += next;
+        endChar++;
+      }
+      if (endChar === startChar && chars.length > 0) endChar++;
+      result.push({
+        rawLineIndex: rawIndex,
+        startChar,
+        endChar,
+        absoluteStart: absoluteLineStart + startChar,
+        promptWidth,
+      });
+      if (chars.length === 0) break;
+      startChar = endChar;
+    }
+    absoluteLineStart += chars.length + 1;
+  }
+  return result;
+}
+
+function getRawLineText(buf: EditBuffer, rawLineIndex: number): string {
+  return bufferToString(buf).split("\n")[rawLineIndex] ?? "";
+}
+
 function isWordBoundary(ch: string): boolean {
   return /[\s\p{P}]/u.test(ch);
 }
@@ -172,8 +288,18 @@ function isWordBoundary(ch: string): boolean {
 // 不引入新依赖（CCB 用 strip-ansi 包，这里就地实现以保持 LingHun 已有依赖收敛）。
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape sequences inherently contain control characters.
 const ANSI_STRIP_PATTERN = /\u001B\[[\d;?]*[a-zA-Z]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B./g;
-function stripAnsi(value: string): string {
-  return value.replace(ANSI_STRIP_PATTERN, "");
+const CONTROL_SEQUENCE_PATTERN =
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal control sequences are control characters.
+  /(?:\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)|\u001B[P_X^][\s\S]*?(?:\u001B\\)|\u001B[@-_]|\u009B[0-?]*[ -/]*[@-~]|\u0000|\u0007|\u0008|\u000B|\u000C|\u000E|\u000F|\u007F)/g;
+export function sanitizeComposerInput(value: string): string {
+  return (
+    value
+      .replace(CONTROL_SEQUENCE_PATTERN, "")
+      .replace(ANSI_STRIP_PATTERN, "")
+      .replace(/\r\n?/g, "\n")
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: composer sanitation intentionally drops raw terminal control bytes while preserving real newline.
+      .replace(/[\u0001-\u0009\u000B-\u001F]/g, "")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +405,24 @@ export function shouldUnstickSlashHidden(
 ): boolean {
   if (!nextText.startsWith("/")) return true;
   return prevHead !== nextHead;
+}
+
+export function isMultilineEnterSequence(input: string): boolean {
+  if (!input.startsWith("\x1B[")) return false;
+  const body = input.slice(2);
+  const csiU = body.endsWith("u") ? body.slice(0, -1).split(";") : undefined;
+  if (csiU?.length === 2) {
+    const [code, modifier] = csiU;
+    return (code === "10" || code === "13") && (modifier === "2" || modifier === "3");
+  }
+  const modified = body.endsWith("~") ? body.slice(0, -1).split(";") : undefined;
+  if (modified?.length === 3) {
+    const [prefix, modifier, code] = modified;
+    return (
+      prefix === "27" && (modifier === "2" || modifier === "3") && (code === "10" || code === "13")
+    );
+  }
+  return false;
 }
 
 const COMPOSER_MAX_VISIBLE_LINES = 5;
@@ -440,7 +584,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     }
     pastePendingRef.current = false;
     if (chunks.length === 0) return;
-    const joined = stripAnsi(chunks.join("")).replace(/\r\n?/g, "\n");
+    const joined = sanitizeComposerInput(chunks.join(""));
     if (!joined) return;
     setBuffer((prev) => bufferInsert(prev, joined));
     setSlashSelection(0);
@@ -657,8 +801,30 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // ─── Submit: Enter（无 shift）─────────────────────────────────────
-      if (key.return && !key.shift) {
+      // Multiline: Shift+Enter plus terminal-safe fallbacks.
+      if (isMultilineEnterSequence(input)) {
+        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        return;
+      }
+      if (key.return && (key.shift || key.meta)) {
+        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        return;
+      }
+      if ((key.ctrl && input === "j") || input === "\n") {
+        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        return;
+      }
+      if (key.return && text.endsWith("\\")) {
+        const withoutBackslash: EditBuffer = {
+          chars: buffer.chars.slice(0, -1),
+          cursor: Math.max(0, buffer.cursor - 1),
+        };
+        setBufferAndResetSelection(bufferInsert(withoutBackslash, "\n"));
+        return;
+      }
+
+      // ─── Submit: Enter（无 shift / fallback modifier）──────────────────
+      if (key.return && !key.shift && !key.meta) {
         if (text.length === 0 && view.taskSuggestions && view.taskSuggestions.length > 0) {
           const index = Math.max(
             0,
@@ -705,12 +871,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         setSlashHidden(false);
         clearHintNotice();
         void onInput(submitText ? { type: "submit", text: submitText } : { type: "empty-submit" });
-        return;
-      }
-
-      // Multiline: Shift+Enter
-      if (key.return && key.shift) {
-        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
         return;
       }
 
@@ -811,9 +971,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           void onInput({ type: "transcript-scroll", action: "wheelUp" });
           return;
         }
-        const { row } = getCursorLinePosition(buffer);
-        if (row > 0) {
-          setBufferAndResetSelection(bufferMoveUp(buffer));
+        const moved = bufferMoveVisualUp(buffer, maxWidth);
+        if (moved.cursor !== buffer.cursor) {
+          setBufferAndResetSelection(moved);
         } else {
           const next = historyUp(historyRef.current, text);
           if (next) {
@@ -840,10 +1000,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           void onInput({ type: "transcript-scroll", action: "wheelDown" });
           return;
         }
-        const { row } = getCursorLinePosition(buffer);
-        const totalLines = text.split("\n").length;
-        if (row < totalLines - 1) {
-          setBufferAndResetSelection(bufferMoveDown(buffer));
+        const moved = bufferMoveVisualDown(buffer, maxWidth);
+        if (moved.cursor !== buffer.cursor) {
+          setBufferAndResetSelection(moved);
         } else {
           const next = historyDown(historyRef.current);
           if (next) {
@@ -944,7 +1103,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // 普通字符输入：去掉 ANSI、\r → \n（处理终端粘贴 SSH coalesce）。
       if (input && input !== "\r" && input !== "\n") {
-        const sanitized = stripAnsi(input).replace(/\r\n?/g, "\n");
+        const sanitized = sanitizeComposerInput(input);
         if (sanitized) {
           setBufferAndResetSelection(bufferInsert(buffer, sanitized));
         }
@@ -1374,7 +1533,7 @@ function displayWidthOf(value: string): number {
  *
  * Returns three segments:
  *   - before: characters before the cursor column (display-width aligned)
- *   - cursorChar: the single character under the cursor (or " " if at line end)
+ *   - cursorChar: the single character under the cursor (or "" if at line end)
  *   - after: characters after the cursor column
  *
  * The caller renders cursorChar with `inverse` to produce a reverse-video
@@ -1396,7 +1555,7 @@ export function splitLineAtDisplayCol(
     acc += w;
   }
   if (i >= chars.length) {
-    return { before: chars.join(""), cursorChar: " ", after: "" };
+    return { before: chars.join(""), cursorChar: "", after: "" };
   }
   const before = chars.slice(0, i).join("");
   const cursorChar = chars[i] ?? " ";
@@ -1441,6 +1600,9 @@ export function handleComposerInput(
     return { kind: "emit", event: { type: "escape" }, nextText: "" };
   }
   if (key.return && key.shift) {
+    return { kind: "append", text: "\n" };
+  }
+  if (isMultilineEnterSequence(input)) {
     return { kind: "append", text: "\n" };
   }
   if (key.return) {

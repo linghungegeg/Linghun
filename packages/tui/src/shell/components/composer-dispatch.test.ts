@@ -12,6 +12,8 @@ import {
   bufferMoveLeft,
   bufferMoveRight,
   bufferMoveUp,
+  bufferMoveVisualDown,
+  bufferMoveVisualUp,
   bufferToString,
   bufferWordLeft,
   bufferWordRight,
@@ -23,6 +25,8 @@ import {
   historyDown,
   historyUp,
   isDoublePressWithin,
+  isMultilineEnterSequence,
+  sanitizeComposerInput,
   shouldEnterPastePath,
   shouldUnstickSlashHidden,
   splitLineAtDisplayCol,
@@ -124,6 +128,38 @@ describe("Composer dispatcher behavior boundaries", () => {
       const down = bufferMoveDown(buf);
       expect(down.cursor).toBe(buf.cursor);
     });
+
+    it("长逻辑行按 soft-wrap 视觉行移动", () => {
+      const buf = { ...createEditBuffer("abcdefghij"), cursor: 8 };
+      const up = bufferMoveVisualUp(buf, 8);
+      expect(up.cursor).toBe(2);
+      const down = bufferMoveVisualDown(up, 8);
+      expect(down.cursor).toBe(8);
+    });
+
+    it("光标刚好在 soft-wrap 下一视觉行开头时归属下一行", () => {
+      const buf = { ...createEditBuffer("abcdefghij"), cursor: 6 };
+      const up = bufferMoveVisualUp(buf, 8);
+      expect(up.cursor).toBe(0);
+      const down = bufferMoveVisualDown(up, 8);
+      expect(down.cursor).toBe(6);
+    });
+
+    it("光标在逻辑行尾时仍可向下进入下一逻辑行", () => {
+      const buf = { ...createEditBuffer("abc\ndef"), cursor: 3 };
+      const down = bufferMoveVisualDown(buf, 80);
+      expect(down.cursor).toBe(7);
+      const up = bufferMoveVisualUp(down, 80);
+      expect(up.cursor).toBe(3);
+    });
+
+    it("中文宽字符按视觉列移动", () => {
+      const buf = { ...createEditBuffer("你好世界abc"), cursor: 4 };
+      const up = bufferMoveVisualUp(buf, 8);
+      expect(up.cursor).toBe(1);
+      const down = bufferMoveVisualDown(up, 8);
+      expect(down.cursor).toBe(4);
+    });
   });
 
   describe("EditBuffer Ctrl+B/F semantics equivalent to ←/→ (one char)", () => {
@@ -172,6 +208,25 @@ describe("Composer dispatcher behavior boundaries", () => {
       const next = bufferInsert(mid, "XY");
       expect(bufferToString(next)).toBe("aXYb");
       expect(next.cursor).toBe(3);
+    });
+  });
+
+  describe("control sequence sanitation", () => {
+    it("recognizes CSI-u / modifyOtherKeys newline sequences before sanitation", () => {
+      expect(isMultilineEnterSequence("\x1B[13;2u")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B[10;3u")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B[27;2;13~")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B[1;2C")).toBe(false);
+    });
+
+    it("drops CSI/ANSI/special key sequences without touching normal text", () => {
+      expect(sanitizeComposerInput("ab\x1B[200~cd\x1B[201~ef")).toBe("abcdef");
+      expect(sanitizeComposerInput("a\x1B[5~b\x1B[1;2Cc")).toBe("abc");
+      expect(sanitizeComposerInput("你好\x1B[31m世界\x1B[0m")).toBe("你好世界");
+    });
+
+    it("keeps real newlines and drops raw control bytes", () => {
+      expect(sanitizeComposerInput("a\r\nb\x00\x7Fc")).toBe("a\nbc");
     });
   });
 
@@ -333,10 +388,10 @@ describe("Composer dispatcher behavior boundaries", () => {
       expect(r.cursorChar).toBe("d");
       expect(r.after).toBe("ef");
     });
-    it("拆分点在行尾：before=full、cursorChar=空格", () => {
+    it("拆分点在行尾：before=full、cursorChar=空，避免视觉多空格", () => {
       const r = splitLineAtDisplayCol("abc", 3);
       expect(r.before).toBe("abc");
-      expect(r.cursorChar).toBe(" ");
+      expect(r.cursorChar).toBe("");
       expect(r.after).toBe("");
     });
     it("CJK 宽字符不被拆开：cursor 落在第二列时仍把整字当作 cursorChar", () => {

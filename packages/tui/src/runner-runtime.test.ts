@@ -172,6 +172,9 @@ describe("terminal state no PASS", () => {
   it("markJobRunnerTerminal sets terminal status", () => {
     const job = createMinimalJob();
     markJobRunnerTerminal(job, "cancelled", "user_cancelled");
+    expect(job.status).toBe("cancelled");
+    expect(job.result?.status).toBe("cancelled");
+    expect(job.result?.summary).toContain("no PASS evidence");
     expect(job.runner?.status).toBe("cancelled");
     expect(job.runner?.completedAt).toBeDefined();
     expect(job.runner?.lastError).toContain("user_cancelled");
@@ -181,6 +184,8 @@ describe("terminal state no PASS", () => {
   it("markJobRunnerTerminal with timeout status", () => {
     const job = createMinimalJob();
     markJobRunnerTerminal(job, "timeout", "exceeded max runtime");
+    expect(job.status).toBe("timeout");
+    expect(job.result?.status).toBe("timeout");
     expect(job.runner?.status).toBe("timeout");
     expect(job.runner?.lastError).toContain("exceeded max runtime");
   });
@@ -188,8 +193,28 @@ describe("terminal state no PASS", () => {
   it("markJobRunnerTerminal with failed status", () => {
     const job = createMinimalJob();
     markJobRunnerTerminal(job, "failed", "process crashed");
+    expect(job.status).toBe("failed");
+    expect(job.result?.status).toBe("failed");
     expect(job.runner?.status).toBe("failed");
     expect(job.runner?.lastError).toContain("process crashed");
+  });
+
+  it("markJobRunnerTerminal preserves an already terminal job status", () => {
+    const job = createMinimalJob({
+      status: "blocked",
+      pauseReason: "architecture boundary risk",
+      result: {
+        status: "blocked",
+        summary: "Blocked by architecture boundary risk.",
+        facts: [],
+        evidenceRefs: [],
+        generatedAt: "2025-01-01T00:00:02.000Z",
+      },
+    });
+    markJobRunnerTerminal(job, "cancelled", "stop after blocked transition");
+    expect(job.status).toBe("blocked");
+    expect(job.result?.status).toBe("blocked");
+    expect(job.runner?.status).toBe("cancelled");
   });
 
   it("terminal states never produce standalone PASS claim in nextAction", () => {
@@ -322,6 +347,8 @@ describe("native runner process guard contract", () => {
     expect(calls).toContainEqual({ argv: ["stop", "--id", job.id, "--root", project] });
     expect(calls.flatMap((call) => call.argv)).not.toContain("taskkill");
     expect(calls.flatMap((call) => call.argv)).not.toContain("/pid");
+    expect(job.status).toBe("cancelled");
+    expect(job.result?.status).toBe("cancelled");
     expect(job.runner?.status).toBe("cancelled");
   });
 });

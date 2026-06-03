@@ -439,7 +439,9 @@ import {
   handleJobCommand,
   hydrateDurableJobBackgroundTasks,
   hydratePersistentAgents,
+  markRunningAgentsStaleForInterrupt,
   sendAgentMessage,
+  transitionDurableJob,
 } from "./job-agent-command-runtime.js";
 import {
   configureModelCommandRuntime,
@@ -880,6 +882,7 @@ import type {
 } from "./tui-data-types.js";
 import {
   type WorkflowBridgeRequestProposal,
+  type WorkflowMainChainRequest,
   bridgeWorkflowPlanToMainChainRequests,
   decideWorkflowStepCapability,
 } from "./workflow-agent-runtime-bridge.js";
@@ -1438,6 +1441,7 @@ export type TuiContext = {
     answer?: string;
     error?: string;
   };
+  activeBtwAbortController?: AbortController;
   /**
    * D.13Q-UX Closure — SessionsPanel 状态（picker，按 updatedAt 排序）。
    */
@@ -1892,6 +1896,8 @@ async function runInkShell(
   const blocks: ProductBlockViewModel[] = [];
   let shell: ReturnType<typeof renderInkShell> | undefined;
   let submittedPending = false;
+  let submittedPendingStartedAt: number | undefined;
+  let activityTicker: ReturnType<typeof setInterval> | undefined;
   // D.13E Step 2 — command transcript 行序号；createCommandBlock 用 sequence 生成稳定 id。
   let commandSequence = 0;
   let resolveExit: (code: number) => void = () => undefined;
@@ -1912,6 +1918,7 @@ async function runInkShell(
         activity: mapRequestActivityToView(context),
         permission: mapPendingApprovalToPermission(context),
         submitted: submittedPending,
+        submittedStartedAt: submittedPendingStartedAt,
         reasoningLevel: runtime.reasoningLevel,
         reasoningSent: runtime.reasoningSent,
         // D.13Q-UX Task Surface — controller 持有的 configPanelState 必须显式
@@ -1956,6 +1963,10 @@ async function runInkShell(
           context.btwPanelState ||
           context.sessionsPanelState
         ) {
+          if (context.btwPanelState?.phase === "loading" && context.activeBtwAbortController) {
+            context.activeBtwAbortController.abort();
+            context.activeBtwAbortController = undefined;
+          }
           context.commandPanelState = undefined;
           context.helpPanelState = undefined;
           context.configPanelState = undefined;
@@ -2224,6 +2235,10 @@ async function runInkShell(
       }
       // ─── D.13Q-UX Closure — BtwPanel 关闭 ────────────────────────────────────
       if (event.type === "btw-close") {
+        if (context.btwPanelState?.phase === "loading" && context.activeBtwAbortController) {
+          context.activeBtwAbortController.abort();
+          context.activeBtwAbortController = undefined;
+        }
         context.btwPanelState = undefined;
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
@@ -2478,6 +2493,7 @@ async function runInkShell(
       }
       // P1-6: immediately enter pending state to prevent home flicker
       submittedPending = true;
+      submittedPendingStartedAt = Date.now();
       // Slash commands are user-visible commands, not chat input. Push a
       // dedicated command block (kind="command", keep=true) into the
       // transcript so it survives ShellBlockOutput splice and renders as an
@@ -2509,6 +2525,7 @@ async function runInkShell(
         );
       } finally {
         submittedPending = false;
+        submittedPendingStartedAt = undefined;
         shell?.rerender();
       }
       if (result === "exit") {
@@ -2526,6 +2543,12 @@ async function runInkShell(
       stdout: output,
       stderr: errorOutput,
     });
+    activityTicker = setInterval(() => {
+      if (!submittedPending && !context.requestActivityPhase && !context.activeAbortController) {
+        return;
+      }
+      shell?.rerender();
+    }, 1000);
     // D.14D — 暴露 rerender 钩子给需要在 handler 内先刷 loading 帧的命令（/btw）。
     context.shellRerender = () => shell?.rerender();
   } catch (error) {
@@ -2539,9 +2562,14 @@ async function runInkShell(
       ),
     );
     writePlainShell(output, controller.getViewModel());
+    if (activityTicker) clearInterval(activityTicker);
     return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
   }
-  return await exitPromise;
+  try {
+    return await exitPromise;
+  } finally {
+    if (activityTicker) clearInterval(activityTicker);
+  }
 }
 
 async function processTuiLine(
@@ -3221,6 +3249,42 @@ function upsertWorkflowBackgroundTask(context: TuiContext, task: BackgroundTaskS
   rememberBackgroundTask(context, task);
 }
 
+function createWorkflowInterruptBackgroundTask(
+  run: NonNullable<WorkflowState["activeRun"]>,
+  language: Language,
+): BackgroundTaskState {
+  const now = new Date().toISOString();
+  const runningStep = run.steps.find((step) => step.status === "running");
+  return {
+    id: run.id,
+    kind: "job",
+    title: `Workflow: ${truncateDisplay(run.goal, 50)}`,
+    status: "running",
+    currentStep: runningStep?.title ?? "workflow running",
+    progress: {
+      completed: run.steps.filter(
+        (step) => step.status === "completed" || step.status === "partial",
+      ).length,
+      total: run.steps.length,
+      label: "workflow",
+    },
+    startedAt: run.startedAt,
+    updatedAt: now,
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    result: "partial",
+    userVisibleSummary:
+      language === "en-US"
+        ? `Workflow ${run.id} was active; interrupt is reconciling its missing background state.`
+        : `Workflow ${run.id} 仍处于活动状态；中断正在恢复缺失的后台状态。`,
+    nextAction:
+      language === "en-US"
+        ? "Inspect /workflows status before rerun."
+        : "重跑前请先查看 /workflows status。",
+  };
+}
+
 function formatWorkflowStatus(context: TuiContext): string {
   const run = context.workflows.activeRun;
   if (!run) {
@@ -3884,7 +3948,7 @@ async function executeWorkflowStep(
         };
       }
     } else if (req.mainChain === "details") {
-      await handleSlashCommand("/details", context, output);
+      await handleSlashCommand(formatWorkflowDetailsSlashCommand(req), context, output);
     } else if (req.mainChain === "agents") {
       await handleAgentsCommand([req.action, req.agentRef ?? ""].filter(Boolean), context, output);
     } else if (req.mainChain === "job") {
@@ -3996,6 +4060,16 @@ async function executeWorkflowStep(
     ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
   };
+}
+
+function formatWorkflowDetailsSlashCommand(
+  req: Extract<WorkflowMainChainRequest, { mainChain: "details" }>,
+): string {
+  const ref = req.refs.find((item) => item.trim().length > 0);
+  if ((req.view === "evidence" || req.view === "background") && ref) {
+    return `/details ${req.view} ${ref}`;
+  }
+  return "/details";
 }
 
 async function executeWorkflowArchitectureReviewStep(
@@ -4274,6 +4348,12 @@ async function finishWorkflowRun(
     context.workflows.activeRun.status = status;
     context.workflows.activeRun.endedAt = now;
     context.workflows.activeRun.result = status === "completed" ? "partial" : status;
+    for (const step of context.workflows.activeRun.steps) {
+      if (step.status !== "running") continue;
+      step.status = status;
+      step.endedAt = now;
+      step.summary = summary;
+    }
   }
   task.status =
     status === "completed"
@@ -4286,7 +4366,13 @@ async function finishWorkflowRun(
             ? "cancelled"
             : "failed";
   task.result =
-    status === "completed" || status === "partial" || status === "blocked" ? "partial" : "fail";
+    status === "completed" || status === "partial" || status === "blocked"
+      ? "partial"
+      : status === "cancelled"
+        ? "cancelled"
+        : status === "stale"
+          ? "stale"
+          : "fail";
   task.currentStep = summary;
   task.updatedAt = now;
   task.lastOutputAt = now;
@@ -4306,7 +4392,7 @@ async function finishWorkflowRun(
     summary,
     createdAt: now,
   });
-  if (status !== "completed") {
+  if (status !== "completed" && status !== "cancelled") {
     await captureFailureLearning(context, sessionId, {
       category: "tool_failure",
       failureSummary: summary,
@@ -4946,6 +5032,17 @@ async function cancelPendingInteraction(
     context.activePlan = undefined;
     context.planAccepted = false;
     writeLine(output, "已取消待确认计划；没有进入执行。可重新运行 /plan 或继续说明修改意见。");
+    writeStatus(output, context);
+    return;
+  }
+  const interrupted = await interruptAllActiveWork(context);
+  if (interrupted.cancelled > 0) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? `Interrupt requested for ${interrupted.cancelled} active item(s); abort=${interrupted.abortSignalsSent}, marked=${interrupted.markedOnly}.`
+        : `已请求中断 ${interrupted.cancelled} 个活动任务；abort=${interrupted.abortSignalsSent}，marked=${interrupted.markedOnly}。`,
+    );
     writeStatus(output, context);
     return;
   }
@@ -6439,6 +6536,7 @@ async function handleBtwCommand(
   }
   const runtime = getSelectedModelRuntime(context);
   const controller = new AbortController();
+  context.activeBtwAbortController = controller;
   const result = await runBtwSideQuestion(
     question,
     gateway,
@@ -6452,6 +6550,9 @@ async function handleBtwCommand(
     context.language,
     controller.signal,
   );
+  if (context.activeBtwAbortController === controller) {
+    context.activeBtwAbortController = undefined;
+  }
   // 记录 side question（含答案/错误）供 /details 审计；不写 evidence，不进 completion gate。
   await context.store.appendEvent(sessionId, {
     type: "btw_question",
@@ -6460,12 +6561,16 @@ async function handleBtwCommand(
     answer: result.status === "answered" ? result.answer : `error: ${result.error}`,
     createdAt: new Date().toISOString(),
   });
-  if (context.isInkSession) {
+  if (
+    context.isInkSession &&
+    context.btwPanelState?.phase === "loading" &&
+    context.btwPanelState.question === question
+  ) {
     context.btwPanelState =
       result.status === "answered"
         ? { question, phase: "answered", answer: result.answer }
         : { question, phase: "error", error: result.error };
-  } else {
+  } else if (!context.isInkSession) {
     writeLine(output, result.status === "answered" ? result.answer : result.error);
   }
 }
@@ -6507,90 +6612,167 @@ function formatBtwStatusAnswer(question: string, context: TuiContext): string | 
 }
 
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
-  const running = context.backgroundTasks.find((task) => task.status === "running");
+  const result = await interruptAllActiveWork(context);
+  if (result.cancelled === 0) {
+    writeLine(output, t(context, "interruptIdle"));
+    return;
+  }
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Interrupt requested for ${result.cancelled} active item(s); abort=${result.abortSignalsSent}, marked=${result.markedOnly}.`
+      : `已请求中断 ${result.cancelled} 个活动任务；abort=${result.abortSignalsSent}，marked=${result.markedOnly}。`,
+  );
+}
+
+type InterruptAllActiveWorkResult = {
+  cancelled: number;
+  abortSignalsSent: number;
+  markedOnly: number;
+};
+
+export async function interruptAllActiveWork(
+  context: TuiContext,
+): Promise<InterruptAllActiveWorkResult> {
   const sessionId = await ensureSession(context);
+  const now = new Date().toISOString();
+  let cancelled = 0;
+  let abortSignalsSent = 0;
+  let markedOnly = 0;
+  const appendInterruptEvent = async (message: string) => {
+    await context.store.appendEvent(sessionId, {
+      type: "interrupt",
+      id: randomUUID(),
+      status: "cancelled",
+      message,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
   if (context.activeVerificationAbortController) {
     context.activeVerificationAbortController.abort();
     context.activeVerificationAbortController = undefined;
+    cancelled += 1;
+    abortSignalsSent += 1;
     context.interrupt = { type: "idle" };
-    const verificationTask = context.backgroundTasks.find(
+    const verificationTasks = context.backgroundTasks.filter(
       (task) => task.kind === "verification" && isActiveBackgroundStatus(task.status),
     );
-    if (verificationTask) {
+    for (const verificationTask of verificationTasks) {
       verificationTask.status = "cancelled";
       verificationTask.result = "cancelled";
-      verificationTask.updatedAt = new Date().toISOString();
+      verificationTask.updatedAt = now;
       verificationTask.nextAction =
         context.language === "en-US"
           ? "Review the verification log, then rerun /verify if needed."
           : "先查看验证日志，必要时复跑 /verify。";
       await appendBackgroundTaskEvent(context, sessionId, verificationTask);
     }
-    await context.store.appendEvent(sessionId, {
-      type: "interrupt",
-      id: randomUUID(),
-      status: "cancelled",
-      message: t(context, "toolInterrupted"),
-      createdAt: new Date().toISOString(),
-    });
-    writeLine(output, t(context, "toolInterrupted"));
-    return;
   }
-  if (
-    context.activeAbortController &&
-    !(running && context.backgroundAbortControllers?.has(running.id))
-  ) {
+
+  if (context.activeAbortController) {
     context.activeAbortController.abort();
+    context.activeAbortController = undefined;
     clearRequestActivity(context);
     context.interrupt = { type: "idle" };
-    await context.store.appendEvent(sessionId, {
-      type: "interrupt",
-      id: randomUUID(),
-      status: "cancelled",
-      message: t(context, "toolInterrupted"),
-      createdAt: new Date().toISOString(),
-    });
-    writeLine(output, t(context, "toolInterrupted"));
-    return;
+    cancelled += 1;
+    abortSignalsSent += 1;
   }
-  if (!running) {
-    await context.store.appendEvent(sessionId, {
-      type: "interrupt",
-      id: randomUUID(),
-      status: "cancelled",
-      message: t(context, "interruptIdle"),
-      createdAt: new Date().toISOString(),
-    });
-    writeLine(output, t(context, "interruptIdle"));
-    return;
+
+  if (context.activeBtwAbortController) {
+    context.activeBtwAbortController.abort();
+    context.activeBtwAbortController = undefined;
+    if (context.btwPanelState?.phase === "loading") {
+      context.btwPanelState = {
+        question: context.btwPanelState.question,
+        phase: "error",
+        error: context.language === "en-US" ? "Side question cancelled." : "临时插问已取消。",
+      };
+    }
+    cancelled += 1;
+    abortSignalsSent += 1;
   }
-  const aborted = abortBackgroundTask(context, running.id);
-  running.status = "cancelled";
-  running.result = "cancelled";
-  running.updatedAt = new Date().toISOString();
-  running.nextAction = aborted
-    ? context.language === "en-US"
-      ? "Abort signal sent. Review /background and the log before continuing."
-      : "已发送取消信号。继续前可先查看 /background 和日志。"
-    : context.language === "en-US"
-      ? "No live abort controller was available; state marked cancelled. Review /background."
-      : "未找到可用取消 controller；仅将状态标记为 cancelled。继续前查看 /background。";
-  await appendBackgroundTaskEvent(context, sessionId, running);
-  await context.store.appendEvent(sessionId, {
-    type: "interrupt",
-    id: randomUUID(),
-    status: "cancelled",
-    message: aborted
-      ? `${t(context, "interruptCancelled")} abortSignal=sent`
-      : `${t(context, "interruptCancelled")} abortSignal=unavailable`,
-    createdAt: new Date().toISOString(),
-  });
-  writeLine(
-    output,
-    aborted
-      ? `${t(context, "interruptCancelled")}（已发送 AbortSignal）`
-      : `${t(context, "interruptCancelled")}（未找到可用 AbortSignal，仅标记状态）`,
+
+  const workflowRun = context.workflows.activeRun;
+  const workflowTask =
+    workflowRun?.status === "running"
+      ? (context.backgroundTasks.find((task) => task.id === workflowRun.id) ??
+        createWorkflowInterruptBackgroundTask(workflowRun, context.language))
+      : undefined;
+  if (workflowRun?.status === "running" && workflowTask) {
+    upsertWorkflowBackgroundTask(context, workflowTask);
+    cancelled += 1;
+    markedOnly += 1;
+    await finishWorkflowRun(
+      workflowRun.id,
+      "cancelled",
+      context.language === "en-US"
+        ? "Workflow cancelled by interrupt; inspect /workflows status before rerun."
+        : "Workflow 已由中断取消；重跑前请先查看 /workflows status。",
+      context,
+      sessionId,
+      workflowTask,
+    );
+  }
+
+  const runningAgentIds = new Set(
+    context.agents.filter((agent) => agent.status === "running").map((agent) => agent.id),
   );
+  const activeTasks = context.backgroundTasks
+    .filter((task) => isActiveBackgroundStatus(task.status) && task.id !== workflowRun?.id)
+    .filter((task) => !runningAgentIds.has(task.id));
+  for (const task of activeTasks) {
+    const aborted = abortBackgroundTask(context, task.id);
+    if (aborted) abortSignalsSent += 1;
+    else markedOnly += 1;
+    cancelled += 1;
+    if (task.kind === "job") {
+      const job = await findDurableJob(context, task.id);
+      if (job) {
+        await transitionDurableJob(
+          job,
+          context,
+          aborted ? "cancelled" : "stale",
+          aborted ? "interrupt_abort_signal_sent" : "interrupt_without_abort_controller",
+        );
+        const updatedTask = createJobBackgroundTask(job, context);
+        Object.assign(task, updatedTask);
+        await appendBackgroundTaskEvent(context, sessionId, task);
+        continue;
+      }
+    }
+    task.status = aborted ? "cancelled" : "stale";
+    task.result = aborted ? "cancelled" : "partial";
+    task.updatedAt = now;
+    task.nextAction = aborted
+      ? context.language === "en-US"
+        ? "Abort signal sent. Review /background and the log before continuing."
+        : "已发送取消信号。继续前可先查看 /background 和日志。"
+      : context.language === "en-US"
+        ? "No live abort controller was available; state marked stale/resumable."
+        : "未找到可用取消 controller；已标记为 stale/resumable。";
+    await appendBackgroundTaskEvent(context, sessionId, task);
+  }
+
+  const markedAgents = await markRunningAgentsStaleForInterrupt(context, sessionId);
+  if (markedAgents.marked > 0) {
+    cancelled += markedAgents.marked;
+    abortSignalsSent += markedAgents.aborted;
+    markedOnly += markedAgents.marked - markedAgents.aborted;
+  }
+
+  if (context.workflows.activeRun?.status === "running") {
+    context.workflows.activeRun.status = "cancelled";
+    context.workflows.activeRun.endedAt = now;
+    context.workflows.activeRun.result = "cancelled";
+  }
+
+  await appendInterruptEvent(
+    cancelled === 0
+      ? t(context, "interruptIdle")
+      : `${t(context, "interruptCancelled")} abortSignals=${abortSignalsSent} markedOnly=${markedOnly}`,
+  );
+  return { cancelled, abortSignalsSent, markedOnly };
 }
 
 // Module 4 — abort controller helpers moved to ./tui-agent-job-runtime.ts
