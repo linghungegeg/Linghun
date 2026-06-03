@@ -405,6 +405,14 @@ function createTodoSurfacePreview(
     lines.push(`${label}: ${lead.content}`);
   }
   if (items.length > 1) {
+    const remaining = items.length - (lead ? 1 : 0);
+    if (remaining > 0) {
+      lines.push(
+        language === "en-US"
+          ? `... ${remaining} more todo item(s) hidden from main output.`
+          : `... 主输出已隐藏 ${remaining} 条 Todo。`,
+      );
+    }
     lines.push(formatDetailsHint(language));
   }
   return { text: lines.join("\n"), truncated: items.length > 1 };

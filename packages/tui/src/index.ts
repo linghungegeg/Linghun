@@ -564,6 +564,7 @@ import {
 import {
   applyToolResultBudgetToMessages,
   type ToolResultBudgetRecord,
+  type ToolResultBudgetState,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
 } from "./tool-result-budget.js";
@@ -1415,6 +1416,8 @@ export type TuiContext = {
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
   // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
   discoveredDeferredToolNames: Set<string>;
+  toolResultBudgetState?: ToolResultBudgetState;
+  sessionStoreVerifiedId?: string;
   // D.13J Block 3 — codebase-memory mutating 工具的 session 权限授予标记。
   // order: whitelist → required-args → permission gate → spawn。readonly 工具不看此 flag。
   codebaseMemoryMutatingGranted?: boolean;
@@ -1695,14 +1698,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     context.workflowRegistry.workflows.map(registryWorkflowToTemplate),
   );
   installProcessGuardExitHandlers();
+  const startup = await prepareTuiStartup(input, output, context);
   await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
-  const gateway = createModelGateway(config);
+  const gateway = createModelGateway(context.config);
   // D.14D — 把 gateway 挂到 context，让 /btw side-question runtime 能发起隔离单轮请求。
   context.modelGateway = gateway;
-  const startup = await prepareTuiStartup(input, output, context);
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
     const controller = context.activeAbortController ?? context.activeVerificationAbortController;
@@ -4840,6 +4843,7 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
     };
     const onKeypress = (str: string, key: { name?: string } = {}) => {
       const name = key.name;
+      const value = str.trim().toLowerCase();
       if (name === "escape") {
         finish("zh-CN");
         return;
@@ -4860,6 +4864,14 @@ async function readInitialLanguageDecision(input: Readable, output: Writable): P
           selectedIndex = 1;
           renderChoices();
         }
+        return;
+      }
+      if (/^(1|zh|中)$/iu.test(value)) {
+        finish("zh-CN");
+        return;
+      }
+      if (/^(2|en|e)$/iu.test(value)) {
+        finish("en-US");
         return;
       }
       // Plain typed choices are handled by readline 'line'; ignore other raw input here.
@@ -5003,6 +5015,7 @@ async function readInitialWorkspaceTrustDecision(
     };
     const onKeypress = (str: string, key: { name?: string } = {}) => {
       const name = key.name;
+      const value = str.trim().toLowerCase();
       if (name === "escape") {
         finish(false);
         return;
@@ -5030,6 +5043,14 @@ async function readInitialWorkspaceTrustDecision(
         return;
       }
       if (name === "n") {
+        finish(false);
+        return;
+      }
+      if (/^(y|是|信)$/iu.test(value)) {
+        finish(true);
+        return;
+      }
+      if (/^(n|否|不)$/iu.test(value)) {
         finish(false);
         return;
       }
@@ -9815,8 +9836,8 @@ async function budgetRecentContextToolResults(
   const budgeted = await applyToolResultBudgetToMessages(messages, {
     projectPath: context.projectPath,
     sessionId,
+    state: getToolResultBudgetState(context),
   });
-  if (budgeted.records.length === 0) return messages;
   for (const record of budgeted.records) {
     await recordToolResultBudgetEvidence(context, sessionId, record);
   }
@@ -12772,6 +12793,23 @@ async function appendBackgroundTaskEvent(
   });
 }
 
+async function appendProgressEventSafely(
+  context: TuiContext,
+  sessionId: string,
+  event: Parameters<TuiContext["store"]["appendEvent"]>[1],
+): Promise<void> {
+  try {
+    await context.store.appendEvent(sessionId, event);
+  } catch (error) {
+    if (isSessionAppendRace(error)) return;
+    throw error;
+  }
+}
+
+function isSessionAppendRace(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("未找到会话：");
+}
+
 function installToolProgressHandler(
   context: TuiContext,
   sessionId: string,
@@ -12795,10 +12833,16 @@ function installToolProgressHandler(
       task.lastOutputAt = task.updatedAt;
       task.hasOutput = true;
       task.progress = { completed: 0, total: 1, label: "streaming" };
-      pending.push(appendBackgroundTaskEvent(context, sessionId, task));
+      pending.push(
+        appendProgressEventSafely(context, sessionId, {
+          type: "background_task_update",
+          task,
+          createdAt: new Date().toISOString(),
+        }),
+      );
     }
     pending.push(
-      context.store.appendEvent(sessionId, {
+      appendProgressEventSafely(context, sessionId, {
         type: "tool_call_delta",
         id: callId,
         message: truncateDisplay(message.replace(/\s+/g, " "), 500),
@@ -12807,11 +12851,15 @@ function installToolProgressHandler(
     );
     const lines = message.split(/\r?\n/u).filter(Boolean);
     const remainingLines = Math.max(0, 12 - visibleProgressLines);
+    const visibleLines = lines.slice(0, remainingLines);
     if (remainingLines > 0) {
-      output.write(`${lines.slice(0, remainingLines).join("\n")}\n`);
+      output.write(`${truncateDisplay(visibleLines.join("\n"), 2_000)}\n`);
       visibleProgressLines += Math.min(lines.length, remainingLines);
     }
-    if (lines.length > remainingLines && !progressSuppressed) {
+    if (
+      (lines.length > remainingLines || visibleLines.some((line) => line.length > 2_000)) &&
+      !progressSuppressed
+    ) {
       output.write(
         context.language === "en-US"
           ? "[stdout] ... streaming output hidden from main view; full log/transcript keeps the complete output.\n"
@@ -13277,13 +13325,33 @@ function isDiffSummary(value: unknown): value is DiffSummary {
 
 async function ensureSession(context: TuiContext): Promise<string> {
   if (context.sessionId) {
-    return context.sessionId;
+    if (context.sessionStoreVerifiedId === context.sessionId) {
+      context.sessionEnded = false;
+      return context.sessionId;
+    }
+    try {
+      await context.store.resume(context.sessionId);
+      context.sessionStoreVerifiedId = context.sessionId;
+      context.sessionEnded = false;
+      return context.sessionId;
+    } catch (error) {
+      if (!isSessionAppendRace(error)) {
+        throw error;
+      }
+      context.sessionId = undefined;
+    }
   }
 
   const session = await context.store.create({ model: context.model });
   context.sessionId = session.id;
+  context.sessionStoreVerifiedId = session.id;
   context.sessionEnded = false;
   return session.id;
+}
+
+function getToolResultBudgetState(context: TuiContext): ToolResultBudgetState {
+  context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+  return context.toolResultBudgetState;
 }
 
 function createSilentOutput(): Writable {

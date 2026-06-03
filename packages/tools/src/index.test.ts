@@ -1,6 +1,8 @@
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
 
@@ -232,6 +234,23 @@ describe("Phase 05 core tools", () => {
     expect(read.output.text).toContain("alpha");
   });
 
+  (process.platform === "win32" ? it : it.skip)(
+    "rejects Windows absolute paths outside the workspace",
+    async () => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+      const context = createToolContext(project);
+      const projectDrive = project[0]?.toUpperCase();
+      const otherDrive = projectDrive === "Z" ? "Y" : "Z";
+
+      await expect(
+        runTool("Read", { path: `${otherDrive}:\\escape.txt` }, context),
+      ).rejects.toThrow("路径越界");
+      await expect(
+        runTool("Read", { path: "\\\\server\\share\\escape.txt" }, context),
+      ).rejects.toThrow("路径越界");
+    },
+  );
+
   it("guards edits with read-before-edit and stale file detection", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const filePath = join(project, "sample.txt");
@@ -354,6 +373,173 @@ describe("Phase 05 core tools", () => {
     expect(grep.output.data).toMatchObject({ count: 1 });
   });
 
+  it("uses rg for Grep and Glob when available, including Chinese paths and ignored dirs", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const calls: string[][] = [];
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: (_command: string, args: string[]) => {
+        calls.push(args);
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          if (args.includes("--files")) {
+            child.stdout.write(".\\中文目录\\命中.txt\nnode_modules/skip.txt\n");
+          } else {
+            child.stdout.write(".\\中文目录\\命中.txt:1: needle\n");
+          }
+          child.stdout.end();
+          child.emit("close", 0);
+        });
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const context = tools.createToolContext(project);
+      const grep = await tools.runTool("Grep", { pattern: "needle", path: ".", limit: 10 }, context);
+      const glob = await tools.runTool("Glob", { pattern: "*.txt", path: ".", limit: 10 }, context);
+
+      expect(grep.output.text).toContain("中文目录/命中.txt:1: needle");
+      expect(glob.output.text).toContain("中文目录/命中.txt");
+      expect(calls.every((args) => args.includes("!**/node_modules/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/dist/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.git/**"))).toBe(true);
+      expect(calls.some((args) => args.includes("--hidden") && args.includes("--no-ignore"))).toBe(
+        true,
+      );
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("uses Linghun glob semantics after rg file enumeration", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const calls: string[][] = [];
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: (_command: string, args: string[]) => {
+        calls.push(args);
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          child.stdout.write("file[1].txt\nfile1.txt\n");
+          child.stdout.end();
+          child.emit("close", 0);
+        });
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const glob = await tools.runTool(
+        "Glob",
+        { pattern: "file[1].txt", path: ".", limit: 10 },
+        tools.createToolContext(project),
+      );
+
+      expect(glob.output.text).toBe("file[1].txt");
+      expect(calls[0]).not.toContain("file[1].txt");
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("normalizes rg Grep and Glob paths with current-directory prefixes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: (_command: string, args: string[]) => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          if (args.includes("--files")) {
+            child.stdout.write(".\\src\\a.ts\n");
+          } else {
+            child.stdout.write(".\\src\\a.ts:1: needle\n");
+          }
+          child.stdout.end();
+          child.emit("close", 0);
+        });
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const context = tools.createToolContext(project);
+      const grep = await tools.runTool("Grep", { pattern: "needle", path: "." }, context);
+      const glob = await tools.runTool("Glob", { pattern: "src/*.ts", path: "." }, context);
+
+      expect(grep.output.text).toContain("src/a.ts:1: needle");
+      expect(grep.output.text).not.toContain(".\\");
+      expect(glob.output.text).toBe("src/a.ts");
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("keeps rg Glob results relative to the requested search path", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: (_command: string, _args: string[]) => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          child.stdout.write("src/命中.txt\n");
+          child.stdout.end();
+          child.emit("close", 0);
+        });
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const glob = await tools.runTool(
+        "Glob",
+        { pattern: "*.txt", path: "src", limit: 10 },
+        tools.createToolContext(project),
+      );
+
+      expect(glob.output.text).toBe("命中.txt");
+      expect(glob.output.truncated).toBe(false);
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("falls back to JS Grep and Glob when rg is unavailable", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await writeFile(join(project, "fallback.txt"), "fallback needle\n", "utf8");
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: () => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => child.emit("error", new Error("ENOENT")));
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const context = tools.createToolContext(project);
+      const grep = await tools.runTool("Grep", { pattern: "needle", path: "." }, context);
+      const glob = await tools.runTool("Glob", { pattern: "*.txt", path: "." }, context);
+
+      expect(grep.output.text).toContain("fallback.txt:1");
+      expect(glob.output.text).toContain("fallback.txt");
+      expect(grep.output.data).toMatchObject({ count: 1 });
+      expect(glob.output.data).toMatchObject({ count: 1 });
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
   it("stops Glob traversal after the requested limit without entering later large trees", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     await Promise.all(
@@ -366,6 +552,13 @@ describe("Phase 05 core tools", () => {
     await writeFile(join(hugeTree, "should-not-be-visited.txt"), "match\n", "utf8");
 
     vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: () => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => child.emit("error", new Error("ENOENT")));
+        return child;
+      },
+    }));
     const fsPromises = await vi.importActual<typeof import("node:fs/promises")>(
       "node:fs/promises",
     );
@@ -397,6 +590,7 @@ describe("Phase 05 core tools", () => {
       expect(glob.output.truncated).toBe(true);
       expect(visitedDirs).not.toContain(hugeTree);
     } finally {
+      vi.doUnmock("node:child_process");
       vi.doUnmock("node:fs/promises");
       vi.resetModules();
     }
@@ -414,6 +608,13 @@ describe("Phase 05 core tools", () => {
     await writeFile(join(hugeTree, "should-not-be-visited.txt"), "needle\n", "utf8");
 
     vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: () => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => child.emit("error", new Error("ENOENT")));
+        return child;
+      },
+    }));
     const fsPromises = await vi.importActual<typeof import("node:fs/promises")>(
       "node:fs/promises",
     );
@@ -445,6 +646,7 @@ describe("Phase 05 core tools", () => {
       expect(grep.output.truncated).toBe(true);
       expect(visitedDirs).not.toContain(hugeTree);
     } finally {
+      vi.doUnmock("node:child_process");
       vi.doUnmock("node:fs/promises");
       vi.resetModules();
     }
@@ -519,3 +721,19 @@ describe("Phase 05 core tools", () => {
     expect(unsupportedFindPredicate.adapter).toBe("blocked");
   });
 });
+
+function createMockChildProcess(): EventEmitter & {
+  stdout: PassThrough;
+  stderr: PassThrough;
+  kill: () => boolean;
+} {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    kill: () => boolean;
+  };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  return child;
+}

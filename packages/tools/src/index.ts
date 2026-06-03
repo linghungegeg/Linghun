@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export type ToolRisk = "low" | "medium" | "high";
 
@@ -130,6 +130,8 @@ const DEFAULT_TOOL_TEXT_LIMIT = 8_000;
 const BASH_PREVIEW_LIMIT = 4_000;
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TODO_ITEMS = 100;
+const SEARCH_EXCLUDED_DIRS = ["node_modules", "dist", ".git"];
+const RG_TIMEOUT_MS = 30_000;
 
 export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
   return {
@@ -656,6 +658,14 @@ async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOut
   const root = resolveWorkspacePath(context.workspaceRoot, input.path ?? ".");
   const expression = createGrepExpression(input.pattern);
   const limit = input.limit ?? DEFAULT_SEARCH_LIMIT;
+  const rgMatches = await tryRipgrepSearch(input, context, root, limit);
+  if (rgMatches) {
+    return {
+      text: rgMatches.matches.length === 0 ? "未找到匹配内容。" : rgMatches.matches.join("\n"),
+      data: { count: rgMatches.matches.length, backend: "rg" },
+      truncated: rgMatches.truncated,
+    };
+  }
   const matches: string[] = [];
 
   for await (const filePath of listFiles(root, () => matches.length >= limit)) {
@@ -691,6 +701,14 @@ function createGrepExpression(pattern: string): RegExp {
 async function globTool(input: GlobInput, context: ToolContext): Promise<ToolOutput> {
   const root = resolveWorkspacePath(context.workspaceRoot, input.path ?? ".");
   const limit = input.limit ?? DEFAULT_SEARCH_LIMIT;
+  const rgMatches = await tryRipgrepFiles(input, context, root, limit);
+  if (rgMatches) {
+    return {
+      text: rgMatches.matches.length === 0 ? "未找到匹配文件。" : rgMatches.matches.join("\n"),
+      data: { count: rgMatches.matches.length, backend: "rg" },
+      truncated: rgMatches.truncated,
+    };
+  }
   const matcher = globToRegExp(input.pattern);
   const matches: string[] = [];
 
@@ -1004,7 +1022,7 @@ function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string 
   }
   const target = resolve(workspaceRoot, inputPath);
   const rel = relative(workspaceRoot, target);
-  if (rel.startsWith("..") || (rel === "" && target !== resolve(workspaceRoot))) {
+  if (rel.startsWith("..") || isAbsolute(rel) || (rel === "" && target !== resolve(workspaceRoot))) {
     throw new Error(`路径越界：${inputPath}。建议：只操作当前工作区内文件。`);
   }
   return target;
@@ -1222,7 +1240,7 @@ async function* listFiles(root: string, shouldStop?: () => boolean): AsyncGenera
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     if (shouldStop?.()) return;
-    if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
+    if (SEARCH_EXCLUDED_DIRS.includes(entry.name)) {
       continue;
     }
     const entryPath = join(root, entry.name);
@@ -1242,6 +1260,168 @@ async function safeReadText(filePath: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+type SearchBackendResult = {
+  matches: string[];
+  truncated: boolean;
+};
+
+async function tryRipgrepSearch(
+  input: GrepInput,
+  context: ToolContext,
+  root: string,
+  limit: number,
+): Promise<SearchBackendResult | null> {
+  const args = [
+    "--line-number",
+    "--no-heading",
+    "--color",
+    "never",
+    "--hidden",
+    "--no-ignore",
+    "--max-columns",
+    "500",
+    ...createRgExcludeArgs(),
+  ];
+  const pattern = input.pattern.startsWith("(?i)") ? input.pattern.slice(4) : input.pattern;
+  if (input.pattern.startsWith("(?i)")) {
+    args.push("-i");
+  }
+  args.push("-e", pattern, relativePath(context.workspaceRoot, root));
+  const result = await runRipgrep(args, context, limit, (line) =>
+    normalizeRgGrepLine(line, context.workspaceRoot),
+  );
+  if (!result) return null;
+  const matches = result.lines.slice(0, limit);
+  return { matches, truncated: result.truncated };
+}
+
+async function tryRipgrepFiles(
+  input: GlobInput,
+  context: ToolContext,
+  root: string,
+  limit: number,
+): Promise<SearchBackendResult | null> {
+  const args = [
+    "--files",
+    "--color",
+    "never",
+    "--hidden",
+    "--no-ignore",
+    ...createRgExcludeArgs(),
+  ];
+  args.push(relativePath(context.workspaceRoot, root));
+  const matcher = globToRegExp(input.pattern);
+  const result = await runRipgrep(args, context, limit, (line) => {
+    const normalized = normalizeRgPath(line, context.workspaceRoot, root);
+    return matcher.test(normalized) || matcher.test(basename(normalized)) ? normalized : null;
+  });
+  if (!result) return null;
+  return { matches: result.lines.slice(0, limit), truncated: result.truncated };
+}
+
+function createRgExcludeArgs(): string[] {
+  return SEARCH_EXCLUDED_DIRS.flatMap((dir) => ["--glob", `!**/${dir}/**`]);
+}
+
+function normalizeRgPath(line: string, workspaceRoot: string, root: string): string {
+  const filePath = resolve(workspaceRoot, line);
+  const rel = relative(root, filePath);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    return stripCurrentDirectoryPrefix(line.replaceAll("\\", "/"));
+  }
+  return stripCurrentDirectoryPrefix(rel.replaceAll("\\", "/"));
+}
+
+function normalizeRgGrepLine(line: string, workspaceRoot: string): string {
+  const firstColon = line.indexOf(":");
+  if (firstColon < 0) return normalizeRgPath(line, workspaceRoot, workspaceRoot);
+  const secondColon = line.indexOf(":", firstColon + 1);
+  if (secondColon < 0) return normalizeRgPath(line, workspaceRoot, workspaceRoot);
+  const file = normalizeRgPath(line.slice(0, firstColon), workspaceRoot, workspaceRoot);
+  return `${file}${line.slice(firstColon)}`;
+}
+
+function stripCurrentDirectoryPrefix(value: string): string {
+  return value.replace(/^\.\/+/u, "");
+}
+
+async function runRipgrep(
+  args: string[],
+  context: ToolContext,
+  limit: number,
+  mapLine: (line: string) => string | null = (line) => line,
+): Promise<{ lines: string[]; truncated: boolean } | null> {
+  return new Promise((resolvePromise) => {
+    const child = spawn("rg", args, {
+      cwd: context.workspaceRoot,
+      shell: false,
+      windowsHide: true,
+    });
+    const lines: string[] = [];
+    let pending = "";
+    let stderr = "";
+    let resolved = false;
+    let killedForLimit = false;
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        child.kill();
+      }
+    }, RG_TIMEOUT_MS);
+    const abort = () => child.kill();
+    context.abortSignal?.addEventListener("abort", abort, { once: true });
+    const finish = (value: { lines: string[]; truncated: boolean } | null) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+      context.abortSignal?.removeEventListener("abort", abort);
+      resolvePromise(value);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      pending += chunk;
+      const parts = pending.split(/\r?\n/u);
+      pending = parts.pop() ?? "";
+      for (const line of parts) {
+        if (!line) continue;
+        const mapped = mapLine(line);
+        if (!mapped) continue;
+        lines.push(mapped);
+        if (lines.length >= limit) {
+          killedForLimit = true;
+          child.kill();
+          break;
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (pending && lines.length < limit) {
+        const mapped = mapLine(pending);
+        if (mapped) {
+          lines.push(mapped);
+        }
+      }
+      if (killedForLimit) {
+        finish({ lines, truncated: true });
+        return;
+      }
+      if (code === 0 || code === 1) {
+        finish({ lines, truncated: false });
+        return;
+      }
+      if (stderr) {
+        finish(null);
+        return;
+      }
+      finish(null);
+    });
+  });
 }
 
 function globToRegExp(pattern: string): RegExp {

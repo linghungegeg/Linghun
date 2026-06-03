@@ -34,6 +34,17 @@ export type ToolResultBudgetResult = {
   records: ToolResultBudgetRecord[];
 };
 
+export type ToolResultBudgetReplacement = {
+  summary: string;
+  record: ToolResultBudgetRecord;
+  fingerprint: string;
+};
+
+export type ToolResultBudgetState = {
+  seenIds: Set<string>;
+  replacements: Map<string, ToolResultBudgetReplacement>;
+};
+
 const TOOL_RESULTS_DIR = "tool-results";
 const TOOL_RESULT_PREVIEW_CHARS = 2_000;
 
@@ -43,6 +54,7 @@ type Candidate = {
   content: string;
   chars: number;
   bytes: number;
+  stateKey?: string;
 };
 
 export async function applyToolResultBudgetToMessages(
@@ -51,13 +63,31 @@ export async function applyToolResultBudgetToMessages(
     projectPath: string;
     sessionId: string;
     now?: Date;
+    state?: ToolResultBudgetState;
   },
 ): Promise<ToolResultBudgetResult> {
-  const candidates = collectToolResultCandidates(messages);
+  const candidates = collectToolResultCandidates(messages, options.state);
   if (candidates.length === 0) return { messages, records: [] };
 
-  const selected = new Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>();
+  const cachedReplacements = new Map<string, string>();
+  const freshCandidates: Candidate[] = [];
   for (const candidate of candidates) {
+    const stateKey = options.state
+      ? getCandidateStateKey(candidate, options.sessionId)
+      : undefined;
+    const existing = stateKey ? options.state?.replacements.get(stateKey) : undefined;
+    if (existing) {
+      cachedReplacements.set(candidate.toolUseId, existing.summary);
+      continue;
+    }
+    if (stateKey && options.state?.seenIds.has(stateKey)) {
+      continue;
+    }
+    freshCandidates.push(candidate);
+  }
+
+  const selected = new Map<string, Candidate & { reason: ToolResultBudgetRecord["reason"] }>();
+  for (const candidate of freshCandidates) {
     if (
       candidate.chars > LINGHUN_DEFAULT_TOOL_RESULT_CHARS ||
       candidate.bytes > LINGHUN_MAX_TOOL_RESULT_BYTES
@@ -66,11 +96,20 @@ export async function applyToolResultBudgetToMessages(
     }
   }
 
+  const freshIds = new Set(freshCandidates.map((candidate) => candidate.toolUseId));
   for (const group of groupCandidatesByAssistantToolUse(messages, candidates)) {
-    const visibleSize = group.reduce((sum, candidate) => sum + candidate.chars, 0);
+    const visibleSize = group.reduce((sum, candidate) => {
+      const stateKey = options.state
+        ? getCandidateStateKey(candidate, options.sessionId)
+        : undefined;
+      const replacement = stateKey ? options.state?.replacements.get(stateKey) : undefined;
+      return sum + (replacement?.summary.length ?? candidate.chars);
+    }, 0);
     if (visibleSize <= LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS) continue;
     let remaining = visibleSize;
-    for (const candidate of [...group].sort((a, b) => b.chars - a.chars)) {
+    for (const candidate of [...group]
+      .filter((item) => freshIds.has(item.toolUseId))
+      .sort((a, b) => b.chars - a.chars)) {
       if (remaining <= LINGHUN_MAX_TOOL_RESULTS_PER_MESSAGE_CHARS) break;
       if (!selected.has(candidate.toolUseId)) {
         selected.set(candidate.toolUseId, { ...candidate, reason: "aggregate_message" });
@@ -79,21 +118,38 @@ export async function applyToolResultBudgetToMessages(
     }
   }
 
-  if (selected.size === 0) return { messages, records: [] };
+  if (selected.size === 0) {
+    for (const candidate of freshCandidates) {
+      options.state?.seenIds.add(getCandidateStateKey(candidate, options.sessionId));
+    }
+    return cachedReplacements.size === 0
+      ? { messages, records: [] }
+      : { messages: replaceToolResults(messages, cachedReplacements), records: [] };
+  }
 
-  const replacements = new Map<string, string>();
+  const replacements = new Map(cachedReplacements);
   const records: ToolResultBudgetRecord[] = [];
   for (const candidate of selected.values()) {
     const artifact = await writeToolResultArtifact(candidate, options);
     const replacement = buildToolResultBudgetSummary(artifact, candidate.reason);
     replacements.set(candidate.toolUseId, replacement);
-    records.push({
+    const record = {
       toolUseId: candidate.toolUseId,
       originalChars: candidate.content.length,
       replacementChars: replacement.length,
       artifact,
       reason: candidate.reason,
+    };
+    records.push(record);
+    const stateKey = getCandidateStateKey(candidate, options.sessionId);
+    options.state?.replacements.set(stateKey, {
+      summary: replacement,
+      record,
+      fingerprint: stateKey,
     });
+  }
+  for (const candidate of freshCandidates) {
+    options.state?.seenIds.add(getCandidateStateKey(candidate, options.sessionId));
   }
 
   return {
@@ -102,7 +158,10 @@ export async function applyToolResultBudgetToMessages(
   };
 }
 
-function collectToolResultCandidates(messages: ModelMessage[]): Candidate[] {
+function collectToolResultCandidates(
+  messages: ModelMessage[],
+  _state?: ToolResultBudgetState,
+): Candidate[] {
   const candidates: Candidate[] = [];
   messages.forEach((message, messageIndex) => {
     if (message.role !== "tool") return;
@@ -117,6 +176,17 @@ function collectToolResultCandidates(messages: ModelMessage[]): Candidate[] {
     });
   });
   return candidates;
+}
+
+function getCandidateStateKey(candidate: Candidate, sessionId: string): string {
+  candidate.stateKey ??= [
+    sessionId,
+    candidate.toolUseId,
+    candidate.chars,
+    candidate.bytes,
+    createHash("sha256").update(candidate.content).digest("hex"),
+  ].join("\0");
+  return candidate.stateKey;
 }
 
 function groupCandidatesByAssistantToolUse(
@@ -205,11 +275,15 @@ function replaceToolResults(
   messages: ModelMessage[],
   replacements: ReadonlyMap<string, string>,
 ): ModelMessage[] {
-  return messages.map((message) => {
+  let changed = false;
+  const next = messages.map((message) => {
     if (message.role !== "tool") return message;
     const replacement = replacements.get(message.tool_call_id);
-    return replacement ? { ...message, content: replacement } : message;
+    if (!replacement || replacement === message.content) return message;
+    changed = true;
+    return { ...message, content: replacement };
   });
+  return changed ? next : messages;
 }
 
 function sanitizeId(value: string): string {

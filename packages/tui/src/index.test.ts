@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -2845,6 +2846,64 @@ describe("Phase 06 TUI slash commands", () => {
     expect(detailsText).toContain("Bearer ***");
     expect(detailsText).toContain("api_key=***");
     expect(detailsText).toContain("scope: provider-visible recent context projection");
+  });
+
+  it("reuses cached tool_result budget replacements during provider preflight", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const context = await createTestContext(project, store, session, createTestModelConfig());
+    const records: string[] = [];
+    const large = `PREFLIGHT_BIG_START\n${"x".repeat(55_000)}\nPREFLIGHT_BIG_END`;
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-preflight-reuse", name: "Read", input: { path: "large.txt" } }],
+      },
+      { role: "tool", tool_call_id: "call-preflight-reuse", content: large },
+    ];
+    const deps = {
+      appendSystemEvent: async () => undefined,
+      captureFailureLearning: async () => undefined,
+      recordToolResultBudgetEvidence: async (
+        _ctx: TuiContext,
+        _id: string,
+        record: { toolUseId: string },
+      ) => {
+        records.push(record.toolUseId);
+        return undefined as string | undefined;
+      },
+      refreshCacheFreshness: () => undefined,
+    };
+
+    const first = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "gpt-4.1" },
+      trigger: "request",
+      deps,
+    });
+    const second = await prepareMessagesForProviderPreflight({
+      messages,
+      context,
+      sessionId: session.id,
+      runtime: { role: "executor", provider: "openai-compatible", model: "gpt-4.1" },
+      trigger: "request",
+      deps,
+    });
+
+    expect(first.messages[1]?.role === "tool" ? first.messages[1].content : "").toContain(
+      "<persisted-tool-result>",
+    );
+    expect(second.messages[1]?.role === "tool" ? second.messages[1].content : "").toContain(
+      "<persisted-tool-result>",
+    );
+    expect(second.messages[1]?.role === "tool" ? second.messages[1].content : "").not.toContain(
+      "PREFLIGHT_BIG_END",
+    );
+    expect(records).toEqual(["call-preflight-reuse"]);
   });
 
   it("blocks provider requests during compact failure cooldown instead of sending partial context", async () => {
@@ -20961,6 +21020,79 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
       (event) => event.type === "tool_call_end",
     );
     expect(toolEvents).toHaveLength(1);
+  });
+
+  it("slash Bash background long output stays bounded on the main screen and completes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(
+      project,
+      store,
+      { ...session, permissionMode: "full-access" },
+      createTestModelConfig(),
+    );
+    context.permissionMode = "full-access";
+
+    const result = await handleSlashCommand(
+      `/bash node -e "for(let i=0;i<500;i++) console.log('TUI_LONG_'+i+'_${"x".repeat(500)}')"`,
+      context,
+      output,
+    );
+
+    expect(result).toBe("handled");
+    expect(output.text).toContain("Bash(node -e");
+    expect(output.text).toContain("主屏已隐藏后续流式输出");
+    expect(output.text.length).toBeLessThan(20_000);
+    expect(output.text).not.toContain("TUI_LONG_499");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "tool_call_end")).toBe(true);
+    expect(transcript.some((event) => event.type === "tool_result")).toBe(true);
+    const backgroundEvents = transcript.filter((event) => event.type === "background_task_update");
+    expect(backgroundEvents.at(-1)).toMatchObject({
+      type: "background_task_update",
+      task: { status: "completed" },
+    });
+    expect(JSON.stringify(backgroundEvents)).not.toContain("TUI_LONG_499");
+    const deltas = transcript.filter((event) => event.type === "tool_call_delta");
+    expect(deltas.every((event) => event.type === "tool_call_delta" && event.message.length <= 501))
+      .toBe(true);
+  });
+
+  it("slash Bash recreates a stale session before writing background events", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const missingSession = {
+      id: randomUUID(),
+      model: "gpt-4.1",
+      permissionMode: "full-access" as const,
+    };
+    const output = new MemoryOutput();
+    const context = await createTestContext(
+      project,
+      store,
+      missingSession,
+      createTestModelConfig(),
+    );
+    context.permissionMode = "full-access";
+
+    const result = await handleSlashCommand(
+      `/bash node -e "for(let i=0;i<50;i++) console.log('TUI_LONG_'+i)"`,
+      context,
+      output,
+    );
+
+    expect(result).toBe("handled");
+    expect(context.sessionId).not.toBe(missingSession.id);
+    const transcript = (await store.resume(context.sessionId ?? "missing")).transcript;
+    expect(transcript.some((event) => event.type === "tool_call_end")).toBe(true);
+    expect(transcript.some((event) => event.type === "tool_result")).toBe(true);
+    expect(transcript.at(-1)).toMatchObject({
+      type: "tool_result",
+      toolName: "Bash",
+      isError: false,
+    });
   });
 
   it("non-interactive Bash denial does not execute the tool and still continues", async () => {

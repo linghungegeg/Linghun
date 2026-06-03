@@ -19,6 +19,7 @@ import {
 } from "./startup-runtime.js";
 import {
   type ToolResultBudgetRecord,
+  type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
@@ -232,12 +233,17 @@ async function prepareMessagesForProviderWithToolResultBudget(
   const budgeted = await applyToolResultBudgetToMessages(messages, {
     projectPath: context.projectPath,
     sessionId,
+    state: getToolResultBudgetState(context),
   });
-  if (budgeted.records.length === 0) return messages;
   for (const record of budgeted.records) {
     await deps.recordToolResultBudgetEvidence(context, sessionId, record);
   }
   return budgeted.messages;
+}
+
+function getToolResultBudgetState(context: TuiContext): ToolResultBudgetState {
+  context.toolResultBudgetState ??= { seenIds: new Set(), replacements: new Map() };
+  return context.toolResultBudgetState;
 }
 
 export function recordCompactBoundary(context: TuiContext, boundary: CompactBoundary): void {
