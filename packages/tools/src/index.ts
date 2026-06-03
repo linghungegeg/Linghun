@@ -725,11 +725,12 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
     (stream, text) => void context.onProgress?.({ toolName: "Bash", stream, text }),
   );
   const adapterLines =
-    adapted.command === input.command
+    adapted.command === input.command && adapted.adapter === "native"
       ? []
-      : [`adapter=${adapted.adapter}`, `originalCommand=${input.command}`];
+      : [`adapter=${adapted.adapter}`, `originalCommand=${summarizeOriginalShellCommand(input.command)}`];
+  const commandForLog = adapted.logCommand ?? adapted.command;
   const fullText = [
-    `$ ${adapted.command}`,
+    `$ ${commandForLog}`,
     ...adapterLines,
     `exitCode=${result.exitCode}`,
     `outcome=${result.outcome}`,
@@ -755,6 +756,7 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
 type ShellCommandAdapter = {
   command: string;
   adapter: "native" | "powershell-adapted" | "blocked";
+  logCommand?: string;
 };
 
 export function adaptShellCommand(command: string): ShellCommandAdapter {
@@ -766,17 +768,59 @@ export function adaptShellCommandForPlatform(
   platform: NodeJS.Platform,
 ): ShellCommandAdapter {
   if (platform !== "win32") return { command, adapter: "native" };
+  const heredoc = convertNodeHereDocForPowerShell(command);
+  if (heredoc) return heredoc;
   const converted = convertUnixPipelineForPowerShell(command);
   if (converted) return { command: converted, adapter: "powershell-adapted" };
   if (looksLikeUnsupportedUnixPipeline(command)) {
     const message =
       "Unsupported Unix pipeline on Windows PowerShell; use PowerShell-safe commands or Node one-liners.";
-    return {
-      command: `powershell.exe -NoProfile -NonInteractive -Command "Write-Error ${quotePowerShellString(message)}; exit 1"`,
-      adapter: "blocked",
-    };
+    return createBlockedPowerShellAdapter(message);
   }
   return { command, adapter: "native" };
+}
+
+function convertNodeHereDocForPowerShell(command: string): ShellCommandAdapter | undefined {
+  const normalized = command.replace(/\r\n/gu, "\n");
+  const match = normalized.match(
+    /^node\s+(-)?\s*<<\s*(['"]?)([A-Za-z_][\w.-]*)\2\s*\n([\s\S]*)\n\3\s*$/u,
+  );
+  if (!match) return undefined;
+
+  const mode = match[1] === "-" ? "stdin" : "script";
+  const body = match[4] ?? "";
+  if (!body.trim()) {
+    return createBlockedPowerShellAdapter("Unsupported empty node here-doc on Windows PowerShell.");
+  }
+  const extension = ".cjs";
+  const bodyBase64 = Buffer.from(body, "utf8").toString("base64");
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$dir = Join-Path ([System.IO.Path]::GetTempPath()) ('linghun-node-heredoc-' + [guid]::NewGuid().ToString('N'))",
+    "[System.IO.Directory]::CreateDirectory($dir) | Out-Null",
+    `$script = Join-Path $dir ('script${extension}')`,
+    `$body = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(${quotePowerShellString(bodyBase64)}))`,
+    "[System.IO.File]::WriteAllText($script, $body, [System.Text.UTF8Encoding]::new($false))",
+    "try {",
+    "  & node $script",
+    "  exit $LASTEXITCODE",
+    "} finally {",
+    "  Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue",
+    "}",
+  ].join("; ");
+
+  return {
+    command: ["powershell.exe -NoProfile -NonInteractive -Command", quoteCmdArg(script)].join(" "),
+    adapter: "powershell-adapted",
+    logCommand: `powershell.exe -NoProfile -NonInteractive -Command <node here-doc adapter: ${mode}>`,
+  };
+}
+
+function createBlockedPowerShellAdapter(message: string): ShellCommandAdapter {
+  return {
+    command: `powershell.exe -NoProfile -NonInteractive -Command "Write-Error ${quotePowerShellString(message)}; exit 1"`,
+    adapter: "blocked",
+  };
 }
 
 function convertUnixPipelineForPowerShell(command: string): string | undefined {
@@ -865,6 +909,13 @@ function quotePowerShellString(value: string): string {
 
 function quoteCmdArg(value: string): string {
   return `"${value.replace(/"/gu, '\\"')}"`;
+}
+
+function summarizeOriginalShellCommand(command: string): string {
+  if (!/\n/u.test(command)) return command;
+  const lines = command.split(/\r?\n/u);
+  const firstLine = lines[0]?.trim() || "multi-line command";
+  return `${firstLine} <${lines.length} lines>`;
 }
 
 async function todoTool(input: TodoInput, context: ToolContext): Promise<ToolOutput> {

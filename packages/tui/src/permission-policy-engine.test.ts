@@ -57,6 +57,20 @@ describe("permission-policy-engine — Bash readonly auto allow", () => {
     expect(v.decision).toBe("require_permission");
     expect(v.pathSafety).not.toBe("workspace_safe");
   });
+
+  for (const cmd of [
+    "node test/orders.test.mjs",
+    "node tests/orders.test.mjs",
+    "node scripts/check.mjs",
+    "node scripts/check.cjs --report",
+  ]) {
+    it(`auto_allow_readonly local node verification script: ${cmd}`, () => {
+      const v = classifyToolRequest(bash(cmd));
+      expect(v.decision).toBe("auto_allow_readonly");
+      expect(v.semantic).toBe("readonly");
+      expect(v.pathSafety).toBe("workspace_safe");
+    });
+  }
 });
 
 describe("permission-policy-engine — Bash require_permission", () => {
@@ -93,6 +107,15 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "node -e \"require('fs').writeFileSync('x.txt','x')\"",
     "node -e \"require('fs').rmSync('x.txt')\"",
     "node -e \"fetch('https://example.com')\"",
+    "node --eval \"console.log(1)\"",
+    "node app.mjs",
+    "node ../test/orders.test.mjs",
+    "node scripts/check.mjs $LINGHUN_OPENAI_API_KEY",
+    "node scripts/check.mjs %LINGHUN_OPENAI_API_KEY%",
+    "node scripts/check.mjs --token",
+    "node --require ./preload.cjs scripts/check.mjs",
+    "node scripts/check.mjs | cat",
+    "node scripts/check.mjs > out.txt",
   ]) {
     it(`require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));

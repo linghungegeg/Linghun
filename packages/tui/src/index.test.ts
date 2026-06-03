@@ -9751,8 +9751,8 @@ describe("Phase 06 TUI slash commands", () => {
     const result = await handleNaturalInput("yes", context, output);
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("当前没有待确认的写入动作");
-    expect(output.text).toContain("需要模型发起 Write/Edit 工具请求后才能确认");
+    expect(output.text).not.toContain("当前没有待确认的写入动作");
+    expect(output.text).not.toContain("需要模型发起 Write/Edit 工具请求后才能确认");
   });
 
   it("model text asking permission to write report.md does not create a pending approval", async () => {
@@ -9801,7 +9801,7 @@ describe("Phase 06 TUI slash commands", () => {
         ),
       ),
     ).toBe(false);
-    expect(output.text).toContain("当前没有待确认的写入动作");
+    expect(output.text).not.toContain("当前没有待确认的写入动作");
     await expect(readFile(join(project, "report.md"), "utf8")).rejects.toThrow();
   });
 
@@ -13550,7 +13550,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
     // D.13D 移除了自然语言→full-access 的 Start Gate；裸 yes 落到 no-pending 分支，
     // 不放行、不发模型。硬边界仍在（mode 始终保持 default）。
-    expect(output.text).toContain("当前没有待确认的写入动作");
+    expect(output.text).not.toContain("当前没有待确认的写入动作");
 
     await handleSlashCommand("/mode plan", context, output);
     await handleSlashCommand("/write sample.txt beta", context, output);
@@ -16309,7 +16309,7 @@ describe("Phase 06 TUI slash commands", () => {
     const result = await handleNaturalInput("yes", context, output);
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("当前没有待确认的写入动作");
+    expect(output.text).not.toContain("当前没有待确认的写入动作");
   });
 
   it("runs Phase 15 pre-Beta end-to-end CCB user journey smoke", async () => {
@@ -20901,6 +20901,143 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     expect(output.text).not.toContain("Handled locally");
   });
 
+  it("non-interactive Bash approval executes once, clears pending, and continues the model loop", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const config = createTestModelConfig({
+      providers: {
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
+    const context = await createTestContext(project, store, session, config);
+    const requests = mockOpenAiToolSequenceWithFinalCalls([], "continued after approval");
+    const gateway = createModelGateway(config);
+    context.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: {
+        id: "call-pending-bash",
+        name: "Bash",
+        input: { command: "node --version" },
+      },
+      sessionId: session.id,
+      continuation: {
+        provider: "openai-compatible",
+        model: "gpt-4.1",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        messages: [
+          { role: "user", content: "run local verification" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call-pending-bash",
+                name: "Bash",
+                input: { command: "node --version" },
+              },
+            ],
+          },
+        ],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    const result = await handleNaturalInput("yes", context, gateway, output);
+
+    expect(result).toBe("handled");
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).toContain("Bash(node --version)");
+    expect(output.text).toContain("continued after approval");
+    expect(requests).toHaveLength(1);
+    const toolEvents = (await store.resume(session.id)).transcript.filter(
+      (event) => event.type === "tool_call_end",
+    );
+    expect(toolEvents).toHaveLength(1);
+  });
+
+  it("non-interactive Bash denial does not execute the tool and still continues", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const config = createTestModelConfig({
+      providers: {
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
+    const context = await createTestContext(project, store, session, config);
+    const requests = mockOpenAiToolSequenceWithFinalCalls([], "continued after denial");
+    const gateway = createModelGateway(config);
+    context.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: {
+        id: "call-denied-bash",
+        name: "Bash",
+        input: { command: "node --version" },
+      },
+      sessionId: session.id,
+      continuation: {
+        provider: "openai-compatible",
+        model: "gpt-4.1",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        messages: [
+          { role: "user", content: "run local verification" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call-denied-bash",
+                name: "Bash",
+                input: { command: "node --version" },
+              },
+            ],
+          },
+        ],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    const result = await handleNaturalInput("no", context, gateway, output);
+
+    expect(result).toBe("handled");
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).toContain("continued after denial");
+    expect(output.text).not.toContain("Bash(node --version)");
+    expect(requests).toHaveLength(1);
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "tool_call_start")).toBe(false);
+    expect(JSON.stringify(transcript)).toContain("denied");
+  });
+
+  it("extra approval after pending cleared stays quiet and local", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    const result = await handleNaturalInput("yes", context, output);
+
+    expect(result).toBe("handled");
+    expect(output.text).not.toContain("当前没有");
+    expect(output.text).not.toContain("No pending");
+  });
+
   it("source invariant: handleNaturalInput main path does not call Natural Command Bridge", async () => {
     const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     const start = indexSrc.indexOf("export async function handleNaturalInput(");
@@ -22097,6 +22234,29 @@ describe("D.13V-B/C source invariants", () => {
       session.id,
     );
     expect(dangerousBash.decision).toBe("deny");
+  });
+
+  it("explicit ask rule still blocks readonly Bash auto allow", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissions.rules.push({
+      id: "ask-bash",
+      effect: "ask",
+      toolName: "Bash",
+      risk: "high",
+    });
+
+    const permission = await decidePermission(
+      "Bash",
+      { command: "node --version" },
+      context,
+      session.id,
+    );
+
+    expect(permission.decision).toBe("ask");
+    expect(permission.autoAllowReadonly).toBeUndefined();
   });
 
   // D.14A closure — AntiCodeBlob 仍不自动改文件；但 Write/Edit/MultiEdit 主链现在接入

@@ -8451,13 +8451,6 @@ export async function handleNaturalInput(
   }
 
   if (/^(yes|y|confirm|ok|okay|确认|是|继续|执行)$/iu.test(text.trim())) {
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? "No pending write approval is active. The assistant must request a Write/Edit tool action before you can confirm it; I did not send this confirmation to the model."
-        : "当前没有待确认的写入动作；需要模型发起 Write/Edit 工具请求后才能确认。这条确认不会发送给模型。",
-    );
-    writeStatus(output, context);
     return "handled";
   }
 

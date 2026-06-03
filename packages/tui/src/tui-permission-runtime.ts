@@ -172,10 +172,10 @@ export async function decidePermission(
   // `deny` outcome.
   if (context.permissionMode !== "plan" && context.permissionMode !== "auto-review") {
     if (verdict.decision === "auto_allow_readonly") {
-      // Honor explicit deny rules even for readonly tools — never override
-      // a user-configured deny.
-      const denyRule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
-      if (!denyRule || denyRule.effect !== "deny") {
+      // Honor explicit deny/ask rules even for readonly tools — never override
+      // a user-configured decision boundary.
+      const existingRule = findPermissionRule(context.permissions.rules, name, tool.permission.risk);
+      if (!existingRule) {
         return {
           request,
           decision: "allow",

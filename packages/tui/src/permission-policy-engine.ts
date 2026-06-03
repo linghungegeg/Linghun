@@ -401,6 +401,15 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
       redactedSummary,
     };
   }
+  if (ENV_EXPANSION_REGEX.test(command)) {
+    return {
+      decision: "require_permission",
+      semantic: "secret_read",
+      pathSafety: "unknown_path",
+      reason: "命令包含环境变量展开；不自动放行。",
+      redactedSummary,
+    };
+  }
 
   if (COMPOSITION_OPERATORS_REGEX.test(command) || ENCODED_OR_NESTED_SHELL_REGEX.test(command)) {
     return {
@@ -437,6 +446,21 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
   const finalSummary = stableSummary ?? redactedSummary;
 
   if (semantic === "readonly") {
+    if (head === "node") {
+      const scriptArg = getSafeNodeLocalScriptArg(args);
+      if (scriptArg) {
+        const pathSafety = classifyPathString(scriptArg, req.workspaceRoot);
+        if (pathSafety !== "workspace_safe") {
+          return {
+            decision: "require_permission",
+            semantic: pathSafety === "sensitive_path" ? "secret_read" : "outside_workspace",
+            pathSafety,
+            reason: "node 本地脚本路径不在工作区普通文件范围内；不自动放行。",
+            redactedSummary,
+          };
+        }
+      }
+    }
     if (PATH_READ_HEADS.has(head)) {
       const pathArgs = getPathReadArgs(head, args);
       if (pathArgs.length > 0) {
@@ -607,7 +631,18 @@ function classifyNodeSubcommand(args: string[]): SemanticClass {
   if (args.length === 0) return "readonly";
   if (isVersionQuery(args)) return "readonly";
   if (args.some((arg) => arg === "-e" || arg === "--eval")) return "unknown";
+  if (getSafeNodeLocalScriptArg(args)) return "readonly";
   return "unknown";
+}
+
+function getSafeNodeLocalScriptArg(args: string[]): string | undefined {
+  const script = args[0];
+  if (!script) return undefined;
+  if (script.startsWith("-")) return undefined;
+  const normalized = script.replaceAll("\\", "/");
+  if (!/\.(?:mjs|cjs|js)$/iu.test(normalized)) return undefined;
+  if (!/^(?:test|tests|scripts)\//iu.test(normalized)) return undefined;
+  return script;
 }
 
 function classifyGitSubcommand(args: string[]): SemanticClass {

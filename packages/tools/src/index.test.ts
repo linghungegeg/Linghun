@@ -91,6 +91,32 @@ describe("Phase 05 core tools", () => {
     expect(bash.output.data).toEqual({ exitCode: 0, outcome: "completed" });
   });
 
+  it("adapts Windows node here-doc without leaking the raw script in the preview", async () => {
+    const command = [
+      "node - <<'NODE'",
+      "const secret = 'raw-script-secret-marker';",
+      "console.log('heredoc-ok');",
+      "NODE",
+    ].join("\n");
+
+    const native = adaptShellCommandForPlatform(command, "linux");
+    expect(native).toEqual({ command, adapter: "native" });
+
+    const adapted = adaptShellCommandForPlatform(command, "win32");
+    expect(adapted.adapter).toBe("powershell-adapted");
+    expect(adapted.command).toContain("powershell.exe -NoProfile -NonInteractive -Command");
+    expect(adapted.logCommand).toContain("<node here-doc adapter: stdin>");
+    expect(adapted.logCommand).not.toContain("raw-script-secret-marker");
+    expect(adapted.command).not.toContain("raw-script-secret-marker");
+  });
+
+  it("keeps unsupported Windows node here-doc safely blocked", () => {
+    const adapted = adaptShellCommandForPlatform("node - <<'NODE'\n   \nNODE", "win32");
+
+    expect(adapted.adapter).toBe("blocked");
+    expect(adapted.command).toContain("Unsupported empty node here-doc");
+  });
+
   it("marks Bash timeout and cancellation outcomes without pass evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);
