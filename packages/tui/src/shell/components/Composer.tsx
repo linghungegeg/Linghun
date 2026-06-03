@@ -413,8 +413,10 @@ export function isMultilineEnterSequence(input: string): boolean {
   const csiU = body.endsWith("u") ? body.slice(0, -1).split(";") : undefined;
   if (csiU?.length === 2) {
     const [code, modifier] = csiU;
+    const normalizedModifier = modifier.split(":")[0];
     return (
-      (code === "10" || code === "13" || code === "57414") && (modifier === "2" || modifier === "3")
+      (code === "10" || code === "13" || code === "57414") &&
+      (normalizedModifier === "2" || normalizedModifier === "3")
     );
   }
   const modified = body.endsWith("~") ? body.slice(0, -1).split(";") : undefined;

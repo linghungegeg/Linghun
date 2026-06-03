@@ -68,8 +68,7 @@ export function ProductBlock({
   // Command transcript row — slash command 提交后作为独立 `❯ /command` 行进入
   // task transcript，与下方 tool/output 块视觉分层。U+276F + accent 颜色，
   // 不带 status marker、不带 detail/nextAction，只显示一行命令。
-  // P0-3：command 显式保持 marginBottom=0，紧贴下方 tool/output 块；
-  // 其他 kind 之间统一加 marginBottom=1，让长 transcript 可扫读。
+  // P0-3：command 显式保持 marginBottom=0，紧贴下方 tool/output 块。
   // P2-3：command 行额外加 marginTop=1，与上方块拉开 1 行视觉间隔，
   // 不引入全局序号或时间戳（避免依赖外部状态 / 假数据）。
   if (block.kind === "command") {
@@ -84,7 +83,7 @@ export function ProductBlock({
       const body = (block.fullText ?? block.title ?? "").trim();
       if (!body) return null;
       return (
-        <Box marginTop={1} marginBottom={1} flexDirection="row">
+        <Box marginTop={1} marginBottom={0} flexDirection="row">
           <Text color={theme.accent ?? theme.muted}>│ </Text>
           <MessageMarkdown text={body} theme={theme} wrapWidth={Math.max(8, width - 2)} />
         </Box>
@@ -121,7 +120,7 @@ export function ProductBlock({
     const tone = isDiagnostic ? "diagnostic" : "default";
     const isAssistantText = block.messageKind === "assistant_text";
     return (
-      <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={1}>
+      <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={0}>
         {isLocalOutput ? (
           <Box flexDirection="row">
             <Text color={theme.dim ?? theme.muted} dimColor>

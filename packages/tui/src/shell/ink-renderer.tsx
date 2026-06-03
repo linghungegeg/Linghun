@@ -5,6 +5,9 @@ import { ShellApp } from "./components/ShellApp.js";
 import { type TerminalCapability, detectTerminalCapability } from "./terminal-capability.js";
 import type { ShellController, ShellRenderOptions } from "./types.js";
 
+const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
+const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
+
 export type InkShellInstance = {
   rerender: () => void;
   clear: () => void;
@@ -33,18 +36,27 @@ export function renderInkShell(
 ): InkShellInstance {
   const stdout = options.stdout as NodeJS.WriteStream | undefined;
   const capability = detectTerminalCapability();
+  const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
+  const enableKittyKeyboard =
+    capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
   let instance: ReturnType<typeof render>;
 
   try {
+    if (enableModifyOtherKeys) {
+      writeBestEffort(stdout, ENABLE_MODIFY_OTHER_KEYS);
+    }
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
       stdout,
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
       alternateScreen: capability.alternateScreen,
-      kittyKeyboard: capability.kittyKeyboard ? { mode: "auto" } : undefined,
+      kittyKeyboard: enableKittyKeyboard ? { mode: "auto" } : undefined,
     });
   } catch (error) {
+    if (enableModifyOtherKeys) {
+      writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
+    }
     showTerminalCursor(stdout);
     throw error;
   }
@@ -69,6 +81,9 @@ export function renderInkShell(
       instance.unmount();
     } catch {
       // stdout/stdin may already be closed (e.g. Windows cmd window close)
+    }
+    if (enableModifyOtherKeys) {
+      writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
     }
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit
@@ -124,8 +139,12 @@ export function renderInkShell(
 }
 
 function showTerminalCursor(stdout: NodeJS.WriteStream | undefined): void {
+  writeBestEffort(stdout, "\x1B[?25h");
+}
+
+function writeBestEffort(stdout: NodeJS.WriteStream | undefined, text: string): void {
   try {
-    stdout?.write("\x1B[?25h");
+    stdout?.write(text);
   } catch {
     // stdout may already be closed
   }

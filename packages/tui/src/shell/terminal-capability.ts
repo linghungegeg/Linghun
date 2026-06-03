@@ -114,7 +114,13 @@ function detectWindowsTerminal(env: NodeJS.ProcessEnv): TerminalCapability {
   // Windows 10 1809+ (build 17763+) ships conpty which supports cursor positioning.
   // cmd.exe and PowerShell on modern Windows can run Ink safely.
   // Only truly ancient conhost (pre-1809) lacks VT support — extremely rare today.
-  if (isWindows10ConptyCapable()) return basicCapability();
+  if (isWindows10ConptyCapable()) {
+    return {
+      ...basicCapability(),
+      shiftEnter: true,
+      keyboardProtocols: ["csi-u", "modifyOtherKeys"],
+    };
+  }
 
   // True legacy: pre-1809 conhost with no VT support
   return legacyCapability();

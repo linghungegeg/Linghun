@@ -19,7 +19,7 @@ import {
 } from "./components/Composer.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
-import { resetTerminalCapabilityCache } from "./terminal-capability.js";
+import { detectTerminalCapability, resetTerminalCapabilityCache } from "./terminal-capability.js";
 import type { ProductBlockViewModel } from "./types.js";
 import {
   createOutputBlock,
@@ -30,9 +30,8 @@ import {
 } from "./view-model.js";
 
 // Reset terminal capability cache after every test to prevent cross-test pollution.
-// On Windows without WT_SESSION, detectTerminalCapability() returns legacy unless
-// LINGHUN_TERMINAL_TIER is explicitly set. Tests that need modern/basic behavior
-// must stub LINGHUN_TERMINAL_TIER accordingly.
+// Tests that need a specific terminal tier should stub LINGHUN_TERMINAL_TIER
+// explicitly; otherwise capability detection follows the host terminal.
 afterEach(() => {
   resetTerminalCapabilityCache();
   vi.unstubAllEnvs();
@@ -353,6 +352,35 @@ describe("Ink shell selection", () => {
     expect(output.text).toContain("\u001B[?1049l");
     expect(resizeCallbacks).toBe(0);
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
+  });
+
+  it("enables extended keyboard reporting for Shift+Enter-capable terminals and restores it on exit", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("WT_SESSION", "test-windows-terminal");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(createContext(), {
+          width: output.columns,
+          height: output.rows,
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("\x1B[>4;2m");
+    expect(output.text).toContain("\x1B[>4m");
+    expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -2654,13 +2682,14 @@ describe("Windows TTY terminal capability detection", () => {
     // On non-Windows CI, we use LINGHUN_TERMINAL_TIER=basic to simulate.
     if (process.platform === "win32") {
       // Remove all terminal indicators to simulate bare cmd.exe
-      process.env.WT_SESSION = undefined as unknown as string;
-      process.env.TERM_PROGRAM = undefined as unknown as string;
-      process.env.TERM = undefined as unknown as string;
-      process.env.ConEmuPID = undefined as unknown as string;
-      process.env.CONEMUDIR = undefined as unknown as string;
-      process.env.MSYSTEM = undefined as unknown as string;
-      process.env.ALACRITTY_WINDOW_ID = undefined as unknown as string;
+      delete process.env.LINGHUN_TERMINAL_TIER;
+      delete process.env.WT_SESSION;
+      delete process.env.TERM_PROGRAM;
+      delete process.env.TERM;
+      delete process.env.ConEmuPID;
+      delete process.env.CONEMUDIR;
+      delete process.env.MSYSTEM;
+      delete process.env.ALACRITTY_WINDOW_ID;
       resetTerminalCapabilityCache();
       expect(
         shouldUseInkShell(
@@ -2668,6 +2697,10 @@ describe("Windows TTY terminal capability detection", () => {
           { isTTY: true } as NodeJS.WriteStream,
         ),
       ).toBe(true);
+      const capability = detectTerminalCapability();
+      expect(capability.tier).toBe("basic");
+      expect(capability.shiftEnter).toBe(true);
+      expect(capability.keyboardProtocols).toEqual(["csi-u", "modifyOtherKeys"]);
     } else {
       // On non-Windows, verify that LINGHUN_TERMINAL_TIER=basic gives Ink
       vi.stubEnv("LINGHUN_TERMINAL_TIER", "basic");
@@ -4173,13 +4206,14 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     const userBranch = source.slice(userStart, source.indexOf("const marker", userStart));
     const assistantBranch = source.slice(
       assistantStart,
-      source.indexOf("return (", assistantStart) + 120,
+      source.indexOf("isLocalOutput ?", assistantStart),
     );
 
-    expect(userBranch).toContain("marginBottom={1}");
+    expect(userBranch).toContain("marginBottom={0}");
     expect(userBranch).toContain("│ ");
     expect(userBranch).toContain("MessageMarkdown");
     expect(assistantBranch).toContain("marginTop={isAssistantText ? 1 : 0}");
+    expect(assistantBranch).toContain("marginBottom={0}");
   });
 
   it("Ink task layout keeps transcript, notices, composer, footer, and light hints separated", async () => {
