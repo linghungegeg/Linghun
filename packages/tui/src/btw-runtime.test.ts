@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBtwMessages, extractBtwResult } from "./btw-runtime.js";
+import { buildBtwMessages, classifyBtwIntent, extractBtwResult } from "./btw-runtime.js";
 
 describe("D.14D btw-runtime", () => {
   describe("buildBtwMessages", () => {
@@ -51,6 +51,52 @@ describe("D.14D btw-runtime", () => {
       if (result.status === "error") {
         expect(result.error).toContain("empty response");
       }
+    });
+  });
+
+  describe("classifyBtwIntent", () => {
+    it("routes readonly status intent to local status answers", () => {
+      expect(
+        classifyBtwIntent({
+          action: "execute_readonly",
+          confidence: 0.9,
+          reason: "readonly status",
+          candidates: [],
+          language: "zh-CN",
+          inquiry: "status",
+          runtimeIntent: { kind: "runtime_status_query", subject: "current_work" },
+          riskHandler: "readonly",
+        }),
+      ).toBe("status_query");
+    });
+
+    it("does not inspect question text to infer status", () => {
+      expect(
+        classifyBtwIntent({
+          action: "execute_readonly",
+          confidence: 0.9,
+          reason: "readonly status",
+          candidates: [],
+          language: "zh-CN",
+          inquiry: "status",
+          runtimeIntent: { kind: "none" },
+          riskHandler: "readonly",
+        }),
+      ).toBe("general_side_question");
+    });
+
+    it("keeps non-status questions model-backed", () => {
+      expect(
+        classifyBtwIntent({
+          action: "model",
+          confidence: 0,
+          reason: "no catalog match",
+          candidates: [],
+          language: "zh-CN",
+          inquiry: "howto",
+          riskHandler: "model",
+        }),
+      ).toBe("general_side_question");
     });
   });
 });

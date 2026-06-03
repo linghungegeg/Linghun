@@ -13,23 +13,21 @@ import type { ShellController } from "../types.js";
  * permission / evidence / completion gate。逻辑在 btw-runtime.ts，index.ts 只接线。
  *
  * UI 形态：
- * - 标题：/btw <question>（warning 黄 + bold） + dim 副标 "临时插问 · 不影响主任务"
+ * - 标题：/btw <question>
  * - 状态：loading（正在询问）/ answered（模型答案，逐行）/ error（可见错误）
- * - 关闭：Esc / Enter / Space（统一 onDone）
+ * - 关闭：Esc / Enter / Space（底部只显示 Esc 关闭）
  * - 与 Composer 互斥（Composer.useInput 在 btwPanel 渲染时 isActive=false）
  */
 
 const HINT_TEXT = {
   "zh-CN": {
     title: "/btw",
-    subtitle: "临时插问 · 不影响主任务",
-    nav: "Esc / Enter / Space 关闭",
+    nav: "Esc 关闭",
     loading: "正在询问模型…",
   },
   "en-US": {
     title: "/btw",
-    subtitle: "Side question · main task unaffected",
-    nav: "Esc / Enter / Space dismiss",
+    nav: "Esc dismiss",
     loading: "Asking the model…",
   },
 } as const;
@@ -70,9 +68,6 @@ export function BtwPanel({
         <Text color={theme.warning ?? theme.accent}>{hint.title}</Text>{" "}
         <Text>{fitText(panel.question, Math.max(8, innerWidth - hint.title.length - 1))}</Text>
       </Text>
-      <Text color={theme.dim ?? theme.muted} dimColor>
-        {fitText(`${hint.subtitle} · ${hint.nav}`, innerWidth)}
-      </Text>
       {panel.phase === "loading" ? (
         <Text color={theme.status.running ?? theme.accent}>
           {fitText(hint.loading, innerWidth)}
@@ -90,6 +85,9 @@ export function BtwPanel({
           {fitText(panel.error ?? "error", innerWidth)}
         </Text>
       ) : null}
+      <Text color={theme.dim ?? theme.muted} dimColor>
+        {fitText(hint.nav, innerWidth)}
+      </Text>
     </Box>
   );
 }

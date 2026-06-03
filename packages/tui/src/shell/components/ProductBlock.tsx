@@ -84,8 +84,8 @@ export function ProductBlock({
       const body = (block.fullText ?? block.title ?? "").trim();
       if (!body) return null;
       return (
-        <Box marginTop={1} marginBottom={0} flexDirection="row">
-          <Text color={theme.muted}>› </Text>
+        <Box marginTop={1} marginBottom={1} flexDirection="row">
+          <Text color={theme.accent ?? theme.muted}>│ </Text>
           <MessageMarkdown text={body} theme={theme} wrapWidth={Math.max(8, width - 2)} />
         </Box>
       );
@@ -119,8 +119,9 @@ export function ProductBlock({
     const isRejected = block.messageKind === "tool_result_rejected";
     const dim = isCancelled || isRejected;
     const tone = isDiagnostic ? "diagnostic" : "default";
+    const isAssistantText = block.messageKind === "assistant_text";
     return (
-      <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="column" marginTop={isAssistantText ? 1 : 0} marginBottom={1}>
         {isLocalOutput ? (
           <Box flexDirection="row">
             <Text color={theme.dim ?? theme.muted} dimColor>

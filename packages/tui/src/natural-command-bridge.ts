@@ -17,6 +17,15 @@ export type CommandGroup =
   | "diagnostics"
   | "exit";
 
+export type RuntimeStatusSubject = "current_work" | "background" | "job" | "workflow" | "agent";
+
+export type RuntimeIntent =
+  | {
+      kind: "runtime_status_query";
+      subject: RuntimeStatusSubject;
+    }
+  | { kind: "none" };
+
 export type CommandCapability = {
   id: string;
   slash: string;
@@ -37,6 +46,7 @@ export type CommandCapability = {
   entersPermissionPipeline: boolean;
   bridgeSafe: boolean;
   hiddenReason?: string;
+  runtimeStatusSubject?: RuntimeStatusSubject;
 };
 
 export type NaturalIntentAction =
@@ -57,6 +67,7 @@ export type NaturalIntent = {
   candidates: CommandCapability[];
   language: Language;
   inquiry: "status" | "doctor" | "read" | "usage" | "risk" | "howto" | "execute";
+  runtimeIntent?: RuntimeIntent;
   riskHandler: CommandRisk | "safe_local_action" | "model" | "clarify";
 };
 
@@ -299,6 +310,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "想知道有哪些工作流或启动 bug-fix/review 模板，或用 /workflows plan 生成计划预览。",
     "Use to discover or start bug-fix/review workflows, or /workflows plan to generate a plan preview.",
     "start_gate",
+    { runtimeStatusSubject: "workflow" },
   ),
   cap(
     "plugins",
@@ -564,6 +576,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "询问长任务状态、日志、取消方式。",
     "Use for long-task state, logs, and cancel hints.",
     "readonly",
+    { runtimeStatusSubject: "background" },
   ),
   cap(
     "job",
@@ -576,6 +589,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "查看或控制长期 job、预算、agent 分配、暂停原因和日志。",
     "Use for long-running job state, budget, agent assignment, pause reason, and logs.",
     "start_gate",
+    { runtimeStatusSubject: "job" },
   ),
   cap(
     "remote",
@@ -612,6 +626,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "查看或解释 agent 状态。",
     "Use to inspect or explain agent state.",
     "readonly",
+    { runtimeStatusSubject: "agent" },
   ),
   cap(
     "fork",
@@ -1003,7 +1018,10 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "通常由系统自动输出；可用于调试短状态。",
     "Usually emitted automatically; useful for short status debugging.",
     "readonly",
-    { hiddenReason: "not listed in /help; status bar is emitted automatically" },
+    {
+      hiddenReason: "not listed in /help; status bar is emitted automatically",
+      runtimeStatusSubject: "current_work",
+    },
   ),
 ];
 
@@ -1197,7 +1215,20 @@ export function routeNaturalIntent(
     ? Math.max(8, scoredAdjusted[0]?.score ?? 0)
     : (scoredAdjusted[0]?.score ?? 0);
   const secondScore = scoredAdjusted[1]?.score ?? 0;
+  const currentWorkCapability = findCurrentWorkStatusCapability(catalog, normalized, inquiry);
 
+  if (!explicit && currentWorkCapability) {
+    return createIntent(
+      "execute_readonly",
+      currentWorkCapability,
+      0.9,
+      "current work runtime status",
+      uniqueCapabilities([currentWorkCapability, ...candidates]),
+      language,
+      inquiry,
+      normalized,
+    );
+  }
   if (!capability) {
     return {
       action: "model",
@@ -1206,6 +1237,7 @@ export function routeNaturalIntent(
       candidates: [],
       language,
       inquiry,
+      runtimeIntent: extractRuntimeIntent(undefined, inquiry),
       riskHandler: "model",
     };
   }
@@ -1318,6 +1350,7 @@ export function routeNaturalIntent(
       candidates,
       language,
       inquiry,
+      runtimeIntent: extractRuntimeIntent(undefined, inquiry),
       riskHandler: "model",
     };
   }
@@ -1692,6 +1725,7 @@ function cap(
     bridgeSafe:
       options.bridgeSafe ?? (readonly || risk === "start_gate" || risk === "tool_permission"),
     hiddenReason: options.hiddenReason,
+    runtimeStatusSubject: options.runtimeStatusSubject,
   };
 }
 
@@ -1714,6 +1748,7 @@ function createIntent(
     candidates,
     language,
     inquiry,
+    runtimeIntent: extractRuntimeIntent(capability, inquiry),
     riskHandler:
       action === "ask_clarify"
         ? "clarify"
@@ -1721,6 +1756,33 @@ function createIntent(
           ? "safe_local_action"
           : capability.risk,
   };
+}
+
+function extractRuntimeIntent(
+  capability: CommandCapability | undefined,
+  inquiry: NaturalIntent["inquiry"],
+): RuntimeIntent {
+  if (inquiry !== "status") return { kind: "none" };
+  return capability?.runtimeStatusSubject
+    ? { kind: "runtime_status_query", subject: capability.runtimeStatusSubject }
+    : { kind: "none" };
+}
+
+function findCurrentWorkStatusCapability(
+  catalog: CommandCapability[],
+  normalized: string,
+  inquiry: NaturalIntent["inquiry"],
+): CommandCapability | undefined {
+  if (inquiry !== "status" || !isCurrentWorkStatusQuestion(normalized)) return undefined;
+  return catalog.find((item) => item.id === "status");
+}
+
+function isCurrentWorkStatusQuestion(text: string): boolean {
+  return (
+    /(?:当前|现在|目前).*(?:在做什么|做什么|在做|做到哪|进展|进度|任务状态|工作状态)|^(?:当前|现在|目前)状态$|(?:进展|进度).*(?:怎么样|如何|到哪|状态)|(?:current|latest)\s+(?:work|task|status|progress)|(?:what|where).*(?:doing|working on|progress)/u.test(
+      text,
+    ) && !/模型|model|provider|权限|permission|cache|缓存|index|索引|memory|记忆/u.test(text)
+  );
 }
 
 function detectInputLanguage(text: string, preferred: Language): Language {
@@ -1763,6 +1825,7 @@ function classifyInquiry(
   projectRulesRead: boolean,
   actionRequest: boolean,
 ): NaturalIntent["inquiry"] {
+  if (isCurrentWorkStatusQuestion(text)) return "status";
   if (
     /是否|开了吗|enabled|status|状态|当前|现在|什么模型|哪个模型|用的哪个|命中|hit rate|list|有哪些|what model|current model|好了没|好了么|已经.*是吧|已经.*了吗|ready|就绪/u.test(
       text,

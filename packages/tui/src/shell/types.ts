@@ -224,6 +224,10 @@ export type TaskFooterView = {
    * D.13Q-UX — cache 段色调：低命中率染 warning，未知染 dim，默认 muted。
    */
   cacheTone?: "default" | "warning" | "dim";
+  /**
+   * Footer 第二行：当前 active/resumable runtime 状态。历史 terminal 任务不进这里。
+   */
+  runtimeStatus?: string;
 };
 
 /**

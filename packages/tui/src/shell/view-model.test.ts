@@ -1165,14 +1165,14 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary?.kind).toBe("run");
     expect(view.taskRuntimeSummary?.status).toBe("running");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 0");
+    expect(view.taskRuntimeSummary?.title).toContain("可恢复 0");
     expect(view.taskRuntimeSummary?.summary).toContain("lint check");
     expect(view.taskRuntimeSummary?.summary).toContain("checking files");
     expect(view.taskRuntimeSummary?.summary).toContain("1/3 steps");
     expect(view.taskRuntimeSummary?.nextAction).toContain("/interrupt");
   });
 
-  it("counts blocked background statuses without exposing mechanism words", () => {
+  it("keeps terminal historical background statuses out of the task runtime summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1188,13 +1188,28 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary).toBeUndefined();
+  });
+
+  it("shows stale/resumable background status with a clear next action", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 100,
+      viewMode: "task",
+      backgroundSummaries: [
+        {
+          id: "agent-stale-1",
+          kind: "agent",
+          title: "Agent cli-tui-worker",
+          status: "stale",
+          currentStep: "stale/resumable",
+        },
+      ],
+    });
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 2");
-    const visible = `${view.taskRuntimeSummary?.title}\n${view.taskRuntimeSummary?.summary}\n${view.taskRuntimeSummary?.nextAction}`;
-    expect(visible).not.toContain("sourceRef");
-    expect(visible).not.toContain("schema");
-    expect(visible).not.toContain("endpoint");
-    expect(visible).not.toContain("runner=");
+    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(view.taskRuntimeSummary?.summary).toContain("上次会话恢复的后台任务");
+    expect(view.taskRuntimeSummary?.nextAction).toContain("/agents show agent-stale-1");
+    expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
   });
 
   it("uses en-US prefix for background blocks", () => {
@@ -1204,7 +1219,7 @@ describe("backgroundSummaries → blocks mapping", () => {
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
     expect(view.blocks.find((b) => b.id === "bg-summary")).toBeUndefined();
-    expect(view.taskRuntimeSummary?.title).toContain("Tasks: 1 running");
+    expect(view.taskRuntimeSummary?.title).toContain("Background tasks: 1 running");
     expect(view.taskRuntimeSummary?.summary).toContain("build");
   });
 
@@ -1215,6 +1230,39 @@ describe("backgroundSummaries → blocks mapping", () => {
       backgroundSummaries: [{ id: "t6", title: "job", status: "completed" }],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
+    expect(view.taskRuntimeSummary).toBeUndefined();
+  });
+
+  it("startup hydrate-style terminal history stays out while running/stale remains visible", () => {
+    const terminalOnly = createShellViewModel(createContext(), {
+      width: 100,
+      viewMode: "task",
+      backgroundSummaries: [
+        { id: "agent-blocked-old", kind: "agent", title: "Agent cli-tui-worker", status: "failed" },
+        { id: "job-completed-old", kind: "job", title: "Job old", status: "completed" },
+        { id: "agent-cancelled-old", kind: "agent", title: "Agent cancelled", status: "cancelled" },
+      ],
+    });
+    expect(terminalOnly.taskRuntimeSummary).toBeUndefined();
+
+    const recoverable = createShellViewModel(createContext(), {
+      width: 100,
+      viewMode: "task",
+      backgroundSummaries: [
+        { id: "agent-blocked-old", kind: "agent", title: "Agent cli-tui-worker", status: "failed" },
+        { id: "agent-running", kind: "agent", title: "Agent active", status: "running" },
+        {
+          id: "agent-stale",
+          kind: "agent",
+          title: "Agent resumed",
+          status: "stale",
+          currentStep: "stale/resumable",
+        },
+      ],
+    });
+    expect(recoverable.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(recoverable.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
   });
 
   it("home mode does not show background blocks", () => {
@@ -1528,7 +1576,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/failed/stale jobs fold into one task summary", () => {
+  it("running/stale jobs fold into one task summary without terminal failed noise", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1541,7 +1589,8 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 2");
+    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
   });
 });
 
@@ -1609,10 +1658,11 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       noColor: true,
       width: 80,
       viewMode: "task",
-      backgroundSummaries: [{ id: "nc1", title: "task", status: "failed" }],
+      backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("[BLOCKED]");
+    expect(rendered).toContain("可恢复 1");
+    expect(rendered).toContain("上次会话恢复的后台任务");
     expect(rendered).toContain("LingHun");
   });
 });
@@ -1938,7 +1988,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task folds running/failed/timeout/stale background into one summary", () => {
+  it("Task folds running/stale background into one summary and ignores terminal history", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1952,7 +2002,9 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("失败/阻塞 3");
+    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("health");
   });
 
   it("fail/blocking output prioritized over normal output", () => {
@@ -3475,8 +3527,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const hintIdx = source.indexOf("footer.cyclePermHint");
     expect(permIdx).toBeGreaterThan(0);
     expect(hintIdx).toBeGreaterThan(permIdx);
-    // cyclePermHint 仍染 status.fail 红色。
-    expect(source).toMatch(/theme\.status\.fail/);
+    // cyclePermHint 是操作提示，不得染 status.fail 红色。
+    const cyclePermHintSnippet = source.slice(
+      Math.max(0, source.indexOf("footer.cyclePermHint") - 120),
+      source.indexOf("footer.cyclePermHint") + 220,
+    );
+    expect(cyclePermHintSnippet).not.toContain("theme.status.fail");
     // 右栏（model · cache · index · reasoning · hint）按顺序作为 segments 渲染。
     expect(source).toContain("rightSegments");
     expect(source).not.toContain("footer.task");
@@ -3733,6 +3789,24 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
     expect(outerWrapper).not.toContain('alignItems="center"');
+  });
+
+  it("TaskLayout renders a task composer separator and keeps footer surfaces separated", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const taskLayoutStart = source.indexOf("function TaskLayout(");
+    const nextFn = source.indexOf("function ", taskLayoutStart + 20);
+    const body = source.slice(taskLayoutStart, nextFn);
+
+    expect(body).toContain("const composerRule = lineChar(noColor, capability).repeat(cw)");
+    expect(body).toContain("{composerRule}");
+    expect(body).toContain("<Composer view={view}");
+    expect(body).not.toContain("view.taskRuntimeSummary");
+    expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
+    expect(body.indexOf("<StatusFooter")).toBeGreaterThan(body.indexOf("<Composer view={view}"));
+    expect(body).not.toContain(
+      "`${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`",
+    );
   });
 
   it("D.14D-C2: TranscriptViewport owns the measured overflow=hidden culling", async () => {
@@ -4019,12 +4093,113 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     });
     const rendered = renderPlainShell(view);
 
-    expect(rendered).toContain("› 请检查输出");
+    expect(rendered).toContain("│ 请检查输出");
     expect(rendered).toContain("普通助手回复");
     expect(rendered).toContain("  |   const ok = true;");
     expect(rendered).toContain("Bash completed");
     expect(rendered).toContain("  ⎿  line one");
     expect(rendered).not.toContain("\x1B[");
+  });
+
+  it("ProductBlock keeps user_text and assistant_text visually layered", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/ProductBlock.tsx"), "utf8");
+    const userStart = source.indexOf('block.messageKind === "user_text"');
+    const assistantStart = source.indexOf('block.messageKind === "assistant_text"');
+    const userBranch = source.slice(userStart, source.indexOf("const marker", userStart));
+    const assistantBranch = source.slice(
+      assistantStart,
+      source.indexOf("return (", assistantStart) + 120,
+    );
+
+    expect(userBranch).toContain("marginBottom={1}");
+    expect(userBranch).toContain("│ ");
+    expect(userBranch).toContain("MessageMarkdown");
+    expect(assistantBranch).toContain("marginTop={isAssistantText ? 1 : 0}");
+  });
+
+  it("Ink task layout keeps transcript, notices, composer, footer, and light hints separated", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const ctx = createContext();
+    (ctx as unknown as { notifications?: unknown[] }).notifications = [
+      {
+        key: "lighthint:cache-hit-low",
+        text: "最近缓存复用变低，后续响应可能会慢一点。",
+        priority: "low",
+        timeoutMs: 5000,
+        createdAt: Date.now(),
+        tone: "dim",
+      },
+    ];
+    const blocks: ProductBlockViewModel[] = [
+      {
+        id: "u-layer",
+        kind: "command",
+        status: "info",
+        title: "请检查输出",
+        summary: "请检查输出",
+        fullText: "请检查输出",
+        messageKind: "user_text",
+        keep: true,
+      },
+      createOutputBlock("助手回复第一段\n\n助手回复第二段", "zh-CN", "a-layer"),
+    ];
+    const controller = {
+      getViewModel: () =>
+        createShellViewModel(ctx, {
+          width: output.columns,
+          height: output.rows,
+          noColor: true,
+          viewMode: "task",
+          outputBlocks: blocks,
+          backgroundSummaries: [
+            {
+              id: "agent-blocked-history",
+              kind: "agent",
+              title: "Agent cli-tui-worker",
+              status: "failed",
+            },
+            {
+              id: "agent-stale-visible",
+              kind: "agent",
+              title: "Agent active worker",
+              status: "stale",
+              currentStep: "stale/resumable",
+            },
+          ],
+        }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    const text = output.text;
+    const userIdx = text.indexOf("│ 请检查输出");
+    const assistantIdx = text.indexOf("助手回复第一段");
+    const runtimeIdx = text.indexOf("上次会话恢复的后台任务");
+    const hintIdx = text.indexOf("最近缓存复用变低");
+    const composerSeparatorIdx = text.indexOf("----------", hintIdx);
+    const footerIdx = text.indexOf("Shift+Tab");
+
+    expect(userIdx).toBeGreaterThan(0);
+    expect(assistantIdx).toBeGreaterThan(userIdx);
+    expect(hintIdx).toBeGreaterThan(assistantIdx);
+    expect(composerSeparatorIdx).toBeGreaterThan(hintIdx);
+    expect(footerIdx).toBeGreaterThan(composerSeparatorIdx);
+    expect(runtimeIdx).toBeGreaterThan(footerIdx);
+    expect(text).not.toContain("失败/阻塞 1");
+    expect(text).not.toContain("Agent cli-tui-worker · blocked");
   });
 
   it("local_command_output/Bash 从属输出使用 ⎿，普通成功结果不出现 bordered CommandPanel", () => {
@@ -4153,6 +4328,24 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       "已有正文：关键证据 X",
     );
     expect(view.notifications?.[0]?.text).toBe("右对齐轻提示");
+  });
+
+  it("cache-hit-low light hint is dim/low rather than an error or fail warning", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "cache-command-runtime.ts"), "utf8");
+    const hintStart = source.indexOf('"cache-hit-low"');
+    const hintSnippet = source.slice(hintStart, hintStart + 260);
+    const notificationStart = source.indexOf("context.notifications.push");
+    const notificationSnippet = source.slice(notificationStart, notificationStart + 360);
+
+    expect(hintSnippet).toContain('"info"');
+    expect(hintSnippet).toContain("10,");
+    expect(notificationSnippet).toContain(
+      'priority: hint.severity === "warning" ? "medium" : "low"',
+    );
+    expect(notificationSnippet).toContain('tone: hint.severity === "warning" ? "warning" : "dim"');
+    expect(hintSnippet).not.toContain('"error"');
+    expect(hintSnippet).not.toContain('"fail"');
   });
 });
 

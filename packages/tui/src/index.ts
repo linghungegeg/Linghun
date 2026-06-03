@@ -99,7 +99,7 @@ import {
   formatBreakCacheStatus,
   writeBreakCacheMarker,
 } from "./break-cache-runtime.js";
-import { runBtwSideQuestion } from "./btw-runtime.js";
+import { classifyBtwIntent, runBtwSideQuestion } from "./btw-runtime.js";
 // D.14A-2 — break-cache runtime moved to ./break-cache-runtime.ts.
 // Re-export the test hooks to preserve model-doctor-runtime.test.ts imports from "./index.js".
 export { type BreakCacheTestHooks, breakCacheTestHooks } from "./break-cache-runtime.js";
@@ -264,6 +264,7 @@ import {
   normalizeRelativePath,
   readToolInputString,
   sanitizeDeferredToolPrimaryText,
+  stripStructuredFinalAnswerClaims,
 } from "./model-loop-runtime.js";
 import {
   type ModelSetupMessageKey,
@@ -289,6 +290,7 @@ import {
   buildRuntimeStatusForModel,
   createModelCapabilitySummary,
   matchesNaturalGateConfirmation,
+  routeNaturalIntent,
 } from "./natural-command-bridge.js";
 import {
   type ModelToolCallLike,
@@ -332,6 +334,10 @@ import {
   formatLocalToolPermissionPrompt,
   formatModelToolPermissionPrompt,
 } from "./permission-presenter.js";
+import {
+  createRuntimeStatusSnapshot,
+  formatRuntimeStatusSnapshotForBtw,
+} from "./runtime-status-snapshot.js";
 // D.14A — deferred tools catalog moved to ./deferred-tools-catalog.ts.
 // Re-export to preserve existing external / test imports from "./index.js".
 export {
@@ -3431,6 +3437,7 @@ async function runWorkflowPlanSteps(
 
   let completed = 0;
   for (const step of stepStates) {
+    if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
     const request = getCurrentWorkflowStepRequest(plan, phase.id, stepStates, step.id);
     const stepStartedAt = new Date().toISOString();
     step.status = "running";
@@ -3448,6 +3455,7 @@ async function runWorkflowPlanSteps(
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
     const result = await executeWorkflowStep(request, context, output);
+    if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
     const stepEndedAt = new Date().toISOString();
     step.status = result.status;
     step.summary = result.summary;
@@ -3493,6 +3501,28 @@ async function runWorkflowPlanSteps(
     workflowTask,
   );
   writeLine(output, `Workflow ${runId} completed with PARTIAL result; no PASS evidence generated.`);
+}
+
+function isWorkflowRunTerminal(
+  context: TuiContext,
+  runId: string,
+  task: BackgroundTaskState,
+): boolean {
+  const status =
+    context.workflows.activeRun?.id === runId ? context.workflows.activeRun.status : undefined;
+  return (
+    status === "completed" ||
+    status === "partial" ||
+    status === "failed" ||
+    status === "blocked" ||
+    status === "cancelled" ||
+    status === "stale" ||
+    task.status === "completed" ||
+    task.status === "failed" ||
+    task.status === "cancelled" ||
+    task.status === "timeout" ||
+    task.status === "stale"
+  );
 }
 
 function formatWorkflowRegistryList(context: TuiContext): string {
@@ -3674,6 +3704,7 @@ async function executeRegistryWorkflowRun(
 ): Promise<void> {
   let completed = 0;
   for (const step of workflow.steps) {
+    if (isWorkflowRunTerminal(context, runId, task)) return;
     const state = stepStates.find((item) => item.id === step.id);
     const started = new Date().toISOString();
     if (state) {
@@ -3688,6 +3719,7 @@ async function executeRegistryWorkflowRun(
     }
     await appendBackgroundTaskEvent(context, sessionId, task);
     const result = await executeRegistryWorkflowStep(workflow, step, goal, context, output);
+    if (isWorkflowRunTerminal(context, runId, task)) return;
     const ended = new Date().toISOString();
     if (state) {
       state.status = result.status;
@@ -3710,6 +3742,7 @@ async function executeRegistryWorkflowRun(
       return;
     }
   }
+  if (isWorkflowRunTerminal(context, runId, task)) return;
   await finishWorkflowRun(
     runId,
     "completed",
@@ -6565,8 +6598,9 @@ async function handleBtwCommand(
     );
     return;
   }
-  const statusAnswer = formatBtwStatusAnswer(question, context);
-  if (statusAnswer) {
+  const btwIntent = classifyBtwIntent(routeNaturalIntent(question, context.language));
+  if (btwIntent === "status_query") {
+    const statusAnswer = formatBtwStatusAnswer(context);
     if (context.isInkSession) {
       context.btwPanelState = { question, phase: "answered", answer: statusAnswer };
     } else {
@@ -6641,202 +6675,20 @@ async function handleBtwCommand(
   }
 }
 
-function formatBtwStatusAnswer(question: string, context: TuiContext): string | undefined {
-  const normalized = question.toLowerCase().replace(/\s+/gu, "");
-  const asksCurrentWork =
-    /(当前|现在|目前).*(做什么|在做|状态|进展|进度)/u.test(question) ||
-    /what(?:areyou|islinghun)?doing|current(?:status|task)|whatisgoingon/u.test(normalized);
-  if (!asksCurrentWork) return undefined;
-  const activeLines = formatBtwActiveStatusLines(context);
-  const recentLine = formatBtwRecentStatusLine(context);
-  const suffix =
-    context.language === "en-US"
-      ? "Details stay in Ctrl+O, /background, or /details."
-      : "详细输出在 Ctrl+O、/background 或 /details。";
-  if (activeLines.length > 0) {
-    return [...activeLines, recentLine, suffix].filter(Boolean).join("\n");
-  }
-  return [
-    context.language === "en-US" ? "Current: no running task." : "当前：没有正在运行的任务。",
-    recentLine,
-    suffix,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function formatBtwActiveStatusLines(context: TuiContext): string[] {
-  const lines: string[] = [];
-  const requestLine = formatBtwModelRequestLine(context);
-  if (requestLine) lines.push(requestLine);
-  const approvalLine = formatBtwPendingApprovalLine(context);
-  if (approvalLine) lines.push(approvalLine);
-  const workflowLine = formatBtwWorkflowLine(context);
-  if (workflowLine) lines.push(workflowLine);
-  for (const task of context.backgroundTasks.filter(isBtwActiveBackgroundTask)) {
-    if (workflowLine && task.id === context.workflows.activeRun?.id) continue;
-    lines.push(formatBtwBackgroundTaskLine(task, context.language, true));
-    if (lines.length >= 5) break;
-  }
-  return lines;
-}
-
-function formatBtwRecentStatusLine(context: TuiContext): string | undefined {
-  const recentTask = context.backgroundTasks
-    .filter((task) => !isActiveBackgroundStatus(task.status))
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
-  const lastVerification = context.lastVerification;
-  const lastModelRequest = context.lastModelRequest;
-  if (!recentTask && !lastVerification && !lastModelRequest) return undefined;
-  if (
-    lastVerification &&
-    (!recentTask || Date.parse(lastVerification.endedAt) >= Date.parse(recentTask.updatedAt)) &&
-    (!lastModelRequest ||
-      Date.parse(lastVerification.endedAt) >= Date.parse(lastModelRequest.endedAt))
-  ) {
-    const status = formatBtwResult(lastVerification.status, context.language);
-    return context.language === "en-US"
-      ? `Recent: verification ${status} · ${truncateDisplay(lastVerification.summary, 90)}.`
-      : `最近：verification ${status} · ${truncateDisplay(lastVerification.summary, 90)}。`;
-  }
-  if (
-    lastModelRequest &&
-    (!recentTask || Date.parse(lastModelRequest.endedAt) >= Date.parse(recentTask.updatedAt))
-  ) {
-    const label = formatBtwModelRequestSummary(lastModelRequest, context.language);
-    return context.language === "en-US"
-      ? `Recent: model request ${label}.`
-      : `最近：模型请求${label}。`;
-  }
-  const status = formatBtwResult(recentTask.result ?? recentTask.status, context.language);
-  const summary = recentTask.currentStep ?? recentTask.userVisibleSummary;
-  return context.language === "en-US"
-    ? `Recent: ${formatBtwTaskKind(recentTask.kind)} ${status} · ${truncateDisplay(summary, 90)}.`
-    : `最近：${formatBtwTaskKind(recentTask.kind)} ${status} · ${truncateDisplay(summary, 90)}。`;
-}
-
-function formatBtwModelRequestLine(context: TuiContext): string | undefined {
-  const phase = context.requestActivityPhase;
-  if (!phase) return undefined;
-  const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
-  const elapsed = startedAt
-    ? formatBtwElapsed(new Date(startedAt).toISOString(), context.language)
-    : "";
-  if (phase === "tool_running") {
-    const toolName =
-      context.requestActivityToolName ?? (context.language === "en-US" ? "tool" : "工具");
-    return context.language === "en-US"
-      ? `Current: model request is running ${toolName}${elapsed}.`
-      : `当前：模型请求正在运行 ${toolName}${elapsed}。`;
-  }
-  if (phase === "permission_waiting") {
-    return context.language === "en-US"
-      ? `Current: model request is waiting for approval${elapsed}.`
-      : `当前：模型请求正在等待确认${elapsed}。`;
-  }
-  const label =
-    context.language === "en-US"
-      ? phase.includes("failed")
-        ? "model request failed"
-        : phase.includes("completed")
-          ? "model request completed"
-          : "model request is active"
-      : phase.includes("failed")
-        ? "模型请求失败"
-        : phase.includes("completed")
-          ? "模型请求已完成"
-          : "模型请求进行中";
-  return context.language === "en-US"
-    ? `Current: ${label}${elapsed}.`
-    : `当前：${label}${elapsed}。`;
-}
-
-function formatBtwPendingApprovalLine(context: TuiContext): string | undefined {
-  if (!context.pendingLocalApproval) return undefined;
-  return context.language === "en-US"
-    ? "Current: waiting for your approval."
-    : "当前：正在等待你的确认。";
-}
-
-function formatBtwWorkflowLine(context: TuiContext): string | undefined {
-  const run = context.workflows.activeRun;
-  if (!run || !isActiveWorkflowStatus(run.status)) return undefined;
-  const runningStep = run.steps.find((step) => step.status === "running");
-  const completed = run.steps.filter(
-    (step) => step.status === "completed" || step.status === "partial",
-  ).length;
-  const total = run.steps.length;
-  const step =
-    runningStep?.title ?? run.steps.find((item) => item.status === "blocked")?.summary ?? run.goal;
-  const elapsed = formatBtwElapsed(run.startedAt, context.language);
-  return context.language === "en-US"
-    ? `Current: workflow ${formatBtwResult(run.status, context.language)} · ${completed}/${total} · ${truncateDisplay(step, 90)}${elapsed}.`
-    : `当前：workflow ${formatBtwResult(run.status, context.language)} · ${completed}/${total} · ${truncateDisplay(step, 90)}${elapsed}。`;
-}
-
-function formatBtwBackgroundTaskLine(
-  task: BackgroundTaskState,
-  language: Language,
-  active: boolean,
-): string {
-  const summary = task.currentStep ?? task.userVisibleSummary;
-  const elapsed = active ? formatBtwElapsed(task.startedAt, language) : "";
-  return language === "en-US"
-    ? `Current: ${formatBtwTaskKind(task.kind)} ${formatBtwResult(task.status, language)} · ${truncateDisplay(summary, 90)}${elapsed}.`
-    : `当前：${formatBtwTaskKind(task.kind)} ${formatBtwResult(task.status, language)} · ${truncateDisplay(summary, 90)}${elapsed}。`;
-}
-
-function isActiveWorkflowStatus(
-  status: NonNullable<WorkflowState["activeRun"]>["status"],
-): boolean {
-  return status === "running" || status === "blocked";
-}
-
-function isBtwActiveBackgroundTask(task: BackgroundTaskState): boolean {
-  return isActiveBackgroundStatus(task.status) || (task.kind === "job" && task.status === "paused");
-}
-
-function formatBtwTaskKind(kind: BackgroundTaskState["kind"]): string {
-  if (kind === "bash") return "background task";
-  return kind;
-}
-
-function formatBtwModelRequestSummary(
-  request: NonNullable<TuiContext["lastModelRequest"]>,
-  language: Language,
-): string {
-  const tool = request.toolName ? ` ${request.toolName}` : "";
-  if (language === "en-US") {
-    if (request.phase === "tool_running") return `last ran tool${tool}`;
-    if (request.phase === "permission_waiting") return "last waited for approval";
-    return "last finished or was cleared";
-  }
-  if (request.phase === "tool_running") return `最近运行过工具${tool}`;
-  if (request.phase === "permission_waiting") return "最近等待过确认";
-  return "最近已结束或已清理";
-}
-
-function formatBtwResult(status: string, language: Language): string {
-  const zh: Record<string, string> = {
-    running: "运行中",
-    paused: "已暂停",
-    completed: "已完成",
-    pass: "通过",
-    fail: "失败",
-    failed: "失败",
-    partial: "部分完成",
-    blocked: "阻塞",
-    cancelled: "已取消",
-    timeout: "超时",
-    stale: "已过期",
-  };
-  return language === "en-US" ? status.replaceAll("_", " ") : (zh[status] ?? status);
-}
-
-function formatBtwElapsed(startedAt: string, language: Language): string {
-  return language === "en-US"
-    ? ` · elapsed ${formatElapsedSince(startedAt)}`
-    : ` · 耗时 ${formatElapsedSince(startedAt)}`;
+function formatBtwStatusAnswer(context: TuiContext): string {
+  const snapshot = createRuntimeStatusSnapshot({
+    language: context.language,
+    requestActivityPhase: context.requestActivityPhase,
+    requestActivityStartedAt: (context as { requestActivityStartedAt?: number })
+      .requestActivityStartedAt,
+    requestActivityToolName: context.requestActivityToolName,
+    pendingApproval: Boolean(context.pendingLocalApproval),
+    workflow: context.workflows.activeRun,
+    backgroundTasks: context.backgroundTasks,
+    lastVerification: context.lastVerification,
+    lastModelRequest: context.lastModelRequest,
+  });
+  return formatRuntimeStatusSnapshotForBtw(snapshot, context.language);
 }
 
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
@@ -8359,7 +8211,7 @@ async function recordVerificationEvidence(
 ): Promise<void> {
   const supportsClaims =
     report.status === "pass"
-      ? ["已验证", "验证通过", "测试通过", "verified", "tests passed"]
+      ? ["verification_passed", "test_passed"]
       : ["verification attempted", `verification:${report.status}`, "未通过验证", "需要复核"];
   const evidence: EvidenceRecord = {
     id: randomUUID(),
@@ -9636,6 +9488,11 @@ async function sendMessage(
         );
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
+      const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
+      if (visibleAssistantText !== assistantText) {
+        assistantText = visibleAssistantText;
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      }
     }
     output.write("\n");
     await context.store.appendEvent(sessionId, {
@@ -10047,6 +9904,11 @@ async function streamFinalModelAnswerWithoutTools(
         extended.verdict,
         context.language,
       );
+      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    }
+    const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
+    if (visibleAssistantText !== assistantText) {
+      assistantText = visibleAssistantText;
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
   }
@@ -10462,6 +10324,11 @@ async function continueModelAfterToolResults(
             extended.verdict,
             context.language,
           );
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        }
+        const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
+        if (visibleAssistantText !== assistantText) {
+          assistantText = visibleAssistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
@@ -12958,7 +12825,9 @@ async function recordArchitectureRuntimeCard(
 ): Promise<EvidenceRecord> {
   const evidence = createEvidenceRecord(
     "command_output",
-    `architecture_runtime target=${card.target}; facts=${card.projectFacts.length}; verification=${card.verification.length}`,
+    context.language === "en-US"
+      ? `Architecture audit recorded: ${card.projectFacts.length} fact(s), ${card.verification.length} verification suggestion(s).`
+      : `架构审计已记录：${card.projectFacts.length} 条事实，${card.verification.length} 条验证建议。`,
     "architecture-runtime:v1",
     ["architecture_runtime", "architecture_card", card.target],
   );

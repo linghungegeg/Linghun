@@ -155,6 +155,7 @@ function TaskLayout({
 }): React.ReactNode {
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
+  const composerRule = lineChar(noColor, capability).repeat(cw);
   // Main transcript scroll：任务页主输出统一走 transcript viewport；composer 固定底部。
   // C1：原来在 output 区与 composer 之间常驻的滚动提示行已删除（噪音），
   // footer 已承载状态；如需 hint 只在 footer/help 区，不在主流。
@@ -278,6 +279,14 @@ function TaskLayout({
           Border-color rules use theme.border (muted) instead of theme.accent
           so the lines don't compete with content. */}
       <Box flexShrink={0} flexDirection="column">
+        {/* D.13Q-UX：轻提示固定在 composer 上方，不和 footer/runtime summary 抢最底部。 */}
+        <NotificationStack notifications={view.notifications} theme={theme} />
+
+        <Box width={cw} paddingX={1} paddingTop={1}>
+          <Text color={theme.border ?? theme.muted} dimColor>
+            {composerRule}
+          </Text>
+        </Box>
         <Box flexDirection="column" width={cw} paddingX={1}>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
@@ -297,19 +306,6 @@ function TaskLayout({
             cacheTone={view.taskFooter.cacheTone}
           />
         ) : null}
-        {view.taskRuntimeSummary ? (
-          <Box paddingX={2} paddingTop={0}>
-            <Text color={theme.muted} dimColor>
-              {fitText(
-                `${view.taskRuntimeSummary.title}: ${view.taskRuntimeSummary.summary}`,
-                Math.max(20, view.width - 4),
-              )}
-            </Text>
-          </Box>
-        ) : null}
-
-        {/* D.13Q-UX：通知栈 — 右对齐，单条主显，绝不进 transcript。 */}
-        <NotificationStack notifications={view.notifications} theme={theme} />
 
         {/* 底部呼吸：在 footer 与终端最底部之间留 1 行空白，避免 task footer
             贴在终端最后一行（光标 / 滚动条 / OS 任务栏会与之相邻不舒服）。

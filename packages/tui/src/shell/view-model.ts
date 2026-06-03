@@ -252,12 +252,7 @@ export function createShellViewModel(
     effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
       ? mapBackgroundSummariesToBlocks(
           options.backgroundSummaries.filter(
-            (s) =>
-              s.status === "running" ||
-              s.status === "paused" ||
-              s.status === "failed" ||
-              s.status === "timeout" ||
-              s.status === "stale",
+            (s) => s.status === "running" || s.status === "paused" || s.status === "stale",
           ),
           language,
         )[0]
@@ -365,18 +360,23 @@ export function createShellViewModel(
   const taskFooter: TaskFooterView | undefined =
     viewMode === "home"
       ? undefined
-      : buildFooterView({
-          language,
-          width,
-          permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
-          cyclePermHint,
-          effectiveModel: context.model,
-          setupNeeded,
-          cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
-          indexStatus: context.index.status,
-          reasoningLevel: options.reasoningLevel,
-          reasoningSent: options.reasoningSent,
-        }).view;
+      : {
+          ...buildFooterView({
+            language,
+            width,
+            permissionModeLabel: formatPermissionModeLabel(context.permissionMode, language),
+            cyclePermHint,
+            effectiveModel: context.model,
+            setupNeeded,
+            cacheHitRate: context.cache?.history?.at(-1)?.hitRate ?? null,
+            indexStatus: context.index.status,
+            reasoningLevel: options.reasoningLevel,
+            reasoningSent: options.reasoningSent,
+          }).view,
+          runtimeStatus: taskRuntimeSummary
+            ? formatFooterRuntimeStatus(taskRuntimeSummary, language)
+            : undefined,
+        };
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
   // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
@@ -1106,23 +1106,24 @@ function mapBackgroundSummariesToBlocks(
   const zh = language === "zh-CN";
   const running = summaries.filter((s) => s.status === "running").length;
   const needConfirm = summaries.filter((s) => s.status === "paused").length;
-  const blocked = summaries.filter(
-    (s) => s.status === "failed" || s.status === "timeout" || s.status === "stale",
-  ).length;
-  const current = summaries.find((s) => s.status === "running") ?? summaries[0];
+  const stale = summaries.filter((s) => s.status === "stale").length;
+  const current =
+    summaries.find((s) => s.status === "running") ??
+    summaries.find((s) => s.status === "stale") ??
+    summaries[0];
   const nextAction =
-    current?.nextAction ??
+    createBackgroundNextAction(current, language) ??
     (zh
-      ? "用 /background 查看任务面板；Ctrl+O 或 /details 展开详情。"
-      : "Use /background for the task panel; Ctrl+O or /details for details.");
+      ? "这是后台任务状态；用 /background 查看任务面板。"
+      : "This is background task status; use /background for the task panel.");
   return [
     {
       id: "bg-summary",
       kind: "run",
-      status: blocked > 0 ? "blocked" : running > 0 ? "running" : "partial",
+      status: stale > 0 ? "blocked" : running > 0 ? "running" : "partial",
       title: zh
-        ? `任务：运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${blocked}`
-        : `Tasks: ${running} running · ${needConfirm} need attention · ${blocked} failed/blocked`,
+        ? `后台任务：运行中 ${running} · 待确认 ${needConfirm} · 可恢复 ${stale}`
+        : `Background tasks: ${running} running · ${needConfirm} need attention · ${stale} resumable`,
       summary: current
         ? summarizeBackgroundStep(current, language)
         : zh
@@ -1133,6 +1134,40 @@ function mapBackgroundSummariesToBlocks(
   ];
 }
 
+function createBackgroundNextAction(
+  task: BackgroundTaskSummary | undefined,
+  language: Language,
+): string | undefined {
+  if (!task) return undefined;
+  const zh = language === "zh-CN";
+  if (task.status === "stale") {
+    if (task.kind === "agent") {
+      return zh
+        ? `上次会话恢复的后台 agent；/agents show ${task.id} 或 /background。`
+        : `Recovered background agent; /agents show ${task.id} or /background.`;
+    }
+    if (task.kind === "job") {
+      return zh
+        ? `上次会话恢复的后台 job；/job report ${task.id} 或 /background。`
+        : `Recovered background job; /job report ${task.id} or /background.`;
+    }
+    return zh
+      ? "这是上次会话恢复的后台任务；用 /background 查看。"
+      : "This is a background task recovered from the previous session; use /background.";
+  }
+  return task.nextAction;
+}
+
+function formatFooterRuntimeStatus(block: ProductBlockViewModel, language: Language): string {
+  const title = cleanBackgroundDisplayText(
+    block.title,
+    language === "en-US" ? "Background" : "后台",
+  );
+  const summary = cleanBackgroundDisplayText(block.summary, "");
+  if (!summary) return title;
+  return `${title} · ${summary}`;
+}
+
 function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language): string {
   const zh = language === "zh-CN";
   const title = cleanBackgroundDisplayText(task.title, zh ? "后台任务" : "Background task");
@@ -1141,7 +1176,11 @@ function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language
     zh ? "等待下一步" : "Waiting for next step",
   );
   const progress = formatBackgroundProgress(task.progress);
-  return progress ? `${title} · ${step} · ${progress}` : `${title} · ${step}`;
+  const summary = progress ? `${title} · ${step} · ${progress}` : `${title} · ${step}`;
+  if (task.status === "stale") {
+    return zh ? `上次会话恢复的后台任务 · ${summary}` : `Recovered background task · ${summary}`;
+  }
+  return zh ? `后台任务 · ${summary}` : `Background task · ${summary}`;
 }
 
 function formatBackgroundProgress(

@@ -14,7 +14,9 @@ import {
   evaluateFinalAnswerClaims,
   extractFileMentions,
   extractFileSearchKeywords,
+  extractLegacyTextRiskClaims,
   extractNaturalReadPath,
+  extractStructuredFinalAnswerClaims,
   formatFileCandidates,
   formatSolutionCompletenessTrigger,
   hasModelSynthesisIntent,
@@ -25,6 +27,7 @@ import {
   matchesFileKeywords,
   normalizeRelativePath,
   readToolInputString,
+  stripStructuredFinalAnswerClaims,
 } from "./model-loop-runtime.js";
 import type { EvidenceRecord } from "./tui-data-types.js";
 
@@ -539,7 +542,27 @@ describe("model-loop-runtime", () => {
     };
   }
 
-  describe("D.13U detectHighRiskClaims", () => {
+  describe("D.13U final answer claim extraction", () => {
+    it("uses explicit structured claim metadata as the typed path", () => {
+      const matches = extractStructuredFinalAnswerClaims(
+        '已完成。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass","phrase":"测试通过"}]}',
+      );
+      expect(matches).toEqual([{ kind: "completion_pass", phrase: "测试通过" }]);
+    });
+
+    it("does not treat legacy natural-language phrases as structured claims", () => {
+      expect(extractStructuredFinalAnswerClaims("已完成，测试通过，PASS。")).toEqual([]);
+      expect(extractLegacyTextRiskClaims("已完成，测试通过，PASS。")).not.toEqual([]);
+    });
+
+    it("strips structured claim metadata from visible final answer text", () => {
+      expect(
+        stripStructuredFinalAnswerClaims(
+          '已完成。\nLinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass"}]}',
+        ),
+      ).toBe("已完成。");
+    });
+
     it("does not flag ordinary chitchat or concept explanation", () => {
       expect(detectHighRiskClaims("可以，我来解释这个概念")).toEqual([]);
       expect(detectHighRiskClaims("你想做哪个方向？我可以帮你列几个选项。")).toEqual([]);

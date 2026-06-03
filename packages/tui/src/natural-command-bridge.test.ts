@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   type RuntimeStatusSource,
@@ -605,13 +606,57 @@ describe("Slice D.9: Long Task / Runner Resilience — Natural Language Route", 
   });
 
   it("routes job/background status queries as readonly without side effects", () => {
-    const bgIntent = routeNaturalIntent("后台任务怎么看");
+    const bgIntent = routeNaturalIntent("后台任务状态");
     expect(bgIntent.capability?.id).toBe("background");
     expect(["answer", "execute_readonly"]).toContain(bgIntent.action);
+    expect(bgIntent.runtimeIntent).toEqual({
+      kind: "runtime_status_query",
+      subject: "background",
+    });
 
     const jobIntent = routeNaturalIntent("任务报告");
     expect(jobIntent.capability?.id).toBe("job");
     expect(["answer", "execute_readonly"]).toContain(jobIntent.action);
+  });
+
+  it("extracts typed runtime status intents for zh/en current work questions", () => {
+    for (const [phrase, language] of [
+      ["当前在做什么", "zh-CN"],
+      ["当前状态", "zh-CN"],
+      ["目前状态", "zh-CN"],
+      ["现在进展怎么样", "zh-CN"],
+      ["current status", "en-US"],
+      ["what are you working on", "en-US"],
+    ] as const) {
+      const intent = routeNaturalIntent(phrase, language);
+      expect(intent.capability?.id).toBe("status");
+      expect(intent.runtimeIntent).toEqual({
+        kind: "runtime_status_query",
+        subject: "current_work",
+      });
+    }
+
+    expect(routeNaturalIntent("当前模型是什么").runtimeIntent).toEqual({ kind: "none" });
+    expect(routeNaturalIntent("current model", "en-US").runtimeIntent).toEqual({ kind: "none" });
+  });
+
+  it("keeps runtime status typing out of btw-runtime question text and token-list regexes", () => {
+    const bridgeSource = readFileSync(new URL("./natural-command-bridge.ts", import.meta.url), {
+      encoding: "utf8",
+    });
+    const btwSource = readFileSync(new URL("./btw-runtime.ts", import.meta.url), {
+      encoding: "utf8",
+    });
+    const runtimeExtractor = extractFunctionSource(bridgeSource, "extractRuntimeIntent");
+    const btwClassifier = extractFunctionSource(btwSource, "classifyBtwIntent");
+
+    expect(bridgeSource).not.toContain("currentWorkTokens");
+    expect(runtimeExtractor).not.toContain("normalized");
+    expect(runtimeExtractor).not.toContain("includes(");
+    expect(btwClassifier).not.toContain(".question");
+    expect(btwClassifier).not.toContain("question:");
+    expect(btwClassifier).not.toContain("includes(");
+    expect(btwClassifier).not.toContain(".test(");
   });
 
   it("does not route ordinary development requests to autopilot/job/background", () => {
@@ -622,6 +667,25 @@ describe("Slice D.9: Long Task / Runner Resilience — Natural Language Route", 
     expect(devIntent.capability?.id).not.toBe("background");
   });
 });
+
+function extractFunctionSource(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  let depth = 0;
+  let seenBody = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") {
+      depth += 1;
+      seenBody = true;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (seenBody && depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  throw new Error(`Could not extract function ${name}`);
+}
 
 describe("D.13R Git Readiness — /git /worktree /checkpoint 在发现层可见", () => {
   it("git / worktree / checkpoint 在 SLASH_COMMAND_REGISTRY 中可见", async () => {

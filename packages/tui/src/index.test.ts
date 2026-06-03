@@ -244,6 +244,37 @@ function mockOpenAiTextFetch(finalText = "done"): unknown[] {
   return requests;
 }
 
+function mockOpenAiBarrierFetch(finalText = "done"): {
+  requests: unknown[];
+  releaseOne: () => void;
+  releaseAll: () => void;
+} {
+  const requests: unknown[] = [];
+  const resolvers: Array<() => void> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      await new Promise<void>((resolveBarrier) => {
+        resolvers.push(resolveBarrier);
+      });
+      const body = `data: ${JSON.stringify({ id: `chatcmpl-barrier-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return {
+    requests,
+    releaseOne: () => {
+      resolvers.shift()?.();
+    },
+    releaseAll: () => {
+      while (resolvers.length > 0) {
+        resolvers.shift()?.();
+      }
+    },
+  };
+}
+
 function mockOpenAiEmptyFetch(body = "data: [DONE]\n\n"): unknown[] {
   const requests: unknown[] = [];
   vi.stubGlobal(
@@ -4098,6 +4129,24 @@ describe("Phase 06 TUI slash commands", () => {
     expect(cleaned).toContain("内部运行时上下文已从主屏省略");
   });
 
+  it("injects structured final answer claim schema and sanitizes its internal marker", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-claim-schema-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt("继续", context, { runtime: "test" });
+    expect(prompt).toContain("FinalAnswerClaimSchema=");
+    expect(prompt).toContain("LinghunFinalAnswerClaims:");
+
+    const cleaned = sanitizeMainScreenLeakage(
+      'LinghunFinalAnswerClaims: {"claims":[{"kind":"completion_pass"}]}',
+      "zh-CN",
+    );
+    expect(cleaned).not.toContain("LinghunFinalAnswerClaims");
+    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+  });
+
   it("includes engineering structure constraints in en-US system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -4450,7 +4499,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(oldToolResults).toHaveLength(1);
   });
 
-  it("hydratePersistentAgents restores all agent statuses correctly to background tasks", async () => {
+  it("hydratePersistentAgents keeps terminal history out of main-screen background tasks", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-agent-status-restore-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "gpt-4o" });
@@ -4559,44 +4608,19 @@ describe("Phase 06 TUI slash commands", () => {
     expect(restoredCompleted?.status).toBe("completed");
     expect(restoredRunning?.status).toBe("stale"); // running -> stale on restore
 
-    // Verify background task restoration
+    // Verify main-screen background task restoration. Terminal history stays in
+    // context.agents for /agents, but does not pollute taskRuntimeSummary via
+    // context.backgroundTasks on a new TUI startup.
     const bgBlocked = context.backgroundTasks.find((t) => t.id === "agent-blocked-01");
     const bgCancelled = context.backgroundTasks.find((t) => t.id === "agent-cancelled-02");
     const bgFailed = context.backgroundTasks.find((t) => t.id === "agent-failed-03");
     const bgCompleted = context.backgroundTasks.find((t) => t.id === "agent-completed-04");
     const bgStale = context.backgroundTasks.find((t) => t.id === "agent-running-05");
 
-    // blocked: background status=failed, result=partial, not running
-    expect(bgBlocked?.status).toBe("failed");
-    expect(bgBlocked?.result).toBe("partial");
-    expect(bgBlocked?.currentStep).toBe("blocked");
-    expect(bgBlocked?.progress?.completed).toBe(1);
-    expect(bgBlocked?.progress?.total).toBe(1);
-    expect(bgBlocked?.userVisibleSummary).toBe("blocked by permission");
-
-    // cancelled: background status=completed, result=fail, not running
-    expect(bgCancelled?.status).toBe("completed");
-    expect(bgCancelled?.result).toBe("fail");
-    expect(bgCancelled?.currentStep).toBe("cancelled");
-    expect(bgCancelled?.progress?.completed).toBe(1);
-    expect(bgCancelled?.progress?.total).toBe(1);
-    expect(bgCancelled?.userVisibleSummary).toBe("user cancelled");
-
-    // failed: background status=completed, result=fail, not running
-    expect(bgFailed?.status).toBe("completed");
-    expect(bgFailed?.result).toBe("fail");
-    expect(bgFailed?.currentStep).toBe("failed");
-    expect(bgFailed?.progress?.completed).toBe(1);
-    expect(bgFailed?.progress?.total).toBe(1);
-    expect(bgFailed?.userVisibleSummary).toBe("failed with error");
-
-    // completed: background status=completed, result=partial, not running
-    expect(bgCompleted?.status).toBe("completed");
-    expect(bgCompleted?.result).toBe("partial");
-    expect(bgCompleted?.currentStep).toBe("completed");
-    expect(bgCompleted?.progress?.completed).toBe(1);
-    expect(bgCompleted?.progress?.total).toBe(1);
-    expect(bgCompleted?.userVisibleSummary).toBe("completed successfully");
+    expect(bgBlocked).toBeUndefined();
+    expect(bgCancelled).toBeUndefined();
+    expect(bgFailed).toBeUndefined();
+    expect(bgCompleted).toBeUndefined();
 
     // running->stale: background status=stale, result=partial, resumable
     expect(bgStale?.status).toBe("stale");
@@ -4605,6 +4629,35 @@ describe("Phase 06 TUI slash commands", () => {
     expect(bgStale?.progress?.completed).toBe(0);
     expect(bgStale?.progress?.total).toBe(1);
     expect(bgStale?.userVisibleSummary).toContain("stale/resumable");
+  });
+
+  it("hydrateDurableJobBackgroundTasks shows recoverable jobs and keeps terminal jobs out of main-screen background tasks", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-hydrate-terminal-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    const failed = await persistDurableJobFixture(project, config, "failed");
+    const completed = await persistDurableJobFixture(project, config, "completed");
+    const cancelled = await persistDurableJobFixture(project, config, "cancelled");
+    const blocked = await persistDurableJobFixture(project, config, "blocked");
+    const { hydrateDurableJobBackgroundTasks } = await import("./job-agent-command-runtime.js");
+
+    await hydrateDurableJobBackgroundTasks(context);
+
+    expect(context.backgroundTasks.find((task) => task.id === failed.id)).toBeUndefined();
+    expect(context.backgroundTasks.find((task) => task.id === completed.id)).toBeUndefined();
+    expect(context.backgroundTasks.find((task) => task.id === cancelled.id)).toBeUndefined();
+    expect(context.backgroundTasks).toContainEqual(
+      expect.objectContaining({
+        id: blocked.id,
+        kind: "job",
+        status: "paused",
+      }),
+    );
   });
 
   it("keeps Polish D agent display names cosmetic, ASCII-safe, and bounded", async () => {
@@ -4704,16 +4757,16 @@ describe("Phase 06 TUI slash commands", () => {
     };
     expect(persisted.status).toBe("blocked");
     expect(persisted.worker?.status).toBe("blocked");
-    expect(persisted.worker?.completedSteps).toBe(1);
+    expect(persisted.worker?.completedSteps).toBe(3);
     expect(persisted.result?.status).toBe("blocked");
-    expect(persisted.budget?.usedSteps).toBe(1);
+    expect(persisted.budget?.usedSteps).toBe(3);
     expect(persisted.budget?.maxSteps).toBe(4);
     expect(persisted.budget?.usedTokens).toBeGreaterThan(0);
     expect(persisted.agents).toHaveLength(5);
     expect(persisted.agents?.[0]?.displayName).toBe("implement-durable-loop-planner");
     expect(persisted.agents?.[1]?.displayName).toBe("implement-durable-loop-worker");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
-    expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(0);
+    expect(persisted.agents?.filter((agent) => agent.status === "completed")).toHaveLength(1);
     expect(persisted.agents?.[0]?.status).toBe("blocked");
     expect(persisted.agents?.[0]).toHaveProperty("runId");
     expect(persisted.budget?.maxRunningAgents).toBe(3);
@@ -4725,13 +4778,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(report).toContain("runId=agent-");
     expect(report).toContain("no full transcript/source/index/log output is injected");
     expect(report).toContain("## Worker result");
-    expect(report).toContain("maxSteps=4; usedSteps=1");
+    expect(report).toContain("maxSteps=4; usedSteps=3");
     expect(report).toContain("verification: partial");
     const log = await readFile(persisted.logPath ?? "", "utf8");
-    expect(log).toContain("agent step 1/5");
+    expect(log).toContain("agent step 3/5");
     expect(log).toContain("agent_blocked");
     const fullOutput = await readFile(persisted.fullOutputPath ?? "", "utf8");
-    expect(fullOutput).toContain("agent step 1/5");
+    expect(fullOutput).toContain("agent step 3/5");
     expect(fullOutput).not.toContain("full transcript");
     expect(fullOutput).not.toContain("full source");
 
@@ -4743,7 +4796,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("本地 durable metadata + 统一后台任务");
     expect(output.text).toContain(
-      "agents: planned=5, scheduled=1, started=1, running=0, queued=0, skipped=0, limited=0, effectiveCap=3",
+      "agents: planned=5, scheduled=3, started=3, running=0, queued=0, skipped=0, limited=0, effectiveCap=3",
     );
     expect(output.text).toContain(`${jobId}  blocked  label=implement-durable-loop-planner`);
     expect(output.text).not.toContain(`${jobId}  running`);
@@ -4751,7 +4804,7 @@ describe("Phase 06 TUI slash commands", () => {
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
     expect(output.text).toContain(
-      "agent assignment: job-agent-1:implement-durable-loop-planner:blocked",
+      "agent assignment: job-agent-1:implement-durable-loop-planner:blocked:agent-",
     );
     expect(output.text).toContain("worker=blocked");
     expect(output.text).toContain("task graph: 4 steps");
@@ -4822,6 +4875,55 @@ describe("Phase 06 TUI slash commands", () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
+    ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+  });
+
+  it("runs /job --multi-agent --agents 6 with a real cap-based concurrent AgentRun pool", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-real-job-cap-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const barrier = mockOpenAiBarrierFetch("job child done");
+
+    const run = handleSlashCommand(
+      "/job run concurrent child scheduling --multi-agent --agents 6 --tokens 50000",
+      context,
+      output,
+    );
+
+    await vi.waitFor(() => expect(context.agents).toHaveLength(3));
+    expect(barrier.requests).toHaveLength(2);
+    expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(3);
+    expect(context.agents.map((agent) => agent.id)).toHaveLength(3);
+    barrier.releaseOne();
+    barrier.releaseOne();
+    await vi.waitFor(() => expect(context.agents).toHaveLength(6));
+    expect(barrier.requests).toHaveLength(5);
+    expect(context.agents).toHaveLength(6);
+    barrier.releaseAll();
+    await run;
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      effectiveAgentCap?: number;
+      agents?: Array<{ status?: string; runId?: string }>;
+    };
+    expect(persisted.effectiveAgentCap).toBe(3);
+    expect(persisted.agents?.filter((agent) => agent.runId?.startsWith("agent-"))).toHaveLength(6);
+    expect(persisted.agents?.every((agent) => agent.status === "completed")).toBe(true);
     expect(
       context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
     ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
@@ -5514,6 +5616,42 @@ describe("Phase 06 TUI slash commands", () => {
     expect(src).toContain("workflowStepStatusFromVerification(report.status)");
   });
 
+  it("source: workflow loop checks terminal state before writing step results", async () => {
+    const src = await readFile(srcPath("index.ts"), "utf8");
+    const runnerStart = src.indexOf("async function runWorkflowPlanSteps");
+    const runnerEnd = src.indexOf("\nfunction formatWorkflowRegistryList", runnerStart);
+    const runner = src.slice(runnerStart, runnerEnd);
+    expect(runner).toContain("if (isWorkflowRunTerminal(context, runId, workflowTask)) return;");
+    expect(runner.indexOf("const result = await executeWorkflowStep")).toBeGreaterThan(0);
+    expect(runner.indexOf("const result = await executeWorkflowStep")).toBeLessThan(
+      runner.indexOf("const stepEndedAt = new Date().toISOString()"),
+    );
+    expect(runner).toContain('status === "cancelled"');
+    expect(runner).toContain('task.status === "cancelled"');
+
+    const registryStart = src.indexOf("async function executeRegistryWorkflowRun");
+    const registryEnd = src.indexOf("\nasync function executeRegistryWorkflowStep", registryStart);
+    const registryRunner = src.slice(registryStart, registryEnd);
+    const firstGuard = registryRunner.indexOf(
+      "if (isWorkflowRunTerminal(context, runId, task)) return;",
+    );
+    const runningWrite = registryRunner.indexOf('state.status = "running"');
+    const stepAwait = registryRunner.indexOf("const result = await executeRegistryWorkflowStep");
+    const resultWrite = registryRunner.indexOf("state.status = result.status");
+    const completedFinish = registryRunner.indexOf(
+      'await finishWorkflowRun(\n    runId,\n    "completed"',
+    );
+    expect(firstGuard).toBeGreaterThan(0);
+    expect(firstGuard).toBeLessThan(runningWrite);
+    expect(stepAwait).toBeGreaterThan(0);
+    expect(
+      registryRunner.indexOf("if (isWorkflowRunTerminal(context, runId, task)) return;", stepAwait),
+    ).toBeLessThan(resultWrite);
+    expect(
+      registryRunner.lastIndexOf("if (isWorkflowRunTerminal(context, runId, task)) return;"),
+    ).toBeLessThan(completedFinish);
+  });
+
   it("blocks nested /job workflow steps in plan mode before run instead of diverging from bridge", async () => {
     const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("plan"));
     expect(plan.ok).toBe(false);
@@ -6172,7 +6310,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
-    expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+    expect(
+      context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
+    ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
     expect(persisted.status).toBe("cancelled");
     expect(persisted.pauseReason).toBe("user_cancelled");
     expect(persisted.capReason).not.toBe("not_running");
@@ -13819,7 +13959,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/plan", context, output);
     await handleSlashCommand("/todo add 主任务", context, output);
-    await handleSlashCommand("/btw 现在是什么阶段？", context, output);
+    await handleSlashCommand("/btw 帮我解释一下单轮隔离是什么意思", context, output);
 
     // D.14D: /btw 现在调模型，plain 路径 writeLine 模型答案（不再是本地备忘文案）。
     expect(output.text).toContain("当前在 D.14D 阶段。");
@@ -13831,6 +13971,38 @@ describe("Phase 06 TUI slash commands", () => {
     // 不写 evidence、不进 final-answer / completion gate。
     expect(context.evidence).toHaveLength(0);
     expect(context.solutionCompleteness.triggered).toBeFalsy();
+  });
+
+  it("D.14D: /btw non-task status questions stay model-backed", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "btw-model",
+        providers: {
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "btw-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const config = await loadConfig(project);
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "btw-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const requests = mockOpenAiTextFetch("当前模型是 btw-model。");
+
+    await handleSlashCommand("/btw 当前模型是什么", context, output);
+
+    expect(requests.length).toBeGreaterThan(0);
+    expect(output.text).toContain("当前模型是 btw-model。");
+    expect(output.text).not.toContain("当前：没有正在运行的任务");
   });
 
   it("D.14D: /btw calls the model and opens an answered BtwPanel in ink; records btw_question without evidence", async () => {
@@ -20274,7 +20446,10 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 
   it("source invariant: handleNaturalInput main path does not call Natural Command Bridge", async () => {
     const indexSrc = await readFile(srcPath("index.ts"), "utf8");
-    expect(indexSrc).not.toContain("routeNaturalIntent(");
+    const start = indexSrc.indexOf("export async function handleNaturalInput(");
+    const end = indexSrc.indexOf("\nasync function", start + 1);
+    const body = indexSrc.slice(start, end);
+    expect(body).not.toContain("routeNaturalIntent(");
   });
 
   it("/btw 当前在做什么只返回短状态，不调用模型插问或刷内部细节", async () => {
@@ -20300,7 +20475,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     const result = await handleSlashCommand("/btw 当前在做什么", context, output);
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("当前：background task 运行中 · running command");
+    expect(output.text).toContain("正在运行：background task 运行中 · running command");
     expect(output.text).toContain("耗时");
     expect(output.text).not.toContain("tool_use");
     expect(output.text).not.toContain("RuntimeStatus");
@@ -20342,8 +20517,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 
     await handleSlashCommand("/btw 当前进度状态", context, output);
 
-    expect(output.text).toContain("当前：workflow 运行中 · 1/2 · 运行 focused verification");
-    expect(output.text).toContain("详细输出在 Ctrl+O、/background 或 /details");
+    expect(output.text).toContain("正在运行：workflow 运行中 · 1/2 · 运行 focused verification");
     expect(output.text).not.toContain("raw-evidence-should-not-leak");
     expect(output.text).not.toContain("evidenceRefs");
   });
@@ -20378,7 +20552,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     await handleSlashCommand("/btw 目前状态", context, output);
 
     expect(output.text).toContain("当前：正在等待你的确认");
-    expect(output.text).toContain("当前：job 已暂停 · 等待用户确认后继续");
+    expect(output.text).toContain("正在运行：job 已暂停 · 等待用户确认后继续");
     expect(output.text).not.toContain("break_cache_mutation");
     expect(output.text).not.toContain("sessionId");
     expect(output.text).not.toContain("内部 transcript");
@@ -22480,7 +22654,8 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(context.lastVerification).toBeDefined();
     expect(
       context.evidence.some(
-        (event) => event.kind === "test_result" && event.supportsClaims.includes("verified"),
+        (event) =>
+          event.kind === "test_result" && event.supportsClaims.includes("verification_passed"),
       ),
     ).toBe(true);
     const parentTranscript = (await store.resume(session.id)).transcript;
@@ -22489,7 +22664,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
         (event) =>
           event.type === "evidence_record" &&
           event.kind === "test_result" &&
-          event.supportsClaims.includes("verified"),
+          event.supportsClaims.includes("verification_passed"),
       ),
     ).toBe(true);
   });

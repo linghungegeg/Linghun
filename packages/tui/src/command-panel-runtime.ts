@@ -64,16 +64,15 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
     detailsParts.push(sanitizeDisplayPaths(context.lastFullOutput, context.projectPath));
   }
 
-  // ── 分区 2：证据（主屏只给计数 + kind 分布；id/source 进 detailsText）───────
+  // ── 分区 2：证据（主屏只给人话计数；id/kind/source 进 detailsText）──────────
   if (evidenceCount > 0) {
-    const kindCounts = new Map<string, number>();
-    for (const e of context.evidence) {
-      kindCounts.set(e.kind, (kindCounts.get(e.kind) ?? 0) + 1);
-    }
-    const kindSummary = [...kindCounts.entries()].map(([kind, n]) => `${kind}×${n}`).join(", ");
     sections.push({
       title: isEn ? `Evidence (${evidenceCount})` : `证据（${evidenceCount}）`,
-      rows: [kindSummary || (isEn ? "recorded" : "已记录")],
+      rows: [
+        isEn
+          ? `${evidenceCount} evidence record${evidenceCount === 1 ? "" : "s"} captured.`
+          : `已记录 ${evidenceCount} 条证据。`,
+      ],
     });
     detailsParts.push("");
     detailsParts.push(isEn ? "## Evidence" : "## 证据");

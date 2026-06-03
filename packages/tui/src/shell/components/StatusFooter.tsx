@@ -58,7 +58,9 @@ export function StatusFooter({
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
         <Text>
           <Text color={theme.muted}>{footer.permissionMode}</Text>
-          <Text color={theme.status.fail}>{footer.cyclePermHint}</Text>
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {footer.cyclePermHint}
+          </Text>
         </Text>
         <Text>
           {rightSegments.map((seg, idx) => (
@@ -68,6 +70,11 @@ export function StatusFooter({
             </Text>
           ))}
         </Text>
+        {footer.runtimeStatus ? (
+          <Text color={theme.dim ?? theme.muted} dimColor>
+            {fitText(footer.runtimeStatus, Math.max(20, width - 4))}
+          </Text>
+        ) : null}
       </Box>
     );
   }
@@ -81,23 +88,32 @@ export function StatusFooter({
   const fittedLeft = left.length > leftBudget ? fitText(left, leftBudget) : left;
 
   return (
-    <Box width={width} paddingX={2} paddingTop={1}>
-      <Box flexGrow={1} flexShrink={1}>
-        <Text>
-          <Text color={theme.muted}>{footer.permissionMode}</Text>
-          <Text color={theme.status.fail}>{fittedLeft.slice(footer.permissionMode.length)}</Text>
-        </Text>
-      </Box>
-      <Box flexShrink={0}>
-        <Text>
-          {rightSegments.map((seg, idx) => (
-            <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
-              {idx > 0 ? " · " : ""}
-              {seg.text}
+    <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
+      <Box width="100%">
+        <Box flexGrow={1} flexShrink={1}>
+          <Text>
+            <Text color={theme.muted}>{footer.permissionMode}</Text>
+            <Text color={theme.dim ?? theme.muted} dimColor>
+              {fittedLeft.slice(footer.permissionMode.length)}
             </Text>
-          ))}
-        </Text>
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text>
+            {rightSegments.map((seg, idx) => (
+              <Text key={seg.key} color={pickColor(theme, seg.tone)} dimColor={seg.tone === "dim"}>
+                {idx > 0 ? " · " : ""}
+                {seg.text}
+              </Text>
+            ))}
+          </Text>
+        </Box>
       </Box>
+      {footer.runtimeStatus ? (
+        <Text color={theme.dim ?? theme.muted} dimColor>
+          {fitText(footer.runtimeStatus, Math.max(20, width - 4))}
+        </Text>
+      ) : null}
     </Box>
   );
 }

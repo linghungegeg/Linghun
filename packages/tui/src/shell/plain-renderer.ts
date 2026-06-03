@@ -291,10 +291,10 @@ function renderPlainTask(view: ShellViewModel, capability: TerminalCapability): 
     lines.push(...view.limitations.map((item) => `  ${dim(item, noColor)}`));
   }
 
-  // Bottom: just an empty line before real readline prompt (no separator)
-  if (view.taskRuntimeSummary) {
-    lines.push(...formatBlockLines({ ...view, blocks: [view.taskRuntimeSummary] }, noColor));
+  if (view.taskFooter?.runtimeStatus) {
+    lines.push(dim(view.taskFooter.runtimeStatus, noColor));
   }
+  // Bottom: just an empty line before real readline prompt (no separator)
   lines.push("");
 
   return lines.join("\n");
@@ -310,7 +310,7 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
     // task transcript（plain 渲染同步 Ink ProductBlock 的 command 分支）。
     if (block.kind === "command") {
       const isUserText = block.messageKind === "user_text";
-      const marker = isUserText ? "\u203A" : "\u276F";
+      const marker = isUserText ? "\u2502" : "\u276F";
       const title = isUserText ? block.title : colorCyan(block.title, noColor);
       if (isUserText) {
         const body = block.fullText ?? block.title;

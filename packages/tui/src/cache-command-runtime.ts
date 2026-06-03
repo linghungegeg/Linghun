@@ -154,7 +154,7 @@ export function collectLightHints(context: TuiContext): LightHint[] {
     hints.push(
       createLightHint(
         "cache-hit-low",
-        "warning",
+        "info",
         10,
         context.language === "en-US"
           ? "Reuse became less effective in the latest turn"

@@ -1044,7 +1044,14 @@ export async function hydrateDurableJobBackgroundTasks(context: TuiContext): Pro
   const jobs = await listDurableJobs(context);
   for (const job of jobs) {
     const recovered = await recoverDurableJobForContext(context, job);
-    upsertJobBackgroundTask(context, recovered);
+    if (
+      recovered.status === "running" ||
+      recovered.status === "stale" ||
+      recovered.status === "sleeping" ||
+      recovered.status === "blocked"
+    ) {
+      upsertJobBackgroundTask(context, recovered);
+    }
   }
 }
 
@@ -1172,137 +1179,170 @@ export async function runDurableJobLiteTick(
       return;
     }
 
-    const assignment = nextRunnableJobAgent(job);
-    if (!assignment) {
-      break;
-    }
-    const summary = `Durable job scheduling ${assignment.type} subtask ${stepIndex + 1}/${job.agents.length}: ${assignment.task ?? assignment.goal}.`;
-    const stepFacts = createDurableJobStepFacts(context, job, stepIndex, assignment);
-    const estimatedTokens = estimateJobTokens(`${summary}\n${stepFacts.join("\n")}`);
-    // P1-5 — token 预算只在用户显式设置（--tokens）时强制；默认无用户可见预算。
-    if (
-      job.budget.explicit?.tokens === true &&
-      (job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens
-    ) {
-      job.result = {
-        status: "overbudget",
-        summary:
-          "Durable worker stopped before the next step because maxTokens would be exceeded; no PASS evidence generated.",
-        facts: stepFacts,
-        evidenceRefs: job.evidenceRefs.map((item) => item.id),
-        generatedAt: new Date().toISOString(),
-      };
+    const batch: {
+      assignment: DurableJobState["agents"][number];
+      stepIndex: number;
+      stepFacts: string[];
+      agent: AgentRun;
+      task: BackgroundTaskState;
+    }[] = [];
+    const batchCap = Math.max(1, getEffectiveAgentCap(job));
+    while (job.status === "running" && batch.length < batchCap) {
+      const nextStepIndex = job.budget.usedSteps ?? 0;
+      if (job.budget.explicit?.steps === true && nextStepIndex >= getDurableJobMaxSteps(job)) {
+        break;
+      }
+      const assignment = nextRunnableJobAgent(job);
+      if (!assignment) {
+        break;
+      }
+      const summary = `Durable job scheduling ${assignment.type} subtask ${nextStepIndex + 1}/${job.agents.length}: ${assignment.task ?? assignment.goal}.`;
+      const stepFacts = createDurableJobStepFacts(context, job, nextStepIndex, assignment);
+      const estimatedTokens = estimateJobTokens(`${summary}\n${stepFacts.join("\n")}`);
+      // P1-5 — token 预算只在用户显式设置（--tokens）时强制；默认无用户可见预算。
+      if (
+        job.budget.explicit?.tokens === true &&
+        (job.budget.usedTokens ?? 0) + estimatedTokens > job.budget.maxTokens
+      ) {
+        job.result = {
+          status: "overbudget",
+          summary:
+            "Durable worker stopped before the next step because maxTokens would be exceeded; no PASS evidence generated.",
+          facts: stepFacts,
+          evidenceRefs: job.evidenceRefs.map((item) => item.id),
+          generatedAt: new Date().toISOString(),
+        };
+        job.worker = {
+          ...job.worker,
+          status: "blocked",
+          currentStep: nextStepIndex + 1,
+          completedSteps: nextStepIndex,
+          endedAt: job.result.generatedAt,
+          summary: job.result.summary,
+        };
+        await transitionDurableJob(
+          job,
+          context,
+          "blocked",
+          `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
+        );
+        return;
+      }
+
+      const now = new Date().toISOString();
+      job.budget.usedTokens = (job.budget.usedTokens ?? 0) + estimatedTokens;
+      job.budget.remainingTokens = Math.max(0, job.budget.maxTokens - job.budget.usedTokens);
+      job.budget.usedSteps = nextStepIndex + 1;
+      assignment.status = "running";
+      assignment.statusReason = "started";
+      assignment.scheduledAt ??= now;
+      assignment.startedAt = now;
       job.worker = {
         ...job.worker,
-        status: "blocked",
-        currentStep: stepIndex + 1,
-        completedSteps: stepIndex,
-        endedAt: job.result.generatedAt,
-        summary: job.result.summary,
+        status: "running",
+        currentStep: nextStepIndex + 1,
+        completedSteps: nextStepIndex + 1,
+        summary,
       };
-      await transitionDurableJob(
+      job.result = {
+        status: "partial",
+        summary,
+        facts: stepFacts,
+        evidenceRefs: job.evidenceRefs.map((item) => item.id),
+        generatedAt: now,
+      };
+      job.verification = {
+        status: "partial",
+        summary: "Bounded worker output is structured but not verification PASS.",
+      };
+      job.heartbeatAt = now;
+      job.updatedAt = now;
+      await context.store.appendEvent(workerSession.id, {
+        type: "system_event",
+        id: randomUUID(),
+        level: "info",
+        message: `${summary} facts=${stepFacts.join(" | ")}`,
+        createdAt: now,
+      });
+      await appendJobLog(
         job,
-        context,
-        "blocked",
-        `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
+        `agent step ${nextStepIndex + 1}/${job.agents.length}: ${assignment.id}/${assignment.type}; tokens=${estimatedTokens}; refs=${stepFacts.join(" | ")}`,
       );
-      return;
+      await persistDurableJobProgress(context, job, `worker step ${nextStepIndex + 1} persisted`);
+
+      const agent = await startDurableJobAgentRun(context, job, assignment, output);
+      const task = context.backgroundTasks.find((item) => item.id === agent.id);
+      if (!task) {
+        assignment.status = "blocked";
+        assignment.statusReason = "missing_agent_background_task";
+        assignment.summary = "AgentRun started but background task was not found; job blocked.";
+        await Promise.all(
+          batch.map((item) => completeAgent(item.agent, item.task, context, output)),
+        );
+        await transitionDurableJob(job, context, "blocked", "missing_agent_background_task");
+        return;
+      }
+      if (agent.status !== "running") {
+        syncJobAssignmentFromAgent(assignment, agent);
+        await Promise.all(
+          batch.map((item) => completeAgent(item.agent, item.task, context, output)),
+        );
+        await transitionDurableJob(job, context, "blocked", `agent_${agent.status}:${agent.id}`);
+        return;
+      }
+      batch.push({ assignment, stepIndex: nextStepIndex, stepFacts, agent, task });
     }
 
-    const agentGuard = deps().checkBackgroundStartGuard(context, "agent", true, job.id);
-    if (agentGuard) {
-      assignment.status = "resource_limited";
-      assignment.statusReason = `resource_guard:${agentGuard}`;
-      assignment.summary = "not started; resource guard limited this agent";
-      await transitionDurableJob(job, context, "sleeping", assignment.statusReason);
-      return;
+    if (batch.length === 0) {
+      break;
     }
 
-    const now = new Date().toISOString();
-    job.budget.usedTokens = (job.budget.usedTokens ?? 0) + estimatedTokens;
-    job.budget.remainingTokens = Math.max(0, job.budget.maxTokens - job.budget.usedTokens);
-    job.budget.usedSteps = stepIndex + 1;
-    assignment.status = "running";
-    assignment.statusReason = "started";
-    assignment.scheduledAt ??= now;
-    assignment.startedAt = now;
-    job.worker = {
-      ...job.worker,
-      status: "running",
-      currentStep: stepIndex + 1,
-      completedSteps: stepIndex + 1,
-      summary,
-    };
-    job.result = {
-      status: "partial",
-      summary,
-      facts: stepFacts,
-      evidenceRefs: job.evidenceRefs.map((item) => item.id),
-      generatedAt: now,
-    };
-    job.verification = {
-      status: "partial",
-      summary: "Bounded worker output is structured but not verification PASS.",
-    };
-    job.heartbeatAt = now;
-    job.updatedAt = now;
-    await context.store.appendEvent(workerSession.id, {
-      type: "system_event",
-      id: randomUUID(),
-      level: "info",
-      message: `${summary} facts=${stepFacts.join(" | ")}`,
-      createdAt: now,
-    });
-    await appendJobLog(
-      job,
-      `agent step ${stepIndex + 1}/${job.agents.length}: ${assignment.id}/${assignment.type}; tokens=${estimatedTokens}; refs=${stepFacts.join(" | ")}`,
+    const completedBatch = await Promise.all(
+      batch.map(async (item) => {
+        await completeAgent(item.agent, item.task, context, output);
+        syncJobAssignmentFromAgent(item.assignment, item.agent);
+        return item;
+      }),
     );
-    await persistDurableJobProgress(context, job, `worker step ${stepIndex + 1} persisted`);
 
-    const agent = await startDurableJobAgentRun(context, job, assignment, output);
-    const task = context.backgroundTasks.find((item) => item.id === agent.id);
-    if (!task) {
-      assignment.status = "blocked";
-      assignment.statusReason = "missing_agent_background_task";
-      assignment.summary = "AgentRun started but background task was not found; job blocked.";
-      await transitionDurableJob(job, context, "blocked", "missing_agent_background_task");
-      return;
+    for (const item of completedBatch) {
+      const assignmentStatus = item.assignment.status as DurableJobAgentStatus;
+      job.updatedAt = item.agent.updatedAt;
+      job.heartbeatAt = item.agent.updatedAt;
+      job.result = {
+        status:
+          assignmentStatus === "failed"
+            ? "failed"
+            : assignmentStatus === "cancelled"
+              ? "cancelled"
+              : "partial",
+        summary: `Agent ${item.agent.id} ${assignmentStatus}: ${item.agent.summary}`,
+        facts: createDurableJobStepFacts(context, job, item.stepIndex, item.assignment),
+        evidenceRefs: job.evidenceRefs.map((entry) => entry.id),
+        generatedAt: item.agent.updatedAt,
+      };
+      job.verification = {
+        status: "partial",
+        summary:
+          item.assignment.type === "verifier"
+            ? "Verifier agent used real verification, but durable job lifecycle is not PASS evidence."
+            : "Agent output is partial until explicit verification/final gate evidence proves PASS.",
+      };
+      await persistDurableJobProgress(
+        context,
+        job,
+        `agent ${item.assignment.id} ${assignmentStatus}`,
+      );
     }
-    if (agent.status !== "running") {
-      syncJobAssignmentFromAgent(assignment, agent);
-      await transitionDurableJob(job, context, "blocked", `agent_${agent.status}:${agent.id}`);
-      return;
-    }
-    await completeAgent(agent, task, context, output);
-    syncJobAssignmentFromAgent(assignment, agent);
-    const assignmentStatus = assignment.status as DurableJobAgentStatus;
-    job.updatedAt = agent.updatedAt;
-    job.heartbeatAt = agent.updatedAt;
-    job.result = {
-      status:
-        assignmentStatus === "failed"
-          ? "failed"
-          : assignmentStatus === "cancelled"
-            ? "cancelled"
-            : "partial",
-      summary: `Agent ${agent.id} ${assignmentStatus}: ${agent.summary}`,
-      facts: createDurableJobStepFacts(context, job, stepIndex, assignment),
-      evidenceRefs: job.evidenceRefs.map((item) => item.id),
-      generatedAt: agent.updatedAt,
-    };
-    job.verification = {
-      status: "partial",
-      summary:
-        assignment.type === "verifier"
-          ? "Verifier agent used real verification, but durable job lifecycle is not PASS evidence."
-          : "Agent output is partial until explicit verification/final gate evidence proves PASS.",
-    };
-    if (
-      assignmentStatus === "blocked" ||
-      assignmentStatus === "failed" ||
-      assignmentStatus === "cancelled" ||
-      assignmentStatus === "stale"
-    ) {
+
+    const terminalAssignment = completedBatch.find((item) => {
+      const status = item.assignment.status as DurableJobAgentStatus;
+      return (
+        status === "blocked" || status === "failed" || status === "cancelled" || status === "stale"
+      );
+    });
+    if (terminalAssignment) {
+      const assignmentStatus = terminalAssignment.assignment.status as DurableJobAgentStatus;
       await transitionDurableJob(
         job,
         context,
@@ -1311,13 +1351,16 @@ export async function runDurableJobLiteTick(
           : assignmentStatus === "stale"
             ? "stale"
             : "blocked",
-        `agent_${assignmentStatus}:${agent.id}`,
+        `agent_${assignmentStatus}:${terminalAssignment.agent.id}`,
       );
       return;
     }
-    await persistDurableJobProgress(context, job, `agent ${assignment.id} ${assignmentStatus}`);
 
-    const afterStop = await applyDurableJobBudgetStop(context, job, `after_step_${stepIndex + 1}`);
+    const afterStop = await applyDurableJobBudgetStop(
+      context,
+      job,
+      `after_step_${job.budget.usedSteps ?? stepIndex + 1}`,
+    );
     if (afterStop) {
       return;
     }
@@ -2711,9 +2754,11 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
         updatedAt: now,
       };
       context.agents.push(agent);
-      const background = createAgentBackgroundTask(agent, context);
-      syncBackgroundWithAgentStatus(background, agent);
-      rememberBackgroundTask(context, background);
+      if (agent.status === "running" || agent.status === "stale") {
+        const background = createAgentBackgroundTask(agent, context);
+        syncBackgroundWithAgentStatus(background, agent);
+        rememberBackgroundTask(context, background);
+      }
       if (parsed.status === "running") {
         await persistAgentRun(context, agent);
       }

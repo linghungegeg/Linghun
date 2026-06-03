@@ -13,6 +13,7 @@
 
 import type { ModelGateway } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
+import type { NaturalIntent } from "./natural-command-bridge.js";
 
 export type BtwSideQuestionRuntime = {
   provider: string;
@@ -25,6 +26,8 @@ export type BtwSideQuestionRuntime = {
 export type BtwSideQuestionResult =
   | { status: "answered"; answer: string }
   | { status: "error"; error: string };
+
+export type BtwIntent = "status_query" | "general_side_question" | "unknown";
 
 const BTW_SYSTEM_PROMPT_ZH =
   "你正在以「临时插问」(side question) 身份回答一个独立的小问题。这是一个隔离的单轮请求：" +
@@ -51,6 +54,16 @@ export function buildBtwMessages(
     { role: "system", content: system },
     { role: "user", content: question },
   ];
+}
+
+export function classifyBtwIntent(intent: NaturalIntent): BtwIntent {
+  if (intent.runtimeIntent?.kind === "runtime_status_query") {
+    return "status_query";
+  }
+  if (intent.action === "model" || intent.confidence > 0) {
+    return "general_side_question";
+  }
+  return "unknown";
 }
 
 /**

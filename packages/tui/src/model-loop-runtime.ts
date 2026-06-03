@@ -671,6 +671,12 @@ export function formatSolutionCompletenessTrigger(
 // - \u666e\u901a\u8f93\u5165\uff08\u95f2\u804a/\u6982\u5ff5\u89e3\u91ca/\u65b9\u6848\u8ba8\u8bba\uff09\u4e0d\u5e94\u89e6\u53d1\u3002
 
 export type FinalAnswerClaimKind =
+  | "completion_claim"
+  | "test_claim"
+  | "file_change_claim"
+  | "verification_claim"
+  | "workflow_status_claim"
+  | "agent_status_claim"
   | "completion_pass"
   | "code_fact"
   | "external_current_fact"
@@ -694,6 +700,8 @@ export type FinalAnswerClaimVerdict = {
   staleKinds?: FinalAnswerClaimKind[];
 };
 
+export const STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX = "LinghunFinalAnswerClaims:";
+
 // D.13V-A — 按 claim 类型分级的 evidence 过期阈值（毫秒）。null 表示不应用过期判断。
 // 阈值依据真实工程节奏：
 // - completion_pass：测试/构建/typecheck/diff-check/smoke 跑过 30 分钟后，代码可能已被改动，再当 PASS 不安全。
@@ -702,6 +710,12 @@ export type FinalAnswerClaimVerdict = {
 // - ccb_parity：与文件版本快照绑定，不按时间过期。
 // - beta_readiness：由 createPhase15BetaVerdictScope 主管，不在此引入额外 staleness。
 const STALE_THRESHOLDS_MS: Record<FinalAnswerClaimKind, number | null> = {
+  completion_claim: 30 * 60 * 1000,
+  test_claim: 30 * 60 * 1000,
+  file_change_claim: 30 * 60 * 1000,
+  verification_claim: 30 * 60 * 1000,
+  workflow_status_claim: null,
+  agent_status_claim: null,
   completion_pass: 30 * 60 * 1000,
   code_fact: 60 * 60 * 1000,
   external_current_fact: 24 * 60 * 60 * 1000,
@@ -726,137 +740,214 @@ export function isEvidenceStaleForClaim(
   return now.getTime() - created > threshold;
 }
 
-const COMPLETION_PASS_PATTERNS: RegExp[] = [
-  /\u5df2\u5b8c\u6210/u, // \u5df2\u5b8c\u6210
-  /\u5168\u90e8\u5b8c\u6210/u, // \u5168\u90e8\u5b8c\u6210
-  /\u5df2\u4fee\u590d/u, // \u5df2\u4fee\u590d
-  /\u5df2\u9a8c\u8bc1/u, // \u5df2\u9a8c\u8bc1
-  /\u6d4b\u8bd5\u901a\u8fc7/u, // \u6d4b\u8bd5\u901a\u8fc7
-  /\u6210\u719f\u53ef\u53d1\u5e03/u, // \u6210\u719f\u53ef\u53d1\u5e03
-  /\u65e0\u98ce\u9669/u, // \u65e0\u98ce\u9669
-  /\u65e0\u95ee\u9898/u, // \u65e0\u95ee\u9898
-  /\u6ca1\u95ee\u9898/u, // \u6ca1\u95ee\u9898
-  /\bbuild\s+(?:has\s+)?passed\b/iu,
-  /\btsc\s+(?:has\s+)?passed\b/iu,
-  /\bdiff[-\s]?check\s+passed\b/iu,
-  /\btests?\s+passed\b/iu,
-  /\bsmoke[-\s]?ready\b/iu,
-  /\b(?:release|production)[-\s]?ready\b/iu,
-  /\bcompleted\b/iu,
-  /\bfixed\b/iu,
-  /\bverified\b/iu,
-  /(?:^|[\s"'\u201c])PASS(?=[\s.\u3002\u3001!?,;:"'\u201d]|$)/u,
-  /\bmature\s+(?:tool|implementation|module)\b/iu,
+type ClaimPhraseSpec = {
+  kind: FinalAnswerClaimKind;
+  phrase: string;
+  aliases?: FinalAnswerClaimKind[];
+};
+
+const FINAL_ANSWER_CLAIM_KINDS: readonly FinalAnswerClaimKind[] = [
+  "completion_claim",
+  "test_claim",
+  "file_change_claim",
+  "verification_claim",
+  "workflow_status_claim",
+  "agent_status_claim",
+  "completion_pass",
+  "code_fact",
+  "external_current_fact",
+  "ccb_parity",
+  "beta_readiness",
+  "git_operation",
+  "action_executed",
 ];
 
-const CODE_FACT_PATTERNS: RegExp[] = [
-  /\u4ee3\u7801\u91cc/u, // \u4ee3\u7801\u91cc
-  /\u8c03\u7528\u94fe\u662f/u, // \u8c03\u7528\u94fe\u662f
-  /(?:\u51fd\u6570|\u65b9\u6cd5).{0,20}\u5728.{0,50}\u6587\u4ef6/u,
-  /\u5f53\u524d\u5b9e\u73b0\u662f/u, // \u5f53\u524d\u5b9e\u73b0\u662f
-  /\u914d\u7f6e\u662f/u, // \u914d\u7f6e\u662f
-  /\bin\s+the\s+code\b/iu,
-  /\bcall\s+chain\s+is\b/iu,
-  /\bthe\s+function\s+\w+\s+(?:is\s+(?:in|at|defined)|exists)/iu,
-  /\bthe\s+config\s+is\b/iu,
+const LEGACY_TEXT_CLAIM_PHRASES: ClaimPhraseSpec[] = [
+  { kind: "completion_claim", phrase: "\u5df2\u5b8c\u6210", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "\u5168\u90e8\u5b8c\u6210", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "\u5df2\u4fee\u590d", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "completed", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "fixed", aliases: ["completion_pass"] },
+  { kind: "test_claim", phrase: "\u6d4b\u8bd5\u901a\u8fc7", aliases: ["completion_pass"] },
+  { kind: "test_claim", phrase: "tests passed", aliases: ["completion_pass"] },
+  { kind: "test_claim", phrase: "test passed", aliases: ["completion_pass"] },
+  { kind: "test_claim", phrase: "PASS", aliases: ["completion_pass"] },
+  { kind: "verification_claim", phrase: "\u5df2\u9a8c\u8bc1", aliases: ["completion_pass"] },
+  { kind: "verification_claim", phrase: "verified", aliases: ["completion_pass"] },
+  {
+    kind: "completion_claim",
+    phrase: "\u6210\u719f\u53ef\u53d1\u5e03",
+    aliases: ["completion_pass"],
+  },
+  { kind: "completion_claim", phrase: "\u65e0\u98ce\u9669", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "\u65e0\u95ee\u9898", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "\u6ca1\u95ee\u9898", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "build passed", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "tsc passed", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "diff-check passed", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "diff check passed", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "smoke-ready", aliases: ["completion_pass"] },
+  { kind: "completion_claim", phrase: "release-ready", aliases: ["completion_pass"] },
+  {
+    kind: "completion_claim",
+    phrase: "production-ready",
+    aliases: ["completion_pass", "ccb_parity"],
+  },
+  { kind: "code_fact", phrase: "\u4ee3\u7801\u91cc" },
+  { kind: "code_fact", phrase: "\u8c03\u7528\u94fe\u662f" },
+  { kind: "code_fact", phrase: "\u5f53\u524d\u5b9e\u73b0\u662f" },
+  { kind: "code_fact", phrase: "\u914d\u7f6e\u662f" },
+  { kind: "code_fact", phrase: "in the code" },
+  { kind: "code_fact", phrase: "call chain is" },
+  { kind: "code_fact", phrase: "the config is" },
+  { kind: "external_current_fact", phrase: "\u4eca\u5929" },
+  { kind: "external_current_fact", phrase: "\u6700\u65b0\u7248\u672c" },
+  { kind: "external_current_fact", phrase: "\u6700\u65b0\u6a21\u578b" },
+  { kind: "external_current_fact", phrase: "\u5f53\u524d\u5b98\u7f51" },
+  { kind: "external_current_fact", phrase: "\u5f53\u524d\u4ef7\u683c" },
+  { kind: "external_current_fact", phrase: "\u6700\u65b0\u4ef7\u683c" },
+  { kind: "external_current_fact", phrase: "today's" },
+  { kind: "external_current_fact", phrase: "current price" },
+  { kind: "external_current_fact", phrase: "current version" },
+  { kind: "external_current_fact", phrase: "current api" },
+  { kind: "external_current_fact", phrase: "current website" },
+  { kind: "external_current_fact", phrase: "latest price" },
+  { kind: "external_current_fact", phrase: "latest version" },
+  { kind: "external_current_fact", phrase: "latest model" },
+  { kind: "external_current_fact", phrase: "latest release" },
+  { kind: "ccb_parity", phrase: "\u7b49\u4e8e ccb" },
+  { kind: "ccb_parity", phrase: "\u4e0e ccb \u4e00\u81f4" },
+  { kind: "ccb_parity", phrase: "\u4e0e ccb \u5bf9\u9f50" },
+  { kind: "ccb_parity", phrase: "ccb parity" },
+  { kind: "beta_readiness", phrase: "beta ready" },
+  { kind: "beta_readiness", phrase: "beta readiness" },
+  { kind: "beta_readiness", phrase: "beta pass" },
+  { kind: "beta_readiness", phrase: "beta completed" },
+  { kind: "beta_readiness", phrase: "\u8fdb\u5165 beta" },
+  { kind: "git_operation", phrase: "\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9" },
+  { kind: "git_operation", phrase: "\u5df2\u521b\u5efa\u7a33\u5b9a\u70b9" },
+  { kind: "git_operation", phrase: "\u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001" },
+  { kind: "git_operation", phrase: "\u5df2\u521b\u5efa worktree" },
+  { kind: "git_operation", phrase: "\u5df2\u751f\u6210 worktree" },
+  { kind: "git_operation", phrase: "\u5df2\u5220\u9664 worktree" },
+  { kind: "git_operation", phrase: "worktree created" },
+  { kind: "git_operation", phrase: "worktree removed" },
+  { kind: "git_operation", phrase: "worktree deleted" },
+  { kind: "git_operation", phrase: "stable point created" },
+  { kind: "git_operation", phrase: "stable point saved" },
+  {
+    kind: "file_change_claim",
+    phrase: "\u5df2\u6210\u529f\u5199\u5165",
+    aliases: ["action_executed"],
+  },
+  {
+    kind: "file_change_claim",
+    phrase: "\u5df2\u5199\u5165\u6587\u4ef6",
+    aliases: ["action_executed"],
+  },
+  {
+    kind: "file_change_claim",
+    phrase: "\u6587\u4ef6\u5df2\u4fee\u6539",
+    aliases: ["action_executed"],
+  },
+  { kind: "file_change_claim", phrase: "file changed", aliases: ["action_executed"] },
+  { kind: "file_change_claim", phrase: "file modified", aliases: ["action_executed"] },
+  { kind: "file_change_claim", phrase: "file written", aliases: ["action_executed"] },
+  { kind: "action_executed", phrase: "\u5df2\u5b89\u88c5" },
+  { kind: "action_executed", phrase: "\u5df2\u6210\u529f\u5b89\u88c5" },
+  { kind: "action_executed", phrase: "\u5b89\u88c5\u6210\u529f" },
+  { kind: "action_executed", phrase: "\u5b89\u88c5\u5b8c\u6210" },
+  { kind: "action_executed", phrase: "\u4f9d\u8d56\u5df2\u5b89\u88c5" },
+  { kind: "action_executed", phrase: "\u5df2\u6267\u884c" },
+  { kind: "action_executed", phrase: "\u5df2\u6210\u529f\u6267\u884c" },
+  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6267\u884c" },
+  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6210\u529f\u6267\u884c" },
+  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u8fd0\u884c" },
+  { kind: "action_executed", phrase: "\u547d\u4ee4\u5df2\u6210\u529f\u8fd0\u884c" },
+  { kind: "action_executed", phrase: "\u7d22\u5f15\u5df2\u5237\u65b0" },
+  { kind: "action_executed", phrase: "\u7d22\u5f15\u5df2\u91cd\u5efa" },
+  { kind: "action_executed", phrase: "\u5df2\u5237\u65b0\u7d22\u5f15" },
+  { kind: "action_executed", phrase: "\u5df2\u91cd\u5efa\u7d22\u5f15" },
+  { kind: "action_executed", phrase: "\u751f\u56fe\u7ed3\u679c\u5df2\u843d\u76d8" },
+  { kind: "action_executed", phrase: "\u56fe\u7247\u7ed3\u679c\u5df2\u751f\u6210" },
+  { kind: "action_executed", phrase: "image result generated" },
+  { kind: "action_executed", phrase: "image result saved" },
+  { kind: "action_executed", phrase: "successfully installed" },
+  { kind: "action_executed", phrase: "successfully ran" },
+  { kind: "action_executed", phrase: "successfully executed" },
+  { kind: "action_executed", phrase: "index refreshed" },
+  { kind: "action_executed", phrase: "index rebuilt" },
+  { kind: "workflow_status_claim", phrase: "workflow completed" },
+  { kind: "workflow_status_claim", phrase: "workflow done" },
+  { kind: "workflow_status_claim", phrase: "\u5de5\u4f5c\u6d41\u5df2\u5b8c\u6210" },
+  { kind: "agent_status_claim", phrase: "agent completed" },
+  { kind: "agent_status_claim", phrase: "agents completed" },
+  { kind: "agent_status_claim", phrase: "multi-agent completed" },
+  { kind: "agent_status_claim", phrase: "\u591a agent \u5df2\u5b8c\u6210" },
+  { kind: "agent_status_claim", phrase: "\u591a\u667a\u80fd\u4f53\u5df2\u5b8c\u6210" },
 ];
 
-const CCB_PARITY_PATTERNS: RegExp[] = [
-  /\u7b49\u4e8e\s*ccb/iu, // \u7b49\u4e8e CCB
-  /\u4e0e\s*ccb\s*(?:\u4e00\u81f4|\u5bf9\u9f50|parity)/iu,
-  /\bccb\s+parity\b/iu,
-  /\bproduction[-\s]?ready\b/iu,
+const LOCAL_CURRENT_PHRASES = [
+  "\u5f53\u524d\u5206\u652f",
+  "\u5f53\u524d\u76ee\u5f55",
+  "\u5f53\u524d\u6587\u4ef6",
+  "\u5f53\u524d\u4f1a\u8bdd",
+  "\u5f53\u524d\u9879\u76ee",
+  "\u5f53\u524d\u5de5\u4f5c\u76ee\u5f55",
+  "\u5f53\u524d\u6a21\u5f0f",
+  "\u5f53\u524d\u7ec4\u4ef6",
+  "\u5f53\u524d\u5b9e\u73b0\u662f",
 ];
 
-const EXTERNAL_CURRENT_PATTERNS: RegExp[] = [
-  /\u4eca\u5929/u, // \u4eca\u5929
-  /\u6700\u65b0\u7248\u672c/u, // \u6700\u65b0\u7248\u672c
-  /\u6700\u65b0\u6a21\u578b/u, // \u6700\u65b0\u6a21\u578b
-  /\u5f53\u524d\u5b98\u7f51/u, // \u5f53\u524d\u5b98\u7f51
-  /\u5f53\u524d\u4ef7\u683c/u, // \u5f53\u524d\u4ef7\u683c
-  /\u5f53\u524d\s*api/iu, // \u5f53\u524d API
-  /\u6700\u65b0\u4ef7\u683c/u, // \u6700\u65b0\u4ef7\u683c
-  /\bToday'?s\b/iu,
-  /\bcurrent\s+(?:price|version|API|website)/iu,
-  /\blatest\s+(?:price|version|model|release)/iu,
-];
+function normalizedClaimText(text: string): string {
+  return text.toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+}
 
-// \u672c\u5730"\u5f53\u524d X"\u767d\u540d\u5355\uff1a\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6/\u4f1a\u8bdd/\u9879\u76ee/\u914d\u7f6e/\u5de5\u4f5c\u76ee\u5f55 \u7b49
-// \u547d\u4e2d\u5373\u4e0d\u7b97 external_current_fact\uff0c\u907f\u514d\u8bef\u4f24\u666e\u901a\u672c\u5730\u67e5\u8be2\u3002
-const LOCAL_CURRENT_WHITELIST =
-  /\u5f53\u524d(?:\u5206\u652f|\u76ee\u5f55|\u6587\u4ef6|\u4f1a\u8bdd|\u9879\u76ee|\u5de5\u4f5c\u76ee\u5f55|\u6a21\u5f0f|\u7ec4\u4ef6|\u5b9e\u73b0\u662f)/u;
-
-const BETA_READINESS_PATTERNS: RegExp[] = [
-  /\bbeta\s+(?:ready|readiness|pass|completed)\b/iu,
-  /\u8fdb\u5165\s*beta/u, // \u8fdb\u5165 beta
-  /\u53ef\u4ee5\s*(?:\u8fdb\u5165|\u53d1\u5e03)\s*beta/u,
-];
-
-// D.14G \u2014 git \u64cd\u4f5c\u9ad8\u98ce\u9669\u58f0\u660e\uff1a\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9 / \u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001 / \u5df2\u521b\u5efa / \u5df2\u5220\u9664 worktree\u3002
-// \u8fd9\u4e9b claim \u5fc5\u987b\u6709\u5bf9\u5e94 git_operation evidence\uff08\u771f\u5b9e runtime \u6267\u884c\u8fc7\uff09\uff0c\u5426\u5219\u964d\u7ea7\u3002
-const GIT_OPERATION_PATTERNS: RegExp[] = [
-  /\u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9/u, // \u5df2\u5efa\u7acb\u7a33\u5b9a\u70b9
-  /\u5df2\u521b\u5efa\u7a33\u5b9a\u70b9/u, // \u5df2\u521b\u5efa\u7a33\u5b9a\u70b9
-  /\u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001/u, // \u5df2\u4fdd\u5b58\u5f53\u524d\u72b6\u6001
-  /\u7a33\u5b9a\u70b9\u5df2(?:\u521b\u5efa|\u5efa\u7acb|\u4fdd\u5b58)/u, // \u7a33\u5b9a\u70b9\u5df2\u521b\u5efa/\u5efa\u7acb/\u4fdd\u5b58
-  /\u5df2(?:\u521b\u5efa|\u751f\u6210).{0,6}worktree/iu, // \u5df2\u521b\u5efa/\u751f\u6210 ... worktree
-  /\u5df2\u5220\u9664.{0,6}worktree/iu, // \u5df2\u5220\u9664 ... worktree
-  /worktree\s+(?:created|removed|deleted)/iu,
-  /\bstable\s+point\s+(?:created|saved)\b/iu,
-  /\bcreated\s+(?:a\s+)?(?:managed\s+)?worktree\b/iu,
-  /\bremoved\s+(?:the\s+)?(?:managed\s+)?worktree\b/iu,
-];
-
-// Run 2 P1-2 — mutating 动作"已执行成功"声明：依赖安装、Bash 命令执行、写文件、
-// 索引刷新。这些必须有对应的真实成功 evidence（command_output/test_result 且非失败、
-// 非 denied/cancelled），否则降级。用户拒绝/取消后只会留下 tool_failure evidence，
-// 因此被拒绝的动作声明会自动降级为未验证。
-const ACTION_EXECUTED_PATTERNS: RegExp[] = [
-  /已(?:成功)?安装/u, // 已安装 / 已成功安装
-  /安装(?:成功|完成)/u, // 安装成功 / 安装完成
-  /依赖(?:已|都已)?安装/u, // 依赖已安装
-  /已(?:成功)?执行/u, // 已执行 / 已成功执行
-  /命令(?:已|都已)?(?:成功)?(?:执行|运行)/u, // 命令已执行/已运行
-  /已(?:成功)?(?:刷新|重建)索引/u, // 已刷新索引 / 已重建索引
-  /索引(?:已|都已)?(?:成功)?(?:刷新|重建|更新)/u, // 索引已刷新
-  /(?:生图结果|图片结果|image result).{0,20}(?:已落盘|已生成|generated|saved)/iu,
-  /\bimage(?:\s+result)?\s+(?:generated|saved)\b/iu,
-  /已(?:成功)?写入(?:文件)?/u, // 已写入 / 已写入文件
-  /\bnpm\s+install\b.{0,30}(?:succe|done|complete|成功|完成)/iu,
-  /\b(?:pnpm|yarn|npm|pip|cargo)\s+(?:install|add|i)\b.{0,30}(?:succe|done|complete|ran|executed)/iu,
-  /\b(?:installed|ran|executed)\s+(?:the\s+)?(?:dependenc|package|command|install)/iu,
-  /\bindex(?:\s+has\s+been|\s+was)?\s+(?:refreshed|rebuilt|updated)\b/iu,
-  /\bsuccessfully\s+(?:installed|ran|executed|refreshed)\b/iu,
-];
-
-function detectMatches(
-  text: string,
-  patterns: RegExp[],
-  kind: FinalAnswerClaimKind,
-): FinalAnswerClaimMatch[] {
-  const out: FinalAnswerClaimMatch[] = [];
-  for (const re of patterns) {
-    const match = re.exec(text);
-    if (match) {
-      out.push({ kind, phrase: match[0] });
-    }
+function findPhraseIndex(text: string, phrase: string): number {
+  if (phrase === "PASS") {
+    const index = text.indexOf("PASS");
+    if (index < 0) return -1;
+    const before = text[index - 1] ?? " ";
+    const after = text[index + phrase.length] ?? " ";
+    if (isAsciiLetterOrDigit(before) || isAsciiLetterOrDigit(after)) return -1;
+    return index;
   }
-  return out;
+  return normalizedClaimText(text).indexOf(normalizedClaimText(phrase));
+}
+
+function isAsciiLetterOrDigit(value: string): boolean {
+  const code = value.charCodeAt(0);
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function pushStructuredClaim(
+  out: FinalAnswerClaimMatch[],
+  seen: Set<string>,
+  kind: FinalAnswerClaimKind,
+  phrase: string,
+): void {
+  const key = `${kind}\u0000${phrase}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  out.push({ kind, phrase });
 }
 
 // 元讨论检测：文本在解释/讨论系统机制本身（反幻觉、gate、evidence、验证系统等），
-// 而非对当前任务做事实声明时，不应触发 completion_pass / code_fact 类 claim。
-const META_DISCUSSION_PATTERNS: RegExp[] = [
-  /反幻觉系统/u,
-  /(?:final.?answer|claim).?gate/iu,
-  /(?:evidence|证据).{0,20}(?:机制|系统|检测|触发|约束|拦截|降级)/u,
-  /(?:gate|闸门|验证系统).{0,30}(?:是什么|怎么|如何|为什么|触发|工作|机制|原理)/u,
-  /(?:不能说|不让你说|约束你|限制你).{0,30}(?:通过|完成|验证|修复|写入|执行|运行|刷新|安装)/u,
-  /(?:会被|被).{0,20}(?:拦截|降级|触发|约束|检测)/u,
-];
-
+// 而非对当前任务做事实声明时，不应触发 completion/code/action 类 claim。
 function isMetaDiscussion(text: string): boolean {
-  return META_DISCUSSION_PATTERNS.some((re) => re.test(text));
+  const lowered = normalizedClaimText(text);
+  return [
+    "\u53cd\u5e7b\u89c9\u7cfb\u7edf",
+    "final answer gate",
+    "claim gate",
+    "evidence",
+    "\u8bc1\u636e\u673a\u5236",
+    "\u9a8c\u8bc1\u7cfb\u7edf",
+    "\u4e0d\u80fd\u8bf4",
+    "\u4e0d\u8ba9\u4f60\u8bf4",
+    "\u4f1a\u88ab\u62e6\u622a",
+    "\u88ab\u964d\u7ea7",
+  ].some((phrase) => lowered.includes(normalizedClaimText(phrase)));
 }
 
 function isQuotedExample(text: string, index: number, phrase: string): boolean {
@@ -877,36 +968,103 @@ function isMetaDiscussionExampleMatch(text: string, match: FinalAnswerClaimMatch
   const window = text.slice(Math.max(0, index - 60), index + match.phrase.length + 60);
   if (isQuotedExample(text, index, match.phrase)) return true;
   const before = text.slice(Math.max(0, index - 60), index);
-  return /(?:会检测|检测|识别|命中|拦截|降级|不能说|不让你说|phrases?\s+like|detects?\s+phrases?|requires?\s+evidence)/iu.test(
-    before,
+  return [
+    "\u4f1a\u68c0\u6d4b",
+    "\u68c0\u6d4b",
+    "\u8bc6\u522b",
+    "\u547d\u4e2d",
+    "\u62e6\u622a",
+    "\u964d\u7ea7",
+    "\u4e0d\u80fd\u8bf4",
+    "\u4e0d\u8ba9\u4f60\u8bf4",
+    "phrases like",
+    "detects phrases",
+    "detect phrases",
+    "requires evidence",
+  ].some((phrase) => normalizedClaimText(before).includes(phrase));
+}
+
+export function extractStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
+  return parseStructuredFinalAnswerClaims(text);
+}
+
+export function extractLegacyTextRiskClaims(text: string): FinalAnswerClaimMatch[] {
+  if (!text) return [];
+  const matches: FinalAnswerClaimMatch[] = [];
+  const seen = new Set<string>();
+  const localCurrentOnly = LOCAL_CURRENT_PHRASES.some((phrase) =>
+    normalizedClaimText(text).includes(normalizedClaimText(phrase)),
   );
+  for (const spec of LEGACY_TEXT_CLAIM_PHRASES) {
+    if (spec.kind === "external_current_fact" && localCurrentOnly) continue;
+    const phraseIndex = findPhraseIndex(text, spec.phrase);
+    if (phraseIndex < 0) continue;
+    const match = {
+      kind: spec.kind,
+      phrase: text.slice(phraseIndex, phraseIndex + spec.phrase.length),
+    };
+    if (isMetaDiscussionExampleMatch(text, match)) continue;
+    pushStructuredClaim(matches, seen, spec.kind, match.phrase);
+    for (const alias of spec.aliases ?? []) {
+      pushStructuredClaim(matches, seen, alias, match.phrase);
+    }
+  }
+  return matches;
 }
 
 export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
+  return extractLegacyTextRiskClaims(text);
+}
+
+function parseStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
   if (!text) return [];
-  const matches: FinalAnswerClaimMatch[] = [];
-  matches.push(...detectMatches(text, BETA_READINESS_PATTERNS, "beta_readiness"));
-  matches.push(
-    ...detectMatches(text, COMPLETION_PASS_PATTERNS, "completion_pass").filter(
-      (match) => !isMetaDiscussionExampleMatch(text, match),
-    ),
+  const line = text
+    .split(/\r?\n/u)
+    .map((item) => item.trim())
+    .find((item) => item.startsWith(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX));
+  if (!line) return [];
+  const payload = line.slice(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX.length).trim();
+  if (!payload) return [];
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    const claims = Array.isArray(parsed)
+      ? parsed
+      : isPlainRecord(parsed) && Array.isArray(parsed.claims)
+        ? parsed.claims
+        : [];
+    const out: FinalAnswerClaimMatch[] = [];
+    const seen = new Set<string>();
+    for (const item of claims) {
+      if (!isPlainRecord(item)) continue;
+      const kind = item.kind;
+      if (!isFinalAnswerClaimKind(kind)) continue;
+      const phrase =
+        typeof item.phrase === "string" && item.phrase.trim() ? item.phrase.trim() : kind;
+      pushStructuredClaim(out, seen, kind, phrase);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFinalAnswerClaimKind(value: unknown): value is FinalAnswerClaimKind {
+  return (
+    typeof value === "string" && FINAL_ANSWER_CLAIM_KINDS.includes(value as FinalAnswerClaimKind)
   );
-  matches.push(
-    ...detectMatches(text, CODE_FACT_PATTERNS, "code_fact").filter(
-      (match) => !isMetaDiscussionExampleMatch(text, match),
-    ),
-  );
-  matches.push(...detectMatches(text, CCB_PARITY_PATTERNS, "ccb_parity"));
-  matches.push(...detectMatches(text, GIT_OPERATION_PATTERNS, "git_operation"));
-  matches.push(
-    ...detectMatches(text, ACTION_EXECUTED_PATTERNS, "action_executed").filter(
-      (match) => !isMetaDiscussionExampleMatch(text, match),
-    ),
-  );
-  // \u5916\u90e8\u5f53\u524d\u4e8b\u5b9e\uff1a\u5148\u53bb\u9664"\u5f53\u524d\u5206\u652f/\u76ee\u5f55/\u6587\u4ef6..."\u7b49\u672c\u5730\u767d\u540d\u5355\uff0c\u518d\u5339\u914d
-  const sanitized = text.replace(LOCAL_CURRENT_WHITELIST, "");
-  matches.push(...detectMatches(sanitized, EXTERNAL_CURRENT_PATTERNS, "external_current_fact"));
-  return matches;
+}
+
+export function stripStructuredFinalAnswerClaims(text: string): string {
+  if (!text) return text;
+  return text
+    .split(/\r?\n/u)
+    .filter((line) => !line.trim().startsWith(STRUCTURED_FINAL_ANSWER_CLAIM_PREFIX))
+    .join("\n")
+    .trim();
 }
 
 function evidenceTokens(record: EvidenceRecord): string {
@@ -976,20 +1134,21 @@ function evidenceSupportsCommandClaim(
   record: EvidenceRecord,
   claim: "test" | "typecheck" | "build" | "diff_check" | "smoke",
 ): boolean {
-  const tokens = evidenceTokens(record);
   if (claim === "test") {
-    return /(?:test_passed|tests?\s+passed|测试通过)/iu.test(tokens);
+    return record.supportsClaims.includes("test_passed");
   }
   if (claim === "typecheck") {
-    return /(?:typecheck_passed|typecheck\s+passed|tsc\s+passed|类型检查通过)/iu.test(tokens);
+    return record.supportsClaims.includes("typecheck_passed");
   }
   if (claim === "build") {
-    return /(?:build_passed|build\s+passed|构建通过)/iu.test(tokens);
+    return record.supportsClaims.includes("build_passed");
   }
   if (claim === "diff_check") {
-    return /(?:diff_check_passed|diff[-\s]?check\s+passed)/iu.test(tokens);
+    return record.supportsClaims.includes("diff_check_passed");
   }
-  return /(?:smoke_passed|smoke_ran|smoke\s+passed|冒烟通过)/iu.test(tokens);
+  return (
+    record.supportsClaims.includes("smoke_passed") || record.supportsClaims.includes("smoke_ran")
+  );
 }
 
 function evidenceSupportsCompletionClaim(
@@ -1013,6 +1172,49 @@ function evidenceSupportsCompletionClaim(
     return evidenceSupportsCommandClaim(record, "smoke");
   }
   return evidenceSupportsTaskCompletion(record);
+}
+
+function evidenceSupportsVerificationClaim(record: EvidenceRecord): boolean {
+  if (record.kind !== "test_result" && record.kind !== "command_output") return false;
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  return (
+    record.supportsClaims.includes("verification_passed") ||
+    record.supportsClaims.includes("test_passed") ||
+    record.supportsClaims.includes("typecheck_passed") ||
+    record.supportsClaims.includes("build_passed") ||
+    record.supportsClaims.includes("diff_check_passed") ||
+    record.supportsClaims.includes("smoke_passed")
+  );
+}
+
+function evidenceSupportsFileChangeClaim(record: EvidenceRecord): boolean {
+  if (record.kind !== "command_output") return false;
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  if (record.supportsClaims.includes("bash_exit_nonzero")) return false;
+  return (
+    record.supportsClaims.includes("file_written") ||
+    record.supportsClaims.includes("Write") ||
+    record.supportsClaims.includes("Edit") ||
+    record.supportsClaims.includes("MultiEdit")
+  );
+}
+
+function evidenceSupportsWorkflowStatusClaim(record: EvidenceRecord): boolean {
+  if (record.kind !== "command_output") return false;
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  return (
+    record.supportsClaims.includes("workflow_execution") &&
+    record.supportsClaims.includes("action_executed")
+  );
+}
+
+function evidenceSupportsAgentStatusClaim(record: EvidenceRecord): boolean {
+  if (record.kind !== "command_output") return false;
+  if (record.supportsClaims.includes("tool_failure")) return false;
+  return (
+    record.supportsClaims.includes("agent_execution") &&
+    record.supportsClaims.includes("action_executed")
+  );
 }
 
 function evidenceSupportsIndexCodeFact(record: EvidenceRecord): boolean {
@@ -1118,6 +1320,12 @@ function evidenceSupportsActionExecuted(record: EvidenceRecord): boolean {
 }
 
 const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
+  completion_claim: "task completion evidence",
+  test_claim: "test result evidence",
+  file_change_claim: "file change evidence",
+  verification_claim: "verification evidence",
+  workflow_status_claim: "terminal successful workflow runtime evidence",
+  agent_status_claim: "terminal successful agent runtime evidence",
   completion_pass: "test/build/typecheck/diff-check/smoke",
   code_fact: "Read/Grep/index",
   external_current_fact: "web_source",
@@ -1132,7 +1340,21 @@ export function evaluateFinalAnswerClaims(
   evidence: EvidenceRecord[],
   now: Date = new Date(),
 ): FinalAnswerClaimVerdict {
-  const matches = detectHighRiskClaims(text);
+  const structured = extractStructuredFinalAnswerClaims(text);
+  return evaluateStructuredFinalAnswerClaims(
+    structured.length > 0 ? structured : extractLegacyTextRiskClaims(text),
+    evidence,
+    now,
+    text,
+  );
+}
+
+export function evaluateStructuredFinalAnswerClaims(
+  matches: FinalAnswerClaimMatch[],
+  evidence: EvidenceRecord[],
+  now: Date = new Date(),
+  sourceText = "",
+): FinalAnswerClaimVerdict {
   if (matches.length === 0) {
     return {
       status: "passed",
@@ -1148,14 +1370,52 @@ export function evaluateFinalAnswerClaims(
   for (const kind of matchedKinds) {
     let supported = false;
     let supporter: (record: EvidenceRecord) => boolean;
+    if (kind === "completion_claim") {
+      const matching = evidence.filter(evidenceSupportsTaskCompletion);
+      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
+      supported = fresh.length > 0;
+      if (!supported) {
+        unsupported.push(kind);
+        if (matching.length > 0 && fresh.length === 0) {
+          staleKinds.push(kind);
+        }
+      }
+      continue;
+    }
+    if (kind === "test_claim") {
+      const matching = evidence.filter((record) => evidenceSupportsCommandClaim(record, "test"));
+      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
+      supported = fresh.length > 0;
+      if (!supported) {
+        unsupported.push(kind);
+        if (matching.length > 0 && fresh.length === 0) {
+          staleKinds.push(kind);
+        }
+      }
+      continue;
+    }
+    if (kind === "verification_claim") {
+      const matching = evidence.filter(evidenceSupportsVerificationClaim);
+      const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
+      supported = fresh.length > 0;
+      if (!supported) {
+        unsupported.push(kind);
+        if (matching.length > 0 && fresh.length === 0) {
+          staleKinds.push(kind);
+        }
+      }
+      continue;
+    }
     if (kind === "completion_pass") {
       const completionMatches = matches.filter((item) => item.kind === "completion_pass");
       const matching = evidence.filter((record) =>
-        completionMatches.some((match) => evidenceSupportsCompletionClaim(record, text, match)),
+        completionMatches.some((match) =>
+          evidenceSupportsCompletionClaim(record, sourceText, match),
+        ),
       );
       const fresh = matching.filter((rec) => !isEvidenceStaleForClaim(rec, kind, now));
       supported = completionMatches.every((match) =>
-        fresh.some((record) => evidenceSupportsCompletionClaim(record, text, match)),
+        fresh.some((record) => evidenceSupportsCompletionClaim(record, sourceText, match)),
       );
       if (!supported) {
         unsupported.push(kind);
@@ -1169,6 +1429,12 @@ export function evaluateFinalAnswerClaims(
       supporter = evidenceSupportsLocalCodeFact;
     } else if (kind === "external_current_fact") {
       supporter = evidenceSupportsExternalCurrent;
+    } else if (kind === "file_change_claim") {
+      supporter = evidenceSupportsFileChangeClaim;
+    } else if (kind === "workflow_status_claim") {
+      supporter = evidenceSupportsWorkflowStatusClaim;
+    } else if (kind === "agent_status_claim") {
+      supporter = evidenceSupportsAgentStatusClaim;
     } else if (kind === "ccb_parity") {
       supporter = evidenceSupportsCcbParity;
     } else if (kind === "git_operation") {
@@ -1238,7 +1504,7 @@ export function buildDowngradedFinalAnswer(
   verdict: FinalAnswerClaimVerdict,
   language: Language,
 ): string {
-  let safeText = originalText;
+  let safeText = stripStructuredFinalAnswerClaims(originalText);
   for (const match of verdict.matchedClaims) {
     if (verdict.unsupportedKinds.includes(match.kind)) {
       const re = new RegExp(escapeRegExp(match.phrase), "giu");
