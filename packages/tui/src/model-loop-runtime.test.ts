@@ -135,10 +135,12 @@ describe("model-loop-runtime", () => {
     it("exposes real agent workflow verification and report tools before CommandProposal fallback", () => {
       const names = createModelToolDefinitions().map((d) => d.name);
       expect(names).toContain("StartAgent");
+      expect(names).toContain("AgentControl");
       expect(names).toContain("RunWorkflow");
       expect(names).toContain("RunVerification");
       expect(names).toContain("WriteReport");
       expect(names.indexOf("StartAgent")).toBeLessThan(names.indexOf("CommandProposal"));
+      expect(names.indexOf("AgentControl")).toBeLessThan(names.indexOf("CommandProposal"));
       expect(names.indexOf("RunWorkflow")).toBeLessThan(names.indexOf("CommandProposal"));
     });
 

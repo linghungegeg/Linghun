@@ -2583,6 +2583,7 @@ export async function cancelAgent(
     background.updatedAt = now;
   }
   context.backgroundAbortControllers?.get(agent.id)?.abort();
+  context.backgroundAbortControllers?.delete(agent.id);
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
   await context.store.appendEvent(parentSessionId, {
     type: "agent_end",
@@ -2597,6 +2598,20 @@ export async function cancelAgent(
   await persistAgentRun(context, agent);
   writeLine(output, agent.summary);
   deps().writeStatus(output, context);
+}
+
+export async function cancelAgentByRef(
+  ref: string | undefined,
+  context: TuiContext,
+  output: Writable,
+): Promise<AgentRun | undefined> {
+  const agent = findAgent(context, ref);
+  if (!agent) {
+    writeLine(output, "未找到 agent。");
+    return undefined;
+  }
+  await cancelAgent(agent, context, output);
+  return agent;
 }
 
 export async function resumeAgent(

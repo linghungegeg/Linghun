@@ -227,6 +227,7 @@ import {
   isModelRole,
 } from "./model-doctor-runtime.js";
 import {
+  AGENT_CONTROL_TOOL_NAME,
   COMMAND_PROPOSAL_TOOL_NAME,
   EXECUTE_EXTRA_TOOL_NAME,
   type FinalAnswerClaimVerdict,
@@ -438,6 +439,7 @@ import {
   handleSkillsCommand,
 } from "./extension-slash-runtime.js";
 import {
+  cancelAgentByRef,
   configureJobAgentCommandRuntime,
   handleAgentsCommand,
   handleBackgroundCommand,
@@ -445,7 +447,6 @@ import {
   handleJobCommand,
   hydrateDurableJobBackgroundTasks,
   hydratePersistentAgents,
-  markRunningAgentsStaleForInterrupt,
   sendAgentMessage,
   transitionDurableJob,
 } from "./job-agent-command-runtime.js";
@@ -2731,7 +2732,7 @@ export async function handleSlashCommand(
     return "handled";
   }
   if (command === "/interrupt") {
-    await handleInterruptCommand(context, output);
+    await handleInterruptCommand(rest, context, output);
     return "handled";
   }
   if (command === "/claim-check") {
@@ -6691,7 +6692,16 @@ function formatBtwStatusAnswer(context: TuiContext): string {
   return formatRuntimeStatusSnapshotForBtw(snapshot, context.language);
 }
 
-async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
+async function handleInterruptCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const agentRef = args.join(" ").trim();
+  if (agentRef) {
+    await cancelAgentByRef(agentRef, context, output);
+    return;
+  }
   const result = await interruptAllActiveWork(context);
   if (result.cancelled === 0) {
     writeLine(output, t(context, "interruptIdle"));
@@ -6834,11 +6844,11 @@ export async function interruptAllActiveWork(
     await appendBackgroundTaskEvent(context, sessionId, task);
   }
 
-  const markedAgents = await markRunningAgentsStaleForInterrupt(context, sessionId);
-  if (markedAgents.marked > 0) {
-    cancelled += markedAgents.marked;
-    abortSignalsSent += markedAgents.aborted;
-    markedOnly += markedAgents.marked - markedAgents.aborted;
+  for (const agent of context.agents.filter((item) => item.status === "running")) {
+    const hadController = Boolean(context.backgroundAbortControllers?.has(agent.id));
+    await cancelAgentByRef(agent.id, context, createSilentOutput());
+    cancelled += 1;
+    if (hadController) abortSignalsSent += 1;
   }
 
   if (context.workflows.activeRun?.status === "running") {
@@ -9506,6 +9516,15 @@ async function sendMessage(
   writeStatus(output, context);
 }
 
+export async function __testSendMessage(
+  text: string,
+  context: TuiContext,
+  gateway: ModelGateway,
+  output: Writable,
+): Promise<void> {
+  await sendMessage(text, context, gateway, output);
+}
+
 // D.14E — 远程入站消息进入本地主链的唯一 glue。校验交给 processRemoteInbound（纯
 // 逻辑），执行交回既有本地管道：approval_response 复用 executePermissionApprove/
 // executePermissionDeny；natural_language_message 原样进 sendMessage（本地模型主链，
@@ -10506,6 +10525,7 @@ async function executeModelToolUse(
   }
   if (
     toolCall.name === START_AGENT_TOOL_NAME ||
+    toolCall.name === AGENT_CONTROL_TOOL_NAME ||
     toolCall.name === SEND_MESSAGE_TOOL_NAME ||
     toolCall.name === RUN_WORKFLOW_TOOL_NAME ||
     toolCall.name === INDEX_OPERATION_TOOL_NAME ||
@@ -11171,6 +11191,50 @@ async function executeLinghunControlToolUse(
         status: agent?.status ?? "blocked",
       });
     }
+    if (toolCall.name === AGENT_CONTROL_TOOL_NAME) {
+      const input = parseAgentControlToolInput(toolCall.input, context);
+      if (!input.ok)
+        return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
+      if (input.action === "list") {
+        await handleAgentsCommand(["list"], context, output);
+        return await finishControlToolResult(
+          toolCall,
+          context,
+          sessionId,
+          output,
+          `Agent list inspected; total=${context.agents.length}.`,
+          false,
+          { total: context.agents.length },
+        );
+      }
+      if (input.action === "show") {
+        await handleAgentsCommand(["show", input.agentRef ?? ""].filter(Boolean), context, output);
+        const agent = findAgent(context, input.agentRef);
+        return await finishControlToolResult(
+          toolCall,
+          context,
+          sessionId,
+          output,
+          agent
+            ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
+            : `Agent not found: ${input.agentRef ?? "latest"}`,
+          !agent,
+          { agentId: agent?.id, status: agent?.status ?? "not_found" },
+        );
+      }
+      const agent = await cancelAgentByRef(input.agentRef, context, output);
+      return await finishControlToolResult(
+        toolCall,
+        context,
+        sessionId,
+        output,
+        agent
+          ? `Agent ${agent.id} cancelled: ${agent.summary}`
+          : `Agent not found: ${input.agentRef ?? "latest"}`,
+        !agent,
+        { agentId: agent?.id, status: agent?.status ?? "not_found" },
+      );
+    }
     if (toolCall.name === SEND_MESSAGE_TOOL_NAME) {
       const input = parseSendMessageToolInput(toolCall.input);
       if (!input.ok)
@@ -11402,6 +11466,34 @@ function buildForkArgsFromStartAgentInput(
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.isolation) args.push("--isolation", input.isolation);
   return args;
+}
+
+function parseAgentControlToolInput(
+  input: unknown,
+  context: TuiContext,
+):
+  | { ok: true; action: "list" | "show" | "cancel"; agentRef?: string }
+  | { ok: false; text: string } {
+  const obj =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const action = obj.action;
+  if (action !== "list" && action !== "show" && action !== "cancel") {
+    return { ok: false, text: "AgentControl requires action list|show|cancel." };
+  }
+  const ref =
+    typeof obj.agentId === "string" && obj.agentId.trim()
+      ? obj.agentId.trim()
+      : typeof obj.agent_id === "string" && obj.agent_id.trim()
+        ? obj.agent_id.trim()
+        : typeof obj.ref === "string" && obj.ref.trim()
+          ? obj.ref.trim()
+          : undefined;
+  if ((action === "show" || action === "cancel") && !ref && context.agents.length > 1) {
+    return { ok: false, text: "AgentControl requires agentId/ref when multiple agents exist." };
+  }
+  return { ok: true, action, ...(ref ? { agentRef: ref } : {}) };
 }
 
 function parseSendMessageToolInput(input: unknown):

@@ -413,13 +413,17 @@ export function isMultilineEnterSequence(input: string): boolean {
   const csiU = body.endsWith("u") ? body.slice(0, -1).split(";") : undefined;
   if (csiU?.length === 2) {
     const [code, modifier] = csiU;
-    return (code === "10" || code === "13") && (modifier === "2" || modifier === "3");
+    return (
+      (code === "10" || code === "13" || code === "57414") && (modifier === "2" || modifier === "3")
+    );
   }
   const modified = body.endsWith("~") ? body.slice(0, -1).split(";") : undefined;
   if (modified?.length === 3) {
     const [prefix, modifier, code] = modified;
     return (
-      prefix === "27" && (modifier === "2" || modifier === "3") && (code === "10" || code === "13")
+      prefix === "27" &&
+      (modifier === "2" || modifier === "3") &&
+      (code === "10" || code === "13" || code === "57414")
     );
   }
   return false;

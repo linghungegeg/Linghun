@@ -290,6 +290,11 @@ function TaskLayout({
         <Box flexDirection="column" width={cw}>
           <Composer view={view} onInput={controller.onInput} capability={capability} />
         </Box>
+        <Box width={cw}>
+          <Text color={theme.border ?? theme.muted} dimColor>
+            {composerRule}
+          </Text>
+        </Box>
 
         {/* Task footer — minimal status line: permission mode · index. NOT the
             full StatusTray; the noisy line was identified as the

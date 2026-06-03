@@ -215,7 +215,9 @@ describe("Composer dispatcher behavior boundaries", () => {
     it("recognizes CSI-u / modifyOtherKeys newline sequences before sanitation", () => {
       expect(isMultilineEnterSequence("\x1B[13;2u")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[10;3u")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B[57414;2u")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[27;2;13~")).toBe(true);
+      expect(isMultilineEnterSequence("\x1B[27;2;57414~")).toBe(true);
       expect(isMultilineEnterSequence("\x1B[1;2C")).toBe(false);
     });
 

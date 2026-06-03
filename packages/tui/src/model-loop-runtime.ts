@@ -187,6 +187,7 @@ export const SEARCH_EXTRA_TOOLS_NAME = "SearchExtraTools" as const;
 export const EXECUTE_EXTRA_TOOL_NAME = "ExecuteExtraTool" as const;
 export const COMMAND_PROPOSAL_TOOL_NAME = "CommandProposal" as const;
 export const START_AGENT_TOOL_NAME = "StartAgent" as const;
+export const AGENT_CONTROL_TOOL_NAME = "AgentControl" as const;
 export const SEND_MESSAGE_TOOL_NAME = "SendMessage" as const;
 export const RUN_WORKFLOW_TOOL_NAME = "RunWorkflow" as const;
 export const INDEX_OPERATION_TOOL_NAME = "IndexOperation" as const;
@@ -204,6 +205,9 @@ export const COMMAND_PROPOSAL_DESCRIPTION =
 
 export const START_AGENT_DESCRIPTION =
   "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Supports addressable name/team, safe cwd/worktree isolation, and true background launch. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
+
+export const AGENT_CONTROL_DESCRIPTION =
+  "Inspect or cancel existing Linghun agents through the real agent runtime. Use action=cancel when the user asks to stop, close, interrupt, kill, or cancel a background/sub-agent. This performs the same durable cancellation as /agents cancel and must be preferred over replying with instructions when a matching agent exists.";
 
 export const SEND_MESSAGE_DESCRIPTION =
   "Send a text message to a running Linghun agent or team by id/name/team. The message enters the target agent mailbox and transcript; fail closed if no running target is found.";
@@ -272,6 +276,20 @@ export function createStartAgentInputSchema(): unknown {
       isolation: { type: "string", enum: ["worktree"] },
     },
     required: ["task"],
+  };
+}
+
+export function createAgentControlInputSchema(): unknown {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: { type: "string", enum: ["list", "show", "cancel"] },
+      agentId: { type: "string" },
+      agent_id: { type: "string" },
+      ref: { type: "string" },
+    },
+    required: ["action"],
   };
 }
 
@@ -374,6 +392,11 @@ export function createModelToolDefinitions(): ModelToolDefinition[] {
       name: START_AGENT_TOOL_NAME,
       description: START_AGENT_DESCRIPTION,
       inputSchema: createStartAgentInputSchema(),
+    },
+    {
+      name: AGENT_CONTROL_TOOL_NAME,
+      description: AGENT_CONTROL_DESCRIPTION,
+      inputSchema: createAgentControlInputSchema(),
     },
     {
       name: SEND_MESSAGE_TOOL_NAME,

@@ -3861,6 +3861,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).toContain("<Composer view={view}");
     expect(body).toContain("<Box width={cw} paddingTop={1}>");
     expect(body).toContain('<Box flexDirection="column" width={cw}>');
+    expect(body.indexOf("{composerRule}", body.indexOf("<Composer view={view}"))).toBeGreaterThan(
+      body.indexOf("<Composer view={view}"),
+    );
     expect(body).not.toContain("width={cw} paddingX={1}");
     expect(body).not.toContain("view.taskRuntimeSummary");
     expect(body.indexOf("<NotificationStack")).toBeLessThan(body.indexOf("{composerRule}"));
