@@ -214,10 +214,23 @@ export type AgentGatewayContinuation = {
 
 type AgentProviderRuntime = Omit<AgentGatewayContinuation, "gateway">;
 
+type JobPreflightResult = {
+  missing: string[];
+  generatedEvidenceIds: string[];
+  generatedVerification: boolean;
+  indexUnknown: boolean;
+};
+
 let runtimeDeps: JobAgentCommandRuntimeDeps | undefined;
 
 export function configureJobAgentCommandRuntime(deps: JobAgentCommandRuntimeDeps): void {
   runtimeDeps = deps;
+}
+
+function validateJobHandoffPreflight(
+  packet: NonNullable<DurableJobState["handoffPacket"]>,
+): string[] {
+  return validateHandoffPacket(packet).filter((item) => item !== "indexStatus");
 }
 
 function deps(): JobAgentCommandRuntimeDeps {
@@ -510,7 +523,8 @@ export async function createDurableJob(
     context,
     await deps().ensureSession(context),
   );
-  const missing = validateHandoffPacket(handoffPacket);
+  const preflight = prepareJobPreflight(context, handoffPacket, options);
+  const missing = preflight.missing;
   const resourceGuard = start
     ? (deps().checkResourceGuard(context, "model") ??
       deps().checkBackgroundStartGuard(context, "job", true))
@@ -531,6 +545,12 @@ export async function createDurableJob(
         : undefined;
   const agents = createDurableJobAgents(options, status, runningCap);
   const effectiveCap = status === "running" ? resolveEffectiveJobAgentCap(context, runningCap) : 0;
+  const capReason = formatInitialJobCapReason(status, {
+    pauseReason,
+    requestedAgents: options.requestedAgents,
+    runningCap,
+    preflight,
+  });
   return {
     id,
     goal: options.goal,
@@ -550,12 +570,7 @@ export async function createDurableJob(
       explicit: { ...options.budgetExplicit },
     },
     effectiveAgentCap: effectiveCap,
-    capReason:
-      status === "running"
-        ? `dynamic_cap:min(default=${runningCap}, requested=${options.requestedAgents})`
-        : status === "sleeping"
-          ? pauseReason
-          : "not_running",
+    capReason,
     timeoutMs: options.timeoutMs,
     permissionPolicy: context.permissionMode,
     allowEdit: options.allowEdit,
@@ -585,6 +600,120 @@ export async function createDurableJob(
         ? ["No PASS evidence is generated for blocked/sleeping jobs."]
         : [],
   };
+}
+
+function prepareJobPreflight(
+  context: TuiContext,
+  handoffPacket: NonNullable<DurableJobState["handoffPacket"]>,
+  options: ParsedJobRunOptions,
+): JobPreflightResult {
+  const generatedEvidenceIds: string[] = [];
+  const generatedVerification = ensureMinimalJobVerification(context, options);
+  const generatedEvidence = ensureMinimalJobEvidence(context, options, generatedVerification);
+  if (generatedEvidence) {
+    generatedEvidenceIds.push(generatedEvidence);
+  }
+  const indexUnknown =
+    !handoffPacket.indexStatus.status || handoffPacket.indexStatus.status === "unknown";
+  syncJobPreflightPacket(handoffPacket, context, generatedVerification);
+  return {
+    missing: validateJobHandoffPreflight(handoffPacket),
+    generatedEvidenceIds,
+    generatedVerification,
+    indexUnknown,
+  };
+}
+
+function ensureMinimalJobVerification(context: TuiContext, options: ParsedJobRunOptions): boolean {
+  if (context.lastVerification) return false;
+  const now = new Date().toISOString();
+  context.lastVerification = {
+    id: `job-preflight-${randomUUID().slice(0, 8)}`,
+    status: "partial",
+    summary:
+      "Minimal job preflight snapshot: no verification command has run yet; read-only audit may start, and completion is not PASS evidence.",
+    commands: [],
+    unverified: ["job preflight generated without running verification commands"],
+    risk: [
+      context.index.status === "unknown"
+        ? "index status unknown; job agents must rely on handoff/evidence/workspace snapshot refs"
+        : `index status ${context.index.status}`,
+    ],
+    startedAt: now,
+    endedAt: now,
+    durationMs: 0,
+    nextAction:
+      options.allowEdit || options.allowBash
+        ? "run targeted verification before edits"
+        : "read-only audit may proceed",
+  };
+  return true;
+}
+
+function ensureMinimalJobEvidence(
+  context: TuiContext,
+  options: ParsedJobRunOptions,
+  generatedVerification: boolean,
+): string | undefined {
+  if (context.evidence.length > 0) return undefined;
+  const id = `job-preflight-${randomUUID().slice(0, 8)}`;
+  context.evidence.unshift({
+    id,
+    kind: "user_provided",
+    source: "/job preflight",
+    summary: `Minimal job preflight evidence for ${options.allowEdit || options.allowBash ? "bounded job" : "read-only audit"}; index=${context.index.status || "unknown"}.`,
+    supportsClaims: ["job-preflight-only"],
+    createdAt: new Date().toISOString(),
+  });
+  return generatedVerification ? `${id}:with_minimal_verification` : id;
+}
+
+function syncJobPreflightPacket(
+  packet: NonNullable<DurableJobState["handoffPacket"]>,
+  context: TuiContext,
+  generatedVerification: boolean,
+): void {
+  packet.verification = context.lastVerification ?? packet.verification;
+  packet.evidenceRefs = context.evidence
+    .map((item) => ({ id: item.id, kind: item.kind, source: item.source, summary: item.summary }))
+    .slice(0, 8);
+  packet.indexStatus = {
+    projectName: context.index.projectName,
+    status: context.index.status || "unknown",
+    nodes: context.index.nodes,
+    edges: context.index.edges,
+    changedFiles: context.index.changedFiles,
+    staleHint: context.index.staleHint,
+  };
+  if (generatedVerification) {
+    packet.pending = [
+      ...packet.pending,
+      "Job preflight generated minimal verification snapshot; it is not PASS evidence.",
+    ];
+  }
+}
+
+function formatInitialJobCapReason(
+  status: DurableJobStatus,
+  input: {
+    pauseReason?: string;
+    requestedAgents: number;
+    runningCap: number;
+    preflight: JobPreflightResult;
+  },
+): string {
+  const generated = [
+    ...input.preflight.generatedEvidenceIds.map((id) => `generatedEvidence=${id}`),
+    input.preflight.generatedVerification ? "generatedVerification=partial" : undefined,
+    input.preflight.indexUnknown ? "index=unknown_nonblocking" : undefined,
+  ].filter(Boolean);
+  if (status === "running") {
+    const suffix = generated.length > 0 ? `;${generated.join(";")}` : "";
+    return `dynamic_cap:min(default=${input.runningCap}, requested=${input.requestedAgents})${suffix}`;
+  }
+  if (input.pauseReason) return input.pauseReason;
+  if (status === "created") return "planned_not_started:/job create only";
+  return `preflight_blocked:${input.preflight.missing.join(",") || "unknown"}`;
 }
 
 function resolveEffectiveJobAgentCap(
@@ -798,7 +927,9 @@ export async function resumeDurableJob(job: DurableJobState, context: TuiContext
     );
     return;
   }
-  const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
+  const missing = job.handoffPacket
+    ? validateJobHandoffPreflight(job.handoffPacket)
+    : ["handoffPacket"];
   if (missing.length > 0) {
     await transitionDurableJob(
       job,
@@ -926,7 +1057,9 @@ export async function recoverDurableJobForContext(
     return job;
   }
   const originalStatus = job.status;
-  const missing = job.handoffPacket ? validateHandoffPacket(job.handoffPacket) : ["handoffPacket"];
+  const missing = job.handoffPacket
+    ? validateJobHandoffPreflight(job.handoffPacket)
+    : ["handoffPacket"];
   if (missing.length > 0) {
     job.status = "blocked";
     job.pauseReason = `needs_handoff_repair:${missing.join(",")}`;

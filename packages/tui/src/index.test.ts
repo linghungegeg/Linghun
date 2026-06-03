@@ -4658,7 +4658,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Beta readiness PASS");
   });
 
-  it("runs /job --multi-agent through real AgentRun children and keeps verifier PASS separate", async () => {
+  it("runs /job --multi-agent through real AgentRun children with unknown index and keeps verifier PASS separate", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-real-job-agents-"));
     const config: LinghunConfig = {
       ...createOpenAiRegistryAgentConfig("route-model"),
@@ -4669,17 +4669,6 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session, config);
     context.modelGateway = createModelGateway(config);
-    context.index.status = "ready";
-    context.index.projectName = "F-Linghun";
-    context.lastVerification = createVerificationReportFixture("partial");
-    context.evidence.push({
-      id: "ev-real-job-agent",
-      kind: "test_result",
-      summary: "real job agent evidence",
-      source: "vitest",
-      supportsClaims: ["real-job-agent"],
-      createdAt: new Date().toISOString(),
-    });
     mockOpenAiTextFetch("job child done");
 
     await handleSlashCommand(
@@ -4699,6 +4688,8 @@ describe("Phase 06 TUI slash commands", () => {
       verification?: { status?: string; summary?: string };
       effectiveAgentCap?: number;
       capReason?: string;
+      evidenceRefs?: Array<{ id?: string; source?: string; summary?: string }>;
+      handoffPacket?: { indexStatus?: { status?: string }; verification?: { status?: string } };
       agents?: Array<{ type?: string; status?: string; runId?: string; task?: string }>;
     };
     expect(persisted.status).toBe("completed");
@@ -4706,6 +4697,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(persisted.verification?.summary).toContain("not PASS evidence");
     expect(persisted.effectiveAgentCap).toBe(3);
     expect(persisted.capReason).toContain("runtime_dynamic_cap");
+    expect(persisted.capReason).not.toBe("not_running");
+    expect(persisted.capReason).not.toContain("effectiveCap=0");
+    expect(persisted.handoffPacket?.indexStatus?.status).toBe("unknown");
+    expect(persisted.handoffPacket?.verification?.status).toBe("partial");
+    expect(persisted.evidenceRefs?.[0]?.source).toBe("/job preflight");
+    const jobTask = context.backgroundTasks.find((task) => task.id === jobId);
+    expect(jobTask?.currentStep).not.toContain("needs_handoff_repair:indexStatus");
+    expect(jobTask?.userVisibleSummary).not.toContain("needs_handoff_repair:indexStatus");
     expect(persisted.agents?.map((agent) => agent.type)).toEqual([
       "planner",
       "worker",
@@ -4954,6 +4953,51 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks.find((task) => task.id === run?.id)?.currentStep).not.toContain(
       "architecture boundary risks found",
     );
+  });
+
+  it("runs readonly architecture audit in external projects without packages/tui/src", async () => {
+    const project = await mkdtemp(join(tmpdir(), "external-readonly-audit-workflow-"));
+    await mkdir(join(project, "src"), { recursive: true });
+    await writeFile(
+      join(project, "src", "index.ts"),
+      Array.from({ length: 1601 }, (_, index) => `export const line${index} = ${index};`).join(
+        "\n",
+      ),
+      "utf8",
+    );
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({ scripts: { typecheck: "echo typecheck" } }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    const output = new MemoryOutput();
+
+    await handleSlashCommand(
+      "/workflows run readonly audit current source architecture risk without editing",
+      context,
+      output,
+    );
+
+    const archStep = context.workflows.activeRun?.steps.find(
+      (step) => step.id === "slice-architecture-review",
+    );
+    expect(archStep?.status).toBe("partial");
+    expect(archStep?.summary).toContain("architecture boundary risks found");
+    expect(archStep?.summary).not.toContain("completed");
+    expect(output.text).not.toContain("no workflow files available");
+    expect(output.text).not.toContain(
+      "architecture boundary check found no readable workflow files",
+    );
+    expect(output.text).not.toContain("PASS：");
+    const evidence = context.evidence.find((item) =>
+      item.supportsClaims.includes("architecture_boundary_check"),
+    );
+    expect(evidence?.summary).toContain("risks=god-file");
+    await expect(stat(join(project, "packages", "tui", "src"))).rejects.toThrow();
   });
 
   it("workflow readonly details step executes the requested evidence ref", async () => {
@@ -5873,7 +5917,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
-  it("blocks Phase 17A jobs when handoff is incomplete and never records PASS evidence", async () => {
+  it("generates minimal job preflight when handoff evidence/index is unavailable without claiming PASS", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const config: LinghunConfig = {
       ...defaultConfig,
@@ -5901,15 +5945,24 @@ describe("Phase 06 TUI slash commands", () => {
     const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
       status?: string;
       pauseReason?: string;
+      capReason?: string;
+      evidenceRefs?: Array<{ source?: string }>;
+      handoffPacket?: { indexStatus?: { status?: string }; verification?: { status?: string } };
       agents?: { status?: string }[];
     };
-    expect(output.text).toContain("needs_handoff_repair");
+    expect(output.text).not.toContain("needs_handoff_repair");
+    expect(output.text).toContain("generatedEvidence=job-preflight");
+    expect(output.text).toContain("index=unknown_nonblocking");
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
     expect(persisted.status).toBe("cancelled");
     expect(persisted.pauseReason).toBe("user_cancelled");
+    expect(persisted.capReason).not.toBe("not_running");
+    expect(persisted.handoffPacket?.indexStatus?.status).toBe("unknown");
+    expect(persisted.handoffPacket?.verification?.status).toBe("partial");
+    expect(persisted.evidenceRefs?.[0]?.source).toBe("/job preflight");
     expect(persisted.agents?.filter((agent) => agent.status === "running")).toHaveLength(0);
   });
 
@@ -14323,6 +14376,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       transcript.some((event) => event.type === "evidence_record" && event.kind === "test_result"),
     ).toBe(true);
+    const verificationEvidence = context.evidence.find((item) => item.kind === "test_result");
+    expect(verificationEvidence?.summary).toContain("PASS：");
+    expect(verificationEvidence?.summary).not.toContain("PASS PASS");
   });
 
   it("reports failed verification with log path and next action", async () => {
@@ -20028,11 +20084,146 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     const result = await handleSlashCommand("/btw 当前在做什么", context, output);
 
     expect(result).toBe("handled");
-    expect(output.text).toContain("当前：Bash · running command");
+    expect(output.text).toContain("当前：background task 运行中 · running command");
     expect(output.text).toContain("耗时");
     expect(output.text).not.toContain("tool_use");
     expect(output.text).not.toContain("RuntimeStatus");
     expect(output.text).not.toContain("gateId");
+  });
+
+  it("/btw 当前进度读取 running workflow 的轻量状态", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const startedAt = new Date(Date.now() - 30_000).toISOString();
+    context.workflows.activeRun = {
+      id: "workflow-status",
+      goal: "修复登录问题",
+      planId: "plan-status",
+      status: "running",
+      startedAt,
+      result: "partial",
+      steps: [
+        {
+          id: "read",
+          title: "读取登录代码",
+          status: "completed",
+          runtime: "details",
+          evidenceRefs: ["raw-evidence-should-not-leak"],
+        },
+        {
+          id: "verify",
+          title: "运行 focused verification",
+          status: "running",
+          runtime: "verification",
+          evidenceRefs: [],
+          startedAt,
+        },
+      ],
+    };
+
+    await handleSlashCommand("/btw 当前进度状态", context, output);
+
+    expect(output.text).toContain("当前：workflow 运行中 · 1/2 · 运行 focused verification");
+    expect(output.text).toContain("详细输出在 Ctrl+O、/background 或 /details");
+    expect(output.text).not.toContain("raw-evidence-should-not-leak");
+    expect(output.text).not.toContain("evidenceRefs");
+  });
+
+  it("/btw 当前进度读取 blocked job 的轻量状态", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks.push({
+      id: "job-blocked",
+      kind: "job",
+      title: "Job",
+      status: "paused",
+      result: "partial",
+      currentStep: "等待用户确认后继续",
+      startedAt: new Date(Date.now() - 45_000).toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: true,
+      userVisibleSummary: "内部 transcript 不应外露",
+      nextAction: "确认后继续",
+    });
+    context.pendingLocalApproval = {
+      kind: "break_cache_mutation",
+      sessionId: session.id,
+      action: "clear",
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    await handleSlashCommand("/btw 目前状态", context, output);
+
+    expect(output.text).toContain("当前：正在等待你的确认");
+    expect(output.text).toContain("当前：job 已暂停 · 等待用户确认后继续");
+    expect(output.text).not.toContain("break_cache_mutation");
+    expect(output.text).not.toContain("sessionId");
+    expect(output.text).not.toContain("内部 transcript");
+  });
+
+  it("/btw 当前进度读取 completed verification 的最近结果", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const now = new Date().toISOString();
+    context.lastVerification = {
+      id: "verify-status",
+      status: "pass",
+      summary: "typecheck 通过",
+      commands: [],
+      unverified: [],
+      risk: [],
+      startedAt: now,
+      endedAt: now,
+      durationMs: 120,
+      nextAction: "继续主任务",
+    };
+
+    await handleSlashCommand("/btw 当前进度如何", context, output);
+
+    expect(output.text).toContain("当前：没有正在运行的任务");
+    expect(output.text).toContain("最近：verification 通过 · typecheck 通过");
+    expect(output.text).not.toContain("模型配置缺少 api_key");
+    expect(output.text).not.toContain("verify-status");
+    expect(output.text).not.toContain("commands");
+  });
+
+  it("/btw 当前进度无活跃任务时说明空态和最近 job 结果", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks.push({
+      id: "job-done",
+      kind: "job",
+      title: "Job",
+      status: "completed",
+      result: "pass",
+      currentStep: "handoff 写入完成",
+      startedAt: new Date(Date.now() - 90_000).toISOString(),
+      updatedAt: new Date().toISOString(),
+      heartbeatIntervalMs: 30_000,
+      staleAfterMs: 120_000,
+      hasOutput: true,
+      userVisibleSummary: "raw evidence should stay hidden",
+    });
+
+    await handleSlashCommand("/btw 当前状态", context, output);
+
+    expect(output.text).toContain("当前：没有正在运行的任务");
+    expect(output.text).toContain("最近：job 通过 · handoff 写入完成");
+    expect(output.text).not.toContain("raw evidence");
+    expect(output.text).not.toContain("job-done");
   });
 
   it("/model doctor 之后 /details 必须展开完整 doctor 正文（含 endpointPath=/v1/messages）", async () => {

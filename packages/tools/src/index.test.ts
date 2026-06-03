@@ -279,6 +279,65 @@ describe("Phase 05 core tools", () => {
     expect(await readFile(filePath, "utf8")).toBe("ALPHA\nGAMMA\n");
   });
 
+  it("reports Read line counts without counting a trailing newline as an extra content line", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    const content = Array.from({ length: 205 }, (_, index) => `line-${index + 1}`).join("\n");
+    await writeFile(join(project, "large-trailing-newline.txt"), `${content}\n`, "utf8");
+
+    const read = await runTool("Read", { path: "large-trailing-newline.txt" }, context);
+
+    expect(read.output.truncated).toBe(true);
+    expect(read.output.data).toMatchObject({
+      lines: 200,
+      selectedLines: 200,
+      windowLines: 200,
+      totalLines: 205,
+      contentLines: 205,
+    });
+    expect(read.output.text).toContain("Read window only");
+    expect(read.output.text).toContain("not the full file");
+  });
+
+  it("reports Read line counts for files without a trailing newline", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "no-trailing-newline.txt"), "alpha\nbeta\ngamma", "utf8");
+
+    const read = await runTool("Read", { path: "no-trailing-newline.txt" }, context);
+
+    expect(read.output.truncated).toBe(false);
+    expect(read.output.data).toMatchObject({
+      lines: 3,
+      selectedLines: 3,
+      windowLines: 3,
+      totalLines: 3,
+      contentLines: 3,
+    });
+    expect(read.output.text).not.toContain("Read window only");
+  });
+
+  it("reports Read offset/limit windows as truncated file windows", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "windowed.txt"), "one\ntwo\nthree\nfour\nfive", "utf8");
+
+    const read = await runTool("Read", { path: "windowed.txt", offset: 1, limit: 2 }, context);
+
+    expect(read.output.truncated).toBe(true);
+    expect(read.output.data).toMatchObject({
+      lines: 2,
+      selectedLines: 2,
+      windowLines: 2,
+      totalLines: 5,
+      contentLines: 5,
+    });
+    expect(read.output.text).toContain("2\ttwo");
+    expect(read.output.text).toContain("3\tthree");
+    expect(read.output.text).toContain("Read window only");
+    expect(read.output.text).toContain("not the full file");
+  });
+
   it("validates tool input and preserves details when output is capped", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

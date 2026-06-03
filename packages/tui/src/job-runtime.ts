@@ -299,7 +299,21 @@ export function updateDurableJobEffectiveAgentCap(
     0,
     Math.min(cap, job.budget.maxRunningAgents, job.agents.length),
   );
-  job.capReason = reason;
+  const preflightSuffix = extractJobPreflightCapSuffix(job.capReason);
+  job.capReason = preflightSuffix ? `${reason};${preflightSuffix}` : reason;
+}
+
+function extractJobPreflightCapSuffix(reason: string | undefined): string | undefined {
+  if (!reason) return undefined;
+  const parts = reason
+    .split(";")
+    .filter(
+      (part) =>
+        part.startsWith("generatedEvidence=") ||
+        part === "generatedVerification=partial" ||
+        part === "index=unknown_nonblocking",
+    );
+  return parts.length > 0 ? parts.join(";") : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +522,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     formatJobRunnerReportLine(job),
     formatApprovedRunnerSpecLine(job),
     `- handoff: ${job.handoffPacket?.id ?? "missing"}`,
+    `- status semantics: ${formatJobLifecycleLegend()}`,
     `- evidenceRefs: ${job.evidenceRefs.map((item) => item.id).join(", ") || "none"}`,
     `- logs: ${formatDisplayPath(job.logPath, job.projectPath)}`,
     `- fullOutput: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
@@ -588,6 +603,7 @@ export function formatJobPrimary(job: DurableJobState, context: JobContext): str
       ? "- scope: local durable metadata + unified background task; no remote channel, Phase 18, Beta PASS, or smoke-ready claim."
       : "- \u8303\u56F4\uFF1A\u672C\u5730 durable metadata + \u7EDF\u4E00\u540E\u53F0\u4EFB\u52A1\uFF1B\u672A\u8FDB\u5165 remote\u3001Phase 18\u3001Beta PASS \u6216 smoke-ready\u3002",
     `- agents: planned=${job.agents.length}, scheduled=${job.agents.filter((agent) => agent.runId).length}, started=${job.agents.filter((agent) => agent.startedAt).length}, running=${runningAgents}, queued=${job.agents.filter((agent) => agent.status === "queued").length}, skipped=${job.agents.filter((agent) => agent.status === "skipped").length}, limited=${job.agents.filter((agent) => agent.status === "budget_limited" || agent.status === "resource_limited").length}, effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}.`,
+    `- status semantics: ${formatJobLifecycleLegend()}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
@@ -606,6 +622,7 @@ export function formatJobStatus(job: DurableJobState): string {
     `- projectPath: ${formatDisplayPath(job.projectPath, job.projectPath)}`,
     `- phase/target: ${job.phase} / ${job.target}`,
     `- agents: planned=${job.agents.length}; scheduled=${job.agents.filter((agent) => agent.runId).length}; started=${job.agents.filter((agent) => agent.startedAt).length}; running=${counts.running}; completed=${counts.completed}; queued=${counts.queued}; sleeping=${counts.sleeping}; skipped=${counts.skipped}; budget_limited=${counts.budget_limited}; resource_limited=${counts.resource_limited}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}; effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}`,
+    `- status semantics: ${formatJobLifecycleLegend()}`,
     `- agent labels: ${formatJobAgentLabels(job.agents)}`,
     formatJobBudgetLine(job),
     `- worker: ${job.worker?.status ?? "not_started"}; step=${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session=${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
@@ -626,6 +643,7 @@ export function formatJobReport(job: DurableJobState): string {
     `- task graph: ${job.plan.length} steps; worker=${job.worker?.status ?? "not_started"}; usedSteps=${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: planned=${job.agents.length}; scheduled=${job.agents.filter((agent) => agent.runId).length}; started=${job.agents.filter((agent) => agent.startedAt).length}; running=${counts.running}; completed=${counts.completed}; queued=${counts.queued}; sleeping=${counts.sleeping}; skipped=${counts.skipped}; budget_limited=${counts.budget_limited}; resource_limited=${counts.resource_limited}; blocked=${counts.blocked}; stale=${counts.stale}; cap=${job.budget.maxRunningAgents}; effectiveCap=${getEffectiveAgentCap(job)}; capReason=${job.capReason ?? "default"}`,
+    `- status semantics: ${formatJobLifecycleLegend()}`,
     formatJobBudgetLine(job),
     `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
@@ -635,6 +653,10 @@ export function formatJobReport(job: DurableJobState): string {
     `- fullOutputPath: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
     `- reportPath: ${formatDisplayPath(job.reportPath, job.projectPath)}`,
   ].join("\n");
+}
+
+function formatJobLifecycleLegend(): string {
+  return "planned=durable assignments only; scheduled=real AgentRun runId exists; started=AgentRun start timestamp exists; running=currently active; completed=AgentRun/job lifecycle ended, not verification PASS; blocked=specific preflight/resource/provider reason required.";
 }
 
 export function formatJobAgentLabels(agents: DurableJobAgent[]): string {

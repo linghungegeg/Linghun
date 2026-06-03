@@ -183,6 +183,22 @@ describe("tool-output-presenter", () => {
       expect(layered.truncated).toBe(true);
     });
 
+    it("Read 主屏区分窗口行数和文件总行数", () => {
+      const layered = createLayeredToolOutput(
+        "Read",
+        {
+          text: "1\tone\n2\ttwo\n...（Read window only: selectedLines=2, windowLines=2, totalLines=5, contentLines=5; not the full file）",
+          data: { lines: 2, selectedLines: 2, windowLines: 2, totalLines: 5, contentLines: 5 },
+          truncated: true,
+        },
+        "zh-CN",
+      );
+
+      expect(layered.preview).toContain("窗口 2/5 行");
+      expect(layered.preview).toContain("contentLines=5");
+      expect(layered.preview).not.toContain("2 行");
+    });
+
     it("evidenceId 透传到 layered.evidenceId（保留诊断信息）", () => {
       const layered = createLayeredToolOutput(
         "Read",

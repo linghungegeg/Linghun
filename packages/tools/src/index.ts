@@ -535,21 +535,38 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
   const content = await readFile(filePath, "utf8");
   const info = await stat(filePath);
   rememberReadSnapshot(context, filePath, content, info);
-  const lines = content.split(/\r?\n/);
+  const lines = splitContentLines(content);
   const offset = Math.max(input.offset ?? 0, 0);
   const limit = Math.max(input.limit ?? DEFAULT_LIMIT, 1);
   const selected = lines.slice(offset, offset + limit);
-  const text = selected.map((line, index) => `${offset + index + 1}\t${line}`).join("\n");
+  const truncated = offset > 0 || offset + limit < lines.length;
+  const textLines = selected.map((line, index) => `${offset + index + 1}\t${line}`);
+  if (truncated) {
+    textLines.push(
+      `...（Read window only: selectedLines=${selected.length}, windowLines=${selected.length}, totalLines=${lines.length}, contentLines=${lines.length}; not the full file）`,
+    );
+  }
   return {
-    text,
+    text: textLines.join("\n"),
     data: {
       path: relativePath(context.workspaceRoot, filePath),
       lines: selected.length,
+      selectedLines: selected.length,
+      windowLines: selected.length,
+      totalLines: lines.length,
+      contentLines: lines.length,
       hash: hashText(content),
       newline: detectNewlineStyle(content),
     },
-    truncated: offset + limit < lines.length,
+    truncated,
   };
+}
+
+function splitContentLines(content: string): string[] {
+  if (content.length === 0) {
+    return [];
+  }
+  return content.replace(/\r?\n$/, "").split(/\r?\n/);
 }
 
 async function writeTool(input: WriteInput, context: ToolContext): Promise<ToolOutput> {

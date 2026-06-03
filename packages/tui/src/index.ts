@@ -1392,6 +1392,12 @@ export type TuiContext = {
   requestActivity?: { slowHintShown: boolean; slowTimer?: ReturnType<typeof setTimeout> };
   requestActivityPhase?: RequestActivityPhase;
   requestActivityToolName?: string;
+  lastModelRequest?: {
+    phase: RequestActivityPhase;
+    toolName?: string;
+    startedAt?: string;
+    endedAt: string;
+  };
   // D.13I tail fix — 记录本 session 通过 SearchExtraTools 真正发现过的 deferred 工具名。
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
   // 这是"已发现"的唯一证据；listDeferredTools 仅作为白名单存在性，不能等同于"发现过"。
@@ -4081,28 +4087,28 @@ async function executeWorkflowArchitectureReviewStep(
   evidenceRefs: string[];
 }> {
   const sessionId = await ensureSession(context);
-  const candidates = selectWorkflowArchitectureReviewFiles(context);
+  const candidates = await selectWorkflowArchitectureReviewFiles(context);
   if (candidates.length === 0) {
     const evidence = createEvidenceRecord(
       "command_output",
-      "workflow architecture review blocked: no workflow files available for boundary check",
+      "workflow architecture review skipped: no project source files available for boundary check",
       "workflow-architecture-review:no-files",
-      ["architecture_boundary_check", "workflow_slice_architecture_review", "needs_review"],
+      ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
       context,
       sessionId,
-      `workflow_architecture_review slice=${request.sliceId} status=blocked evidence=${evidence.id} files=0 reason=no-files`,
+      `workflow_architecture_review slice=${request.sliceId} status=partial evidence=${evidence.id} files=0 reason=no-files`,
       "warning",
     );
     return {
-      status: "blocked",
+      status: "partial",
       summary: formatWorkflowStepSummary(
         request.sliceId,
-        "blocked",
-        "architecture boundary check found no readable workflow files",
+        "partial",
+        "architecture boundary check skipped: no project source files found; continue readonly workflow with partial evidence",
         context.language,
       ),
       evidenceRefs: [evidence.id],
@@ -4124,24 +4130,24 @@ async function executeWorkflowArchitectureReviewStep(
   if (metrics.length === 0) {
     const evidence = createEvidenceRecord(
       "command_output",
-      `workflow architecture review blocked: candidate files unreadable (${candidates.join(", ")})`,
+      `workflow architecture review skipped: candidate files unreadable (${candidates.join(", ")})`,
       "workflow-architecture-review:unreadable",
-      ["architecture_boundary_check", "workflow_slice_architecture_review", "needs_review"],
+      ["architecture_boundary_check", "workflow_slice_architecture_review", "partial_evidence"],
     );
     rememberEvidence(context, evidence);
     await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
     await appendSystemEvent(
       context,
       sessionId,
-      `workflow_architecture_review slice=${request.sliceId} status=blocked evidence=${evidence.id} files=0 reason=unreadable`,
+      `workflow_architecture_review slice=${request.sliceId} status=partial evidence=${evidence.id} files=0 reason=unreadable`,
       "warning",
     );
     return {
-      status: "blocked",
+      status: "partial",
       summary: formatWorkflowStepSummary(
         request.sliceId,
-        "blocked",
-        "architecture boundary check could not read workflow files",
+        "partial",
+        "architecture boundary check skipped: no readable project source files; continue readonly workflow with partial evidence",
         context.language,
       ),
       evidenceRefs: [evidence.id],
@@ -4185,23 +4191,83 @@ async function executeWorkflowArchitectureReviewStep(
   };
 }
 
-function selectWorkflowArchitectureReviewFiles(context: TuiContext): string[] {
+async function selectWorkflowArchitectureReviewFiles(context: TuiContext): Promise<string[]> {
   const files = new Set<string>();
+  for (const file of [...context.tools.changedFiles, ...context.recentlyMentionedFiles]) {
+    const normalized = file.replace(/\\/g, "/");
+    if (!/\.(?:ts|tsx|js|jsx)$/u.test(normalized)) continue;
+    files.add(normalized);
+  }
+  if (files.size < WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) {
+    for (const discovered of await discoverWorkflowArchitectureReviewFiles(context.projectPath)) {
+      files.add(discovered);
+      if (files.size >= WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) break;
+    }
+  }
   for (const file of [
-    ...context.tools.changedFiles,
-    ...context.recentlyMentionedFiles,
     "packages/tui/src/index.ts",
     "packages/tui/src/workflow-planner-entry.ts",
     "packages/tui/src/workflow-task-surface.ts",
     "packages/tui/src/workflow-agent-runtime-bridge.ts",
   ]) {
-    const normalized = file.replace(/\\/g, "/");
-    if (!normalized.startsWith("packages/tui/src/")) continue;
-    if (!normalized.includes("workflow") && !normalized.endsWith("index.ts")) continue;
-    if (!/\.(?:ts|tsx|js|jsx)$/u.test(normalized)) continue;
-    files.add(normalized);
+    if (files.size >= WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) break;
+    if (canReadProjectFile(context.projectPath, file)) files.add(file);
   }
   return Array.from(files).slice(0, WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT);
+}
+
+async function discoverWorkflowArchitectureReviewFiles(projectPath: string): Promise<string[]> {
+  const roots = ["src", "packages", "apps", "."];
+  const discovered: string[] = [];
+  for (const root of roots) {
+    await discoverWorkflowArchitectureReviewFilesUnder(
+      projectPath,
+      root,
+      root === "." ? 1 : 4,
+      discovered,
+    );
+    if (discovered.length >= WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) break;
+  }
+  return discovered.slice(0, WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT);
+}
+
+async function discoverWorkflowArchitectureReviewFilesUnder(
+  projectPath: string,
+  relativeRoot: string,
+  depth: number,
+  discovered: string[],
+): Promise<void> {
+  if (depth < 0 || discovered.length >= WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) return;
+  const entries = await readdir(resolve(projectPath, relativeRoot), { withFileTypes: true }).catch(
+    () => undefined,
+  );
+  if (!entries) return;
+  for (const entry of entries) {
+    if (discovered.length >= WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT) return;
+    if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist") continue;
+    const relativePath = relativeRoot === "." ? entry.name : `${relativeRoot}/${entry.name}`;
+    if (entry.isFile() && /\.(?:ts|tsx|js|jsx)$/u.test(entry.name)) {
+      discovered.push(relativePath);
+      continue;
+    }
+    if (entry.isDirectory()) {
+      await discoverWorkflowArchitectureReviewFilesUnder(
+        projectPath,
+        relativePath,
+        depth - 1,
+        discovered,
+      );
+    }
+  }
+}
+
+function canReadProjectFile(projectPath: string, path: string): boolean {
+  try {
+    accessSync(resolve(projectPath, path), constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getCurrentWorkflowStepRequest(
@@ -6578,37 +6644,199 @@ async function handleBtwCommand(
 function formatBtwStatusAnswer(question: string, context: TuiContext): string | undefined {
   const normalized = question.toLowerCase().replace(/\s+/gu, "");
   const asksCurrentWork =
-    /(当前|现在|目前).*(做什么|在做|状态|进展)/u.test(question) ||
+    /(当前|现在|目前).*(做什么|在做|状态|进展|进度)/u.test(question) ||
     /what(?:areyou|islinghun)?doing|current(?:status|task)|whatisgoingon/u.test(normalized);
   if (!asksCurrentWork) return undefined;
-  const activePhase = context.requestActivityPhase;
-  const activeToolName = context.requestActivityToolName;
-  const runningTask = context.backgroundTasks.find((task) => task.status === "running");
-  const elapsed = runningTask
-    ? context.language === "en-US"
-      ? ` · elapsed ${formatElapsedSince(runningTask.startedAt)}`
-      : ` · 耗时 ${formatElapsedSince(runningTask.startedAt)}`
+  const activeLines = formatBtwActiveStatusLines(context);
+  const recentLine = formatBtwRecentStatusLine(context);
+  const suffix =
+    context.language === "en-US"
+      ? "Details stay in Ctrl+O, /background, or /details."
+      : "详细输出在 Ctrl+O、/background 或 /details。";
+  if (activeLines.length > 0) {
+    return [...activeLines, recentLine, suffix].filter(Boolean).join("\n");
+  }
+  return [
+    context.language === "en-US" ? "Current: no running task." : "当前：没有正在运行的任务。",
+    recentLine,
+    suffix,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatBtwActiveStatusLines(context: TuiContext): string[] {
+  const lines: string[] = [];
+  const requestLine = formatBtwModelRequestLine(context);
+  if (requestLine) lines.push(requestLine);
+  const approvalLine = formatBtwPendingApprovalLine(context);
+  if (approvalLine) lines.push(approvalLine);
+  const workflowLine = formatBtwWorkflowLine(context);
+  if (workflowLine) lines.push(workflowLine);
+  for (const task of context.backgroundTasks.filter(isBtwActiveBackgroundTask)) {
+    if (workflowLine && task.id === context.workflows.activeRun?.id) continue;
+    lines.push(formatBtwBackgroundTaskLine(task, context.language, true));
+    if (lines.length >= 5) break;
+  }
+  return lines;
+}
+
+function formatBtwRecentStatusLine(context: TuiContext): string | undefined {
+  const recentTask = context.backgroundTasks
+    .filter((task) => !isActiveBackgroundStatus(task.status))
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+  const lastVerification = context.lastVerification;
+  const lastModelRequest = context.lastModelRequest;
+  if (!recentTask && !lastVerification && !lastModelRequest) return undefined;
+  if (
+    lastVerification &&
+    (!recentTask || Date.parse(lastVerification.endedAt) >= Date.parse(recentTask.updatedAt)) &&
+    (!lastModelRequest ||
+      Date.parse(lastVerification.endedAt) >= Date.parse(lastModelRequest.endedAt))
+  ) {
+    const status = formatBtwResult(lastVerification.status, context.language);
+    return context.language === "en-US"
+      ? `Recent: verification ${status} · ${truncateDisplay(lastVerification.summary, 90)}.`
+      : `最近：verification ${status} · ${truncateDisplay(lastVerification.summary, 90)}。`;
+  }
+  if (
+    lastModelRequest &&
+    (!recentTask || Date.parse(lastModelRequest.endedAt) >= Date.parse(recentTask.updatedAt))
+  ) {
+    const label = formatBtwModelRequestSummary(lastModelRequest, context.language);
+    return context.language === "en-US"
+      ? `Recent: model request ${label}.`
+      : `最近：模型请求${label}。`;
+  }
+  const status = formatBtwResult(recentTask.result ?? recentTask.status, context.language);
+  const summary = recentTask.currentStep ?? recentTask.userVisibleSummary;
+  return context.language === "en-US"
+    ? `Recent: ${formatBtwTaskKind(recentTask.kind)} ${status} · ${truncateDisplay(summary, 90)}.`
+    : `最近：${formatBtwTaskKind(recentTask.kind)} ${status} · ${truncateDisplay(summary, 90)}。`;
+}
+
+function formatBtwModelRequestLine(context: TuiContext): string | undefined {
+  const phase = context.requestActivityPhase;
+  if (!phase) return undefined;
+  const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+  const elapsed = startedAt
+    ? formatBtwElapsed(new Date(startedAt).toISOString(), context.language)
     : "";
-  if (activePhase) {
-    const phase =
-      activePhase === "tool_running"
-        ? context.language === "en-US"
-          ? `running ${activeToolName ?? "tool"}`
-          : `正在运行 ${activeToolName ?? "工具"}`
-        : context.language === "en-US"
-          ? activePhase.replaceAll("_", " ")
-          : activePhase;
+  if (phase === "tool_running") {
+    const toolName =
+      context.requestActivityToolName ?? (context.language === "en-US" ? "tool" : "工具");
     return context.language === "en-US"
-      ? `Current: ${phase}${elapsed}. Details stay in Ctrl+O or /details.`
-      : `当前：${phase}${elapsed}。详细输出在 Ctrl+O 或 /details。`;
+      ? `Current: model request is running ${toolName}${elapsed}.`
+      : `当前：模型请求正在运行 ${toolName}${elapsed}。`;
   }
-  if (runningTask) {
-    const step = runningTask.currentStep ?? runningTask.userVisibleSummary;
+  if (phase === "permission_waiting") {
     return context.language === "en-US"
-      ? `Current: ${runningTask.title} · ${step}${elapsed}.`
-      : `当前：${runningTask.title} · ${step}${elapsed}。`;
+      ? `Current: model request is waiting for approval${elapsed}.`
+      : `当前：模型请求正在等待确认${elapsed}。`;
   }
-  return context.language === "en-US" ? "Current: idle." : "当前：空闲。";
+  const label =
+    context.language === "en-US"
+      ? phase.includes("failed")
+        ? "model request failed"
+        : phase.includes("completed")
+          ? "model request completed"
+          : "model request is active"
+      : phase.includes("failed")
+        ? "模型请求失败"
+        : phase.includes("completed")
+          ? "模型请求已完成"
+          : "模型请求进行中";
+  return context.language === "en-US"
+    ? `Current: ${label}${elapsed}.`
+    : `当前：${label}${elapsed}。`;
+}
+
+function formatBtwPendingApprovalLine(context: TuiContext): string | undefined {
+  if (!context.pendingLocalApproval) return undefined;
+  return context.language === "en-US"
+    ? "Current: waiting for your approval."
+    : "当前：正在等待你的确认。";
+}
+
+function formatBtwWorkflowLine(context: TuiContext): string | undefined {
+  const run = context.workflows.activeRun;
+  if (!run || !isActiveWorkflowStatus(run.status)) return undefined;
+  const runningStep = run.steps.find((step) => step.status === "running");
+  const completed = run.steps.filter(
+    (step) => step.status === "completed" || step.status === "partial",
+  ).length;
+  const total = run.steps.length;
+  const step =
+    runningStep?.title ?? run.steps.find((item) => item.status === "blocked")?.summary ?? run.goal;
+  const elapsed = formatBtwElapsed(run.startedAt, context.language);
+  return context.language === "en-US"
+    ? `Current: workflow ${formatBtwResult(run.status, context.language)} · ${completed}/${total} · ${truncateDisplay(step, 90)}${elapsed}.`
+    : `当前：workflow ${formatBtwResult(run.status, context.language)} · ${completed}/${total} · ${truncateDisplay(step, 90)}${elapsed}。`;
+}
+
+function formatBtwBackgroundTaskLine(
+  task: BackgroundTaskState,
+  language: Language,
+  active: boolean,
+): string {
+  const summary = task.currentStep ?? task.userVisibleSummary;
+  const elapsed = active ? formatBtwElapsed(task.startedAt, language) : "";
+  return language === "en-US"
+    ? `Current: ${formatBtwTaskKind(task.kind)} ${formatBtwResult(task.status, language)} · ${truncateDisplay(summary, 90)}${elapsed}.`
+    : `当前：${formatBtwTaskKind(task.kind)} ${formatBtwResult(task.status, language)} · ${truncateDisplay(summary, 90)}${elapsed}。`;
+}
+
+function isActiveWorkflowStatus(
+  status: NonNullable<WorkflowState["activeRun"]>["status"],
+): boolean {
+  return status === "running" || status === "blocked";
+}
+
+function isBtwActiveBackgroundTask(task: BackgroundTaskState): boolean {
+  return isActiveBackgroundStatus(task.status) || (task.kind === "job" && task.status === "paused");
+}
+
+function formatBtwTaskKind(kind: BackgroundTaskState["kind"]): string {
+  if (kind === "bash") return "background task";
+  return kind;
+}
+
+function formatBtwModelRequestSummary(
+  request: NonNullable<TuiContext["lastModelRequest"]>,
+  language: Language,
+): string {
+  const tool = request.toolName ? ` ${request.toolName}` : "";
+  if (language === "en-US") {
+    if (request.phase === "tool_running") return `last ran tool${tool}`;
+    if (request.phase === "permission_waiting") return "last waited for approval";
+    return "last finished or was cleared";
+  }
+  if (request.phase === "tool_running") return `最近运行过工具${tool}`;
+  if (request.phase === "permission_waiting") return "最近等待过确认";
+  return "最近已结束或已清理";
+}
+
+function formatBtwResult(status: string, language: Language): string {
+  const zh: Record<string, string> = {
+    running: "运行中",
+    paused: "已暂停",
+    completed: "已完成",
+    pass: "通过",
+    fail: "失败",
+    failed: "失败",
+    partial: "部分完成",
+    blocked: "阻塞",
+    cancelled: "已取消",
+    timeout: "超时",
+    stale: "已过期",
+  };
+  return language === "en-US" ? status.replaceAll("_", " ") : (zh[status] ?? status);
+}
+
+function formatBtwElapsed(startedAt: string, language: Language): string {
+  return language === "en-US"
+    ? ` · elapsed ${formatElapsedSince(startedAt)}`
+    : ` · 耗时 ${formatElapsedSince(startedAt)}`;
 }
 
 async function handleInterruptCommand(context: TuiContext, output: Writable): Promise<void> {
@@ -8136,7 +8364,7 @@ async function recordVerificationEvidence(
   const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind: "test_result",
-    summary: `${report.status.toUpperCase()} ${report.summary} 日志：${report.logPath ?? "无日志"}`,
+    summary: `${formatVerificationEvidenceStatusSummary(report)} 日志：${report.logPath ?? "无日志"}`,
     source: report.logPath ?? "Verification Runner",
     supportsClaims,
     createdAt: new Date().toISOString(),
@@ -8165,6 +8393,13 @@ async function recordVerificationEvidence(
       severity: report.status === "fail" ? "high" : "medium",
     });
   }
+}
+
+function formatVerificationEvidenceStatusSummary(report: VerificationReport): string {
+  const statusLabel = report.status.toUpperCase();
+  return new RegExp(`^${statusLabel}(?:\\s|:|：)`, "u").test(report.summary)
+    ? report.summary
+    : `${statusLabel} ${report.summary}`;
 }
 
 async function recordAgentExecutionEvidence(
@@ -8779,6 +9014,15 @@ function clearRequestActivity(context: TuiContext): void {
   const timer = context.requestActivity?.slowTimer;
   if (timer) {
     clearTimeout(timer);
+  }
+  if (context.requestActivityPhase) {
+    const startedAt = (context as { requestActivityStartedAt?: number }).requestActivityStartedAt;
+    context.lastModelRequest = {
+      phase: context.requestActivityPhase,
+      toolName: context.requestActivityToolName,
+      startedAt: startedAt ? new Date(startedAt).toISOString() : undefined,
+      endedAt: new Date().toISOString(),
+    };
   }
   context.requestActivity = undefined;
   context.requestActivityPhase = undefined;

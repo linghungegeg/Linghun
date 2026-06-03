@@ -99,9 +99,25 @@ export function formatJobNextAction(job: DurableJobState, language: Language): s
       : `可用 /job pause ${job.id}、/job cancel ${job.id}、/job report ${job.id} 或 /job logs ${job.id}。`;
   }
   if (job.status === "blocked") {
+    const reason = job.pauseReason ?? "";
+    if (reason.startsWith("needs_handoff_repair:")) {
+      return language === "en-US"
+        ? "Repair the handoff packet or evidence state, then /job resume."
+        : "先修复 handoff/evidence 状态，再用 /job resume。";
+    }
+    if (reason.startsWith("agent_blocked:")) {
+      return language === "en-US"
+        ? `Inspect /job report ${job.id} and /job logs ${job.id}; resume after fixing the blocked child agent cause.`
+        : `查看 /job report ${job.id} 和 /job logs ${job.id}；修复 child agent 阻塞原因后再 resume。`;
+    }
+    if (reason.includes("provider") || reason.includes("model") || reason.includes("api_key")) {
+      return language === "en-US"
+        ? "Fix model/provider configuration, then /job resume."
+        : "先修复模型/provider 配置，再用 /job resume。";
+    }
     return language === "en-US"
-      ? "Repair the handoff packet or evidence/index state, then /job resume."
-      : "先修复 handoff/evidence/index 状态，再用 /job resume。";
+      ? `Inspect /job report ${job.id} and /job logs ${job.id}; resume after fixing the blocked reason.`
+      : `查看 /job report ${job.id} 和 /job logs ${job.id}；修复阻塞原因后再 resume。`;
   }
   return language === "en-US"
     ? `Inspect /job report ${job.id}; completed/cancelled/timeout/stale/blocked never count as verification PASS.`

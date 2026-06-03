@@ -436,8 +436,11 @@ export function formatVerificationPlan(plan: VerificationStep[], language: Langu
 }
 
 export function formatVerificationReport(report: VerificationReport, language: Language): string {
+  const statusLabel = report.status.toUpperCase();
+  const statusAlreadyShown = new RegExp(`^${statusLabel}(?:\\s|:|：)`, "u").test(report.summary);
+  const summary = statusAlreadyShown ? report.summary : `${statusLabel} ${report.summary}`;
   const lines = [
-    `${report.status.toUpperCase()} ${report.summary}`,
+    summary,
     language === "en-US" ? `Duration: ${report.durationMs}ms` : `耗时：${report.durationMs}ms`,
   ];
   for (const command of report.commands) {

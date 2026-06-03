@@ -1,6 +1,11 @@
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { createVerificationPlan, formatVerificationPlan } from "./verification-command-runtime.js";
+import type { VerificationReport } from "./index.js";
+import {
+  createVerificationPlan,
+  formatVerificationPlan,
+  formatVerificationReport,
+} from "./verification-command-runtime.js";
 
 describe("/verify command", () => {
   describe("typecheck action", () => {
@@ -76,5 +81,46 @@ describe("/verify command", () => {
         }
       }
     });
+  });
+
+  it("formats zh/en pass reports without duplicating PASS", () => {
+    const report: VerificationReport = {
+      id: "verify-pass",
+      status: "pass",
+      summary: "PASS：1 个验证步骤通过。",
+      commands: [
+        {
+          kind: "smoke",
+          command: "node -e \"console.log('ok')\"",
+          reason: "fixture",
+          status: "pass",
+          summary: "ok",
+          exitCode: 0,
+          durationMs: 1,
+        },
+      ],
+      unverified: [],
+      risk: [],
+      logPath: "/tmp/verify",
+      startedAt: "2026-06-03T00:00:00.000Z",
+      endedAt: "2026-06-03T00:00:00.001Z",
+      durationMs: 1,
+      nextAction: "review",
+    };
+
+    const zh = formatVerificationReport(report, "zh-CN");
+    const en = formatVerificationReport(report, "en-US");
+
+    expect(zh.split("\n")[0]).toBe("PASS：1 个验证步骤通过。");
+    expect(en.split("\n")[0]).toBe("PASS：1 个验证步骤通过。");
+    expect(zh).not.toContain("PASS PASS");
+    expect(en).not.toContain("PASS PASS");
+    expect(zh).not.toContain("PASS PASS：");
+    expect(en).not.toContain("PASS PASS：");
+
+    const englishReport = { ...report, summary: "PASS: 1 verification step passed." };
+    expect(formatVerificationReport(englishReport, "en-US").split("\n")[0]).toBe(
+      "PASS: 1 verification step passed.",
+    );
   });
 });

@@ -375,11 +375,19 @@ function createSummaryFirstPreview(
   const metadata = output?.data && typeof output.data === "object" ? output.data : undefined;
   const count = readNumber(metadata, "count");
   const dataLines = readNumber(metadata, "lines");
+  const windowLines = readNumber(metadata, "windowLines");
+  const totalLines = readNumber(metadata, "totalLines");
+  const contentLines = readNumber(metadata, "contentLines");
   const exitCode = readNumber(metadata, "exitCode");
   const stats = [
-    language === "en-US"
-      ? `${dataLines ?? lines.length} line(s)`
-      : `${dataLines ?? lines.length} 行`,
+    formatToolLineStat(name, {
+      language,
+      visibleLines: dataLines ?? lines.length,
+      windowLines,
+      totalLines,
+      contentLines,
+      truncated: Boolean(output?.truncated),
+    }),
   ];
   if (count !== undefined) {
     stats.push(language === "en-US" ? `${count} match(es)` : `${count} 条结果`);
@@ -425,6 +433,34 @@ function createSummaryFirstPreview(
     return { text: [`- ${stats.join("; ")}`, ...tail, `- ${hint}`].join("\n"), truncated: true };
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
+}
+
+function formatToolLineStat(
+  name: ToolName,
+  input: {
+    language: Language;
+    visibleLines: number;
+    windowLines?: number;
+    totalLines?: number;
+    contentLines?: number;
+    truncated: boolean;
+  },
+): string {
+  if (name !== "Read" || input.totalLines === undefined) {
+    return input.language === "en-US"
+      ? `${input.visibleLines} line(s)`
+      : `${input.visibleLines} 行`;
+  }
+  const windowLines = input.windowLines ?? input.visibleLines;
+  const contentLines = input.contentLines ?? input.totalLines;
+  if (input.truncated) {
+    return input.language === "en-US"
+      ? `window ${windowLines}/${input.totalLines} line(s); contentLines=${contentLines}`
+      : `窗口 ${windowLines}/${input.totalLines} 行；contentLines=${contentLines}`;
+  }
+  return input.language === "en-US"
+    ? `total ${input.totalLines} line(s); contentLines=${contentLines}`
+    : `总计 ${input.totalLines} 行；contentLines=${contentLines}`;
 }
 
 function formatBashTail(lines: string[], language: Language): string[] {

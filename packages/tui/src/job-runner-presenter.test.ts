@@ -173,6 +173,18 @@ describe("job runner presenters", () => {
     expect(mapDurableJobToBackgroundResult("completed")).toBe("partial");
     expect(mapDurableJobToBackgroundResult("timeout")).toBe("timeout");
     expect(formatJobNextAction(baseJob, "en-US")).toContain("/job cancel job-test");
+    expect(
+      formatJobNextAction(
+        { ...baseJob, status: "blocked", pauseReason: "agent_blocked:agent-1" },
+        "zh-CN",
+      ),
+    ).not.toContain("handoff/evidence/index");
+    expect(
+      formatJobNextAction(
+        { ...baseJob, status: "blocked", pauseReason: "agent_blocked:agent-1" },
+        "en-US",
+      ),
+    ).toContain("blocked child agent cause");
 
     const rendered = formatBackgroundTask(baseBackground, "en-US");
     expect(rendered).toContain("[background] Job: safe · timeout · timeout 1/4");
