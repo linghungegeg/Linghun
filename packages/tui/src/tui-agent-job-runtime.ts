@@ -200,10 +200,22 @@ export function mapAgentBackgroundResult(
 }
 
 export function findAgent(context: TuiContext, id: string | undefined): AgentRun | undefined {
-  if (!id) {
-    return context.agents[0];
+  if (id) {
+    const normalized = id.trim();
+    return context.agents.find(
+      (agent) =>
+        agent.id === normalized ||
+        agent.id.endsWith(normalized) ||
+        agent.addressableName === normalized ||
+        agent.teamName === normalized,
+    );
   }
-  return context.agents.find((agent) => agent.id === id || agent.id.endsWith(id));
+  return (
+    context.agents.find((agent) => agent.status === "running") ??
+    context.agents.find((agent) => agent.status === "stale") ??
+    context.agents.find((agent) => agent.status === "blocked") ??
+    context.agents[0]
+  );
 }
 
 export function formatAgentSummary(agent: AgentRun, _context: TuiContext): string {

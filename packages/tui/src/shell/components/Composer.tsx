@@ -461,6 +461,7 @@ const HINT_NOTICE_DECAY_MS = 1500;
 
 export function Composer({ view, onInput, capability }: ComposerProps): React.ReactNode {
   const [buffer, setBuffer] = useState<EditBuffer>(createEditBuffer());
+  const bufferRef = useRef<EditBuffer>(buffer);
   const [slashSelection, setSlashSelection] = useState(0);
   const [slashHidden, setSlashHidden] = useState(false);
   const [permissionFocus, setPermissionFocus] = useState<PermissionActionId>("allow_once");
@@ -492,15 +493,12 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     [view.language, view.permission],
   );
 
-  // D.13E Step 2 修正 #1：交互型 picker 面板渲染时 Composer.useInput 必须
-  // isActive=false，让 ConfigPanel/HelpPanel/BtwPanel/SessionsPanel 自己成为
-  // ↑↓/Enter/Esc 的唯一消费者。普通 CommandPanel 只处理 Esc；Composer
-  // 保持活跃，让 PageUp/PageDown/滚轮继续滚动 task viewport。
   const configPanelActive = Boolean(
     view.configPanel || view.helpPanel || view.btwPanel || view.sessionsPanel,
   );
 
   const text = bufferToString(buffer);
+  const commandPanelActive = Boolean(view.commandPanel);
   const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
   // Slash candidates surface in two cases:
   //   1. Bare "/" — show the core 5 entries as a soft onboarding affordance.
@@ -537,11 +535,20 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       : Math.max(0, Math.min(slashSelection, slashCandidates.length - 1));
 
   const resetBuffer = useCallback((nextText = "") => {
-    setBuffer(createEditBuffer(nextText));
+    const next = createEditBuffer(nextText);
+    bufferRef.current = next;
+    setBuffer(next);
     setSlashSelection(0);
   }, []);
 
   const setBufferAndResetSelection = useCallback((next: EditBuffer) => {
+    bufferRef.current = next;
+    setBuffer(next);
+    setSlashSelection(0);
+  }, []);
+  const updateBufferAndResetSelection = useCallback((update: (current: EditBuffer) => EditBuffer) => {
+    const next = update(bufferRef.current);
+    bufferRef.current = next;
     setBuffer(next);
     setSlashSelection(0);
   }, []);
@@ -592,7 +599,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     if (chunks.length === 0) return;
     const joined = sanitizeComposerInput(chunks.join(""));
     if (!joined) return;
-    setBuffer((prev) => bufferInsert(prev, joined));
+    const next = bufferInsert(bufferRef.current, joined);
+    bufferRef.current = next;
+    setBuffer(next);
     setSlashSelection(0);
   }, []);
 
@@ -626,9 +635,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   useInput(
     (input, key) => {
       // D.13E Step 2 — Owner-priority dispatcher 显式化：
-      // 用 selectInputOwner 决定本次事件归属，permission > paste > slash > composer。
+      // 用 selectInputOwner 决定本次事件归属，permission > panel > paste > slash > composer。
       const owner = selectInputOwner(input, key, {
         permissionActive,
+        panelActive: configPanelActive || commandPanelActive,
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
       });
@@ -689,7 +699,25 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // ─── 2. Paste 聚合（次高优先级）────────────────────────────────────
+      // ─── 2. Panel layer keys ───────────────────────────────────────────
+      if (owner === "panel") {
+        if (key.escape) {
+          if (view.helpPanel) void onInput({ type: "help-close" });
+          else if (view.btwPanel) void onInput({ type: "btw-close" });
+          else if (view.sessionsPanel) void onInput({ type: "sessions-close" });
+          else if (view.configPanel) void onInput({ type: "config-back" });
+          else if (view.commandPanel) void onInput({ type: "command-panel-close" });
+          else void onInput({ type: "escape" });
+          return;
+        }
+        if (key.ctrl && input.toLowerCase() === "o") {
+          void onInput({ type: "toggle-details" });
+          return;
+        }
+      }
+      if (configPanelActive) return;
+
+      // ─── 3. Paste 聚合（次高优先级）────────────────────────────────────
       // owner === "paste" 表示进入 paste 路径，包含 pending 期 Enter / Esc /
       // 普通字符聚合 / 大 chunk 4 种情况。
       if (owner === "paste") {
@@ -707,7 +735,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         return;
       }
 
-      // ─── 3. Slash candidates owner（统一消费并 return；禁止 fall-through）────
+      // ─── 4. Slash candidates owner（统一消费并 return；禁止 fall-through）────
       const slashVisible = slashCandidates.length > 0 && !slashHidden;
       if (owner === "slash") {
         if (key.escape) {
@@ -809,15 +837,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // Multiline: Shift+Enter plus terminal-safe fallbacks.
       if (isMultilineEnterSequence(input)) {
-        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
         return;
       }
       if (key.return && (key.shift || key.meta)) {
-        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
         return;
       }
       if ((key.ctrl && input === "j") || input === "\n") {
-        setBufferAndResetSelection(bufferInsert(buffer, "\n"));
+        updateBufferAndResetSelection((current) => bufferInsert(current, "\n"));
         return;
       }
       if (key.return && text.endsWith("\\")) {
@@ -1111,13 +1139,10 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       if (input && input !== "\r" && input !== "\n") {
         const sanitized = sanitizeComposerInput(input);
         if (sanitized) {
-          setBufferAndResetSelection(bufferInsert(buffer, sanitized));
+          updateBufferAndResetSelection((current) => bufferInsert(current, sanitized));
         }
       }
     },
-    // D.13E Step 2 修正 #1：交互型 picker 面板渲染时 isActive=false，让面板
-    // 自己独占 ↑↓/Enter/Esc。普通 CommandPanel 不停用 Composer，以便
-    // PageUp/PageDown/滚轮继续回看 transcript；Esc 仍由 CommandPanel 关闭。
     { isActive: !configPanelActive },
   );
 

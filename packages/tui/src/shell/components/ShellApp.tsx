@@ -192,65 +192,6 @@ function TaskLayout({
             </Box>
           ) : null}
 
-          {/* Run 3 B — 高级面板移到 blocks/activity 之后渲染，作为最新 surface。
-            stickToBottom=true 时面板在底部可见，不会被历史 transcript 裁掉。
-            面板打开时 Composer isActive=false，避免双消费。
-            Permission > HelpPanel > BtwPanel > SessionsPanel > ConfigPanel > CommandPanel 互斥。 */}
-          {!view.permission && view.helpPanel ? (
-            <HelpPanel
-              panel={view.helpPanel}
-              controller={controller}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-          {!view.permission && !view.helpPanel && view.btwPanel ? (
-            <BtwPanel
-              panel={view.btwPanel}
-              controller={controller}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-          {!view.permission && !view.helpPanel && !view.btwPanel && view.sessionsPanel ? (
-            <SessionsPanel
-              panel={view.sessionsPanel}
-              controller={controller}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-          {!view.permission &&
-          !view.helpPanel &&
-          !view.btwPanel &&
-          !view.sessionsPanel &&
-          view.configPanel ? (
-            <ConfigPanel
-              panel={view.configPanel}
-              controller={controller}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-          {!view.permission &&
-          !view.helpPanel &&
-          !view.btwPanel &&
-          !view.sessionsPanel &&
-          !view.configPanel &&
-          view.commandPanel ? (
-            <CommandPanel
-              panel={view.commandPanel}
-              controller={controller}
-              width={view.width - 4}
-              noColor={noColor}
-              language={view.language}
-            />
-          ) : null}
-
           {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
           {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
             <TaskSuggestionBar
@@ -271,6 +212,12 @@ function TaskLayout({
             </Box>
           ) : null}
         </TranscriptViewport>
+        <PanelLayer
+          view={view}
+          controller={controller}
+          width={view.width - 4}
+          noColor={noColor}
+        />
       </Box>
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents
@@ -322,6 +269,76 @@ function TaskLayout({
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
+
+function PanelLayer({
+  view,
+  controller,
+  width,
+  noColor,
+}: {
+  view: ShellViewModel;
+  controller: ShellController;
+  width: number;
+  noColor: boolean;
+}): React.ReactNode {
+  if (view.permission) return null;
+  if (view.helpPanel) {
+    return (
+      <HelpPanel
+        panel={view.helpPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
+  if (view.btwPanel) {
+    return (
+      <BtwPanel
+        panel={view.btwPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
+  if (view.sessionsPanel) {
+    return (
+      <SessionsPanel
+        panel={view.sessionsPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
+  if (view.configPanel) {
+    return (
+      <ConfigPanel
+        panel={view.configPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
+  if (view.commandPanel) {
+    return (
+      <CommandPanel
+        panel={view.commandPanel}
+        controller={controller}
+        width={width}
+        noColor={noColor}
+        language={view.language}
+      />
+    );
+  }
+  return null;
+}
 
 function ActivityIndicator({
   activity,

@@ -25,8 +25,8 @@ const idleCtx: OwnerContext = {
 };
 
 describe("OWNER_PRIORITY", () => {
-  it("is fixed permission > paste > slash > composer", () => {
-    expect(OWNER_PRIORITY).toEqual(["permission", "paste", "slash", "composer"]);
+  it("is fixed permission > panel > paste > slash > composer", () => {
+    expect(OWNER_PRIORITY).toEqual(["permission", "panel", "paste", "slash", "composer"]);
   });
 });
 
@@ -100,6 +100,24 @@ describe("selectInputOwner — paste second", () => {
   it("paste owner on aggregated single char while pastePending", () => {
     const ctx: OwnerContext = { ...idleCtx, pastePending: true };
     expect(selectInputOwner("a", noKey, ctx)).toBe("paste");
+  });
+});
+
+describe("selectInputOwner — panel second", () => {
+  it("panel owns Escape before paste/slash/composer", () => {
+    const ctx: OwnerContext = {
+      ...idleCtx,
+      panelActive: true,
+      pastePending: true,
+      slashVisible: true,
+    };
+    expect(selectInputOwner("", { ...noKey, escape: true }, ctx)).toBe("panel");
+  });
+
+  it("panel owns Ctrl+O for details without blocking ordinary typing", () => {
+    const ctx: OwnerContext = { ...idleCtx, panelActive: true };
+    expect(selectInputOwner("o", { ...noKey, ctrl: true }, ctx)).toBe("panel");
+    expect(selectInputOwner("a", noKey, ctx)).toBe("composer");
   });
 });
 

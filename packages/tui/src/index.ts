@@ -557,6 +557,7 @@ import {
   formatToolStart,
 } from "./tool-output-presenter.js";
 import {
+  applyToolResultBudgetToMessages,
   type ToolResultBudgetRecord,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
@@ -1486,6 +1487,8 @@ export type TuiContext = {
    * 能在 await 前主动刷新一帧。plain TUI / 测试无此钩子时安全跳过。
    */
   shellRerender?: () => void;
+  /** Optional Ink output memory cleanup hook, invoked after context compaction succeeds. */
+  compactOutputMemory?: () => Promise<void> | void;
   /**
    * D.13Q-UX Task Surface — 通用 CommandPanel 状态。高级 slash 命令的结果
    * 由命令处理器 set 进这里，view-model 透传给 view.commandPanel。
@@ -1918,6 +1921,7 @@ async function runInkShell(
     resolveExit = resolve;
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
+  context.compactOutputMemory = () => shellOutput.compactOutputMemory();
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
@@ -3770,7 +3774,37 @@ async function executeRegistryWorkflowStep(
     if (step.action === "agent") {
       const role = step.role ?? "worker";
       const task = step.task ?? (goal || workflow.description);
+      const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
       await handleForkCommand([role, task], context, output);
+      const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
+      if (!agent) {
+        return {
+          status: "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            "blocked",
+            context.language === "en-US"
+              ? "agent runtime did not start; step is waiting for runtime/resource availability"
+              : "agent runtime 未启动；步骤正在等待 runtime/resource 可用",
+            context.language,
+          ),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+      if (agent.status === "failed") {
+        return {
+          status: "failed",
+          summary: formatWorkflowStepSummary(step.id, "failed", agent.summary, context.language),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+      if (agent.status === "blocked" || agent.status === "stale" || agent.status === "cancelled") {
+        return {
+          status: agent.status === "cancelled" ? "cancelled" : "blocked",
+          summary: formatWorkflowStepSummary(step.id, "blocked", agent.summary, context.language),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
     } else if (step.action === "verification") {
       const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output);
       const status = workflowStepStatusFromVerification(report.status);
@@ -3932,7 +3966,26 @@ async function executeWorkflowStep(
         const summary = formatWorkflowStepSummary(
           request.sliceId,
           "blocked",
-          context.language === "en-US" ? "agent runtime did not start" : "agent runtime 未启动",
+          context.language === "en-US"
+            ? "agent runtime did not start; step is waiting for runtime/resource availability"
+            : "agent runtime 未启动；步骤正在等待 runtime/resource 可用",
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "blocked",
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
+      const agentTask = context.backgroundTasks.find((task) => task.id === agent.id);
+      if (!agentTask) {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          context.language === "en-US"
+            ? `agent runtime ${agent.id} has no background task; treating step as waiting/resource blocked`
+            : `agent runtime ${agent.id} 没有后台任务；步骤按 waiting/resource blocked 处理`,
           context.language,
         );
         await captureWorkflowFailureLearning(request, summary, context);
@@ -5146,11 +5199,6 @@ async function cancelPendingInteraction(
     writeStatus(output, context);
     return;
   }
-  writeLine(
-    output,
-    "当前没有可取消的等待交互；已执行的工具不会被静默撤销。需要停止长任务请用 /interrupt 或 /job cancel <id>。",
-  );
-  writeStatus(output, context);
 }
 
 function hasPendingEnterConfirmation(context: TuiContext): boolean {
@@ -7686,6 +7734,9 @@ const compactPreflightDeps = {
   },
 };
 
+const TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS = 2_000;
+const TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS = 8_000;
+
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
 }
@@ -8291,6 +8342,14 @@ async function recordToolResultBudgetEvidence(
   sessionId: string,
   record: ToolResultBudgetRecord,
 ): Promise<string> {
+  const existing = context.evidence.find(
+    (item) =>
+      item.fullOutputPath === record.artifact.path ||
+      item.outputPath === record.artifact.path ||
+      item.summary.includes(record.artifact.relativePath),
+  );
+  if (existing) return existing.id;
+
   const evidence = createEvidenceRecord(
     "command_output",
     formatToolResultBudgetEvidenceSummary(record),
@@ -9678,28 +9737,35 @@ async function buildModelMessagesWithRecentContext(
       }
     }
     const selected = withoutCurrent.slice(-Math.max(MAX_CONTEXT_MESSAGES, added + toolCalls.size));
+    const historyMessages: ModelMessage[] = [];
     for (const event of selected) {
       if (event.type === "user_message") {
-        messages.push({ role: "user", content: event.text });
+        historyMessages.push({ role: "user", content: event.text });
       }
       if (event.type === "assistant_text_delta") {
-        messages.push({ role: "assistant", content: event.text });
+        historyMessages.push({ role: "assistant", content: event.text });
       }
       if (event.type === "tool_result") {
         const toolCall = toolCalls.get(event.toolUseId);
         if (!toolCall) {
-          messages.push({
+          const content = await budgetToolResultTranscriptContent(
+            context,
+            sessionId,
+            event.toolUseId,
+            event.content,
+          );
+          historyMessages.push({
             role: "assistant",
             content: `Previous ${event.toolName} tool_result summary: ${JSON.stringify({
               isError: event.isError ?? false,
               evidenceId: event.evidenceId,
-              content: event.content,
+              content,
             })}`,
           });
           continue;
         }
-        messages.push({ role: "assistant", content: "", toolCalls: [toolCall] });
-        messages.push({
+        historyMessages.push({ role: "assistant", content: "", toolCalls: [toolCall] });
+        historyMessages.push({
           role: "tool",
           tool_call_id: event.toolUseId,
           content: JSON.stringify({
@@ -9711,6 +9777,12 @@ async function buildModelMessagesWithRecentContext(
         });
       }
     }
+    const budgetedHistory = await budgetRecentContextToolResults(
+      context,
+      sessionId,
+      historyMessages,
+    );
+    messages.push(...budgetedHistory);
   } catch (error) {
     await appendSystemEvent(
       context,
@@ -9721,6 +9793,22 @@ async function buildModelMessagesWithRecentContext(
   }
   messages.push({ role: "user", content: currentUserText });
   return messages;
+}
+
+async function budgetRecentContextToolResults(
+  context: TuiContext,
+  sessionId: string,
+  messages: ModelMessage[],
+): Promise<ModelMessage[]> {
+  const budgeted = await applyToolResultBudgetToMessages(messages, {
+    projectPath: context.projectPath,
+    sessionId,
+  });
+  if (budgeted.records.length === 0) return messages;
+  for (const record of budgeted.records) {
+    await recordToolResultBudgetEvidence(context, sessionId, record);
+  }
+  return budgeted.messages;
 }
 
 async function streamFinalModelAnswerWithoutTools(
@@ -11806,6 +11894,12 @@ async function appendDeferredToolResultEvent(
   isError: boolean,
   evidenceId?: string,
 ): Promise<void> {
+  const budgetedContent = await budgetToolResultTranscriptContent(
+    context,
+    sessionId,
+    toolUseId,
+    content,
+  );
   // 复用既有 tool_result store schema；toolName 字段塞 dispatchName 字符串以便排查（doctor /
   // details / verifier 都已基于 toolName 字段读取）。store 类型对 toolName 是 string 标签，
   // 所以这里用 cast 的方式保持向后兼容，不引入新 event kind。
@@ -11813,7 +11907,7 @@ async function appendDeferredToolResultEvent(
     type: "tool_result",
     toolUseId,
     toolName: dispatchName as unknown as ToolName,
-    content,
+    content: budgetedContent,
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
@@ -11829,15 +11923,56 @@ async function appendToolResultEvent(
   isError: boolean,
   evidenceId?: string,
 ): Promise<void> {
+  const budgetedContent = await budgetToolResultTranscriptContent(
+    context,
+    sessionId,
+    toolUseId,
+    content,
+  );
   await context.store.appendEvent(sessionId, {
     type: "tool_result",
     toolUseId,
     toolName,
-    content,
+    content: budgetedContent,
     isError,
     evidenceId,
     createdAt: new Date().toISOString(),
   });
+}
+
+async function budgetToolResultTranscriptContent(
+  context: TuiContext,
+  sessionId: string,
+  toolUseId: string,
+  content: unknown,
+): Promise<unknown> {
+  const contentText = stringifyToolResultContentForBudget(content);
+  if (!contentText || contentText.startsWith("<persisted-tool-result>")) return content;
+  if (
+    contentText.length <= LINGHUN_DEFAULT_TOOL_RESULT_CHARS &&
+    Buffer.byteLength(contentText, "utf8") <= LINGHUN_MAX_TOOL_RESULT_BYTES
+  ) {
+    return content;
+  }
+
+  const budgeted = await applyToolResultBudgetToMessages(
+    [{ role: "tool", tool_call_id: toolUseId, content: contentText }],
+    { projectPath: context.projectPath, sessionId },
+  );
+  for (const record of budgeted.records) {
+    await recordToolResultBudgetEvidence(context, sessionId, record);
+  }
+  const replacement = budgeted.messages[0];
+  return replacement?.role === "tool" ? replacement.content : content;
+}
+
+function stringifyToolResultContentForBudget(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return null;
+  }
 }
 
 // D.14D-R P0-2 — 结构化索引工具执行 glue。
@@ -13007,8 +13142,54 @@ function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
   return {
     type: "tool_call_end",
     id,
-    output,
+    output: compactToolOutputForTranscript(output),
     createdAt: new Date().toISOString(),
+  };
+}
+
+function compactToolOutputForTranscript(output: ToolOutput): ToolOutput {
+  const text = typeof output.text === "string" ? output.text : "";
+  const textBytes = Buffer.byteLength(text, "utf8");
+  if (
+    text.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
+    textBytes <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
+  ) {
+    const compactedDetails =
+      typeof output.details === "string" && output.details.length > TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
+        ? `<transcript-tool-output-details-truncated originalChars=${output.details.length}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`
+        : output.details;
+    return compactedDetails === output.details ? output : { ...output, details: compactedDetails };
+  }
+  const preview = text.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS);
+  return {
+    ...output,
+    text: [
+      preview,
+      "",
+      `<transcript-tool-output-truncated originalChars=${text.length} originalBytes=${textBytes}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`,
+    ].join("\n"),
+    details:
+      typeof output.details === "string" && output.details.length > TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS
+        ? `<transcript-tool-output-details-truncated originalChars=${output.details.length}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`
+        : output.details,
+    data: compactToolOutputDataForTranscript(output.data),
+    truncated: true,
+  };
+}
+
+function compactToolOutputDataForTranscript(data: unknown): unknown {
+  if (!data || typeof data !== "object") return data;
+  const serialized = JSON.stringify(data);
+  if (
+    serialized.length <= LINGHUN_DEFAULT_TOOL_RESULT_CHARS &&
+    Buffer.byteLength(serialized, "utf8") <= LINGHUN_MAX_TOOL_RESULT_BYTES
+  ) {
+    return data;
+  }
+  return {
+    truncated: true,
+    originalChars: serialized.length,
+    preview: serialized.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
   };
 }
 
@@ -13140,6 +13321,7 @@ export function __testCreateShellBlockOutput(
   // unsupported first-pass final answer 不残留于 streaming block / lastFullOutput。
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
+  compactOutputMemory(): Promise<void>;
 } {
   return createShellBlockOutputForTest(context, blocks, onWrite);
 }

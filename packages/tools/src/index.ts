@@ -658,10 +658,7 @@ async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOut
   const limit = input.limit ?? DEFAULT_SEARCH_LIMIT;
   const matches: string[] = [];
 
-  for (const filePath of await listFiles(root)) {
-    if (matches.length >= limit) {
-      break;
-    }
+  for await (const filePath of listFiles(root, () => matches.length >= limit)) {
     const content = await safeReadText(filePath);
     if (content === null) {
       continue;
@@ -697,7 +694,7 @@ async function globTool(input: GlobInput, context: ToolContext): Promise<ToolOut
   const matcher = globToRegExp(input.pattern);
   const matches: string[] = [];
 
-  for (const filePath of await listFiles(root)) {
+  for await (const filePath of listFiles(root, () => matches.length >= limit)) {
     const rel = relativePath(context.workspaceRoot, filePath);
     if (matcher.test(rel) || matcher.test(basename(filePath))) {
       matches.push(rel);
@@ -1163,28 +1160,29 @@ function detectNewlineStyle(content: string): "lf" | "crlf" | "mixed" | "none" {
   return "none";
 }
 
-async function listFiles(root: string): Promise<string[]> {
+async function* listFiles(root: string, shouldStop?: () => boolean): AsyncGenerator<string> {
+  if (shouldStop?.()) return;
   const current = await stat(root);
   if (current.isFile()) {
-    return [root];
+    yield root;
+    return;
   }
 
   const entries = await readdir(root, { withFileTypes: true });
-  const files: string[] = [];
   for (const entry of entries) {
+    if (shouldStop?.()) return;
     if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
       continue;
     }
     const entryPath = join(root, entry.name);
     if (entry.isDirectory()) {
-      files.push(...(await listFiles(entryPath)));
+      yield* listFiles(entryPath, shouldStop);
       continue;
     }
     if (entry.isFile()) {
-      files.push(entryPath);
+      yield entryPath;
     }
   }
-  return files;
 }
 
 async function safeReadText(filePath: string): Promise<string | null> {

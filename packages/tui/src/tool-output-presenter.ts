@@ -329,11 +329,10 @@ function createToolOutputPreview(
   language: Language,
   output?: ToolOutput,
 ): { text: string; truncated: boolean } {
-  if (isSummaryFirstTool(name)) {
-    return createSummaryFirstPreview(name, text, language, output);
-  }
-
   if (name === "Todo") {
+    const structured = createTodoSurfacePreview(output, language);
+    if (structured) return structured;
+
     const lines = text.split(/\r?\n/u);
     if (lines.length <= TODO_OUTPUT_ITEM_LIMIT) {
       return { text, truncated: false };
@@ -350,7 +349,87 @@ function createToolOutputPreview(
     };
   }
 
+  if (isSummaryFirstTool(name)) {
+    return createSummaryFirstPreview(name, text, language, output);
+  }
+
   return { text, truncated: false };
+}
+
+function createTodoSurfacePreview(
+  output: ToolOutput | undefined,
+  language: Language,
+): { text: string; truncated: boolean } | undefined {
+  const items = readTodoItems(output?.data);
+  if (!items) return undefined;
+  if (items.length === 0) {
+    return {
+      text: language === "en-US" ? "Todo: no active tasks." : "Todo：暂无任务。",
+      truncated: false,
+    };
+  }
+  const counts = {
+    in_progress: items.filter((item) => item.status === "in_progress").length,
+    pending: items.filter((item) => item.status === "pending").length,
+    completed: items.filter((item) => item.status === "completed").length,
+    blocked: items.filter((item) => item.status === "blocked").length,
+  };
+  const lead =
+    items.find((item) => item.status === "in_progress") ??
+    items.find((item) => item.status === "blocked") ??
+    items.find((item) => item.status === "pending");
+  const parts =
+    language === "en-US"
+      ? [
+          `${counts.in_progress} in progress`,
+          `${counts.pending} pending`,
+          `${counts.completed} completed`,
+          `${counts.blocked} blocked`,
+        ]
+      : [
+          `进行中 ${counts.in_progress}`,
+          `待办 ${counts.pending}`,
+          `完成 ${counts.completed}`,
+          `阻塞 ${counts.blocked}`,
+        ];
+  const lines = [language === "en-US" ? `Todo: ${parts.join(" · ")}` : `Todo：${parts.join(" · ")}`];
+  if (lead) {
+    const label =
+      language === "en-US"
+        ? lead.status.replace("_", " ")
+        : lead.status === "in_progress"
+          ? "进行中"
+          : lead.status === "blocked"
+            ? "阻塞"
+            : "待办";
+    lines.push(`${label}: ${lead.content}`);
+  }
+  if (items.length > 1) {
+    lines.push(formatDetailsHint(language));
+  }
+  return { text: lines.join("\n"), truncated: items.length > 1 };
+}
+
+type TodoSurfaceItem = {
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "blocked";
+};
+
+function readTodoItems(data: unknown): TodoSurfaceItem[] | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const items = (data as Record<string, unknown>).items;
+  if (!Array.isArray(items)) return undefined;
+  return items.filter((item): item is TodoSurfaceItem => {
+    if (!item || typeof item !== "object") return false;
+    const record = item as Record<string, unknown>;
+    return (
+      typeof record.content === "string" &&
+      (record.status === "pending" ||
+        record.status === "in_progress" ||
+        record.status === "completed" ||
+        record.status === "blocked")
+    );
+  });
 }
 
 function isSummaryFirstTool(name: ToolName): boolean {

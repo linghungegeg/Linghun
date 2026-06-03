@@ -18,7 +18,7 @@ import {
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
-import { createToolContext } from "@linghun/tools";
+import { createToolContext, type ToolOutput } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
@@ -133,6 +133,7 @@ import {
   createReadinessItems,
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
+import { findAgent } from "./tui-agent-job-runtime.js";
 import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -5761,6 +5762,45 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.agents[0]?.task).toContain("Review the requested change.");
   });
 
+  it("registry workflows register each agent step as a real AgentRun", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-registry-workflow-agents-"));
+    await mkdir(join(project, ".linghun", "workflows"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "workflows", "agents.json"),
+      JSON.stringify({
+        id: "agents",
+        name: "Agents",
+        description: "Run two real agent steps.",
+        steps: [
+          { id: "planner", action: "agent", role: "planner", task: "plan the fix" },
+          { id: "worker", action: "agent", role: "worker", task: "inspect the runtime" },
+        ],
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiTextFetch("registry agent step completed");
+    const { loadWorkflowRegistry } = await import("./agent-workflow-registry.js");
+    const registry = await loadWorkflowRegistry(project);
+    context.workflowRegistry = { workflows: registry.items, errors: registry.errors };
+
+    await handleSlashCommand("/workflows run agents", context, output);
+
+    expect(context.agents).toHaveLength(2);
+    expect(context.agents.map((agent) => agent.status)).toEqual(["completed", "completed"]);
+    expect(context.backgroundTasks.filter((task) => task.kind === "agent")).toHaveLength(2);
+    expect(context.workflows.activeRun?.status).toBe("completed");
+    expect(context.workflows.activeRun?.steps.map((step) => step.status)).toEqual([
+      "completed",
+      "completed",
+    ]);
+  });
+
   it("passes custom agent registry model to child provider stream", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-registry-agent-model-"));
     await mkdir(join(project, ".linghun", "agents"), { recursive: true });
@@ -10948,7 +10988,121 @@ describe("Phase 06 TUI slash commands", () => {
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
     expect(transcript).toContain('"toolName":"Read"');
-    expect(transcript).toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(transcript).toContain("<persisted-tool-result>");
+    expect(transcript).toContain("tool_result_budget_persisted");
+    expect(transcript).toMatch(/sha256=[a-f0-9]{64}/u);
+    const artifact = await expectBudgetArtifact(project, transcript);
+    expect(artifact).toContain("READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    const transcriptEvents = transcript
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line) as { type?: string; content?: unknown; output?: ToolOutput });
+    const toolResultEvent = transcriptEvents.find((event) => event.type === "tool_result");
+    const toolEndEvent = transcriptEvents.find((event) => event.type === "tool_call_end");
+    expect(JSON.stringify(toolResultEvent?.content)).not.toContain(
+      "READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER",
+    );
+    expect(JSON.stringify(toolEndEvent?.output)).not.toContain(
+      "READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER",
+    );
+    expect(JSON.stringify(toolEndEvent?.output)).toContain("transcript-tool-output-truncated");
+  });
+
+  it("budgets legacy raw tool_result from transcript before the next provider request", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-legacy-tool-budget-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "legacy-tool-budget-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "legacy-tool-budget-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "legacy-tool-budget-model" });
+    await store.appendEvent(session.id, {
+      type: "tool_call_start",
+      id: "legacy-call-read",
+      name: "Read",
+      input: { path: "legacy-large.txt" },
+      createdAt: new Date().toISOString(),
+    });
+    await store.appendEvent(session.id, {
+      type: "tool_result",
+      toolUseId: "legacy-call-read",
+      toolName: "Read",
+      content: `LEGACY_BUDGET_START\n${"x".repeat(60_000)}\nLEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER`,
+      isError: false,
+      createdAt: new Date().toISOString(),
+    });
+    await store.appendEvent(session.id, {
+      type: "tool_result",
+      toolUseId: "legacy-unpaired-read",
+      toolName: "Read",
+      content: `LEGACY_UNPAIRED_START\n${"y".repeat(60_000)}\nLEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER`,
+      isError: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    const requests = mockOpenAiTextFetch("继续完成。");
+    const output = new MemoryOutput();
+    const config = createTestModelConfig({
+      defaultModel: "legacy-tool-budget-model",
+      providers: {
+        "openai-compatible": {
+          type: "openai-compatible",
+          baseUrl: "https://example.test/v1",
+          apiKey: "sk-test",
+          model: "legacy-tool-budget-model",
+        },
+      },
+    });
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+
+    await __testSendMessage("继续", context, gateway, output);
+
+    expect(requests).toHaveLength(1);
+    const first = requests[0] as {
+      messages?: Array<{ role?: string; tool_call_id?: string; content?: string }>;
+    };
+    const toolMessage = (first.messages ?? []).find((message) => message.role === "tool");
+    expect(toolMessage?.tool_call_id).toBe("legacy-call-read");
+    expect(toolMessage?.content).toContain("<persisted-tool-result>");
+    expect(toolMessage?.content).not.toContain("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    const assistantSummary = (first.messages ?? []).find(
+      (message) =>
+        message.role === "assistant" &&
+        message.content?.includes("legacy-unpaired-read"),
+    );
+    expect(assistantSummary?.content).toContain("<persisted-tool-result>");
+    expect(assistantSummary?.content).not.toContain("LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER");
+
+    const transcript = await readFile(session.transcriptPath, "utf8");
+    expect(transcript).toContain("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(transcript).toContain("LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(transcript).toContain("tool_result_budget_persisted");
+    await expectBudgetArtifact(project, transcript);
+    const artifactDir = join(project, ".linghun", "session", "tool-results", session.id);
+    const artifacts = await Promise.all(
+      (await readdir(artifactDir)).map((entry) => readFile(join(artifactDir, entry), "utf8")),
+    );
+    expect(artifacts.some((artifact) => artifact.includes("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER"))).toBe(
+      true,
+    );
+    expect(
+      artifacts.some((artifact) =>
+        artifact.includes("LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER"),
+      ),
+    ).toBe(true);
   });
 
   it("keeps OpenAI chat tool_call/tool_result paired after provider preflight compact", async () => {
@@ -14334,6 +14488,18 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("状态为 idle");
   });
 
+  it("Esc stays quiet when there is no pending or cancellable work", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-esc-idle-quiet-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleTuiKeypress("escape", context, output);
+
+    expect(output.text).toBe("");
+  });
+
   it("/interrupt sends AbortSignal to a running Bash background task", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -14540,6 +14706,56 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.agents[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.status).toBe("completed");
     expect(output.text).toContain("agent agent-interrupt-explicit 已取消");
+  });
+
+  it("resolves implicit agent refs to active before stale or blocked agents", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-ref-resolution-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const startedAt = new Date().toISOString();
+    const baseAgent = {
+      type: "worker" as const,
+      role: "executor" as const,
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "resolve refs",
+      model: "deepseek-v4-flash",
+      permissionMode: "default" as const,
+      transcriptPath: join(project, "agent.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: "agent",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    context.agents = [
+      { ...baseAgent, id: "agent-blocked", status: "blocked" as const },
+      { ...baseAgent, id: "agent-stale", status: "stale" as const },
+      {
+        ...baseAgent,
+        id: "agent-running",
+        status: "running" as const,
+        addressableName: "runner",
+        teamName: "team-a",
+      },
+    ];
+
+    expect(findAgent(context, undefined)?.id).toBe("agent-running");
+    expect(findAgent(context, "runner")?.id).toBe("agent-running");
+    expect(findAgent(context, "team-a")?.id).toBe("agent-running");
+    context.agents = context.agents.filter((agent) => agent.id !== "agent-running");
+    expect(findAgent(context, undefined)?.id).toBe("agent-stale");
+    context.agents = context.agents.filter((agent) => agent.id !== "agent-stale");
+    expect(findAgent(context, undefined)?.id).toBe("agent-blocked");
   });
 
   it("model-facing AgentControl cancel uses the same durable agent cancel path", async () => {

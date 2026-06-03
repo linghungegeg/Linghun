@@ -161,6 +161,17 @@ describe("TUI Interaction Contract — 输入归属", () => {
     expect(selectInputOwner("", returnKey, ctx)).toBe("permission");
   });
 
+  it("panel 存在时 Esc 只归 panel，不落到全局 escape", () => {
+    const ctx: OwnerContext = {
+      permissionActive: false,
+      panelActive: true,
+      pastePending: false,
+      slashVisible: true,
+    };
+    expect(selectInputOwner("", escKey, ctx)).toBe("panel");
+    expect(selectInputOwner("a", baseKey, ctx)).toBe("composer");
+  });
+
   it("permission 关闭后 Composer 恢复输入", () => {
     const ctx: OwnerContext = { permissionActive: false, pastePending: false, slashVisible: false };
     expect(selectInputOwner("a", baseKey, ctx)).toBe("composer");
@@ -305,16 +316,33 @@ describe("TUI Interaction Contract — 面板可见性（view-model 层）", () 
 });
 
 describe("TUI Interaction Contract — 主屏降噪", () => {
-  it("Todo 输出超过 8 条时主屏只显示前 8 条 + 隐藏提示", async () => {
+  it("Todo 结构化数据在主屏显示语义状态摘要，不显示原始列表", async () => {
     const { createLayeredToolOutput } = await import("../../tool-output-presenter.js");
-    const todoText = Array.from({ length: 12 }, (_, i) => `- task ${i + 1}`).join("\n");
-    const layered = createLayeredToolOutput("Todo", { text: todoText }, "zh-CN");
-    const lines = layered.preview.split("\n");
-    expect(lines.length).toBeLessThanOrEqual(9);
-    expect(layered.preview).toContain("主输出已隐藏");
+    const layered = createLayeredToolOutput(
+      "Todo",
+      {
+        text: "[pending] task 1\n[in_progress] task 2",
+        data: {
+          items: [
+            { id: "1", content: "task 1", status: "pending" },
+            { id: "2", content: "task 2", status: "in_progress" },
+            { id: "3", content: "task 3", status: "completed" },
+            { id: "4", content: "task 4", status: "blocked" },
+          ],
+        },
+      },
+      "zh-CN",
+    );
+    expect(layered.preview).toContain("进行中 1");
+    expect(layered.preview).toContain("待办 1");
+    expect(layered.preview).toContain("完成 1");
+    expect(layered.preview).toContain("阻塞 1");
+    expect(layered.preview).toContain("进行中: task 2");
+    expect(layered.preview).not.toContain("[pending]");
+    expect(layered.truncated).toBe(true);
   });
 
-  it("Todo 输出 <=8 条时完整显示", async () => {
+  it("Todo 无结构化数据时保留旧文本回退", async () => {
     const { createLayeredToolOutput } = await import("../../tool-output-presenter.js");
     const todoText = Array.from({ length: 5 }, (_, i) => `- task ${i + 1}`).join("\n");
     const layered = createLayeredToolOutput("Todo", { text: todoText }, "zh-CN");

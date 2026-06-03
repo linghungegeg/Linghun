@@ -5,7 +5,7 @@ import type { Key } from "ink";
  *
  * 把 Composer.tsx useInput 回调里的 4 段 if 链抽成纯函数：
  *
- *   permission > paste > slash > composer
+ *   permission > panel > paste > slash > composer
  *
  * 现有实现见 packages/tui/src/shell/components/Composer.tsx 第 448-500+ 行。
  * 本模块只把 owner 选择的判定逻辑（"当前事件应当属于哪个 owner"）reduce
@@ -20,12 +20,14 @@ import type { Key } from "ink";
  * 本模块不持有状态，不调用 useInput / useState；纯函数 + 常量。
  */
 
-export type InputOwner = "permission" | "paste" | "slash" | "composer";
+export type InputOwner = "permission" | "panel" | "paste" | "slash" | "composer";
 
 /** Composer 中各 owner 的有效条件（由调用方在每次 useInput 回调起始处计算并传入）。 */
 export type OwnerContext = {
   /** view.permission 存在 → permission 卡占据焦点。 */
   permissionActive: boolean;
+  /** Any active panel surface that should close/navigate before global input. */
+  panelActive?: boolean;
   /** pastePendingRef.current → paste 聚合窗口内。 */
   pastePending: boolean;
   /** slashCandidates.length > 0 && !slashHidden → slash 候选可见。 */
@@ -76,7 +78,9 @@ export function shouldOwnerBePaste(
  *
  *   1. permission（permissionActive）
  *      —— 权限卡占位时，所有按键都被 permission 选择器接管。
- *   2. paste
+ *   2. panel
+ *      —— 面板层存在时，至少 Esc/Ctrl+O 等面板键先由 panel 处理，不落到全局停止。
+ *   3. paste
  *      —— pastePending 期间 Enter / Esc 也算 paste owner（吞 Enter / 取消粘贴）；
  *         其他大 chunk 或聚合中按键继续 paste。
  *   3. slash
@@ -89,6 +93,8 @@ export function shouldOwnerBePaste(
  */
 export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerContext): InputOwner {
   if (ctx.permissionActive) return "permission";
+
+  if (ctx.panelActive && isPanelKey(input, key)) return "panel";
 
   // paste 优先：pending 期间的 Enter/Esc 也算 paste owner（用于吞 Enter / 取消粘贴）；
   // 大 chunk 或 pending 中的普通字符同样 paste。
@@ -125,9 +131,14 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
   );
 }
 
+function isPanelKey(input: string, key: OwnerKeyShape): boolean {
+  return key.escape || (key.ctrl && input.toLowerCase() === "o");
+}
+
 /** 调试 / 测试辅助：返回 owner 选择的稳定优先级数组。 */
 export const OWNER_PRIORITY: ReadonlyArray<InputOwner> = [
   "permission",
+  "panel",
   "paste",
   "slash",
   "composer",

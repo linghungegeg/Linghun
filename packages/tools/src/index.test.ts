@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
 
 describe("Phase 05 core tools", () => {
@@ -326,6 +326,102 @@ describe("Phase 05 core tools", () => {
 
     expect(grep.output.text).toContain("invoice.ts:1");
     expect(grep.output.data).toMatchObject({ count: 1 });
+  });
+
+  it("stops Glob traversal after the requested limit without entering later large trees", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await Promise.all(
+      Array.from({ length: 100 }, (_, index) =>
+        writeFile(join(project, `${String(index).padStart(3, "0")}-match.txt`), "match\n", "utf8"),
+      ),
+    );
+    const hugeTree = join(project, "zzz-huge-tree");
+    await mkdir(hugeTree);
+    await writeFile(join(hugeTree, "should-not-be-visited.txt"), "match\n", "utf8");
+
+    vi.resetModules();
+    const fsPromises = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const visitedDirs: string[] = [];
+    vi.doMock("node:fs/promises", () => ({
+      ...fsPromises,
+      readdir: async (...args: Parameters<typeof fsPromises.readdir>) => {
+        const target = String(args[0]);
+        visitedDirs.push(target);
+        if (target === hugeTree) {
+          throw new Error("Glob should stop before traversing zzz-huge-tree");
+        }
+        const entries = await fsPromises.readdir(...args);
+        return Array.isArray(entries)
+          ? [...entries].sort((left, right) => String(left.name).localeCompare(String(right.name)))
+          : entries;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const glob = await tools.runTool(
+        "Glob",
+        { pattern: "*.txt", path: ".", limit: 100 },
+        tools.createToolContext(project),
+      );
+
+      expect(glob.output.data).toMatchObject({ count: 100 });
+      expect(glob.output.truncated).toBe(true);
+      expect(visitedDirs).not.toContain(hugeTree);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("stops Grep traversal after the requested limit without entering later large trees", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await Promise.all(
+      Array.from({ length: 100 }, (_, index) =>
+        writeFile(join(project, `${String(index).padStart(3, "0")}-match.txt`), "needle\n", "utf8"),
+      ),
+    );
+    const hugeTree = join(project, "zzz-huge-tree");
+    await mkdir(hugeTree);
+    await writeFile(join(hugeTree, "should-not-be-visited.txt"), "needle\n", "utf8");
+
+    vi.resetModules();
+    const fsPromises = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const visitedDirs: string[] = [];
+    vi.doMock("node:fs/promises", () => ({
+      ...fsPromises,
+      readdir: async (...args: Parameters<typeof fsPromises.readdir>) => {
+        const target = String(args[0]);
+        visitedDirs.push(target);
+        if (target === hugeTree) {
+          throw new Error("Grep should stop before traversing zzz-huge-tree");
+        }
+        const entries = await fsPromises.readdir(...args);
+        return Array.isArray(entries)
+          ? [...entries].sort((left, right) => String(left.name).localeCompare(String(right.name)))
+          : entries;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const grep = await tools.runTool(
+        "Grep",
+        { pattern: "needle", path: ".", limit: 100 },
+        tools.createToolContext(project),
+      );
+
+      expect(grep.output.data).toMatchObject({ count: 100 });
+      expect(grep.output.truncated).toBe(true);
+      expect(visitedDirs).not.toContain(hugeTree);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
   });
 
   it("reports Read offset/limit windows as truncated file windows", async () => {

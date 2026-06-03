@@ -246,6 +246,7 @@ export function recordCompactBoundary(context: TuiContext, boundary: CompactBoun
   if (context.cache.compactBoundaries.length > MAX_COMPACT_BOUNDARIES) {
     context.cache.compactBoundaries.shift();
   }
+  void context.compactOutputMemory?.();
 }
 
 function getAutoCompactBufferTokens(context: TuiContext, runtime: CompactPreflightRuntime): number {

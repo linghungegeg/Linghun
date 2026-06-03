@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -3924,6 +3925,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // 测试只用到 language / lastFullOutput / suppressLastFullOutputCapture 三个字段。
     return {
       language: "zh-CN",
+      projectPath: "/tmp",
+      sessionId: "test-session",
       lastFullOutput: undefined,
       suppressLastFullOutputCapture: false,
     } as unknown as TuiContext;
@@ -4044,6 +4047,98 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const visible = view.blocks.find((b) => b.id === "assistant-stream-ctrl-o");
     expect(visible).toBeDefined();
     expect(visible?.nextAction ?? "").toContain("Ctrl+O");
+  });
+
+  it("output memory compact 保留 keep/fail/blocked 与最近普通输出", async () => {
+    const blocks: ProductBlockViewModel[] = [
+      { id: "keep-old", kind: "details", status: "info", title: "", summary: "keep", keep: true },
+      { id: "fail-old", kind: "error", status: "fail", title: "", summary: "fail" },
+      { id: "blocked-old", kind: "error", status: "blocked", title: "", summary: "blocked" },
+    ];
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
+
+    for (let index = 0; index < 90; index += 1) {
+      output.write(`ephemeral-${index}\n`);
+    }
+    await output.compactOutputMemory();
+
+    expect(blocks.find((block) => block.id === "keep-old")).toBeDefined();
+    expect(blocks.find((block) => block.id === "fail-old")).toBeDefined();
+    expect(blocks.find((block) => block.id === "blocked-old")).toBeDefined();
+    expect(blocks.length).toBeLessThanOrEqual(80);
+    expect(blocks.some((block) => block.summary.includes("ephemeral-0"))).toBe(false);
+    expect(blocks.some((block) => block.summary.includes("ephemeral-89"))).toBe(true);
+  });
+
+  it("output memory compact archives large lastFullOutput behind a bounded summary", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "linghun-output-memory-"));
+    try {
+      const ctx = { ...makeFakeContext(), projectPath: tempDir, sessionId: "s1" };
+      const blocks: ProductBlockViewModel[] = [];
+      const output = __testCreateShellBlockOutput(ctx, blocks);
+
+      output.write(`${"large-output\n".repeat(1300)}`);
+      await output.compactOutputMemory();
+
+      expect(ctx.lastFullOutput).toContain("<persisted-tui-output>");
+      expect(ctx.lastFullOutput?.length).toBeLessThan(12_000);
+      expect(ctx.lastFullOutput).toContain("artifactPath: .linghun/session/tui-output/s1/");
+      expect(ctx.lastFullOutput).toContain("preview:");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("output memory compact archives large block fullText behind a bounded summary", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "linghun-output-block-memory-"));
+    try {
+      const ctx = { ...makeFakeContext(), projectPath: tempDir, sessionId: "s1" };
+      const large = "block-output\n".repeat(1300);
+      const blocks: ProductBlockViewModel[] = [
+        {
+          id: "large-block",
+          kind: "details",
+          status: "info",
+          title: "",
+          summary: "large",
+          fullText: large,
+          keep: true,
+        },
+      ];
+      const output = __testCreateShellBlockOutput(ctx, blocks);
+
+      await output.compactOutputMemory();
+
+      expect(blocks[0]?.fullText).toContain("<persisted-tui-block-output>");
+      expect(blocks[0]?.fullText?.length).toBeLessThan(12_000);
+      expect(blocks[0]?.fullText).toContain("artifactPath: .linghun/session/tui-output/s1/");
+      expect(blocks[0]?.fullText).not.toContain(large);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("output memory compact serializes concurrent cleanup requests", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "linghun-output-concurrent-memory-"));
+    try {
+      const ctx = { ...makeFakeContext(), projectPath: tempDir, sessionId: "s1" };
+      const blocks: ProductBlockViewModel[] = [];
+      const output = __testCreateShellBlockOutput(ctx, blocks);
+
+      output.write(`${"first-large-output\n".repeat(1300)}`);
+      const firstCleanup = output.compactOutputMemory();
+      output.write(`${"second-large-output\n".repeat(1300)}`);
+      const secondCleanup = output.compactOutputMemory();
+
+      await Promise.all([firstCleanup, secondCleanup]);
+
+      expect(ctx.lastFullOutput).toContain("<persisted-tui-output>");
+      expect(ctx.lastFullOutput).not.toContain("second-large-output\n".repeat(1300));
+      expect(ctx.lastFullOutput?.length).toBeLessThan(12_000);
+      expect(blocks.every((block) => (block.fullText?.length ?? 0) < 12_000)).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

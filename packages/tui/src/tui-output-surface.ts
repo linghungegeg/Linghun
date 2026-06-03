@@ -1,8 +1,18 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { Writable } from "node:stream";
 import type { TuiContext } from "./index.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock } from "./shell/view-model.js";
 import { writeLine } from "./startup-runtime.js";
+
+const MAX_OUTPUT_BLOCKS = 80;
+const PRESERVE_RECENT_EPHEMERAL_BLOCKS = 12;
+const MAX_LAST_FULL_OUTPUT_CHARS = 12_000;
+const MAX_BLOCK_FULL_TEXT_CHARS = 12_000;
+const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
+const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
@@ -23,6 +33,7 @@ export class ShellBlockOutput extends Writable {
    * 否则只会留下最后一片 chunk 而非完整文本。
    */
   private assistantBlockId: string | undefined;
+  private compactOutputMemoryQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly context: TuiContext,
@@ -54,6 +65,7 @@ export class ShellBlockOutput extends Writable {
       if (!this.context.suppressLastFullOutputCapture) {
         this.context.lastFullOutput = normalized;
       }
+      void this.compactOutputMemory();
       // D.13Q-UX Real Smoke Fix v3 — 不再在 ShellBlockOutput 内做 ephemeral
       // splice 重排（旧实现 keep+lastEphemeral 会破坏 user → assistant →
       // diagnostic → user → assistant 的真实时间线，并且与 view-model 的
@@ -122,6 +134,7 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = nextFull;
     }
+    trimOutputBlocks(this.blocks);
     this.onWrite();
   }
 
@@ -132,6 +145,7 @@ export class ShellBlockOutput extends Writable {
    */
   endAssistantStream(): void {
     this.assistantBlockId = undefined;
+    void this.compactOutputMemory();
     this.onWrite();
   }
 
@@ -167,6 +181,7 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
     }
+    void this.compactOutputMemory();
     this.onWrite();
   }
 
@@ -200,6 +215,7 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
+    void this.compactOutputMemory();
     this.onWrite();
   }
 
@@ -236,6 +252,7 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
+    void this.compactOutputMemory();
     this.onWrite();
   }
 
@@ -261,8 +278,169 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
+    void this.compactOutputMemory();
     this.onWrite();
   }
+
+  async compactOutputMemory(): Promise<void> {
+    this.compactOutputMemoryQueue = this.compactOutputMemoryQueue.then(() =>
+      this.compactOutputMemoryOnce(),
+    );
+    return this.compactOutputMemoryQueue;
+  }
+
+  private async compactOutputMemoryOnce(): Promise<void> {
+    trimOutputBlocks(this.blocks);
+    try {
+      await compactBlockFullText(this.context, this.blocks);
+      await compactLastFullOutput(this.context);
+    } catch (error) {
+      compactBlockFullTextInMemory(this.blocks, error);
+      compactLastFullOutputInMemory(this.context, error);
+    }
+  }
+}
+
+function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {
+  if (blocks.length <= MAX_OUTPUT_BLOCKS) return;
+  const isPreserved = (block: ProductBlockViewModel): boolean =>
+    block.keep === true || block.status === "fail" || block.status === "blocked";
+  const ephemeralIndices = blocks
+    .map((block, index) => (isPreserved(block) ? -1 : index))
+    .filter((index) => index >= 0);
+  const keepEphemeral = new Set(
+    ephemeralIndices.slice(Math.max(0, ephemeralIndices.length - PRESERVE_RECENT_EPHEMERAL_BLOCKS)),
+  );
+  const selected = blocks.filter((block, index) => isPreserved(block) || keepEphemeral.has(index));
+  if (selected.length > MAX_OUTPUT_BLOCKS) {
+    const overflow = selected.length - MAX_OUTPUT_BLOCKS;
+    const removable = selected
+      .map((block, index) => (isPreserved(block) ? -1 : index))
+      .filter((index) => index >= 0)
+      .slice(0, overflow);
+    const drop = new Set(removable);
+    selected.splice(0, selected.length, ...selected.filter((_block, index) => !drop.has(index)));
+  }
+  blocks.splice(0, blocks.length, ...selected);
+}
+
+async function compactBlockFullText(
+  context: TuiContext,
+  blocks: ProductBlockViewModel[],
+): Promise<void> {
+  for (const block of blocks) {
+    const value = block.fullText;
+    if (!value || value.length <= MAX_BLOCK_FULL_TEXT_CHARS || isCompactedOutputText(value)) {
+      continue;
+    }
+    const artifact = await writeOutputArtifact(context, value);
+    if (block.fullText !== value) {
+      continue;
+    }
+    block.fullText = buildCompactedOutputSummary({
+      tag: "persisted-tui-block-output",
+      relativePath: artifact.relativePath,
+      originalChars: value.length,
+      sha256: artifact.sha256,
+      preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
+    });
+  }
+}
+
+function compactBlockFullTextInMemory(blocks: ProductBlockViewModel[], error: unknown): void {
+  for (const block of blocks) {
+    const value = block.fullText;
+    if (!value || value.length <= MAX_BLOCK_FULL_TEXT_CHARS || isCompactedOutputText(value)) {
+      continue;
+    }
+    block.fullText = buildCompactedOutputSummary({
+      tag: "compacted-tui-block-output",
+      archiveFailed: error instanceof Error ? error.message : String(error),
+      originalChars: value.length,
+      preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
+    });
+  }
+}
+
+async function compactLastFullOutput(context: TuiContext): Promise<void> {
+  const value = context.lastFullOutput;
+  if (!value || value.length <= MAX_LAST_FULL_OUTPUT_CHARS || isCompactedOutputText(value)) return;
+  const artifact = await writeOutputArtifact(context, value);
+  if (context.lastFullOutput !== value) return;
+  context.lastFullOutput = buildCompactedOutputSummary({
+    tag: "persisted-tui-output",
+    relativePath: artifact.relativePath,
+    originalChars: value.length,
+    sha256: artifact.sha256,
+    preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
+  });
+}
+
+function compactLastFullOutputInMemory(context: TuiContext, error: unknown): void {
+  const value = context.lastFullOutput;
+  if (!value || value.length <= MAX_LAST_FULL_OUTPUT_CHARS || isCompactedOutputText(value)) return;
+  context.lastFullOutput = buildCompactedOutputSummary({
+    tag: "compacted-tui-output",
+    archiveFailed: error instanceof Error ? error.message : String(error),
+    originalChars: value.length,
+    preview: value.slice(0, LAST_FULL_OUTPUT_PREVIEW_CHARS),
+  });
+}
+
+async function writeOutputArtifact(
+  context: TuiContext,
+  text: string,
+): Promise<{ relativePath: string; sha256: string }> {
+  const sessionId = context.sessionId ?? "unsaved";
+  const dir = join(
+    context.projectPath,
+    ".linghun",
+    "session",
+    OUTPUT_MEMORY_ARTIFACT_DIR,
+    sessionId,
+  );
+  await mkdir(dir, { recursive: true });
+  const sha256 = createHash("sha256").update(text).digest("hex");
+  const path = join(dir, `${randomUUID()}-${sha256.slice(0, 12)}.txt`);
+  await writeFile(path, text, "utf8");
+  return {
+    relativePath: relative(context.projectPath, path).replace(/\\/g, "/"),
+    sha256,
+  };
+}
+
+function buildCompactedOutputSummary(input: {
+  tag: string;
+  relativePath?: string;
+  archiveFailed?: string;
+  originalChars: number;
+  sha256?: string;
+  preview: string;
+}): string {
+  return [
+    `<${input.tag}>`,
+    input.relativePath ? `artifactPath: ${input.relativePath}` : "",
+    input.archiveFailed ? `archiveFailed: ${input.archiveFailed}` : "",
+    `originalChars: ${input.originalChars}`,
+    input.sha256 ? `sha256: ${input.sha256}` : "",
+    `previewChars: ${input.preview.length}`,
+    "read: use the artifact path if you need the full TUI output.",
+    "preview:",
+    input.preview,
+    input.originalChars > input.preview.length ? "..." : "",
+    `</${input.tag}>`,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+function isCompactedOutputText(value: string): boolean {
+  return (
+    value.startsWith("<persisted-tui-output>") ||
+    value.startsWith("<compacted-tui-output>") ||
+    value.startsWith("<persisted-tui-block-output>") ||
+    value.startsWith("<compacted-tui-block-output>")
+  );
 }
 
 /**
@@ -377,6 +555,7 @@ export function createShellBlockOutputForTest(
   discardAssistantBlock(id: string): void;
   replaceAssistantBlockContent(id: string, text: string): void;
   writeLocalCommandOutputLine(text: string): void;
+  compactOutputMemory(): Promise<void>;
 } {
   return new ShellBlockOutput(context, blocks, onWrite);
 }
