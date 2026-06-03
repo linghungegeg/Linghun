@@ -317,6 +317,17 @@ describe("Phase 05 core tools", () => {
     expect(read.output.text).not.toContain("Read window only");
   });
 
+  it("supports common leading (?i) case-insensitive Grep patterns", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const context = createToolContext(project);
+    await writeFile(join(project, "invoice.ts"), "export const InvoiceTotal = 1;\n", "utf8");
+
+    const grep = await runTool("Grep", { pattern: "(?i)invoice", path: "." }, context);
+
+    expect(grep.output.text).toContain("invoice.ts:1");
+    expect(grep.output.data).toMatchObject({ count: 1 });
+  });
+
   it("reports Read offset/limit windows as truncated file windows", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const context = createToolContext(project);

@@ -654,7 +654,7 @@ async function multiEditTool(input: MultiEditInput, context: ToolContext): Promi
 
 async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOutput> {
   const root = resolveWorkspacePath(context.workspaceRoot, input.path ?? ".");
-  const expression = new RegExp(input.pattern);
+  const expression = createGrepExpression(input.pattern);
   const limit = input.limit ?? DEFAULT_SEARCH_LIMIT;
   const matches: string[] = [];
 
@@ -682,6 +682,13 @@ async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOut
     data: { count: matches.length },
     truncated: matches.length >= limit,
   };
+}
+
+function createGrepExpression(pattern: string): RegExp {
+  if (pattern.startsWith("(?i)")) {
+    return new RegExp(pattern.slice(4), "i");
+  }
+  return new RegExp(pattern);
 }
 
 async function globTool(input: GlobInput, context: ToolContext): Promise<ToolOutput> {

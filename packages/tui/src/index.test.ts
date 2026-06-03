@@ -374,6 +374,107 @@ function mockOpenAiRepeatedRawToolProtocol(rawText: string): unknown[] {
   return requests;
 }
 
+function mockOpenAiReadThenAnswerFetch(
+  readInput: unknown,
+  finalText: string,
+  options?: { forceBashFirst?: boolean },
+): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      const hasToolResult = Array.isArray(request.messages)
+        ? request.messages.some((message: { role?: string }) => message.role === "tool")
+        : false;
+      const toolCall = !hasToolResult
+        ? {
+            id: "call-read-large",
+            toolName: options?.forceBashFirst ? "Bash" : "Read",
+            input: options?.forceBashFirst
+              ? { command: 'node -e "console.log(process.env.LINGHUN_OPENAI_API_KEY)"' }
+              : readInput,
+          }
+        : null;
+      const body = toolCall
+        ? [
+            `data: ${JSON.stringify({
+              id: `chatcmpl-read-${requests.length}`,
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: toolCall.id,
+                        type: "function",
+                        function: {
+                          name: toolCall.toolName,
+                          arguments: JSON.stringify(toolCall.input),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            })}`,
+            "data: [DONE]",
+            "",
+          ].join("\n\n")
+        : `data: ${JSON.stringify({ id: `chatcmpl-read-${requests.length}`, choices: [{ delta: { content: finalText } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
+function mockOpenAiUnsafeBashForWorkerFetch(): unknown[] {
+  const requests: unknown[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body));
+      requests.push(request);
+      const messages = Array.isArray(request.messages)
+        ? (request.messages as Array<{ role?: string; content?: string }>)
+        : [];
+      const system = messages.find((message) => message.role === "system")?.content ?? "";
+      const hasToolResult = messages.some((message) => message.role === "tool");
+      const isWorker = system.includes("Linghun worker child agent");
+      const body =
+        isWorker && !hasToolResult
+          ? [
+              `data: ${JSON.stringify({
+                id: `chatcmpl-worker-bash-${requests.length}`,
+                choices: [
+                  {
+                    delta: {
+                      tool_calls: [
+                        {
+                          id: "call-worker-bash",
+                          type: "function",
+                          function: {
+                            name: "Bash",
+                            arguments: JSON.stringify({
+                              command: 'node -e "console.log(process.env.LINGHUN_OPENAI_API_KEY)"',
+                            }),
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              })}`,
+              "data: [DONE]",
+              "",
+            ].join("\n\n")
+          : `data: ${JSON.stringify({ id: `chatcmpl-worker-bash-${requests.length}`, choices: [{ delta: { content: "child done" } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }),
+  );
+  return requests;
+}
+
 function mockOpenAiReportReadThenWriteFlow(report: string, finalText: string): unknown[] {
   const requests: unknown[] = [];
   vi.stubGlobal(
@@ -541,7 +642,7 @@ function mockOpenAiResponsesLongHistoryThenToolFetch(): unknown[] {
       } else if (mainRequestCount === 2) {
         body = [
           `data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", call_id: "call-compact-bash", name: "Bash" } })}\n\n`,
-          `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: JSON.stringify({ command: "node -e \"console.log('responses pair content')\"" }) })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, delta: JSON.stringify({ command: "echo responses pair content" }) })}\n\n`,
           `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", call_id: "call-compact-bash", name: "Bash" } })}\n\n`,
           `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp-compact-2", usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } })}\n\n`,
         ].join("");
@@ -4724,6 +4825,121 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
     ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
+  });
+
+  it("read-only multi-agent job uses Read metadata for large-file audit without avoidable Bash block", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-readonly-job-agents-"));
+    await mkdir(join(project, "src", "shared"), { recursive: true });
+    await writeFile(
+      join(project, "src", "shared", "large-generated.ts"),
+      `${Array.from(
+        { length: 1650 },
+        (_, index) => `export const line${index + 1} = ${index + 1};`,
+      ).join("\n")}\n`,
+      "utf8",
+    );
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const requests = mockOpenAiReadThenAnswerFetch(
+      { path: "src/shared/large-generated.ts" },
+      "Read confirmed contentLines=1650; readonly audit complete without Bash.",
+    );
+
+    await handleSlashCommand(
+      "/job run 只读审计 large-generated 大文件边界 --multi-agent --agents 4 --tokens 50000",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      verification?: { status?: string };
+      agents?: Array<{ type?: string; status?: string; summary?: string }>;
+    };
+    expect(persisted.status).toBe("completed");
+    expect(persisted.verification?.status).toBe("partial");
+    expect(persisted.agents?.every((agent) => agent.status === "completed")).toBe(true);
+    expect(persisted.agents?.some((agent) => agent.summary?.includes("contentLines=1650"))).toBe(
+      true,
+    );
+    const systemMessages = requests
+      .flatMap((request) =>
+        Array.isArray((request as { messages?: unknown[] }).messages)
+          ? ((request as { messages?: Array<{ role?: string; content?: string }> }).messages ?? [])
+          : [],
+      )
+      .filter((message) => message.role === "system")
+      .map((message) => message.content ?? "");
+    expect(systemMessages.some((message) => message.includes("contentLines"))).toBe(true);
+    expect(systemMessages.some((message) => message.includes("Bash is not a bypass"))).toBe(true);
+    expect(
+      systemMessages.some((message) =>
+        message.includes("Do not start/done/block guessed Todo ids"),
+      ),
+    ).toBe(true);
+    const readToolResults = requests.flatMap((request) => toolMessageContents(request));
+    expect(readToolResults.some((content) => content.includes('"contentLines":1650'))).toBe(true);
+    expect(
+      context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
+    ).not.toContainEqual(expect.objectContaining({ status: "paused", result: "partial" }));
+    expect(output.text).not.toContain("Bash 需要用户确认");
+  });
+
+  it("read-only multi-agent job remains blocked when worker requests unsafe Bash under allowBash=false", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-readonly-job-bash-block-"));
+    const config: LinghunConfig = {
+      ...createOpenAiRegistryAgentConfig("route-model"),
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiUnsafeBashForWorkerFetch();
+
+    await handleSlashCommand(
+      "/job run 只读审计 auth billing 和权限边界 --multi-agent --agents 4 --tokens 50000",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find((task) => task.kind === "job")?.id;
+    const statePath = join(
+      resolveStoragePaths(config, project).jobs,
+      jobId ?? "missing",
+      "state.json",
+    );
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      status?: string;
+      worker?: { status?: string; summary?: string };
+      result?: { status?: string; summary?: string };
+      verification?: { status?: string };
+      agents?: Array<{ type?: string; status?: string; summary?: string }>;
+    };
+    expect(persisted.status).toBe("blocked");
+    expect(persisted.worker?.status).toBe("blocked");
+    expect(persisted.result?.status).toBe("blocked");
+    expect(persisted.verification?.status).toBe("partial");
+    const worker = persisted.agents?.find((agent) => agent.type === "worker");
+    expect(worker?.status).toBe("blocked");
+    expect(worker?.summary).toContain("Bash 需要用户确认");
+    expect(context.backgroundTasks.find((task) => task.id === jobId)).toEqual(
+      expect.objectContaining({ status: "paused", result: "partial" }),
+    );
   });
 
   it("runs /workflows run through real workflow steps while /workflows plan stays preview-only", async () => {
@@ -10468,7 +10684,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     const requests = mockOpenAiToolFetch(
       "Bash",
-      { command: 'node -e "process.exit(7)"' },
+      { command: "false" },
       "Bash 失败结果已收到，我会改用现有证据说明。",
     );
     const output = new MemoryOutput();
@@ -10484,7 +10700,7 @@ describe("Phase 06 TUI slash commands", () => {
     const second = requests[1] as { messages?: { role?: string; content?: string }[] };
     const toolMessage = second.messages?.find((message) => message.role === "tool");
     expect(toolMessage?.content).toContain('"ok":false');
-    expect(toolMessage?.content).toContain('"exitCode":7');
+    expect(toolMessage?.content).toMatch(/"exitCode":\d+/u);
     expect(output.text).toContain("工具 Bash 已完成");
     expect(output.text).toContain("Bash 失败结果已收到");
 
@@ -11625,7 +11841,7 @@ describe("Phase 06 TUI slash commands", () => {
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    await handleSlashCommand('/bash node -e "process.exit(7)"', context, output);
+    await handleSlashCommand("/bash false", context, output);
     await handleSlashCommand("/failures", context, output);
 
     expect(context.failureLearning.records).toHaveLength(1);

@@ -2380,6 +2380,7 @@ async function executeAgentToolCall(
 }
 
 function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): string {
+  const readonlyAuditHint = createReadonlyAuditToolHint(agent);
   const roleHint =
     agent.type === "explorer"
       ? "Explore with read-only tools first. Return concise findings and evidence."
@@ -2398,9 +2399,25 @@ function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): stri
     `Permission mode: ${agent.permissionMode}`,
     `Pending mailbox messages: ${countPendingMailbox(agent)}`,
     "Use structured tools only; never write raw tool_use/tool_result protocol as text.",
+    readonlyAuditHint,
     "Respect the actual OS/shell before Bash. On Windows/PowerShell, prefer PowerShell cmdlets or Node one-liners; avoid Unix-only find|sed|head pipelines unless verified available.",
     "If a required tool is denied, asks for approval, or fails, report blocked instead of claiming completion.",
   ].join("\n");
+}
+
+function createReadonlyAuditToolHint(agent: AgentRun): string {
+  const factTools = agent.type === "verifier" ? "Read/Grep/Glob" : "Read/Grep/Glob/Todo";
+  const base = `For read-only audits, prefer ${factTools} for facts. Read results include totalLines/contentLines/windowLines/selectedLines; use contentLines for file line-count conclusions instead of calling Bash.`;
+  if (agent.type !== "worker" && agent.type !== "verifier") {
+    return agent.type === "explorer"
+      ? `${base} Do not start/done/block guessed Todo ids; list or add Todo items first, or skip Todo when Read/Grep/Glob can answer the audit.`
+      : base;
+  }
+  return [
+    base,
+    "Bash is not a bypass. When allowBash is false, only commands classified by the permission policy engine as safe readonly auto_allow_readonly may run without confirmation.",
+    "If a Bash command would need confirmation, switch back to Read/Grep/Glob when that can answer the audit; otherwise report blocked with the exact command and permission reason.",
+  ].join(" ");
 }
 
 function buildAgentUserMessage(agent: AgentRun): string {

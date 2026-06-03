@@ -295,6 +295,7 @@ const PATH_READ_HEADS = new Set<string>([
   "less",
   "more",
   "view",
+  "wc",
   "get-content",
   "gc",
 ]);
@@ -437,26 +438,38 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
 
   if (semantic === "readonly") {
     if (PATH_READ_HEADS.has(head)) {
-      const pathArg = args.find((a) => !a.startsWith("-"));
-      if (pathArg) {
-        const pathSafety = classifyPathString(pathArg, req.workspaceRoot);
-        if (pathSafety === "workspace_safe") {
+      const pathArgs = getPathReadArgs(head, args);
+      if (pathArgs.length > 0) {
+        const pathSafeties = pathArgs.map((arg) => classifyPathString(arg, req.workspaceRoot));
+        const unsafePathSafety =
+          pathSafeties.find((pathSafety) => pathSafety === "sensitive_path") ??
+          pathSafeties.find((pathSafety) => pathSafety !== "workspace_safe");
+        if (!unsafePathSafety) {
           return {
             decision: "auto_allow_readonly",
             semantic: "readonly",
-            pathSafety,
+            pathSafety: "workspace_safe",
             reason: `${head} 读取工作区内文件，自动放行。`,
             redactedSummary,
           };
         }
         return {
           decision: "require_permission",
-          semantic: pathSafety === "sensitive_path" ? "secret_read" : "outside_workspace",
-          pathSafety,
+          semantic: unsafePathSafety === "sensitive_path" ? "secret_read" : "outside_workspace",
+          pathSafety: unsafePathSafety,
           reason:
-            pathSafety === "sensitive_path"
+            unsafePathSafety === "sensitive_path"
               ? `${head} 命中敏感路径；不自动放行。`
               : `${head} 路径在工作区外或无法判定；不自动放行。`,
+          redactedSummary,
+        };
+      }
+      if (head === "wc") {
+        return {
+          decision: "require_permission",
+          semantic: "unknown",
+          pathSafety: "unknown_path",
+          reason: "wc 未提供可判定的工作区文件路径；不自动放行。",
           redactedSummary,
         };
       }
@@ -477,6 +490,13 @@ function classifyBashRequest(req: PolicyRequest): PolicyVerdict {
     reason: bashReasonFor(semantic, head),
     redactedSummary: finalSummary,
   };
+}
+
+function getPathReadArgs(head: string, args: string[]): string[] {
+  const pathArgs = args.filter((arg) => !arg.startsWith("-"));
+  if (head === "wc") return pathArgs;
+  const firstPath = pathArgs[0];
+  return firstPath ? [firstPath] : [];
 }
 
 /**
@@ -563,6 +583,9 @@ function classifyBashHead(head: string, args: string[]): SemanticClass {
   }
   // package managers: --version / -v stay readonly; install pairs go to install.
   if (isVersionQuery(args)) return "readonly";
+  if (head === "node") {
+    return classifyNodeSubcommand(args);
+  }
   for (const [pkgHead, verbs] of INSTALL_PAIRS) {
     if (head === pkgHead) {
       const verb = args.find((a) => !a.startsWith("-"))?.toLowerCase();
@@ -577,6 +600,13 @@ function classifyBashHead(head: string, args: string[]): SemanticClass {
   if (PATH_READ_HEADS.has(head)) return "readonly";
 
   if (READONLY_HEADS.has(head)) return "readonly";
+  return "unknown";
+}
+
+function classifyNodeSubcommand(args: string[]): SemanticClass {
+  if (args.length === 0) return "readonly";
+  if (isVersionQuery(args)) return "readonly";
+  if (args.some((arg) => arg === "-e" || arg === "--eval")) return "unknown";
   return "unknown";
 }
 

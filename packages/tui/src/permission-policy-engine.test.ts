@@ -43,6 +43,20 @@ describe("permission-policy-engine — Bash readonly auto allow", () => {
     expect(v.decision).toBe("auto_allow_readonly");
     expect(v.pathSafety).toBe("workspace_safe");
   });
+
+  it("wc -l workspace 内普通文件自动放行", () => {
+    const v = classifyToolRequest(bash("wc -l src/shared/large-generated.ts"));
+    expect(v.decision).toBe("auto_allow_readonly");
+    expect(v.semantic).toBe("readonly");
+    expect(v.pathSafety).toBe("workspace_safe");
+  });
+
+  it("wc 多路径中任一越界或敏感路径都不自动放行", () => {
+    const outside = process.platform === "win32" ? "C:\\Users\\Admin\\foo.txt" : "/etc/passwd";
+    const v = classifyToolRequest(bash(`wc -l src/shared/large-generated.ts ${outside}`));
+    expect(v.decision).toBe("require_permission");
+    expect(v.pathSafety).not.toBe("workspace_safe");
+  });
 });
 
 describe("permission-policy-engine — Bash require_permission", () => {
@@ -74,6 +88,11 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "powershell -EncodedCommand QQA=",
     "bash -c 'echo hi'",
     "cmd /c dir",
+    'node -e "console.log(process.env.LINGHUN_OPENAI_API_KEY)"',
+    "node -e \"require('child_process').execSync('git status')\"",
+    "node -e \"require('fs').writeFileSync('x.txt','x')\"",
+    "node -e \"require('fs').rmSync('x.txt')\"",
+    "node -e \"fetch('https://example.com')\"",
   ]) {
     it(`require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));
@@ -91,6 +110,9 @@ describe("permission-policy-engine — Bash require_permission", () => {
     "cat < input.txt",
     "echo `pwd`",
     "echo $(pwd)",
+    "Get-Content src/shared/large-generated.ts | Measure-Object -Line",
+    "node --version > version.txt",
+    "wc -l",
   ]) {
     it(`组合符强制 require_permission: ${cmd}`, () => {
       const v = classifyToolRequest(bash(cmd));
