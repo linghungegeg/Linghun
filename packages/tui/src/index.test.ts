@@ -9067,6 +9067,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("SHOULD_NOT_RUN");
     expect(output.text).not.toContain("tool_result");
     expect(transcript).toContain('"type":"tool_result"');
+    await expect(readFailureRecordFiles(project)).resolves.toEqual([]);
   });
 
   it("continues after cancelled model tool permission as a distinct tool_result", async () => {
@@ -18523,6 +18524,17 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.lastFullOutput).not.toContain("unknown-project");
   });
 });
+
+async function readFailureRecordFiles(projectPath: string): Promise<string[]> {
+  try {
+    return await readdir(join(projectPath, ".linghun", "failures"));
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    if (code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 describe("D.8 provider circuit breaker integration", () => {
   it("2 consecutive recoverable errors enter cooldown, 3rd check is blocked", async () => {

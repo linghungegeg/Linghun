@@ -286,6 +286,10 @@ import {
   validateModelSetupPartial,
 } from "./model-setup-runtime.js";
 import {
+  evaluateMetaScheduler,
+  formatMetaSchedulerDirective,
+} from "./meta-scheduler-runtime.js";
+import {
   type NaturalIntent,
   type PendingNaturalCommand,
   type SLASH_COMMAND_REGISTRY,
@@ -5628,6 +5632,7 @@ async function executePermissionApprove(
       approval.continuation,
       true,
     );
+    await recordModelToolFailureForMetaScheduler(context, approval.sessionId, result);
     const reportWriteGuard = approval.continuation?.reportWriteGuard;
     if (doesWriteSatisfyReportGuard(reportWriteGuard, approval.toolCall, result)) {
       reportWriteGuard.completed = true;
@@ -9088,6 +9093,18 @@ async function sendMessage(
   await refreshWorkspaceReferenceCache(context, runtimeStatus);
   // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
   const worktreeContext = await computeWorktreeContext(context.projectPath);
+  const metaSchedulerDecision = evaluateMetaScheduler({
+    language: context.language,
+    userText: text,
+    index: context.index,
+    evidence: context.evidence,
+    failureLearning: context.failureLearning,
+    backgroundTasks: context.backgroundTasks,
+    workflow: context.workflows.activeRun,
+  });
+  for (const event of metaSchedulerDecision.internalEvents) {
+    await appendSystemEvent(context, sessionId, event, "info");
+  }
   const systemPrompt = createModelSystemPrompt(
     text,
     context,
@@ -9095,6 +9112,7 @@ async function sendMessage(
     architectureDirective,
     summarizeWorktreeContextForPrompt(worktreeContext),
     buildFailureLearningSummaryForPrompt(context.failureLearning),
+    formatMetaSchedulerDirective(metaSchedulerDecision),
   );
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
@@ -9431,6 +9449,7 @@ async function sendMessage(
           reasoningSent: selectedRuntime.reasoningSent,
           ...(reportWriteGuard ? { reportWriteGuard } : {}),
         });
+        await recordModelToolFailureForMetaScheduler(context, sessionId, result);
         if (result.pendingApproval) {
           return;
         }
@@ -10345,6 +10364,7 @@ async function continueModelAfterToolResults(
           output,
           continuation,
         );
+        await recordModelToolFailureForMetaScheduler(context, sessionId, result);
         if (result.pendingApproval) {
           return;
         }
@@ -12976,6 +12996,41 @@ async function recordProviderFailureEvidence(
     severity: "high",
   });
   return evidence;
+}
+
+async function recordModelToolFailureForMetaScheduler(
+  context: TuiContext,
+  sessionId: string,
+  result: {
+    ok: boolean;
+    tool: string;
+    text: string;
+    pendingApproval?: boolean;
+    evidenceId?: string;
+  },
+): Promise<void> {
+  if (result.ok || result.pendingApproval) return;
+  if (isUserDecisionToolStop(result.text)) return;
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `meta_scheduler_tool_failure tool=${result.tool} evidence=${result.evidenceId ?? "none"}`,
+    "warning",
+  );
+  await captureFailureLearning(context, sessionId, {
+    category: "tool_failure",
+    failureSummary: `tool failed: ${result.tool}: ${truncateDisplay(result.text, 180)}`,
+    rootCauseGuess: `${result.tool} returned a failed result in the model tool loop`,
+    avoidNextTime:
+      "Do not claim the tool action completed; inspect the failure, retry with corrected inputs, or explicitly degrade.",
+    sourceRef: result.evidenceId ? `evidence:${result.evidenceId}` : `tool:${result.tool}`,
+    relatedTarget: result.tool,
+    severity: "medium",
+  });
+}
+
+function isUserDecisionToolStop(text: string): boolean {
+  return /^(?:ask|denied|deny|rejected|cancelled|canceled|block):/iu.test(text.trim());
 }
 
 function sanitizeProviderFailureError(error: unknown): unknown {
