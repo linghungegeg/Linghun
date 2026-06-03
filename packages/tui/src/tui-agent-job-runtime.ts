@@ -34,6 +34,7 @@ import {
 } from "./job-runner-presenter.js";
 import { deriveAgentDisplayName } from "./job-runtime.js";
 import type { JobContext } from "./job-runtime.js";
+import { formatIndexRuntimeRef } from "./index-runtime.js";
 import {
   findDurableJob as findDurableJobFromFs,
   formatJobList as formatJobListImpl,
@@ -117,7 +118,7 @@ export function createAgentContextSummary(
     `todos=${packet.todos.length}`,
     `evidence=${evidence.length > 0 ? evidence.join("; ") : "none"}`,
     `keyFiles=${files.length > 0 ? files.join(", ") : "none"}`,
-    `index=${packet.indexStatus.projectName}:${packet.indexStatus.status}`,
+    `index=${formatIndexRuntimeRef(packet.indexStatus)}`,
     `cacheFreshness=${freshness}`,
     `architecture=${architecture}`,
     `failureLearning=${activeFailures.length}`,

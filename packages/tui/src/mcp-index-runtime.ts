@@ -35,6 +35,7 @@ import {
   type CodebaseMemoryBinarySource,
   type CodebaseMemoryBinaryStatus,
   findCurrentIndexProject,
+  readLocalIndexArtifactState,
 } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
@@ -818,12 +819,33 @@ export async function removeMcpServer(id: string, context: TuiContext): Promise<
 }
 
 export async function refreshIndexStatus(context: TuiContext, fresh = false): Promise<void> {
+  if (!context.index.enabled) {
+    context.index.status = "disabled";
+    context.index.artifactStatus = "disabled";
+    context.index.error = "codebase index is disabled in settings.";
+    context.index.projectName = undefined;
+    context.index.projectSelectionSource = "missing";
+    context.index.safetyRiskyFiles = undefined;
+    context.index.safetyAction = undefined;
+    return;
+  }
+
+  await refreshLocalIndexArtifactState(context);
   const resolution = await getCodebaseMemoryResolution(context);
   if (resolution.status !== "ready") {
-    context.index.status = "missing";
-    context.index.artifactStatus = "unknown";
+    context.index.status =
+      context.index.artifactStatus === "ready"
+        ? "unknown-project"
+        : context.index.artifactStatus === "corrupt"
+          ? "error"
+          : "missing";
+    const artifactError = context.index.error;
+    context.index.artifactStatus = context.index.artifactStatus ?? "unknown";
     context.index.error = `${resolution.summary}。普通聊天不受影响；如需索引，请配置 ${CODEBASE_MEMORY_ENV} 或安装 Linghun-managed codebase-memory。`;
-    context.index.projectName = undefined;
+    if (context.index.status === "error" && artifactError) {
+      context.index.error = artifactError;
+    }
+    if (context.index.status === "missing") context.index.projectName = undefined;
     context.index.projectSelectionSource = "missing";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
@@ -843,12 +865,24 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   }
   const project = findCurrentIndexProject(projects.data, context.projectPath);
   if (!project) {
-    context.index.status = "missing";
-    context.index.artifactStatus = "missing";
-    context.index.artifactPath = undefined;
-    context.index.projectName = undefined;
+    await refreshLocalIndexArtifactState(context);
+    context.index.status =
+      context.index.artifactStatus === "ready"
+        ? "unknown-project"
+        : context.index.artifactStatus === "corrupt"
+          ? "error"
+          : "missing";
+    context.index.artifactStatus =
+      context.index.artifactStatus === "ready" || context.index.artifactStatus === "corrupt"
+        ? context.index.artifactStatus
+        : "missing";
     context.index.projectSelectionSource = "missing";
-    context.index.error = "未找到当前项目索引。请运行 /index init fast 建立索引。";
+    context.index.error =
+      context.index.status === "error"
+        ? (context.index.error ?? "本地 codebase-memory artifact 损坏。")
+        : context.index.status === "unknown-project"
+        ? "检测到本地 .codebase-memory/graph.db.zst，但 codebase-memory list_projects 未能匹配当前项目。请运行 /index status --fresh 或 /index refresh 重新绑定项目。"
+        : "未找到当前项目索引。请运行 /index init fast 建立索引。";
     context.index.safetyRiskyFiles = undefined;
     context.index.safetyAction = undefined;
     return;
@@ -885,6 +919,22 @@ export async function refreshIndexStatus(context: TuiContext, fresh = false): Pr
   context.index.safetyAction = undefined;
   if (fresh) {
     await refreshIndexStaleHint(context, project.name);
+  }
+}
+
+export async function refreshLocalIndexArtifactState(context: TuiContext): Promise<void> {
+  const artifact = await readLocalIndexArtifactState(context.projectPath);
+  context.index.artifactStatus = artifact.status === "ready" ? "ready" : artifact.status;
+  context.index.artifactPath = artifact.artifactPath;
+  if (artifact.status === "ready") {
+    context.index.projectName = context.index.projectName ?? artifact.projectName;
+    context.index.nodes = context.index.nodes ?? artifact.nodes;
+    context.index.edges = context.index.edges ?? artifact.edges;
+    context.index.indexedAt = context.index.indexedAt ?? artifact.indexedAt;
+    return;
+  }
+  if (artifact.status === "corrupt") {
+    context.index.error = artifact.error;
   }
 }
 

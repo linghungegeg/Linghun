@@ -108,7 +108,7 @@ export function collectArchitectureFacts(context: ArchitectureRuntimeContext): s
   facts.push(...usefulEvidence);
 
   if (context.index?.status) {
-    const project = context.index.projectName ?? "unknown-project";
+    const project = context.index.projectName ? `${context.index.projectName}: ` : "";
     const size =
       typeof context.index.nodes === "number" || typeof context.index.edges === "number"
         ? ` nodes=${context.index.nodes ?? "unknown"} edges=${context.index.edges ?? "unknown"}`
@@ -116,7 +116,7 @@ export function collectArchitectureFacts(context: ArchitectureRuntimeContext): s
     const stale = context.index.staleHint
       ? ` staleHint=${truncate(context.index.staleHint, 80)}`
       : "";
-    facts.push(`index:${project}: status=${context.index.status}${size}${stale}`);
+    facts.push(`index:${project}status=${context.index.status}${size}${stale}`);
   }
 
   if (context.permissionMode) {

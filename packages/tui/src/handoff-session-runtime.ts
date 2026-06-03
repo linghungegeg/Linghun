@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { isDeepCompactPacket } from "./deep-compact-runtime.js";
+import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import type {
   CompactProjection,
@@ -336,14 +337,7 @@ export function createHandoffPacket(
     verdictEvidence: createEmptyVerdictEvidenceScope(),
     verification: context.lastVerification ?? null,
     risks: context.lastVerification ? context.lastVerification.risk : [],
-    indexStatus: {
-      projectName: context.index.projectName,
-      status: context.index.status,
-      nodes: context.index.nodes,
-      edges: context.index.edges,
-      changedFiles: context.index.changedFiles,
-      staleHint: context.index.staleHint,
-    },
+    indexStatus: createIndexStatusSnapshot(context.index),
     permissionMode: context.permissionMode,
     modelProvider: { provider: getRuntimeStatusProvider(context), model: context.model },
     recentCommit: "unknown until git metadata is checked externally",
@@ -436,7 +430,7 @@ export function formatResumePacket(
     `- evidenceRefs: ${packet.evidenceRefs.length}`,
     `- keyFiles: ${packet.keyFiles.join(", ")}`,
     `- verification: ${packet.verification?.status ?? "missing"}`,
-    `- indexStatus: ${packet.indexStatus.status}`,
+    `- indexStatus: ${formatIndexRuntimeRef(packet.indexStatus)}`,
     `- readonly: ${missing.length > 0 ? `yes (${missing.join(", ")})` : "no"}`,
     context.memory.projectRulesError
       ? `- projectRules warning: ${context.memory.projectRulesError}`

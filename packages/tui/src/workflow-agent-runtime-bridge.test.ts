@@ -620,7 +620,7 @@ describe("D.14H-C workflow agent runtime bridge", () => {
           { status: "ignored", projectScope: "F-Linghun" },
         ],
       },
-    } as TuiContext;
+    } as unknown as TuiContext;
 
     const summary = createAgentContextSummary(packet, "verify worker context", context);
 
@@ -632,5 +632,58 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     expect(summary).toContain("permission=default");
     expect(summary).toContain("notIncluded=full transcript/full memory/full index/large logs");
     expect(summary).not.toMatch(/sourceRef|raw context|providerEnv|apiKey|baseUrl/iu);
+  });
+
+  it("agent context summary does not leak undefined project when index is unresolved", () => {
+    const packet = {
+      id: "handoff-unknown-index",
+      sessionId: "session-1",
+      projectPath: "F:/Linghun",
+      currentPhase: "Index closure",
+      nextPhase: "continue",
+      phaseStatus: "in_progress",
+      goal: "avoid undefined index summary",
+      completed: [],
+      pending: [],
+      mustNotDo: [],
+      todos: [],
+      changedFiles: [],
+      evidenceRefs: [],
+      verdictEvidence: {
+        scope: "focused",
+        status: "PARTIAL",
+        evidenceRefs: [],
+        validationCommands: [],
+        uncoveredItems: [],
+        residualRisks: [],
+        nextAction: "run focused tests",
+      },
+      verification: null,
+      risks: [],
+      keyFiles: [],
+      indexStatus: {
+        status: "unknown-project",
+        nodes: 5,
+        edges: 4,
+      },
+      permissionMode: "default",
+      modelProvider: { provider: "deepseek", model: "deepseek-v4-pro" },
+      recentCommit: "unknown",
+      budgetUsage: "local validation only",
+      createdAt: "2026-06-01T00:00:00.000Z",
+      generatedBy: "test",
+    } as HandoffPacket;
+    const context = {
+      language: "en-US",
+      permissionMode: "default",
+      cache: {},
+      failureLearning: { projectScope: "F-Linghun", records: [] },
+    } as unknown as TuiContext;
+
+    const summary = createAgentContextSummary(packet, "inspect index state", context);
+
+    expect(summary).toContain("index=unknown-project nodes=5 edges=4");
+    expect(summary).not.toContain("index=undefined:unknown");
+    expect(summary).not.toContain("undefined");
   });
 });

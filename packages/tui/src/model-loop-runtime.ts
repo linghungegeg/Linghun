@@ -1489,7 +1489,7 @@ export type RuntimeStatusForPrompt = {
     accepted: number;
     autoAccept: boolean;
   };
-  index: { status: string; changedFiles: number | null };
+  index: { status: string; projectName: string | null; changedFiles: number | null };
   cache: { latestHitRate: number | null; changedKeys: string[] };
   model: { name: string };
   permissionMode: string;
@@ -1526,6 +1526,7 @@ export function projectRuntimeStatusForPrompt(
     },
     index: {
       status: typeof index.status === "string" ? index.status : "unknown",
+      projectName: typeof index.projectName === "string" ? index.projectName : null,
       changedFiles: typeof index.changedFiles === "number" ? (index.changedFiles as number) : null,
     },
     cache: {

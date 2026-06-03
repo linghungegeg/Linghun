@@ -1,8 +1,157 @@
 import { describe, expect, test } from "vitest";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { defaultConfig } from "@linghun/config";
+import { createIndexState } from "./index-runtime.js";
 import { summarizeIndexResult } from "./index-result-presenter.js";
-import { isSupportiveIndexEvidence } from "./mcp-index-runtime.js";
+import { refreshIndexStatus, isSupportiveIndexEvidence } from "./mcp-index-runtime.js";
+
+async function writeMockCodebaseMemory(
+  projectPath: string,
+  mockDir: string,
+  options: {
+    projects?: Array<{ name: string; root_path?: string }>;
+    status?: string;
+    versionExitCode?: number;
+  } = {},
+): Promise<string> {
+  const mockPath = join(mockDir, "codebase-memory-mock.cjs");
+  const projects = options.projects ?? [{ name: "F-Linghun", root_path: projectPath }];
+  await writeFile(
+    mockPath,
+    `if (process.argv.includes("--version")) {
+  console.log("codebase-memory-mcp mock 0.0.0");
+  process.exit(${options.versionExitCode ?? 0});
+}
+const tool = process.argv[3];
+if (tool === "list_projects") {
+  console.log(JSON.stringify({ projects: ${JSON.stringify(projects)} }));
+} else if (tool === "index_status") {
+  console.log(JSON.stringify({ status: ${JSON.stringify(options.status ?? "ready")}, nodes: 11, edges: 7 }));
+} else {
+  console.log(JSON.stringify({ ok: true }));
+}
+`,
+    "utf8",
+  );
+  return mockPath;
+}
+
+async function writeLocalArtifact(
+  projectPath: string,
+  artifact: { project?: string; nodes?: number; edges?: number } = {},
+): Promise<void> {
+  const dir = join(projectPath, ".codebase-memory");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "graph.db.zst"), "mock-graph", "utf8");
+  await writeFile(
+    join(dir, "artifact.json"),
+    JSON.stringify({
+      schema_version: 1,
+      indexed_at: "2026-06-04T00:00:00Z",
+      project: artifact.project ?? "F-Linghun",
+      nodes: artifact.nodes ?? 5,
+      edges: artifact.edges ?? 4,
+    }),
+    "utf8",
+  );
+}
+
+function createIndexContext(projectPath: string, mockPath?: string, enabled = true) {
+  const config = {
+    ...defaultConfig,
+    index: { ...defaultConfig.index, enabled },
+    mcp: {
+      ...defaultConfig.mcp,
+      enabledServers: enabled ? ["codebase-memory"] : [],
+      servers: {
+        ...defaultConfig.mcp.servers,
+        "codebase-memory": {
+          ...defaultConfig.mcp.servers["codebase-memory"],
+          command: mockPath ?? "missing-codebase-memory-for-test",
+          args: [],
+        },
+      },
+    },
+  };
+  return {
+    config,
+    projectPath,
+    index: createIndexState(config),
+  };
+}
 
 describe("mcp-index-runtime", () => {
+  test("refreshIndexStatus resolves real project status when settings enable codebase-memory and artifact exists", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-ready-"));
+    await writeLocalArtifact(projectPath, { project: "F-Linghun", nodes: 5, edges: 4 });
+    const mockPath = await writeMockCodebaseMemory(projectPath, projectPath);
+    const context = createIndexContext(projectPath, mockPath);
+
+    await refreshIndexStatus(context as never);
+
+    expect(context.index.status).toBe("ready");
+    expect(context.index.projectName).toBe("F-Linghun");
+    expect(context.index.nodes).toBe(11);
+    expect(context.index.edges).toBe(7);
+    expect(context.index.artifactStatus).toBe("ready");
+    expect(context.index.status).not.toBe("unknown");
+  });
+
+  test("refreshIndexStatus uses the current artifact and CLI project name instead of a hardcoded project", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "custom-index-project-"));
+    await writeLocalArtifact(projectPath, { project: "CustomProject", nodes: 3, edges: 2 });
+    const mockPath = await writeMockCodebaseMemory(projectPath, projectPath, {
+      projects: [{ name: "CustomProject", root_path: projectPath }],
+    });
+    const context = createIndexContext(projectPath, mockPath);
+
+    await refreshIndexStatus(context as never);
+
+    expect(context.index.status).toBe("ready");
+    expect(context.index.projectName).toBe("CustomProject");
+    expect(context.index.projectName).not.toBe("F-Linghun");
+  });
+
+  test("refreshIndexStatus keeps artifact-backed unknown-project distinct from missing", async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), "linghun-index-unmatched-"));
+    await writeLocalArtifact(projectPath, { project: "F-Linghun", nodes: 5, edges: 4 });
+    const mockPath = await writeMockCodebaseMemory(projectPath, projectPath, {
+      projects: [{ name: "other-project", root_path: join(projectPath, "other") }],
+    });
+    const context = createIndexContext(projectPath, mockPath);
+
+    await refreshIndexStatus(context as never);
+
+    expect(context.index.status).toBe("unknown-project");
+    expect(context.index.projectName).toBe("F-Linghun");
+    expect(context.index.artifactStatus).toBe("ready");
+    expect(context.index.error).toContain("graph.db.zst");
+  });
+
+  test("refreshIndexStatus distinguishes disabled and corrupt artifact states", async () => {
+    const disabledProject = await mkdtemp(join(tmpdir(), "linghun-index-disabled-"));
+    const disabledContext = createIndexContext(disabledProject, undefined, false);
+    await refreshIndexStatus(disabledContext as never);
+    expect(disabledContext.index.status).toBe("disabled");
+    expect(disabledContext.index.artifactStatus).toBe("disabled");
+
+    const corruptProject = await mkdtemp(join(tmpdir(), "linghun-index-corrupt-"));
+    await mkdir(join(corruptProject, ".codebase-memory"), { recursive: true });
+    await writeFile(join(corruptProject, ".codebase-memory", "graph.db.zst"), "", "utf8");
+    const mockPath = await writeMockCodebaseMemory(corruptProject, corruptProject, {
+      projects: [],
+    });
+    const corruptContext = createIndexContext(corruptProject, mockPath);
+
+    await refreshIndexStatus(corruptContext as never);
+
+    expect(corruptContext.index.status).toBe("error");
+    expect(corruptContext.index.artifactStatus).toBe("corrupt");
+    expect(corruptContext.index.error).toContain("graph.db.zst");
+  });
+
   test("summarizeIndexResult handles search_graph results", () => {
     const searchGraphData = {
       total: 2,

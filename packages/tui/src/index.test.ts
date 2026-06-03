@@ -32,7 +32,7 @@ import {
   formatSolutionCompletenessReportBlock,
   needsSolutionCompletenessReportClosure,
 } from "./final-answer-gate.js";
-import { hydrateResumeContext } from "./handoff-session-runtime.js";
+import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
@@ -18480,6 +18480,47 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已更新 MCP server：local-demo");
     expect(output.text).toContain("未执行 server");
     expect(output.text).toContain("已移除 MCP server：local-demo");
+  });
+
+  it("writes real index project and status into handoff packets", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-handoff-index-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.index.nodes = 295;
+    context.index.edges = 292;
+
+    const packet = createHandoffPacket(context, [], undefined, session.id);
+
+    expect(packet.indexStatus).toMatchObject({
+      projectName: "F-Linghun",
+      status: "ready",
+      nodes: 295,
+      edges: 292,
+    });
+    expect(JSON.stringify(packet.indexStatus)).not.toContain("undefined");
+  });
+
+  it("workflow plan preview inherits the same index project/status", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-index-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.index.nodes = 295;
+    context.index.edges = 292;
+
+    await handleSlashCommand("/workflows plan inspect runtime index", context, output);
+
+    expect(context.lastFullOutput).toContain("status=ready");
+    expect(context.lastFullOutput).toContain("project=F-Linghun");
+    expect(context.lastFullOutput).toContain("F-Linghun:ready");
+    expect(context.lastFullOutput).not.toContain("undefined");
+    expect(context.lastFullOutput).not.toContain("unknown-project");
   });
 });
 

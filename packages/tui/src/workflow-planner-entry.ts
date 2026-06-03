@@ -135,7 +135,9 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
   }
 
   if (indexStatusRef) {
-    const project = indexStatusRef.projectName ? ` project=${indexStatusRef.projectName}` : "";
+    const project = indexStatusRef.projectName
+      ? ` project=${indexStatusRef.projectName}`
+      : " project=unresolved";
     const freshness = indexStatusRef.freshness ? ` ${indexStatusRef.freshness}` : "";
     references.push({
       kind: "workspace_cache",

@@ -78,7 +78,7 @@ export type RuntimeStatusForModel = {
     accepted: number;
     autoAccept: boolean;
   };
-  index: { status: string; changedFiles: number | null };
+  index: { status: string; projectName: string | null; changedFiles: number | null };
   cache: { latestHitRate: number | null; changedKeys: string[] };
   model: { provider: string; name: string };
   permissionMode: PermissionMode;
@@ -101,7 +101,7 @@ export type RuntimeStatusSource = {
     candidates: unknown[];
     accepted: unknown[];
   };
-  index: { status: string; changedFiles?: number };
+  index: { status: string; projectName?: string; changedFiles?: number };
   cache: {
     history: { hitRate: number | null; freshness?: { changedKeys?: string[] } }[];
     lastFreshness?: { changedKeys?: string[] };
@@ -1132,6 +1132,7 @@ export function buildRuntimeStatusForModel(context: RuntimeStatusSource): Runtim
     },
     index: {
       status: context.index.status,
+      projectName: context.index.projectName ?? null,
       changedFiles: context.index.changedFiles ?? null,
     },
     cache: {

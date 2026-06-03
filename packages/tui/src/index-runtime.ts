@@ -1,4 +1,5 @@
-import { basename } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
 import type { LinghunConfig } from "@linghun/config";
 
 export type CodebaseMemoryBinarySource = "env" | "bundled" | "managed" | "path" | "missing";
@@ -8,8 +9,23 @@ export type CodebaseMemoryBinaryStatus =
   | "corrupt"
   | "unsupported"
   | "unknown";
-export type CodebaseMemoryArtifactStatus = "ready" | "missing" | "stale" | "corrupt" | "unknown";
+export type CodebaseMemoryArtifactStatus =
+  | "ready"
+  | "missing"
+  | "stale"
+  | "corrupt"
+  | "disabled"
+  | "unknown";
 export type CodebaseMemoryProjectSelectionSource = "root_path" | "name-candidate" | "missing";
+export type IndexRuntimeStatus =
+  | "disabled"
+  | "unknown"
+  | "unknown-project"
+  | "ready"
+  | "missing"
+  | "stale"
+  | "error"
+  | "indexing";
 
 export type IndexSafetyFile = {
   path: string;
@@ -20,7 +36,7 @@ export type IndexSafetyFile = {
 export type IndexState = {
   enabled: boolean;
   projectName?: string;
-  status: "unknown" | "ready" | "missing" | "stale" | "error" | "indexing";
+  status: IndexRuntimeStatus;
   nodes?: number;
   edges?: number;
   indexedAt?: string;
@@ -51,8 +67,82 @@ export type CurrentIndexProject = {
 export function createIndexState(config: LinghunConfig): IndexState {
   return {
     enabled: config.index.enabled,
-    status: config.index.enabled ? "unknown" : "missing",
+    status: config.index.enabled ? "unknown" : "disabled",
+    artifactStatus: config.index.enabled ? "unknown" : "disabled",
+    projectSelectionSource: config.index.enabled ? undefined : "missing",
   };
+}
+
+export type LocalIndexArtifactState =
+  | {
+      status: "ready";
+      artifactPath: string;
+      projectName?: string;
+      nodes?: number;
+      edges?: number;
+      indexedAt?: string;
+    }
+  | { status: "missing"; artifactPath?: string }
+  | { status: "corrupt"; artifactPath?: string; error: string };
+
+export async function readLocalIndexArtifactState(
+  projectPath: string,
+): Promise<LocalIndexArtifactState> {
+  const artifactDir = join(projectPath, ".codebase-memory");
+  const graphPath = join(artifactDir, "graph.db.zst");
+  try {
+    const graphStat = await stat(graphPath);
+    if (!graphStat.isFile() || graphStat.size <= 0) {
+      return { status: "corrupt", artifactPath: graphPath, error: "graph.db.zst is empty" };
+    }
+  } catch (error) {
+    const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    if (code === "ENOENT") {
+      return { status: "missing", artifactPath: graphPath };
+    }
+    return {
+      status: "corrupt",
+      artifactPath: graphPath,
+      error: error instanceof Error ? error.message : "cannot stat graph.db.zst",
+    };
+  }
+
+  const metadata = await readLocalIndexArtifactMetadata(join(artifactDir, "artifact.json"));
+  if (metadata.status === "corrupt") {
+    return { ...metadata, artifactPath: graphPath };
+  }
+  return { status: "ready", artifactPath: graphPath, ...metadata };
+}
+
+async function readLocalIndexArtifactMetadata(
+  artifactJsonPath: string,
+): Promise<
+  | { status?: undefined; projectName?: string; nodes?: number; edges?: number; indexedAt?: string }
+  | { status: "corrupt"; error: string }
+> {
+  let raw: string;
+  try {
+    raw = await readFile(artifactJsonPath, "utf8");
+  } catch (error) {
+    const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    return code === "ENOENT"
+      ? {}
+      : {
+          status: "corrupt",
+          error: error instanceof Error ? error.message : "cannot read artifact.json",
+        };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      projectName: typeof parsed.project === "string" ? parsed.project : undefined,
+      nodes: typeof parsed.nodes === "number" ? parsed.nodes : undefined,
+      edges: typeof parsed.edges === "number" ? parsed.edges : undefined,
+      indexedAt: typeof parsed.indexed_at === "string" ? parsed.indexed_at : undefined,
+    };
+  } catch {
+    return { status: "corrupt", error: "artifact.json is not valid JSON" };
+  }
 }
 
 export function findCurrentIndexProject(
@@ -113,4 +203,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
+}
+
+export function createIndexStatusSnapshot(index: IndexState): Pick<
+  IndexState,
+  "projectName" | "status" | "nodes" | "edges" | "changedFiles" | "staleHint"
+> {
+  return {
+    projectName: index.projectName,
+    status: index.status,
+    nodes: index.nodes,
+    edges: index.edges,
+    changedFiles: index.changedFiles,
+    staleHint: index.staleHint,
+  };
+}
+
+export function formatIndexRuntimeRef(
+  index: Pick<IndexState, "projectName" | "status" | "nodes" | "edges" | "staleHint">,
+): string {
+  const project = index.projectName ? `${index.projectName}:` : "";
+  const size =
+    typeof index.nodes === "number" || typeof index.edges === "number"
+      ? ` nodes=${index.nodes ?? "unknown"} edges=${index.edges ?? "unknown"}`
+      : "";
+  const stale = index.staleHint ? ` stale=${truncateIndexRef(index.staleHint, 80)}` : "";
+  return `${project}${index.status}${size}${stale}`;
+}
+
+function truncateIndexRef(value: string, max: number): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= max ? compact : `${compact.slice(0, Math.max(0, max - 1))}…`;
 }

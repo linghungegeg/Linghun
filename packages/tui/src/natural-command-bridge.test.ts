@@ -534,7 +534,7 @@ describe("Phase 15 RuntimeStatusForModel", () => {
         candidates: [{ id: "candidate", text: "long text should not appear" }],
         accepted: [{ id: "accepted", text: "full memory should not appear" }],
       },
-      index: { status: "ready", changedFiles: 2 },
+      index: { status: "ready", projectName: "F-Linghun", changedFiles: 2 },
       cache: { history: [{ hitRate: 0.92, freshness: { changedKeys: ["modelProviderHash"] } }] },
       skills: { enabled: true, skills: [{ id: "skill" }] },
       plugins: { enabled: false, plugins: [] },
@@ -547,7 +547,7 @@ describe("Phase 15 RuntimeStatusForModel", () => {
       accepted: 1,
       autoAccept: false,
     });
-    expect(status.index).toEqual({ status: "ready", changedFiles: 2 });
+    expect(status.index).toEqual({ status: "ready", projectName: "F-Linghun", changedFiles: 2 });
     expect(status.cache.latestHitRate).toBe(0.92);
     expect(status.model).toEqual({ provider: "anthropic", name: "claude-sonnet-4-6" });
     const serialized = JSON.stringify(status);

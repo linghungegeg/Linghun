@@ -21,6 +21,7 @@ import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { createManagedWorktree } from "./git-operation-runtime.js";
 import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
+import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
   formatBackgroundTask,
@@ -637,7 +638,7 @@ function ensureMinimalJobVerification(context: TuiContext, options: ParsedJobRun
     risk: [
       context.index.status === "unknown"
         ? "index status unknown; job agents must rely on handoff/evidence/workspace snapshot refs"
-        : `index status ${context.index.status}`,
+        : `index status ${formatIndexRuntimeRef(context.index)}`,
     ],
     startedAt: now,
     endedAt: now,
@@ -661,7 +662,7 @@ function ensureMinimalJobEvidence(
     id,
     kind: "user_provided",
     source: "/job preflight",
-    summary: `Minimal job preflight evidence for ${options.allowEdit || options.allowBash ? "bounded job" : "read-only audit"}; index=${context.index.status || "unknown"}.`,
+    summary: `Minimal job preflight evidence for ${options.allowEdit || options.allowBash ? "bounded job" : "read-only audit"}; index=${formatIndexRuntimeRef(context.index)}.`,
     supportsClaims: ["job-preflight-only"],
     createdAt: new Date().toISOString(),
   });
@@ -677,14 +678,7 @@ function syncJobPreflightPacket(
   packet.evidenceRefs = context.evidence
     .map((item) => ({ id: item.id, kind: item.kind, source: item.source, summary: item.summary }))
     .slice(0, 8);
-  packet.indexStatus = {
-    projectName: context.index.projectName,
-    status: context.index.status || "unknown",
-    nodes: context.index.nodes,
-    edges: context.index.edges,
-    changedFiles: context.index.changedFiles,
-    staleHint: context.index.staleHint,
-  };
+  packet.indexStatus = createIndexStatusSnapshot(context.index);
   if (generatedVerification) {
     packet.pending = [
       ...packet.pending,
@@ -1467,7 +1461,7 @@ export function createDurableJobStepFacts(
     `phase=${job.phase}`,
     `target=${job.target}`,
     `handoff=${job.handoffPacket?.id ?? "missing"}`,
-    `index=${context.index.status}${context.index.projectName ? `:${context.index.projectName}` : ""}`,
+    `index=${formatIndexRuntimeRef(context.index)}`,
     `workspaceCache=${workspaceRef?.source ?? "missing"};snapshot=${snapshotState}`,
     `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
     `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,

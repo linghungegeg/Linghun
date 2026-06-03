@@ -6,6 +6,7 @@ import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
 import { estimateTranscriptContextChars } from "./context-estimator.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
+import { formatIndexRuntimeRef } from "./index-runtime.js";
 import {
   sanitizeDiagnosticText,
   sanitizeDisplayPaths,
@@ -298,7 +299,7 @@ function buildDeepCompactRequestMessages(
     `trigger=${trigger}`,
     `transcriptEventCount=${transcript.length}`,
     `projectRules=${sanitizeDeepCompactText(context, context.memory.projectRulesSummary || "none", 300)}`,
-    `index=${context.index.status}:${context.index.projectName ?? "unknown"} stale=${context.index.staleHint ?? "none"}`,
+    `index=${formatIndexRuntimeRef(context.index)}`,
     `cacheFreshness=${context.cache.lastFreshness?.changedKeys.join(",") || "stable-or-unknown"}`,
     `memoryAccepted=${context.memory.accepted.length}`,
     `failureLearning=${

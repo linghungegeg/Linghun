@@ -161,6 +161,7 @@ import {
   type IndexState,
   createIndexState,
   findCurrentIndexProject,
+  formatIndexRuntimeRef,
 } from "./index-runtime.js";
 import {
   formatBackgroundDetails,
@@ -1690,6 +1691,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     context.workflowRegistry.workflows.map(registryWorkflowToTemplate),
   );
   installProcessGuardExitHandlers();
+  await refreshIndexStatus(context);
   await hydrateDurableJobBackgroundTasks(context);
   await hydratePersistentAgents(context);
   context.failureLearning.records = await loadFailureRecords(context.failureLearning);
@@ -3119,9 +3121,7 @@ function buildWorkflowPlannerContextInput(context: TuiContext): {
     indexStatusRef: {
       status: context.index.status,
       projectName: context.index.projectName,
-      freshness: context.index.staleHint
-        ? `staleHint=${context.index.staleHint}`
-        : "freshness=not_checked",
+      freshness: formatIndexRuntimeRef(context.index),
     },
     ...(context.currentArchitectureCard
       ? {
