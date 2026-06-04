@@ -97,6 +97,13 @@ export function createLogArtifactRegistry(context: TuiContext) {
 
 export function formatAgentDetails(agent: AgentRun, context: TuiContext): string {
   const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
+  const mailbox = agent.mailbox ?? [];
+  const mailboxCounts = {
+    pending: mailbox.filter((message) => (message.status ?? "pending") === "pending").length,
+    consumed: mailbox.filter((message) => message.status === "consumed").length,
+    failed: mailbox.filter((message) => message.status === "failed").length,
+  };
+  const mailboxTail = mailbox.slice(-5);
   const lines = [
     `Agent ${agent.id} (${label})`,
     `- display name: ${label}`,
@@ -109,11 +116,12 @@ export function formatAgentDetails(agent: AgentRun, context: TuiContext): string
     `- max turns: ${agent.maxTurns ?? "default"}`,
     `- allowed tools: ${agent.allowedTools?.join(",") ?? "default"}`,
     `- status: ${agent.status}`,
+    `- activity: ${agent.activityStatus ?? "unknown"}${agent.activitySummary ? ` — ${sanitizeDisplayPaths(agent.activitySummary, context.projectPath)}` : ""}`,
     `- task: ${truncateDisplay(agent.task, 120)}`,
     `- parent session: ${agent.parentSessionId ?? "none"}`,
     `- transcript: ${formatDisplayPath(agent.transcriptPath, context.projectPath)}`,
     `- cwd: ${agent.cwd ? formatDisplayPath(agent.cwd, context.projectPath) : "."}`,
-    `- pending mailbox: ${agent.mailbox.filter((message) => !message.consumedAt).length}`,
+    `- mailbox: pending ${mailboxCounts.pending}, consumed ${mailboxCounts.consumed}, failed ${mailboxCounts.failed}`,
     `- permission mode: ${agent.permissionMode}`,
     `- cost: input ${agent.cost.inputTokens}, output ${agent.cost.outputTokens}, cache read ${agent.cost.cacheReadTokens}, cache write ${agent.cost.cacheWriteTokens}, estimated CNY ${agent.cost.estimatedCny}`,
     "- boundary: display name does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
@@ -126,6 +134,14 @@ export function formatAgentDetails(agent: AgentRun, context: TuiContext): string
         ? `- cancel: /agents cancel ${agent.id}`
         : `- 中断：/agents cancel ${agent.id}`,
     );
+  }
+  if (mailboxTail.length > 0) {
+    lines.push("- mailbox tail:");
+    for (const message of mailboxTail) {
+      lines.push(
+        `  - ${message.id} ${message.status ?? (message.consumedAt ? "consumed" : "pending")} from ${message.from} to ${message.to ?? agent.id}: ${sanitizeDisplayPaths(message.summary ?? truncateDisplay(message.text.replace(/\s+/g, " "), 120), context.projectPath)}`,
+      );
+    }
   }
   return lines.join("\n");
 }

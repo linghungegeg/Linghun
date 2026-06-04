@@ -210,7 +210,7 @@ export const AGENT_CONTROL_DESCRIPTION =
   "Inspect or cancel existing Linghun agents through the real agent runtime. Use action=cancel when the user asks to stop, close, interrupt, kill, or cancel one background/sub-agent; use action=cancel_all or stop_all when the user asks to stop all agents. This performs the same durable cancellation as /agents cancel and must be preferred over replying with instructions when a matching agent exists.";
 
 export const SEND_MESSAGE_DESCRIPTION =
-  "Send a text message to a running Linghun agent or team by id/name/team. The message enters the target agent mailbox and transcript; fail closed if no running target is found.";
+  "Send a text message to a running Linghun agent mailbox by id/name. Team broadcast is fail-closed unless targetType=team or broadcastTeam=true is explicit, and has a small delivery limit. Ambiguous id/name/team matches return candidates instead of broadcasting.";
 
 export const RUN_WORKFLOW_DESCRIPTION =
   "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Supports explicit multi-agent intent (agents/multiAgent/runningCap/teamName) and records that intent in workflow/tool transcript events. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs.";
@@ -303,6 +303,10 @@ export function createSendMessageInputSchema(): unknown {
       team: { type: "string" },
       teamName: { type: "string" },
       team_name: { type: "string" },
+      targetType: { type: "string", enum: ["id", "name", "team"] },
+      target_type: { type: "string", enum: ["id", "name", "team"] },
+      broadcastTeam: { type: "boolean" },
+      broadcast_team: { type: "boolean" },
       message: { type: "string" },
     },
     required: ["message"],

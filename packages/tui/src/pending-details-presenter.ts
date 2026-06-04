@@ -130,6 +130,25 @@ export function formatPendingApprovalDetails(
           "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
         ].join("\n");
   }
+  if (approval.kind === "agent_tool_use") {
+    return context.language === "en-US"
+      ? [
+          "Pending agent permission details",
+          `- agent: ${approval.agentId}`,
+          `- tool: ${approval.toolName}`,
+          "- reason: child agent requested a protected tool; parent approval is required.",
+          "- tool input, tokens, request ids, and internal gate ids are hidden.",
+          "- next: yes/confirm to allow once; no/cancel/Esc to deny.",
+        ].join("\n")
+      : [
+          "待确认 agent 权限详情",
+          `- agent：${approval.agentId}`,
+          `- 工具：${approval.toolName}`,
+          "- 原因：子 agent 请求受保护工具，需要父会话确认。",
+          "- tool input、token、request id 和内部 gate id 已隐藏。",
+          "- 下一步：yes/确认 允许一次；no/cancel/Esc 拒绝。",
+        ].join("\n");
+  }
   return context.language === "en-US"
     ? [
         "Pending permission details",

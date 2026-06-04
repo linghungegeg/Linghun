@@ -444,6 +444,8 @@ import {
   cancelAllAgents,
   cancelAgentByRef,
   configureJobAgentCommandRuntime,
+  denyAgentToolUse,
+  executeApprovedAgentToolUse,
   handleAgentsCommand,
   handleBackgroundCommand,
   handleForkCommand,
@@ -827,6 +829,7 @@ export {
 // + helpers all reference them) and re-exported so downstream consumers that
 // rely on `import type { ... } from "../index.js"` keep compiling unchanged.
 import type {
+  AgentMailboxMessage,
   AgentRun,
   AgentType,
   ApprovedRunnerJobSpec,
@@ -1124,6 +1127,15 @@ type PendingLocalApproval =
       toolCall: ModelToolCall;
       sessionId: string;
       continuation?: PendingModelContinuation;
+    }
+  | {
+      kind: "agent_tool_use";
+      agentId: string;
+      agentTranscriptSessionId: string;
+      toolCall: ModelToolCall;
+      toolName: ToolName;
+      sessionId: string;
+      verdict?: import("./permission-policy-engine.js").PolicyVerdict;
     }
   | {
       kind: "memory_mutation";
@@ -5963,6 +5975,53 @@ async function executePermissionApprove(
   gateway: ModelGateway | undefined,
   output: Writable,
 ): Promise<void> {
+  if (approval.kind === "agent_tool_use") {
+    const agent = context.agents.find((item) => item.id === approval.agentId);
+    if (!agent) {
+      const evidence = await recordToolFailureEvidence(
+        context,
+        approval.sessionId,
+        approval.toolName,
+        `agent approval target missing: ${approval.agentId}`,
+      );
+      await appendToolResultEvent(
+        context,
+        approval.sessionId,
+        approval.toolCall.id,
+        approval.toolName,
+        `agent ${approval.agentId} is no longer available; ${approval.toolName} was not executed.`,
+        true,
+        evidence.id,
+      );
+      writeLine(output, `agent ${approval.agentId} 不存在，未执行 ${approval.toolName}。`);
+      writeStatus(output, context);
+      return;
+    }
+    const result = await executeApprovedAgentToolUse(
+      agent,
+      approval.toolCall,
+      approval.toolName,
+      context,
+      approval.sessionId,
+    );
+    await appendToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      approval.toolName,
+      result.text,
+      !result.ok,
+      result.evidenceId,
+    );
+    writeLine(
+      output,
+      result.ok
+        ? `agent ${agent.id} 已执行 ${approval.toolName}；子 agent 仍保持 blocked，可检查 /agents show ${agent.id}。`
+        : `agent ${agent.id} 执行 ${approval.toolName} 失败：${truncateDisplay(result.text, 160)}`,
+    );
+    writeStatus(output, context);
+    return;
+  }
   if (approval.kind === "index_ignore_write") {
     const written = await executeIndexIgnoreWritePlan(approval.plan, context, output);
     if (written) {
@@ -6126,6 +6185,49 @@ async function executePermissionDeny(
 ): Promise<void> {
   const sessionId = await ensureSession(context);
   const outcomeText = cancelled ? "permission cancelled by user" : "permission denied by user";
+  if (approval.kind === "agent_tool_use") {
+    const agent = context.agents.find((item) => item.id === approval.agentId);
+    if (!agent) {
+      const evidence = await recordToolFailureEvidence(
+        context,
+        approval.sessionId,
+        approval.toolName,
+        `agent approval target missing after deny: ${approval.agentId}`,
+      );
+      await appendToolResultEvent(
+        context,
+        approval.sessionId,
+        approval.toolCall.id,
+        approval.toolName,
+        `agent ${approval.agentId} is no longer available; ${approval.toolName} was not executed.`,
+        true,
+        evidence.id,
+      );
+      writeLine(output, `agent ${approval.agentId} 不存在，未执行 ${approval.toolName}。`);
+      writeStatus(output, context);
+      return;
+    }
+    const result = await denyAgentToolUse(
+      agent,
+      approval.toolCall,
+      approval.toolName,
+      context,
+      approval.sessionId,
+      outcomeText,
+    );
+    await appendToolResultEvent(
+      context,
+      approval.sessionId,
+      approval.toolCall.id,
+      approval.toolName,
+      result.text,
+      true,
+      result.evidenceId,
+    );
+    writeLine(output, `已拒绝 agent ${agent.id} 的 ${approval.toolName}；工具未执行。`);
+    writeStatus(output, context);
+    return;
+  }
   if (approval.kind === "index_ignore_write") {
     await recordToolFailureEvidence(
       context,
@@ -8200,7 +8302,45 @@ configureJobAgentCommandRuntime({
     };
   },
   recordAgentExecutionEvidence,
+  recordAgentMailboxEvidence,
+  recordAgentToolEvidence,
+  recordAgentToolFailureEvidence,
   recordToolResultBudgetEvidence,
+  createAgentToolApproval: ({
+    context,
+    agent,
+    toolCall,
+    toolName,
+    parentSessionId,
+    permission,
+    output,
+  }) => {
+    if (context.pendingLocalApproval) {
+      writeLine(
+        output,
+        context.language === "en-US"
+          ? `Agent ${agent.id} requested ${toolName}, but another local approval is already pending. Resolve the current approval first, then resume or resend.`
+          : `agent ${agent.id} 请求 ${toolName}，但当前已有本地权限审批待处理。请先处理当前审批，再 resume 或重新发送。`,
+      );
+      return false;
+    }
+    context.pendingLocalApproval = {
+      kind: "agent_tool_use",
+      agentId: agent.id,
+      agentTranscriptSessionId: agent.transcriptSessionId,
+      toolCall,
+      toolName,
+      sessionId: parentSessionId,
+      verdict: permission.verdict,
+    };
+    if (!context.isInkSession) {
+      writeLine(
+        output,
+        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
+      );
+    }
+    return true;
+  },
   prepareProviderPreflight: (context, sessionId, messages, runtime, trigger) =>
     prepareMessagesForProviderPreflight({
       messages,
@@ -8825,6 +8965,69 @@ async function recordAgentExecutionEvidence(
     type: "evidence_record",
     ...evidence,
   });
+  return evidence.id;
+}
+
+async function recordAgentMailboxEvidence(
+  context: TuiContext,
+  sessionId: string,
+  agent: AgentRun,
+  messages: AgentMailboxMessage[],
+): Promise<string | undefined> {
+  if (messages.length === 0) return undefined;
+  const evidence = createEvidenceRecord(
+    "command_output",
+    `agent_mailbox ${agent.id}: consumed ${messages.length} message(s): ${messages
+      .map((message) => `${message.id}:${message.summary}`)
+      .join("; ")}`,
+    `agent:${agent.id}:mailbox`,
+    ["agent_mailbox", `agent_${agent.type}`, "mailbox_consumed"],
+  );
+  rememberEvidence(context, evidence);
+  await context.store.appendEvent(sessionId, {
+    type: "evidence_record",
+    ...evidence,
+  });
+  return evidence.id;
+}
+
+async function recordAgentToolEvidence(
+  context: TuiContext,
+  sessionId: string,
+  agent: AgentRun,
+  toolName: ToolName,
+  output: ToolOutput,
+  input: unknown,
+): Promise<string | undefined> {
+  const evidence = await recordToolEvidence(context, sessionId, toolName, output, input);
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `agent tool evidence: agent ${agent.id}; tool ${toolName}; evidence ${evidence?.id ?? "none"}`,
+    "info",
+  );
+  return evidence?.id;
+}
+
+async function recordAgentToolFailureEvidence(
+  context: TuiContext,
+  sessionId: string,
+  agent: AgentRun,
+  toolName: ToolName,
+  summary: string,
+): Promise<string | undefined> {
+  const evidence = await recordToolFailureEvidence(
+    context,
+    sessionId,
+    toolName,
+    `agent ${agent.id}: ${summary}`,
+  );
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `agent tool failure: agent ${agent.id}; tool ${toolName}; evidence ${evidence.id}`,
+    "warning",
+  );
   return evidence.id;
 }
 
@@ -12134,6 +12337,8 @@ function parseSendMessageToolInput(input: unknown):
       team?: string;
       teamName?: string;
       team_name?: string;
+      targetType?: "id" | "name" | "team";
+      broadcastTeam?: boolean;
       message: string;
     }
   | { ok: false; text: string } {
@@ -12145,6 +12350,11 @@ function parseSendMessageToolInput(input: unknown):
   if (typeof message !== "string" || !message.trim()) {
     return { ok: false, text: "SendMessage requires message." };
   }
+  const targetTypeRaw = obj.targetType ?? obj.target_type;
+  const targetType =
+    targetTypeRaw === "id" || targetTypeRaw === "name" || targetTypeRaw === "team"
+      ? targetTypeRaw
+      : undefined;
   return {
     ok: true,
     ...(typeof obj.to === "string" && obj.to.trim() ? { to: obj.to.trim() } : {}),
@@ -12156,6 +12366,8 @@ function parseSendMessageToolInput(input: unknown):
     ...(typeof obj.team_name === "string" && obj.team_name.trim()
       ? { team_name: obj.team_name.trim() }
       : {}),
+    ...(targetType ? { targetType } : {}),
+    ...(obj.broadcastTeam === true || obj.broadcast_team === true ? { broadcastTeam: true } : {}),
     message: message.trim(),
   };
 }

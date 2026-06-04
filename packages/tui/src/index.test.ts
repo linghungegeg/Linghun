@@ -4637,6 +4637,354 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("enforces Phase 5 mailbox caps, strict SendMessage routing, explicit team broadcast, and low-noise show", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-mailbox-protocol-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(
+      project,
+      store,
+      session,
+      createOpenAiRegistryAgentConfig("route-model"),
+    );
+    const startedAt = new Date().toISOString();
+    const makeAgent = (
+      id: string,
+      overrides: Partial<AgentRun> = {},
+    ): AgentRun => ({
+      id,
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: id,
+      model: "route-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: join(project, `${id}.jsonl`),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `${id} running`,
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+      ...overrides,
+    });
+    context.agents = [
+      makeAgent("agent-phase5-a", { addressableName: "dup", teamName: "core" }),
+      makeAgent("agent-phase5-b", { addressableName: "dup", teamName: "core" }),
+      makeAgent("agent-phase5-c", { addressableName: "solo", teamName: "solo-team" }),
+    ];
+    context.backgroundTasks = context.agents.map((agent) =>
+      createBackgroundTaskFixture("agent", { id: agent.id, title: `Agent ${agent.id}` }),
+    );
+
+    const { sendAgentMessage } = await import("./job-agent-command-runtime.js");
+    const ambiguous = await sendAgentMessage(context, { to: "dup", message: "hello" });
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.text).toContain("ambiguous");
+    expect(context.agents.flatMap((agent) => agent.mailbox)).toHaveLength(0);
+
+    await handleSlashCommand("/agents send core 隐式广播不允许", context, output);
+    expect(output.text).toContain("explicit broadcast");
+    expect(context.agents.flatMap((agent) => agent.mailbox)).toHaveLength(0);
+
+    const conflicting = await sendAgentMessage(context, {
+      to: "agent-phase5-a",
+      team: "core",
+      message: "冲突目标不能广播",
+    });
+    expect(conflicting.ok).toBe(false);
+    expect(conflicting.text).toContain("conflicting");
+    expect(context.agents.flatMap((agent) => agent.mailbox)).toHaveLength(0);
+
+    await handleSlashCommand("/agents send --team core 团队广播", context, output);
+    expect(context.agents[0]?.mailbox[0]).toMatchObject({
+      from: "user",
+      to: "agent-phase5-a",
+      status: "pending",
+      summary: "团队广播",
+    });
+    expect(context.agents[1]?.mailbox[0]).toMatchObject({
+      to: "agent-phase5-b",
+      status: "pending",
+    });
+    expect(context.agents[2]?.mailbox).toHaveLength(0);
+
+    const full = context.agents[2];
+    if (!full) throw new Error("missing fixture agent");
+    full.mailbox = Array.from({ length: 20 }, (_, index) => ({
+      id: `msg-full-${index}`,
+      from: "user",
+      to: full.id,
+      text: `pending ${index}`,
+      createdAt: startedAt,
+      status: "pending",
+      summary: `pending ${index}`,
+    }));
+    const capped = await sendAgentMessage(context, { name: "solo", message: "one more" });
+    expect(capped.ok).toBe(false);
+    expect(capped.text).toContain("limit is 20");
+    expect(full.mailbox).toHaveLength(20);
+
+    for (let index = 0; index < 6; index += 1) {
+      context.agents.push(
+        makeAgent(`agent-phase5-overflow-${index}`, {
+          addressableName: `overflow-${index}`,
+          teamName: "overflow",
+        }),
+      );
+    }
+    const overflow = await sendAgentMessage(context, { team: "overflow", message: "too many" });
+    expect(overflow.ok).toBe(false);
+    expect(overflow.text).toContain("limit is 5");
+    expect(
+      context.agents
+        .filter((agent) => agent.teamName === "overflow")
+        .flatMap((agent) => agent.mailbox),
+    ).toHaveLength(0);
+
+    await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, output);
+    expect(output.text).toContain("- mailbox: pending 1, consumed 0, failed 0");
+    expect(output.text).toContain("- mailbox tail:");
+    expect(output.text).toContain("from user to agent-phase5-a: 团队广播");
+    expect(output.text).not.toContain("tool_result");
+  });
+
+  it("consumes bounded mailbox messages and records consumed status/evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-mailbox-bounded-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const startedAt = new Date().toISOString();
+    const agent: AgentRun = {
+      id: "agent-bounded-mailbox",
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "consume bounded mailbox",
+      model: "route-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: join(project, "agent-bounded-mailbox.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: Array.from({ length: 5 }, (_, index) => ({
+        id: `msg-bounded-${index}`,
+        from: "user",
+        to: "agent-bounded-mailbox",
+        text: `bounded message ${index}`,
+        createdAt: startedAt,
+        status: "pending",
+        summary: `bounded message ${index}`,
+      })),
+      summary: "agent running",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    context.agents = [agent];
+    const background = createBackgroundTaskFixture("agent", {
+      id: agent.id,
+      title: "Agent bounded mailbox",
+    });
+    context.backgroundTasks = [background];
+    mockOpenAiTextFetch("bounded mailbox consumed");
+
+    const { completeAgent } = await import("./job-agent-command-runtime.js");
+    await completeAgent(agent, background, context, output);
+
+    expect(agent.mailbox.filter((message) => message.status === "consumed")).toHaveLength(3);
+    expect(agent.mailbox.filter((message) => message.status === "pending")).toHaveLength(2);
+    expect(context.evidence.some((item) => item.summary.includes("agent_mailbox"))).toBe(true);
+    const transcript = (await store.resume(agent.transcriptSessionId)).transcript;
+    expect(
+      transcript.filter(
+        (event) => event.type === "system_event" && event.message.includes("mailbox_consumed"),
+      ),
+    ).toHaveLength(3);
+  });
+
+  it("marks bounded mailbox batch failed when consumption evidence cannot be recorded", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-mailbox-failed-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const startedAt = new Date().toISOString();
+    const agent: AgentRun = {
+      id: "agent-failed-mailbox",
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "fail mailbox evidence",
+      model: "route-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: join(project, "agent-failed-mailbox.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: Array.from({ length: 4 }, (_, index) => ({
+        id: `msg-failed-${index}`,
+        from: "user",
+        to: "agent-failed-mailbox",
+        text: `failed message ${index}`,
+        createdAt: startedAt,
+        status: "pending",
+        summary: `failed message ${index}`,
+      })),
+      summary: "agent running",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    context.agents = [agent];
+    const background = createBackgroundTaskFixture("agent", {
+      id: agent.id,
+      title: "Agent failed mailbox",
+    });
+    context.backgroundTasks = [background];
+    const appendEvent = context.store.appendEvent.bind(context.store);
+    context.store.appendEvent = (async (sessionId, event) => {
+      if (event.type === "evidence_record") {
+        throw new Error("mailbox evidence failed");
+      }
+      return appendEvent(sessionId, event);
+    }) as typeof context.store.appendEvent;
+    mockOpenAiTextFetch("not reached");
+
+    const { completeAgent } = await import("./job-agent-command-runtime.js");
+    await completeAgent(agent, background, context, output);
+
+    expect(agent.mailbox.filter((message) => message.status === "failed")).toHaveLength(3);
+    expect(agent.mailbox.filter((message) => message.status === "pending")).toHaveLength(1);
+    expect(agent.summary).toContain("mailbox evidence failed");
+    expect(agent.status).toBe("failed");
+  });
+
+  it("bridges child agent Write permission to parent approval and executes once when approved", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-permission-approve-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiToolFetch(
+      "Write",
+      { path: "agent-approved.txt", content: "approved by parent\n" },
+      "unused child final",
+    );
+
+    await handleSlashCommand(
+      "/fork worker write approved file --name approval-agent",
+      context,
+      output,
+    );
+    const agent = context.agents[0];
+
+    expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
+    expect(context.pendingLocalApproval).toMatchObject({
+      agentId: agent?.id,
+      toolName: "Write",
+    });
+    expect(agent?.status).toBe("blocked");
+    expect(output.text).toContain("允许本次执行？yes / no");
+
+    await handleNaturalInput("yes", context, context.modelGateway, output);
+
+    await expect(readFile(join(project, "agent-approved.txt"), "utf8")).resolves.toBe(
+      "approved by parent\n",
+    );
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(agent?.status).toBe("blocked");
+    expect(agent?.summary).toContain("approved Write executed");
+    expect(context.evidence.some((item) => item.summary.includes("Write:"))).toBe(true);
+    const transcript = (await store.resume(agent?.transcriptSessionId ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("agent_permission_pending"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("agent_permission_approved"),
+      ),
+    ).toBe(true);
+  });
+
+  it("bridges child agent Write permission denial without executing the tool", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-permission-deny-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiToolFetch(
+      "Write",
+      { path: "agent-denied.txt", content: "denied should not write\n" },
+      "unused child final",
+    );
+
+    await handleSlashCommand(
+      "/fork worker write denied file --name denied-agent",
+      context,
+      output,
+    );
+    const agent = context.agents[0];
+    expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
+
+    await handleNaturalInput("no", context, context.modelGateway, output);
+
+    await expect(readFile(join(project, "agent-denied.txt"), "utf8")).rejects.toThrow();
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(agent?.status).toBe("blocked");
+    expect(agent?.summary).toContain("permission denied");
+    const transcript = (await store.resume(agent?.transcriptSessionId ?? "")).transcript;
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "system_event" && event.message.includes("agent_permission_denied"),
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (event) =>
+          event.type === "tool_result" && String(event.content).includes("was NOT executed"),
+      ),
+    ).toBe(true);
+  });
+
   it("/agents resume restarts stale AgentRun without replaying old tool results", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-agent-stale-resume-"));
     const config = createOpenAiRegistryAgentConfig("route-model");

@@ -892,6 +892,7 @@ export function mapPendingApprovalToPermission(
         mutation?: { action?: string };
         action?: string;
         assetPath?: string;
+        agentId?: string;
         verdict?: {
           semantic?: PolicySemantic;
           pathSafety?: PathSafety;
@@ -1021,7 +1022,11 @@ export function mapPendingApprovalToPermission(
     };
   }
 
-  if (approval.kind === "model_tool_use" || approval.kind === "architecture_drift") {
+  if (
+    approval.kind === "model_tool_use" ||
+    approval.kind === "architecture_drift" ||
+    approval.kind === "agent_tool_use"
+  ) {
     const toolName = approval.toolName ?? "unknown";
     // D.13Q-UX Closure: 优先用 engine 真实 verdict（semantic / pathSafety /
     // redactedSummary / reason）装配 explanationLines；engine 没给时才回落到
@@ -1058,7 +1063,15 @@ export function mapPendingApprovalToPermission(
         approval.kind === "model_tool_use"
           ? []
           : buildOneShotPermissionActions(context.language),
-      explanationLines,
+      explanationLines:
+        approval.kind === "agent_tool_use"
+          ? [
+              context.language === "en-US"
+                ? `Child agent ${approval.agentId ?? "unknown"} requested this tool.`
+                : `子 agent ${approval.agentId ?? "unknown"} 请求该工具。`,
+              ...explanationLines,
+            ]
+          : explanationLines,
     };
   }
   return undefined;

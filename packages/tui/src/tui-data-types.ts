@@ -333,9 +333,14 @@ export type AgentType = "explorer" | "worker" | "verifier" | "planner";
 export type AgentMailboxMessage = {
   id: string;
   from: "user" | "model" | "workflow" | "system";
+  to: string;
   text: string;
   createdAt: string;
+  status: "pending" | "consumed" | "failed";
+  summary: string;
   consumedAt?: string;
+  failedAt?: string;
+  error?: string;
 };
 
 export type RoleUsage = {
@@ -430,6 +435,8 @@ export type AgentRun = {
   maxTurns?: number;
   permissionMode: PermissionMode;
   status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+  activityStatus?: "processing" | "waiting_mailbox" | "blocked" | "cancelled" | "completed";
+  activitySummary?: string;
   transcriptPath: string;
   transcriptSessionId: string;
   mailbox: AgentMailboxMessage[];

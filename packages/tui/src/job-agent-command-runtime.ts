@@ -129,6 +129,11 @@ type AgentWorkResult = {
 };
 
 const AGENT_MAX_MODEL_TURNS = LINGHUN_MAX_AGENT_CHILD_TURNS;
+export const AGENT_MAILBOX_MAX_MESSAGES = 20;
+export const AGENT_MAILBOX_MAX_BYTES = 16_384;
+export const AGENT_MAILBOX_CONSUME_BATCH = 3;
+export const AGENT_TEAM_BROADCAST_MAX = 5;
+const AGENT_PERMISSION_BRIDGE_TOOLS = new Set<ToolName>(["Bash", "Edit", "Write", "MultiEdit"]);
 
 function getAgentRunsDir(context: TuiContext): string {
   return resolveStoragePaths(context.config, context.projectPath).agentRuns;
@@ -194,11 +199,41 @@ export type JobAgentCommandRuntimeDeps = {
     agent: AgentRun,
     result: AgentWorkResult,
   ) => Promise<string | undefined>;
+  recordAgentMailboxEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    agent: AgentRun,
+    messages: AgentMailboxMessage[],
+  ) => Promise<string | undefined>;
+  recordAgentToolEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    agent: AgentRun,
+    toolName: ToolName,
+    output: ToolOutput,
+    input: unknown,
+  ) => Promise<string | undefined>;
+  recordAgentToolFailureEvidence: (
+    context: TuiContext,
+    sessionId: string,
+    agent: AgentRun,
+    toolName: ToolName,
+    summary: string,
+  ) => Promise<string | undefined>;
   recordToolResultBudgetEvidence: (
     context: TuiContext,
     sessionId: string,
     record: ToolResultBudgetRecord,
   ) => Promise<string | undefined>;
+  createAgentToolApproval: (input: {
+    context: TuiContext;
+    agent: AgentRun;
+    toolCall: ModelToolCall;
+    toolName: ToolName;
+    parentSessionId: string;
+    permission: Awaited<ReturnType<typeof decidePermission>>;
+    output: Writable;
+  }) => boolean;
   prepareProviderPreflight: (
     context: TuiContext,
     sessionId: string,
@@ -243,6 +278,88 @@ function deps(): JobAgentCommandRuntimeDeps {
     throw new Error("job-agent-command-runtime deps not configured");
   }
   return runtimeDeps;
+}
+
+function setAgentActivity(
+  agent: AgentRun,
+  activityStatus: NonNullable<AgentRun["activityStatus"]>,
+  summary: string,
+): void {
+  agent.activityStatus = activityStatus;
+  agent.activitySummary = truncateDisplay(summary.replace(/\s+/g, " "), 180);
+  agent.updatedAt = new Date().toISOString();
+}
+
+function normalizeMailboxMessage(agent: AgentRun, message: AgentMailboxMessage): AgentMailboxMessage {
+  const consumedAt = message.consumedAt;
+  const failedAt = message.failedAt;
+  const status = message.status ?? (failedAt ? "failed" : consumedAt ? "consumed" : "pending");
+  return {
+    ...message,
+    to: message.to ?? agent.id,
+    status,
+    summary: message.summary ?? summarizeMailboxText(message.text),
+  };
+}
+
+function normalizeAgentMailbox(agent: AgentRun): AgentMailboxMessage[] {
+  return (agent.mailbox ?? [])
+    .filter((message) => message && typeof message.id === "string")
+    .map((message) => normalizeMailboxMessage(agent, message));
+}
+
+function summarizeMailboxText(text: string): string {
+  return truncateDisplay(text.replace(/\s+/g, " ").trim(), 120);
+}
+
+function mailboxPendingMessages(agent: AgentRun): AgentMailboxMessage[] {
+  agent.mailbox = normalizeAgentMailbox(agent);
+  return agent.mailbox.filter((message) => message.status === "pending");
+}
+
+function mailboxPendingBytes(agent: AgentRun): number {
+  return mailboxPendingMessages(agent).reduce(
+    (total, message) => total + Buffer.byteLength(message.text, "utf8"),
+    0,
+  );
+}
+
+function trimAgentMailboxHistory(agent: AgentRun): void {
+  if (agent.mailbox.length <= AGENT_MAILBOX_MAX_MESSAGES) return;
+  const pending = agent.mailbox.filter((message) => message.status === "pending");
+  const terminal = agent.mailbox.filter((message) => message.status !== "pending");
+  agent.mailbox = [
+    ...terminal.slice(-Math.max(0, AGENT_MAILBOX_MAX_MESSAGES - pending.length)),
+    ...pending,
+  ].slice(-AGENT_MAILBOX_MAX_MESSAGES);
+}
+
+function markMailboxMessagesFailed(
+  agent: AgentRun,
+  messages: AgentMailboxMessage[],
+  error: string,
+): void {
+  const now = new Date().toISOString();
+  for (const message of messages) {
+    message.status = "failed";
+    message.failedAt = now;
+    message.error = truncateDisplay(error, 160);
+  }
+  setAgentActivity(agent, "blocked", `mailbox failed: ${truncateDisplay(error, 120)}`);
+}
+
+function formatAgentCandidate(agent: AgentRun): string {
+  const labels = [
+    agent.id,
+    agent.addressableName ? `name=${agent.addressableName}` : undefined,
+    agent.teamName ? `team=${agent.teamName}` : undefined,
+    `status=${agent.status}`,
+  ].filter(Boolean);
+  return labels.join(" ");
+}
+
+function formatAgentCandidates(agents: AgentRun[]): string {
+  return agents.map(formatAgentCandidate).join("; ");
 }
 
 function toRunnerContext(context: TuiContext): RunnerContext {
@@ -830,6 +947,8 @@ async function startDurableJobAgentRun(
     model: effectiveModel,
     permissionMode: getAgentPermissionMode(assignment.type, context.permissionMode),
     status: resolved.usable ? "running" : "blocked",
+    activityStatus: resolved.usable ? "processing" : "blocked",
+    activitySummary: resolved.usable ? "job child agent running" : "route unusable",
     transcriptPath: child.transcriptPath,
     transcriptSessionId: child.id,
     mailbox: [],
@@ -1582,17 +1701,12 @@ export async function handleAgentsCommand(
     return;
   }
   if (action === "send") {
-    const to = args[1];
-    const message = args.slice(2).join(" ").trim();
-    if (!to || !message) {
-      writeLine(output, "用法：/agents send <id|name|team> <message>");
+    const parsed = parseAgentsSendArgs(args.slice(1));
+    if (!parsed) {
+      writeLine(output, "用法：/agents send <id|name> <message> 或 /agents send --team <team> <message>");
       return;
     }
-    const result = await sendAgentMessage(context, {
-      to,
-      message,
-      from: "user",
-    });
+    const result = await sendAgentMessage(context, { ...parsed, from: "user" });
     writeLine(output, result.text);
     return;
   }
@@ -1640,8 +1754,21 @@ export async function handleAgentsCommand(
   }
   writeLine(
     output,
-    "用法：/agents | /agents registry | /agents show <id> | /agents resume <id> | /agents cancel <id>|all | /agents send <id|name|team> <message>",
+    "用法：/agents | /agents registry | /agents show <id> | /agents resume <id> | /agents cancel <id>|all | /agents send <id|name> <message> | /agents send --team <team> <message>",
   );
+}
+
+function parseAgentsSendArgs(
+  args: string[],
+): { to?: string; team?: string; message: string } | undefined {
+  if (args[0] === "--team" || args[0] === "--team-name") {
+    const team = args[1]?.trim();
+    const message = args.slice(2).join(" ").trim();
+    return team && message ? { team, message } : undefined;
+  }
+  const target = args[0]?.trim();
+  const message = args.slice(1).join(" ").trim();
+  return target && message ? { to: target, message } : undefined;
 }
 
 export async function handleForkCommand(
@@ -1719,6 +1846,8 @@ export async function handleForkCommand(
     ...(registryMaxTurns ? { maxTurns: registryMaxTurns } : {}),
     permissionMode: getAgentPermissionMode(type, context.permissionMode),
     status: "running",
+    activityStatus: "processing",
+    activitySummary: "agent running",
     transcriptPath: child.transcriptPath,
     transcriptSessionId: child.id,
     mailbox: [],
@@ -1782,6 +1911,20 @@ export async function completeAgent(
   output: Writable,
 ): Promise<void> {
   const parentSessionId = agent.parentSessionId ?? (await deps().ensureSession(context));
+  const statusBeforeRun = agent.status;
+  if (statusBeforeRun !== "running") {
+    writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，不会派发新任务。`);
+    syncBackgroundWithAgentStatus(task, agent);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
+    return;
+  }
+  setAgentActivity(
+    agent,
+    "processing",
+    `processing task; pending mailbox ${countPendingMailbox(agent)}`,
+  );
+  syncBackgroundWithAgentStatus(task, agent);
+  await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   let result: AgentWorkResult;
   try {
     result = await runAgentWork(agent, context, output);
@@ -1801,6 +1944,11 @@ export async function completeAgent(
   const now = new Date().toISOString();
   agent.status = result.status;
   agent.summary = result.summary;
+  setAgentActivity(
+    agent,
+    result.status === "completed" ? "completed" : "blocked",
+    result.summary,
+  );
   agent.updatedAt = now;
   agent.cost.outputTokens = Math.ceil(result.summary.length / 4);
   deps().addRoleUsage(
@@ -2128,19 +2276,12 @@ export async function runModelBackedAgent(
       }
     | undefined;
   for (let round = 0; round < maxTurns; round += 1) {
-    const mailbox = consumeAgentMailbox(agent);
+    const mailbox = await consumeAgentMailbox(agent, context, parentSessionId);
     if (mailbox.length > 0) await persistAgentRun(context, agent);
     for (const message of mailbox) {
       messages.push({
         role: "user",
-        content: `Mailbox message ${message.id} from ${message.from}: ${message.text}`,
-      });
-      await context.store.appendEvent(agent.transcriptSessionId, {
-        type: "system_event",
-        id: randomUUID(),
-        level: "info",
-        message: `mailbox_consumed:${message.id}`,
-        createdAt: message.consumedAt ?? new Date().toISOString(),
+        content: `Mailbox message ${message.id} from ${message.from} to ${message.to}: ${message.text}`,
       });
     }
     let toolCalls: ModelToolCall[] = [];
@@ -2433,12 +2574,54 @@ async function executeAgentToolCall(
   });
   if (permission.decision !== "allow") {
     const text = `${permission.decision}: ${permission.reason}`;
+    let pendingApproval = false;
+    if (permission.decision === "ask") {
+      if (AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)) {
+        pendingApproval = deps().createAgentToolApproval({
+          context,
+          agent,
+          toolCall,
+          toolName,
+          parentSessionId,
+          permission,
+          output,
+        });
+        if (pendingApproval) {
+          agent.status = "blocked";
+          setAgentActivity(agent, "blocked", `${toolName} waiting for parent approval`);
+          const background =
+            context.backgroundTasks.find((task) => task.id === agent.id) ??
+            createAgentBackgroundTask(agent, context);
+          if (!context.backgroundTasks.some((task) => task.id === background.id)) {
+            rememberBackgroundTask(context, background);
+          }
+          syncBackgroundWithAgentStatus(background, agent);
+          await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+          await persistAgentRun(context, agent);
+          await context.store.appendEvent(agent.transcriptSessionId, {
+            type: "system_event",
+            id: randomUUID(),
+            level: "warning",
+            message: `agent_permission_pending:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      } else {
+        await context.store.appendEvent(agent.transcriptSessionId, {
+          type: "system_event",
+          id: randomUUID(),
+          level: "warning",
+          message: `agent_permission_not_bridged:${toolCall.id}; tool=${toolName}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    }
     await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
     return {
       ok: false,
       tool: toolName,
       text,
-      pendingApproval: permission.decision === "ask",
+      pendingApproval,
     };
   }
   if (permission.preflight) {
@@ -2453,6 +2636,137 @@ async function executeAgentToolCall(
     text: result.output.text,
     data: result.output.data,
   };
+}
+
+export async function executeApprovedAgentToolUse(
+  agent: AgentRun,
+  toolCall: ModelToolCall,
+  toolName: ToolName,
+  context: TuiContext,
+  parentSessionId: string,
+): Promise<{ ok: boolean; tool: string; text: string; data?: unknown; evidenceId?: string }> {
+  const now = new Date().toISOString();
+  if (!AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)) {
+    const text = `Agent permission bridge does not execute ${toolName}; supported tools: Bash, Edit, Write, MultiEdit.`;
+    const evidenceId = await deps().recordAgentToolFailureEvidence(
+      context,
+      parentSessionId,
+      agent,
+      toolName,
+      text,
+    );
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    setAgentActivity(agent, "blocked", text);
+    agent.summary = text;
+    await persistAgentRun(context, agent);
+    return { ok: false, tool: toolName, text, evidenceId };
+  }
+  try {
+    await context.store.appendEvent(agent.transcriptSessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "info",
+      message: `agent_permission_approved:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+      createdAt: now,
+    });
+    const result = await runAgentToolInCwd(toolName, toolCall.input, agent, context);
+    await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
+    const evidenceId = await deps().recordAgentToolEvidence(
+      context,
+      parentSessionId,
+      agent,
+      toolName,
+      result.output,
+      toolCall.input,
+    );
+    const failed = isAgentToolOutputFailure(toolName, result.output);
+    agent.status = "blocked";
+    agent.summary = failed
+      ? `agent ${agent.id} approved ${toolName} executed but failed; inspect transcript/evidence ${evidenceId ?? "none"}.`
+      : `agent ${agent.id} approved ${toolName} executed; child loop remains stopped after approval.`;
+    setAgentActivity(agent, "blocked", agent.summary);
+    const background =
+      context.backgroundTasks.find((task) => task.id === agent.id) ??
+      createAgentBackgroundTask(agent, context);
+    if (!context.backgroundTasks.some((task) => task.id === background.id)) {
+      rememberBackgroundTask(context, background);
+    }
+    syncBackgroundWithAgentStatus(background, agent);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await persistAgentRun(context, agent);
+    return {
+      ok: !failed,
+      tool: toolName,
+      text: result.output.text,
+      data: result.output.data,
+      evidenceId,
+    };
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    const evidenceId = await deps().recordAgentToolFailureEvidence(
+      context,
+      parentSessionId,
+      agent,
+      toolName,
+      text,
+    );
+    await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+    agent.status = "blocked";
+    agent.summary = `agent ${agent.id} approved ${toolName} failed: ${truncateDisplay(text, 160)}`;
+    setAgentActivity(agent, "blocked", agent.summary);
+    const background =
+      context.backgroundTasks.find((task) => task.id === agent.id) ??
+      createAgentBackgroundTask(agent, context);
+    if (!context.backgroundTasks.some((task) => task.id === background.id)) {
+      rememberBackgroundTask(context, background);
+    }
+    syncBackgroundWithAgentStatus(background, agent);
+    await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    await persistAgentRun(context, agent);
+    return { ok: false, tool: toolName, text, evidenceId };
+  }
+}
+
+export async function denyAgentToolUse(
+  agent: AgentRun,
+  toolCall: ModelToolCall,
+  toolName: ToolName,
+  context: TuiContext,
+  parentSessionId: string,
+  outcomeText: string,
+): Promise<{ ok: false; tool: string; text: string; evidenceId?: string }> {
+  const text =
+    toolName === "Bash" || toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit"
+      ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
+      : outcomeText;
+  const evidenceId = await deps().recordAgentToolFailureEvidence(
+    context,
+    parentSessionId,
+    agent,
+    toolName,
+    text,
+  );
+  await context.store.appendEvent(agent.transcriptSessionId, {
+    type: "system_event",
+    id: randomUUID(),
+    level: "warning",
+    message: `agent_permission_denied:${toolCall.id}; tool=${toolName}; parentSession=${parentSessionId}`,
+    createdAt: new Date().toISOString(),
+  });
+  await appendAgentToolResultEvent(agent, context, toolCall.id, toolName, text, true);
+  agent.status = "blocked";
+  agent.summary = `agent ${agent.id} ${toolName} permission denied; child loop remains stopped.`;
+  setAgentActivity(agent, "blocked", agent.summary);
+  const background =
+    context.backgroundTasks.find((task) => task.id === agent.id) ??
+    createAgentBackgroundTask(agent, context);
+  if (!context.backgroundTasks.some((task) => task.id === background.id)) {
+    rememberBackgroundTask(context, background);
+  }
+  syncBackgroundWithAgentStatus(background, agent);
+  await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+  await persistAgentRun(context, agent);
+  return { ok: false, tool: toolName, text, evidenceId };
 }
 
 function createAgentLoopSystemPrompt(agent: AgentRun, context: TuiContext): string {
@@ -2497,21 +2811,43 @@ function createReadonlyAuditToolHint(agent: AgentRun): string {
 }
 
 function buildAgentUserMessage(agent: AgentRun): string {
-  const mailbox = consumeAgentMailbox(agent);
-  const lines = [agent.task];
-  for (const message of mailbox) {
-    lines.push(`Mailbox message ${message.id} from ${message.from}: ${message.text}`);
-  }
-  return lines.join("\n\n");
+  return agent.task;
 }
 
-function consumeAgentMailbox(agent: AgentRun): AgentMailboxMessage[] {
+async function consumeAgentMailbox(
+  agent: AgentRun,
+  context: TuiContext,
+  parentSessionId: string,
+): Promise<AgentMailboxMessage[]> {
+  agent.mailbox = normalizeAgentMailbox(agent);
   const now = new Date().toISOString();
-  const pending = agent.mailbox.filter((message) => !message.consumedAt);
-  for (const message of pending) {
-    message.consumedAt = now;
+  const pending = mailboxPendingMessages(agent).slice(0, AGENT_MAILBOX_CONSUME_BATCH);
+  if (pending.length === 0) {
+    setAgentActivity(agent, "waiting_mailbox", "waiting for mailbox or provider turn");
+    return [];
   }
-  return pending;
+  try {
+    setAgentActivity(agent, "processing", `consuming ${pending.length} mailbox message(s)`);
+    for (const message of pending) {
+      message.status = "consumed";
+      message.consumedAt = now;
+      message.summary = summarizeMailboxText(message.text);
+      await context.store.appendEvent(agent.transcriptSessionId, {
+        type: "system_event",
+        id: randomUUID(),
+        level: "info",
+        message: `mailbox_consumed:${message.id}; from=${message.from}; to=${message.to}; summary=${message.summary}`,
+        createdAt: now,
+      });
+    }
+    await deps().recordAgentMailboxEvidence(context, parentSessionId, agent, pending);
+    return pending;
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    markMailboxMessagesFailed(agent, pending, text);
+    await persistAgentRun(context, agent);
+    throw error;
+  }
 }
 
 function getAgentAllowedTools(agent: AgentRun): (typeof builtInTools)[ToolName][] {
@@ -2739,6 +3075,9 @@ export function syncBackgroundWithAgentStatus(
   background: BackgroundTaskState,
   agent: AgentRun,
 ): void {
+  const activitySummary = agent.activitySummary
+    ? truncateDisplay(agent.activitySummary, 140)
+    : undefined;
   if (TERMINAL_AGENT_STATUSES.has(agent.status)) {
     background.status =
       agent.status === "blocked"
@@ -2748,7 +3087,7 @@ export function syncBackgroundWithAgentStatus(
           : agent.status === "failed"
             ? "failed"
             : "completed";
-    background.currentStep = `${agent.status}`;
+    background.currentStep = activitySummary ? `${agent.status}: ${activitySummary}` : `${agent.status}`;
     background.result =
       agent.status === "completed"
         ? mapAgentBackgroundResult(agent, undefined)
@@ -2764,7 +3103,7 @@ export function syncBackgroundWithAgentStatus(
     };
   } else if (agent.status === "stale") {
     background.status = "stale";
-    background.currentStep = "stale/resumable";
+    background.currentStep = activitySummary ? `stale/resumable: ${activitySummary}` : "stale/resumable";
     background.result = "partial";
     background.progress = {
       completed: 0,
@@ -2773,10 +3112,10 @@ export function syncBackgroundWithAgentStatus(
     };
   } else if (agent.status === "running") {
     background.status = "running";
-    background.currentStep = `running ${agent.type}`;
+    background.currentStep = activitySummary ?? `running ${agent.type}`;
     background.result = undefined;
   }
-  background.userVisibleSummary = agent.summary;
+  background.userVisibleSummary = activitySummary ? `${activitySummary}; ${agent.summary}` : agent.summary;
   background.updatedAt = agent.updatedAt;
 }
 
@@ -2832,10 +3171,18 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       const maxTurns = normalizeRegistryAgentMaxTurns(parsed.maxTurns);
       const agent: AgentRun = {
         ...parsed,
-        mailbox: parsed.mailbox ?? [],
+        mailbox: [],
         ...(allowedTools !== undefined ? { allowedTools } : {}),
         ...(maxTurns ? { maxTurns } : {}),
         status: parsed.status === "running" ? "stale" : parsed.status,
+        activityStatus:
+          parsed.status === "running"
+            ? "blocked"
+            : parsed.status === "completed"
+              ? "completed"
+              : parsed.status === "cancelled"
+                ? "cancelled"
+                : parsed.activityStatus,
         staleReason:
           parsed.status === "running" ? "hydrate_running_agent_after_restart" : parsed.staleReason,
         summary:
@@ -2844,6 +3191,7 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
             : parsed.summary,
         updatedAt: now,
       };
+      agent.mailbox = normalizeAgentMailbox({ ...agent, mailbox: parsed.mailbox ?? [] });
       context.agents.push(agent);
       if (agent.status === "running" || agent.status === "stale") {
         const background = createAgentBackgroundTask(agent, context);
@@ -2878,47 +3226,219 @@ export async function sendAgentMessage(
     team?: string;
     teamName?: string;
     team_name?: string;
+    targetType?: "id" | "name" | "team";
+    broadcastTeam?: boolean;
     message: string;
     from?: AgentMailboxMessage["from"];
   },
 ): Promise<{ ok: boolean; text: string; delivered: string[] }> {
-  const target = input.to ?? input.name ?? input.team ?? input.teamName ?? input.team_name;
   const text = input.message.trim();
-  if (!target || !text) {
+  if (!text) {
     return { ok: false, text: "SendMessage requires target and non-empty message.", delivered: [] };
   }
-  const targets = findMessageTargets(context, target);
-  if (targets.length === 0) {
-    return {
-      ok: false,
-      text: `SendMessage failed: no running agent/team found for "${target}".`,
-      delivered: [],
-    };
+  const resolved = resolveMessageTargets(context, input);
+  if (!resolved.ok) {
+    return { ok: false, text: resolved.text, delivered: [] };
   }
+  const messageBytes = Buffer.byteLength(text, "utf8");
+  const capError = firstMailboxCapError(resolved.targets, text, messageBytes);
+  if (capError) return { ok: false, text: capError, delivered: [] };
   const now = new Date().toISOString();
-  for (const agent of targets) {
+  const parentSessionId = await deps().ensureSession(context);
+  for (const agent of resolved.targets) {
+    agent.mailbox = normalizeAgentMailbox(agent);
+    trimAgentMailboxHistory(agent);
     const message: AgentMailboxMessage = {
       id: `msg-${randomUUID().slice(0, 8)}`,
       from: input.from ?? "model",
+      to: agent.id,
       text,
       createdAt: now,
+      status: "pending",
+      summary: summarizeMailboxText(text),
     };
     agent.mailbox.push(message);
-    agent.updatedAt = now;
+    trimAgentMailboxHistory(agent);
+    setAgentActivity(agent, "waiting_mailbox", `mailbox pending ${countPendingMailbox(agent)}`);
     await context.store.appendEvent(agent.transcriptSessionId, {
       type: "user_message",
       id: message.id,
       text,
       createdAt: now,
     });
+    await context.store.appendEvent(agent.transcriptSessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "info",
+      message: `mailbox_enqueued:${message.id}; from=${message.from}; to=${message.to}; summary=${message.summary}`,
+      createdAt: now,
+    });
+    const background = context.backgroundTasks.find((task) => task.id === agent.id);
+    if (background) {
+      syncBackgroundWithAgentStatus(background, agent);
+      await deps().appendBackgroundTaskEvent(context, parentSessionId, background);
+    }
     await persistAgentRun(context, agent);
   }
-  const delivered = targets.map((agent) => agent.id);
+  const delivered = resolved.targets.map((agent) => agent.id);
   return {
     ok: true,
     text: `SendMessage delivered to ${delivered.join(", ")}; pending mailbox updated.`,
     delivered,
   };
+}
+
+function resolveMessageTargets(
+  context: TuiContext,
+  input: {
+    to?: string;
+    name?: string;
+    team?: string;
+    teamName?: string;
+    team_name?: string;
+    targetType?: "id" | "name" | "team";
+    broadcastTeam?: boolean;
+  },
+): { ok: true; targets: AgentRun[] } | { ok: false; text: string } {
+  const toTarget = input.to?.trim();
+  const nameTarget = input.name?.trim();
+  const teamFields = [input.team, input.teamName, input.team_name]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  const uniqueTeamTargets = Array.from(new Set(teamFields));
+  const targetKinds = [
+    toTarget ? "to" : undefined,
+    nameTarget ? "name" : undefined,
+    uniqueTeamTargets.length > 0 ? "team" : undefined,
+  ].filter(Boolean);
+  if (targetKinds.length > 1 || uniqueTeamTargets.length > 1) {
+    return {
+      ok: false,
+      text: `SendMessage target is conflicting; provide exactly one id/name target or one explicit team target. Received ${[
+        toTarget ? `to=${toTarget}` : undefined,
+        nameTarget ? `name=${nameTarget}` : undefined,
+        uniqueTeamTargets.length > 0 ? `team=${uniqueTeamTargets.join("|")}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(", ")}.`,
+    };
+  }
+  const teamTarget = input.team ?? input.teamName ?? input.team_name;
+  const target = input.to ?? input.name ?? teamTarget;
+  if (!target?.trim()) {
+    return { ok: false, text: "SendMessage requires an explicit id/name target or --team target." };
+  }
+  const explicitTeam = Boolean(teamTarget) || input.targetType === "team" || input.broadcastTeam;
+  if (explicitTeam) {
+    const team = (teamTarget ?? input.to ?? input.name ?? "").trim();
+    if (!team) {
+      return { ok: false, text: "SendMessage team broadcast requires a non-empty team name." };
+    }
+    const targets = context.agents.filter(
+      (agent) => agent.status === "running" && agent.teamName === team,
+    );
+    if (targets.length === 0) {
+      return { ok: false, text: `SendMessage failed: no running team found for "${team}".` };
+    }
+    if (targets.length > AGENT_TEAM_BROADCAST_MAX) {
+      return {
+        ok: false,
+        text: `SendMessage failed: team "${team}" has ${targets.length} running agents; limit is ${AGENT_TEAM_BROADCAST_MAX}. Send to specific ids/names or reduce the team.`,
+      };
+    }
+    return { ok: true, targets };
+  }
+  const normalized = target.trim();
+  const byId = context.agents.filter(
+    (agent) =>
+      agent.status === "running" && (agent.id === normalized || agent.id.endsWith(normalized)),
+  );
+  const byName = context.agents.filter(
+    (agent) => agent.status === "running" && agent.addressableName === normalized,
+  );
+  if (input.targetType === "id") {
+    return resolveSingleTarget(normalized, byId, "id");
+  }
+  if (input.targetType === "name") {
+    return resolveSingleTarget(normalized, byName, "name");
+  }
+  const candidates = uniqueAgents([...byId, ...byName]);
+  if (candidates.length === 0) {
+    const teamCandidates = context.agents.filter(
+      (agent) => agent.status === "running" && agent.teamName === normalized,
+    );
+    const hint =
+      teamCandidates.length > 0
+        ? ` Team "${normalized}" exists; use /agents send --team ${normalized} <message> for explicit broadcast.`
+        : "";
+    return {
+      ok: false,
+      text: `SendMessage failed: no running agent id/name found for "${normalized}".${hint}`,
+    };
+  }
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      text: `SendMessage target "${normalized}" is ambiguous; candidates: ${formatAgentCandidates(candidates)}. Use a full id or unique name; use --team for explicit team broadcast.`,
+    };
+  }
+  return { ok: true, targets: candidates };
+}
+
+function resolveSingleTarget(
+  target: string,
+  matches: AgentRun[],
+  kind: "id" | "name",
+): { ok: true; targets: AgentRun[] } | { ok: false; text: string } {
+  const candidates = uniqueAgents(matches);
+  if (candidates.length === 0) {
+    return { ok: false, text: `SendMessage failed: no running agent ${kind} found for "${target}".` };
+  }
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      text: `SendMessage ${kind} "${target}" is ambiguous; candidates: ${formatAgentCandidates(candidates)}.`,
+    };
+  }
+  return { ok: true, targets: candidates };
+}
+
+function firstMailboxCapError(
+  targets: AgentRun[],
+  text: string,
+  messageBytes: number,
+): string | undefined {
+  for (const agent of targets) {
+    const mailbox = normalizeAgentMailbox(agent);
+    const pendingMessages = mailbox.filter((message) => message.status === "pending");
+    const pendingCount = pendingMessages.length;
+    const pendingBytes = pendingMessages.reduce(
+      (total, message) => total + Buffer.byteLength(message.text, "utf8"),
+      0,
+    );
+    if (pendingCount >= AGENT_MAILBOX_MAX_MESSAGES) {
+      return `SendMessage failed: agent ${agent.id} mailbox has ${pendingCount} pending messages; limit is ${AGENT_MAILBOX_MAX_MESSAGES}. Resume/cancel the agent or wait for it to consume mailbox.`;
+    }
+    if (
+      messageBytes > AGENT_MAILBOX_MAX_BYTES ||
+      pendingBytes + messageBytes > AGENT_MAILBOX_MAX_BYTES
+    ) {
+      return `SendMessage failed: agent ${agent.id} mailbox would exceed ${AGENT_MAILBOX_MAX_BYTES} bytes (pending ${pendingBytes}, message ${messageBytes}). Send a shorter message or wait for consumption.`;
+    }
+    if (!text.trim()) {
+      return "SendMessage requires a non-empty message.";
+    }
+  }
+  return undefined;
+}
+
+function uniqueAgents(agents: AgentRun[]): AgentRun[] {
+  const seen = new Set<string>();
+  return agents.filter((agent) => {
+    if (seen.has(agent.id)) return false;
+    seen.add(agent.id);
+    return true;
+  });
 }
 
 // Module 4 — findAgent moved to ./tui-agent-job-runtime.ts
@@ -2986,19 +3506,7 @@ function formatAgentRegistryList(context: TuiContext): string {
 }
 
 function countPendingMailbox(agent: AgentRun): number {
-  return agent.mailbox.filter((message) => !message.consumedAt).length;
-}
-
-function findMessageTargets(context: TuiContext, target: string): AgentRun[] {
-  const normalized = target.trim();
-  return context.agents.filter(
-    (agent) =>
-      agent.status === "running" &&
-      (agent.id === normalized ||
-        agent.id.endsWith(normalized) ||
-        agent.addressableName === normalized ||
-        agent.teamName === normalized),
-  );
+  return normalizeAgentMailbox(agent).filter((message) => message.status === "pending").length;
 }
 
 type ForkCommandOptions = {
