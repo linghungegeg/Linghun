@@ -199,7 +199,7 @@ describe("shell view model", () => {
     });
     const rendered = renderPlainShell(view);
 
-    expect(block.summary).toBe("done with apiKey=[masked-key]");
+    expect(block.summary).toBe("done with apiKey=[masked-key]\nfull line 2\nfull line 3");
     expect(block.detail).toBeUndefined();
     // D.13Q-UX assistant_text 在 plain 模式应保留所有多行正文。
     expect(block.messageKind).toBe("assistant_text");
@@ -776,7 +776,7 @@ describe("home → task view mode transition", () => {
     // Permission uses single border
     expect(output.text).toContain("│");
     expect(output.text).toContain("是");
-    expect(output.text).toContain("项目级允许");
+    expect(output.text).toContain("允许以后这类 Bash 操作");
     expect(output.text).toContain("否");
     expect(output.text).toContain("详情");
   });
@@ -1124,6 +1124,8 @@ describe("mapPendingApprovalToPermission — real context field mapping", () => 
     expect(result?.scope).toContain(".linghunignore");
     expect(result?.actionSummary).toContain(".linghunignore");
     expect(result?.actionSummary).toContain("修改文件");
+    expect(result?.actions?.map((item) => item.id)).toEqual(["allow_once", "deny", "details"]);
+    expect(result?.actions?.map((item) => item.id)).not.toContain("allow_always_tool");
   });
 
   it("D.14D-R2 P1-1: maps git_stable_point approval to a GitStablePointCreate PermissionPanel view", () => {
@@ -1198,8 +1200,9 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary?.id).toBe("bg-summary");
     expect(view.taskRuntimeSummary?.kind).toBe("run");
     expect(view.taskRuntimeSummary?.status).toBe("running");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可恢复 0");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).toContain("lint check");
     expect(view.taskRuntimeSummary?.summary).toContain("checking files");
     expect(view.taskRuntimeSummary?.summary).toContain("1/3 steps");
@@ -1240,9 +1243,12 @@ describe("backgroundSummaries → blocks mapping", () => {
       ],
     });
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
-    expect(view.taskRuntimeSummary?.summary).toContain("上次会话恢复的后台任务");
-    expect(view.taskRuntimeSummary?.nextAction).toContain("/agents show agent-stale-1");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
+    expect(view.taskRuntimeSummary?.title).toContain("智能体 1");
+    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("上次会话恢复的后台任务");
+    expect(view.taskRuntimeSummary?.nextAction).not.toContain("agent-stale-1");
     expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
   });
 
@@ -1253,7 +1259,8 @@ describe("backgroundSummaries → blocks mapping", () => {
       backgroundSummaries: [{ id: "t5", title: "build", status: "running" }],
     });
     expect(view.blocks.find((b) => b.id === "bg-summary")).toBeUndefined();
-    expect(view.taskRuntimeSummary?.title).toContain("Background tasks: 1 running");
+    expect(view.taskRuntimeSummary?.title).toContain("Background 1");
+    expect(view.taskRuntimeSummary?.title).toContain("running 1");
     expect(view.taskRuntimeSummary?.summary).toContain("build");
   });
 
@@ -1294,8 +1301,11 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
+    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 2");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 2");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("需要确认 1");
     expect(recoverable.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(recoverable.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(recoverable.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
   });
 
@@ -1622,8 +1632,10 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
+    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
   });
 });
@@ -1695,7 +1707,9 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("可恢复 1");
+    expect(rendered).toContain("后台 1");
+    expect(rendered).toContain("需要确认 1");
+    expect(rendered).not.toContain("可恢复");
     expect(rendered).toContain("详情 /background");
     expect(rendered).not.toContain("上次会话恢复的后台任务");
     expect(rendered).toContain("LingHun");
@@ -2036,8 +2050,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
+    expect(view.taskRuntimeSummary?.title).toContain("后台 2");
+    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
-    expect(view.taskRuntimeSummary?.title).toContain("可恢复 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
     expect(view.taskRuntimeSummary?.summary).not.toContain("health");
   });
@@ -2092,7 +2108,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(outputBlocks.length).toBeLessThanOrEqual(3);
   });
 
-  it("output blocks have Ctrl+O details hint", () => {
+  it("ordinary multi-line assistant output stays fully visible without Ctrl+O", () => {
     const block = createOutputBlock(
       "some output text\nwith additional lines that exceed summary",
       "zh-CN",
@@ -2104,7 +2120,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       outputBlocks: [block],
     });
     const outBlock = view.blocks.find((b) => b.id === "out-hint");
-    expect(outBlock?.nextAction).toContain("Ctrl+O");
+    expect(outBlock?.nextAction).toBeUndefined();
+    expect(outBlock?.summary).toContain("with additional lines");
   });
 
   it("D13E-P3 #2: short single-line normal output has NO Ctrl+O hint (no fake fold)", () => {
@@ -2119,16 +2136,17 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(enShort.nextAction).toBeUndefined();
   });
 
-  it("D13E-P3 #2: multi-line tool output / doctor body / error stack DOES carry Ctrl+O hint", () => {
+  it("D13E-P3 #2: ordinary multi-line assistant / diagnostic body does not auto-fold", () => {
     const multiLine = createOutputBlock(
       "checking provider...\nendpoint: https://example.com\nreasoning: high\nstatus: ok",
       "zh-CN",
       "out-multi",
     );
-    expect(multiLine.nextAction).toContain("Ctrl+O");
+    expect(multiLine.nextAction).toBeUndefined();
+    expect(multiLine.summary).toContain("status: ok");
 
     // D.13Q-UX Real Smoke Fix v3：含 "error / failed / 失败" 关键词的多行正文
-    // 不再被关键词扫描误标 fail。多行折叠仍挂 Ctrl+O，但走 assistant_text 渲染。
+    // 不再被关键词扫描误标 fail，也不会因为普通多行自动折叠。
     const errorStack = createOutputBlock(
       "Error: request failed\n  at provider.send\n  at gateway.invoke",
       "zh-CN",
@@ -2137,7 +2155,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(errorStack.status).toBe("info");
     expect(errorStack.kind).toBe("details");
     expect(errorStack.messageKind).toBe("assistant_text");
-    expect(errorStack.nextAction).toContain("Ctrl+O");
+    expect(errorStack.nextAction).toBeUndefined();
+    expect(errorStack.summary).toContain("gateway.invoke");
   });
 
   it("D13E-P3 #2: long single-line output is treated as folded only past the 16-char threshold", () => {
@@ -2180,7 +2199,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     const out1 = view.blocks.find((b) => b.id === "short");
     const out2 = view.blocks.find((b) => b.id === "long");
     expect(out1?.nextAction).toBeUndefined();
-    expect(out2?.nextAction).toContain("Ctrl+O");
+    expect(out2?.nextAction).toBeUndefined();
+    expect(out2?.fullText).toContain("status: ok");
   });
 
   it("D13E-P3 #3: ProductBlock filters out title='unknown' / empty as no-title (source check)", async () => {
@@ -2317,7 +2337,8 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       "out-err-multi",
     );
     expect(multi.status).toBe("info");
-    expect(multi.nextAction).toContain("Ctrl+O");
+    expect(multi.nextAction).toBeUndefined();
+    expect(multi.summary).toContain("runner.ts:17");
   });
 
   it("permission pending suppresses normal output", () => {
@@ -3580,7 +3601,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
 
     expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
-    expect(view.taskFooter?.runtimeStatus).toContain("后台任务：可恢复 1");
+    expect(view.taskFooter?.runtimeStatus).toContain("后台 1");
+    expect(view.taskFooter?.runtimeStatus).toContain("需要确认 1");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("可恢复");
     expect(view.taskFooter?.runtimeStatus).toContain("详情 /background");
     expect(view.taskFooter?.runtimeStatus).not.toContain("运行中 0");
     expect(view.taskFooter?.runtimeStatus).not.toContain("待确认 0");
@@ -3592,7 +3615,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
     const rendered = renderPlainShell(view);
     expect(rendered.indexOf("工作树：")).toBeGreaterThanOrEqual(0);
-    expect(rendered.indexOf("后台任务：")).toBeGreaterThan(rendered.indexOf("工作树："));
+    expect(rendered.indexOf("后台 1")).toBeGreaterThan(rendered.indexOf("工作树："));
   });
 
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
@@ -4037,12 +4060,12 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(view.blocks.some((b) => b.summary === "没有可见输出。")).toBe(false);
   });
 
-  it("Ctrl+O 只在有真实 fullText 的 streaming block 上出现；空 streaming block 不带 nextAction", () => {
+  it("assistant streaming fullText stays visible without Ctrl+O auto-fold", () => {
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
 
     output.beginAssistantStream("assistant-stream-ctrl-o");
-    // 单段长正文足以触发 Ctrl+O 提示（多行）
+    // 普通 assistant 多行正文直接展示，不再自动折成 Ctrl+O。
     output.appendAssistantDelta("第一行\n第二行\n第三行");
     output.endAssistantStream();
 
@@ -4052,7 +4075,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     const view = createShellViewModel(createContext(), { outputBlocks: blocks });
     const visible = view.blocks.find((b) => b.id === "assistant-stream-ctrl-o");
     expect(visible).toBeDefined();
-    expect(visible?.nextAction ?? "").toContain("Ctrl+O");
+    expect(visible?.nextAction).toBeUndefined();
+    expect(visible?.fullText).toContain("第三行");
   });
 
   it("output memory compact 保留 keep/fail/blocked 与最近普通输出", async () => {
@@ -5074,7 +5098,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     expect(out?.nextAction).toBeUndefined();
   });
 
-  it("多行被折叠的 block 才出现 Ctrl+O hint", () => {
+  it("ordinary multi-line assistant block does not get a Ctrl+O hint", () => {
     const block: ProductBlockViewModel = {
       id: "multi",
       kind: "details",
@@ -5089,7 +5113,8 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
       outputBlocks: [block],
     });
     const out = view.blocks.find((b) => b.id === "multi");
-    expect(out?.nextAction).toContain("Ctrl+O");
+    expect(out?.nextAction).toBeUndefined();
+    expect(out?.fullText).toContain("third line");
   });
 
   it("Ctrl+O 展开态在 transcript block 内显示 fullText，不创建 CommandPanel", () => {

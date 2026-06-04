@@ -174,8 +174,11 @@ export function formatBackgroundOutputDetails(
 export function formatBackgroundTask(task: BackgroundTaskState, language: Language): string {
   const progress = task.progress ? ` ${task.progress.completed}/${task.progress.total ?? "?"}` : "";
   const elapsed = formatElapsedSince(task.startedAt);
-  const title = truncateLine(task.title, 32);
-  const step = truncateLine(task.currentStep ?? "-", 34);
+  const title = truncateLine(
+    cleanPanelText(task.title, language === "en-US" ? "Background task" : "后台任务"),
+    32,
+  );
+  const step = truncateLine(cleanPanelText(task.currentStep ?? "-", "-"), 34);
   return language === "en-US"
     ? `[background] ${title} · ${task.status} · ${step}${progress} · elapsed ${elapsed}`
     : `[后台] ${title} · ${task.status} · ${step}${progress} · 耗时 ${elapsed}`;
@@ -277,9 +280,11 @@ function normalizePanelStatus(status: BackgroundTaskState["status"], language: L
 function cleanPanelText(value: string, fallback: string): string {
   const cleaned = value
     .replace(
-      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu,
+      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|raw tool result|endpoint|runner=|evidenceRefs?|planId|runId|workflowId|forkId|threadId|system_event|provider abort|provider_abort|abort signal)\b/giu,
       "",
     )
+    .replace(/\b(workflow|agent|job|run|plan)-[A-Za-z0-9_-]{6,}\b/giu, "$1")
+    .replace(/\b[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\b/gu, "id")
     .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;

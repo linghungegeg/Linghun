@@ -43,17 +43,17 @@ export function formatPermissionModeLabel(mode: PermissionMode, language: Langua
   if (language === "en-US") {
     const labels: Record<PermissionMode, string> = {
       default: "default mode",
-      "auto-review": "auto mode",
+      "auto-review": "auto-review",
       plan: "plan mode",
-      "full-access": "bypass approvals",
+      "full-access": "full access (safety on)",
     };
     return labels[mode] ?? mode;
   }
   const labels: Record<PermissionMode, string> = {
     default: "默认模式",
-    "auto-review": "自动模式",
+    "auto-review": "自动审核",
     plan: "计划模式",
-    "full-access": "跳过审批",
+    "full-access": "全权限（仍守安全）",
   };
   return labels[mode] ?? mode;
 }

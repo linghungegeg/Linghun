@@ -408,6 +408,7 @@ export type ShellInputEvent =
   | { type: "submit"; text: string }
   | { type: "empty-submit" }
   | { type: "escape" }
+  | { type: "interrupt" }
   | { type: "shift-enter" }
   | { type: "cycle-permission-mode" }
   | { type: "config-move"; delta: -1 | 1 }

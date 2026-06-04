@@ -622,9 +622,7 @@ function withPermissionActions(
             ? "是"
             : "Yes"
           : o.id === "allow_always_tool"
-            ? language === "zh-CN"
-              ? "项目级允许"
-              : "Project allow"
+            ? buildAllowAlwaysLabel(permission.toolName, language)
             : o.id === "details"
               ? language === "zh-CN"
                 ? "详情"
@@ -635,6 +633,26 @@ function withPermissionActions(
       shortcut: o.shortcut,
     }));
   return { ...permission, actions };
+}
+
+function buildOneShotPermissionActions(language: Language): PermissionAction[] {
+  const isEn = language === "en-US";
+  return [
+    { id: "allow_once", label: isEn ? "Yes" : "是", shortcut: "y" },
+    { id: "deny", label: isEn ? "No" : "否", shortcut: "n" },
+    { id: "details", label: isEn ? "Details" : "详情", shortcut: "d" },
+  ];
+}
+
+function buildAllowAlwaysLabel(toolName: string, language: Language): string {
+  const isEn = language === "en-US";
+  if (toolName === "Bash") {
+    return isEn ? "Allow future similar Bash actions" : "允许以后这类 Bash 操作";
+  }
+  if (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") {
+    return isEn ? "Allow future similar file changes" : "允许以后这类文件修改";
+  }
+  return isEn ? "Allow future similar actions" : "允许以后这类操作";
 }
 
 export function getComposerPlaceholder(language: Language): string {
@@ -678,9 +696,9 @@ export function createOutputBlock(
   const foldHintStripped = stripEmbeddedFoldHint(rawNormalized);
   const normalized = foldHintStripped.text;
   const explicitFold = foldHintStripped.stripped;
-  const firstLine = normalized.split("\n").find((line) => line.trim()) ?? normalized;
   const copy = shellText[language];
-  const summary = firstLine || copy.noVisibleOutput;
+  const summary =
+    (explicitFold ? summarizeExplicitFold(normalized) : normalized) || copy.noVisibleOutput;
   // D.13Q-UX Real Smoke Fix v3 — 不再用正文关键词（错误|失败|error|failed）
   // 决定 block 是否失败。/mcp status 这类 diagnostic 文案里出现"启动或检测
   // 失败会隔离"会被旧实现整块标红，造成用户以为 MCP 不可用。失败必须由结构化
@@ -697,9 +715,12 @@ export function createOutputBlock(
   // Short normal final answers / completion confirms / "我能帮您做点什么？"
   // echoes never satisfy either condition and stay clean (no hint row).
   const nonEmptyLineCount = normalized.split("\n").filter((line) => line.trim().length > 0).length;
+  const toolResultLike = isToolResultLike(normalized);
   const hasMore =
     explicitFold ||
-    (normalized.length > 0 && (nonEmptyLineCount >= 3 || normalized.length > summary.length + 16));
+    (toolResultLike &&
+      normalized.length > 0 &&
+      (nonEmptyLineCount >= 6 || normalized.length > summary.length + 16));
   return {
     id,
     kind: "details",
@@ -723,6 +744,19 @@ export function createOutputBlock(
   };
 }
 
+function isToolResultLike(text: string): boolean {
+  return /^(?:工具\s+\w+\s+已完成|Tool\s+\w+\s+completed|(?:Bash|Read|Grep|Glob|Write|Edit|MultiEdit|Todo|Diff)\s+(?:摘要|summary)|搜索摘要|文件搜索摘要|读取摘要|Bash 已结束|Search summary|File search summary|Read summary|Bash finished)/u.test(
+    text.trim(),
+  );
+}
+
+function summarizeExplicitFold(text: string): string {
+  const lines = text.split("\n");
+  const nonEmpty = lines.filter((line) => line.trim().length > 0);
+  if (nonEmpty.length <= 1) return nonEmpty[0] ?? text;
+  return nonEmpty.slice(0, 5).join("\n");
+}
+
 /**
  * Adds /details hint to output blocks only when the block actually has more
  * content than its summary. D13E-P3 cleanup #2: discipline tightened — the
@@ -740,13 +774,25 @@ function addDetailsHint(block: ProductBlockViewModel, language: Language): Produ
   const fullText = block.fullText ?? "";
   const summary = block.summary ?? "";
   const nonEmptyLines = fullText.split("\n").filter((line) => line.trim().length > 0).length;
+  const toolResultLike = isToolResultLike(fullText);
+  const messageKind = block.messageKind;
+  const foldableNonAssistant =
+    messageKind !== undefined &&
+    messageKind !== "assistant_text" &&
+    messageKind !== "assistant_thinking" &&
+    messageKind !== "user_text";
+  const isFailLike = block.status === "fail" || block.status === "blocked";
   const hasMore =
-    fullText.length > 0 && (nonEmptyLines >= 3 || fullText.length > summary.length + 16);
+    fullText.length > 0 &&
+    (Boolean(block.nextAction && /Ctrl\+O/i.test(block.nextAction)) ||
+      Boolean(block.ctrlOCollapsed) ||
+      (isFailLike && (nonEmptyLines >= 2 || fullText.length > summary.length + 16)) ||
+      (foldableNonAssistant && nonEmptyLines >= 2) ||
+      (toolResultLike && (nonEmptyLines >= 6 || fullText.length > summary.length + 16)));
   if (!hasMore) return block;
   const existingCtrlOHint = block.nextAction && /Ctrl\+O/i.test(block.nextAction);
   const nonCtrlOAction = block.nextAction && !existingCtrlOHint;
   if (nonCtrlOAction) return block;
-  const isFailLike = block.status === "fail" || block.status === "blocked";
   return {
     ...block,
     nextAction: block.nextAction ?? (isFailLike ? copy.errorDetailsHint : copy.detailsHint),
@@ -869,7 +915,7 @@ export function mapPendingApprovalToPermission(
       scope: [path],
       hint: "",
       actionSummary: isEn ? `Edit file: ${path}` : `修改文件：${path}`,
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -907,7 +953,7 @@ export function mapPendingApprovalToPermission(
       scope: [],
       hint: "",
       actionSummary,
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -922,7 +968,7 @@ export function mapPendingApprovalToPermission(
       scope: [],
       hint: "",
       actionSummary: isEn ? `Update controlled memory: ${action}` : `更新受控记忆：${action}`,
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -939,7 +985,7 @@ export function mapPendingApprovalToPermission(
       actionSummary: isEn
         ? `Update break-cache marker: ${action}`
         : `更新 break-cache marker：${action}`,
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -953,7 +999,7 @@ export function mapPendingApprovalToPermission(
       scope: approval.assetPath ? [approval.assetPath] : [".linghun/assets"],
       hint: "",
       actionSummary: isEn ? "Write image metadata" : "写入 image metadata",
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -970,7 +1016,7 @@ export function mapPendingApprovalToPermission(
       actionSummary: isEn
         ? "Create a stable point (git commit / snapshot) for the workspace"
         : "为工作区创建稳定点（git commit / snapshot）",
-      actions: [],
+      actions: buildOneShotPermissionActions(context.language),
       explanationLines: buildPermissionExplanationLines("mutating", "medium", context.language),
     };
   }
@@ -1008,7 +1054,10 @@ export function mapPendingApprovalToPermission(
         toolName,
         approval.toolCall?.input,
       ),
-      actions: [],
+      actions:
+        approval.kind === "model_tool_use"
+          ? []
+          : buildOneShotPermissionActions(context.language),
       explanationLines,
     };
   }
@@ -1142,8 +1191,9 @@ function mapBackgroundSummariesToBlocks(
   if (summaries.length === 0) return [];
   const zh = language === "zh-CN";
   const running = summaries.filter((s) => s.status === "running").length;
-  const needConfirm = summaries.filter((s) => s.status === "paused").length;
+  const needConfirm = summaries.filter((s) => s.status === "paused" || s.status === "stale").length;
   const stale = summaries.filter((s) => s.status === "stale").length;
+  const agents = summaries.filter((s) => s.kind === "agent").length;
   const current =
     summaries.find((s) => s.status === "running") ??
     summaries.find((s) => s.status === "stale") ??
@@ -1159,8 +1209,8 @@ function mapBackgroundSummariesToBlocks(
       kind: "run",
       status: stale > 0 ? "blocked" : running > 0 ? "running" : "partial",
       title: zh
-        ? `后台任务：运行中 ${running} · 待确认 ${needConfirm} · 可恢复 ${stale}`
-        : `Background tasks: ${running} running · ${needConfirm} need attention · ${stale} resumable`,
+        ? `后台 ${summaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
+        : `Background ${summaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
       summary: current
         ? summarizeBackgroundStep(current, language)
         : zh
@@ -1179,18 +1229,14 @@ function createBackgroundNextAction(
   const zh = language === "zh-CN";
   if (task.status === "stale") {
     if (task.kind === "agent") {
-      return zh
-        ? `上次会话恢复的后台 agent；/agents show ${task.id} 或 /background。`
-        : `Recovered background agent; /agents show ${task.id} or /background.`;
+      return zh ? "后台 agent 需要确认；用 /agents 或 /background 查看。" : "Background agent needs attention; use /agents or /background.";
     }
     if (task.kind === "job") {
-      return zh
-        ? `上次会话恢复的后台 job；/job report ${task.id} 或 /background。`
-        : `Recovered background job; /job report ${task.id} or /background.`;
+      return zh ? "后台 job 需要确认；用 /job report 或 /background 查看。" : "Background job needs attention; use /job report or /background.";
     }
     return zh
-      ? "这是上次会话恢复的后台任务；用 /background 查看。"
-      : "This is a background task recovered from the previous session; use /background.";
+      ? "后台任务需要确认；用 /background 查看。"
+      : "Background task needs attention; use /background.";
   }
   return task.nextAction;
 }
@@ -1202,38 +1248,15 @@ function formatFooterRuntimeStatus(
 ): string {
   const zh = language === "zh-CN";
   const running = summaries.filter((task) => task.status === "running").length;
-  const needConfirm = summaries.filter((task) => task.status === "paused").length;
-  const stale = summaries.filter((task) => task.status === "stale").length;
+  const needConfirm = summaries.filter(
+    (task) => task.status === "paused" || task.status === "stale",
+  ).length;
   const total = summaries.length;
   const agents = summaries.filter((task) => task.kind === "agent").length;
-  const jobs = summaries.filter((task) => task.kind === "job").length;
-  const titlePieces = [];
-  if (running > 0) {
-    titlePieces.push(zh ? `运行中 ${running}` : `${running} running`);
-  }
-  if (needConfirm > 0) {
-    titlePieces.push(zh ? `待确认 ${needConfirm}` : `${needConfirm} need attention`);
-  }
-  if (stale > 0) {
-    titlePieces.push(zh ? `可恢复 ${stale}` : `${stale} resumable`);
-  }
-
-  const title =
-    titlePieces.length > 0
-      ? zh
-        ? `后台任务：${titlePieces.join(" · ")}`
-        : `Background tasks: ${titlePieces.join(" · ")}`
-      : cleanBackgroundDisplayText(block.title, zh ? "后台任务" : "Background tasks");
-  const pieces = [title];
-  if (total > 1) {
-    pieces.push(zh ? `共 ${total}` : `${total} total`);
-  }
-  if (agents > 1 || (agents > 0 && agents < total)) {
-    pieces.push(zh ? `智能体 ${agents}` : `${agents} agent`);
-  }
-  if (jobs > 1 || (jobs > 0 && jobs < total)) {
-    pieces.push(zh ? `job ${jobs}` : `${jobs} job`);
-  }
+  const pieces = [zh ? `后台 ${total}` : `background ${total}`];
+  if (agents > 0) pieces.push(zh ? `智能体 ${agents}` : `agents ${agents}`);
+  if (needConfirm > 0) pieces.push(zh ? `需要确认 ${needConfirm}` : `need attention ${needConfirm}`);
+  if (running > 0) pieces.push(zh ? `运行中 ${running}` : `running ${running}`);
   pieces.push(zh ? "详情 /background" : "details /background");
   return pieces.join(" · ");
 }
@@ -1258,9 +1281,6 @@ function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language
   );
   const progress = formatBackgroundProgress(task.progress);
   const summary = progress ? `${title} · ${step} · ${progress}` : `${title} · ${step}`;
-  if (task.status === "stale") {
-    return zh ? `上次会话恢复的后台任务 · ${summary}` : `Recovered background task · ${summary}`;
-  }
   return zh ? `后台任务 · ${summary}` : `Background task · ${summary}`;
 }
 
@@ -1276,9 +1296,11 @@ function formatBackgroundProgress(
 function cleanBackgroundDisplayText(value: string, fallback: string): string {
   const cleaned = String(value || "")
     .replace(
-      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|endpoint|runner=)\b/giu,
+      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|raw tool result|endpoint|runner=|evidenceRefs?|planId|runId|workflowId|forkId|threadId|system_event|provider abort|provider_abort|abort signal)\b/giu,
       "",
     )
+    .replace(/\b(workflow|agent|job|run|plan)-[A-Za-z0-9_-]{6,}\b/giu, "$1")
+    .replace(/\b[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\b/gu, "id")
     .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;

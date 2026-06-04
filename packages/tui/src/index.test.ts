@@ -2625,7 +2625,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(request.tool_choice ?? request.toolChoice).toBe("none");
     const promptText = JSON.stringify(request.messages ?? []);
     expect(promptText).toContain("Full transcript semantic outline");
-    expect(promptText).toContain("transcriptEventCount=122");
+    expect(promptText).toContain("transcript events 122");
     expect(promptText).toContain(marker);
     expect(context.cache.deepCompact?.scope).toBe("full transcript semantic compact");
     expect(context.cache.deepCompact?.summary).toContain(marker);
@@ -2704,7 +2704,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.compactFailure?.reason).toContain("compact_agent_tool_use_blocked");
     expect(context.cache.compactCooldownUntil).toBeGreaterThan(Date.now());
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
-    expect(transcript).toContain("deep_compact_failed");
+    expect(transcript).toContain("deep compact failed");
     expect(transcript).not.toContain("deep_compact_packet");
   });
 
@@ -2820,7 +2820,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(result.blocked).toBe(false);
     const providerText = JSON.stringify(result.messages);
     expect(providerText).toContain("[Context compact boundary");
-    expect(providerText).toContain("scope=provider-visible recent context projection");
+    expect(providerText).toContain("scope provider-visible recent context projection");
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     const status = formatCompactStatus(context);
     const detailsText = __testBuildExplicitDetailsCommandPanel(context)?.detailsText ?? "";
@@ -2968,7 +2968,7 @@ describe("Phase 06 TUI slash commands", () => {
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
-    expect(transcript).toContain("context_compact_failed");
+    expect(transcript).toContain("context compact failed");
     expect(transcript).toContain("context_compact_cooldown_active");
   });
 
@@ -3023,7 +3023,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(result.blocked).toBe(false);
     const providerText = JSON.stringify(result.messages);
     expect(providerText).toContain("[Deep compact deep-final-test]");
-    expect(providerText).toContain("scope=full transcript semantic compact");
+    expect(providerText).toContain("scope full transcript semantic compact");
     expect(providerText).toContain("never treat it as PASS engineering evidence");
     const verdict = createPhase15BetaVerdictScope(
       context.evidence,
@@ -3122,9 +3122,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(loaded.projectRulesExists).toBe(true);
     expect(loaded.projectRulesSummary).toContain("长期稳定项目规则");
     expect(loaded.projectRulesSummary.length).toBeLessThan(700);
-    expect(output.text).toContain("summary=长期稳定项目规则");
+    expect(output.text).toContain("summary 长期稳定项目规则");
     expect(output.text).toContain("projectRulesHash");
-    expect(output.text).toMatch(/changedKeys: .*projectRulesHash/);
+    expect(output.text).toMatch(/changed keys: .*projectRulesHash/);
     expect(output.text).toContain("projectRules:");
     expect(output.text).not.toContain(
       "长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则 长期稳定项目规则",
@@ -3573,11 +3573,11 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory", context, output);
-    expect(output.text).toContain("autoLearning: off");
+    expect(output.text).toContain("auto learning: off");
 
     await handleSlashCommand("/memory learn on", context, output);
     await handleSlashCommand("/memory", context, output);
-    expect(output.text).toContain("autoLearning: on");
+    expect(output.text).toContain("auto learning: on");
   });
 
   it("D.14B: disabling learning stops new candidate generation", async () => {
@@ -3718,7 +3718,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/skills evolve", context, output);
     expect(output.text).toContain("Skill evolution candidates");
-    expect(output.text).toContain("autoEnable=no");
+    expect(output.text).toContain("auto enable no");
 
     await handleSlashCommand(`/skills evolve reject ${candidateId}`, context, output);
     expect(context.skills.evolutionCandidates).toHaveLength(0);
@@ -3804,8 +3804,8 @@ describe("Phase 06 TUI slash commands", () => {
       output,
     );
 
-    expect(output.text).toContain("verdict=PARTIAL");
-    expect(output.text).toContain("scope=beta");
+    expect(output.text).toContain("verdict PARTIAL");
+    expect(output.text).toContain("scope beta");
     expect(output.text).toContain("证据已缺失；详情用 /details evidence。");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).toContain("real TUI report-generation path lacks PASS evidence");
@@ -3832,12 +3832,12 @@ describe("Phase 06 TUI slash commands", () => {
       output,
     );
 
-    expect(output.text).toContain("verdict=PARTIAL");
+    expect(output.text).toContain("verdict PARTIAL");
     expect(output.text).toContain("证据已记录；详情用 /details evidence。");
     expect(output.text).toContain("DeepSeek dual-provider live report evidence is missing");
     expect(output.text).not.toContain("Evidence:");
     expect(output.text).not.toContain("123e4567-e89b-12d3-a456-426614174000");
-    expect(output.text).not.toContain("verdict=PASS");
+    expect(output.text).not.toContain("verdict PASS");
   });
 
   it("guards deferred codebase-memory tools before blind execution", () => {
@@ -4005,7 +4005,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Verdict Evidence Gate");
     expect(output.text).not.toContain("coverage matrix");
     expect(output.text).not.toContain("systemic_gap");
-    expect(output.text).not.toContain("verdict=PARTIAL");
+    expect(output.text).not.toContain("verdict PARTIAL");
   });
 
   it("D.14D: sanitizes internal prompt-token echoes from the committed answer (ink main-screen source of truth)", async () => {
@@ -4979,12 +4979,14 @@ describe("Phase 06 TUI slash commands", () => {
     );
 
     await vi.waitFor(() => expect(context.agents).toHaveLength(3));
+    await vi.waitFor(() => expect(barrier.requests).toHaveLength(2));
     expect(barrier.requests).toHaveLength(2);
     expect(context.agents.filter((agent) => agent.status === "running")).toHaveLength(3);
     expect(context.agents.map((agent) => agent.id)).toHaveLength(3);
     barrier.releaseOne();
     barrier.releaseOne();
     await vi.waitFor(() => expect(context.agents).toHaveLength(6));
+    await vi.waitFor(() => expect(barrier.requests).toHaveLength(5));
     expect(barrier.requests).toHaveLength(5);
     expect(context.agents).toHaveLength(6);
     barrier.releaseAll();
@@ -5393,7 +5395,7 @@ describe("Phase 06 TUI slash commands", () => {
     const evidence = context.evidence.find((item) =>
       item.supportsClaims.includes("architecture_boundary_check"),
     );
-    expect(evidence?.summary).toContain("risks=god-file");
+    expect(evidence?.summary).toContain("risks god-file");
     await expect(stat(join(project, "packages", "tui", "src"))).rejects.toThrow();
   });
 
@@ -5776,7 +5778,8 @@ describe("Phase 06 TUI slash commands", () => {
     const stepAwait = registryRunner.indexOf("const result = await executeRegistryWorkflowStep");
     const resultWrite = registryRunner.indexOf("state.status = result.status");
     const completedFinish = registryRunner.indexOf(
-      'await finishWorkflowRun(\n    runId,\n    "completed"',
+      '"completed"',
+      registryRunner.lastIndexOf("await finishWorkflowRun("),
     );
     expect(firstGuard).toBeGreaterThan(0);
     expect(firstGuard).toBeLessThan(runningWrite);
@@ -6357,7 +6360,7 @@ describe("Phase 06 TUI slash commands", () => {
       result?: { status?: string; summary?: string };
     };
     expect(budgetState.status).toBe("blocked");
-    expect(budgetState.pauseReason).toContain("budget_exceeded");
+    expect(budgetState.pauseReason).toContain("budget exceeded");
     expect(budgetState.result?.status).toBe("overbudget");
     expect(budgetState.result?.summary).toContain("no PASS evidence");
     expect(budgetContext.backgroundTasks).not.toContainEqual(
@@ -7836,7 +7839,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Index: start init fast");
     expect(output.text).toContain("status: ready");
     expect(output.text).toContain("只做最小必要改动");
-    expect(output.text.match(/工具 Read 已完成/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(output.text.match(/读取摘要/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
     expect(output.text).toContain("Cache status");
     expect(output.text).toContain("Memory status");
     expect(output.text).not.toContain("I can prepare this action");
@@ -8814,11 +8817,11 @@ describe("Phase 06 TUI slash commands", () => {
     const request = mainRequests[1] as { messages?: Array<{ role?: string; content?: string }> };
     const requestText = JSON.stringify(request.messages ?? []);
     expect(requestText).toContain("[Deep compact");
-    expect(requestText).toContain("scope=full transcript semantic compact");
+    expect(requestText).toContain("scope full transcript semantic compact");
     expect(requestText).toContain("[Context compact boundary");
     expect(requestText).toContain("Linghun compact summary");
-    expect(requestText).toContain("filesOrEvidenceRefs");
-    expect(requestText).toContain("failureLearning");
+    expect(requestText).toContain("files or evidence refs");
+    expect(requestText).toContain("failure learning");
     expect(requestText).not.toContain("RAW_TRANSCRIPT_SECRET_SHOULD_NOT_REACH_PROVIDER");
     expect(output.text).toContain("压缩后继续");
     expect(output.text).not.toContain("48000");
@@ -8875,7 +8878,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("本轮工具调用已达上限");
     // 不应出现 provider 失败式的 /model doctor 甩锅（轮次耗尽不是 provider 故障）。
     expect(output.text).not.toContain("已达到工具轮次上限；将不再调用工具");
-    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
+    expect(output.text.match(/读取摘要/g)).toHaveLength(4);
     expect(requests.length).toBeGreaterThanOrEqual(5);
   });
 
@@ -8911,7 +8914,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(41);
+    expect(output.text.match(/读取摘要/g)).toHaveLength(41);
     expect(output.text).toContain("已完成 41 轮有进展读取。");
     expect(output.text).not.toContain("工具调用上限");
     expect(output.text).not.toContain("执行轮次预算已耗尽");
@@ -8950,7 +8953,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(100);
+    expect(output.text.match(/读取摘要/g)).toHaveLength(100);
     expect(output.text).toContain("执行轮次预算已耗尽（100 轮）");
     expect(output.text).toContain("预算耗尽后的无工具总结。");
     expect(output.text).not.toContain("工具调用上限");
@@ -9043,7 +9046,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text.match(/工具 Read 已完成/g)).toHaveLength(4);
+    expect(output.text.match(/读取摘要/g)).toHaveLength(4);
     expect(output.text).toContain("已综合现有信息回答。");
     expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(6);
@@ -9127,7 +9130,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain("Git 状态：");
-    expect(output.text).toContain("工具 Read 已完成");
+    expect(output.text).toContain("读取摘要");
   });
 
   it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
@@ -10521,10 +10524,10 @@ describe("Phase 06 TUI slash commands", () => {
       (compactedRequest as { messages?: unknown[] }).messages ?? [],
     );
     expect(requestText).toContain("[Deep compact");
-    expect(requestText).toContain("scope=full transcript semantic compact");
-    expect(requestText).toContain("scope=provider-visible recent context projection");
+    expect(requestText).toContain("scope full transcript semantic compact");
+    expect(requestText).toContain("scope provider-visible recent context projection");
     expect(context.cache.compactProjection?.summary).toContain(
-      "scope=provider-visible recent context projection",
+      "scope provider-visible recent context projection",
     );
     const childTranscript = JSON.stringify(
       (await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript,
@@ -10659,7 +10662,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(result.message).toContain("未闭合 tool pair");
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     expect(transcript).toContain("context_compact_skipped_tool_pairing");
-    expect(transcript).toContain("context_compact_failed");
+    expect(transcript).toContain("context compact failed");
   });
 
   it("StartAgent child loop continues past 40 progressing tool rounds", async () => {
@@ -11065,7 +11068,7 @@ describe("Phase 06 TUI slash commands", () => {
     const toolMessage = second.messages?.find((message) => message.role === "tool");
     expect(toolMessage?.content).toContain('"ok":false');
     expect(toolMessage?.content).toMatch(/"exitCode":\d+/u);
-    expect(output.text).toContain("工具 Bash 已完成");
+    expect(output.text).toContain("Bash 已结束");
     expect(output.text).toContain("Bash 失败结果已收到");
 
     const session = (
@@ -11289,7 +11292,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mainRequests).toHaveLength(3);
     const secondText = JSON.stringify((mainRequests[1] as { messages?: unknown[] }).messages ?? []);
     expect(secondText).toContain("[Deep compact");
-    expect(secondText).toContain("scope=full transcript semantic compact");
+    expect(secondText).toContain("scope full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_TOOL_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
     const third = mainRequests[2] as {
@@ -11350,7 +11353,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mainRequests).toHaveLength(3);
     const secondText = JSON.stringify((mainRequests[1] as { input?: unknown[] }).input ?? []);
     expect(secondText).toContain("[Deep compact");
-    expect(secondText).toContain("scope=full transcript semantic compact");
+    expect(secondText).toContain("scope full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_RESPONSES_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
     const thirdInput =
@@ -11491,7 +11494,7 @@ describe("Phase 06 TUI slash commands", () => {
     }
     const secondText = JSON.stringify(mainRequests[1]?.body.messages ?? []);
     expect(secondText).toContain("[Deep compact");
-    expect(secondText).toContain("scope=full transcript semantic compact");
+    expect(secondText).toContain("scope full transcript semantic compact");
     expect(secondText).toContain("[Context compact boundary");
     expect(secondText).not.toContain("RAW_ANTHROPIC_PAIR_CONTEXT_SHOULD_NOT_REACH_PROVIDER");
     const thirdBlocks = (mainRequests[2]?.body.messages ?? []).flatMap((message) =>
@@ -12294,9 +12297,9 @@ describe("Phase 06 TUI slash commands", () => {
       transcript.some(
         (event) =>
           event.type === "system_event" &&
-          event.message.includes("permission_auto_allow_readonly") &&
-          event.message.includes("tool=Bash") &&
-          event.message.includes("semantic=readonly"),
+          event.message.includes("permission auto allow readonly") &&
+          event.message.includes("tool Bash") &&
+          event.message.includes("semantic readonly"),
       ),
     ).toBe(true);
     // Audit event must not leak the actual command argument verbatim — the
@@ -12304,12 +12307,12 @@ describe("Phase 06 TUI slash commands", () => {
     const autoAllowEvent = transcript.find(
       (event) =>
         event.type === "system_event" &&
-        event.message.includes("permission_auto_allow_readonly") &&
-        event.message.includes("tool=Bash"),
+        event.message.includes("permission auto allow readonly") &&
+        event.message.includes("tool Bash"),
     );
     expect(
       autoAllowEvent && autoAllowEvent.type === "system_event" ? autoAllowEvent.message : "",
-    ).toContain("summary=");
+    ).toContain("summary ");
   });
 
   it("Run 2 P2-4: slash Bash non-zero is captured in failure learning", async () => {
@@ -12451,7 +12454,7 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-edit-1",
     );
 
-    expect(formatted).toContain("工具 Edit 已完成");
+    expect(formatted).toContain("Edit 摘要");
     expect(formatted).toContain("补丁 +1 -1");
     expect(formatted).toContain("读取保护已启用");
     expect(formatted).not.toContain("expectedHash");
@@ -12475,7 +12478,7 @@ describe("Phase 06 TUI slash commands", () => {
       "ev-bash-1",
     );
 
-    expect(formatted).toContain("Tool Bash completed");
+    expect(formatted).toContain("Bash finished");
     expect(formatted).toContain("50 line(s)");
     expect(formatted).toContain("exit code 0");
     expect(formatted).toContain("Output folded. Press Ctrl+O to expand.");
@@ -12593,7 +12596,7 @@ describe("Phase 06 TUI slash commands", () => {
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
     expect(transcript).toContain(
-      "provider_failure kind=quota_or_balance_exhausted code=PROVIDER_STREAM_ERROR",
+      "provider failure: kind quota_or_balance_exhausted; code PROVIDER_STREAM_ERROR",
     );
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
@@ -12653,7 +12656,7 @@ describe("Phase 06 TUI slash commands", () => {
       /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/iu,
     );
     expect(output.text).toContain(
-      "最近模型服务失败：类型=额度或余额不足 code=PROVIDER_STREAM_ERROR",
+      "最近模型服务失败：类型 额度或余额不足；code PROVIDER_STREAM_ERROR",
     );
     expect(output.text).toContain("服务商 openai-compatible；模型 failure-model");
     expect(output.text).toContain("接口类型 chat_completions");
@@ -12666,7 +12669,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
     expect(transcript).toContain(
-      "provider_failure kind=quota_or_balance_exhausted code=PROVIDER_STREAM_ERROR",
+      "provider failure: kind quota_or_balance_exhausted; code PROVIDER_STREAM_ERROR",
     );
     expect(transcript).toContain('"type":"evidence_record"');
     expect(transcript).toContain('"type":"system_event"');
@@ -13139,7 +13142,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/permissions recent", context, output);
 
     expect(output.text).toContain("已切换权限模式：plan");
-    expect(output.text).toContain("工具 Read 已完成");
+    expect(output.text).toContain("读取摘要");
     expect(output.text).toContain("权限已拒绝");
     expect(output.text).toContain("Plan 模式禁止写入");
     expect(output.text).not.toContain("命中 allow 规则");
@@ -13774,6 +13777,71 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
   });
 
+  it("Shift+Tab rechecks pending model approval and continues when the new mode allows it", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-shift-tab-pending-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const config = createTestModelConfig({
+      providers: {
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
+    const context = await createTestContext(project, store, session, config);
+    const requests = mockOpenAiToolSequenceWithFinalCalls([], "continued after shift-tab");
+    context.modelGateway = createModelGateway(config);
+    context.permissionMode = "plan";
+    context.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: {
+        id: "call-shift-tab-bash",
+        name: "Bash",
+        input: { command: "node --version" },
+      },
+      sessionId: session.id,
+      continuation: {
+        provider: "openai-compatible",
+        model: "gpt-4.1",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        messages: [
+          { role: "user", content: "run local verification" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call-shift-tab-bash",
+                name: "Bash",
+                input: { command: "node --version" },
+              },
+            ],
+          },
+        ],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    await handleTuiKeypress("shift-tab", context, output);
+
+    expect(context.permissionMode).toBe("full-access");
+    expect(context.pendingLocalApproval).toBeUndefined();
+    expect(output.text).toContain("Bash(node --version)");
+    expect(output.text).toContain("continued after shift-tab");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("source: Composer Ctrl+C dispatches interrupt instead of escape", async () => {
+    const text = await readFile(srcPath("shell/components/Composer.tsx"), "utf8");
+    expect(text).toContain('void onInput({ type: "interrupt" });');
+    expect(text).not.toContain('void onInput({ type: "escape" });\n        return;\n      }\n\n      // Ctrl+V');
+  });
+
   it("/mode full-access switches without local opt-in", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -13807,7 +13875,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("已切换权限模式：auto-review");
     expect(output.text).not.toContain("写入前摘要");
     expect(output.text).not.toContain("已创建 checkpoint");
-    expect(output.text).toContain("工具 Edit 已完成");
+    expect(output.text).toContain("Edit 摘要");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("beta");
     await expect(readFile(join(project, "medium.txt"), "utf8")).resolves.toBe("should-not-write");
   });
@@ -13883,7 +13951,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("帮助：优先直接描述你的目标。");
     expect(output.text).toContain("Language switched to English.");
     expect(output.text).toContain("Help: describe your goal directly first.");
-    expect(output.text).toContain("Status: Session");
+    expect(output.text).toContain("Status: Model");
     expect(output.text).toContain("Unknown command: /not-a-command");
     expect(output.text).toContain("Something went wrong.");
     expect(context.config.language).toBe("en-US");
@@ -14085,7 +14153,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     context.backgroundTasks = [createBackgroundTaskFixture("verification")];
     await handleSlashCommand("/bash node --version", context, output);
-    expect(output.text).toContain("已有重任务正在运行：verification");
+    expect(output.text).toContain("已有 verification 重任务正在运行");
     expect(context.permissionMode).toBe("full-access");
   });
 
@@ -14654,6 +14722,49 @@ describe("Phase 06 TUI slash commands", () => {
     await handleTuiKeypress("escape", context, output);
 
     expect(output.text).toBe("");
+  });
+
+  it("Esc with active workflow/background but no panel does not interrupt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-esc-active-no-interrupt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const startedAt = new Date().toISOString();
+
+    context.backgroundTasks = [
+      {
+        id: "bg-esc-active",
+        kind: "job",
+        title: "Workflow: active",
+        status: "running",
+        currentStep: "step 1",
+        progress: { completed: 1, total: 3 },
+        startedAt,
+        updatedAt: startedAt,
+        heartbeatIntervalMs: 30_000,
+        staleAfterMs: 120_000,
+        hasOutput: false,
+        result: "partial",
+        userVisibleSummary: "workflow running",
+      },
+    ];
+    context.workflows.activeRun = {
+      id: "workflow-esc-active",
+      goal: "keep running",
+      planId: "plan-esc-active",
+      status: "running",
+      startedAt,
+      result: "partial",
+      steps: [],
+    };
+
+    await handleTuiKeypress("escape", context, output);
+
+    expect(output.text).toBe("");
+    expect(context.backgroundTasks[0]?.status).toBe("running");
+    expect(context.workflows.activeRun.status).toBe("running");
+    expect(context.notifications?.at(-1)?.text).toContain("Esc 不会停止任务");
   });
 
   it("/interrupt sends AbortSignal to a running Bash background task", async () => {
@@ -16058,17 +16169,17 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Advanced/high-cost/automation");
     expect(output.text).toContain("Dangerous defaults");
     expect(output.text).toContain("Unsupported / pending");
-    expect(output.text).toContain("auto full-repo index on startup=no");
+    expect(output.text).toContain("auto full-repo index on startup no");
     expect(output.text).toContain(
-      "skills: discover manifests=yes; autoExecute=no; trustedIds=none",
+      "skills: discover manifests yes; auto execute no; trusted ids none",
     );
-    expect(output.text).toContain("workflows: discover templates=yes; autoRun=no");
+    expect(output.text).toContain("workflows: discover templates yes; auto run no");
     expect(output.text).toContain(
-      "plugins: discover manifests=yes; autoExecute=no; trustedIds=none",
+      "plugins: discover manifests yes; auto execute no; trusted ids none",
     );
     expect(output.text).toContain("mode switching: direct /mode and Shift+Tab cycling");
-    expect(output.text).toContain("hooks: enabled=no; projectTrusted=no; auto execution=no");
-    expect(output.text).toContain("continuous phase progression=no");
+    expect(output.text).toContain("hooks: enabled no; project trusted no; auto execution no");
+    expect(output.text).toContain("continuous phase progression no");
     expect(output.text).not.toContain("EvidenceSummary");
     expect(output.text).not.toContain("tool_result");
     expect(output.text).not.toContain("Evidence:");
@@ -16372,7 +16483,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("Architecture drift");
     expect(output.text).toContain("Linghun 想执行 Write packages/other/src/small.ts。");
     expect(output.text).toContain("允许本次执行？yes / no");
-    expect(output.text).toContain("工具 Write 已完成");
+    expect(output.text).toContain("Write 摘要");
     await expect(readFile(join(project, "packages/other/src/small.ts"), "utf8")).resolves.toBe(
       "// typo fix\n",
     );
@@ -16527,10 +16638,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests).toHaveLength(1);
     expect(output.text).toContain("正在思考…");
     expect(output.text).toContain("权限已拒绝");
-    expect(output.text).toContain("工具 Write 已完成");
+    expect(output.text).toContain("Write 摘要");
     expect(output.text).toContain("摘要");
     expect(await readFile(join(project, "report.md"), "utf8")).toBe("final");
-    expect(output.text).toContain("工具 Bash 已完成");
+    expect(output.text).toContain("Bash 已结束");
     expect(output.text).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("MCP status");
@@ -16749,13 +16860,13 @@ describe("Phase 06 TUI slash commands", () => {
         (event) =>
           event.type === "system_event" &&
           event.message.includes("connect_lite_network_start_gate_confirmed") &&
-          event.message.includes("boundary=exact-command_start_gate_not_full_permission_approval"),
+          event.message.includes("boundary exact-command_start_gate_not_full_permission_approval"),
       ),
     ).toBe(true);
 
     expect(output.text).toContain("已安装 skill manifest：connect-skill");
     expect(output.text).toContain("Skills Connect Lite status");
-    expect(output.text).toContain("localPath=present:skill-source");
+    expect(output.text).toContain("local path present:skill-source");
     expect(output.text).toContain("Skills validate");
     expect(output.text).toContain("Trust notice：即将启用 skill connect-skill");
     expect(output.text).toContain("Connect Lite Start Gate：skills install github");
@@ -16824,10 +16935,10 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/plugins doctor", context, output);
 
     expect(output.text).toContain("none：可运行 /skills add 查看注册路径");
-    expect(output.text).toContain("commands=/a-cmd,/m-cmd,/z-cmd");
-    expect(output.text).toContain("hooks=Plugin,PreToolUse,Stop,Workflow");
-    expect(output.text).toContain("workflows=a-flow,z-flow");
-    expect(output.text).toContain("skills=a-skill,z-skill");
+    expect(output.text).toContain("commands /a-cmd,/m-cmd,/z-cmd");
+    expect(output.text).toContain("hooks Plugin,PreToolUse,Stop,Workflow");
+    expect(output.text).toContain("workflows a-flow,z-flow");
+    expect(output.text).toContain("skills a-skill,z-skill");
     expect(output.text).toContain("plugin 贡献项稳定排序");
   });
 
@@ -18626,8 +18737,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("默认 untrusted/disabled");
     expect(output.text).toContain("MCP validate");
     expect(output.text).toContain("disabled; untrusted");
-    expect(output.text).toContain("source=present:node");
-    expect(output.text).toContain("permissions=tool-discovery");
+    expect(output.text).toContain("source present:node");
+    expect(output.text).toContain("permissions tool-discovery");
     expect(output.text).toContain("已禁用 MCP server：local-demo");
     expect(output.text).toContain("Trust notice：即将启用本地 MCP server");
     expect(output.text).toContain(
@@ -20901,7 +21012,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     ].join("\n");
     const block = createOutputBlock(errorBody, "zh-CN");
 
-    expect(block.summary).toBe("Provider request failed");
+    expect(block.summary).toBe(errorBody);
     expect(block.fullText).toBe(errorBody);
     // D.13Q-UX Real Smoke Fix v3：createOutputBlock 不再用关键词扫描决定 fail；
     // 普通 writeLine 一律 kind="details" / status="info"。真正的工具错误由
@@ -22428,9 +22539,9 @@ describe("D.13V-B/C source invariants", () => {
     const text = await readFile(srcPath("runtime-status-presenter.ts"), "utf8");
     // formatPermissionModeLabel 必须保持四档；新增第五种会破坏分支
     expect(text).toMatch(/default:\s*"default mode"/);
-    expect(text).toMatch(/"auto-review":\s*"auto mode"/);
+    expect(text).toMatch(/"auto-review":\s*"auto-review"/);
     expect(text).toMatch(/plan:\s*"plan mode"/);
-    expect(text).toMatch(/"full-access":\s*"bypass approvals"/);
+    expect(text).toMatch(/"full-access":\s*"full access \(safety on\)"/);
   });
 
   it("auto-review 允许普通 report.md 写入，但危险动作仍走 ask/deny", async () => {

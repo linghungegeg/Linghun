@@ -1729,12 +1729,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   context.modelGateway = gateway;
   const sigintHandler = () => {
     requestTrackedProcessStop(false);
-    const controller = context.activeAbortController ?? context.activeVerificationAbortController;
-    if (!controller) {
-      return;
-    }
-    controller.abort();
-    writeLine(output, t(context, "toolInterrupted"));
+    void handleInterruptCommand([], context, output).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      writeLine(output, `Interrupt failed: ${message}`);
+    });
   };
   process.once("SIGINT", sigintHandler);
 
@@ -2034,6 +2032,13 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "interrupt") {
+        submittedPending = false;
+        await handleInterruptCommand([], context, shellOutput);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       if (event.type === "cycle-permission-mode") {
         // Ink 路径下的 Shift+Tab 必须 quiet：只切 context.permissionMode，
         // 不能再走 handleTuiKeypress("shift-tab") → setPermissionMode 那条 plain TUI
@@ -2057,8 +2062,16 @@ async function runInkShell(
         } catch {
           // 会话/事件写入失败不阻断 UI 切换；底层日志路径不应把用户输入区拖死。
         }
+        const continued = await reevaluatePendingLocalApprovalAfterModeChange(
+          context,
+          gateway,
+          shellOutput,
+        );
         shell?.rerender();
         await shell?.waitUntilRenderFlush();
+        if (continued) {
+          writeStatus(shellOutput, context);
+        }
         return;
       }
       if (event.type === "shift-enter") {
@@ -5272,6 +5285,14 @@ export async function handleTuiKeypress(
   }
   if (key === "shift-tab") {
     await cycleMode(context, output);
+    const continued = await reevaluatePendingLocalApprovalAfterModeChange(
+      context,
+      context.modelGateway,
+      output,
+    );
+    if (continued) {
+      writeStatus(output, context);
+    }
     return;
   }
   if (hasPendingEnterConfirmation(context)) {
@@ -5316,17 +5337,56 @@ async function cancelPendingInteraction(
     writeStatus(output, context);
     return;
   }
-  const interrupted = await interruptAllActiveWork(context);
-  if (interrupted.cancelled > 0) {
-    writeLine(
-      output,
-      context.language === "en-US"
-        ? `Interrupt requested for ${interrupted.cancelled} active item(s); abort signals ${interrupted.abortSignalsSent}, marked ${interrupted.markedOnly}.`
-        : `已请求中断 ${interrupted.cancelled} 个活动任务；abort signals ${interrupted.abortSignalsSent}，marked ${interrupted.markedOnly}。`,
-    );
-    writeStatus(output, context);
-    return;
+  if (hasActiveInterruptibleWork(context)) {
+    if (!context.notifications) context.notifications = [];
+    context.notifications.push({
+      key: `esc-no-interrupt:${Date.now()}`,
+      text:
+        context.language === "en-US"
+          ? "Esc does not stop tasks; press Ctrl+C or run /interrupt to stop."
+          : "Esc 不会停止任务；按 Ctrl+C 或 /interrupt 停止。",
+      priority: "medium",
+      timeoutMs: 4000,
+      createdAt: Date.now(),
+      tone: "dim",
+    });
   }
+}
+
+async function reevaluatePendingLocalApprovalAfterModeChange(
+  context: TuiContext,
+  gateway: ModelGateway | undefined,
+  output: Writable,
+): Promise<boolean> {
+  const approval = context.pendingLocalApproval;
+  if (!approval || approval.kind !== "model_tool_use") return false;
+  const permission = await decidePermission(
+    approval.toolName,
+    approval.toolCall.input,
+    context,
+    approval.sessionId,
+  );
+  approval.verdict = permission.verdict;
+  if (permission.decision !== "allow") return false;
+  context.pendingLocalApproval = undefined;
+  await executePermissionApprove(approval, context, gateway, output);
+  return true;
+}
+
+function hasActiveInterruptibleWork(context: TuiContext): boolean {
+  if (context.activeAbortController) return true;
+  if (context.activeVerificationAbortController) return true;
+  if (context.backgroundAbortControllers && context.backgroundAbortControllers.size > 0) return true;
+  if (context.interrupt?.type === "running") return true;
+  if (
+    context.backgroundTasks.some((task) =>
+      task.status === "running" || task.status === "paused" || task.status === "stale",
+    )
+  ) {
+    return true;
+  }
+  const workflowStatus = context.workflows.activeRun?.status;
+  return workflowStatus === "running" || workflowStatus === "blocked";
 }
 
 function hasPendingEnterConfirmation(context: TuiContext): boolean {
@@ -6528,7 +6588,7 @@ function checkResourceGuard(
         task.kind === "job",
     );
     return heavy
-      ? `并发上限：已有重任务正在运行：${heavy.kind} ${heavy.id}。请等待完成、查看 /background，或先 /interrupt。这是 resource/concurrency cap，不是权限拒绝。`
+      ? `并发上限：已有 ${heavy.kind} 重任务正在运行。请等待完成、查看 /background，或先 /interrupt。这是 resource/concurrency cap，不是权限拒绝。`
       : null;
   }
   const cap = BACKGROUND_KIND_CAPS[kind];

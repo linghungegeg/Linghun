@@ -46,7 +46,7 @@ describe("Polish A runtime status presenter", () => {
     );
 
     expect(line).toContain("Model gpt-5.5");
-    expect(line).toContain("Mode auto mode");
+    expect(line).toContain("Mode auto-review");
     expect(line).toContain("Cache 90%");
     expect(line).toContain("Index ready");
     expect(line).not.toContain("Session");

@@ -1090,8 +1090,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
       // Ctrl+C — 不是复制（复制走终端选区 / Ctrl+Shift+C）。
       //  - buffer 非空：第一次显示提示；窗口内第二次清空 buffer。不走上层 escape。
-      //  - buffer 空 + 请求运行中：走既有 escape/interrupt 链路。
-      //  - buffer 空 + 空闲：交既有上层链路（exit 由控制器决定）。
+      //  - buffer 空：明确触发 interrupt；Esc 只负责 UI 关闭，不再穿透停止任务。
       if (key.ctrl && input === "c") {
         if (text.length > 0) {
           const now = Date.now();
@@ -1108,7 +1107,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           return;
         }
         clearHintNotice();
-        void onInput({ type: "escape" });
+        void onInput({ type: "interrupt" });
         return;
       }
 
@@ -1337,12 +1336,19 @@ function PermissionActionRow({
 
 function buildPermissionActions(
   language: ShellViewModel["language"],
-  _actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
+  actions?: { id: PermissionActionId; label: string; shortcut?: string }[],
 ): { id: PermissionActionId; label: string; shortcut?: string }[] {
+  if (actions && actions.length > 0) {
+    return actions;
+  }
   const isEn = language === "en-US";
   return [
     { id: "allow_once", label: isEn ? "Yes" : "是", shortcut: "y" },
-    { id: "allow_always_tool", label: isEn ? "Project allow" : "项目级允许", shortcut: "a" },
+    {
+      id: "allow_always_tool",
+      label: isEn ? "Allow future similar actions" : "允许以后这类操作",
+      shortcut: "a",
+    },
     { id: "deny", label: isEn ? "No" : "否", shortcut: "n" },
     { id: "details", label: isEn ? "Details" : "详情", shortcut: "d" },
   ];

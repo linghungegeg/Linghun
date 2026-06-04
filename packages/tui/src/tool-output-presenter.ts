@@ -73,10 +73,7 @@ export function formatToolOutput(
   evidenceId?: string,
 ): string {
   const layered = createLayeredToolOutput(name, output, language, evidenceId);
-  const lines = [
-    language === "en-US" ? `Tool ${name} completed` : `工具 ${name} 已完成`,
-    `- ${language === "en-US" ? "summary" : "摘要"}: ${layered.summary}`,
-  ];
+  const lines = [formatPrimaryToolLead(name, output, layered, language)];
   if (layered.preview) {
     lines.push(layered.preview);
   }
@@ -99,6 +96,37 @@ export function formatToolOutput(
     lines.push(bashEnd);
   }
   return lines.join("\n");
+}
+
+function formatPrimaryToolLead(
+  name: ToolName,
+  output: ToolOutput,
+  layered: LayeredToolOutput,
+  language: Language,
+): string {
+  const metadata = output.data && typeof output.data === "object" ? output.data : undefined;
+  const count = readNumber(metadata, "count");
+  const exitCode = readNumber(metadata, "exitCode");
+  const totalLines = readNumber(metadata, "totalLines") ?? readNumber(metadata, "contentLines");
+  const visibleLines =
+    readNumber(metadata, "windowLines") ?? readNumber(metadata, "lines") ?? lineCount(output.text);
+  if (language === "en-US") {
+    if (name === "Grep") return `Search summary: ${count ?? 0} match(es).`;
+    if (name === "Glob") return `File search summary: ${count ?? visibleLines} file(s).`;
+    if (name === "Read") return `Read summary: ${totalLines ?? visibleLines} line(s).`;
+    if (name === "Bash" && exitCode !== undefined) return `Bash finished: exit code ${exitCode}.`;
+    return `${name} summary: ${layered.summary}`;
+  }
+  if (name === "Grep") return `搜索摘要：${count ?? 0} 处。`;
+  if (name === "Glob") return `文件搜索摘要：${count ?? visibleLines} 个文件。`;
+  if (name === "Read") return `读取摘要：${totalLines ?? visibleLines} 行。`;
+  if (name === "Bash" && exitCode !== undefined) return `Bash 已结束：退出码 ${exitCode}。`;
+  return `${name} 摘要：${layered.summary}`;
+}
+
+function lineCount(value: string): number {
+  if (!value) return 0;
+  return value.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
 }
 
 function formatBashEndSummary(
@@ -534,6 +562,12 @@ function createSummaryFirstPreview(
     const hint = formatDetailsHint(language);
     const tail = name === "Bash" && !looksLikeMojibake(text) ? formatBashTail(lines, language) : [];
     return { text: [`- ${stats.join("; ")}`, ...tail, `- ${hint}`].join("\n"), truncated: true };
+  }
+  if (name === "Bash" && !looksLikeMojibake(text)) {
+    const tail = formatBashTail(lines, language);
+    if (tail.length > 0) {
+      return { text: [`- ${stats.join("; ")}`, ...tail].join("\n"), truncated: false };
+    }
   }
   return { text: `- ${stats.join("; ")}`, truncated: false };
 }
