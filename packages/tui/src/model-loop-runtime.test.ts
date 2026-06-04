@@ -144,6 +144,16 @@ describe("model-loop-runtime", () => {
       expect(names.indexOf("RunWorkflow")).toBeLessThan(names.indexOf("CommandProposal"));
     });
 
+    it("allows AgentControl to stop all running agents through structured actions", () => {
+      const agentControl = createModelToolDefinitions().find((d) => d.name === "AgentControl");
+      const schema = agentControl?.inputSchema as {
+        properties?: { action?: { enum?: string[] } };
+      };
+      expect(schema.properties?.action?.enum).toEqual(
+        expect.arrayContaining(["cancel_all", "stop_all"]),
+      );
+    });
+
     it("keeps open object arguments explicit for Responses-compatible control tools", () => {
       const defs = createModelToolDefinitions();
       const executeSchema = defs.find((d) => d.name === "ExecuteExtraTool")?.inputSchema as {

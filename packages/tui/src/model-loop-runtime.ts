@@ -207,7 +207,7 @@ export const START_AGENT_DESCRIPTION =
   "Start a real Linghun agent runtime for user requests such as multi-agent work, explorer/planner/worker/verifier delegation, or /fork-style role work. Supports addressable name/team, safe cwd/worktree isolation, and true background launch. Runs through validation, start/background guard, permission pipeline, sidechain transcript, evidence, and final agent status.";
 
 export const AGENT_CONTROL_DESCRIPTION =
-  "Inspect or cancel existing Linghun agents through the real agent runtime. Use action=cancel when the user asks to stop, close, interrupt, kill, or cancel a background/sub-agent. This performs the same durable cancellation as /agents cancel and must be preferred over replying with instructions when a matching agent exists.";
+  "Inspect or cancel existing Linghun agents through the real agent runtime. Use action=cancel when the user asks to stop, close, interrupt, kill, or cancel one background/sub-agent; use action=cancel_all or stop_all when the user asks to stop all agents. This performs the same durable cancellation as /agents cancel and must be preferred over replying with instructions when a matching agent exists.";
 
 export const SEND_MESSAGE_DESCRIPTION =
   "Send a text message to a running Linghun agent or team by id/name/team. The message enters the target agent mailbox and transcript; fail closed if no running target is found.";
@@ -284,7 +284,7 @@ export function createAgentControlInputSchema(): unknown {
     type: "object",
     additionalProperties: false,
     properties: {
-      action: { type: "string", enum: ["list", "show", "cancel"] },
+      action: { type: "string", enum: ["list", "show", "cancel", "cancel_all", "stop_all"] },
       agentId: { type: "string" },
       agent_id: { type: "string" },
       ref: { type: "string" },

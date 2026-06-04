@@ -26,6 +26,7 @@
 
 import type { ModelRole } from "@linghun/config";
 import type { PermissionMode } from "@linghun/shared";
+import { formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
 import {
   formatJobNextAction,
@@ -34,7 +35,6 @@ import {
 } from "./job-runner-presenter.js";
 import { deriveAgentDisplayName } from "./job-runtime.js";
 import type { JobContext } from "./job-runtime.js";
-import { formatIndexRuntimeRef } from "./index-runtime.js";
 import {
   findDurableJob as findDurableJobFromFs,
   formatJobList as formatJobListImpl,
@@ -142,13 +142,19 @@ export function createAgentBackgroundTask(
   const backgroundStatus: BackgroundTaskState["status"] = isTerminal
     ? agent.status === "blocked"
       ? "failed"
-      : "completed"
+      : agent.status === "cancelled"
+        ? "cancelled"
+        : agent.status === "failed"
+          ? "failed"
+          : "completed"
     : agent.status === "stale"
       ? "stale"
       : "running";
   const backgroundResult: BackgroundTaskState["result"] = isTerminal
     ? agent.status === "completed"
       ? mapAgentBackgroundResult(agent, undefined)
+      : agent.status === "cancelled"
+        ? "cancelled"
       : "fail"
     : agent.status === "stale"
       ? "partial"
@@ -191,6 +197,10 @@ export function createAgentBackgroundTask(
   };
 }
 
+export function isAgentCancellable(agent: Pick<AgentRun, "status">): boolean {
+  return agent.status === "running";
+}
+
 export function mapAgentBackgroundResult(
   agent: AgentRun,
   verifierStatus?: string,
@@ -220,6 +230,10 @@ export function findAgent(context: TuiContext, id: string | undefined): AgentRun
   );
 }
 
+export function listCancellableAgents(context: TuiContext): AgentRun[] {
+  return context.agents.filter(isAgentCancellable);
+}
+
 export function formatAgentSummary(agent: AgentRun, _context: TuiContext): string {
   return `[agent] ${agent.id} · ${agent.type} · ${agent.status} · ${agent.summary}`;
 }
@@ -236,6 +250,13 @@ export function findBackgroundTask(
 
 export function isActiveBackgroundStatus(status: BackgroundTaskStatus): boolean {
   return status === "running" || status === "stale";
+}
+
+export function isRuntimeActiveBackgroundTask(task: BackgroundTaskState): boolean {
+  if (task.kind === "agent") {
+    return task.status === "running";
+  }
+  return isActiveBackgroundStatus(task.status);
 }
 
 export function rememberBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {

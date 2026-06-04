@@ -180,6 +180,8 @@ describe("Phase 15 Natural Intent Router", () => {
     ["切到自动审查", "mode", "/mode auto-review"],
     ["switch to auto mode", "mode", "/mode auto-review"],
     ["切到完全访问", "mode", "/mode full-access"],
+    ["停止所有智能体", "agents", "/agents cancel all"],
+    ["stop all agents", "agents", "/agents cancel all"],
   ])("classifies Natural Intent Contract sample %s", (phrase, id, command) => {
     const intent = routeNaturalIntent(phrase);
     expect(intent.capability?.id).toBe(id);

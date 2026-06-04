@@ -92,7 +92,10 @@ import {
   getAgentRole,
   getDurableJobPaths,
   isActiveBackgroundStatus,
+  isAgentCancellable,
   isAgentType,
+  isRuntimeActiveBackgroundTask,
+  listCancellableAgents,
   listDurableJobs,
   mapAgentBackgroundResult,
   registerBackgroundAbortController,
@@ -268,11 +271,14 @@ export async function handleBackgroundCommand(
 ): Promise<void> {
   await hydrateDurableJobBackgroundTasks(context);
   deps().refreshBackgroundLifecycle(context);
+  const tasks = context.backgroundTasks.filter(
+    (task) => task.kind !== "agent" || task.status === "running",
+  );
   // D.13Q-UX Task Surface — ink session 走降噪 CommandPanel；
   // plain TUI / 非交互保留旧 writeLine 行为，避免破坏既有字符串断言。
   if (context.isInkSession) {
     const isEn = context.language === "en-US";
-    const total = context.backgroundTasks.length;
+    const total = tasks.length;
     if (total === 0) {
       showCommandPanel(context, output, {
         title: "/background",
@@ -281,19 +287,19 @@ export async function handleBackgroundCommand(
       });
       return;
     }
-    const running = context.backgroundTasks.filter((t) => t.status === "running").length;
-    const needConfirm = context.backgroundTasks.filter((t) => t.status === "paused").length;
-    const failedOrBlocked = context.backgroundTasks.filter(
+    const running = tasks.filter((t) => t.status === "running").length;
+    const needConfirm = tasks.filter((t) => t.status === "paused").length;
+    const failedOrBlocked = tasks.filter(
       (t) => t.status === "failed" || t.status === "timeout" || t.status === "stale",
     ).length;
-    const completed = context.backgroundTasks.filter((t) => t.status === "completed").length;
+    const completed = tasks.filter((t) => t.status === "completed").length;
     const summary: string[] = [
       isEn
         ? `Tasks · ${running} running · ${needConfirm} need attention · ${failedOrBlocked} failed/blocked · ${completed} done`
         : `任务 · 运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${failedOrBlocked} · 已完成 ${completed}`,
     ];
-    const sections = buildBackgroundPanelSections(context.backgroundTasks, context.language);
-    const detailsText = context.backgroundTasks
+    const sections = buildBackgroundPanelSections(tasks, context.language);
+    const detailsText = tasks
       .map((task) => formatBackgroundTaskPanelDetails(task, context.language, context.projectPath))
       .join("\n\n");
     showCommandPanel(context, output, {
@@ -309,11 +315,11 @@ export async function handleBackgroundCommand(
     });
     return;
   }
-  if (context.backgroundTasks.length === 0) {
+  if (tasks.length === 0) {
     writeLine(output, context.language === "en-US" ? "No background tasks." : "没有后台任务。");
     return;
   }
-  for (const task of context.backgroundTasks) {
+  for (const task of tasks) {
     writeLine(output, formatBackgroundTask(task, context.language));
   }
 }
@@ -717,7 +723,7 @@ function resolveEffectiveJobAgentCap(
 ): number {
   const runningAgents = context.backgroundTasks.filter(
     (task) =>
-      task.id !== ignoreTaskId && task.kind === "agent" && isActiveBackgroundStatus(task.status),
+      task.id !== ignoreTaskId && task.kind === "agent" && isRuntimeActiveBackgroundTask(task),
   ).length;
   return Math.max(0, Math.min(requestedCap, DEFAULT_JOB_RUNNING_AGENT_CAP - runningAgents));
 }
@@ -1534,18 +1540,21 @@ export async function handleAgentsCommand(
     const isEn = context.language === "en-US";
     const total = context.agents.length;
     const running = context.agents.filter((a) => a.status === "running").length;
+    const cancellable = listCancellableAgents(context);
     showCommandPanel(context, output, {
       title: "/agents",
       tone: "neutral",
       summary: [
         isEn
-          ? `Agents · ${total} total · ${running} running — Ctrl+O for details.`
-          : `Agents · 共 ${total} · 运行中 ${running} — Ctrl+O 查看详情。`,
+          ? `Agents · ${total} total · ${running} running · ${cancellable.length} cancellable — Ctrl+O for details.`
+          : `Agents · 共 ${total} · 运行中 ${running} · 可取消 ${cancellable.length} — Ctrl+O 查看详情。`,
       ],
       actions:
-        total > 0
-          ? ["/agents show <id>", "/agents cancel <id>"]
-          : ["/fork explorer|planner|verifier|worker <task>"],
+        cancellable.length > 0
+          ? ["/agents show <id>", "/agents cancel <id>", "/agents cancel all"]
+          : total > 0
+            ? ["/agents show <id>"]
+            : ["/fork explorer|planner|verifier|worker <task>"],
       detailsText: formatAgentsList(context),
     });
     return;
@@ -1585,6 +1594,11 @@ export async function handleAgentsCommand(
     return;
   }
   if (action === "cancel" || action === "interrupt") {
+    const ref = args[1]?.trim();
+    if (ref === "all" || ref === "*" || ref === "--all") {
+      await cancelAllAgents(context, output);
+      return;
+    }
     const agent = findAgent(context, args[1]);
     if (!agent) {
       writeLine(output, "未找到 agent。");
@@ -1604,7 +1618,7 @@ export async function handleAgentsCommand(
   }
   writeLine(
     output,
-    "用法：/agents | /agents registry | /agents show <id> | /agents resume <id> | /agents cancel <id> | /agents send <id|name|team> <message>",
+    "用法：/agents | /agents registry | /agents show <id> | /agents resume <id> | /agents cancel <id>|all | /agents send <id|name|team> <message>",
   );
 }
 
@@ -1631,7 +1645,7 @@ export async function handleForkCommand(
     writeLine(output, guard);
     return;
   }
-  const runningCount = context.agents.filter((agent) => agent.status === "running").length;
+  const runningCount = listCancellableAgents(context).length;
   if (runningCount >= DEFAULT_JOB_RUNNING_AGENT_CAP) {
     writeLine(
       output,
@@ -2567,6 +2581,10 @@ export async function cancelAgent(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  if (!isAgentCancellable(agent)) {
+    writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
+    return;
+  }
   const now = new Date().toISOString();
   agent.status = "cancelled";
   agent.summary = `agent ${agent.id} 已取消；主会话可继续。`;
@@ -2604,8 +2622,36 @@ export async function cancelAgentByRef(
     writeLine(output, "未找到 agent。");
     return undefined;
   }
+  if (!isAgentCancellable(agent)) {
+    writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需取消。`);
+    return undefined;
+  }
   await cancelAgent(agent, context, output);
   return agent;
+}
+
+export async function cancelAllAgents(context: TuiContext, output: Writable): Promise<AgentRun[]> {
+  const agents = listCancellableAgents(context);
+  if (agents.length === 0) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "No cancellable agents. Running agents are already clear."
+        : "没有可取消的 agent；running agent 已清空。",
+    );
+    return [];
+  }
+  for (const agent of agents) {
+    await cancelAgent(agent, context, createSilentOutput());
+  }
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? `Cancelled ${agents.length} agent(s).`
+      : `已取消 ${agents.length} 个 agent。`,
+  );
+  deps().writeStatus(output, context);
+  return agents;
 }
 
 export async function resumeAgent(
@@ -2667,11 +2713,20 @@ export function syncBackgroundWithAgentStatus(
   agent: AgentRun,
 ): void {
   if (TERMINAL_AGENT_STATUSES.has(agent.status)) {
-    background.status = agent.status === "blocked" ? "failed" : "completed";
+    background.status =
+      agent.status === "blocked"
+        ? "failed"
+        : agent.status === "cancelled"
+          ? "cancelled"
+          : agent.status === "failed"
+            ? "failed"
+            : "completed";
     background.currentStep = `${agent.status}`;
     background.result =
       agent.status === "completed"
         ? mapAgentBackgroundResult(agent, undefined)
+        : agent.status === "cancelled"
+          ? "cancelled"
         : agent.status === "blocked"
           ? "partial"
           : "fail";
@@ -2763,7 +2818,7 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
         updatedAt: now,
       };
       context.agents.push(agent);
-      if (agent.status === "running" || agent.status === "stale") {
+      if (agent.status === "running") {
         const background = createAgentBackgroundTask(agent, context);
         syncBackgroundWithAgentStatus(background, agent);
         rememberBackgroundTask(context, background);
@@ -2840,6 +2895,7 @@ function formatAgentsList(context: TuiContext): string {
       ? "No agents. Usage: /fork explorer|planner|verifier|worker <task>."
       : "当前没有 agent。用法：/fork explorer|planner|verifier|worker <task>。";
   }
+  const cancellable = listCancellableAgents(context);
   const lines = [context.language === "en-US" ? "Agents:" : "Agents："];
   for (const agent of context.agents) {
     const label = truncateDisplay(
@@ -2851,9 +2907,19 @@ function formatAgentsList(context: TuiContext): string {
       ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18)
       : ".";
     lines.push(
-      `${agent.id}  ${label}  status ${agent.status}  type ${agent.type}  role ${agent.role}  name ${agent.addressableName ?? "-"}  team ${agent.teamName ?? "-"}  pending ${pending}  cwd ${cwd}`,
+      `${agent.id}  ${label}  status ${agent.status}  cancellable ${isAgentCancellable(agent) ? "yes" : "no"}  type ${agent.type}  role ${agent.role}  name ${agent.addressableName ?? "-"}  team ${agent.teamName ?? "-"}  pending ${pending}  cwd ${cwd}`,
     );
   }
+  lines.push(
+    context.language === "en-US"
+      ? `cancellable ids: ${cancellable.map((agent) => agent.id).join(", ") || "none"}`
+      : `可取消 agent IDs：${cancellable.map((agent) => agent.id).join(", ") || "none"}`,
+  );
+  lines.push(
+    context.language === "en-US"
+      ? "Use /agents cancel all to stop every running agent."
+      : "使用 /agents cancel all 可停止所有 running agent。",
+  );
   lines.push(
     context.language === "en-US"
       ? "displayName is cosmetic only; role, permission mode, resource guard, evidence, and lifecycle stay unchanged."

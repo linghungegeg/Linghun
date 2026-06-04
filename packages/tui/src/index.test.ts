@@ -135,6 +135,7 @@ import {
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
 import { findAgent } from "./tui-agent-job-runtime.js";
+import type { AgentRun } from "./tui-data-types.js";
 import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -4700,13 +4701,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(bgFailed).toBeUndefined();
     expect(bgCompleted).toBeUndefined();
 
-    // running->stale: background status=stale, result=partial, resumable
-    expect(bgStale?.status).toBe("stale");
-    expect(bgStale?.result).toBe("partial");
-    expect(bgStale?.currentStep).toBe("stale/resumable");
-    expect(bgStale?.progress?.completed).toBe(0);
-    expect(bgStale?.progress?.total).toBe(1);
-    expect(bgStale?.userVisibleSummary).toContain("stale/resumable");
+    // running->stale remains visible in /agents, but does not pollute
+    // background/footer/cap on a new TUI startup.
+    expect(bgStale).toBeUndefined();
   });
 
   it("hydrateDurableJobBackgroundTasks shows recoverable jobs and keeps terminal jobs out of main-screen background tasks", async () => {
@@ -8551,6 +8548,12 @@ describe("Phase 06 TUI slash commands", () => {
       proposed: "/fork planner 修复 TUI 噪音",
       realTool: "StartAgent",
       realInput: { role: "planner", task: "修复 TUI 噪音" },
+    },
+    {
+      prompt: "停止所有智能体",
+      proposed: "/agents cancel all",
+      realTool: "AgentControl",
+      realInput: { action: "cancel_all" },
     },
     {
       prompt: "生成报告",
@@ -14078,13 +14081,13 @@ describe("Phase 06 TUI slash commands", () => {
     const panel = context.commandPanelState;
     expect(panel?.summary?.join("\n")).toContain("运行中 1");
     expect(panel?.summary?.join("\n")).toContain("待确认 1");
-    expect(panel?.summary?.join("\n")).toContain("失败/阻塞 1");
+    expect(panel?.summary?.join("\n")).toContain("失败/阻塞 0");
     const mainSurface = [
       ...(panel?.summary ?? []),
       ...(panel?.sections ?? []).flatMap((section) => [section.title ?? "", ...section.rows]),
     ].join("\n");
     expect(mainSurface).toContain("Verification");
-    expect(mainSurface).toContain("Agent");
+    expect(mainSurface).not.toContain("Agent");
     expect(mainSurface).toContain("Index");
     expect(mainSurface).toContain("typecheck");
     expect(mainSurface).toContain("1/2 checks");
@@ -14101,6 +14104,7 @@ describe("Phase 06 TUI slash commands", () => {
     ]) {
       expect(mainSurface).not.toContain(banned);
     }
+    expect(panel?.detailsText).not.toContain("agent-panel");
     expect(panel?.detailsText).toContain("/details background verify-panel");
     expect(output.text).toBe("");
   });
@@ -14151,6 +14155,15 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/fork explorer inspect cache", context, output);
     expect(output.text).toContain("agent 后台任务已达到上限 3");
 
+    output.text = "";
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { status: "stale" }),
+      createBackgroundTaskFixture("agent", { status: "stale" }),
+      createBackgroundTaskFixture("agent", { status: "stale" }),
+    ];
+    await handleSlashCommand("/fork explorer stale history is not cap", context, output);
+    expect(output.text).not.toContain("agent 后台任务已达到上限 3");
+
     context.backgroundTasks = [createBackgroundTaskFixture("verification")];
     await handleSlashCommand("/bash node --version", context, output);
     expect(output.text).toContain("已有 verification 重任务正在运行");
@@ -14193,7 +14206,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks.find((task) => task.id === "bash-stale")?.status).toBe("stale");
     expect(output.text).toContain("stale");
     expect(output.text).toContain("timeout");
-    expect(output.text).toContain("cancelled");
+    expect(output.text).not.toContain("agent cancelled");
     expect(output.text).toContain("bash-stale.log");
     expect(output.text).toContain("Background output bash-stale");
     expect(output.text).toContain("- path:");
@@ -14724,6 +14737,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toBe("");
   });
 
+  it("Esc stays quiet for stale agent history without abort controllers", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-esc-stale-agent-idle-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-stale-history",
+        title: "Agent stale history",
+        status: "stale",
+        currentStep: "stale/resumable",
+      }),
+    ];
+
+    await handleTuiKeypress("escape", context, output);
+
+    expect(output.text).toBe("");
+  });
+
   it("Esc with active workflow/background but no panel does not interrupt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-esc-active-no-interrupt-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -14904,8 +14937,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(controller.signal.aborted).toBe(true);
     expect(context.backgroundAbortControllers?.has(agent.id)).toBe(false);
     expect(context.agents[0]?.status).toBe("cancelled");
-    expect(context.backgroundTasks[0]?.status).toBe("completed");
-    expect(context.backgroundTasks[0]?.result).toBe("fail");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     const persisted = JSON.parse(
       await readFile(
         join(resolveStoragePaths(context.config, project).agentRuns, `${agent.id}.json`),
@@ -14971,7 +15004,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(controller.signal.aborted).toBe(true);
     expect(context.agents[0]?.status).toBe("cancelled");
-    expect(context.backgroundTasks[0]?.status).toBe("completed");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(output.text).toContain("agent agent-interrupt-explicit 已取消");
   });
 
@@ -15081,9 +15115,254 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests.length).toBeGreaterThanOrEqual(2);
     expect(controller.signal.aborted).toBe(true);
     expect(context.agents[0]?.status).toBe("cancelled");
-    expect(context.backgroundTasks[0]?.status).toBe("completed");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(output.text).toContain("Agent cancelled");
     expect(output.text).not.toContain("Agent agent-control-cancel cancelled");
+  });
+
+  it("model-facing AgentControl list returns cancellable agent ids and status", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agentcontrol-list-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const startedAt = new Date().toISOString();
+    const makeAgent = (id: string, status: AgentRun["status"]): AgentRun => ({
+      id,
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: id,
+      model: "route-model",
+      permissionMode: "default",
+      status,
+      transcriptPath: join(project, `${id}.jsonl`),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `${id} ${status}`,
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    });
+    context.agents = [
+      makeAgent("agent-list-running", "running"),
+      makeAgent("agent-list-stale", "stale"),
+    ];
+    mockOpenAiToolFetch("AgentControl", { action: "list" }, "已列出智能体。");
+
+    await __testSendMessage("列出可取消智能体", context, gateway, output);
+
+    expect(output.text).toContain("Agent list inspected: 2 agent(s); cancellable 1");
+    expect(output.text).toContain("agent-list-running:running");
+    expect(output.text).not.toContain("agent-list-stale:stale");
+  });
+
+  it("/agents cancel all cancels only running agents and leaves stale/terminal out of background cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agents-cancel-all-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    const startedAt = new Date().toISOString();
+    const makeAgent = (id: string, status: AgentRun["status"]): AgentRun => ({
+      id,
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: id,
+      model: "deepseek-v4-flash",
+      permissionMode: "default",
+      status,
+      transcriptPath: join(project, `${id}.jsonl`),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `${id} summary`,
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    context.agents = [
+      makeAgent("agent-running-a", "running"),
+      makeAgent("agent-running-b", "running"),
+      makeAgent("agent-stale-c", "stale"),
+      makeAgent("agent-completed-d", "completed"),
+    ];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "agent-running-a", title: "Agent a" }),
+      createBackgroundTaskFixture("agent", { id: "agent-running-b", title: "Agent b" }),
+      createBackgroundTaskFixture("agent", {
+        id: "agent-stale-c",
+        title: "Agent stale",
+        status: "stale",
+      }),
+    ];
+    context.backgroundAbortControllers = new Map([
+      ["agent-running-a", firstController],
+      ["agent-running-b", secondController],
+    ]);
+
+    await handleSlashCommand("/agents", context, output);
+    expect(output.text).toContain("可取消 agent IDs：agent-running-a, agent-running-b");
+    expect(output.text).toContain("agent-running-a");
+    expect(output.text).toContain("agent-running-b");
+    expect(output.text).toContain("cancellable yes");
+    expect(output.text).toContain("cancellable no");
+
+    await handleSlashCommand("/agents cancel all", context, output);
+
+    expect(firstController.signal.aborted).toBe(true);
+    expect(secondController.signal.aborted).toBe(true);
+    expect(context.agents.find((agent) => agent.id === "agent-running-a")?.status).toBe(
+      "cancelled",
+    );
+    expect(context.agents.find((agent) => agent.id === "agent-running-b")?.status).toBe(
+      "cancelled",
+    );
+    expect(context.agents.find((agent) => agent.id === "agent-stale-c")?.status).toBe("stale");
+    expect(context.agents.find((agent) => agent.id === "agent-completed-d")?.status).toBe(
+      "completed",
+    );
+    expect(context.backgroundTasks.filter((task) => task.status === "running")).toHaveLength(0);
+    expect(
+      context.backgroundTasks.filter((task) => task.kind === "agent" && task.status === "stale"),
+    ).toHaveLength(1);
+    expect(output.text).toContain("已取消 2 个 agent");
+  });
+
+  it("model-facing AgentControl cancel_all stops every running agent in one call", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agentcontrol-cancel-all-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const startedAt = new Date().toISOString();
+    const makeAgent = (id: string): AgentRun => ({
+      id,
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: id,
+      model: "route-model",
+      permissionMode: "default",
+      status: "running",
+      transcriptPath: join(project, `${id}.jsonl`),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `${id} running`,
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    context.agents = [makeAgent("agent-control-all-a"), makeAgent("agent-control-all-b")];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "agent-control-all-a", title: "Agent a" }),
+      createBackgroundTaskFixture("agent", { id: "agent-control-all-b", title: "Agent b" }),
+    ];
+    context.backgroundAbortControllers = new Map([
+      ["agent-control-all-a", firstController],
+      ["agent-control-all-b", secondController],
+    ]);
+    const requests = mockOpenAiToolFetch(
+      "AgentControl",
+      { action: "cancel_all" },
+      "所有智能体已停止。",
+    );
+
+    await __testSendMessage("停止所有智能体", context, gateway, output);
+
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(firstController.signal.aborted).toBe(true);
+    expect(secondController.signal.aborted).toBe(true);
+    expect(context.agents.map((agent) => agent.status)).toEqual(["cancelled", "cancelled"]);
+    expect(output.text).toContain("AgentControl cancel_all: cancelled 2 agent");
+  });
+
+  it("model-facing AgentControl stop_all is an alias for cancelling every running agent", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agentcontrol-stop-all-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const startedAt = new Date().toISOString();
+    const controller = new AbortController();
+    context.agents = [
+      {
+        id: "agent-control-stop-all",
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        parentSessionId: session.id,
+        task: "stop all alias",
+        model: "route-model",
+        permissionMode: "default",
+        status: "running",
+        transcriptPath: join(project, "agent-control-stop-all.jsonl"),
+        transcriptSessionId: session.id,
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "agent context",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt,
+        updatedAt: startedAt,
+      },
+    ];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "agent-control-stop-all", title: "Agent stop" }),
+    ];
+    context.backgroundAbortControllers = new Map([["agent-control-stop-all", controller]]);
+    mockOpenAiToolFetch("AgentControl", { action: "stop_all" }, "所有智能体已停止。");
+
+    await __testSendMessage("停止所有智能体", context, gateway, output);
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.agents[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(output.text).toContain("AgentControl stop_all: cancelled 1 agent");
   });
 
   it("verification cancel uses process guard and remains non-PASS", async () => {

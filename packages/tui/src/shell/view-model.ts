@@ -1188,16 +1188,21 @@ function mapBackgroundSummariesToBlocks(
   summaries: BackgroundTaskSummary[],
   language: Language,
 ): ProductBlockViewModel[] {
-  if (summaries.length === 0) return [];
+  const visibleSummaries = summaries.filter(
+    (summary) => summary.kind !== "agent" || summary.status === "running",
+  );
+  if (visibleSummaries.length === 0) return [];
   const zh = language === "zh-CN";
-  const running = summaries.filter((s) => s.status === "running").length;
-  const needConfirm = summaries.filter((s) => s.status === "paused" || s.status === "stale").length;
-  const stale = summaries.filter((s) => s.status === "stale").length;
-  const agents = summaries.filter((s) => s.kind === "agent").length;
+  const running = visibleSummaries.filter((s) => s.status === "running").length;
+  const needConfirm = visibleSummaries.filter(
+    (s) => s.status === "paused" || s.status === "stale",
+  ).length;
+  const stale = visibleSummaries.filter((s) => s.status === "stale").length;
+  const agents = visibleSummaries.filter((s) => s.kind === "agent").length;
   const current =
-    summaries.find((s) => s.status === "running") ??
-    summaries.find((s) => s.status === "stale") ??
-    summaries[0];
+    visibleSummaries.find((s) => s.status === "running") ??
+    visibleSummaries.find((s) => s.status === "stale") ??
+    visibleSummaries[0];
   const nextAction =
     createBackgroundNextAction(current, language) ??
     (zh
@@ -1209,8 +1214,8 @@ function mapBackgroundSummariesToBlocks(
       kind: "run",
       status: stale > 0 ? "blocked" : running > 0 ? "running" : "partial",
       title: zh
-        ? `后台 ${summaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
-        : `Background ${summaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
+        ? `后台 ${visibleSummaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
+        : `Background ${visibleSummaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
       summary: current
         ? summarizeBackgroundStep(current, language)
         : zh
@@ -1247,12 +1252,15 @@ function formatFooterRuntimeStatus(
   summaries: BackgroundTaskSummary[],
 ): string {
   const zh = language === "zh-CN";
-  const running = summaries.filter((task) => task.status === "running").length;
-  const needConfirm = summaries.filter(
+  const visibleSummaries = summaries.filter(
+    (summary) => summary.kind !== "agent" || summary.status === "running",
+  );
+  const running = visibleSummaries.filter((task) => task.status === "running").length;
+  const needConfirm = visibleSummaries.filter(
     (task) => task.status === "paused" || task.status === "stale",
   ).length;
-  const total = summaries.length;
-  const agents = summaries.filter((task) => task.kind === "agent").length;
+  const total = visibleSummaries.length;
+  const agents = visibleSummaries.filter((task) => task.kind === "agent").length;
   const pieces = [zh ? `后台 ${total}` : `background ${total}`];
   if (agents > 0) pieces.push(zh ? `智能体 ${agents}` : `agents ${agents}`);
   if (needConfirm > 0) pieces.push(zh ? `需要确认 ${needConfirm}` : `need attention ${needConfirm}`);

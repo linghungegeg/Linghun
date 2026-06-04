@@ -444,6 +444,7 @@ import {
   handleSkillsCommand,
 } from "./extension-slash-runtime.js";
 import {
+  cancelAllAgents,
   cancelAgentByRef,
   configureJobAgentCommandRuntime,
   handleAgentsCommand,
@@ -513,7 +514,12 @@ import {
 } from "./shell/models/command-transcript-presenter.js";
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
-import type { ProductBlockViewModel, ShellController, ShellInputEvent } from "./shell/types.js";
+import type {
+  BackgroundTaskSummary,
+  ProductBlockViewModel,
+  ShellController,
+  ShellInputEvent,
+} from "./shell/types.js";
 import {
   createOutputBlock,
   createShellViewModel,
@@ -1886,26 +1892,7 @@ async function runPlainTui(
         outputBlocks: blocks,
         reasoningLevel: runtime.reasoningLevel,
         reasoningSent: runtime.reasoningSent,
-        backgroundSummaries: context.backgroundTasks
-          .filter(
-            (task) =>
-              task.status === "running" ||
-              task.status === "completed" ||
-              task.status === "failed" ||
-              task.status === "timeout" ||
-              task.status === "paused" ||
-              task.status === "stale",
-          )
-          .map((task) => ({
-            id: task.id,
-            kind: task.kind,
-            title: task.title,
-            status: task.status,
-            currentStep: task.currentStep,
-            progress: task.progress,
-            result: task.result,
-            nextAction: task.nextAction,
-          })),
+        backgroundSummaries: formatShellBackgroundSummaries(context),
         limitations: createShellLimitations({
           language: context.language,
           providerEnvWarning: startup.providerEnvWarning,
@@ -1970,26 +1957,7 @@ async function runInkShell(
         // 喂给 view-model；旧实现遗漏这一行，导致 /config submit 后 ConfigPanel
         // 永远不会出现在 ShellViewModel.configPanel 上。
         configPanelState: context.configPanelState,
-        backgroundSummaries: context.backgroundTasks
-          .filter(
-            (t) =>
-              t.status === "running" ||
-              t.status === "completed" ||
-              t.status === "failed" ||
-              t.status === "timeout" ||
-              t.status === "paused" ||
-              t.status === "stale",
-          )
-          .map((t) => ({
-            id: t.id,
-            kind: t.kind,
-            title: t.title,
-            status: t.status,
-            currentStep: t.currentStep,
-            progress: t.progress,
-            result: t.result,
-            nextAction: t.nextAction,
-          })),
+        backgroundSummaries: formatShellBackgroundSummaries(context),
         limitations: createShellLimitations({
           language: context.language,
           providerEnvWarning: startup.providerEnvWarning,
@@ -5380,7 +5348,7 @@ function hasActiveInterruptibleWork(context: TuiContext): boolean {
   if (context.interrupt?.type === "running") return true;
   if (
     context.backgroundTasks.some((task) =>
-      task.status === "running" || task.status === "paused" || task.status === "stale",
+      isRuntimeActiveBackgroundTask(task) || task.status === "paused",
     )
   ) {
     return true;
@@ -6475,8 +6443,8 @@ async function runDetailsCommandBody(
   const summary = [
     "Linghun details",
     `- evidence: ${context.evidence.length}/${MAX_EVIDENCE_RECORDS}`,
-    `- background: ${context.backgroundTasks.length}/${MAX_BACKGROUND_TASKS}`,
-    `- agents: ${context.agents.length}/${MAX_AGENTS}`,
+    `- background: ${context.backgroundTasks.filter(isRuntimeActiveBackgroundTask).length}/${MAX_BACKGROUND_TASKS}`,
+    `- agents: ${listCancellableAgents(context).length}/${MAX_AGENTS}`,
     `- checkpoints: ${context.checkpoints.length}/${MAX_CHECKPOINTS}`,
     "- full output: /details evidence <id> | /details background <id> | /details output <id>",
   ];
@@ -6526,9 +6494,16 @@ import {
 export {
   findBackgroundTask,
   isActiveBackgroundStatus,
+  isRuntimeActiveBackgroundTask,
+  listCancellableAgents,
 } from "./tui-agent-job-runtime.js";
 
-import { findBackgroundTask, isActiveBackgroundStatus } from "./tui-agent-job-runtime.js";
+import {
+  findBackgroundTask,
+  isActiveBackgroundStatus,
+  isRuntimeActiveBackgroundTask,
+  listCancellableAgents,
+} from "./tui-agent-job-runtime.js";
 
 function refreshBackgroundLifecycle(context: TuiContext): void {
   const now = Date.now();
@@ -6573,7 +6548,7 @@ function checkResourceGuard(
       : null;
   }
   const activeTasks = context.backgroundTasks.filter(
-    (task) => task.id !== ignoreTaskId && isActiveBackgroundStatus(task.status),
+    (task) => task.id !== ignoreTaskId && isRuntimeActiveBackgroundTask(task),
   );
   if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
     return `并发上限：后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。这是 resource/concurrency cap，不是权限拒绝。`;
@@ -7046,7 +7021,7 @@ export async function interruptAllActiveWork(
     context.agents.filter((agent) => agent.status === "running").map((agent) => agent.id),
   );
   const activeTasks = context.backgroundTasks
-    .filter((task) => isActiveBackgroundStatus(task.status) && task.id !== workflowRun?.id)
+    .filter((task) => isRuntimeActiveBackgroundTask(task) && task.id !== workflowRun?.id)
     .filter((task) => !runningAgentIds.has(task.id));
   for (const task of activeTasks) {
     const aborted = abortBackgroundTask(context, task.id);
@@ -11484,14 +11459,32 @@ async function executeLinghunControlToolUse(
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       if (input.action === "list") {
         await handleAgentsCommand(["list"], context, output);
+        const cancellable = listCancellableAgents(context);
         return await finishControlToolResult(
           toolCall,
           context,
           sessionId,
           output,
-          `Agent list inspected: ${context.agents.length} agent(s).`,
+          `Agent list inspected: ${context.agents.length} agent(s); cancellable ${cancellable.length}: ${cancellable.map((agent) => `${agent.id}:${agent.status}`).join(", ") || "none"}.`,
           false,
-          { total: context.agents.length },
+          {
+            total: context.agents.length,
+            cancellable: cancellable.map((agent) => ({ id: agent.id, status: agent.status })),
+          },
+        );
+      }
+      if (input.action === "cancel_all" || input.action === "stop_all") {
+        const agents = await cancelAllAgents(context, output);
+        return await finishControlToolResult(
+          toolCall,
+          context,
+          sessionId,
+          output,
+          agents.length > 0
+            ? `AgentControl ${input.action}: cancelled ${agents.length} agent(s).`
+            : `AgentControl ${input.action}: no cancellable agents.`,
+          false,
+          { cancelled: agents.map((agent) => ({ id: agent.id, status: agent.status })) },
         );
       }
       if (input.action === "show") {
@@ -11646,7 +11639,8 @@ async function executeLinghunControlToolUse(
 
 function executableCommandProposalTool(command: string): string | undefined {
   const normalized = command.trim().toLowerCase();
-  if (/^\/(?:fork|agents?\b|agent\b)/u.test(normalized)) return START_AGENT_TOOL_NAME;
+  if (/^\/fork\b/u.test(normalized)) return START_AGENT_TOOL_NAME;
+  if (/^\/agents?\b/u.test(normalized)) return AGENT_CONTROL_TOOL_NAME;
   if (/^\/workflows?\s+(?:run|plan|enable|disable|[^\s]+)/u.test(normalized)) {
     return RUN_WORKFLOW_TOOL_NAME;
   }
@@ -11768,15 +11762,21 @@ function parseAgentControlToolInput(
   input: unknown,
   context: TuiContext,
 ):
-  | { ok: true; action: "list" | "show" | "cancel"; agentRef?: string }
+  | { ok: true; action: "list" | "show" | "cancel" | "cancel_all" | "stop_all"; agentRef?: string }
   | { ok: false; text: string } {
   const obj =
     input && typeof input === "object" && !Array.isArray(input)
       ? (input as Record<string, unknown>)
       : {};
   const action = obj.action;
-  if (action !== "list" && action !== "show" && action !== "cancel") {
-    return { ok: false, text: "AgentControl requires action list|show|cancel." };
+  if (
+    action !== "list" &&
+    action !== "show" &&
+    action !== "cancel" &&
+    action !== "cancel_all" &&
+    action !== "stop_all"
+  ) {
+    return { ok: false, text: "AgentControl requires action list|show|cancel|cancel_all|stop_all." };
   }
   const ref =
     typeof obj.agentId === "string" && obj.agentId.trim()
@@ -13534,12 +13534,36 @@ function createSilentOutput(): Writable {
   });
 }
 
+function formatShellBackgroundSummaries(context: TuiContext): BackgroundTaskSummary[] {
+  return context.backgroundTasks
+    .filter((task) => task.kind !== "agent" || task.status === "running")
+    .filter(
+      (task) =>
+        task.status === "running" ||
+        task.status === "completed" ||
+        task.status === "failed" ||
+        task.status === "timeout" ||
+        task.status === "paused" ||
+        task.status === "stale",
+    )
+    .map((task) => ({
+      id: task.id,
+      kind: task.kind,
+      title: task.title,
+      status: task.status,
+      currentStep: task.currentStep,
+      progress: task.progress,
+      result: task.result,
+      nextAction: task.nextAction,
+    }));
+}
+
 function isSessionEnded(transcript: TranscriptEvent[]): boolean {
   return transcript.at(-1)?.type === "session_end";
 }
 
 function writeStatus(output: Writable, context: TuiContext): void {
-  const background = context.backgroundTasks.filter((task) => task.status === "running").length;
+  const background = context.backgroundTasks.filter(isRuntimeActiveBackgroundTask).length;
   const latestHitRate = context.cache.history.at(-1)?.hitRate ?? null;
   const gate = context.pendingLocalApproval
     ? "waiting approval"

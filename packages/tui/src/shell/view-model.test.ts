@@ -1228,7 +1228,7 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("shows stale/resumable background status with a clear next action", () => {
+  it("keeps stale agent background status out of the task runtime summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 100,
       viewMode: "task",
@@ -1242,14 +1242,7 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
-    expect(view.taskRuntimeSummary?.status).toBe("blocked");
-    expect(view.taskRuntimeSummary?.title).toContain("后台 1");
-    expect(view.taskRuntimeSummary?.title).toContain("智能体 1");
-    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
-    expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
-    expect(view.taskRuntimeSummary?.summary).not.toContain("上次会话恢复的后台任务");
-    expect(view.taskRuntimeSummary?.nextAction).not.toContain("agent-stale-1");
-    expect(view.taskRuntimeSummary?.nextAction).toContain("/background");
+    expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
   it("uses en-US prefix for background blocks", () => {
@@ -1274,7 +1267,7 @@ describe("backgroundSummaries → blocks mapping", () => {
     expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("startup hydrate-style terminal history stays out while running/stale remains visible", () => {
+  it("startup hydrate-style terminal and stale agent history stay out while running remains visible", () => {
     const terminalOnly = createShellViewModel(createContext(), {
       width: 100,
       viewMode: "task",
@@ -1301,9 +1294,9 @@ describe("backgroundSummaries → blocks mapping", () => {
         },
       ],
     });
-    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 2");
-    expect(recoverable.taskRuntimeSummary?.title).toContain("需要确认 1");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("后台 1");
+    expect(recoverable.taskRuntimeSummary?.title).toContain("智能体 1");
+    expect(recoverable.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(recoverable.taskRuntimeSummary?.title).toContain("运行中 1");
     expect(recoverable.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(recoverable.taskRuntimeSummary?.summary).not.toContain("cli-tui-worker");
@@ -3590,9 +3583,9 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       viewMode: "task",
       backgroundSummaries: [
         {
-          id: "task-724a5c-worker",
-          kind: "agent",
-          title: "Agent task-724a5c-worker",
+          id: "job-724a5c-worker",
+          kind: "job",
+          title: "Job task-724a5c-worker",
           status: "stale",
           currentStep: "stale/resumable",
           progress: { completed: 0, total: 1 },
@@ -3607,7 +3600,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(view.taskFooter?.runtimeStatus).toContain("详情 /background");
     expect(view.taskFooter?.runtimeStatus).not.toContain("运行中 0");
     expect(view.taskFooter?.runtimeStatus).not.toContain("待确认 0");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("agent 1");
+    expect(view.taskFooter?.runtimeStatus).not.toContain("job 1");
     expect(view.taskFooter?.runtimeStatus).not.toContain("task-724a5c-worker");
     expect(view.taskFooter?.runtimeStatus).not.toContain("stale/resumable");
     expect(view.taskFooter?.runtimeStatus).not.toContain("上次会话恢复的后台任务");
@@ -4407,9 +4400,9 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
               status: "failed",
             },
             {
-              id: "agent-stale-visible",
-              kind: "agent",
-              title: "Agent active worker",
+              id: "job-stale-visible",
+              kind: "job",
+              title: "Job active worker",
               status: "stale",
               currentStep: "stale/resumable",
             },

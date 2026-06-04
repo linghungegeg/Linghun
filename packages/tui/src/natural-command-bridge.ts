@@ -618,7 +618,7 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
     "agents",
     "/agents",
-    ["agent", "agents", "智能体", "subagent"],
+    ["agent", "agents", "智能体", "subagent", "stop all agents", "停止所有智能体"],
     "Agent",
     "Agents",
     "查看 agent 状态、transcript、usage 和取消入口。",
@@ -1938,6 +1938,11 @@ function isNaturalControlPlaneIntent(
       text,
     );
   }
+  if (id === "agents") {
+    return /agent|agents|智能体|subagent|停止|停掉|取消|interrupt|cancel|stop|kill|有哪些|list|状态|status/u.test(
+      text,
+    );
+  }
   return (
     ["model", "cache", "memory", "mode", "readiness"].includes(id) && !classification.actionRequest
   );
@@ -1963,7 +1968,7 @@ function isFirstBatchStatusCapability(id: string): boolean {
 
 function isActionRequest(text: string): boolean {
   if (/好了没|好了么|已经.*是吧|已经.*了吗|ready/u.test(text)) return false;
-  return /帮我|请|直接|打开|建立|恢复|build|start|create|run|enable|accept|force|切换|switch|set|resume/u.test(
+  return /帮我|请|直接|打开|建立|恢复|停止|停掉|取消|build|start|create|run|enable|accept|force|switch|set|resume|stop|cancel|kill|interrupt/u.test(
     text,
   );
 }
@@ -2142,6 +2147,17 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
   if (capability.id === "fork") {
     const role = extractAgentRole(normalized);
     return role ? `/fork ${role} <task>` : "/fork <explorer|planner|verifier|worker> <task>";
+  }
+  if (capability.id === "agents") {
+    if (
+      /停止所有|全部停止|停掉所有|取消所有|全部取消|stop all|cancel all|kill all/u.test(
+        normalized,
+      )
+    ) {
+      return "/agents cancel all";
+    }
+    if (/停止|停掉|取消|interrupt|cancel|stop|kill/u.test(normalized)) return "/agents cancel <id>";
+    return "/agents";
   }
   if (capability.id === "permissions" && /add|remove|添加|删除/u.test(normalized))
     return "/permissions add|remove ...";
