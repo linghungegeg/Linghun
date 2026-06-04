@@ -8367,6 +8367,30 @@ const compactPreflightDeps = {
 
 const TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS = 2_000;
 const TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS = 8_000;
+// Phase 6.5: round assistant text 入 provider context 时的上限；超出截断为 head+tail+artifact ref，
+// 避免超长模型输出污染下一轮 provider 上下文。
+const MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER = 16_000;
+const ROUND_ASSISTANT_HEAD_CHARS = 4_000;
+const ROUND_ASSISTANT_TAIL_CHARS = 4_000;
+
+/**
+ * Phase 6.5 — 将超长 round assistant text 截断为 head + artifact 引用的有界投影，
+ * 仅用于写回 provider messages，完整正文保留在 block.fullText / lastFullOutput 中。
+ */
+function truncateRoundAssistantForProvider(
+  text: string,
+  context: { language: "zh-CN" | "en-US"; projectPath: string },
+): string {
+  if (text.length <= MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER) return text;
+  const head = text.slice(0, ROUND_ASSISTANT_HEAD_CHARS);
+  const tail = text.slice(-ROUND_ASSISTANT_TAIL_CHARS);
+  const omitted = text.length - ROUND_ASSISTANT_HEAD_CHARS - ROUND_ASSISTANT_TAIL_CHARS;
+  const separator =
+    context.language === "en-US"
+      ? `\n\n[... ${omitted} characters omitted — full output preserved in artifact; use /details or Ctrl+O to inspect ...]\n\n`
+      : `\n\n[... 中间省略 ${omitted} 个字符 — 完整输出已保存在 artifact 中；用 /details 或 Ctrl+O 查看 ...]\n\n`;
+  return head + separator + tail;
+}
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
@@ -9902,6 +9926,7 @@ async function sendMessage(
       )) {
         if (controller.signal.aborted) {
           clearRequestActivity(context);
+          endAssistantStream(output);
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
@@ -10034,7 +10059,11 @@ async function sendMessage(
       }
 
       if (roundAssistantText || toolCalls.length > 0) {
-        messagesForProvider.push({ role: "assistant", content: roundAssistantText, toolCalls });
+        messagesForProvider.push({
+          role: "assistant",
+          content: truncateRoundAssistantForProvider(roundAssistantText, context),
+          toolCalls,
+        });
       }
       if (toolCalls.length === 0) {
         if (reportWriteGuard && shouldSendReportEvidenceReminder(reportWriteGuard)) {
@@ -10571,6 +10600,7 @@ async function streamFinalModelAnswerWithoutTools(
   )) {
     if (signal.aborted) {
       clearRequestActivity(context);
+      endAssistantStream(output);
       writeLine(output, t(context, "toolInterrupted"));
       return assistantText;
     }
@@ -10855,6 +10885,7 @@ async function continueModelAfterToolResults(
         // 早返回保持一致。
         if (controller.signal.aborted) {
           clearRequestActivity(context);
+          endAssistantStream(output);
           writeLine(output, t(context, "toolInterrupted"));
           return;
         }
@@ -10950,7 +10981,11 @@ async function continueModelAfterToolResults(
         break;
       }
       if (roundAssistantText || toolCalls.length > 0) {
-        continuation.messages.push({ role: "assistant", content: roundAssistantText, toolCalls });
+        continuation.messages.push({
+          role: "assistant",
+          content: truncateRoundAssistantForProvider(roundAssistantText, context),
+          toolCalls,
+        });
       }
       if (toolCalls.length === 0) {
         const reportWriteGuard = continuation.reportWriteGuard;

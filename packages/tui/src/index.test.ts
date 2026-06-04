@@ -8747,8 +8747,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(requests[0]).toMatchObject({
       model: "gpt-5.5",
       reasoning: { effort: "medium" },
+      max_output_tokens: 16_384,
     });
-    expect(requests[0]).not.toHaveProperty("max_output_tokens");
     const modelRequestJson = JSON.stringify(requests[0]);
     expect(modelRequestJson).toContain('{"type":"function","name":"Read"');
     expect(modelRequestJson).toContain('"name":"Write"');
@@ -23515,6 +23515,104 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
       /replaceAssistantBlockContent\(output, assistantStreamBlockId, assistantText\)/g,
     );
     expect(downgrade?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // Phase 6.5 — 长上下文/长输出 Streaming Memory Guard 测试
+  it("Phase 6.5: appendAssistantDelta 触发流式 compaction（block.fullText 超阈值时写 artifact）", async () => {
+    const fs = await import("node:fs/promises");
+    const { createShellBlockOutputForTest } = await import(
+      "../src/tui-output-surface.js"
+    );
+    const blocks: ProductBlockViewModel[] = [];
+    const id = "streaming-burst-test";
+    const output = createShellBlockOutputForTest(makeFakeContext(), blocks);
+    output.beginAssistantStream(id);
+
+    // 模拟 35K 字符的大量输出（超 MAX_STREAMING_FULL_TEXT_CHARS=32_000）
+    const largeText = "x".repeat(35_000);
+    output.appendAssistantDelta(largeText);
+
+    // block 应存在且 fullText 保持为完整文本（compaction 异步触发）
+    const block = blocks.find((b) => b.id === id);
+    expect(block).toBeTruthy();
+    expect(block!.fullText?.length).toBe(35_000);
+
+    // compaction 完成后，block.fullText 应为 bounded preview
+    await output.compactOutputMemory();
+    const compacted = blocks.find((b) => b.id === id);
+    expect(compacted).toBeTruthy();
+    expect(compacted!.fullText!.length).toBeLessThan(3_000);
+    expect(compacted!.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
+  });
+
+  it("Phase 6.5: summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {
+    const { createShellBlockOutputForTest } = await import(
+      "../src/tui-output-surface.js"
+    );
+    const blocks: ProductBlockViewModel[] = [];
+    const id = "long-summary-test";
+    const output = createShellBlockOutputForTest(makeFakeContext(), blocks);
+    output.beginAssistantStream(id);
+
+    // 写一个超长单行（600 chars，超 MAX_STREAMING_SUMMARY_CHARS=500）
+    const longLine = "L".repeat(600);
+    output.appendAssistantDelta(longLine);
+
+    const block = blocks.find((b) => b.id === id);
+    expect(block).toBeTruthy();
+    expect(block!.summary!.length).toBeLessThanOrEqual(504); // 500 + "…"
+    expect(block!.summary).toContain("…");
+  });
+
+  it("Phase 6.5: 默认 max_tokens 写入 Amazon chat 请求", async () => {
+    const { OpenAiCompatibleProvider } = await import("@linghun/providers");
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+    expect(request.max_tokens).toBe(16_384);
+  });
+
+  it("Phase 6.5: 用户显式 maxOutputTokens 优先于默认值", async () => {
+    const { OpenAiCompatibleProvider } = await import("@linghun/providers");
+    const provider = new OpenAiCompatibleProvider({
+      id: "openai-compatible",
+      type: "openai-compatible",
+      baseUrl: "https://example.com/v1/",
+      apiKey: "test-key",
+      model: "custom-model",
+    });
+    const request = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+      maxOutputTokens: 2_000,
+    });
+    expect(request.max_tokens).toBe(2_000);
+  });
+
+  it("Phase 6.5: truncateRoundAssistantForProvider 超长截断为 head+tail", async () => {
+    const indexSrc = await (await import("node:fs/promises")).readFile(
+      srcPath("index.ts"),
+      "utf8",
+    );
+    expect(indexSrc).toContain("truncateRoundAssistantForProvider");
+    expect(indexSrc).toContain("MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER");
+    expect(indexSrc).toContain("中间省略");
+  });
+
+  it("Phase 6.5: abort 路径调 endAssistantStream 清理 streaming 状态", async () => {
+    const fs = await import("node:fs/promises");
+    const indexSrc = await fs.readFile(srcPath("index.ts"), "utf8");
+    // controller.signal.aborted 检查后面的代码块必须包含 endAssistantStream
+    const abortBlocks = indexSrc.match(
+      /if \(controller\.signal\.aborted\)[\s\S]*?endAssistantStream\(output\)/g,
+    );
+    expect(abortBlocks?.length).toBeGreaterThanOrEqual(1);
   });
 });
 

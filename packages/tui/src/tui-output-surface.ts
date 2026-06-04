@@ -13,6 +13,10 @@ const MAX_LAST_FULL_OUTPUT_CHARS = 12_000;
 const MAX_BLOCK_FULL_TEXT_CHARS = 12_000;
 const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
 const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
+// Phase 6.5: 流式累积超此阈值时立即触发 artifact 落盘，避免 block.fullText 在主内存无限膨胀。
+const MAX_STREAMING_FULL_TEXT_CHARS = 32_000;
+// Phase 6.5: summary 首行超长时截断，避免单行渲染撑爆 TUI。
+const MAX_STREAMING_SUMMARY_CHARS = 500;
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
@@ -130,11 +134,18 @@ export class ShellBlockOutput extends Writable {
     const nextFull = `${block.fullText ?? ""}${text}`;
     const firstLine = nextFull.split("\n").find((line) => line.trim()) ?? nextFull;
     block.fullText = nextFull;
-    block.summary = firstLine || block.summary;
+    block.summary =
+      firstLine.length > MAX_STREAMING_SUMMARY_CHARS
+        ? `${firstLine.slice(0, MAX_STREAMING_SUMMARY_CHARS)}…`
+        : firstLine;
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = nextFull;
     }
     trimOutputBlocks(this.blocks);
+    // Phase 6.5: 流式累积超过阈值时立即触发 artifact 落盘，不等流结束。
+    if (nextFull.length >= MAX_STREAMING_FULL_TEXT_CHARS) {
+      void this.compactOutputMemory();
+    }
     this.onWrite();
   }
 

@@ -66,10 +66,11 @@ describe("OpenAI compatible provider", () => {
       model: "custom-model",
       messages: [{ role: "user", content: "你好" }],
       stream: true,
+      max_tokens: 16_384,
     });
   });
 
-  it("sends chat max_tokens only when explicitly configured", () => {
+  it("sends chat max_tokens with explicit config, defaults 16384 when not configured", () => {
     const provider = new OpenAiCompatibleProvider({
       id: "openai-compatible",
       type: "openai-compatible",
@@ -84,6 +85,11 @@ describe("OpenAI compatible provider", () => {
     });
 
     expect(request.max_tokens).toBe(4_000);
+
+    const defaulted = provider.createChatRequest({
+      messages: [{ role: "user", content: "你好" }],
+    });
+    expect(defaulted.max_tokens).toBe(16_384);
   });
 
   it("uses OpenAI tool schemas and assistant tool results", () => {
@@ -235,6 +241,7 @@ describe("OpenAI compatible provider", () => {
       model: "gpt-5.5",
       input: [{ role: "user", content: "你好" }],
       stream: true,
+      max_output_tokens: 16_384,
       tools: [
         {
           type: "function",
@@ -751,7 +758,7 @@ describe("OpenAI compatible provider", () => {
       messages: [{ role: "user", content: "你好" }],
     });
 
-    expect(request).not.toHaveProperty("max_tokens");
+    expect(request.max_tokens).toBe(8_192);
     expect(request).not.toHaveProperty("reasoning");
   });
 

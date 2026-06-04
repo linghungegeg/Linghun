@@ -1555,8 +1555,14 @@ function createOptionalMaxTokens<K extends "max_tokens" | "max_output_tokens">(
   request: ModelRequest,
   config: ProviderConfig,
 ): Partial<Record<K, number>> {
+  const model = request.model ?? config.model;
+  const known = findKnownModel(model);
+  // Phase 6.5: 已知模型取自身 maxOutputTokens；未知模型补默认 16384。
+  // 用户显式配置（request.maxOutputTokens / config.maxOutputTokens）始终优先。
+  const modelCap = known?.maxOutputTokens ?? 16_384;
   const configured = request.maxOutputTokens ?? config.maxOutputTokens;
-  return configured === undefined ? {} : ({ [key]: configured } as Record<K, number>);
+  const value = configured ?? modelCap;
+  return { [key]: value } as Record<K, number>;
 }
 
 function createOpenAiChatTools(
