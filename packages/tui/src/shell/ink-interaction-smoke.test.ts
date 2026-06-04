@@ -158,9 +158,6 @@ describe("Ink TTY interaction smoke", () => {
     expect(events).toContainEqual({ type: "command-panel-close" });
     expect(events).not.toContainEqual({ type: "escape" });
 
-    const userEventCount = () =>
-      events.filter((event) => event.type !== "transcript-scroll-measure").length;
-    const beforePermissionTyping = userEventCount();
     view = {
       ...view,
       commandPanel: undefined,
@@ -180,9 +177,14 @@ describe("Ink TTY interaction smoke", () => {
     shell.rerender();
     await shell.waitUntilRenderFlush();
 
+    const beforePermissionEvents = events.length;
     input.write("x");
     await shell.waitUntilRenderFlush();
-    expect(userEventCount()).toBe(beforePermissionTyping);
+    expect(events.slice(beforePermissionEvents)).not.toContainEqual({
+      type: "permission-action",
+      actionId: "allow_once",
+    });
+    expect(events.slice(beforePermissionEvents)).not.toContainEqual({ type: "submit", text: "x" });
 
     input.write("y");
     await shell.waitUntilRenderFlush();
@@ -208,6 +210,113 @@ describe("Ink TTY interaction smoke", () => {
     input.write("n");
     await shell.waitUntilRenderFlush();
     expect(events).toContainEqual({ type: "permission-action", actionId: "deny" });
+
+    shell.unmount();
+  });
+
+  it("routes selectable background CommandPanel keys to panel actions", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: {
+        title: "/background",
+        summary: ["任务 · 运行中 2 · 待确认 0 · 失败/阻塞 0 · 已完成 0"],
+        sections: [
+          {
+            title: "Agent",
+            rows: [
+              {
+                text: "Agent a · 运行中 · -",
+                taskRef: { id: "agent-a", kind: "agent" as const },
+                detailsText: "Agent a details",
+              },
+            ],
+          },
+          {
+            title: "Bash / job",
+            rows: [
+              {
+                text: "Bash lint · 运行中 · -",
+                taskRef: { id: "bash-a", kind: "background" as const },
+                detailsText: "Bash details",
+              },
+            ],
+          },
+        ],
+        cursor: 0,
+        scrollOffset: 0,
+        expanded: false,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    input.write("\x1b[B");
+    await shell.waitUntilRenderFlush();
+    input.write("\x1b[A");
+    await shell.waitUntilRenderFlush();
+    input.write("\r");
+    await shell.waitUntilRenderFlush();
+    input.write("x");
+    await shell.waitUntilRenderFlush();
+    input.write("\x1b");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await shell.waitUntilRenderFlush();
+
+    expect(events).toContainEqual({ type: "command-panel-move", delta: 1 });
+    expect(events).toContainEqual({ type: "command-panel-move", delta: -1 });
+    expect(events).toContainEqual({ type: "command-panel-toggle" });
+    expect(events).toContainEqual({ type: "command-panel-stop" });
+    expect(events).toContainEqual({ type: "command-panel-close" });
+    expect(events).not.toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(events).not.toContainEqual({ type: "submit", text: "x" });
+
+    shell.unmount();
+  });
+
+  it("renders selected background row details only when expanded", async () => {
+    let view = {
+      ...baseTaskView(),
+      commandPanel: {
+        title: "/background",
+        summary: ["任务 · 运行中 2 · 待确认 0 · 失败/阻塞 0 · 已完成 0"],
+        sections: [
+          {
+            title: "Agent",
+            rows: [
+              {
+                text: "Agent a · 运行中 · -",
+                taskRef: { id: "agent-a", kind: "agent" as const },
+                detailsText: "Agent a details",
+              },
+              {
+                text: "Agent b · 运行中 · -",
+                taskRef: { id: "agent-b", kind: "agent" as const },
+                detailsText: "Agent b details",
+              },
+            ],
+          },
+        ],
+        cursor: 1,
+        scrollOffset: 0,
+        expanded: false,
+      },
+    };
+    const { output, shell } = await renderWithEvents(() => view);
+
+    expect(output.text).toContain("> Agent b");
+    expect(output.text).not.toContain("Agent b details");
+
+    view = {
+      ...view,
+      commandPanel: {
+        ...view.commandPanel,
+        expanded: true,
+      },
+    };
+    shell.rerender();
+    await shell.waitUntilRenderFlush();
+
+    expect(output.text).toContain("Agent b details");
+    expect(output.text).not.toContain("Agent a details");
 
     shell.unmount();
   });

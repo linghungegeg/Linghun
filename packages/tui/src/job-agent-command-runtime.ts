@@ -13,6 +13,7 @@ import type {
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import type { CommandPanelRow, CommandPanelSection } from "./shell/types.js";
 import type {
   CompactPreflightRuntime,
   ProviderPreflightCompactResult,
@@ -298,7 +299,7 @@ export async function handleBackgroundCommand(
         ? `Tasks · ${running} running · ${needConfirm} need attention · ${failedOrBlocked} failed/blocked · ${completed} done`
         : `任务 · 运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${failedOrBlocked} · 已完成 ${completed}`,
     ];
-    const sections = buildBackgroundPanelSections(tasks, context.language);
+    const sections = buildBackgroundPanelSections(tasks, context.language, context.projectPath);
     const detailsText = tasks
       .map((task) => formatBackgroundTaskPanelDetails(task, context.language, context.projectPath))
       .join("\n\n");
@@ -307,11 +308,10 @@ export async function handleBackgroundCommand(
       tone: failedOrBlocked > 0 ? "warning" : "neutral",
       summary,
       sections,
-      actions:
-        failedOrBlocked > 0
-          ? ["/details background <id>", "/details output <id>"]
-          : ["/details background <id>"],
       detailsText,
+      cursor: 0,
+      scrollOffset: 0,
+      expanded: false,
     });
     return;
   }
@@ -327,7 +327,8 @@ export async function handleBackgroundCommand(
 function buildBackgroundPanelSections(
   tasks: TuiContext["backgroundTasks"],
   language: TuiContext["language"],
-): { title?: string; rows: string[] }[] {
+  projectPath?: string,
+): CommandPanelSection[] {
   const isEn = language === "en-US";
   const groups: Array<{ kind: TuiContext["backgroundTasks"][number]["kind"]; title: string }> = [
     { kind: "agent", title: isEn ? "Agent" : "Agent" },
@@ -338,7 +339,7 @@ function buildBackgroundPanelSections(
     { kind: "mcp", title: isEn ? "MCP" : "MCP" },
     { kind: "compact", title: isEn ? "Other" : "其他" },
   ];
-  const sections: { title?: string; rows: string[] }[] = [];
+  const sections: CommandPanelSection[] = [];
   const used = new Set<string>();
   for (const group of groups) {
     const grouped = tasks.filter((task) => task.kind === group.kind && !used.has(task.id));
@@ -346,7 +347,9 @@ function buildBackgroundPanelSections(
     for (const task of grouped) used.add(task.id);
     sections.push({
       title: group.title,
-      rows: grouped.slice(0, 4).map((task) => formatBackgroundTaskPanelRow(task, language)),
+      rows: grouped
+        .slice(0, 4)
+        .map((task) => createBackgroundPanelRow(task, language, projectPath)),
     });
     const hidden = grouped.length - 4;
     if (hidden > 0) {
@@ -359,10 +362,27 @@ function buildBackgroundPanelSections(
   if (other.length > 0) {
     sections.push({
       title: isEn ? "Other" : "其他",
-      rows: other.slice(0, 4).map((task) => formatBackgroundTaskPanelRow(task, language)),
+      rows: other.slice(0, 4).map((task) => createBackgroundPanelRow(task, language, projectPath)),
     });
   }
   return sections;
+}
+
+function createBackgroundPanelRow(
+  task: BackgroundTaskState,
+  language: TuiContext["language"],
+  projectPath?: string,
+): CommandPanelRow {
+  const text = formatBackgroundTaskPanelRow(task, language);
+  return {
+    text,
+    selectable: true,
+    taskRef: {
+      id: task.id,
+      kind: task.kind === "agent" ? "agent" : task.kind === "job" ? "job" : "background",
+    },
+    detailsText: formatBackgroundTaskPanelDetails(task, language, projectPath),
+  };
 }
 
 export async function handleJobCommand(
@@ -2727,9 +2747,9 @@ export function syncBackgroundWithAgentStatus(
         ? mapAgentBackgroundResult(agent, undefined)
         : agent.status === "cancelled"
           ? "cancelled"
-        : agent.status === "blocked"
-          ? "partial"
-          : "fail";
+          : agent.status === "blocked"
+            ? "partial"
+            : "fail";
     background.progress = {
       completed: 1,
       total: 1,

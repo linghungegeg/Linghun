@@ -49,6 +49,9 @@ import {
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
   __testSendMessage,
+  __testStopCommandPanelSelection,
+  __testToggleCommandPanelSelection,
+  __testUpdateCommandPanelSelection,
   addAllowRuleForTest,
   containsSecret,
   createCacheState,
@@ -14084,7 +14087,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(panel?.summary?.join("\n")).toContain("失败/阻塞 0");
     const mainSurface = [
       ...(panel?.summary ?? []),
-      ...(panel?.sections ?? []).flatMap((section) => [section.title ?? "", ...section.rows]),
+      ...(panel?.sections ?? []).flatMap((section) => [
+        section.title ?? "",
+        ...section.rows.map((row) => (typeof row === "string" ? row : row.text)),
+      ]),
     ].join("\n");
     expect(mainSurface).toContain("Verification");
     expect(mainSurface).not.toContain("Agent");
@@ -14107,6 +14113,77 @@ describe("Phase 06 TUI slash commands", () => {
     expect(panel?.detailsText).not.toContain("agent-panel");
     expect(panel?.detailsText).toContain("/details background verify-panel");
     expect(output.text).toBe("");
+  });
+
+  it("Ink /background rows are selectable task items with per-row details", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-selectable-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("verification", {
+        id: "verify-selectable",
+        title: "typecheck selectable",
+        status: "running",
+      }),
+    ];
+
+    await handleSlashCommand("/background", context, output);
+
+    const row = context.commandPanelState?.sections?.[0]?.rows[0];
+    expect(typeof row).toBe("object");
+    expect(row).toMatchObject({
+      taskRef: { id: "verify-selectable", kind: "background" },
+      detailsText: expect.stringContaining("/details background verify-selectable"),
+    });
+    expect(context.commandPanelState?.actions).toBeUndefined();
+    expect(context.commandPanelState?.expanded).toBe(false);
+  });
+
+  it("CommandPanel selection updates cursor and scrollOffset on selectable /background rows", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-selection-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.backgroundTasks = [
+      ...Array.from({ length: 4 }, (_, index) =>
+        createBackgroundTaskFixture("verification", {
+          id: `verify-select-${index}`,
+          title: `Verify select ${index}`,
+          status: "running",
+        }),
+      ),
+      ...Array.from({ length: 4 }, (_, index) =>
+        createBackgroundTaskFixture("bash", {
+          id: `bash-select-${index}`,
+          title: `Bash select ${index}`,
+          status: "running",
+        }),
+      ),
+      ...Array.from({ length: 2 }, (_, index) =>
+        createBackgroundTaskFixture("index", {
+          id: `index-select-${index}`,
+          title: `Index select ${index}`,
+          status: "running",
+        }),
+      ),
+    ];
+
+    await handleSlashCommand("/background", context, output);
+
+    for (let i = 0; i < 8; i++) __testUpdateCommandPanelSelection(context, 1);
+
+    expect(context.commandPanelState?.cursor).toBe(8);
+    expect(context.commandPanelState?.scrollOffset).toBe(1);
+
+    __testUpdateCommandPanelSelection(context, -1);
+
+    expect(context.commandPanelState?.cursor).toBe(7);
+    expect(context.commandPanelState?.scrollOffset).toBe(1);
   });
 
   it("guards foreground model requests and background resource caps", async () => {
@@ -15007,6 +15084,116 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(output.text).toContain("agent agent-interrupt-explicit 已取消");
+  });
+
+  it("CommandPanel x stops the selected agent through cancelAgentByRef", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-x-agent-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    const startedAt = new Date().toISOString();
+    const controller = new AbortController();
+    context.agents = [
+      {
+        id: "agent-panel-stop",
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        parentSessionId: session.id,
+        task: "stop from background panel",
+        model: "deepseek-v4-flash",
+        permissionMode: "default",
+        status: "running",
+        transcriptPath: join(project, "agent-panel-stop.jsonl"),
+        transcriptSessionId: session.id,
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "agent context",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt,
+        updatedAt: startedAt,
+      },
+    ];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-panel-stop",
+        title: "Agent panel stop",
+      }),
+    ];
+    context.backgroundAbortControllers = new Map([["agent-panel-stop", controller]]);
+    await handleSlashCommand("/background", context, output);
+
+    await __testStopCommandPanelSelection(context, output);
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.agents[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(context.commandPanelState?.summary?.join("\n")).not.toContain("raw evidence");
+    expect(output.text).toBe("");
+  });
+
+  it("CommandPanel x stops the selected job through /job cancel transition", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-x-job-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    context.config = {
+      ...context.config,
+      storage: { ...context.config.storage, jobs: { scope: "project" } },
+    };
+    const job = await persistDurableJobFixture(project, context.config, "running");
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("job", {
+        id: job.id,
+        title: "Job panel stop",
+      }),
+    ];
+    await handleSlashCommand("/background", context, output);
+
+    await __testStopCommandPanelSelection(context, output);
+
+    const persisted = await readDurableJobState(getDurableJobStatePath(job));
+    expect(persisted?.status).toBe("cancelled");
+    expect(persisted?.result?.status).toBe("cancelled");
+    expect(context.backgroundTasks.find((task) => task.id === job.id)?.status).toBe("cancelled");
+    expect(output.text).toBe("");
+  });
+
+  it("CommandPanel x stops a selected ordinary background task through abort semantics", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-x-bash-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    const controller = new AbortController();
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("bash", {
+        id: "bash-panel-stop",
+        title: "Bash panel stop",
+      }),
+    ];
+    context.backgroundAbortControllers = new Map([["bash-panel-stop", controller]]);
+    await handleSlashCommand("/background", context, output);
+
+    await __testStopCommandPanelSelection(context, output);
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(context.backgroundAbortControllers?.has("bash-panel-stop")).toBe(false);
+    expect(context.backgroundTasks[0]?.status).toBe("cancelled");
+    expect(context.backgroundTasks[0]?.result).toBe("cancelled");
+    expect(output.text).toBe("");
   });
 
   it("resolves implicit agent refs to active before stale or blocked agents", async () => {

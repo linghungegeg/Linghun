@@ -5539,7 +5539,7 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(output.text).toContain("❯");
   });
 
-  it("普通 CommandPanel 不停用 Composer，保留 PageUp/PageDown transcript-scroll 路径", async () => {
+  it("普通 CommandPanel 不停用 Composer，可选任务面板才接管行操作", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
     const activeConfig = source.slice(
@@ -5552,6 +5552,8 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
     expect(source).toContain('void onInput({ type: "transcript-scroll", action: "halfPageDown" })');
     expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelUp" })');
     expect(source).toContain('void onInput({ type: "transcript-scroll", action: "wheelDown" })');
+    expect(source).toContain("const commandPanelConsumesInput = hasSelectableCommandPanelRows");
+    expect(source).toContain('void onInput({ type: "command-panel-stop" })');
   });
 });
 

@@ -1,6 +1,6 @@
 import type { Writable } from "node:stream";
 import type { TuiContext } from "./index.js";
-import type { CommandPanelView } from "./shell/types.js";
+import type { CommandPanelRow, CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./startup-runtime.js";
 
 /**
@@ -28,7 +28,9 @@ import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./start
  *
  * 返回 undefined 表示三类内容都为空 —— 调用方走 notifications 轻提示。
  */
-export function buildExplicitDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
+export function buildExplicitDetailsCommandPanel(
+  context: TuiContext,
+): CommandPanelView | undefined {
   const isEn = context.language === "en-US";
   const hasOutput = Boolean(context.lastFullOutput);
   const hasCompact = Boolean(
@@ -270,11 +272,26 @@ export function showCommandPanel(
   if (panel.sections) {
     for (const section of panel.sections) {
       if (section.title) lines.push(section.title);
-      lines.push(...section.rows);
+      lines.push(...section.rows.map((row) => getCommandPanelRowText(row)));
     }
   }
   if (panel.actions && panel.actions.length > 0) {
     for (const action of panel.actions) lines.push(`→ ${action}`);
   }
   writeLine(output, lines.join("\n"));
+}
+
+export function getCommandPanelRowText(row: CommandPanelRow): string {
+  return typeof row === "string" ? row : row.text;
+}
+
+export function getCommandPanelSelectableRows(
+  panel: CommandPanelView,
+): Exclude<CommandPanelRow, string>[] {
+  return (panel.sections ?? [])
+    .flatMap((section) => section.rows)
+    .filter(
+      (row): row is Exclude<CommandPanelRow, string> =>
+        typeof row !== "string" && row.selectable !== false && Boolean(row.taskRef),
+    );
 }

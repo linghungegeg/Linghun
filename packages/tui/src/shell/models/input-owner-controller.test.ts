@@ -119,6 +119,15 @@ describe("selectInputOwner — panel second", () => {
     expect(selectInputOwner("o", { ...noKey, ctrl: true }, ctx)).toBe("composer");
     expect(selectInputOwner("a", noKey, ctx)).toBe("composer");
   });
+
+  it("interactive panel owns arrows, Enter, and x without changing priority", () => {
+    const ctx: OwnerContext = { ...idleCtx, panelActive: true, panelInteractive: true };
+    expect(selectInputOwner("", { ...noKey, upArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
+    expect(selectInputOwner("", { ...noKey, downArrow: true } as OwnerKeyShape, ctx)).toBe("panel");
+    expect(selectInputOwner("", { ...noKey, return: true }, ctx)).toBe("panel");
+    expect(selectInputOwner("x", noKey, ctx)).toBe("panel");
+    expect(selectInputOwner("x", { ...noKey, ctrl: true }, ctx)).toBe("composer");
+  });
 });
 
 describe("selectInputOwner — slash third", () => {

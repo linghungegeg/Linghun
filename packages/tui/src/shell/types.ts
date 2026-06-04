@@ -278,10 +278,26 @@ export type ConfigPanelView =
  *   - tone：neutral / warning / error，控制边框色与状态色。
  *   - cursor / scrollOffset：面板自身可滚动时使用。
  */
+export type CommandPanelTaskRef = {
+  id: string;
+  kind: "agent" | "job" | "background";
+};
+
+export type CommandPanelRow =
+  | string
+  | {
+      text: string;
+      selectable?: boolean;
+      taskRef?: CommandPanelTaskRef;
+      detailsText?: string;
+    };
+
+export type CommandPanelSection = { title?: string; rows: CommandPanelRow[] };
+
 export type CommandPanelView = {
   title: string;
   summary?: string[];
-  sections?: { title?: string; rows: string[] }[];
+  sections?: CommandPanelSection[];
   actions?: string[];
   detailsText?: string;
   tone?: "neutral" | "warning" | "error";
@@ -460,7 +476,10 @@ export type ShellInputEvent =
   | { type: "transcript-scroll-measure"; viewportHeight: number; contentHeight: number }
   | { type: "transcript-scroll-end" }
   | { type: "transcript-scroll-top" }
-  | { type: "command-panel-close" };
+  | { type: "command-panel-close" }
+  | { type: "command-panel-move"; delta: -1 | 1 }
+  | { type: "command-panel-toggle" }
+  | { type: "command-panel-stop" };
 
 export type ShellController = {
   onInput: (event: ShellInputEvent) => Promise<void> | void;

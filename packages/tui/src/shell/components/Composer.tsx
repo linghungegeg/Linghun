@@ -12,6 +12,7 @@ import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../t
 import { createShellTheme } from "../theme.js";
 import type {
   PermissionActionId,
+  CommandPanelView,
   ShellInputEvent,
   ShellViewModel,
   TaskPermissionView,
@@ -499,6 +500,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   const text = bufferToString(buffer);
   const commandPanelActive = Boolean(view.commandPanel);
+  const commandPanelConsumesInput = hasSelectableCommandPanelRows(view.commandPanel);
   const slashHeadCurrent = useMemo(() => slashHead(text), [text]);
   // Slash candidates surface in two cases:
   //   1. Bare "/" — show the core 5 entries as a soft onboarding affordance.
@@ -546,12 +548,15 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
     setBuffer(next);
     setSlashSelection(0);
   }, []);
-  const updateBufferAndResetSelection = useCallback((update: (current: EditBuffer) => EditBuffer) => {
-    const next = update(bufferRef.current);
-    bufferRef.current = next;
-    setBuffer(next);
-    setSlashSelection(0);
-  }, []);
+  const updateBufferAndResetSelection = useCallback(
+    (update: (current: EditBuffer) => EditBuffer) => {
+      const next = update(bufferRef.current);
+      bufferRef.current = next;
+      setBuffer(next);
+      setSlashSelection(0);
+    },
+    [],
+  );
 
   const submitPermissionAction = useCallback(
     (id: PermissionActionId) => {
@@ -639,6 +644,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       const owner = selectInputOwner(input, key, {
         permissionActive,
         panelActive: configPanelActive || commandPanelActive,
+        panelInteractive: commandPanelConsumesInput,
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
       });
@@ -708,6 +714,25 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           else if (view.configPanel) void onInput({ type: "config-back" });
           else if (view.commandPanel) void onInput({ type: "command-panel-close" });
           else void onInput({ type: "escape" });
+          return;
+        }
+        if (commandPanelConsumesInput) {
+          if (key.upArrow) {
+            void onInput({ type: "command-panel-move", delta: -1 });
+            return;
+          }
+          if (key.downArrow) {
+            void onInput({ type: "command-panel-move", delta: 1 });
+            return;
+          }
+          if (key.return) {
+            void onInput({ type: "command-panel-toggle" });
+            return;
+          }
+          if (input.toLowerCase() === "x" && !key.ctrl && !key.meta) {
+            void onInput({ type: "command-panel-stop" });
+            return;
+          }
           return;
         }
       }
@@ -1594,6 +1619,16 @@ export function splitLineAtDisplayCol(
   const cursorChar = chars[i] ?? " ";
   const after = chars.slice(i + 1).join("");
   return { before, cursorChar, after };
+}
+
+function hasSelectableCommandPanelRows(panel: CommandPanelView | undefined): boolean {
+  return Boolean(
+    panel?.sections?.some((section) =>
+      section.rows.some(
+        (row) => typeof row !== "string" && row.selectable !== false && Boolean(row.taskRef),
+      ),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------

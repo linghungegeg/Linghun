@@ -285,10 +285,7 @@ import {
   parseModelSetupPrefill,
   validateModelSetupPartial,
 } from "./model-setup-runtime.js";
-import {
-  evaluateMetaScheduler,
-  formatMetaSchedulerDirective,
-} from "./meta-scheduler-runtime.js";
+import { evaluateMetaScheduler, formatMetaSchedulerDirective } from "./meta-scheduler-runtime.js";
 import {
   type NaturalIntent,
   type PendingNaturalCommand,
@@ -629,7 +626,11 @@ export { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prom
 // FreshnessRule= WebSearch/WebFetch unverified; RuntimeIdentityRule= Do not include provider, endpointProfile, route role, baseUrl; "(provider: ...)" openai-compatible.
 // RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; RuntimeIdentityRule allows when the user runs /model doctor or /model route doctor; doctor may print provider=${runtime.provider}.
 // /model echo still includes reasoning=${runtime.reasoningStatus}; async function handleModelCommand( uses formatModelRouteSummary and intentionally omits trailing writeStatus(output, context).
-import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
+import {
+  buildExplicitDetailsCommandPanel,
+  getCommandPanelSelectableRows,
+  showCommandPanel,
+} from "./command-panel-runtime.js";
 import {
   handleCheckpointCommand,
   handleGitCommand,
@@ -2099,6 +2100,24 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "command-panel-move") {
+        updateCommandPanelSelection(context, event.delta);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "command-panel-toggle") {
+        toggleCommandPanelSelection(context);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "command-panel-stop") {
+        await stopCommandPanelSelection(context, output);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       // ─── Main transcript scroll ─────────────────────────────────────────────
       if (event.type === "transcript-scroll") {
         const { reduceTranscriptScroll } = await import(
@@ -3368,7 +3387,9 @@ function formatWorkflowDisplayLabel(value: string | undefined, fallback: string)
   return truncateDisplay(cleaned, 48);
 }
 
-function formatRegistryWorkflowStepTitle(step: RegistryWorkflowDefinition["steps"][number]): string {
+function formatRegistryWorkflowStepTitle(
+  step: RegistryWorkflowDefinition["steps"][number],
+): string {
   if (step.task?.trim()) return truncateDisplay(step.task.replace(/\s+/g, " ").trim(), 48);
   return workflowActionLabel(step.action, "workflow step");
 }
@@ -5344,11 +5365,12 @@ async function reevaluatePendingLocalApprovalAfterModeChange(
 function hasActiveInterruptibleWork(context: TuiContext): boolean {
   if (context.activeAbortController) return true;
   if (context.activeVerificationAbortController) return true;
-  if (context.backgroundAbortControllers && context.backgroundAbortControllers.size > 0) return true;
+  if (context.backgroundAbortControllers && context.backgroundAbortControllers.size > 0)
+    return true;
   if (context.interrupt?.type === "running") return true;
   if (
-    context.backgroundTasks.some((task) =>
-      isRuntimeActiveBackgroundTask(task) || task.status === "paused",
+    context.backgroundTasks.some(
+      (task) => isRuntimeActiveBackgroundTask(task) || task.status === "paused",
     )
   ) {
     return true;
@@ -6902,6 +6924,131 @@ function formatBtwStatusAnswer(context: TuiContext): string {
     lastModelRequest: context.lastModelRequest,
   });
   return formatRuntimeStatusSnapshotForBtw(snapshot, context.language);
+}
+
+function updateCommandPanelSelection(context: TuiContext, delta: -1 | 1): void {
+  const panel = context.commandPanelState;
+  if (!panel) return;
+  const rows = getCommandPanelSelectableRows(panel);
+  if (rows.length === 0) return;
+  const current = Math.max(0, Math.min(panel.cursor ?? 0, rows.length - 1));
+  const next = (current + delta + rows.length) % rows.length;
+  const pageSize = 8;
+  const currentOffset = Math.max(0, panel.scrollOffset ?? 0);
+  const scrollOffset =
+    next < currentOffset
+      ? next
+      : next >= currentOffset + pageSize
+        ? Math.max(0, next - pageSize + 1)
+        : currentOffset;
+  context.commandPanelState = { ...panel, cursor: next, scrollOffset };
+}
+
+function toggleCommandPanelSelection(context: TuiContext): void {
+  const panel = context.commandPanelState;
+  if (!panel || getCommandPanelSelectableRows(panel).length === 0) return;
+  context.commandPanelState = { ...panel, expanded: !panel.expanded };
+}
+
+export function __testUpdateCommandPanelSelection(context: TuiContext, delta: -1 | 1): void {
+  updateCommandPanelSelection(context, delta);
+}
+
+export function __testToggleCommandPanelSelection(context: TuiContext): void {
+  toggleCommandPanelSelection(context);
+}
+
+async function stopCommandPanelSelection(context: TuiContext, output: Writable): Promise<void> {
+  const panel = context.commandPanelState;
+  if (!panel) return;
+  const rows = getCommandPanelSelectableRows(panel);
+  if (rows.length === 0) return;
+  const cursor = Math.max(0, Math.min(panel.cursor ?? 0, rows.length - 1));
+  const taskRef = rows[cursor]?.taskRef;
+  if (!taskRef) return;
+  const dispatchOutput = context.isInkSession ? createSilentOutput() : output;
+  if (taskRef.kind === "agent") {
+    await cancelAgentByRef(taskRef.id, context, dispatchOutput);
+  } else if (taskRef.kind === "job") {
+    await handleJobCommand(["cancel", taskRef.id], context, dispatchOutput);
+  } else {
+    await stopSingleBackgroundTask(taskRef.id, context, dispatchOutput);
+  }
+  if (context.isInkSession) {
+    await handleBackgroundCommand([], context, createSilentOutput());
+  }
+}
+
+export async function __testStopCommandPanelSelection(
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  await stopCommandPanelSelection(context, output);
+}
+
+async function stopSingleBackgroundTask(
+  taskId: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<boolean> {
+  const task = findBackgroundTask(context, taskId);
+  if (!task || !isRuntimeActiveBackgroundTask(task)) {
+    writeLine(
+      output,
+      context.language === "en-US"
+        ? "Selected background task is not running."
+        : "选中的后台任务当前未运行。",
+    );
+    return false;
+  }
+  const sessionId = await ensureSession(context);
+  const now = new Date().toISOString();
+  let aborted = false;
+  if (task.kind === "verification" && context.activeVerificationAbortController) {
+    context.activeVerificationAbortController.abort();
+    context.activeVerificationAbortController = undefined;
+    context.interrupt = { type: "idle" };
+    aborted = true;
+  } else {
+    aborted = abortBackgroundTask(context, task.id);
+  }
+  if (task.kind === "job") {
+    const job = await findDurableJob(context, task.id);
+    if (job) {
+      await transitionDurableJob(
+        job,
+        context,
+        aborted ? "cancelled" : "stale",
+        aborted ? "selected_abort_signal_sent" : "selected_without_abort_controller",
+      );
+      const updatedTask = createJobBackgroundTask(job, context);
+      Object.assign(task, updatedTask);
+      await appendBackgroundTaskEvent(context, sessionId, task);
+      return true;
+    }
+  }
+  task.status = aborted ? "cancelled" : "stale";
+  task.result = aborted ? "cancelled" : "partial";
+  task.updatedAt = now;
+  task.nextAction = aborted
+    ? context.language === "en-US"
+      ? "Abort signal sent. Review /background and the log before continuing."
+      : "已发送取消信号。继续前可先查看 /background 和日志。"
+    : context.language === "en-US"
+      ? "No live abort controller was available; state marked stale/resumable."
+      : "未找到可用取消 controller；已标记为 stale/resumable。";
+  await appendBackgroundTaskEvent(context, sessionId, task);
+  writeLine(
+    output,
+    aborted
+      ? context.language === "en-US"
+        ? `Stopped ${task.title}.`
+        : `已停止 ${task.title}。`
+      : context.language === "en-US"
+        ? `${task.title} has no live abort controller; marked stale.`
+        : `${task.title} 没有可用取消 controller；已标记为 stale。`,
+  );
+  return true;
 }
 
 async function handleInterruptCommand(
@@ -11776,7 +11923,10 @@ function parseAgentControlToolInput(
     action !== "cancel_all" &&
     action !== "stop_all"
   ) {
-    return { ok: false, text: "AgentControl requires action list|show|cancel|cancel_all|stop_all." };
+    return {
+      ok: false,
+      text: "AgentControl requires action list|show|cancel|cancel_all|stop_all.",
+    };
   }
   const ref =
     typeof obj.agentId === "string" && obj.agentId.trim()
@@ -13437,7 +13587,8 @@ function compactToolOutputForTranscript(output: ToolOutput): ToolOutput {
       `<transcript-tool-output-truncated originalChars=${text.length} originalBytes=${textBytes}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`,
     ].join("\n"),
     details:
-      typeof output.details === "string" && output.details.length > TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS
+      typeof output.details === "string" &&
+      output.details.length > TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS
         ? `<transcript-tool-output-details-truncated originalChars=${output.details.length}${output.fullOutputPath ? ` fullOutputPath=${output.fullOutputPath}` : ""}>`
         : output.details,
     data: compactToolOutputDataForTranscript(output.data),

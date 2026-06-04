@@ -28,6 +28,8 @@ export type OwnerContext = {
   permissionActive: boolean;
   /** Any active panel surface that should close/navigate before global input. */
   panelActive?: boolean;
+  /** True when the active panel owns row navigation/actions, not only Esc close. */
+  panelInteractive?: boolean;
   /** pastePendingRef.current → paste 聚合窗口内。 */
   pastePending: boolean;
   /** slashCandidates.length > 0 && !slashHidden → slash 候选可见。 */
@@ -94,7 +96,7 @@ export function shouldOwnerBePaste(
 export function selectInputOwner(input: string, key: OwnerKeyShape, ctx: OwnerContext): InputOwner {
   if (ctx.permissionActive) return "permission";
 
-  if (ctx.panelActive && isPanelKey(input, key)) return "panel";
+  if (ctx.panelActive && isPanelKey(input, key, ctx.panelInteractive === true)) return "panel";
 
   // paste 优先：pending 期间的 Enter/Esc 也算 paste owner（用于吞 Enter / 取消粘贴）；
   // 大 chunk 或 pending 中的普通字符同样 paste。
@@ -131,8 +133,11 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
   );
 }
 
-function isPanelKey(_input: string, key: OwnerKeyShape): boolean {
-  return key.escape;
+function isPanelKey(input: string, key: OwnerKeyShape, interactive: boolean): boolean {
+  if (key.escape) return true;
+  if (!interactive) return false;
+  if (key.return || isNavigationKey(key)) return true;
+  return input.toLowerCase() === "x" && !key.ctrl && !key.meta;
 }
 
 /** 调试 / 测试辅助：返回 owner 选择的稳定优先级数组。 */
