@@ -788,13 +788,22 @@ export function adaptShellCommandForPlatform(
   if (platform !== "win32") return { command, adapter: "native" };
   const heredoc = convertNodeHereDocForPowerShell(command);
   if (heredoc) return heredoc;
+  if (looksLikeUnsupportedUnixMultiline(command)) {
+    return createBlockedPowerShellAdapter(
+      "Unsupported multi-line Unix shell syntax on Windows PowerShell; use PowerShell-safe commands or Node one-liners.",
+    );
+  }
   const converted = convertUnixPipelineForPowerShell(command);
   if (converted) return { command: converted, adapter: "powershell-adapted" };
+  const readOnlyCommand = convertUnixReadOnlyCommandForPowerShell(command);
+  if (readOnlyCommand) return readOnlyCommand;
   if (looksLikeUnsupportedUnixPipeline(command)) {
     const message =
       "Unsupported Unix pipeline on Windows PowerShell; use PowerShell-safe commands or Node one-liners.";
     return createBlockedPowerShellAdapter(message);
   }
+  const unsupportedReadOnlyCommand = blockUnsupportedUnixReadOnlyCommand(command);
+  if (unsupportedReadOnlyCommand) return unsupportedReadOnlyCommand;
   return { command, adapter: "native" };
 }
 
@@ -838,6 +847,7 @@ function createBlockedPowerShellAdapter(message: string): ShellCommandAdapter {
   return {
     command: `powershell.exe -NoProfile -NonInteractive -Command "Write-Error ${quotePowerShellString(message)}; exit 1"`,
     adapter: "blocked",
+    logCommand: `powershell.exe -NoProfile -NonInteractive -Command <blocked: ${message}>`,
   };
 }
 
@@ -902,12 +912,135 @@ function convertUnixPipelineForPowerShell(command: string): string | undefined {
   return undefined;
 }
 
+function convertUnixReadOnlyCommandForPowerShell(command: string): ShellCommandAdapter | undefined {
+  const tokens = tokenizeSimpleShellCommand(command);
+  if (!tokens) return undefined;
+  const [program = "", ...args] = tokens;
+  const lowerProgram = program.toLowerCase();
+  let script: string | undefined;
+
+  if (lowerProgram === "cat") {
+    if (args.length === 1) {
+      script = `Get-Content -LiteralPath ${quotePowerShellString(args[0] ?? "")}`;
+    }
+  } else if (lowerProgram === "ls") {
+    script = convertLsForPowerShell(args);
+  } else if (lowerProgram === "grep") {
+    script = convertGrepForPowerShell(args);
+  } else if (lowerProgram === "pwd") {
+    if (args.length === 0) script = "Get-Location | ForEach-Object { $_.Path }";
+  } else if (lowerProgram === "which") {
+    if (args.length === 1) {
+      script = [
+        `$cmd = Get-Command -ErrorAction Stop ${quotePowerShellString(args[0] ?? "")}`,
+        "if ($cmd.Source) { $cmd.Source } elseif ($cmd.Path) { $cmd.Path } else { $cmd.Name }",
+      ].join("; ");
+    }
+  }
+
+  if (!script) return undefined;
+  return {
+    command: ["powershell.exe -NoProfile -NonInteractive -Command", quoteCmdArg(`$ErrorActionPreference='Stop'; ${script}`)].join(
+      " ",
+    ),
+    adapter: "powershell-adapted",
+  };
+}
+
+function convertLsForPowerShell(args: string[]): string | undefined {
+  let force = false;
+  let path = ".";
+  for (const arg of args) {
+    if (arg === "-a" || arg === "-la" || arg === "-al") {
+      force = true;
+      continue;
+    }
+    if (arg === "-l") {
+      continue;
+    }
+    if (arg.startsWith("-")) return undefined;
+    if (path !== ".") return undefined;
+    path = arg;
+  }
+  const forceArg = force ? " -Force" : "";
+  return `Get-ChildItem -LiteralPath ${quotePowerShellString(path)}${forceArg}`;
+}
+
+function convertGrepForPowerShell(args: string[]): string | undefined {
+  const recursive = args[0] === "-R" || args[0] === "-r";
+  const offset = recursive ? 1 : 0;
+  const pattern = args[offset];
+  const target = args[offset + 1];
+  if (!pattern || !target || args.length !== offset + 2) return undefined;
+  if (recursive) {
+    return [
+      `Get-ChildItem -LiteralPath ${quotePowerShellString(target)} -File -Recurse`,
+      `Select-String -Pattern ${quotePowerShellString(pattern)}`,
+    ].join(" | ");
+  }
+  return `Select-String -Pattern ${quotePowerShellString(pattern)} -LiteralPath ${quotePowerShellString(target)}`;
+}
+
 function looksLikeUnsupportedUnixPipeline(command: string): boolean {
   return (
     /\bfind\s+.+\|\s*(?:sed|head)\b/iu.test(command) ||
+    /\b(?:cat|grep|ls|find|sed|head)\b.+\|\s*(?:sed|head|grep|awk|xargs)\b/isu.test(command) ||
     /\bsed\s+-n\b/iu.test(command) ||
     /\bhead\s+-n\b/iu.test(command)
   );
+}
+
+function looksLikeUnsupportedUnixMultiline(command: string): boolean {
+  const normalized = command.replace(/\r\n/gu, "\n");
+  if (!/\n/u.test(normalized)) return false;
+  if (/<<\s*['"]?[A-Za-z_][\w.-]*['"]?/u.test(normalized)) return true;
+  return normalized
+    .split("\n")
+    .some((line) => /^\s*(?:cat|ls|grep|find|sed|head|which|pwd)\b/iu.test(line));
+}
+
+function blockUnsupportedUnixReadOnlyCommand(command: string): ShellCommandAdapter | undefined {
+  const tokens = tokenizeSimpleShellCommand(command);
+  const program = tokens?.[0]?.toLowerCase() ?? command.trim().match(/^(\w+)/u)?.[1]?.toLowerCase();
+  if (!program || !["cat", "ls", "grep", "pwd", "which"].includes(program)) return undefined;
+  return createBlockedPowerShellAdapter(
+    `Unsupported ${program} form on Windows PowerShell; use a simple read-only form or a PowerShell-safe command.`,
+  );
+}
+
+function tokenizeSimpleShellCommand(command: string): string[] | undefined {
+  const trimmed = command.trim();
+  if (!trimmed || /[\r\n|;&<>]/u.test(trimmed)) return undefined;
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+    if (!char) continue;
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return undefined;
+  if (current) tokens.push(current);
+  return tokens.length > 0 ? tokens : undefined;
 }
 
 function stripShellQuotes(value: string): string {

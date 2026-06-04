@@ -720,6 +720,60 @@ describe("Phase 05 core tools", () => {
     );
     expect(unsupportedFindPredicate.adapter).toBe("blocked");
   });
+
+  it("adapts simple read-only Unix commands for Windows PowerShell", () => {
+    const cat = adaptShellCommandForPlatform("cat 'notes file.txt'", "win32");
+    expect(cat.adapter).toBe("powershell-adapted");
+    expect(cat.command).toContain("Get-Content");
+    expect(cat.command).toContain("'notes file.txt'");
+
+    const ls = adaptShellCommandForPlatform('ls -la "src files"', "win32");
+    expect(ls.adapter).toBe("powershell-adapted");
+    expect(ls.command).toContain("Get-ChildItem");
+    expect(ls.command).toContain("-Force");
+    expect(ls.command).toContain("'src files'");
+
+    const grep = adaptShellCommandForPlatform("grep 'hello world' '中文 路径\\file.txt'", "win32");
+    expect(grep.adapter).toBe("powershell-adapted");
+    expect(grep.command).toContain("Select-String");
+    expect(grep.command).toContain("'hello world'");
+    expect(grep.command).toContain("'中文 路径\\file.txt'");
+
+    const recursiveGrep = adaptShellCommandForPlatform("grep -R \"needle\" src", "win32");
+    expect(recursiveGrep.adapter).toBe("powershell-adapted");
+    expect(recursiveGrep.command).toContain("Get-ChildItem");
+    expect(recursiveGrep.command).toContain("-Recurse");
+    expect(recursiveGrep.command).toContain("Select-String");
+
+    const pwd = adaptShellCommandForPlatform("pwd", "win32");
+    expect(pwd.adapter).toBe("powershell-adapted");
+    expect(pwd.command).toContain("Get-Location");
+
+    const which = adaptShellCommandForPlatform("which node", "win32");
+    expect(which.adapter).toBe("powershell-adapted");
+    expect(which.command).toContain("Get-Command");
+    expect(which.command).toContain("'node'");
+  });
+
+  it("blocks unsupported Windows Unix command forms without leaking raw scripts", () => {
+    const catPipeline = adaptShellCommandForPlatform("cat package.json | grep version", "win32");
+    expect(catPipeline.adapter).toBe("blocked");
+    expect(catPipeline.command).toContain("Unsupported Unix pipeline");
+
+    const unsupportedGrep = adaptShellCommandForPlatform("grep -n version package.json", "win32");
+    expect(unsupportedGrep.adapter).toBe("blocked");
+    expect(unsupportedGrep.command).toContain("Unsupported grep form");
+
+    const unterminatedQuote = adaptShellCommandForPlatform("cat 'notes file.txt", "win32");
+    expect(unterminatedQuote.adapter).toBe("blocked");
+    expect(unterminatedQuote.command).toContain("Unsupported cat form");
+
+    const multiline = adaptShellCommandForPlatform("cat <<EOF\nsecret raw script\nEOF", "win32");
+    expect(multiline.adapter).toBe("blocked");
+    expect(multiline.command).toContain("Unsupported multi-line Unix shell syntax");
+    expect(multiline.command).not.toContain("secret raw script");
+    expect(multiline.logCommand).not.toContain("secret raw script");
+  });
 });
 
 function createMockChildProcess(): EventEmitter & {
