@@ -130,9 +130,9 @@ export function formatProviderFallbackAttemptSummary(
   language: Language,
 ): string {
   if (language === "en-US") {
-    return `Fallback attempt: ${input.fromProvider}/${input.fromModel} failed with ${formatProviderFailureKindLabel(input.reasonKind, language)}; trying ${input.toProvider}/${input.toModel}.`;
+    return `Fallback attempt: the primary model failed with ${formatProviderFailureKindLabel(input.reasonKind, language)}; trying a backup model.`;
   }
-  return `正在尝试备用模型：${input.fromProvider}/${input.fromModel} 因${formatProviderFailureKindLabel(input.reasonKind, language)}失败，改用 ${input.toProvider}/${input.toModel}。`;
+  return `正在尝试备用模型：主模型因${formatProviderFailureKindLabel(input.reasonKind, language)}失败，正在切换。`;
 }
 
 export function formatProviderFailureKindLabel(

@@ -23,6 +23,8 @@ describe("Polish A runtime status presenter", () => {
     expect(line).toContain("模式 默认模式");
     expect(line).toContain("缓存 92%");
     expect(line).toContain("索引 ready");
+    expect(line).not.toContain("会话");
+    expect(line).not.toContain("确认 无");
     expect(line.length).toBeLessThanOrEqual(100);
   });
 
@@ -47,6 +49,8 @@ describe("Polish A runtime status presenter", () => {
     expect(line).toContain("Mode auto mode");
     expect(line).toContain("Cache 90%");
     expect(line).toContain("Index ready");
+    expect(line).not.toContain("Session");
+    expect(line).not.toContain("Gate none");
     expect(line).not.toContain("openai-compatible");
     expect(line).not.toContain("api.example.test");
     expect(line).not.toContain("sk-secret");
@@ -99,6 +103,7 @@ describe("Polish A runtime status presenter", () => {
     expect(line).toContain("缓存?");
     expect(line).toContain("索引?");
     expect(line).toContain("确认 待确认");
+    expect(line).not.toContain("会话");
     expect(line.length).toBeLessThanOrEqual(100);
   });
 });

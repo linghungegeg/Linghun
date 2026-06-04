@@ -245,6 +245,11 @@ export function createShellViewModel(
   // Home 首屏不显示 background blocks
   // setup 进行中时，background / 最近输出噪音被收敛，让用户专注配置流程
   const blocks: ProductBlockViewModel[] = [];
+  const ctrlOExpandState = (
+    context as {
+      ctrlOExpandState?: { active?: boolean; blockId?: string };
+    }
+  ).ctrlOExpandState;
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
@@ -292,7 +297,9 @@ export function createShellViewModel(
       return true;
     });
     // Add /details hint only to error/blocked blocks (avoid noise on info rows).
-    const outputWithHints = selectedBlocks.map((b) => addDetailsHint(b, language));
+    const outputWithHints = selectedBlocks.map((b) =>
+      applyCtrlOExpandState(addDetailsHint(b, language), ctrlOExpandState),
+    );
     blocks.push(...outputWithHints);
   }
 
@@ -479,6 +486,9 @@ export function createShellViewModel(
         : undefined,
     },
     blocks: fittedBlocks,
+    ctrlOExpand: ctrlOExpandState?.active
+      ? { active: true, ...(ctrlOExpandState.blockId ? { blockId: ctrlOExpandState.blockId } : {}) }
+      : { active: false },
     limitations: options.limitations ?? [],
     taskFooter,
     taskRuntimeSummary: taskRuntimeSummary ? fitBlockToWidth(taskRuntimeSummary, width) : undefined,
@@ -722,7 +732,6 @@ export function createOutputBlock(
  */
 function addDetailsHint(block: ProductBlockViewModel, language: Language): ProductBlockViewModel {
   const copy = shellText[language];
-  if (block.nextAction) return block;
   // D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint 必须只在真正可展开时显示。
   //   - fullText 比 summary 多内容（多行 / 单行长出 16 字符以上）才算"被折叠"；
   //   - 普通块 / 错误块共用同一判定，避免短错误（"已拒绝 Bash"）也挂 Ctrl+O。
@@ -734,8 +743,31 @@ function addDetailsHint(block: ProductBlockViewModel, language: Language): Produ
   const hasMore =
     fullText.length > 0 && (nonEmptyLines >= 3 || fullText.length > summary.length + 16);
   if (!hasMore) return block;
+  const existingCtrlOHint = block.nextAction && /Ctrl\+O/i.test(block.nextAction);
+  const nonCtrlOAction = block.nextAction && !existingCtrlOHint;
+  if (nonCtrlOAction) return block;
   const isFailLike = block.status === "fail" || block.status === "blocked";
-  return { ...block, nextAction: isFailLike ? copy.errorDetailsHint : copy.detailsHint };
+  return {
+    ...block,
+    nextAction: block.nextAction ?? (isFailLike ? copy.errorDetailsHint : copy.detailsHint),
+    ctrlOCollapsed: true,
+  };
+}
+
+function applyCtrlOExpandState(
+  block: ProductBlockViewModel,
+  state: { active?: boolean; blockId?: string } | undefined,
+): ProductBlockViewModel {
+  if (!state?.active) return block;
+  if (state.blockId && state.blockId !== block.id) return block;
+  const fullText = (block.fullText ?? "").trim();
+  if (!fullText) return block;
+  return {
+    ...block,
+    summary: fullText,
+    nextAction: undefined,
+    ctrlOCollapsed: false,
+  };
 }
 
 /**

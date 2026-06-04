@@ -105,25 +105,26 @@ export function createAgentContextSummary(
       item.status === "active" && item.projectScope === context.failureLearning.projectScope,
   );
   const freshness = context.cache.lastFreshness
-    ? `changed=${context.cache.lastFreshness.changedKeys.slice(0, 5).join(",") || "none"}`
-    : "not_checked";
+    ? `changed ${context.cache.lastFreshness.changedKeys.slice(0, 5).join(", ") || "none"}`
+    : "not checked";
   const architecture = packet.currentArchitectureCard
     ? truncateDisplay(packet.currentArchitectureCard.recommendedApproach, 120)
     : "none";
+  const indexSummary = formatIndexRuntimeRef(packet.indexStatus).replace(/=/gu, " ");
   return [
     "Agent context package (trimmed)",
-    `handoff=${packet.id}`,
-    `task=${truncateDisplay(task, 200)}`,
-    `language=${context.language}`,
-    `todos=${packet.todos.length}`,
-    `evidence=${evidence.length > 0 ? evidence.join("; ") : "none"}`,
-    `keyFiles=${files.length > 0 ? files.join(", ") : "none"}`,
-    `index=${formatIndexRuntimeRef(packet.indexStatus)}`,
-    `cacheFreshness=${freshness}`,
-    `architecture=${architecture}`,
-    `failureLearning=${activeFailures.length}`,
-    `permission=${context.permissionMode}`,
-    "notIncluded=full transcript/full memory/full index/large logs",
+    `handoff ${packet.id}`,
+    `task ${truncateDisplay(task, 200)}`,
+    `language ${context.language}`,
+    `todos ${packet.todos.length}`,
+    `evidence ${evidence.length > 0 ? evidence.join("; ") : "none"}`,
+    `key files ${files.length > 0 ? files.join(", ") : "none"}`,
+    `index ${indexSummary}`,
+    `cache freshness ${freshness}`,
+    `architecture ${architecture}`,
+    `failure learning ${activeFailures.length}`,
+    `permission ${context.permissionMode}`,
+    "not included: full transcript/full memory/full index/large logs",
   ].join(" | ");
 }
 

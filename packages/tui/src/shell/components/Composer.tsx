@@ -710,10 +710,6 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
           else void onInput({ type: "escape" });
           return;
         }
-        if (key.ctrl && input.toLowerCase() === "o") {
-          void onInput({ type: "toggle-details" });
-          return;
-        }
       }
       if (configPanelActive) return;
 
@@ -1123,9 +1119,9 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
       }
 
       // D.13Q-UX Ctrl+O — 查看完整内容：派发 toggle-details 事件，由 onInput
-      // 路由到 handleDetailsCommand。**不再 submit "/details"**，避免 transcript
-      // 命令行里冒出 ❯ /details；/details slash 仍保留为兼容命令，但用户按
-      // Ctrl+O 时不应当作 slash 提交。
+      // 切换 transcript/message verbose 展开态。**不再 submit "/details"**，避免
+      // transcript 命令行里冒出 ❯ /details；/details slash 仍保留为兼容命令，
+      // 但用户按 Ctrl+O 时不应当作 slash 提交，也不应打开 CommandPanel。
       if (key.ctrl && input === "o") {
         clearHintNotice();
         void onInput({ type: "toggle-details" });

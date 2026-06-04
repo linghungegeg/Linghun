@@ -290,7 +290,7 @@ describe("extension-command-runtime", () => {
       context.skills = state;
 
       const output = formatSkills(context);
-      expect(output).toContain("lastError=");
+      expect(output).toContain("last error ");
       expect(output).toContain("disabled");
     });
   });
@@ -321,8 +321,8 @@ describe("extension-command-runtime", () => {
       context.plugins = state;
 
       const output = formatPlugins(context);
-      expect(output).toContain("commands=foo");
-      expect(output).toContain("hooks=Stop");
+      expect(output).toContain("commands foo");
+      expect(output).toContain("hooks Stop");
     });
   });
 

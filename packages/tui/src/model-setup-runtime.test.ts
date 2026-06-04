@@ -224,9 +224,9 @@ describe("model-setup-runtime", () => {
         },
       };
       const msg = formatModelSetupSummary(setup, "zh-CN");
-      expect(msg).toContain("baseUrl=present");
-      expect(msg).toContain("apiKey=present");
-      expect(msg).toContain("model=gpt-4o");
+      expect(msg).toContain("base URL present");
+      expect(msg).toContain("api key present");
+      expect(msg).toContain("model gpt-4o");
       expect(msg).not.toContain("sk-secret-key-12345678");
     });
     it("shows missing for absent values", () => {
@@ -237,9 +237,9 @@ describe("model-setup-runtime", () => {
         values: {},
       };
       const msg = formatModelSetupSummary(setup, "en-US");
-      expect(msg).toContain("baseUrl=missing");
-      expect(msg).toContain("apiKey=missing");
-      expect(msg).toContain("model=missing");
+      expect(msg).toContain("base URL missing");
+      expect(msg).toContain("api key missing");
+      expect(msg).toContain("model missing");
     });
   });
 

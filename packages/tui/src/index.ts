@@ -623,7 +623,7 @@ export { createModelSystemPrompt, sanitizeMainScreenLeakage } from "./model-prom
 // FreshnessRule= WebSearch/WebFetch unverified; RuntimeIdentityRule= Do not include provider, endpointProfile, route role, baseUrl; "(provider: ...)" openai-compatible.
 // RuntimeStatusForModel does not contain provider/baseUrl/endpointProfile by default; RuntimeIdentityRule allows when the user runs /model doctor or /model route doctor; doctor may print provider=${runtime.provider}.
 // /model echo still includes reasoning=${runtime.reasoningStatus}; async function handleModelCommand( uses formatModelRouteSummary and intentionally omits trailing writeStatus(output, context).
-import { buildToggleDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
+import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
 import {
   handleCheckpointCommand,
   handleGitCommand,
@@ -1286,7 +1286,7 @@ async function recordProviderFallbackAttempt(
   await appendSystemEvent(
     context,
     sessionId,
-    `provider_fallback_attempt from=${input.from.provider}/${input.from.model} to=${input.to.provider}/${input.to.model} reason=${input.kind} code=${input.code} status=${input.status}`,
+    `provider fallback attempt: from ${input.from.provider}/${input.from.model}; to ${input.to.provider}/${input.to.model}; reason ${input.kind}; code ${input.code}; status ${input.status}`,
     input.status === "succeeded" ? "info" : "warning",
   );
 }
@@ -1504,6 +1504,12 @@ export type TuiContext = {
    */
   commandPanelState?: import("./shell/types.js").CommandPanelView;
   /**
+   * Ctrl+O transcript/message verbose expand state. This is intentionally
+   * separate from commandPanelState: Ctrl+O expands folded output blocks, while
+   * CommandPanel remains reserved for explicit advanced slash panels.
+   */
+  ctrlOExpandState?: { active: boolean; blockId?: string };
+  /**
    * D.13Q-UX Task Surface — 任务区滚动状态。home 模式下不读取；task/pending
    * 模式默认为 { scrollOffset: 0, stickToBottom: true }。
    */
@@ -1642,6 +1648,21 @@ function mergeWorkflowTemplates(...groups: WorkflowTemplate[][]): WorkflowTempla
     }
   }
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function isCtrlOExpandableBlock(block: ProductBlockViewModel): boolean {
+  const fullText = (block.fullText ?? "").trim();
+  const summary = (block.summary ?? "").trim();
+  if (!fullText) return false;
+  if (!summary) return fullText.length > 0;
+  const nonEmptyLines = fullText.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+  return nonEmptyLines >= 2 || fullText.length > summary.length + 16;
+}
+
+function findLatestCtrlOExpandableBlock(
+  blocks: ProductBlockViewModel[],
+): ProductBlockViewModel | undefined {
+  return [...blocks].reverse().find(isCtrlOExpandableBlock);
 }
 
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
@@ -1982,6 +2003,12 @@ async function runInkShell(
       process.once("SIGINT", sigintHandler);
       if (event.type === "escape") {
         submittedPending = false;
+        if (context.ctrlOExpandState?.active) {
+          context.ctrlOExpandState = { active: false };
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
         if (
           context.commandPanelState ||
           context.helpPanelState ||
@@ -2024,7 +2051,7 @@ async function runInkShell(
           await appendSystemEvent(
             context,
             sessionId,
-            `permission_mode_change: ${previousMode} -> ${nextMode}; reason=ink shift-tab quiet cycle; boundary=Start Gate and permission pipeline remain active`,
+            `permission mode change: ${previousMode} -> ${nextMode}; reason ink shift-tab quiet cycle; boundary Start Gate and permission pipeline remain active`,
             "info",
           );
         } catch {
@@ -2049,55 +2076,25 @@ async function runInkShell(
       // 出现 /details，transcript 命令行也不会多出一条 ❯ /details。/details slash
       // 仍保留为兼容命令（显式诊断走原 handleDetailsCommand 链路）。
       //
-      // D.13Q-UX Task Surface Maturity Sweep：Ctrl+O 完全脱离 transcript。
-      //   优先 1：commandPanel 已打开且有 detailsText —— toggle expanded。
-      //   优先 2：最近的 fail/blocked/error block 有 fullText —— 升级为 commandPanel 详情。
-      //   优先 3：lastFullOutput / evidence / background 任一存在 —— 装配为
-      //           commandPanel detailsText（不再调 handleDetailsCommand 写 transcript）。
-      //   都没有：notifications 轻提示，不写 transcript。
+      // Ctrl+O 是 transcript/message verbose expand，不是高级 CommandPanel。
+      // 有可展开 output block 时只切换 view-model 的 block 展开态；无可展开内容
+      // 时只显示轻提示，不写 transcript，不触发 /details，也不靠 Esc 退出。
       if (event.type === "toggle-details") {
         submittedPending = false;
-        // 1) commandPanel 内 toggle
-        if (context.commandPanelState?.detailsText) {
-          context.commandPanelState = {
-            ...context.commandPanelState,
-            expanded: !context.commandPanelState.expanded,
-          };
+        const expandableBlock = findLatestCtrlOExpandableBlock(blocks);
+        if (expandableBlock) {
+          const isSameBlockExpanded =
+            context.ctrlOExpandState?.active &&
+            (!context.ctrlOExpandState.blockId ||
+              context.ctrlOExpandState.blockId === expandableBlock.id);
+          context.ctrlOExpandState = isSameBlockExpanded
+            ? { active: false }
+            : { active: true, blockId: expandableBlock.id };
           shell?.rerender();
           await shell?.waitUntilRenderFlush();
           return;
         }
-        // 2) 最近 block 有可展开 fullText 时，把它升级为 commandPanel 详情
-        const expandableBlock = [...blocks]
-          .reverse()
-          .find((b) => (b.fullText ?? "").trim().length > (b.summary ?? "").length + 1);
-        if (expandableBlock?.fullText) {
-          context.commandPanelState = {
-            title:
-              expandableBlock.title?.trim() ||
-              (context.language === "en-US" ? "Latest output" : "最近输出"),
-            tone:
-              expandableBlock.status === "fail" || expandableBlock.status === "blocked"
-                ? "error"
-                : "neutral",
-            summary: [expandableBlock.summary],
-            detailsText: expandableBlock.fullText,
-            expanded: true,
-          };
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-          return;
-        }
-        // 3) lastFullOutput / evidence / background fallback：装配 commandPanel
-        //    detailsText 而不是写 transcript。
-        const fallbackPanel = buildToggleDetailsCommandPanel(context);
-        if (fallbackPanel) {
-          context.commandPanelState = fallbackPanel;
-          shell?.rerender();
-          await shell?.waitUntilRenderFlush();
-          return;
-        }
-        // 4) 全空：notifications 轻提示，不写 transcript。
+        context.ctrlOExpandState = { active: false };
         if (!context.notifications) context.notifications = [];
         context.notifications.push({
           key: "ctrl-o-empty",
@@ -2930,7 +2927,7 @@ export async function handleSlashCommand(
       return "handled";
     }
     // D.14E+ — plain TUI 也用 CommandPanel 避免刷屏：主屏显示总数+最近 5 个，
-    // 完整列表进 detailsText（Ctrl+O 展开或 /details sessions）。
+    // 完整列表进 detailsText（/details sessions）。
     const recentSessions = sessions.slice(0, 5);
     const summaryLines = [
       t(context, "sessionHeader"),
@@ -3255,7 +3252,7 @@ function createWorkflowBackgroundProjection(
     result: run.status === "completed" ? "partial" : run.status === "failed" ? "fail" : "partial",
     userVisibleSummary:
       run.status === "stale"
-        ? `Workflow ${run.id} stale after restart; inspect /workflows status before rerun.`
+        ? "Workflow stale after restart; inspect /workflows status before rerun."
         : task.userVisibleSummary,
     nextAction:
       run.status === "stale"
@@ -3300,8 +3297,8 @@ function createWorkflowInterruptBackgroundTask(
     result: "partial",
     userVisibleSummary:
       language === "en-US"
-        ? `Workflow ${run.id} was active; interrupt is reconciling its missing background state.`
-        : `Workflow ${run.id} 仍处于活动状态；中断正在恢复缺失的后台状态。`,
+        ? "Workflow was active; interrupt is reconciling its missing background state."
+        : "workflow 仍处于活动状态；中断正在恢复缺失的后台状态。",
     nextAction:
       language === "en-US"
         ? "Inspect /workflows status before rerun."
@@ -3334,14 +3331,84 @@ function formatWorkflowStatus(context: TuiContext): string {
   );
   return [
     `Workflow ${run.id}`,
-    `- status: ${run.status}; result=${run.result}`,
+    `- status: ${run.status}; result ${run.result}`,
     `- goal: ${truncateDisplay(run.goal, 120)}`,
     `- planId: ${run.planId}`,
-    `- steps: queued=${counts.queued}; running=${counts.running}; completed=${counts.completed}; partial=${counts.partial}; blocked=${counts.blocked}; failed=${counts.failed}; cancelled=${counts.cancelled}; stale=${counts.stale}`,
+    `- steps: queued ${counts.queued}; running ${counts.running}; completed ${counts.completed}; partial ${counts.partial}; blocked ${counts.blocked}; failed ${counts.failed}; cancelled ${counts.cancelled}; stale ${counts.stale}`,
     `- evidenceRefs: ${run.steps.flatMap((step) => step.evidenceRefs).join(", ") || "none"}`,
     "- completion is PARTIAL only; blocked/stale/cancelled/failed steps never claim PASS.",
     "- background: /background; details: /details background <id>",
   ].join("\n");
+}
+
+function formatWorkflowStartPrimary(input: {
+  language: Language;
+  steps: number;
+  currentPhase: string;
+  background: boolean;
+}): string {
+  const phase = formatWorkflowDisplayLabel(input.currentPhase, "workflow");
+  if (input.language === "en-US") {
+    return [
+      input.background ? "Background workflow started." : "Workflow started.",
+      `- steps: ${input.steps}`,
+      `- current phase: ${phase}`,
+      "- details: /workflows status or /background",
+    ].join("\n");
+  }
+  return [
+    input.background ? "后台 workflow 已启动。" : "workflow 已启动。",
+    `- steps: ${input.steps}`,
+    `- 当前阶段：${phase}`,
+    "- 详情：/workflows status 或 /background",
+  ].join("\n");
+}
+
+function formatWorkflowBackgroundSummary(input: {
+  language: Language;
+  steps: number;
+  currentPhase: string;
+  background: boolean;
+}): string {
+  const phase = formatWorkflowDisplayLabel(input.currentPhase, "workflow");
+  if (input.language === "en-US") {
+    return `${input.background ? "Background workflow started" : "Workflow started"}; steps: ${input.steps}; current phase: ${phase}; details: /workflows status or /background.`;
+  }
+  return `${input.background ? "后台 workflow 已启动" : "workflow 已启动"}；steps: ${input.steps}；当前阶段：${phase}；详情：/workflows status 或 /background。`;
+}
+
+function formatWorkflowDisplayLabel(value: string | undefined, fallback: string): string {
+  const cleaned = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return fallback;
+  if (/^workflow(?:[-:_]|$)/iu.test(cleaned)) return fallback;
+  if (/^(agent|verification|details|index|bash|write):[\w.-]+$/iu.test(cleaned)) {
+    return workflowActionLabel(cleaned.split(":")[0] ?? "", fallback);
+  }
+  return truncateDisplay(cleaned, 48);
+}
+
+function formatRegistryWorkflowStepTitle(step: RegistryWorkflowDefinition["steps"][number]): string {
+  if (step.task?.trim()) return truncateDisplay(step.task.replace(/\s+/g, " ").trim(), 48);
+  return workflowActionLabel(step.action, "workflow step");
+}
+
+function workflowActionLabel(action: string, fallback: string): string {
+  switch (action) {
+    case "agent":
+      return "agent step";
+    case "verification":
+      return "verification step";
+    case "index":
+      return "index step";
+    case "details":
+      return "details step";
+    case "bash":
+      return "bash step";
+    case "write":
+      return "write step";
+    default:
+      return fallback;
+  }
 }
 
 async function runWorkflowSteps(
@@ -3426,7 +3493,12 @@ async function runWorkflowPlanSteps(
     staleAfterMs: 120_000,
     hasOutput: false,
     result: "partial",
-    userVisibleSummary: `Workflow 正在执行：${stepStates.length} 个真实步骤。`,
+    userVisibleSummary: formatWorkflowBackgroundSummary({
+      language: context.language,
+      steps: stepStates.length,
+      currentPhase: phase.title || phase.id,
+      background: false,
+    }),
     nextAction: "等待 step_result；失败时查看 /failures 和 transcript。",
   };
   context.workflows.activeRun = {
@@ -3446,6 +3518,15 @@ async function runWorkflowPlanSteps(
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, workflowTask);
+  writeLine(
+    output,
+    formatWorkflowStartPrimary({
+      language: context.language,
+      steps: stepStates.length,
+      currentPhase: phase.title || phase.id,
+      background: false,
+    }),
+  );
 
   let completed = 0;
   for (const step of stepStates) {
@@ -3512,7 +3593,12 @@ async function runWorkflowPlanSteps(
     sessionId,
     workflowTask,
   );
-  writeLine(output, `Workflow ${runId} completed with PARTIAL result; no PASS evidence generated.`);
+  writeLine(
+    output,
+    context.language === "en-US"
+      ? "Workflow completed with PARTIAL result; no PASS evidence generated. Use /workflows status for details."
+      : "workflow 已完成，结果仍为 PARTIAL；未生成 PASS 证据。可用 /workflows status 查看详情。",
+  );
 }
 
 function isWorkflowRunTerminal(
@@ -3611,7 +3697,7 @@ async function runRegistryWorkflow(
   const startedAt = new Date().toISOString();
   const stepStates: WorkflowStepState[] = workflow.steps.map((step) => ({
     id: step.id,
-    title: `${step.action}:${step.id}`,
+    title: formatRegistryWorkflowStepTitle(step),
     status: "queued",
     runtime:
       step.action === "verification"
@@ -3624,7 +3710,7 @@ async function runRegistryWorkflow(
   const task: BackgroundTaskState = {
     id: runId,
     kind: "job",
-    title: `Workflow: ${workflow.id}`,
+    title: `Workflow: ${truncateDisplay(workflow.name || "workflow", 50)}`,
     status: "running",
     currentStep: "workflow starting",
     progress: { completed: 0, total: stepStates.length, label: "workflow" },
@@ -3634,7 +3720,12 @@ async function runRegistryWorkflow(
     staleAfterMs: 120_000,
     hasOutput: false,
     result: "partial",
-    userVisibleSummary: `Workflow ${workflow.id} 正在执行：${stepStates.length} 个 registry step。`,
+    userVisibleSummary: formatWorkflowBackgroundSummary({
+      language: context.language,
+      steps: stepStates.length,
+      currentPhase: workflow.name,
+      background: runInBackground || Boolean(workflow.runInBackground),
+    }),
     nextAction: "查看 /workflows registry、/background 或 /details background。",
   };
   context.workflows.activeRun = {
@@ -3659,13 +3750,21 @@ async function runRegistryWorkflow(
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, task);
-  writeLine(output, formatBackgroundTask(task, context.language));
+  writeLine(
+    output,
+    formatWorkflowStartPrimary({
+      language: context.language,
+      steps: stepStates.length,
+      currentPhase: workflow.name,
+      background: runInBackground || Boolean(workflow.runInBackground),
+    }),
+  );
   if (runInBackground || workflow.runInBackground) {
     writeLine(
       output,
       context.language === "en-US"
-        ? `Background workflow started: ${runId}. Use /background.`
-        : `后台 workflow 已启动：${runId}。可用 /background 查看。`,
+        ? "Workflow is running in the background. Use /background for details."
+        : "workflow 正在后台运行。可用 /background 查看详情。",
     );
     setTimeout(() => {
       void executeRegistryWorkflowRun(
@@ -3682,7 +3781,7 @@ async function runRegistryWorkflow(
         void finishWorkflowRun(
           runId,
           "failed",
-          `registry workflow ${workflow.id} failed: ${message}`,
+          `Registry workflow failed: ${message}`,
           context,
           sessionId,
           task,
@@ -3723,7 +3822,7 @@ async function executeRegistryWorkflowRun(
       state.status = "running";
       state.startedAt = started;
     }
-    task.currentStep = `${step.action}:${step.id}`;
+    task.currentStep = formatRegistryWorkflowStepTitle(step);
     task.updatedAt = started;
     task.progress = { completed, total: stepStates.length, label: step.action };
     if (context.workflows.activeRun?.id === runId) {
@@ -3758,7 +3857,7 @@ async function executeRegistryWorkflowRun(
   await finishWorkflowRun(
     runId,
     "completed",
-    `registry workflow ${workflow.id} completed; result remains PARTIAL until verification/final gate evidence proves PASS.`,
+    "Registry workflow completed; result remains PARTIAL until verification/final gate evidence proves PASS.",
     context,
     sessionId,
     task,
@@ -4102,7 +4201,7 @@ async function executeWorkflowStep(
         const summary = formatWorkflowStepSummary(
           request.sliceId,
           nestedStatus,
-          `nested job ${job.id} ${job.status}${job.result?.status ? ` result=${job.result.status}` : ""}: ${job.pauseReason ?? job.result?.summary ?? "not runnable"}`,
+          `nested job ${job.id} ${job.status}${job.result?.status ? ` result ${job.result.status}` : ""}: ${job.pauseReason ?? job.result?.summary ?? "not runnable"}`,
           context.language,
         );
         await captureWorkflowFailureLearning(request, summary, context);
@@ -4120,7 +4219,7 @@ async function executeWorkflowStep(
         summary: formatWorkflowStepSummary(
           request.sliceId,
           "completed",
-          `nested job lifecycle ${job.id} ${job.status}; workflow result remains PARTIAL; persisted state=${getDurableJobStatePath(job)}`,
+          `nested job lifecycle ${job.id} ${job.status}; workflow result remains PARTIAL; persisted state ${getDurableJobStatePath(job)}`,
           context.language,
         ),
         evidenceRefs: mergeWorkflowEvidenceRefs(
@@ -4194,7 +4293,7 @@ async function executeWorkflowArchitectureReviewStep(
     await appendSystemEvent(
       context,
       sessionId,
-      `workflow_architecture_review slice=${request.sliceId} status=partial evidence=${evidence.id} files=0 reason=no-files`,
+      `workflow architecture review: slice ${request.sliceId}; status partial; evidence ${evidence.id}; files 0; reason no files`,
       "warning",
     );
     return {
@@ -4233,7 +4332,7 @@ async function executeWorkflowArchitectureReviewStep(
     await appendSystemEvent(
       context,
       sessionId,
-      `workflow_architecture_review slice=${request.sliceId} status=partial evidence=${evidence.id} files=0 reason=unreadable`,
+      `workflow architecture review: slice ${request.sliceId}; status partial; evidence ${evidence.id}; files 0; reason unreadable`,
       "warning",
     );
     return {
@@ -4253,7 +4352,7 @@ async function executeWorkflowArchitectureReviewStep(
   const riskKinds = Array.from(new Set(check.violations.map((item) => item.kind)));
   const evidence = createEvidenceRecord(
     "command_output",
-    `workflow architecture boundary check ${check.summary}; files=${scannedFiles.length}; risks=${riskKinds.join(",") || "none"}`,
+    `workflow architecture boundary check ${check.summary}; files ${scannedFiles.length}; risks ${riskKinds.join(",") || "none"}`,
     `workflow-architecture-review:${request.workflowId}:${request.phaseId}:${request.sliceId}`,
     [
       "architecture_boundary_check",
@@ -4267,7 +4366,7 @@ async function executeWorkflowArchitectureReviewStep(
   await appendSystemEvent(
     context,
     sessionId,
-    `workflow_architecture_review slice=${request.sliceId} status=${status} evidence=${evidence.id} files=${scannedFiles.join(",")} summary=${check.summary}`,
+    `workflow architecture review: slice ${request.sliceId}; status ${status}; evidence ${evidence.id}; files ${scannedFiles.join(",")}; summary ${check.summary}`,
     status === "completed" ? "info" : "warning",
   );
 
@@ -4277,8 +4376,8 @@ async function executeWorkflowArchitectureReviewStep(
       request.sliceId,
       status,
       status === "partial"
-        ? `architecture boundary risks found (${check.summary}); continue readonly workflow with evidence=${evidence.id}`
-        : `architecture boundary check ${check.summary}; evidence=${evidence.id}`,
+        ? `architecture boundary risks found (${check.summary}); continue readonly workflow with evidence ${evidence.id}`
+        : `architecture boundary check ${check.summary}; evidence ${evidence.id}`,
       context.language,
     ),
     evidenceRefs: [evidence.id],
@@ -4536,7 +4635,7 @@ async function finishWorkflowRun(
   task.currentStep = summary;
   task.updatedAt = now;
   task.lastOutputAt = now;
-  task.userVisibleSummary = summary;
+  task.userVisibleSummary = task.userVisibleSummary || summary;
   task.nextAction =
     status === "completed" || status === "partial"
       ? "Review verification evidence; do not treat workflow completion as PASS."
@@ -4613,7 +4712,7 @@ async function recordWorkflowPlanPreviewEvidence(
 ): Promise<void> {
   const evidence = createEvidenceRecord(
     "user_provided",
-    `workflow_plan_preview: ${result.plan.title}; evidenceMerge=${result.surface.evidenceMergeSummary}; requests runnable=${result.bridgeResult.summary.runnable} startGate=${result.bridgeResult.summary.startGateNeeded} blocked=${result.bridgeResult.summary.blocked}`,
+    `workflow plan preview: ${result.plan.title}; evidence merge ${result.surface.evidenceMergeSummary}; requests runnable ${result.bridgeResult.summary.runnable}; start gate ${result.bridgeResult.summary.startGateNeeded}; blocked ${result.bridgeResult.summary.blocked}`,
     `workflow-plan-preview:${result.plan.id}`,
     [
       "workflow_plan_preview",
@@ -4626,7 +4725,7 @@ async function recordWorkflowPlanPreviewEvidence(
   await appendSystemEvent(
     context,
     sessionId,
-    `workflow_plan_preview evidence=${evidence.id} plan=${result.plan.id} previewOnly=yes passEvidence=no`,
+    `workflow plan preview: evidence ${evidence.id}; plan ${result.plan.id}; preview only yes; pass evidence no`,
     "info",
   );
 }
@@ -4634,9 +4733,9 @@ async function recordWorkflowPlanPreviewEvidence(
 function summarizeWorkflowCacheFreshness(freshness: CacheFreshness): string {
   const changed =
     freshness.changedKeys.length > 0
-      ? `changed=${freshness.changedKeys.slice(0, 5).join(",")}`
-      : "changed=none";
-  return `${changed}; modelProviderHash=${freshness.modelProviderHash}; memoryHash=${freshness.memoryHash}`;
+      ? `changed ${freshness.changedKeys.slice(0, 5).join(", ")}`
+      : "changed none";
+  return `cache freshness ${changed}`;
 }
 
 async function handleDoctorCommand(
@@ -5164,6 +5263,10 @@ export async function handleTuiKeypress(
   output: Writable,
 ): Promise<void> {
   if (key === "escape") {
+    if (context.ctrlOExpandState?.active) {
+      context.ctrlOExpandState = { active: false };
+      return;
+    }
     await cancelPendingInteraction(context, output, "Esc");
     return;
   }
@@ -5218,8 +5321,8 @@ async function cancelPendingInteraction(
     writeLine(
       output,
       context.language === "en-US"
-        ? `Interrupt requested for ${interrupted.cancelled} active item(s); abort=${interrupted.abortSignalsSent}, marked=${interrupted.markedOnly}.`
-        : `已请求中断 ${interrupted.cancelled} 个活动任务；abort=${interrupted.abortSignalsSent}，marked=${interrupted.markedOnly}。`,
+        ? `Interrupt requested for ${interrupted.cancelled} active item(s); abort signals ${interrupted.abortSignalsSent}, marked ${interrupted.markedOnly}.`
+        : `已请求中断 ${interrupted.cancelled} 个活动任务；abort signals ${interrupted.abortSignalsSent}，marked ${interrupted.markedOnly}。`,
     );
     writeStatus(output, context);
     return;
@@ -5320,7 +5423,7 @@ function formatPendingAutopilotDetails(context: TuiContext): string {
   return [
     "持续推进待确认",
     `- 目标：${truncateDisplay(pending.goal, 100)}`,
-    `- 允许范围：durable job + background + runner fallback；allowEdit=${pending.allowEdit ? "yes" : "no"}；allowBash=${pending.allowBash ? "yes" : "no"}`,
+    `- 允许范围：durable job + background + runner fallback；allow edit ${pending.allowEdit ? "yes" : "no"}；allow bash ${pending.allowBash ? "yes" : "no"}`,
     `- 预算：steps<=${pending.maxSteps}；tokens<=${pending.maxTokens}；timeoutMs<=${pending.timeoutMs}`,
     "- 禁止事项：不绕过 Start Gate / permission pipeline / Plan approval；不进入真实 smoke；不把 runner completed 当 verification PASS。",
     "- 控制入口：/autopilot confirm 启动；/esc 或 /autopilot cancel 取消；启动后用 /job pause|resume|cancel <id>。",
@@ -5421,7 +5524,7 @@ async function setPermissionMode(
   await appendSystemEvent(
     context,
     sessionId,
-    `permission_mode_change: ${previousMode} -> ${nextMode}; reason=${reason}; boundary=Start Gate and permission pipeline remain active`,
+    `permission mode change: ${previousMode} -> ${nextMode}; reason ${reason}; boundary Start Gate and permission pipeline remain active`,
     "info",
   );
   writeLine(output, t(context, "modeSwitched", { mode: nextMode }));
@@ -5464,7 +5567,7 @@ async function handlePlanCommand(
     await appendSystemEvent(
       context,
       sessionId,
-      `plan_approved: proposal=${context.activePlan.id}; option=${optionId}; boundary=${boundary}; note=does not authorize all tools`,
+      `plan approved: proposal ${context.activePlan.id}; option ${optionId}; boundary ${boundary}; note does not authorize all tools`,
       "info",
     );
     writeLine(
@@ -6645,7 +6748,7 @@ async function handleRewindCommand(
   });
   const evidence = createEvidenceRecord(
     "command_output",
-    `checkpoint_restore ${checkpoint.id}: files=${checkpoint.changedFiles.join(",")}`,
+    `checkpoint restore ${checkpoint.id}: files ${checkpoint.changedFiles.join(",")}`,
     `checkpoint:${checkpoint.id}`,
     ["checkpoint_restore", "Write"],
   );
@@ -6784,8 +6887,8 @@ async function handleInterruptCommand(
   writeLine(
     output,
     context.language === "en-US"
-      ? `Interrupt requested for ${result.cancelled} active item(s); abort=${result.abortSignalsSent}, marked=${result.markedOnly}.`
-      : `已请求中断 ${result.cancelled} 个活动任务；abort=${result.abortSignalsSent}，marked=${result.markedOnly}。`,
+      ? `Interrupt requested for ${result.cancelled} active item(s); abort signals ${result.abortSignalsSent}, marked ${result.markedOnly}.`
+      : `已请求中断 ${result.cancelled} 个活动任务；abort signals ${result.abortSignalsSent}，marked ${result.markedOnly}。`,
   );
 }
 
@@ -6934,7 +7037,7 @@ export async function interruptAllActiveWork(
   await appendInterruptEvent(
     cancelled === 0
       ? t(context, "interruptIdle")
-      : `${t(context, "interruptCancelled")} abortSignals=${abortSignalsSent} markedOnly=${markedOnly}`,
+      : `${t(context, "interruptCancelled")} abort signals ${abortSignalsSent}; marked only ${markedOnly}`,
   );
   return { cancelled, abortSignalsSent, markedOnly };
 }
@@ -7063,8 +7166,8 @@ async function handleCacheCommand(
     writeLine(
       output,
       action === "warmup"
-        ? `已尝试预热 cache。workspace reference=${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`
-        : `已尝试刷新 cache。workspace reference=${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`,
+        ? `已尝试预热 cache。workspace reference ${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`
+        : `已尝试刷新 cache。workspace reference ${snapshot.source}；该最小路径不保证 provider 一定写入缓存，请用 /cache status 或 provider usage 对账。`,
     );
     return;
   }
@@ -7111,7 +7214,7 @@ async function handleCompactCommand(
     }
     writeLine(
       output,
-      `Deep compact completed: ${result.packet.id}；scope=full transcript semantic compact；tools disabled/toolChoice none；不写项目文件、不写长期记忆、不启动后台任务。`,
+      `Deep compact completed: ${result.packet.id}；scope full transcript semantic compact；tools disabled/tool choice none；不写项目文件、不写长期记忆、不启动后台任务。`,
     );
     writeStatus(output, context);
     return;
@@ -8061,7 +8164,7 @@ async function handleVisionCommand(
   const route = resolved.route;
   const evidence = createEvidenceRecord(
     "vision_observation",
-    `VisionObservation: provider=${route.provider}, model=${route.primaryModel}, source=${sourcePath}`,
+    `VisionObservation: provider ${route.provider}, model ${route.primaryModel}, source ${sourcePath}`,
     sourcePath,
     ["vision_observation", "视觉观察", "image evidence"],
   );
@@ -8089,7 +8192,7 @@ async function handleVisionCommand(
   );
   await context.store.appendEvent(sessionId, { type: "evidence_record", ...evidence });
   writeLine(output, `VisionObservation: ${observation.id}`);
-  writeLine(output, `- provider/model: ${route.provider}/${route.primaryModel}`);
+  writeLine(output, `- model route: ${route.provider}/${route.primaryModel}`);
   writeLine(output, `- source: ${sourcePath}`);
   writeLine(output, "- boundary: vision role 只写入 evidence，不执行 Bash、不改代码。");
 }
@@ -8231,7 +8334,7 @@ async function executeImageGeneration(
   );
   const evidence = createEvidenceRecord(
     "image_result",
-    `ImageGenerationResult ${approval.id}: provider=${approval.provider}, model=${approval.model}, asset=${approval.assetPath}`,
+    `ImageGenerationResult ${approval.id}: provider ${approval.provider}, model ${approval.model}, asset ${approval.assetPath}`,
     approval.assetPath,
     ["image_result", "生图结果", "image generated"],
   );
@@ -9066,7 +9169,7 @@ async function sendMessage(
   await appendSystemEvent(
     context,
     sessionId,
-    `model_request selectedRole=${selectedRuntime.role} provider=${selectedRuntime.provider} model=${selectedRuntime.model} endpointProfile=${selectedRuntime.endpointProfile} reasoningLevel=${selectedRuntime.reasoningLevel ?? "none"} reasoningSent=${selectedRuntime.reasoningSent ? "yes" : "no"} tools=${selectedTools ? "yes" : "no"}`,
+    `model request: selected role ${selectedRuntime.role}; provider ${selectedRuntime.provider}; model ${selectedRuntime.model}; endpoint profile ${selectedRuntime.endpointProfile}; reasoning level ${selectedRuntime.reasoningLevel ?? "none"}; reasoning sent ${selectedRuntime.reasoningSent ? "yes" : "no"}; tools ${selectedTools ? "yes" : "no"}`,
     "info",
   );
   const assistantEventId = randomUUID();
@@ -9539,7 +9642,7 @@ async function sendMessage(
     await appendSystemEvent(
       context,
       sessionId,
-      `provider_fallback_attempt status=succeeded to=${selectedRuntime.provider}/${selectedRuntime.model}`,
+      `provider fallback attempt: status succeeded; to ${selectedRuntime.provider}/${selectedRuntime.model}`,
       "info",
     );
   }
@@ -9710,7 +9813,7 @@ export async function handleRemoteInboundMessage(
       await appendSystemEvent(
         context,
         sessionId,
-        `remote_inbox_queued channel=${message.channel} id=${inbox.item.id} reason=${inbox.reason}`,
+        `remote inbox queued: channel ${message.channel}; id ${inbox.item.id}; reason ${inbox.reason}`,
         "info",
       );
       return {
@@ -10071,7 +10174,7 @@ async function streamFinalModelAnswerWithoutTools(
     await appendSystemEvent(
       context,
       sessionId,
-      `provider_fallback_attempt status=succeeded to=${continuation.provider}/${continuation.model}`,
+      `provider fallback attempt: status succeeded; to ${continuation.provider}/${continuation.model}`,
       "info",
     );
   }
@@ -10494,7 +10597,7 @@ async function continueModelAfterToolResults(
       await appendSystemEvent(
         context,
         sessionId,
-        `provider_fallback_attempt status=succeeded to=${continuation.provider}/${continuation.model}`,
+        `provider fallback attempt: status succeeded; to ${continuation.provider}/${continuation.model}`,
         "info",
       );
     }
@@ -10518,7 +10621,7 @@ async function recordProviderEmptyResponse(
   const provider = getRuntimeStatusProvider(context);
   const model = context.model;
   const metadata = [
-    `provider=${provider}`,
+    `provider ${provider}`,
     `model=${model}`,
     `chunkCount=${chunkCount}`,
     `hadUsage=${hadUsage ? "yes" : "no"}`,
@@ -10736,7 +10839,7 @@ async function executeModelToolUse(
     await appendSystemEvent(
       context,
       sessionId,
-      `permission_auto_allow_readonly: tool=${toolName} semantic=${verdict.semantic} pathSafety=${verdict.pathSafety} summary=${verdict.redactedSummary} reason=${verdict.reason}`,
+      `permission auto allow readonly: tool ${toolName}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`,
       "info",
     );
   }
@@ -11184,14 +11287,14 @@ async function executeDeferredDispatchToolUse(
       await appendSystemEvent(
         context,
         sessionId,
-        `permission_auto_allow_readonly: tool=ExecuteExtraTool target=${deferredVerdict.redactedSummary} semantic=${deferredVerdict.semantic} reason=${deferredVerdict.reason}`,
+        `permission auto allow readonly: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
         "info",
       );
     } else {
       await appendSystemEvent(
         context,
         sessionId,
-        `permission_policy_require: tool=ExecuteExtraTool target=${deferredVerdict.redactedSummary} semantic=${deferredVerdict.semantic} reason=${deferredVerdict.reason}`,
+        `permission policy require: tool ExecuteExtraTool; target ${deferredVerdict.redactedSummary}; semantic ${deferredVerdict.semantic}; reason ${deferredVerdict.reason}`,
         "info",
       );
     }
@@ -11308,7 +11411,7 @@ async function executeLinghunControlToolUse(
       const agent = context.agents.find((item) => !before.has(item.id));
       const ok = agent?.status === "completed" || agent?.status === "running";
       const text = agent
-        ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
+        ? `Agent ${agent.status}: ${agent.summary}`
         : formatStartAgentDidNotStartMessage(input, context);
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         agentId: agent?.id,
@@ -11326,7 +11429,7 @@ async function executeLinghunControlToolUse(
           context,
           sessionId,
           output,
-          `Agent list inspected; total=${context.agents.length}.`,
+          `Agent list inspected: ${context.agents.length} agent(s).`,
           false,
           { total: context.agents.length },
         );
@@ -11340,7 +11443,7 @@ async function executeLinghunControlToolUse(
           sessionId,
           output,
           agent
-            ? `Agent ${agent.id} ${agent.status}: ${agent.summary}`
+            ? `Agent ${agent.status}: ${agent.summary}`
             : `Agent not found: ${input.agentRef ?? "latest"}`,
           !agent,
           { agentId: agent?.id, status: agent?.status ?? "not_found" },
@@ -11353,7 +11456,7 @@ async function executeLinghunControlToolUse(
         sessionId,
         output,
         agent
-          ? `Agent ${agent.id} cancelled: ${agent.summary}`
+          ? `Agent cancelled: ${agent.summary}`
           : `Agent not found: ${input.agentRef ?? "latest"}`,
         !agent,
         { agentId: agent?.id, status: agent?.status ?? "not_found" },
@@ -11411,7 +11514,16 @@ async function executeLinghunControlToolUse(
       const ok =
         run?.status === "completed" || (input.runInBackground && run?.status === "running");
       const text = run
-        ? `Workflow ${run.id} ${run.status}; result=${run.result}.`
+        ? formatWorkflowStartPrimary({
+            language: context.language,
+            steps: run.steps.length,
+            currentPhase:
+              run.steps.find((step) => step.status === "running")?.title ??
+              run.steps.find((step) => step.status === "queued")?.title ??
+              run.steps.at(-1)?.title ??
+              "workflow",
+            background: input.runInBackground && run.status === "running",
+          })
         : "Workflow runtime did not start.";
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         workflowId: run?.id,
@@ -12229,8 +12341,8 @@ async function executeApprovedIndexToolUse(
         context.language,
       )
     : context.language === "en-US"
-      ? `Index ${action} did not complete: status=${context.index.status}. ${context.index.error ?? ""}`.trim()
-      : `索引${action === "repair" ? "修复" : action === "init fast" ? "初始化" : "刷新"}未完成：状态=${context.index.status}。${context.index.error ?? ""}`.trim();
+      ? `Index ${action} did not complete: status ${context.index.status}. ${context.index.error ?? ""}`.trim()
+      : `索引${action === "repair" ? "修复" : action === "init fast" ? "初始化" : "刷新"}未完成：状态 ${context.index.status}。${context.index.error ?? ""}`.trim();
   const primaryText =
     ok && action !== "repair" && context.index.status === "ready"
       ? `${formatIndexRefreshSummary(
@@ -12382,7 +12494,7 @@ async function recordReportIncompleteEvidence(
   await appendSystemEvent(
     context,
     sessionId,
-    `report_incomplete: missing Write evidence for ${guard.requestedPath}; evidence=${evidence.id}`,
+    `report incomplete: missing Write evidence for ${guard.requestedPath}; evidence ${evidence.id}`,
     "warning",
   );
   // D.14B — report guard 未满足转 failure learning。relatedTarget 用脱敏路径基名，不记完整绝对路径。
@@ -12509,7 +12621,7 @@ async function handleToolCommand(
       await appendSystemEvent(
         context,
         sessionId,
-        `permission_auto_allow_readonly: tool=${name} semantic=${verdict.semantic} pathSafety=${verdict.pathSafety} summary=${verdict.redactedSummary} reason=${verdict.reason}`,
+        `permission auto allow readonly: tool ${name}; semantic ${verdict.semantic}; path safety ${verdict.pathSafety}; summary ${verdict.redactedSummary}; reason ${verdict.reason}`,
         "info",
       );
     }
@@ -12996,7 +13108,7 @@ async function recordProviderFailureEvidence(
   const message = error instanceof Error ? error.message : String(error);
   const failureKind = classifyProviderFailure(error);
   const transitFailure = failureKind === "transit";
-  const summary = `provider_failure kind=${failureKind} code=${code} provider=${runtime.provider} model=${runtime.model} endpointProfile=${runtime.endpointProfile} message=${sanitizeProviderFailureText(message)}`;
+  const summary = `provider failure: kind ${failureKind}; code ${code}; provider ${runtime.provider}; model ${runtime.model}; endpoint profile ${runtime.endpointProfile}; message ${sanitizeProviderFailureText(message)}`;
   const evidence = createEvidenceRecord(
     "command_output",
     summary,
@@ -13055,7 +13167,7 @@ async function recordModelToolFailureForMetaScheduler(
   await appendSystemEvent(
     context,
     sessionId,
-    `meta_scheduler_tool_failure tool=${result.tool} evidence=${result.evidenceId ?? "none"}`,
+    `meta scheduler tool failure: tool ${result.tool}; evidence ${result.evidenceId ?? "none"}`,
     "warning",
   );
   await captureFailureLearning(context, sessionId, {
@@ -13164,7 +13276,7 @@ async function recordArchitectureRuntimeCard(
   await appendSystemEvent(
     context,
     sessionId,
-    `architecture_runtime_triggered evidence=${evidence.id} target=${card.target}`,
+    `architecture runtime triggered: evidence ${evidence.id}; target ${card.target}`,
     "info",
   );
   if (context.memory.lastHandoff) {
@@ -13229,7 +13341,7 @@ async function appendRouteDecisionEvent(
   await appendSystemEvent(
     context,
     sessionId,
-    `RoleRouteDecision ${decision.id}: trigger=${decision.triggerReason} role=${decision.role} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackCandidates=${decision.fallbackCandidates.join(",") || "none"} capabilities=${decision.requiredCapabilities.join("+")} budget=${decision.maxCostCny === undefined ? "unconfigured" : decision.maxCostCny} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} budgetStop=${decision.budgetStop ? "yes" : "no"} stop=${decision.stopConditions.join("|") || "none"}`,
+    `Role route decision ${decision.id}: trigger ${decision.triggerReason}; role ${decision.role}; selected ${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"}; fallback candidates ${decision.fallbackCandidates.join(",") || "none"}; capabilities ${decision.requiredCapabilities.join("+")}; budget ${decision.maxCostCny === undefined ? "unconfigured" : decision.maxCostCny}; fallback used ${decision.fallbackUsed ? "yes" : "no"}; budget stop ${decision.budgetStop ? "yes" : "no"}; stop ${decision.stopConditions.join("|") || "none"}`,
     decision.stopConditions.length > 0 ? "warning" : "info",
   );
 }
@@ -13443,14 +13555,14 @@ export function __testCreateShellBlockOutput(
 }
 
 /**
- * D.13Q-UX Task Surface — 测试入口：暴露 Ctrl+O fallback panel 装配器。
- * 单测用它验证 lastFullOutput / evidence / background 的 panel 化行为，
- * 不再触发 handleDetailsCommand 写 transcript。
+ * D.13Q-UX Task Surface — 测试入口：暴露 explicit /details panel 装配器。
+ * 单测用它验证 lastFullOutput / evidence / background 的 panel 化行为；
+ * Ctrl+O 不走这个 CommandPanel 路径。
  */
-export function __testBuildToggleDetailsCommandPanel(
+export function __testBuildExplicitDetailsCommandPanel(
   context: TuiContext,
 ): import("./shell/types.js").CommandPanelView | undefined {
-  return buildToggleDetailsCommandPanel(context);
+  return buildExplicitDetailsCommandPanel(context);
 }
 
 /**

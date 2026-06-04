@@ -274,10 +274,10 @@ export function formatBreakCacheStatus(context: TuiContext, current: CacheFreshn
     `- endpointProfileHash: ${current.endpointProfileHash ?? "-"}`,
     `- cacheControlHash: ${current.cacheControlHash ?? "-"}`,
     `- cacheTtlHash: ${current.cacheTtlHash ?? "-"}`,
-    `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl}`,
-    `- mode: ${marker.mode}${marker.nonce ? ` nonce=${marker.nonce.slice(0, 8)}…` : ""}${marker.mode === "always" ? "（固定 break-cache namespace；不会每次请求都破坏缓存）" : ""}`,
+    `- prompt cache: enabled ${context.config.promptCache.enabled ? "yes" : "no"}; system ttl ${context.config.promptCache.systemTtl}`,
+    `- mode: ${marker.mode}${marker.nonce ? `; nonce ${marker.nonce.slice(0, 8)}…` : ""}${marker.mode === "always" ? "（固定 break-cache namespace；不会每次请求都破坏缓存）" : ""}`,
     `- recent break-cache events: ${recentEvents.length === 0 ? "none" : recentEvents.map((event) => `${event.action}@${event.createdAt}`).join("; ")}`,
-    `- changedKeys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
+    `- changed keys: ${keys.length > 0 ? keys.join(", ") : "none"}`,
     "- usage: /break-cache status | once | always | off | --clear；marker 与 event 仅记录动作，不记录 prompt/key/raw request/response。always=固定 nonce 切到新 cache namespace（stable nonce），不是每次请求都破坏缓存。",
     "- suggestion: 如 system prompt / tool schema / MCP list / model/provider / memory / compact / plugin list / endpoint profile / cacheControl / cacheTtl 变化，可运行 /cache warmup 或 /cache refresh；不会替你自动执行。",
   ].join("\n");

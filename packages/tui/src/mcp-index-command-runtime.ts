@@ -64,7 +64,7 @@ export function formatMcpStatus(context: TuiContext): string {
     : "未检测，运行 /mcp doctor 检测";
   const servers = context.mcp.servers.map((server) => {
     const suffix = server.error ? ` (${truncateDisplay(server.error, 80)})` : "";
-    return `- ${server.name}: ${server.status} command=${redactedPath(server.command)}${suffix}`;
+    return `- ${server.name}: ${server.status}; command ${redactedPath(server.command)}${suffix}`;
   });
   const lastDoctor = context.mcp.lastDoctor ?? notRunHint;
   const memorySource = context.index.binarySource ?? notRunHint;
@@ -82,8 +82,8 @@ export function formatMcpStatus(context: TuiContext): string {
     `- tools(stable): ${context.mcp.tools.length}`,
     `- lastDoctor: ${lastDoctor}`,
     ...servers,
-    `- codebase-memory source=${memorySource}`,
-    `- codebase-memory binary=${memoryBinary} version=${memoryVersion}`,
+    `- codebase-memory source ${memorySource}`,
+    `- codebase-memory binary ${memoryBinary}; version ${memoryVersion}`,
     `- runtime: ${runtime}`,
     "- guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution; unknown or incomplete tool calls are rejected.",
     "- guard: extension-contributed MCP/skill/plugin tools must pass discovery + trust + schemaLoaded + compatible runtime before execution.",
@@ -156,17 +156,17 @@ export function formatIndexStatus(context: TuiContext): string {
     `- project: ${context.index.projectName ?? basename(context.projectPath)}`,
     `- project selection: ${context.index.projectSelectionSource ?? (context.index.projectName ? "root_path" : "missing")}`,
     `- status: ${context.index.status}`,
-    `- source=${context.index.binarySource ?? "unknown"}`,
+    `- source: ${context.index.binarySource ?? "unknown"}`,
     `- binary status: ${context.index.binaryStatus ?? "unknown"}`,
     `- binary command: ${context.index.binaryCommand ?? "-"}`,
     `- version: ${context.index.binaryVersion ?? "-"}`,
     `- artifact status: ${context.index.artifactStatus ?? "unknown"}`,
-    `- artifactPath(details): ${redactedPath(context.index.artifactPath)}`,
+    `- artifact path (details): ${redactedPath(context.index.artifactPath)}`,
     `- runtime: ${context.index.runtime ?? "Linghun-managed codebase-memory or external fallback"}`,
-    `- nodes/edges: ${context.index.nodes ?? "-"}/${context.index.edges ?? "-"}`,
-    `- changedFiles: ${context.index.changedFiles ?? "-"}`,
-    `- staleHint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
-    `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files=${context.index.safetyRiskyFiles.length}` : "-"}`,
+    `- graph: ${context.index.nodes ?? "-"} nodes, ${context.index.edges ?? "-"} edges`,
+    `- changed files: ${context.index.changedFiles ?? "-"}`,
+    `- stale hint: ${context.index.staleHint ? truncateDisplay(context.index.staleHint, 160) : "-"}`,
+    `- safety: ${context.index.safetyRiskyFiles?.length ? `pending risky files ${context.index.safetyRiskyFiles.length}` : "-"}`,
     `- error: ${context.index.error ? truncateDisplay(context.index.error, 120) : "-"}`,
     `- lastQuery: ${context.index.lastQuery ?? "-"}`,
     `- next action: ${suggestion}`,

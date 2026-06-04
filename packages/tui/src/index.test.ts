@@ -42,7 +42,7 @@ import {
   type TuiContext,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
-  __testBuildToggleDetailsCommandPanel,
+  __testBuildExplicitDetailsCommandPanel,
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
   __testFormatStartAgentDidNotStartMessage,
@@ -1666,7 +1666,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/model route");
     expect(output.text).toContain("/model route doctor");
     expect(output.text).toContain("/model route set <role> <model>");
-    expect(output.text).toContain("provider=deepseek model=deepseek-v4-flash");
+    expect(output.text).toContain("provider deepseek model deepseek-v4-flash");
     expect(output.text).toContain("角色路由摘要");
     expect(output.text).toContain("/vision <path>");
     expect(output.text).toContain("/image generate <prompt>");
@@ -1698,7 +1698,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("/doctor hooks");
     expect(output.text).toContain("/problems");
     expect(output.text).toContain(
-      "当前模型：role=executor provider=deepseek model=deepseek-v4-flash reasoning=未生效",
+      "当前模型：role executor provider deepseek model deepseek-v4-flash reasoning 未生效",
     );
     expect(output.text).toContain("模式 默认模式");
     expect(output.text).not.toContain("¥--");
@@ -1896,7 +1896,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(providerEnv).toContain("LINGHUN_OPENAI_MODEL=direct-setup-model");
     expect(providerEnv).toContain("LINGHUN_INFERENCE_LEVEL=High");
     expect(output.text).toContain("模型配置摘要");
-    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("api key present");
     expect(output.text).toContain("已保存，请重启 Linghun 后使用新的用户级 provider 配置。");
     expect(output.text).not.toContain("sk-direct-setup-secret");
     expect(projectSettings).not.toContain("apiKey");
@@ -1979,7 +1979,7 @@ describe("Phase 06 TUI slash commands", () => {
       "openai-compatible",
     );
     expect(output.text).toContain("模型配置摘要");
-    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("api key present");
     expect(output.text).toContain("已保存，请重启 Linghun 后使用新的用户级 provider 配置。");
     expect(output.text).toContain("之后进入其他仓库会默认复用");
     expect(output.text).not.toContain("sk-test-setup-secret");
@@ -2009,9 +2009,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/model doctor", context, output);
 
-    expect(output.text).toContain("source=user-provider-env");
-    expect(output.text).toContain("reasoning=ignored/unsupported");
-    expect(output.text).toContain("apiKey=present");
+    expect(output.text).toContain("source user-provider-env");
+    expect(output.text).toContain("reasoning ignored/unsupported");
+    expect(output.text).toContain("api key present");
     expect(output.text).not.toContain("sk-provider-env-secret");
   });
 
@@ -2213,9 +2213,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(items.find((item) => item.id === "mcp")?.status).toBe("partial");
     expect(items.find((item) => item.id === "freshness")?.status).toBe("partial");
-    expect(items.find((item) => item.id === "freshness")?.summary).toContain(
-      "local presence is not source validation",
-    );
+    expect(items.find((item) => item.id === "freshness")?.summary).toContain("本地存在不等于来源已验证");
     // D.14A-R-Fix P1-5 — baseView.providerLiveVerified=false → provider 不 pass
     const providerItem = items.find((item) => item.id === "provider");
     expect(providerItem?.status).toBe("partial");
@@ -2373,18 +2371,18 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/problems", context, output);
 
     expect(output.text).toContain("Project Doctor Lite: [PASS]");
-    expect(output.text).toContain("packageManager=pnpm@10.10.0");
-    expect(output.text).toContain("scripts=build,check,test,typecheck");
-    expect(output.text).toContain("script:test=ok");
-    expect(output.text).toContain("script:typecheck=ok");
-    expect(output.text).toContain("script:check=ok");
-    expect(output.text).toContain("script:build=ok");
+    expect(output.text).toContain("包管理器 pnpm@10.10.0");
+    expect(output.text).toContain("脚本 build, check, test, typecheck");
+    expect(output.text).toContain("script:test ok");
+    expect(output.text).toContain("script:typecheck ok");
+    expect(output.text).toContain("script:check ok");
+    expect(output.text).toContain("script:build ok");
     expect(output.text).toContain("Source-of-Truth Drift Linter Lite: [PASS]");
     expect(output.text).toContain("Context Picker Lite: [PARTIAL]");
     expect(output.text).toContain("web-source-evidence");
     expect(output.text).toContain("Rollback Coach Lite: [PARTIAL]");
-    expect(output.text).toContain("gitStatus=dirty");
-    expect(output.text).toContain("mode=advisory-only");
+    expect(output.text).toContain("git 状态 dirty");
+    expect(output.text).toContain("模式 advisory-only");
     expect(output.text).toContain("Task Cost Preview Lite: [PARTIAL]");
     expect(output.text).toContain("local-only");
     expect(output.text).toContain("advisory-estimate");
@@ -2538,7 +2536,7 @@ describe("Phase 06 TUI slash commands", () => {
     hydrateResumeContext(hydratedContext, transcript);
     expect(hydratedContext.cache.deepCompact?.scope).toBe("full transcript semantic compact");
     expect(hydratedContext.cache.deepCompact?.summary).toContain("RAW_OLDER_TRANSCRIPT_ONLY");
-    const details = __testBuildToggleDetailsCommandPanel(context);
+    const details = __testBuildExplicitDetailsCommandPanel(context);
     expect(details?.detailsText).toContain("scope: full transcript semantic compact");
     expect(context.permissionMode).toBe("default");
   });
@@ -2825,7 +2823,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(providerText).toContain("scope=provider-visible recent context projection");
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     const status = formatCompactStatus(context);
-    const detailsText = __testBuildToggleDetailsCommandPanel(context)?.detailsText ?? "";
+    const detailsText = __testBuildExplicitDetailsCommandPanel(context)?.detailsText ?? "";
     for (const text of [providerText, transcript, status, detailsText]) {
       expect(text).not.toContain(rawSk);
       expect(text).not.toContain(rawBearer);
@@ -3075,7 +3073,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Memory review");
     expect(output.text).toContain("已写入项目级长期记忆");
     expect(output.text).toContain("memoryHash");
-    expect(output.text).toContain("changedKeys: memoryHash");
+    expect(output.text).toContain("changed keys: memoryHash");
     // D.13R: 文案明确为"会话分支（session branch，不是 git 分支）"，避免与 git branch 混淆。
     expect(output.text).toContain("已创建会话分支");
     expect(output.text).toContain("session branch");
@@ -3156,10 +3154,10 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(loaded.accepted).toHaveLength(1);
     expect(loaded.accepted[0]?.summary).toBe("项目长期规则只保存稳定工程事实");
-    expect(output.text).toContain("review queue: candidates=0; accepted=1");
+    expect(output.text).toContain("review queue: candidates 0; accepted 1");
     expect(output.text).toContain("项目长期规则只保存稳定工程事实");
     expect(output.text).toContain("memoryHash");
-    expect(output.text).toMatch(/changedKeys: .*memoryHash/);
+    expect(output.text).toMatch(/changed keys: .*memoryHash/);
   });
 
   it("controls Phase 16 memory lifecycle, injection, and stats", async () => {
@@ -3188,19 +3186,19 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("ControlledMemorySummary=");
     expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
-    expect(output.text).toContain("autoLearning: off; autoAccept=no");
+    expect(output.text).toContain("auto learning: off; auto accept no");
     expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
-    expect(output.text).toContain("自动学习：关闭；autoAccept=no；切换：/memory learn on|off");
+    expect(output.text).toContain("自动学习：关闭；auto accept no；切换：/memory learn on|off");
     expect(output.text).toContain(
-      "session-scope：已接受=0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
+      "session-scope：已接受 0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
     );
     expect(output.text).toContain(
-      "project/user persistent scope：已接受=1（project=1；user=0）；仅 accepted-only topK 注入 prompt",
+      "project/user persistent scope：已接受 1（project 1；user 0）；仅 accepted-only topK 注入 prompt",
     );
     expect(output.text).toContain(
-      "candidate：project=0；user=0；session=0；候选不会自动接受或注入",
+      "candidate：project 0；user 0；session 0；候选不会自动接受或注入",
     );
-    expect(output.text).toContain("prompt 注入：acceptedOnly topK=3；injected=1");
+    expect(output.text).toContain("prompt 注入：accepted-only topK 3；injected 1");
     expect(output.text).toContain("完整候选、聊天、日志和索引 dump 不注入 prompt");
 
     await handleSlashCommand(`/memory disable ${acceptedId}`, context, output);
@@ -3250,7 +3248,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(sessionPrompt).toContain("仅当前会话可见的临时偏好");
     await handleSlashCommand("/memory stats", context, output);
     expect(output.text).toContain(
-      "session-scope：已接受=1；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
+      "session-scope：已接受 1；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
     );
 
     const nextSession = await store.create({ model: "deepseek-v4-flash" });
@@ -3286,7 +3284,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.lastLearningRun?.modelCalled).toBe(false);
     expect(output.text).toContain("Memory learn（受控 / 只生成候选）");
     expect(output.text).toContain("调用模型：no");
-    expect(output.text).toContain("autoAccept=no");
+    expect(output.text).toContain("auto accept no");
   });
 
   it("D.14B: defaults to learning mode off and does not auto-generate candidates", async () => {
@@ -3338,7 +3336,7 @@ describe("Phase 06 TUI slash commands", () => {
     const nextContext = await createTestContext(project, store, session);
     nextContext.memory = reloaded;
     await handleSlashCommand("/memory learn status", nextContext, output);
-    expect(output.text).toContain("来源=persisted");
+    expect(output.text).toContain("来源 persisted");
   });
 
   it("persists memory candidates so review can continue after restart", async () => {
@@ -4252,7 +4250,7 @@ describe("Phase 06 TUI slash commands", () => {
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
 
-    const directive = "ArchitectureRuntime=triggered\nAntiCodeBlob=test";
+    const directive = "Architecture Runtime: triggered\nAnti code blob: test";
     const prompt = createModelSystemPrompt(
       "实现跨模块功能",
       context,
@@ -4262,8 +4260,8 @@ describe("Phase 06 TUI slash commands", () => {
       directive,
     );
 
-    expect(prompt).toContain("ArchitectureRuntime=triggered");
-    expect(prompt).toContain("AntiCodeBlob=test");
+    expect(prompt).toContain("Architecture Runtime: triggered");
+    expect(prompt).toContain("Anti code blob: test");
   });
 
   it("keeps Solution Completeness Gate quiet for normal requests", async () => {
@@ -4418,15 +4416,15 @@ describe("Phase 06 TUI slash commands", () => {
     ).transcript;
 
     expect(output.text).toContain("Agent context package (trimmed)");
-    expect(output.text).toContain("notIncluded=full transcript/full memory/full index/large logs");
+    expect(output.text).toContain("not included: full transcript/full memory/full index/large logs");
     expect(output.text).toContain("explorer blocked：模型网关未就绪");
     expect(output.text).toContain("planner blocked：模型网关未就绪");
     expect(output.text).toContain("verifier 已运行真实验证");
     expect(output.text).toContain("Agents：");
     expect(output.text).toContain("inspect-cache-explorer");
-    expect(output.text).toContain("displayName: inspect-cache-explorer");
+    expect(output.text).toContain("display name: inspect-cache-explorer");
     expect(output.text).toContain(
-      "displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
+      "display name does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
     );
     expect(inspectAgent?.displayName).toBe("inspect-cache-explorer");
     expect(inspectAgent?.role).toBe("executor");
@@ -4495,7 +4493,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(agent?.mailbox).toHaveLength(1);
     expect(agent?.mailbox[0]?.consumedAt).toBeUndefined();
     await handleSlashCommand("/agents", context, output);
-    expect(output.text).toContain("pending=1");
+    expect(output.text).toContain("pending 1");
     const { completeAgent } = await import("./job-agent-command-runtime.js");
     const background = context.backgroundTasks.find((task) => task.id === agent?.id);
     expect(background).toBeDefined();
@@ -4765,15 +4763,16 @@ describe("Phase 06 TUI slash commands", () => {
     expect(verifierAgent?.permissionMode).toBe("default");
     expect(explorerAgent?.permissionMode).toBe("plan");
     expect(output.text).toContain("repair-extremely-long-verifier");
-    expect(output.text).toContain(`displayName: ${explorerAgent?.displayName}`);
+    expect(output.text).toContain(`display name: ${explorerAgent?.displayName}`);
     expect(output.text).toContain(
-      "displayName does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
+      "display name does not change type, role route, permission mode, resource guard, evidence, or lifecycle",
     );
     expect(output.text).not.toContain("修复中文路径显示-explorer");
     const keyLines = output.text
       .split("\n")
       .filter(
-        (line) => line.includes("repair-extremely-long-verifier") || line.includes("displayName"),
+        (line) =>
+          line.includes("repair-extremely-long-verifier") || line.includes("display name"),
       );
     expect(keyLines.every((line) => line.length <= 160)).toBe(true);
   });
@@ -4855,10 +4854,10 @@ describe("Phase 06 TUI slash commands", () => {
     const report = await readFile(persisted.reportPath ?? "", "utf8");
     expect(report).toContain("Node/TUI runtime remains default");
     expect(report).toContain("## Agent assignment");
-    expect(report).toContain("runId=agent-");
+    expect(report).toContain("run agent-");
     expect(report).toContain("no full transcript/source/index/log output is injected");
     expect(report).toContain("## Worker result");
-    expect(report).toContain("maxSteps=4; usedSteps=3");
+    expect(report).toContain("max steps 4; used steps 3");
     expect(report).toContain("verification: partial");
     const log = await readFile(persisted.logPath ?? "", "utf8");
     expect(log).toContain("agent step 3/5");
@@ -4876,9 +4875,9 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toContain("本地 durable metadata + 统一后台任务");
     expect(output.text).toContain(
-      "agents: planned=5, scheduled=3, started=3, running=0, queued=0, skipped=0, limited=0, effectiveCap=3",
+      "agents: planned 5; scheduled 3; started 3; running 0; queued 0; skipped 0; limited 0; effective cap 3",
     );
-    expect(output.text).toContain(`${jobId}  blocked  label=implement-durable-loop-planner`);
+    expect(output.text).toContain(`${jobId}  blocked  label implement-durable-loop-planner`);
     expect(output.text).not.toContain(`${jobId}  running`);
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
@@ -4886,9 +4885,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "agent assignment: job-agent-1:implement-durable-loop-planner:blocked:agent-",
     );
-    expect(output.text).toContain("worker=blocked");
+    expect(output.text).toContain("worker blocked");
     expect(output.text).toContain("task graph: 4 steps");
-    expect(output.text).toContain("fullOutputPath:");
+    expect(output.text).toContain("full output path:");
     expect(output.text).not.toContain("Beta readiness PASS");
   });
 
@@ -4951,7 +4950,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(
       context.agents.every((agent) =>
         agent.contextSummary.includes(
-          "notIncluded=full transcript/full source/full index/full memory/raw tool_result",
+          "not included: full transcript/full source/full index/full memory/raw tool_result",
         ),
       ),
     ).toBe(true);
@@ -5170,8 +5169,8 @@ describe("Phase 06 TUI slash commands", () => {
       previewTranscript.some(
         (event) =>
           event.type === "system_event" &&
-          event.message.includes("workflow_plan_preview") &&
-          event.message.includes("passEvidence=no"),
+          event.message.includes("workflow plan preview") &&
+          event.message.includes("pass evidence no"),
       ),
     ).toBe(true);
 
@@ -5300,8 +5299,8 @@ describe("Phase 06 TUI slash commands", () => {
       transcript.some(
         (event) =>
           event.type === "system_event" &&
-          event.message.includes("workflow_architecture_review") &&
-          event.message.includes("status=partial"),
+          event.message.includes("workflow architecture review") &&
+          event.message.includes("status partial"),
       ),
     ).toBe(true);
   });
@@ -5448,6 +5447,64 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.workflows.activeRun?.steps[0]?.status).toBe("completed");
     expect(output.text).toContain("Evidence ev-target");
     expect(output.text).toContain("target evidence summary");
+  });
+
+  it("workflow start primary output is short and hides raw search/internal ids", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-start-denoise-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    context.evidence.push({
+      id: "ev-target",
+      kind: "grep_result",
+      summary: "Grep raw results should stay in details",
+      source: "Grep",
+      supportsClaims: ["grep_result"],
+      createdAt: new Date().toISOString(),
+    });
+    const plan = normalizeWorkflowPlan({
+      id: "wf-start-denoise",
+      title: "Workflow start denoise",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-search",
+      phases: [
+        {
+          id: "phase-search",
+          title: "Source exploration",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed in test" },
+          slices: [
+            {
+              id: "slice-details-ref",
+              title: "Show search evidence",
+              role: "explorer",
+              status: "queued",
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              references: [{ kind: "evidence", ref: "ev-target", summary: "target ref" }],
+            },
+          ],
+        },
+      ],
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid denoise plan");
+
+    await __testRunWorkflowStepsWithPlan("explore with Grep Glob provider abort", plan.plan, context, output);
+
+    const firstBlock = output.text.slice(0, output.text.indexOf("Evidence ev-target"));
+    expect(firstBlock).toContain("workflow 已启动。");
+    expect(firstBlock).toContain("steps: 1");
+    expect(firstBlock).toContain("当前阶段：Source exploration");
+    expect(firstBlock).toContain("/workflows status");
+    expect(firstBlock).not.toContain("Grep raw");
+    expect(firstBlock).not.toContain("Glob");
+    expect(firstBlock).not.toContain("provider abort");
+    expect(firstBlock).not.toMatch(/workflow-[a-f0-9-]{8,}/iu);
+    expect(output.text).toContain("workflow 已完成，结果仍为 PARTIAL");
+    expect(output.text).not.toMatch(/Workflow workflow-[a-f0-9-]{8,} completed/iu);
   });
 
   it("workflow run blocks mutating worker steps when the real agent loop is unavailable", async () => {
@@ -5761,8 +5818,8 @@ describe("Phase 06 TUI slash commands", () => {
     await writeFile(
       join(project, ".linghun", "workflows", "check.json"),
       JSON.stringify({
-        id: "check",
-        name: "Check",
+        id: "registry-internal-check-123456",
+        name: "Human Check",
         description: "Run registry details step.",
         steps: [{ id: "details", action: "details" }],
       }),
@@ -5791,24 +5848,41 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/agents registry", context, output);
     expect(output.text).toContain("reviewer Reviewer");
-    expect(output.text).toContain("model=registry-reviewer-model");
-    expect(output.text).toContain("tools=Read");
-    expect(output.text).toContain("maxTurns=2");
+    expect(output.text).toContain("model registry-reviewer-model");
+    expect(output.text).toContain("tools Read");
+    expect(output.text).toContain("max turns 2");
     await handleSlashCommand("/workflows registry", context, output);
     expect(output.text).toContain("agent:reviewer Reviewer");
-    expect(output.text).toContain("check Check");
+    expect(output.text).toContain("registry-internal-check-123456 Human Check");
     expect(output.text).toContain("bad.json: steps must be a non-empty array");
 
-    await handleSlashCommand("/workflows run check", context, output);
-    expect(context.workflows.activeRun?.planId).toBe("check");
+    const runOutput = new MemoryOutput();
+    await handleSlashCommand("/workflows run registry-internal-check-123456", context, runOutput);
+    const startBlock = runOutput.text.slice(0, runOutput.text.indexOf("Linghun details"));
+    expect(startBlock).toContain("workflow 已启动。");
+    expect(startBlock).toContain("steps: 1");
+    expect(startBlock).toContain("当前阶段：Human Check");
+    expect(startBlock).toContain("/workflows status");
+    expect(startBlock).not.toContain("registry-internal-check-123456");
+    expect(startBlock).not.toMatch(/workflow-registry-internal-check-[a-z0-9-]+/iu);
+    expect(context.workflows.activeRun?.planId).toBe("registry-internal-check-123456");
     expect(context.workflows.activeRun?.status).toBe("completed");
     expect(context.workflows.activeRun?.result).toBe("partial");
-    expect(
-      context.backgroundTasks.find((task) => task.title.includes("Workflow: check")),
-    ).toMatchObject({
+    const workflowTask = context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id);
+    expect(workflowTask).toMatchObject({
       kind: "job",
       result: "partial",
     });
+    expect(workflowTask?.title).toContain("Workflow: Human Check");
+    expect(workflowTask?.title).not.toContain("registry-internal-check-123456");
+    expect(workflowTask?.userVisibleSummary).toContain("workflow 已启动");
+    expect(workflowTask?.userVisibleSummary).toContain("steps: 1");
+    expect(workflowTask?.userVisibleSummary).toContain("当前阶段：Human Check");
+    expect(workflowTask?.userVisibleSummary).not.toContain("registry-internal-check-123456");
+    const statusOutput = new MemoryOutput();
+    await handleSlashCommand("/workflows status", context, statusOutput);
+    expect(statusOutput.text).toContain(context.workflows.activeRun?.id ?? "missing-workflow-id");
+    expect(statusOutput.text).toContain("registry-internal-check-123456");
     const transcript = (await store.resume(session.id)).transcript;
     expect(transcript.some((event) => event.type === "workflow_start")).toBe(true);
     expect(transcript.some((event) => event.type === "background_task_update")).toBe(true);
@@ -6547,7 +6621,7 @@ describe("Phase 06 TUI slash commands", () => {
     ) as { runner?: { adapter?: string; resolution?: string; fallbackReason?: string } };
     expect(missingOutput.text).toContain("Native Runner Doctor：unavailable");
     expect(missingOutput.text).toContain(`bundled candidate: bundled:${platformArch}/`);
-    expect(missingOutput.text).toContain("Node fallback=available");
+    expect(missingOutput.text).toContain("Node fallback available");
     expect(missingState.runner).toMatchObject({
       adapter: "node",
       resolution: "unavailable",
@@ -6818,8 +6892,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(runnerStdout).toContain("heartbeat");
     expect(output.text).not.toContain(runnerStdoutPath);
     expect(output.text).not.toContain(runnerStderrPath);
-    expect(reportText).toContain("stdout:present:stdout.log");
-    expect(reportText).toContain("stderr:present:stderr.log");
+    expect(reportText).toContain("stdout present:stdout.log");
+    expect(reportText).toContain("stderr present:stderr.log");
     expect(reportText).not.toContain(runnerStdoutPath);
     expect(reportText).not.toContain(runnerStderrPath);
     const calls = await readMockNativeRunnerCalls(mockRunner.callsPath);
@@ -6832,14 +6906,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(startCall?.argv.join(" ")).not.toContain("secret");
     expect(calls.some((call) => call.argv[0] === "status")).toBe(true);
     expect(doctorOutput.text).toContain("Native Runner Doctor：available");
-    expect(doctorOutput.text).toContain("Node fallback=available");
+    expect(doctorOutput.text).toContain("Node fallback available");
     expect(doctorOutput.text).toContain("present:linghun-native-runner-mock.cjs");
     expect(doctorOutput.text).not.toContain(project);
     expect(output.text).not.toContain(
       "[后台] Job: native runner tes · completed · worker step 1/1; agents 0/0; runner=",
     );
-    expect(output.text).toMatch(/runner=native\/(?:running|completed|cancelled)/u);
-    expect(output.text).toContain("heartbeat=");
+    expect(output.text).toMatch(/runner native\/(?:running|completed|cancelled)/u);
+    expect(output.text).toContain("heartbeat ");
     expect(output.text).toContain(
       "completed/cancelled/timeout/stale/blocked never equals verification PASS",
     );
@@ -6961,7 +7035,7 @@ describe("Phase 06 TUI slash commands", () => {
       runner?: { adapter?: string; status?: string; resolution?: string; fallbackReason?: string };
     };
     expect(mismatchOutput.text).toContain("Native Runner Doctor：protocol_mismatch");
-    expect(mismatchOutput.text).toContain("Node fallback=available");
+    expect(mismatchOutput.text).toContain("Node fallback available");
     expect(mismatchState.runner).toMatchObject({
       adapter: "node",
       resolution: "protocol_mismatch",
@@ -7135,8 +7209,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("已设置 planner role");
     expect(output.text).toContain("已设置 verifier role");
-    expect(output.text).toContain("role=planner");
-    expect(output.text).toContain("role=verifier");
+    expect(output.text).toContain("role planner");
+    expect(output.text).toContain("role verifier");
     expect(output.text).toContain("Role handoff: executor -> reviewer");
     expect(output.text).toContain("VisionObservation:");
     expect(output.text).toContain("Image result saved:");
@@ -7155,7 +7229,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.roleUsage.some((usage) => usage.role === "vision")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "image")).toBe(true);
     expect(context.routeDecisions.some((decision) => decision.role === "planner")).toBe(true);
-    expect(output.text).toContain("fallbackUsed=");
+    expect(output.text).toContain("fallback used ");
     expect(output.text).not.toContain("¥--");
   });
 
@@ -7531,9 +7605,9 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("provider=deepseek model=deepseek-v4-pro");
+    expect(output.text).toContain("provider deepseek; model deepseek-v4-pro");
     expect(output.text).toContain(
-      "openai-compatible: type=openai-compatible provider=openai-compatible model=gpt-5.5",
+      "openai-compatible: type openai-compatible; provider openai-compatible; model gpt-5.5",
     );
     expect(output.text).toContain(
       "角色路由摘要：planner:deepseek/deepseek-v4-pro；executor:deepseek/deepseek-v4-pro",
@@ -7541,11 +7615,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
     expect(output.text).toContain(
-      "deepseek: type=deepseek provider=deepseek model=deepseek-v4-pro runtimeProfile=deepseek_chat_completions endpointProfile=chat_completions compatibilityProfile=deepseek baseUrl=present endpointPath=/v1/chat/completions tools=enabled toolSchema=openai_chat_tools toolResult=chat_tool_message retry=429/502/503/504x3 timeoutMs=30000 idleTimeoutMs=30000 includeUsage=no reasoning=not configured/未生效",
+      "deepseek: type deepseek; provider deepseek; model deepseek-v4-pro; runtime profile deepseek_chat_completions; endpoint profile chat_completions; compatibility deepseek; base URL present; endpoint path /v1/chat/completions; tools enabled; tool schema openai_chat_tools; tool result chat_tool_message; retry 429/502/503/504x3; timeout 30000ms; idle timeout 30000ms; include usage no; reasoning not configured/未生效",
     );
-    expect(output.text).toContain("apiKey=present");
-    expect(output.text).toContain("masked=sk-…cret");
-    expect(output.text).not.toContain("provider=deepseek model=gpt-5.5");
+    expect(output.text).toContain("api key present");
+    expect(output.text).toContain("masked sk-…cret");
+    expect(output.text).not.toContain("provider deepseek; model gpt-5.5");
     expect(output.text).not.toContain("openai-compatible/gpt-5.5");
     expect(output.text).not.toContain("sk-test-openai-compatible-secret");
     expect(requests[0]).toMatchObject({ model: "deepseek-reasoner" });
@@ -7585,9 +7659,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests[0]).not.toHaveProperty("reasoning");
-    expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).toContain("endpoint profile chat_completions");
     expect(output.text).toContain(
-      "reasoning=ignored/unsupported/未生效 compatibilityProfile=strict_openai_compatible",
+      "reasoning ignored/unsupported/未生效 compatibility profile strict_openai_compatible",
     );
     expect(output.text).toContain("正在思考…");
     expect(output.text).not.toContain("正在思考… provider=");
@@ -7654,12 +7728,12 @@ describe("Phase 06 TUI slash commands", () => {
       resumed.transcript.some(
         (event) =>
           event.type === "system_event" &&
-          event.message.includes("selectedRole=executor") &&
-          event.message.includes("provider=openai-compatible") &&
-          event.message.includes("model=gpt-5.5") &&
-          event.message.includes("endpointProfile=responses") &&
-          event.message.includes("reasoningLevel=Medium") &&
-          event.message.includes("tools=yes"),
+          event.message.includes("selected role executor") &&
+          event.message.includes("provider openai-compatible") &&
+          event.message.includes("model gpt-5.5") &&
+          event.message.includes("endpoint profile responses") &&
+          event.message.includes("reasoning level Medium") &&
+          event.message.includes("tools yes"),
       ),
     ).toBe(true);
   });
@@ -7755,7 +7829,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toContain(
-      "当前模型：role=executor provider=openai-compatible model=control-plane-model reasoning=未生效",
+      "当前模型：role executor provider openai-compatible model control-plane-model reasoning 未生效",
     );
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("索引初始化完成");
@@ -7841,7 +7915,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index doctor", context, output);
 
-    expect(output.text).toContain("source=env");
+    expect(output.text).toContain("source: env");
     expect(output.text).toContain("binary status: ready");
     expect(output.text).toContain("binary command: present:env-codebase-memory.cjs");
     expect(output.text).toContain("version: 1.2.3");
@@ -7886,7 +7960,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index status", context, output);
 
-    expect(output.text).toContain("source=managed");
+    expect(output.text).toContain("source: managed");
     expect(output.text).toContain("binary command: present:codebase-memory-mcp.cjs");
     expect(output.text).toContain("version: 2.0.0");
     expect(output.text).toContain("runtime: Linghun-managed codebase-memory");
@@ -7917,7 +7991,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index status", context, output);
 
-    expect(output.text).toContain("source=path");
+    expect(output.text).toContain("source: path");
     expect(output.text).toContain("version: 4.0.0");
     expect(output.text).toContain("runtime: external fallback from PATH");
     expect(await readMockCalls(pathMock.callsPath)).toEqual(["list_projects", "index_status"]);
@@ -7951,7 +8025,7 @@ describe("Phase 06 TUI slash commands", () => {
 
       await handleSlashCommand("/index status", context, output);
 
-      expect(output.text).toContain("source=path");
+      expect(output.text).toContain("source: path");
       expect(output.text).toContain("binary status: ready");
       expect(output.text).toContain("binary command: present:codebase-memory-mcp.cmd");
       expect(output.text).toContain("version: 5.0.0");
@@ -8049,10 +8123,10 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(output.text).toContain("MCP tools（稳定排序摘要，不输出完整 schema）");
     expect(output.text).toContain("placeholder 表示安全占位摘要");
-    expect(output.text).toContain("schemaLoaded=no");
+    expect(output.text).toContain("schema loaded no");
     expect(output.text).toContain("MCP status");
     expect(output.text).toContain("codebase-memory: configured");
-    expect(output.text).toContain("codebase-memory source=env");
+    expect(output.text).toContain("codebase-memory source env");
     expect(output.text).toContain("runtime: explicit codebase-memory override");
     expect(output.text).toContain(
       "guard: codebase-memory deferred tools currently require Linghun static registry + required args before CLI execution",
@@ -8066,7 +8140,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("fast status：未运行 detect_changes");
     expect(output.text).toContain("Index search（语义符号搜索");
     expect(output.text).toContain("Index architecture（短摘要）");
-    expect(output.text).toContain("nodes/edges: 12/8");
+    expect(output.text).toContain("graph: 12 nodes, 8 edges");
     expect(output.text).not.toContain("RAW_SOURCE_TAIL_SHOULD_NOT_DUMP");
     expect(output.text).not.toContain("FULL_GRAPH_SHOULD_NOT_DUMP");
     expect(await readMockCalls(callsPath)).toEqual(
@@ -10809,9 +10883,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     const showOutput = new MemoryOutput();
     await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, showOutput);
-    expect(showOutput.text).toContain("- provider/model: openai-compatible / child-fallback-model");
+    expect(showOutput.text).toContain("- model route: openai-compatible / child-fallback-model");
     expect(showOutput.text).not.toContain(
-      "- provider/model: openai-compatible / child-primary-model",
+      "- model route: openai-compatible / child-primary-model",
     );
     expect(
       context.roleUsage.some(
@@ -10833,13 +10907,13 @@ describe("Phase 06 TUI slash commands", () => {
     const fallbackMessages = childTranscript
       .filter((event) => event.type === "system_event")
       .map((event) => event.message)
-      .filter((message) => message.includes("provider_fallback_attempt"));
-    expect(fallbackMessages.some((message) => message.includes("status=attempted"))).toBe(true);
-    expect(fallbackMessages.some((message) => message.includes("status=succeeded"))).toBe(true);
-    expect(fallbackMessages[0]).toContain("from=openai-compatible/child-primary-model");
-    expect(fallbackMessages[0]).toContain("to=openai-compatible/child-fallback-model");
-    expect(fallbackMessages[0]).toContain("reason=rate_limit");
-    expect(fallbackMessages[0]).toContain("code=PROVIDER_RATE_LIMITED");
+      .filter((message) => message.includes("provider fallback attempt"));
+    expect(fallbackMessages.some((message) => message.includes("status attempted"))).toBe(true);
+    expect(fallbackMessages.some((message) => message.includes("status succeeded"))).toBe(true);
+    expect(fallbackMessages[0]).toContain("from openai-compatible/child-primary-model");
+    expect(fallbackMessages[0]).toContain("to openai-compatible/child-fallback-model");
+    expect(fallbackMessages[0]).toContain("reason rate_limit");
+    expect(fallbackMessages[0]).toContain("code PROVIDER_RATE_LIMITED");
   });
 
   it("StartAgent child fallback target cooldown blocks before fallback request", async () => {
@@ -10948,9 +11022,9 @@ describe("Phase 06 TUI slash commands", () => {
     const childTranscript = JSON.stringify(
       (await store.resume(context.agents[0]?.transcriptSessionId ?? "")).transcript,
     );
-    expect(childTranscript).toContain("status=attempted");
-    expect(childTranscript).toContain("status=failed");
-    expect(childTranscript).not.toContain("status=succeeded");
+    expect(childTranscript).toContain("status attempted");
+    expect(childTranscript).toContain("status failed");
+    expect(childTranscript).not.toContain("status succeeded");
   });
 
   it("returns Bash non-zero exits as failed model-visible tool_results", async () => {
@@ -11584,7 +11658,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(calls).toContain("detect_changes");
     expect(calls).toContain("index_repository");
     expect(output.text).toContain("status: ready");
-    expect(output.text).toContain("索引已刷新：状态=ready。");
+    expect(output.text).toContain("索引已刷新：状态 ready。");
     expect(output.text).not.toContain("gateId");
 
     const session = (
@@ -11683,7 +11757,7 @@ describe("Phase 06 TUI slash commands", () => {
     ).toBe(true);
   });
 
-  it("Run 3: Ink auto-skip success keeps details for Ctrl+O without opening CommandPanel", async () => {
+  it("Run 3: Ink auto-skip success keeps explicit details without opening CommandPanel", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     await writeFile(join(project, "large.json"), "x".repeat(1_100_000), "utf8");
     const mockDir = await mkdtemp(join(tmpdir(), "linghun-codebase-memory-mock-"));
@@ -11697,7 +11771,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/index refresh", context, output);
 
-    const detailsPanel = __testBuildToggleDetailsCommandPanel(context);
+    const detailsPanel = __testBuildExplicitDetailsCommandPanel(context);
     const summary = output.text;
     expect(context.commandPanelState).toBeUndefined();
     expect(summary).toContain("已自动跳过 1 项大文件/生成物");
@@ -11976,7 +12050,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(await readMockCalls(callsPath)).toContain("index_repository");
     expect(output.text).not.toContain("索引刷新已执行");
-    expect(output.text.match(/索引已刷新：状态=ready。/g)).toHaveLength(1);
+    expect(output.text.match(/索引已刷新：状态 ready。/g)).toHaveLength(1);
   });
 
   it("Pre-open-source restraint: Ink IndexRefresh success does not open CommandPanel", async () => {
@@ -11994,7 +12068,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(await readMockCalls(callsPath)).toContain("index_repository");
     expect(context.commandPanelState).toBeUndefined();
-    expect(output.text).toContain("索引已刷新：状态=ready。");
+    expect(output.text).toContain("索引已刷新：状态 ready。");
   });
 
   it("D.14D-R P0-2: model IndexRefresh denied → no index_repository, model told NOT refreshed", async () => {
@@ -12379,7 +12453,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(formatted).toContain("工具 Edit 已完成");
     expect(formatted).toContain("补丁 +1 -1");
-    expect(formatted).toContain("读取保护 expectedHash");
+    expect(formatted).toContain("读取保护已启用");
+    expect(formatted).not.toContain("expectedHash");
     expect(formatted).toContain("输出已折叠，按 Ctrl+O 展开。");
     expect(formatted).not.toContain("raw edit preview");
     expect(formatted).not.toContain("operation: Edit");
@@ -12580,8 +12655,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "最近模型服务失败：类型=额度或余额不足 code=PROVIDER_STREAM_ERROR",
     );
-    expect(output.text).toContain("provider=openai-compatible model=failure-model");
-    expect(output.text).toContain("endpointProfile=chat_completions");
+    expect(output.text).toContain("服务商 openai-compatible；模型 failure-model");
+    expect(output.text).toContain("接口类型 chat_completions");
     expect(output.text).toMatch(/details: \/details evidence|详情：\/details evidence/u);
     expect(output.text).not.toContain("sk-provider-secret");
     expect(output.text).not.toContain("C:/Users/Admin/Linghun");
@@ -12656,7 +12731,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/usage", context, output);
     await handleSlashCommand("/stats", context, output);
 
-    expect(output.text).toContain("provider=unknown model=unmatched-model");
+    expect(output.text).toContain("provider unknown model unmatched-model");
     expect(output.text).toContain("- provider: unknown");
     expect(output.text).not.toContain("provider=deepseek model=unmatched-model");
     expect(output.text).not.toContain("- provider: deepseek");
@@ -12745,7 +12820,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.routeDecisions[0]?.fallbackUsed).toBe(true);
     expect(context.routeDecisions[0]?.selectedModel).toBe("deepseek-v4-pro");
     expect(parentTranscript.some((event) => event.type === "system_event")).toBe(true);
-    expect(output.text).toContain("fallbackUsed=yes");
+    expect(output.text).toContain("fallback used yes");
   });
 
   it("pauses unavailable routes with repair advice and diagnoses openai-compatible config", async () => {
@@ -12821,17 +12896,17 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/model route doctor", context, output);
 
-    expect(output.text).toContain("provider=openai-compatible");
-    expect(output.text).toContain("model=gpt-5.5");
-    expect(output.text).toContain("endpointProfile=chat_completions");
-    expect(output.text).toContain("compatibilityProfile=strict_openai_compatible");
-    expect(output.text).toContain("baseUrl=present");
-    expect(output.text).toContain("endpointPath=/v1/chat/completions");
-    expect(output.text).toContain("warning: baseUrl 包含完整 endpoint suffix=responses");
+    expect(output.text).toContain("provider openai-compatible");
+    expect(output.text).toContain("model gpt-5.5");
+    expect(output.text).toContain("endpoint profile chat_completions");
+    expect(output.text).toContain("compatibility strict_openai_compatible");
+    expect(output.text).toContain("base URL present");
+    expect(output.text).toContain("endpoint path /v1/chat/completions");
+    expect(output.text).toContain("warning: baseUrl 包含完整 endpoint suffix responses");
     expect(output.text).toContain("profile/baseUrl 不匹配");
     expect(output.text).toContain("baseUrl 应填根路径，例如 https://example.com/v1");
-    expect(output.text).toContain("apiKey=present");
-    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).toContain("api key present");
+    expect(output.text).toContain("masked sk-…cret");
     expect(output.text).not.toContain("sk-test-openai-secret");
   });
 
@@ -12863,13 +12938,13 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
-    expect(output.text).toContain("apiKey=present source=project-settings");
+    expect(output.text).toContain("api key present source project-settings");
     expect(output.text).toContain(
-      "WARN: project-settings provider=openai-compatible contains apiKey",
+      "WARN: project settings provider openai-compatible contains apiKey",
     );
     expect(output.text).toContain("建议保存 apiKey");
     expect(output.text).toContain("环境变量或私有配置");
-    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).toContain("masked sk-…cret");
     expect(output.text).not.toContain("sk-project-doctor-secret");
     expect(output.text).not.toContain(project);
     expect(output.text).not.toContain("模型 key 配好了吗");
@@ -12903,10 +12978,10 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("apiKey=present source=env");
-    expect(output.text).toContain("masked=sk-…cret");
+    expect(output.text).toContain("api key present source env");
+    expect(output.text).toContain("masked sk-…cret");
     expect(output.text).toContain(
-      "WARN: project-settings provider=openai-compatible contains apiKey",
+      "WARN: project settings provider openai-compatible contains apiKey",
     );
     expect(output.text).not.toContain("sk-project-overridden-secret");
     expect(output.text).not.toContain("sk-env-doctor-secret");
@@ -13148,6 +13223,27 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.activePlan).toBeTruthy();
     await handleTuiKeypress("escape", context, output);
     expect(context.activePlan).toBeUndefined();
+
+    context.ctrlOExpandState = { active: true, blockId: "output-1" };
+    context.backgroundTasks = [
+      {
+        id: "bg-ctrl-o-esc",
+        kind: "bash",
+        title: "running command",
+        status: "running",
+        currentStep: "running",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        heartbeatIntervalMs: 30_000,
+        staleAfterMs: 120_000,
+        hasOutput: false,
+        result: "partial",
+        userVisibleSummary: "running command",
+      },
+    ];
+    await handleTuiKeypress("escape", context, output);
+    expect(context.ctrlOExpandState?.active).toBe(false);
+    expect(context.backgroundTasks[0]?.status).toBe("running");
 
     await handleSlashCommand(
       "/autopilot key handler work --steps 1 --tokens 50000",
@@ -13565,7 +13661,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/autopilot details", context, output);
     expect(output.text).toContain("持续推进待确认");
     expect(output.text).toContain("steps<=2");
-    expect(output.text).toContain("allowEdit=yes");
+    expect(output.text).toContain("allow edit yes");
     await handleSlashCommand("/autopilot cancel", context, output);
     expect(context.pendingAutopilot).toBeUndefined();
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).toHaveLength(0);
@@ -14573,7 +14669,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
     await running;
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=1，marked=0。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 1，marked 0。");
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
     expect(context.backgroundAbortControllers?.size ?? 0).toBe(0);
@@ -14589,7 +14685,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
     expect(context.backgroundTasks[0]?.status).toBe("stale");
     expect(context.backgroundTasks[0]?.result).toBe("partial");
   });
@@ -14640,7 +14736,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
     expect(context.backgroundTasks[0]?.status).toBe("stale");
     expect(context.backgroundTasks[0]?.result).toBe("stale");
     const persisted = await readDurableJobState(getDurableJobStatePath(job));
@@ -14693,7 +14789,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/interrupt", context, output);
 
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=1，marked=0。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 1，marked 0。");
     expect(controller.signal.aborted).toBe(true);
     expect(context.backgroundAbortControllers?.has(agent.id)).toBe(false);
     expect(context.agents[0]?.status).toBe("cancelled");
@@ -14875,7 +14971,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(controller.signal.aborted).toBe(true);
     expect(context.agents[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.status).toBe("completed");
-    expect(output.text).toContain("Agent agent-control-cancel cancelled");
+    expect(output.text).toContain("Agent cancelled");
+    expect(output.text).not.toContain("Agent agent-control-cancel cancelled");
   });
 
   it("verification cancel uses process guard and remains non-PASS", async () => {
@@ -15020,7 +15117,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
 
     const task = context.backgroundTasks.find((item) => item.id === runId);
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
     expect(context.workflows.activeRun.status).toBe("cancelled");
     expect(context.workflows.activeRun.result).toBe("cancelled");
     expect(task?.status).toBe("cancelled");
@@ -15089,7 +15186,7 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/interrupt", context, output);
 
     const task = context.backgroundTasks.find((item) => item.id === runId);
-    expect(output.text).toContain("已请求中断 1 个活动任务；abort=0，marked=1。");
+    expect(output.text).toContain("已请求中断 1 个活动任务；abort signals 0，marked 1。");
     expect(task?.status).toBe("cancelled");
     expect(task?.result).toBe("cancelled");
     const statePath = join(
@@ -15436,7 +15533,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.history).toHaveLength(2);
     expect(context.cache.history[0]?.turn).toBe(3);
     expect(output.text).toContain("Cache log 最近");
-    expect(output.text).toContain("来源=provider reported zero");
+    expect(output.text).toContain("来源 provider reported zero");
     expect(output.text).not.toMatch(/cache_read|cache_write|write_source|endpoint=|compact=/u);
     expect(output.text).toContain("cache history size：2");
     expect(await readFile(join(project, "cache-history.json"), "utf8")).toContain(
@@ -15494,8 +15591,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("不代表零写入成本");
     expect(output.text).toContain("任何金额只能标记 estimated");
     expect(output.text).toContain("cost: estimated unavailable");
-    expect(output.text).toContain("/v1/responses: samples=1");
-    expect(output.text).toContain("/v1/messages: samples=1");
+    expect(output.text).toContain("/v1/responses: samples 1");
+    expect(output.text).toContain("/v1/messages: samples 1");
     expect(output.text).not.toContain("零成本");
     expect(output.text).not.toContain("¥");
   });
@@ -15654,7 +15751,7 @@ describe("Phase 06 TUI slash commands", () => {
       await handleSlashCommand(command, context, output);
 
       expect(output.text).toContain("status: stale");
-      expect(output.text).toContain("changedFiles: 2");
+      expect(output.text).toContain("changed files: 2");
       expect(output.text).toContain("detect_changes 发现 2 个变更文件");
       expect(output.text).toContain("不会自动刷新");
       expect(await readMockCalls(callsPath)).toEqual([
@@ -16188,8 +16285,8 @@ describe("Phase 06 TUI slash commands", () => {
       transcript.some(
         (event) =>
           event.type === "system_event" &&
-          event.message.includes("provider_fallback_attempt") &&
-          event.message.includes("status=succeeded"),
+          event.message.includes("provider fallback attempt") &&
+          event.message.includes("status succeeded"),
       ),
     ).toBe(true);
   });
@@ -16521,7 +16618,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("summary-first / load-on-demand");
     expect(output.text).toContain("broken-skill");
     expect(output.text).toContain("manifest load failed; skill isolated from prompt and tools");
-    expect(output.text).toContain("lastError");
+    expect(output.text).toContain("last error");
     expect(output.text).toContain("skill manifest 加载失败，不能启用：broken-skill");
     expect(output.text).toContain("Trust notice：即将启用 skill bug-helper");
     expect(output.text).toContain("已禁用 skill：bug-helper");
@@ -16534,9 +16631,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Trust notice：即将启用 plugin local-tools");
     expect(output.text).toContain("已禁用 plugin：local-tools");
     expect(output.text).toContain("Hooks doctor");
-    expect(output.text).toContain("timeoutMs");
-    expect(output.text).toContain("outputLimitBytes");
-    expect(output.text).toContain("logPath");
+    expect(output.text).toContain("timeout");
+    expect(output.text).toContain("output limit");
+    expect(output.text).toContain("log ");
     expect(output.text).toContain("hook 诊断只检查来源、边界和可见状态");
     expect(output.text).toContain("pluginListHash");
     expect(output.text).not.toContain("完整 skill 正文");
@@ -18576,8 +18673,8 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/workflows plan inspect runtime index", context, output);
 
-    expect(context.lastFullOutput).toContain("status=ready");
-    expect(context.lastFullOutput).toContain("project=F-Linghun");
+    expect(context.lastFullOutput).toContain("status ready");
+    expect(context.lastFullOutput).toContain("project F-Linghun");
     expect(context.lastFullOutput).toContain("F-Linghun:ready");
     expect(context.lastFullOutput).not.toContain("undefined");
     expect(context.lastFullOutput).not.toContain("unknown-project");
@@ -21351,10 +21448,10 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     // 模拟 ShellBlockOutput 把 /model doctor 的 normalized 全文挂上 lastFullOutput。
     const doctorBody = [
       "Model route doctor",
-      "- provider.env merge: applied=yes overrodeModelRoutes=yes providers=openai-compatible",
+      "- provider.env merge: applied yes overrode model routes yes providers openai-compatible",
       "- providers:",
-      "  - openai-compatible: type=openai-compatible runtimeProfile=anthropic_messages endpointProfile=anthropic_messages endpointPath=/v1/messages apiKey=present",
-      "- planner: provider=openai-compatible model=claude-opus-4-7",
+      "  - openai-compatible: type openai-compatible runtime profile anthropic_messages endpoint profile anthropic_messages endpoint path /v1/messages api key present",
+      "- planner: provider openai-compatible model claude-opus-4-7",
     ].join("\n");
     context.lastFullOutput = doctorBody;
 
@@ -21363,7 +21460,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
 
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("provider.env merge");
-    expect(output.text).toContain("endpointPath=/v1/messages");
+    expect(output.text).toContain("endpoint path /v1/messages");
     expect(output.text).toContain("openai-compatible");
   });
 
@@ -22398,7 +22495,7 @@ describe("D.13V-B/C source invariants", () => {
     const archSrc = await readFile(srcPath("architecture-runtime.ts"), "utf8");
     // AntiCodeBlob/EngineeringStructure 仅作为 prompt/directive 文案存在
     expect(promptSrc).toContain("EngineeringStructure=");
-    expect(archSrc).toContain("AntiCodeBlob=");
+    expect(archSrc).toContain("Anti code blob:");
     // 主链只允许接入 conservative preflight，不允许自动重构或扩大成全量边界阻断。
     const indexSrc = await readFile(srcPath("index.ts"), "utf8");
     expect(indexSrc).toContain("runBoundaryEditPreflight");

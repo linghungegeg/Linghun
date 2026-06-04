@@ -39,19 +39,27 @@ function isMessageKind(kind: MessageBlockKind | undefined): boolean {
   );
 }
 
-function hasHiddenContent(block: ProductBlockViewModel): boolean {
+function hasHiddenContent(block: ProductBlockViewModel, renderedBody?: string): boolean {
   const fullText = (block.fullText ?? "").trim();
   const summary = (block.summary ?? "").trim();
   if (!fullText) return false;
+  if (renderedBody?.trim() === fullText) return false;
   if (!summary) return fullText.length > 0;
   const nonEmptyLines = fullText.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
   return nonEmptyLines >= 2 || fullText.length > summary.length + 16;
 }
 
-function visibleNextAction(block: ProductBlockViewModel): string | undefined {
+function visibleNextAction(block: ProductBlockViewModel, renderedBody?: string): string | undefined {
   if (!block.nextAction) return undefined;
   if (!/Ctrl\+O/i.test(block.nextAction)) return block.nextAction;
-  return hasHiddenContent(block) ? block.nextAction : undefined;
+  return hasHiddenContent(block, renderedBody) ? block.nextAction : undefined;
+}
+
+function messageBody(block: ProductBlockViewModel, nextAction: string | undefined): string {
+  if (nextAction && /Ctrl\+O/i.test(nextAction) && block.ctrlOCollapsed) {
+    return (block.summary ?? "").trim();
+  }
+  return (block.fullText ?? block.summary ?? "").trim();
 }
 
 export function ProductBlock({
@@ -110,7 +118,9 @@ export function ProductBlock({
     block.messageKind !== "tool_result_error" &&
     block.messageKind !== "assistant_thinking"
   ) {
-    const body = (block.fullText ?? block.summary ?? "").trim();
+    const previewBody = messageBody(block, block.nextAction);
+    const nextAction = visibleNextAction(block, previewBody);
+    const body = messageBody(block, nextAction);
     if (!body) return null;
     const isLocalOutput = block.messageKind === "local_command_output";
     const isDiagnostic = block.messageKind === "diagnostic";
@@ -152,7 +162,9 @@ export function ProductBlock({
 
   // assistant_thinking 走 dim italic。
   if (block.messageKind === "assistant_thinking") {
-    const body = (block.fullText ?? block.summary ?? "").trim();
+    const previewBody = messageBody(block, block.nextAction);
+    const nextAction = visibleNextAction(block, previewBody);
+    const body = messageBody(block, nextAction);
     if (!body) return null;
     return (
       <Box flexDirection="column" marginBottom={1}>
@@ -196,7 +208,9 @@ export function ProductBlock({
 
   // tool_result_error: 标题/状态行保留，正文走 MessageMarkdown 红色，可展开 hint 用 CtrlOToExpand。
   if (block.messageKind === "tool_result_error") {
-    const body = (block.fullText ?? block.summary ?? "").trim();
+    const previewBody = messageBody(block, block.nextAction);
+    const nextAction = visibleNextAction(block, previewBody);
+    const body = messageBody(block, nextAction);
     return (
       <Box
         flexDirection="column"

@@ -107,6 +107,16 @@ function visibleNextAction(
   return hasHiddenContent(block, renderedBody) ? block.nextAction : undefined;
 }
 
+function messageBody(
+  block: ShellViewModel["blocks"][number],
+  nextAction: string | undefined,
+): string {
+  if (nextAction && /Ctrl\+O/i.test(nextAction) && block.ctrlOCollapsed) {
+    return (block.summary ?? "").trim();
+  }
+  return (block.fullText ?? block.summary ?? "").trim();
+}
+
 function renderPlainMarkdownLines(
   text: string,
   noColor: boolean,
@@ -334,8 +344,9 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
       messageKind !== "tool_result_error" &&
       messageKind !== "assistant_thinking"
     ) {
-      const body = (block.fullText ?? block.summary ?? "").trim();
-      const nextAction = visibleNextAction(block, body);
+      const previewBody = messageBody(block, block.nextAction);
+      const nextAction = visibleNextAction(block, previewBody);
+      const body = messageBody(block, nextAction);
       if (!body) return [];
       const lines = body.split("\n");
       const dimAll =
@@ -356,14 +367,17 @@ function formatBlockLines(view: ShellViewModel, noColor: boolean): string[] {
     }
 
     if (messageKind === "assistant_thinking") {
-      const body = (block.fullText ?? block.summary ?? "").trim();
+      const previewBody = messageBody(block, block.nextAction);
+      const nextAction = visibleNextAction(block, previewBody);
+      const body = messageBody(block, nextAction);
       if (!body) return [];
       return [`${dim("\u2234 ", noColor)}${dim(body, noColor)}`];
     }
 
     if (messageKind === "tool_result_error") {
-      const body = (block.fullText ?? block.summary ?? "").trim();
-      const nextAction = visibleNextAction(block, body);
+      const previewBody = messageBody(block, block.nextAction);
+      const nextAction = visibleNextAction(block, previewBody);
+      const body = messageBody(block, nextAction);
       const out: string[] = [];
       const failMarker = getStatusMarker("fail", noColor);
       const coloredFailMarker = colorStatus(failMarker, "fail", noColor);

@@ -231,8 +231,8 @@ describe("model-doctor-runtime", () => {
     it("includes route details", () => {
       const output = formatModelRoutes(baseConfig);
       expect(output).toContain("executor");
-      expect(output).toContain("provider=deepseek");
-      expect(output).toContain("tools=yes");
+      expect(output).toContain("provider deepseek");
+      expect(output).toContain("tools yes");
       expect(output).toContain("/model route doctor");
     });
   });
@@ -585,28 +585,28 @@ describe("model-doctor-runtime", () => {
       };
     }
 
-    it("shows promptCache enabled=yes systemTtl=5m by default", async () => {
+    it("shows prompt cache enabled yes system ttl 5m by default", async () => {
       const output = await formatModelRouteDoctor(makeContext(baseConfig));
-      expect(output).toContain("- promptCache: enabled=yes systemTtl=5m");
+      expect(output).toContain("- prompt cache: enabled yes; system ttl 5m");
       expect(output).toContain("5m 默认 cache_control 无 ttl 字面量");
     });
 
-    it("shows promptCache enabled=no when disabled", async () => {
+    it("shows prompt cache enabled no when disabled", async () => {
       const config: LinghunConfig = {
         ...baseConfig,
         promptCache: { enabled: false, systemTtl: "5m" },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("- promptCache: enabled=no systemTtl=5m");
+      expect(output).toContain("- prompt cache: enabled no; system ttl 5m");
     });
 
-    it("shows promptCache systemTtl=1h when configured", async () => {
+    it("shows prompt cache system ttl 1h when configured", async () => {
       const config: LinghunConfig = {
         ...baseConfig,
         promptCache: { enabled: true, systemTtl: "1h" },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("- promptCache: enabled=yes systemTtl=1h");
+      expect(output).toContain("- prompt cache: enabled yes; system ttl 1h");
     });
 
     it("annotates anthropic_messages provider with cache_control + usage fields", async () => {
@@ -626,7 +626,7 @@ describe("model-doctor-runtime", () => {
       };
       const output = await formatModelRouteDoctor(makeContext(config));
       expect(output).toContain("anthropic prompt cache:");
-      expect(output).toContain("cache_control=injected ttl=1h");
+      expect(output).toContain("cache_control injected; ttl 1h");
       expect(output).toContain("ephemeral_5m_input_tokens/ephemeral_1h_input_tokens");
     });
 
@@ -646,7 +646,7 @@ describe("model-doctor-runtime", () => {
         promptCache: { enabled: false, systemTtl: "5m" },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("cache_control=off");
+      expect(output).toContain("cache_control off");
     });
 
     it("D.13G: anthropic_messages provider does NOT emit tools-disabled-reason; emits 'anthropic tools: enabled' annotation by default", async () => {
@@ -667,10 +667,10 @@ describe("model-doctor-runtime", () => {
       };
       const output = await formatModelRouteDoctor(makeContext(config));
       expect(output).not.toContain("tools disabled reason:");
-      expect(output).toContain("anthropic tools: enabled schema=anthropic_tools");
-      expect(output).toContain("tools=enabled");
-      expect(output).toContain("toolSchema=anthropic_tools");
-      expect(output).toContain("toolResult=anthropic_tool_result");
+      expect(output).toContain("anthropic tools: enabled; schema anthropic_tools");
+      expect(output).toContain("tools enabled");
+      expect(output).toContain("tool schema anthropic_tools");
+      expect(output).toContain("tool result anthropic_tool_result");
     });
 
     it("D.13G: anthropic_messages provider with explicit supportsTools=false still emits tools-disabled-reason", async () => {
@@ -710,7 +710,7 @@ describe("model-doctor-runtime", () => {
       const output = await formatModelRouteDoctor(makeContext(config));
       expect(output).toContain("root baseUrl + responses 可能可用");
       expect(output).toContain("chat_completions 通常需要 /v1 root");
-      expect(output).toContain("content-type=text/html");
+      expect(output).toContain("content type text/html");
       expect(output).toContain("少了 /v1");
       expect(output).not.toContain("sk-test-openai-1234567890");
     });
@@ -731,8 +731,8 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("reasoning=effective/sent level=High");
-      expect(output).not.toContain("reasoning=ignored/unsupported");
+      expect(output).toContain("reasoning effective/sent level High");
+      expect(output).not.toContain("reasoning ignored/unsupported");
     });
 
     it("D.13K: anthropic_messages provider 无 reasoningLevel → reasoning=not configured/未生效", async () => {
@@ -750,7 +750,7 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output = await formatModelRouteDoctor(makeContext(config));
-      expect(output).toContain("reasoning=not configured/未生效");
+      expect(output).toContain("reasoning not configured/未生效");
     });
 
     it("never leaks raw apiKey or prompt text", async () => {
@@ -775,9 +775,9 @@ describe("model-doctor-runtime", () => {
 
     it("shows effective endpointProfile decision and reason", async () => {
       const output = await formatModelRouteDoctor(makeContext(baseConfig));
-      expect(output).toContain("endpointProfile decision:");
-      expect(output).toContain("source=");
-      expect(output).toContain("reason=");
+      expect(output).toContain("endpoint profile decision:");
+      expect(output).toContain("source ");
+      expect(output).toContain("reason ");
     });
 
     it("uses runtime contract endpoint profile for responses suffix reasoning diagnostics", async () => {
@@ -798,15 +798,15 @@ describe("model-doctor-runtime", () => {
       const output = await formatModelRouteDoctor(makeContext(config));
 
       expect(output).toContain(
-        "provider=openai-compatible model=gpt-5.5 runtimeProfile=openai_responses endpointProfile=responses",
+        "provider openai-compatible; model gpt-5.5; runtime profile openai_responses; endpoint profile responses",
       );
-      expect(output).toContain("endpointPath=/responses");
-      expect(output).toContain("reasoning=effective/sent level=High");
-      expect(output).not.toContain("reasoning=ignored/unsupported");
+      expect(output).toContain("endpoint path /responses");
+      expect(output).toContain("reasoning effective/sent level High");
+      expect(output).not.toContain("reasoning ignored/unsupported");
     });
 
     it("D.13H model doctor shows anthropic context editing disabled reason without leaking apiKey", async () => {
-      // 默认 contextEditingEnabled 未配置 → enabled=no、sendable=no、reason="disabled by config"。
+      // 默认 contextEditingEnabled 未配置 → enabled no、sendable no、reason "disabled by config"。
       // 即使 apiKey 配置了完整字符串，doctor 也不能在输出里出现 raw apiKey 或 raw beta header。
       const config: LinghunConfig = {
         ...baseConfig,
@@ -824,10 +824,10 @@ describe("model-doctor-runtime", () => {
       const output = await formatModelRouteDoctor(makeContext(config));
       // 必须出现 D.13H 诊断行，且明确 disabled。
       expect(output).toContain("anthropic context editing:");
-      expect(output).toContain("enabled=no");
-      expect(output).toContain("sendable=no");
-      expect(output).toContain("betaHeaders=0");
-      expect(output).toContain("reason=disabled by config");
+      expect(output).toContain("enabled no");
+      expect(output).toContain("sendable no");
+      expect(output).toContain("beta headers 0");
+      expect(output).toContain("reason disabled by config");
       expect(output).toContain("cache_edits/cache_reference body 字段 hard-disabled");
       // 严禁泄露 raw apiKey。
       expect(output).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
@@ -845,13 +845,13 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output2 = await formatModelRouteDoctor(makeContext(configEmptyBeta));
-      expect(output2).toContain("enabled=yes");
-      expect(output2).toContain("sendable=no");
-      expect(output2).toContain("betaHeaders=0");
-      expect(output2).toContain("reason=missing non-empty beta header");
+      expect(output2).toContain("enabled yes");
+      expect(output2).toContain("sendable no");
+      expect(output2).toContain("beta headers 0");
+      expect(output2).toContain("reason missing non-empty beta header");
       expect(output2).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
 
-      // 配置 enabled=true + 非空 beta header → sendable=yes、betaHeaders 计数=1，但 raw header 不输出。
+      // 配置 enabled=true + 非空 beta header → sendable yes、beta headers 计数 1，但 raw header 不输出。
       const sentinelBetaHeader = "context-editing-2025-SENTINEL-XYZ";
       const configReal: LinghunConfig = {
         ...config,
@@ -865,10 +865,10 @@ describe("model-doctor-runtime", () => {
         },
       };
       const output3 = await formatModelRouteDoctor(makeContext(configReal));
-      expect(output3).toContain("enabled=yes");
-      expect(output3).toContain("sendable=yes");
-      expect(output3).toContain("betaHeaders=1");
-      expect(output3).toContain("reason=ok");
+      expect(output3).toContain("enabled yes");
+      expect(output3).toContain("sendable yes");
+      expect(output3).toContain("beta headers 1");
+      expect(output3).toContain("reason ok");
       expect(output3).not.toContain(sentinelBetaHeader);
       expect(output3).not.toContain("sk-test-secret-DO-NOT-LEAK-AAAA");
     });
@@ -1035,13 +1035,13 @@ describe("model-doctor-runtime", () => {
         };
         const text = await formatModelRouteDoctor(ctx);
         // 必须出现 deferredTools 行 + 三个 count 字段
-        expect(text).toContain("deferredTools:");
-        expect(text).toContain("total=12");
-        expect(text).toContain("executable=10");
-        expect(text).toContain("codebase-memory=10");
-        expect(text).toContain("mcp=2");
-        expect(text).toContain("skill=0");
-        expect(text).toContain("plugin=0");
+        expect(text).toContain("deferred tools:");
+        expect(text).toContain("total 12");
+        expect(text).toContain("executable 10");
+        expect(text).toContain("codebase-memory 10");
+        expect(text).toContain("mcp 2");
+        expect(text).toContain("skill 0");
+        expect(text).toContain("plugin 0");
         // 不允许暴露 raw schema / 参数原文 / apiKey 字面量
         expect(text).not.toContain("input_schema");
         expect(text).not.toContain("inputSchema");
@@ -1064,6 +1064,7 @@ describe("model-doctor-runtime", () => {
         };
         const text = await formatModelRouteDoctor(ctx);
         expect(text).not.toContain("deferredTools:");
+        expect(text).not.toContain("deferred tools:");
       } finally {
         await rm(projectPath, { recursive: true, force: true });
       }
@@ -1109,9 +1110,9 @@ describe("model-doctor-runtime", () => {
         };
         const text = await formatModelRouteDoctor(ctx);
         expect(text).toContain("WARN placeholder model:");
-        expect(text).toContain("deepseek=deepseek-v4-flash");
-        expect(text).toContain("executor.primary=deepseek-v4-pro");
-        expect(text).toContain("executor.fallback=deepseek-v4-flash");
+        expect(text).toContain("deepseek -> deepseek-v4-flash");
+        expect(text).toContain("executor.primary -> deepseek-v4-pro");
+        expect(text).toContain("executor.fallback -> deepseek-v4-flash");
         expect(text).toContain("LINGHUN_DEEPSEEK_MODEL");
         expect(text).toContain("现役模型名");
       } finally {
@@ -1156,7 +1157,7 @@ describe("model-doctor-runtime", () => {
           routeDecisions: [],
         };
         const text = await doctorModule.formatModelRouteDoctor(ctx);
-        expect(text).toContain("provider.env merge: applied=no");
+        expect(text).toContain("provider.env merge: applied no");
       } finally {
         if (originalHome === undefined) process.env.HOME = undefined;
         else process.env.HOME = originalHome;
@@ -1179,7 +1180,7 @@ describe("model-doctor-runtime", () => {
           routeDecisions: [],
         });
         // 如果文本包含 provider.env merge: applied=yes，必须同时包含安全提示
-        if (text.includes("provider.env merge: applied=yes")) {
+        if (text.includes("provider.env merge: applied yes")) {
           expect(text).toContain("安全提示");
           expect(text).toContain("不要 cat/type");
           expect(text).toContain("含敏感凭据");
@@ -1247,8 +1248,8 @@ describe("model-doctor-runtime", () => {
         });
 
         expect(text).toContain("最近备用模型尝试");
-        expect(text).toContain("状态=已成功");
-        expect(text).toContain("原因=限流");
+        expect(text).toContain("状态 已成功");
+        expect(text).toContain("原因 限流");
       } finally {
         await rm(projectPath, { recursive: true, force: true });
       }
@@ -1287,7 +1288,7 @@ describe("model-doctor-runtime", () => {
           },
         };
         const text = await formatModelRouteDoctor(ctx);
-        expect(text).toContain("discoveredDeferredTools: total=3");
+        expect(text).toContain("discovered deferred tools: total 3");
         expect(text).toContain("alpha_tool");
         expect(text).toContain("list_projects");
         expect(text).toContain("trace_path");
@@ -1312,7 +1313,7 @@ describe("model-doctor-runtime", () => {
           },
         };
         const text = await formatModelRouteDoctor(ctx);
-        expect(text).toContain("discoveredDeferredTools: total=50");
+        expect(text).toContain("discovered deferred tools: total 50");
         expect(text).toContain("+18 more");
       } finally {
         await rm(projectPath, { recursive: true, force: true });

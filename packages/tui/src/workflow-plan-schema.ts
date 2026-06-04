@@ -388,14 +388,14 @@ export function projectWorkflowPlan(plan: NormalizedWorkflowPlan): WorkflowPlanP
   const maxCost = plan.budget.maxCostCny;
   const nextAction = currentPhase?.stopPoint.reason ?? "Review workflow plan before execution.";
   const tokenCostSummary = [
-    maxTokens ? `tokens<=${maxTokens}` : "tokens=unset",
-    maxCost ? `cost<=${maxCost} CNY` : "cost=unset",
+    maxTokens ? `tokens <= ${maxTokens}` : "tokens unset",
+    maxCost ? `cost <= ${maxCost} CNY` : "cost unset",
   ].join("; ");
 
   const summaryText = [
     `Workflow ${plan.title}`,
     `Current phase: ${currentPhase?.title ?? "unknown"}`,
-    `Agents: done=${done}, running=${running}, blocked=${blocked}`,
+    `Agents: done ${done}, running ${running}, blocked ${blocked}`,
     `Evidence refs: ${evidenceCount}`,
     `Budget: ${tokenCostSummary}`,
     `Next: ${nextAction}`,
@@ -661,8 +661,8 @@ function scanForbiddenRawFields(
 
 function formatSliceBudget(slice: WorkflowSlice): string {
   const parts = [
-    slice.budget?.maxTokens ? `tokens<=${slice.budget.maxTokens}` : "tokens=unset",
-    slice.budget?.maxDurationMs ? `duration<=${slice.budget.maxDurationMs}ms` : "duration=unset",
+    slice.budget?.maxTokens ? `tokens <= ${slice.budget.maxTokens}` : "tokens unset",
+    slice.budget?.maxDurationMs ? `duration <= ${slice.budget.maxDurationMs}ms` : "duration unset",
   ];
   return parts.join(";");
 }

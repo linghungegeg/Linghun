@@ -89,7 +89,7 @@ describe("job runner presenters", () => {
       (value) => value,
     );
     expect(disabled).toContain("Native Runner Doctor：disabled");
-    expect(disabled).toContain("Node fallback=available");
+    expect(disabled).toContain("Node fallback available");
     expect(disabled).toContain("runner only accepts Linghun-approved job specs");
     expect(disabled).not.toContain("Beta PASS");
     expect(disabled).not.toContain("smoke-ready");
@@ -113,7 +113,7 @@ describe("job runner presenters", () => {
       (value) => value,
     );
     expect(missing).toContain("fallback reason: runner binary is missing or not executable");
-    expect(missing).toContain("Node fallback=available");
+    expect(missing).toContain("Node fallback available");
 
     const ready = formatRunnerDoctor(
       {
@@ -140,7 +140,7 @@ describe("job runner presenters", () => {
   });
 
   it("formats fallback and placeholder runner summaries without full native-benefit claims", () => {
-    expect(formatJobRunnerInline(baseJob)).toBe("runner=not_started; Node/TUI default");
+    expect(formatJobRunnerInline(baseJob)).toBe("runner not started; Node/TUI default");
     expect(formatJobRunnerReportLine(baseJob)).toBe(
       "- runner: not_started; Node/TUI default path remains active.",
     );
@@ -160,10 +160,10 @@ describe("job runner presenters", () => {
       },
     };
     expect(formatJobRunnerInline(fallbackJob)).toBe(
-      "runner=node/node_fallback; resolution=unavailable; fallback=unavailable",
+      "runner node/node_fallback; resolution unavailable; fallback unavailable",
     );
-    expect(formatJobRunnerReportLine(fallbackJob)).toContain("adapter=node; status=node_fallback");
-    expect(formatJobRunnerReportLine(fallbackJob)).toContain("fallback=unavailable");
+    expect(formatJobRunnerReportLine(fallbackJob)).toContain("adapter node; status node_fallback");
+    expect(formatJobRunnerReportLine(fallbackJob)).toContain("fallback unavailable");
     expect(formatJobRunnerReportLine(fallbackJob)).not.toContain("smoke-ready");
   });
 
@@ -283,7 +283,7 @@ describe("job runner presenters", () => {
         nextAction: "Inspect the log, fix the issue, then rerun if needed.",
       };
       const rendered = formatBackgroundDetails(task, "en-US");
-      expect(rendered).toContain(`result=${result}`);
+      expect(rendered).toContain(`result ${result}`);
       expect(rendered).toContain("- why stale/blocked:");
       expect(rendered).toContain("- resume/cancel: Inspect the log");
       expect(rendered).toContain("- summary: Command ended with");

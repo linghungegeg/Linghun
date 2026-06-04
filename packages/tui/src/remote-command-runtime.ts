@@ -699,7 +699,7 @@ async function startRemoteFeishuBridge(
   } catch {
     await appendRemoteSystemEvent(
       context,
-      `remote_bridge_start channel=${channel.id} status=failed`,
+      `remote bridge start: channel ${channel.id}; status failed`,
       "warning",
     );
     return {
@@ -812,7 +812,7 @@ export function formatRemoteDoctor(context: TuiContext): string {
     const bridge = getRemoteBridgeDoctor(context.remote, channel.id);
     lines.push(`- ${channel.id}: ${channel.runtimeStatus}`);
     lines.push(`  binding: ${channel.bindingStatus}`);
-    lines.push(`  transport: ${channel.config.transport}; status=${channel.transportStatus}`);
+    lines.push(`  transport: ${channel.config.transport}; status ${channel.transportStatus}`);
     lines.push(`  capability: ${grade.grade} — ${grade.reason}`);
     lines.push(`  bridge: ${bridge.readiness}; ${bridge.nextAction}`);
     lines.push(`  last error: ${channel.lastError ?? "none"}`);
@@ -1173,7 +1173,7 @@ export function formatRemoteSetup(channelArg: string | undefined, context: TuiCo
     );
   }
   lines.push(
-    `- 当前状态：runtime=${channel.runtimeStatus}; binding=${channel.bindingStatus}; transport=${config.transport}/${channel.transportStatus}`,
+    `- 当前状态：runtime ${channel.runtimeStatus}; binding ${channel.bindingStatus}; transport ${config.transport}/${channel.transportStatus}`,
     `- 下一步：补齐 [待填] 字段后运行 /remote test ${channel.id}，再运行 /remote status；不要在主屏粘贴 secret/token/full endpoint。`,
   );
   return lines.join("\n");

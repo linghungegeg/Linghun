@@ -77,7 +77,8 @@ describe("Phase 15 Command Capability Catalog", () => {
 
   it("creates a stable short model-visible summary", () => {
     const summary = createModelCapabilitySummary(8);
-    expect(summary).toContain("risk=");
+    expect(summary).toContain("risk ");
+    expect(summary).not.toContain("risk=");
     expect(summary).toContain("/cache");
     expect(summary.length).toBeLessThan(1200);
     expect(summary).not.toContain("transcript");

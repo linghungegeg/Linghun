@@ -56,7 +56,7 @@ export function formatCacheLog(context: TuiContext): string {
     `Cache log 最近 ${context.cache.history.length}/${context.cache.config.maxTurns} 轮：`,
     ...context.cache.history.map(
       (item) =>
-        `#${item.turn} 命中率=${formatPercent(item.hitRate)} 输入=${item.inputTokens} 输出=${item.outputTokens} 缓存读取=${item.cacheReadTokens} 缓存写入=${item.cacheWriteTokens} 来源=${formatCacheWriteSource(item.cacheWriteTokensSource)} 模型=${item.model} provider=${item.provider}`,
+        `#${item.turn} 命中率 ${formatPercent(item.hitRate)} 输入 ${item.inputTokens} 输出 ${item.outputTokens} 缓存读取 ${item.cacheReadTokens} 缓存写入 ${item.cacheWriteTokens} 来源 ${formatCacheWriteSource(item.cacheWriteTokensSource)} 模型 ${item.model} provider ${item.provider}`,
     ),
   ].join("\n");
 }
@@ -87,7 +87,7 @@ export function formatCacheStatus(context: TuiContext, currentFreshness: CacheFr
     `- read/write tokens: ${latest?.cacheReadTokens ?? 0}/${latest?.cacheWriteTokens ?? 0}`,
     `- cache write source: ${source}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
-    `- workspace reference: hits=${context.cache.workspaceReference.hits} misses=${context.cache.workspaceReference.misses} failures=${context.cache.workspaceReference.failures} latest=${context.cache.workspaceReference.latest?.source ?? "none"}`,
+    `- workspace reference: hits ${context.cache.workspaceReference.hits}; misses ${context.cache.workspaceReference.misses}; failures ${context.cache.workspaceReference.failures}; latest ${context.cache.workspaceReference.latest?.source ?? "none"}`,
     `- workspace snapshot lite: ${formatWorkspaceSnapshotLiteStatus(context)}`,
     `- freshness changedKeys: ${changed.length > 0 ? changed.join(", ") : "none"}`,
     `- note: ${zeroNote}`,
@@ -102,7 +102,7 @@ export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
   const changed = snapshot.changedSummary?.changedKeys.length
     ? snapshot.changedSummary.changedKeys.join(",")
     : "none";
-  return `files=${snapshot.counts.files} dirs=${snapshot.counts.directories} ignored=${snapshot.counts.ignored} stored=${snapshot.counts.storedEntries} partial=${snapshot.partial ? "yes" : "no"} changed=${changed}`;
+  return `files ${snapshot.counts.files}; dirs ${snapshot.counts.directories}; ignored ${snapshot.counts.ignored}; stored ${snapshot.counts.storedEntries}; partial ${snapshot.partial ? "yes" : "no"}; changed ${changed}`;
 }
 
 export function formatCompactStatus(context: TuiContext): string {
@@ -115,18 +115,18 @@ export function formatCompactStatus(context: TuiContext): string {
     "Context Compact status",
     "- deep scope: full transcript semantic compact",
     "- projection scope: provider-visible recent context projection",
-    `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger=${pressure.triggerChars})` : "unknown"}`,
+    `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger ${pressure.triggerChars})` : "unknown"}`,
     `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
     `- boundaries: ${context.cache.compactBoundaries.length}`,
     `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
     `- latest tokens: ${latest ? `${latest.preCompactTokenEstimate ?? "-"}->${latest.postCompactTokenEstimate ?? "-"}` : "-"}`,
     `- latest compact time: ${deep?.createdAt ?? projection?.createdAt ?? latest?.createdAt ?? "none"}`,
-    `- deep packet: ${deep ? `${deep.id}; trigger=${deep.trigger}; events=${deep.transcriptEventCount}` : "none"}`,
+    `- deep packet: ${deep ? `${deep.id}; trigger ${deep.trigger}; events ${deep.transcriptEventCount}` : "none"}`,
     `- deep summary: ${deep ? sanitizeCompactStatusText(deep.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
     `- projection summary: ${projection ? sanitizeCompactStatusText(projection.summary.split(/\r?\n/u).slice(0, 4).join(" | ")) : "none"}`,
     `- discarded/degraded scope: ${projection ? sanitizeCompactStatusText(projection.discardedRange) : "none"}`,
     `- tool pairing safe: ${projection ? (projection.toolPairingSafe ? "yes" : "no") : pressure ? (pressure.toolPairingSafe ? "yes" : "no") : "unknown"}`,
-    `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldownUntil=${failure.cooldownUntil}` : "none"}`,
+    `- failure/cooldown: ${failure ? `${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactStatusText(failure.reason)}; cooldown until ${failure.cooldownUntil}` : "none"}`,
     `- preserved evidence refs: ${deep?.preservedEvidenceRefs.length ?? latest?.preservedEvidenceRefs.length ?? 0}`,
     `- preserved files: ${deep?.preservedFiles.length ?? latest?.preservedFiles.length ?? 0}`,
     "- boundary: deep summary and projection are redacted; raw transcript, secrets, large tool results, provider raw requests, and absolute paths stay out.",

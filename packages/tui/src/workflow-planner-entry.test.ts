@@ -403,25 +403,25 @@ describe("D.14H-F workflow planner core-system wiring", () => {
 
   it("cacheFreshnessHint injects as workspace_cache reference", () => {
     const result = generateWorkflowPlanPreview(
-      goal({ cacheFreshnessHint: "modelProviderHash changed" }),
+      goal({ cacheFreshnessHint: "cache freshness changed model route" }),
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const cacheRef = result.plan.references?.find((r) => r.ref === "cache-freshness-hint");
     expect(cacheRef).toBeDefined();
-    expect(cacheRef?.summary).toContain("modelProviderHash");
+    expect(cacheRef?.summary).toContain("cache freshness changed");
   });
 
   it("workflow worker context carries bounded index, memory, cache, failure, and architecture summaries", () => {
     const result = generateWorkflowPlanPreview(
       goal({
         controlledMemoryRef: { rulesFound: true, summary: "Use pnpm and vitest" },
-        cacheFreshnessHint: "changed=none; memoryHash=abc",
+        cacheFreshnessHint: "cache freshness changed none",
         failureLearningRefs: [{ lesson: "Re-run typecheck before claiming pass", source: "ev-1" }],
         indexStatusRef: {
           status: "ready",
           projectName: "F-Linghun",
-          freshness: "staleHint=none",
+          freshness: "stale hint none",
         },
         architectureRef: {
           target: "workflow worker context",
@@ -433,7 +433,7 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     if (!result.ok) return;
     const refs = result.plan.references ?? [];
     expect(refs.find((r) => r.ref === "controlled-memory-context")?.summary).toContain("pnpm");
-    expect(refs.find((r) => r.ref === "cache-freshness-hint")?.summary).toContain("memoryHash");
+    expect(refs.find((r) => r.ref === "cache-freshness-hint")?.summary).toContain("changed none");
     expect(refs.find((r) => r.ref === "index-status-context")?.summary).toContain("F-Linghun");
     expect(refs.find((r) => r.ref === "architecture-runtime-context")).toMatchObject({
       kind: "architecture",
@@ -544,10 +544,10 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     const result = generateWorkflowPlanPreview(goal());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.mobileSummary).toContain("done=");
-    expect(result.mobileSummary).toContain("running=");
-    expect(result.mobileSummary).toContain("blocked=");
-    expect(result.mobileSummary).toContain("queued=");
+    expect(result.mobileSummary).toContain("done ");
+    expect(result.mobileSummary).toContain("running ");
+    expect(result.mobileSummary).toContain("blocked ");
+    expect(result.mobileSummary).toContain("queued ");
   });
 
   it("failureLearningRefs with secrets are sanitized in detailsText and mobileSummary", () => {

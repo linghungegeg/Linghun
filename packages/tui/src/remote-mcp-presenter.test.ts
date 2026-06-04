@@ -37,7 +37,7 @@ describe("remote MCP presenters", () => {
       [
         "Remote Channels：已开启；仅发送脱敏摘要/审批请求/结果报告。",
         "- 不发送完整 transcript、源码、日志、index result、evidence、API key/token 或 provider raw request。",
-        "- feishu: ready; binding=bound; transport=webhook_mock/mock; lastError=none; next=/remote test feishu",
+        "- feishu: ready; binding bound; transport webhook_mock/mock; last error none; next /remote test feishu",
         "- webhook_mock：diagnostic/test-only dry run，不代表真实 remote delivery PASS。",
         "- 主路径：/remote setup <channel> -> /remote test <channel> -> /remote status",
       ].join("\n"),
@@ -113,8 +113,8 @@ describe("remote MCP presenters", () => {
     expect(formatMcpTools(mcp)).toBe(
       [
         "MCP tools（稳定排序摘要，不输出完整 schema）",
-        "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schemaLoaded=yes 只会在 discovery/doctor 成功后出现。",
-        "- codebase-memory :: index_status — Check index status; discovery=placeholder; trusted=no; schemaLoaded=no; runtime=unknown",
+        "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schema loaded 只有在 discovery/doctor 成功后才会开启。",
+        "- codebase-memory :: index_status — Check index status; discovery placeholder; trusted no; schema loaded no; runtime unknown",
       ].join("\n"),
     );
   });

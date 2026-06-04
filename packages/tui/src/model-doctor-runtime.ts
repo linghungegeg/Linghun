@@ -194,13 +194,13 @@ export function formatModelRoutes(config: LinghunConfig): string {
     "Model routes（多模型按角色触发，不默认乱开）",
     ...config.modelRoutes.routes.map((route) =>
       [
-        `- ${route.role}: provider=${route.provider || "未配置"}`,
-        `model=${route.primaryModel || "未配置"}`,
-        `capabilities=${route.requiredCapabilities.join("+") || "none"}`,
-        `tools=${route.allowTools ? "yes" : "no"}`,
-        `write=${route.allowWrite ? "yes" : "no"}`,
-        `bash=${route.allowBash ? "yes" : "no"}`,
-        `budget=${route.maxCostCny === undefined ? "unconfigured" : `estimated <= ${route.maxCostCny} CNY`}`,
+        `- ${route.role}: provider ${route.provider || "未配置"}`,
+        `model ${route.primaryModel || "未配置"}`,
+        `capabilities ${route.requiredCapabilities.join("+") || "none"}`,
+        `tools ${route.allowTools ? "yes" : "no"}`,
+        `write ${route.allowWrite ? "yes" : "no"}`,
+        `bash ${route.allowBash ? "yes" : "no"}`,
+        `budget ${route.maxCostCny === undefined ? "unconfigured" : `estimated <= ${route.maxCostCny} CNY`}`,
       ].join("  "),
     ),
     "提示：/model route doctor 诊断缺 provider、能力不足和预算配置。",
@@ -274,7 +274,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   const providerEnvApiKeyProviders = await readProviderEnvApiKeyProviders();
   if (lastProviderEnvWarning) {
     lines.push(
-      `WARN: provider.env 读取失败；path=${lastProviderEnvWarning.path}；reason=${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
+      `WARN: provider.env 读取失败；路径 ${lastProviderEnvWarning.path}；原因 ${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
     );
   }
   // D.13J Block 1：provider.env 合并可见化。
@@ -285,11 +285,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   if (lastProviderEnvMerge?.applied) {
     const ids = lastProviderEnvMerge.providerIds;
     lines.push(
-      `- provider.env merge: applied=yes overrodeModelRoutes=${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"} overrodeDefaultModel=${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"} providers=${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请检查该文件是否存在、确认 provider id、或临时改名。安全提示：provider.env 含敏感凭据，不要 cat/type 到主屏、日志或报告)`,
+      `- provider.env merge: applied yes; overrode model routes ${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"}; overrode default model ${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"}; providers ${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请检查该文件是否存在、确认 provider id、或临时改名。安全提示：provider.env 含敏感凭据，不要 cat/type 到主屏、日志或报告)`,
     );
   } else if (lastProviderEnvMerge && !lastProviderEnvMerge.applied) {
     lines.push(
-      "- provider.env merge: applied=no (~/.linghun/provider.env 未覆盖项目 settings；如需切换 provider 请使用 /model setup)",
+      "- provider.env merge: applied no (~/.linghun/provider.env 未覆盖项目 settings；如需切换 provider 请使用 /model setup)",
     );
   }
   const hasShellOpenAiEnv = Boolean(
@@ -313,10 +313,10 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   const placeholderHits = collectPlaceholderModelHits(context.config);
   if (placeholderHits.providers.length > 0 || placeholderHits.routes.length > 0) {
     const providerHits = placeholderHits.providers
-      .map((hit) => `${hit.providerId}=${hit.model}`)
+      .map((hit) => `${hit.providerId} -> ${hit.model}`)
       .join(",");
     const routeHits = placeholderHits.routes
-      .map((hit) => `${hit.role}.${hit.field}=${hit.model}`)
+      .map((hit) => `${hit.role}.${hit.field} -> ${hit.model}`)
       .join(",");
     lines.push(
       `- WARN placeholder model: providers=[${providerHits || "none"}] routes=[${routeHits || "none"}] (这些是占位/未成熟模型名；smoke 前请用 LINGHUN_DEEPSEEK_MODEL/LINGHUN_DEFAULT_MODEL 替换为现役模型名，例如 deepseek-chat/deepseek-reasoner)`,
@@ -325,14 +325,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
   // D.13F：顶层 promptCache 摘要（仅展示 enabled / systemTtl，与具体 provider 无关）。
   // 不输出 apiKey、prompt 明文、cacheBreakNonce、raw request/response，仅状态字段。
   lines.push(
-    `- promptCache: enabled=${context.config.promptCache.enabled ? "yes" : "no"} systemTtl=${context.config.promptCache.systemTtl} (5m 默认 cache_control 无 ttl 字面量；1h 才显式写 ttl)`,
+    `- prompt cache: enabled ${context.config.promptCache.enabled ? "yes" : "no"}; system ttl ${context.config.promptCache.systemTtl} (5m 默认 cache_control 无 ttl 字面量；1h 才显式写 ttl)`,
   );
   // D.13I：deferred 工具发现摘要。仅展示 total / byKind / executableCount，
   // 不含 raw schema/secret/参数；用户 /model doctor 时才看到 deferred 命名空间是否被发现。
   if (context.deferredToolsSummary) {
     const summary = context.deferredToolsSummary;
     lines.push(
-      `- deferredTools: total=${summary.total} executable=${summary.executableCount} codebase-memory=${summary.byKind["codebase-memory"]} mcp=${summary.byKind.mcp} skill=${summary.byKind.skill} plugin=${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
+      `- deferred tools: total ${summary.total}; executable ${summary.executableCount}; codebase-memory ${summary.byKind["codebase-memory"]}; mcp ${summary.byKind.mcp}; skill ${summary.byKind.skill}; plugin ${summary.byKind.plugin} (SearchExtraTools/ExecuteExtraTool 入口；built-in 工具不走该派发)`,
     );
   }
   // D.13J Block 2：本 session 通过 SearchExtraTools 已发现的 deferred 工具名摘要。
@@ -348,7 +348,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       const visible = ds.names.join(",");
       const tail = ds.truncated ? `,…+${ds.total - ds.names.length} more` : "";
       lines.push(
-        `- discoveredDeferredTools: total=${ds.total} names=[${visible}${tail}] (本 session 经 SearchExtraTools 记录过的工具名；session 重启即清零)`,
+        `- discovered deferred tools: total ${ds.total}; names [${visible}${tail}] (本 session 经 SearchExtraTools 记录过的工具名；session 重启即清零)`,
       );
     }
   }
@@ -365,7 +365,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     //   "推理 High 已发送" / "Reasoning High sent"（生效路径）
     //   "未配置推理等级" / "Reasoning not configured"（缺省）
     //   "推理 High 不会发送（当前网关或模型不接受）" / "Reasoning High not sent ..."（不生效）
-    // 技术字段（effective/sent level=High，路径详情）仍写在同一行的括号里，
+    // 技术字段（effective/sent level High，路径详情）仍写在同一行的括号里，
     // 避免再开一段；既不破坏现有 doctor grep 用例（仍含 effective/sent 关键字），
     // 也让普通用户能直接看懂主行。
     const reasoningSentLocal = Boolean(
@@ -387,16 +387,15 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
           : `推理 ${reasoningLevel} 不会发送（当前网关或模型不接受）`;
     const reasoningTechnical = reasoningLevel
       ? endpointProfile === "responses"
-        ? `effective/sent level=${reasoningLevel}`
+        ? `effective/sent level ${reasoningLevel}`
         : endpointProfile === "anthropic_messages"
-          ? `effective/sent level=${reasoningLevel}`
+          ? `effective/sent level ${reasoningLevel}`
           : compatibilityProfile === "permissive_openai_compatible"
-            ? `effective/sent level=${reasoningLevel}`
-            : `ignored/unsupported/未生效 compatibilityProfile=${compatibilityProfile}`
+            ? `effective/sent level ${reasoningLevel}`
+            : `ignored/unsupported/未生效 compatibility profile ${compatibilityProfile}`
       : "not configured/未生效";
-    // 顺序保持 technical 在前：现有 grep 用例期望 `reasoning=ignored/unsupported`
-    // / `reasoning=effective/sent` / `reasoning=not configured` 直接跟在 `reasoning=`
-    // 后面；human-readable 段放在括号里，给普通用户当主语义看，但不破坏 grep。
+    // 顺序保持 technical 在前，让诊断仍容易搜索；human-readable 段放在括号里，
+    // 给普通用户当主语义看。
     const reasoningStatus = `${reasoningTechnical} (${reasoningPlain})`;
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       provider.baseUrl,
@@ -415,27 +414,27 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       requestModel: undefined,
     });
     lines.push(
-      `  - ${providerId}: type=${provider.type} provider=${providerId} model=${provider.model || "missing"} runtimeProfile=${contract.profile} endpointProfile=${contract.endpointProfile} compatibilityProfile=${contract.compatibilityProfile} baseUrl=${provider.baseUrl ? "present" : "missing"} endpointPath=${baseUrlDiagnostic.endpointPath} tools=${contract.supportsTools ? "enabled" : "disabled"} toolSchema=${contract.toolSchemaShape} toolResult=${contract.toolResultShape} retry=${contract.retryStatuses.join("/")}x${contract.maxAttempts} timeoutMs=${contract.requestTimeoutMs} idleTimeoutMs=${contract.streamIdleTimeoutMs} includeUsage=${contract.includeUsage ? "yes" : "no"} reasoning=${reasoningStatus} apiKey=${provider.apiKey && keySource ? `present source=${keySource} masked=${maskSecret(provider.apiKey)}` : "missing source=missing"}`,
+      `  - ${providerId}: type ${provider.type}; provider ${providerId}; model ${provider.model || "missing"}; runtime profile ${contract.profile}; endpoint profile ${contract.endpointProfile}; compatibility ${contract.compatibilityProfile}; base URL ${provider.baseUrl ? "present" : "missing"}; endpoint path ${baseUrlDiagnostic.endpointPath}; tools ${contract.supportsTools ? "enabled" : "disabled"}; tool schema ${contract.toolSchemaShape}; tool result ${contract.toolResultShape}; retry ${contract.retryStatuses.join("/")}x${contract.maxAttempts}; timeout ${contract.requestTimeoutMs}ms; idle timeout ${contract.streamIdleTimeoutMs}ms; include usage ${contract.includeUsage ? "yes" : "no"}; reasoning ${reasoningStatus}; api key ${provider.apiKey && keySource ? `present source ${keySource} masked ${maskSecret(provider.apiKey)}` : "missing source missing"}`,
     );
-    lines.push(`    endpointProfile decision: source=${decision.source} reason=${decision.reason}`);
+    lines.push(`    endpoint profile decision: source ${decision.source}; reason ${decision.reason}`);
     if (provider.type === "openai-compatible") {
       lines.push(
-        "    openai-compatible endpoint hint: root baseUrl + responses 可能可用；chat_completions 通常需要 /v1 root；如果返回 content-type=text/html，baseUrl 可能填到了网页登录页或少了 /v1。",
+        "    openai-compatible endpoint hint: root baseUrl + responses 可能可用；chat_completions 通常需要 /v1 root；如果返回 content type text/html，baseUrl 可能填到了网页登录页或少了 /v1。",
       );
     }
-    // D.13G：tools=disabled 时显式标注原因；anthropic_messages profile 现已原生支持 tools，
-    // 仅在 contract.supportsTools=false（用户显式禁用）时才印 reason。
+    // D.13G：tools disabled 时显式标注原因；anthropic_messages profile 现已原生支持 tools，
+    // 仅在 contract.supportsTools false（用户显式禁用）时才印 reason。
     if (!contract.supportsTools) {
       const reason =
         contract.endpointProfile === "anthropic_messages"
-          ? "anthropic_messages profile 已原生支持 tools，但当前 provider 显式声明 supportsTools=false；如需启用请把配置改为 supportsTools=true 或删除该字段"
-          : `runtime contract supportsTools=false (profile=${contract.profile})`;
+          ? "anthropic_messages profile 已原生支持 tools，但当前 provider 显式声明 supports tools false；如需启用请把配置改为 supportsTools true 或删除该字段"
+          : `runtime contract supports tools false (profile ${contract.profile})`;
       lines.push(`    tools disabled reason: ${reason}`);
     }
     // D.13G：anthropic_messages tools 启用时显式标注 schema/sort 属性，便于诊断。
     if (contract.endpointProfile === "anthropic_messages" && contract.supportsTools) {
       lines.push(
-        "    anthropic tools: enabled schema=anthropic_tools(input_schema) tool_choice=auto/none sort=name-asc(stable for prompt cache)",
+        "    anthropic tools: enabled; schema anthropic_tools(input_schema); tool choice auto/none; sort name-asc(stable for prompt cache)",
       );
     }
     // D.13F：Anthropic prompt cache 可观察字段说明（与 promptCache.enabled 联动）。
@@ -444,11 +443,11 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       const promptCacheEnabled = context.config.promptCache.enabled;
       const ttl = context.config.promptCache.systemTtl;
       lines.push(
-        `    anthropic prompt cache: cache_control=${
+        `    anthropic prompt cache: cache_control ${
           promptCacheEnabled
-            ? `injected ttl=${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}`
+            ? `injected; ttl ${ttl === "1h" ? "1h" : "5m-default(no ttl literal)"}`
             : "off"
-        } usage_fields=cache_creation.ephemeral_5m_input_tokens/ephemeral_1h_input_tokens (read-only when emitted by upstream)`,
+        }; usage fields cache_creation.ephemeral_5m_input_tokens/ephemeral_1h_input_tokens (read-only when emitted by upstream)`,
       );
       // D.13H：Anthropic Context Editing / cache_edits 收口（hard-disabled）。
       // 仅输出 enabled / sendable / betaHeaders count / disabled reason；不输出
@@ -461,12 +460,12 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
         contract,
       );
       lines.push(
-        `    anthropic context editing: enabled=${contextEditing.enabled ? "yes" : "no"} sendable=${contextEditing.sendable ? "yes" : "no"} betaHeaders=${contextEditing.betaHeaderCount} reason=${contextEditing.disabledReason ?? "ok"} (cache_edits/cache_reference body 字段 hard-disabled)`,
+        `    anthropic context editing: enabled ${contextEditing.enabled ? "yes" : "no"}; sendable ${contextEditing.sendable ? "yes" : "no"}; beta headers ${contextEditing.betaHeaderCount}; reason ${contextEditing.disabledReason ?? "ok"} (cache_edits/cache_reference body 字段 hard-disabled)`,
       );
     }
     if (projectSettingsApiKeyProviders.has(providerId)) {
       lines.push(
-        `    WARN: project-settings provider=${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
+        `    WARN: project settings provider ${providerId} contains apiKey; project .linghun/settings.json 不建议保存 apiKey，请迁移到环境变量或私有配置。`,
       );
     }
     if (decision.warnings.length > 0) {
@@ -482,16 +481,16 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     }
     if (baseUrlDiagnostic.fullEndpointSuffix) {
       lines.push(
-        `    warning: baseUrl 包含完整 endpoint suffix=${baseUrlDiagnostic.fullEndpointSuffix}；已按 root baseUrl 诊断，最终 endpointPath=${baseUrlDiagnostic.endpointPath}`,
+        `    warning: baseUrl 包含完整 endpoint suffix ${baseUrlDiagnostic.fullEndpointSuffix}；已按 root baseUrl 诊断，最终 endpoint path ${baseUrlDiagnostic.endpointPath}`,
       );
       lines.push(`    recommendation: ${baseUrlDiagnostic.recommendation}`);
       if (baseUrlDiagnostic.profileMismatch) {
         lines.push(
-          `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${endpointProfile}`,
+          `    profile/baseUrl 不匹配：baseUrl suffix ${baseUrlDiagnostic.fullEndpointSuffix}，endpoint profile ${endpointProfile}`,
         );
       } else if (provider.endpointProfile && provider.endpointProfile !== endpointProfile) {
         lines.push(
-          `    profile/baseUrl 不匹配：baseUrl suffix=${baseUrlDiagnostic.fullEndpointSuffix}，endpointProfile=${provider.endpointProfile}，runtimeEndpointProfile=${endpointProfile}`,
+          `    profile/baseUrl 不匹配：baseUrl suffix ${baseUrlDiagnostic.fullEndpointSuffix}，configured endpoint profile ${provider.endpointProfile}，runtime endpoint profile ${endpointProfile}`,
         );
       }
     }
@@ -500,14 +499,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     const problems = diagnoseRoute(route, context.config);
     const level = getRouteDoctorLevel(route, problems, context.config);
     lines.push(
-      `- ${route.role}: ${level}${problems.length === 0 ? "" : `：${problems.join("；")}`} provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"} fallback=${route.fallbackModels.length > 0 ? route.fallbackModels.join(",") : "未配置"}`,
+      `- ${route.role}: ${level}${problems.length === 0 ? "" : `：${problems.join("；")}`} provider ${route.provider || "未配置"} model ${route.primaryModel || "未配置"} fallback ${route.fallbackModels.length > 0 ? route.fallbackModels.join(",") : "未配置"}`,
     );
   }
   if (context.routeDecisions.length > 0) {
     lines.push(isEn ? "- recent route decisions:" : "- 最近路由决策：");
     for (const decision of context.routeDecisions.slice(0, 3)) {
       lines.push(
-        `  - ${decision.role}: trigger=${decision.triggerReason} selected=${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"} fallbackUsed=${decision.fallbackUsed ? "yes" : "no"} stop=${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
+        `  - ${decision.role}: trigger ${decision.triggerReason}; selected ${decision.selectedProvider || "paused"}/${decision.selectedModel || "paused"}; fallback used ${decision.fallbackUsed ? "yes" : "no"}; stop ${decision.stopConditions.length > 0 ? decision.stopConditions.join("|") : "none"}`,
       );
     }
   }
@@ -523,7 +522,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
     const humanKind = formatProviderFailureKindLabel(failureKind, context.language);
     if (isEn) {
       lines.push(
-        `- last model-service failure: kind=${humanKind} code=${failure.code} provider=${failure.provider} model=${failure.model} endpointProfile=${failure.endpointProfile}; details: /details evidence`,
+        `- last model-service failure: kind ${humanKind}; code ${failure.code}; provider ${failure.provider}; model ${failure.model}; endpoint profile ${failure.endpointProfile}; details: /details evidence`,
       );
       if (failure.kind === "quota_or_balance_exhausted") {
         lines.push(
@@ -532,7 +531,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       }
     } else {
       lines.push(
-        `- 最近模型服务失败：类型=${humanKind} code=${failure.code} 服务商=${failure.provider} 模型=${failure.model} 接口类型=${failure.endpointProfile}；详情：/details evidence`,
+        `- 最近模型服务失败：类型 ${humanKind}；code ${failure.code}；服务商 ${failure.provider}；模型 ${failure.model}；接口类型 ${failure.endpointProfile}；详情：/details evidence`,
       );
       if (failure.kind === "quota_or_balance_exhausted") {
         lines.push("- 额度/余额说明：这是上游错误分类，不是 Linghun 查询余额的结果。");
@@ -555,8 +554,8 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
             : "已失败";
     lines.push(
       isEn
-        ? `- last fallback attempt: ${statusText}; ${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}; reason=${reason} code=${attempt.reasonCode}`
-        : `- 最近备用模型尝试：状态=${statusText}；${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}；原因=${reason} code=${attempt.reasonCode}`,
+        ? `- last fallback attempt: ${statusText}; ${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}; reason ${reason}; code ${attempt.reasonCode}`
+        : `- 最近备用模型尝试：状态 ${statusText}；${attempt.fromProvider}/${attempt.fromModel} -> ${attempt.toProvider}/${attempt.toModel}；原因 ${reason}；code ${attempt.reasonCode}`,
     );
   }
   if (hasOpenAiCompatibleDoctorProblem(context.config)) {

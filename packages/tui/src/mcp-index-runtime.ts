@@ -723,7 +723,7 @@ export function validateMcpServers(context: TuiContext, id?: string): string {
       if (server.status === "missing") problems.push("missing binary");
       if (server.status === "error") problems.push("doctor error");
       if (config?.trustLevel === "untrusted") problems.push("untrusted");
-      return `- ${server.name}: ${problems.length === 0 ? "ok" : problems.join("; ")} source=${config?.sourceUrl ? sanitizeDiagnosticText(config.sourceUrl) : redactedPath(config?.localPath ?? config?.command)} ref=${config?.ref ?? "-"} commit=${config?.commit ?? "-"} permissions=${config?.permissionSummary ?? "tool-discovery"} next=${problems.length === 0 ? "tools/status available" : "run /mcp doctor, then validate/enable after fixing"}`;
+      return `- ${server.name}: ${problems.length === 0 ? "ok" : problems.join("; ")}; source ${config?.sourceUrl ? sanitizeDiagnosticText(config.sourceUrl) : redactedPath(config?.localPath ?? config?.command)}; ref ${config?.ref ?? "-"}; commit ${config?.commit ?? "-"}; permissions ${config?.permissionSummary ?? "tool-discovery"}; next ${problems.length === 0 ? "tools/status available" : "run /mcp doctor, then validate/enable after fixing"}`;
     }),
   ].join("\n");
 }
@@ -1170,7 +1170,7 @@ export function isSupportiveIndexEvidence(
   ) {
     return false;
   }
-  return /(?:\bpath\s*=\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile_path\s*[:=]\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile:\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsymbol\s*=\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsnippet\s*=\s*(?!\s*$).+|\bmatch\s*=\s*(?!\s*$).+)/imu.test(
+  return /(?:\bpath\s*(?:=|:|\s)\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile_path\s*[:=]\s*(?!unknown\b|-)(?:[^\s,;]+)|\bfile:\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsymbol\s*(?:=|:|\s)\s*(?!unknown\b|-)(?:[^\s,;]+)|\bsnippet\s*=\s*(?!\s*$).+|\bmatch\s*=\s*(?!\s*$).+)/imu.test(
     text,
   );
 }

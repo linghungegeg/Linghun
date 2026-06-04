@@ -174,7 +174,7 @@ export async function handleMemoryCommand(
       context.memory.learningMode = "active";
       await writeMemoryLearningMode(context);
       const sessionId = await deps().ensureSession(context);
-      await deps().appendSystemEvent(context, sessionId, "memory_learning_mode=active", "info");
+      await deps().appendSystemEvent(context, sessionId, "memory learning mode active", "info");
       writeLine(
         output,
         context.language === "en-US"
@@ -187,7 +187,7 @@ export async function handleMemoryCommand(
       context.memory.learningMode = "off";
       await writeMemoryLearningMode(context);
       const sessionId = await deps().ensureSession(context);
-      await deps().appendSystemEvent(context, sessionId, "memory_learning_mode=off", "info");
+      await deps().appendSystemEvent(context, sessionId, "memory learning mode off", "info");
       writeLine(
         output,
         context.language === "en-US"
@@ -200,8 +200,8 @@ export async function handleMemoryCommand(
       writeLine(
         output,
         context.language === "en-US"
-          ? `Learning mode: ${context.memory.learningMode}; source=${context.memory.learningModeSource ?? "default"}; candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}`
-          : `学习模式：${context.memory.learningMode === "active" ? "开启" : "关闭"}；来源=${context.memory.learningModeSource ?? "default"}；候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}`,
+          ? `Learning mode: ${context.memory.learningMode}; source ${context.memory.learningModeSource ?? "default"}; candidates ${context.memory.candidates.length}; accepted ${context.memory.accepted.length}`
+          : `学习模式：${context.memory.learningMode === "active" ? "开启" : "关闭"}；来源 ${context.memory.learningModeSource ?? "default"}；候选 ${context.memory.candidates.length}；已接受 ${context.memory.accepted.length}`,
       );
       return;
     }

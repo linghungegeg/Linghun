@@ -31,7 +31,7 @@ export function formatRunnerDoctor(
   sanitizeDiagnosticText: (value: string) => string,
 ): string {
   return [
-    `Native Runner Doctor：${resolution.status}；Node fallback=${resolution.nodeFallback}；主 TUI 不因 runner 问题崩溃。`,
+    `Native Runner Doctor：${resolution.status}；Node fallback ${resolution.nodeFallback}；主 TUI 不因 runner 问题崩溃。`,
     `- enabled: ${resolution.enabled ? "yes" : "no"}`,
     `- source: ${resolution.source}`,
     `- platform/arch: ${resolution.platform}/${resolution.arch}`,
@@ -49,10 +49,10 @@ export function formatRunnerDoctor(
 
 export function formatJobRunnerInline(job: DurableJobState): string {
   if (!job.runner) {
-    return "runner=not_started; Node/TUI default";
+    return "runner not started; Node/TUI default";
   }
-  const heartbeat = job.runner.heartbeatAt ? `; heartbeat=${job.runner.heartbeatAt}` : "";
-  return `runner=${job.runner.adapter}/${job.runner.status}; resolution=${job.runner.resolution}; fallback=${job.runner.fallbackReason ?? "none"}${heartbeat}`;
+  const heartbeat = job.runner.heartbeatAt ? `; heartbeat ${job.runner.heartbeatAt}` : "";
+  return `runner ${job.runner.adapter}/${job.runner.status}; resolution ${job.runner.resolution}; fallback ${job.runner.fallbackReason ?? "none"}${heartbeat}`;
 }
 
 export function formatJobRunnerReportLine(job: DurableJobState): string {
@@ -60,9 +60,9 @@ export function formatJobRunnerReportLine(job: DurableJobState): string {
     return "- runner: not_started; Node/TUI default path remains active.";
   }
   const logRefs = job.runner.logRefs
-    ? `; logs=state:${job.runner.logRefs.state},stdout:${job.runner.logRefs.stdout},stderr:${job.runner.logRefs.stderr}`
+    ? `; logs state ${job.runner.logRefs.state}, stdout ${job.runner.logRefs.stdout}, stderr ${job.runner.logRefs.stderr}`
     : "";
-  return `- runner: enabled=${job.runner.enabled}; adapter=${job.runner.adapter}; status=${job.runner.status}; resolution=${job.runner.resolution}; pathRef=${job.runner.pathRef ?? "-"}; protocol=${job.runner.protocol ?? "unknown"}; version=${job.runner.version ?? "unknown"}; heartbeat=${job.runner.heartbeatAt ?? "-"}; fallback=${job.runner.fallbackReason ?? "none"}; lastError=${job.runner.lastError ?? "none"}; next=${job.runner.nextAction}${logRefs}`;
+  return `- runner: enabled ${job.runner.enabled}; adapter ${job.runner.adapter}; status ${job.runner.status}; resolution ${job.runner.resolution}; path ${job.runner.pathRef ?? "-"}; protocol ${job.runner.protocol ?? "unknown"}; version ${job.runner.version ?? "unknown"}; heartbeat ${job.runner.heartbeatAt ?? "-"}; fallback ${job.runner.fallbackReason ?? "none"}; last error ${job.runner.lastError ?? "none"}; next ${job.runner.nextAction}${logRefs}`;
 }
 
 export function mapDurableJobToBackgroundStatus(
@@ -136,17 +136,17 @@ export function formatBackgroundDetails(
     language === "en-US" ? `Background ${task.id}` : `Background ${task.id}`,
     `- kind: ${task.kind}`,
     `- title: ${truncateLine(task.title, 72)}`,
-    `- status: ${task.status}; result=${task.result ?? "-"}`,
-    `- currentStep: ${truncateLine(task.currentStep ?? "-", 72)}`,
+    `- status: ${task.status}; result ${task.result ?? "-"}`,
+    `- current step: ${truncateLine(task.currentStep ?? "-", 72)}`,
     `- progress: ${progress}`,
     `- why stale/blocked: ${formatBackgroundReason(task, language)}`,
     `- resume/cancel: ${truncateLine(task.nextAction ?? "-", 96)}`,
     `- summary: ${truncateLine(sanitizeDisplayPaths(task.userVisibleSummary, projectPath), 120)}`,
-    `- logPath: ${formatDisplayPath(task.logPath, projectPath)}`,
-    `- outputPath: ${formatDisplayPath(task.outputPath, projectPath)}`,
-    `- hasOutput: ${task.hasOutput}`,
-    `- startedAt: ${task.startedAt}`,
-    `- updatedAt: ${task.updatedAt}`,
+    `- log path: ${formatDisplayPath(task.logPath, projectPath)}`,
+    `- output path: ${formatDisplayPath(task.outputPath, projectPath)}`,
+    `- has output: ${task.hasOutput}`,
+    `- started at: ${task.startedAt}`,
+    `- updated at: ${task.updatedAt}`,
   ].join("\n");
 }
 

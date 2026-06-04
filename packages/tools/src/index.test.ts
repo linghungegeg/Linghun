@@ -35,7 +35,7 @@ describe("Phase 05 core tools", () => {
     expect(todoAdd.output.text).toContain("[pending] 验证工具闭环");
     expect(context.todos[0]?.status).toBe("completed");
     expect(context.todos[0]?.evidence).toBe("测试通过");
-    expect(bash.output.text).toContain("exitCode=0");
+    expect(bash.output.text).toContain("exit code 0");
     expect(bash.output.fullOutputPath).toBeTruthy();
     expect(diff.output.text).toContain("sample.txt");
   });
@@ -314,7 +314,8 @@ describe("Phase 05 core tools", () => {
     const diff = await runTool("Diff", {}, context);
 
     expect(edit.output.summary).toContain("+1 -1");
-    expect(edit.output.details).toContain("readGuard: expectedHash");
+    expect(edit.output.details).toContain("read protection: enabled");
+    expect(edit.output.details).not.toContain("readGuard");
     expect(multi.output.data).toMatchObject({ operation: "MultiEdit", editCount: 2 });
     expect(diff.output.data).toMatchObject({
       changedFiles: ["sample.txt"],
@@ -340,8 +341,8 @@ describe("Phase 05 core tools", () => {
       totalLines: 205,
       contentLines: 205,
     });
-    expect(read.output.text).toContain("Read window only");
-    expect(read.output.text).toContain("not the full file");
+    expect(read.output.text).toContain("只显示读取窗口");
+    expect(read.output.text).toContain("不是完整文件");
   });
 
   it("reports Read line counts for files without a trailing newline", async () => {
@@ -359,7 +360,7 @@ describe("Phase 05 core tools", () => {
       totalLines: 3,
       contentLines: 3,
     });
-    expect(read.output.text).not.toContain("Read window only");
+    expect(read.output.text).not.toContain("只显示读取窗口");
   });
 
   it("supports common leading (?i) case-insensitive Grep patterns", async () => {
@@ -405,6 +406,11 @@ describe("Phase 05 core tools", () => {
       expect(calls.every((args) => args.includes("!**/node_modules/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/dist/**"))).toBe(true);
       expect(calls.every((args) => args.includes("!**/.git/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.codebase-memory/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/logs/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/agent-runs/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/failures/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/*.tsbuildinfo"))).toBe(true);
       expect(calls.some((args) => args.includes("--hidden") && args.includes("--no-ignore"))).toBe(
         true,
       );
@@ -481,6 +487,51 @@ describe("Phase 05 core tools", () => {
     }
   });
 
+  it("does not exclude the explicitly requested rg search root", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    const calls: string[][] = [];
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: (_command: string, args: string[]) => {
+        calls.push(args);
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          if (args.includes("--files")) {
+            child.stdout.write(".linghun/logs/run.txt\n");
+          } else {
+            child.stdout.write(".linghun/logs/run.txt:1: needle\n");
+          }
+          child.stdout.end();
+          child.emit("close", 0);
+        });
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const context = tools.createToolContext(project);
+      const grep = await tools.runTool(
+        "Grep",
+        { pattern: "needle", path: ".linghun/logs" },
+        context,
+      );
+      const glob = await tools.runTool(
+        "Glob",
+        { pattern: "*.txt", path: ".linghun/logs" },
+        context,
+      );
+
+      expect(grep.output.text).toContain(".linghun/logs/run.txt:1: needle");
+      expect(glob.output.text).toContain("run.txt");
+      expect(calls.every((args) => !args.includes("!**/.linghun/logs/**"))).toBe(true);
+      expect(calls.every((args) => args.includes("!**/.linghun/agent-runs/**"))).toBe(true);
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
   it("keeps rg Glob results relative to the requested search path", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     vi.resetModules();
@@ -538,6 +589,62 @@ describe("Phase 05 core tools", () => {
       vi.doUnmock("node:child_process");
       vi.resetModules();
     }
+  });
+
+  it("skips generated cache and Linghun log paths in JS Grep and Glob fallback", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await mkdir(join(project, ".linghun", "logs"), { recursive: true });
+    await mkdir(join(project, ".linghun", "agent-runs"), { recursive: true });
+    await mkdir(join(project, ".linghun", "failures"), { recursive: true });
+    await mkdir(join(project, ".codebase-memory"), { recursive: true });
+    await writeFile(join(project, "src.txt"), "visible needle\n", "utf8");
+    await writeFile(join(project, "tsconfig.tsbuildinfo"), "hidden needle\n", "utf8");
+    await writeFile(join(project, ".linghun", "logs", "run.txt"), "hidden needle\n", "utf8");
+    await writeFile(join(project, ".linghun", "agent-runs", "run.txt"), "hidden needle\n", "utf8");
+    await writeFile(join(project, ".linghun", "failures", "fail.txt"), "hidden needle\n", "utf8");
+    await writeFile(join(project, ".codebase-memory", "graph.txt"), "hidden needle\n", "utf8");
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      spawn: () => {
+        const child = createMockChildProcess();
+        queueMicrotask(() => child.emit("error", new Error("ENOENT")));
+        return child;
+      },
+    }));
+
+    try {
+      const tools = await import("./index.js");
+      const context = tools.createToolContext(project);
+      const grep = await tools.runTool("Grep", { pattern: "needle", path: "." }, context);
+      const glob = await tools.runTool("Glob", { pattern: "*.txt", path: "." }, context);
+
+      expect(grep.output.text).toContain("src.txt:1");
+      expect(grep.output.text).not.toContain("tsconfig.tsbuildinfo");
+      expect(grep.output.text).not.toContain(".linghun/logs");
+      expect(grep.output.text).not.toContain(".linghun/agent-runs");
+      expect(grep.output.text).not.toContain(".linghun/failures");
+      expect(grep.output.text).not.toContain(".codebase-memory");
+      expect(glob.output.text).toContain("src.txt");
+      expect(glob.output.text).not.toContain(".linghun/logs");
+      expect(glob.output.text).not.toContain(".codebase-memory");
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
+  it("still allows explicit Read for paths excluded from search defaults", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
+    await mkdir(join(project, ".linghun", "logs"), { recursive: true });
+    await writeFile(join(project, ".linghun", "logs", "run.txt"), "explicit read ok\n", "utf8");
+
+    const read = await runTool(
+      "Read",
+      { path: ".linghun/logs/run.txt" },
+      createToolContext(project),
+    );
+
+    expect(read.output.text).toContain("explicit read ok");
   });
 
   it("stops Glob traversal after the requested limit without entering later large trees", async () => {
@@ -669,8 +776,8 @@ describe("Phase 05 core tools", () => {
     });
     expect(read.output.text).toContain("2\ttwo");
     expect(read.output.text).toContain("3\tthree");
-    expect(read.output.text).toContain("Read window only");
-    expect(read.output.text).toContain("not the full file");
+    expect(read.output.text).toContain("只显示读取窗口");
+    expect(read.output.text).toContain("不是完整文件");
   });
 
   it("validates tool input and preserves details when output is capped", async () => {

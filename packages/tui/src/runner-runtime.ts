@@ -373,7 +373,7 @@ export function formatApprovedRunnerSpecLine(job: DurableJobState): string {
     return `- approved spec: none\n${formatNativeRunnerProcessGuardContract()}`;
   }
   return [
-    `- approved spec: id=${spec.id}; taskKind=${spec.approvedTaskKind}; cwdRef=${redactedPath(spec.cwd)}; timeoutMs=${spec.timeoutMs}; expectedProtocol=${spec.expectedProtocol}; envAllowlist=${spec.envAllowlist.join(",") || "none"}; redactedEnvRefs=${spec.redactedEnvRefs.join(",") || "none"}; evidenceRefs=${spec.evidenceRefs.join(",") || "none"}; logRefs=state/stdout/stderr/jobLog/fullOutput/report`,
+    `- approved spec: id ${spec.id}; task kind ${spec.approvedTaskKind}; cwd ref ${redactedPath(spec.cwd)}; timeout ${spec.timeoutMs}ms; expected protocol ${spec.expectedProtocol}; env allowlist ${spec.envAllowlist.join(",") || "none"}; redacted env refs ${spec.redactedEnvRefs.join(",") || "none"}; evidence refs ${spec.evidenceRefs.join(",") || "none"}; log refs state/stdout/stderr/jobLog/fullOutput/report`,
     formatNativeRunnerProcessGuardContract(),
   ].join("\n");
 }
@@ -441,7 +441,7 @@ export async function startRunnerForDurableJob(
   };
   await deps.appendJobLog(
     job,
-    `runner adapter=${job.runner.adapter} status=${job.runner.status} resolution=${job.runner.resolution} fallback=${job.runner.fallbackReason ?? "none"}`,
+    `runner adapter ${job.runner.adapter}; status ${job.runner.status}; resolution ${job.runner.resolution}; fallback ${job.runner.fallbackReason ?? "none"}`,
   );
 }
 

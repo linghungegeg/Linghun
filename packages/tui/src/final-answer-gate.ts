@@ -280,7 +280,7 @@ export function formatClaimCheck(result: ClaimCheck, language: Language): string
     const risks = result.verdict.residualRisks.join("; ");
     return language === "en-US"
       ? [
-          `Claim Checker: verdict=${result.verdict.status}; scope=${result.verdict.scope}.`,
+          `Claim Checker: verdict ${result.verdict.status}; scope ${result.verdict.scope}.`,
           `Evidence is ${evidenceStatus}; use /details evidence for details.`,
           `Validation: ${validation}.`,
           `Uncovered: ${uncovered}.`,
@@ -288,7 +288,7 @@ export function formatClaimCheck(result: ClaimCheck, language: Language): string
           `Next: ${result.verdict.nextAction}`,
         ].join("\n")
       : [
-          `Claim Checker：verdict=${result.verdict.status}；scope=${result.verdict.scope}。`,
+          `Claim Checker：verdict ${result.verdict.status}；scope ${result.verdict.scope}。`,
           `证据已${evidenceStatus === "recorded" ? "记录" : "缺失"}；详情用 /details evidence。`,
           `Validation：${validation}。`,
           `Uncovered：${uncovered}。`,

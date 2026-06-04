@@ -57,7 +57,7 @@ export function createLayeredToolOutput(
   return {
     layer: "primary",
     toolName: name,
-    summary: output.summary ?? createToolSummary(name, output, language),
+    summary: sanitizeToolSummaryForPrimary(output.summary ?? createToolSummary(name, output, language), language),
     preview: preview.text,
     details: output.details,
     truncated,
@@ -181,9 +181,9 @@ export function formatToolStart(name: ToolName, input: unknown): string | undefi
   } else if (name === "Write" || name === "Edit" || name === "MultiEdit") {
     arg = str("file_path") ?? str("path");
   } else if (name === "Grep") {
-    arg = str("pattern") ?? str("path");
+    arg = "search";
   } else if (name === "Glob") {
-    arg = str("pattern") ?? str("path");
+    arg = "files";
   }
   if (!arg) return undefined;
   return `${name}(${clamp(redactBannerArg(arg))})`;
@@ -316,11 +316,27 @@ function formatDetailsHint(language: Language): string {
 
 function createToolSummary(name: ToolName, output: ToolOutput, language: Language): string {
   const changed = output.changedFiles?.length ?? 0;
-  const suffix = changed > 0 ? `; changedFiles=${changed}` : "";
   if (language === "en-US") {
+    const suffix = changed > 0 ? `; changed ${changed} file${changed === 1 ? "" : "s"}` : "";
     return `${name} completed${output.truncated ? " with truncated main output" : ""}${suffix}.`;
   }
+  const suffix = changed > 0 ? `；改动 ${changed} 个文件` : "";
   return `${name} 已完成${output.truncated ? "，主输出已截断" : ""}${suffix}。`;
+}
+
+function sanitizeToolSummaryForPrimary(summary: string, language: Language): string {
+  if (language === "en-US") {
+    return summary
+      .replace(/\bchangedFiles=(\d+)/gu, "changed files: $1")
+      .replace(/\bcontentLines=(\d+)/gu, "content lines: $1")
+      .replace(/\bselectedLines=(\d+)/gu, "selected lines: $1")
+      .replace(/\bwindowLines=(\d+)/gu, "window lines: $1");
+  }
+  return summary
+    .replace(/\bchangedFiles=(\d+)/gu, "改动文件：$1")
+    .replace(/\bcontentLines=(\d+)/gu, "内容行数：$1")
+    .replace(/\bselectedLines=(\d+)/gu, "选中行数：$1")
+    .replace(/\bwindowLines=(\d+)/gu, "窗口行数：$1");
 }
 
 function createToolOutputPreview(
@@ -498,12 +514,12 @@ function createSummaryFirstPreview(
     if (changedFiles.length > 0) {
       stats.push(
         language === "en-US"
-          ? `changedFiles ${changedFiles.length}`
-          : `changedFiles ${changedFiles.length}`,
+          ? `changed ${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"}`
+          : `改动文件 ${changedFiles.length}`,
       );
     }
     if (readGuard) {
-      stats.push(language === "en-US" ? `read guard ${readGuard}` : `读取保护 ${readGuard}`);
+      stats.push(language === "en-US" ? "read protection enabled" : "读取保护已启用");
     }
   }
   // Run 3 C — Ctrl+O 提示必须和真实可展开内容绑定。
@@ -542,12 +558,12 @@ function formatToolLineStat(
   const contentLines = input.contentLines ?? input.totalLines;
   if (input.truncated) {
     return input.language === "en-US"
-      ? `window ${windowLines}/${input.totalLines} line(s); contentLines=${contentLines}`
-      : `窗口 ${windowLines}/${input.totalLines} 行；contentLines=${contentLines}`;
+      ? `window ${windowLines}/${input.totalLines} line(s); content ${contentLines} line(s)`
+      : `窗口 ${windowLines}/${input.totalLines} 行；内容 ${contentLines} 行`;
   }
   return input.language === "en-US"
-    ? `total ${input.totalLines} line(s); contentLines=${contentLines}`
-    : `总计 ${input.totalLines} 行；contentLines=${contentLines}`;
+    ? `total ${input.totalLines} line(s); content ${contentLines} line(s)`
+    : `总计 ${input.totalLines} 行；内容 ${contentLines} 行`;
 }
 
 function formatBashTail(lines: string[], language: Language): string[] {

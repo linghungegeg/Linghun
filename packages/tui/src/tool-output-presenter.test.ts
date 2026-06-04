@@ -48,9 +48,9 @@ describe("tool-output-presenter", () => {
       expect(formatToolStart("MultiEdit", { file_path: "c.ts" })).toBe("MultiEdit(c.ts)");
     });
 
-    it("Grep/Glob 显示 pattern", () => {
-      expect(formatToolStart("Grep", { pattern: "foo" })).toBe("Grep(foo)");
-      expect(formatToolStart("Glob", { pattern: "*.ts" })).toBe("Glob(*.ts)");
+    it("Grep/Glob 主屏 start banner 不回显原始搜索式", () => {
+      expect(formatToolStart("Grep", { pattern: "foo" })).toBe("Grep(search)");
+      expect(formatToolStart("Glob", { pattern: "*.ts" })).toBe("Glob(files)");
     });
 
     it("超长参数被裁剪到 120 字符", () => {
@@ -187,7 +187,7 @@ describe("tool-output-presenter", () => {
       const layered = createLayeredToolOutput(
         "Read",
         {
-          text: "1\tone\n2\ttwo\n...（Read window only: selectedLines=2, windowLines=2, totalLines=5, contentLines=5; not the full file）",
+          text: "1\tone\n2\ttwo\n...（只显示读取窗口：选中 2 行 / 全文 5 行；不是完整文件）",
           data: { lines: 2, selectedLines: 2, windowLines: 2, totalLines: 5, contentLines: 5 },
           truncated: true,
         },
@@ -195,7 +195,8 @@ describe("tool-output-presenter", () => {
       );
 
       expect(layered.preview).toContain("窗口 2/5 行");
-      expect(layered.preview).toContain("contentLines=5");
+      expect(layered.preview).toContain("内容 5 行");
+      expect(layered.preview).not.toContain("contentLines=5");
       expect(layered.preview).not.toContain("2 行");
     });
 
@@ -240,7 +241,25 @@ describe("tool-output-presenter", () => {
         "zh-CN",
       );
       expect(layered.preview).toContain("补丁 +3 -1");
-      expect(layered.preview).toContain("changedFiles 1");
+      expect(layered.preview).toContain("改动文件 1");
+      expect(layered.preview).not.toContain("changedFiles 1");
+    });
+
+    it("主屏 summary 将半机器字段改成人话", () => {
+      const layered = createLayeredToolOutput(
+        "Edit",
+        {
+          text: "edited",
+          summary: "Edit sample.txt: +1 -1; changedFiles=1; contentLines=5",
+          changedFiles: ["sample.txt"],
+          data: { addedLines: 1, removedLines: 1, lines: 1 },
+        },
+        "zh-CN",
+      );
+      expect(layered.summary).toContain("改动文件：1");
+      expect(layered.summary).toContain("内容行数：5");
+      expect(layered.summary).not.toContain("changedFiles=");
+      expect(layered.summary).not.toContain("contentLines=");
     });
   });
 

@@ -17,21 +17,18 @@ import { sanitizeDiagnosticText, sanitizeDisplayPaths, writeLine } from "./start
  *
  * 调用方应当只把"用户面向"的关键状态填进 panel；guard / runtime / binary /
  * source / version / schemaLoaded / trustLevel / endpoint 等内部字段一律
- * 不进 summary / sections，要么入 detailsText（Ctrl+O 展开），要么仅在
- * doctor 子命令路径上输出。
+ * 不进 summary / sections，要么入 detailsText，要么仅在 doctor 子命令路径上输出。
  */
 /**
- * D.13Q-UX Task Surface Maturity Sweep — Ctrl+O fallback 装配器。
+ * D.13Q-UX Task Surface Maturity Sweep — explicit /details panel 装配器。
  *
- * 当 commandPanel 未打开、最近 block 也没有可展开 fullText 时，把
- * lastFullOutput / evidence / background 装配成一个 CommandPanel detailsText
- * 视图，让 Ctrl+O **始终走 panel 路径**，绝不调 handleDetailsCommand
- * （那会 writeLine 进 transcript，污染 lastFullOutput 并出现 "Linghun details"
- * 计数行）。
+ * 把 lastFullOutput / evidence / background 装配成一个 CommandPanel detailsText
+ * 视图，供显式 /details slash 命令和测试使用。Ctrl+O 不走这里；它只切换
+ * transcript/message block 的 verbose 展开态。
  *
  * 返回 undefined 表示三类内容都为空 —— 调用方走 notifications 轻提示。
  */
-export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
+export function buildExplicitDetailsCommandPanel(context: TuiContext): CommandPanelView | undefined {
   const isEn = context.language === "en-US";
   const hasOutput = Boolean(context.lastFullOutput);
   const hasCompact = Boolean(
@@ -123,8 +120,8 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
       rows: [
         projection
           ? isEn
-            ? `Last compact ${projection.createdAt}; pairing=${projection.toolPairingSafe ? "safe" : "unsafe"}`
-            : `最近压缩 ${projection.createdAt}；pairing=${projection.toolPairingSafe ? "安全" : "不安全"}`
+            ? `Last compact ${projection.createdAt}; pairing ${projection.toolPairingSafe ? "safe" : "unsafe"}`
+            : `最近压缩 ${projection.createdAt}；pairing ${projection.toolPairingSafe ? "安全" : "不安全"}`
           : isEn
             ? "No successful compact projection"
             : "没有成功的 compact projection",
@@ -145,10 +142,10 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
           `- deep: ${context.cache.deepCompact.id}`,
           "- deep scope: full transcript semantic compact",
           `- trigger: ${context.cache.deepCompact.trigger}`,
-          `- evidenceRefs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
+          `- evidence refs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
           `- files: ${context.cache.deepCompact.preservedFiles.join(", ") || "none"}`,
           `- deep summary: ${sanitizeCompactDetailsText(context.cache.deepCompact.summary, context.projectPath)}`,
-          "- passEvidence: no; context continuity only",
+          "- pass evidence: no; context continuity only",
         ].join("\n"),
       );
     }
@@ -159,14 +156,14 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
           `- pressure: ${projection.pressureRatio}`,
           "- scope: provider-visible recent context projection",
           `- discarded: ${sanitizeCompactDetailsText(projection.discardedRange, context.projectPath)}`,
-          `- evidenceRefs: ${projection.evidenceRefs.join(", ") || "none"}`,
+          `- evidence refs: ${projection.evidenceRefs.join(", ") || "none"}`,
           `- summary: ${sanitizeCompactDetailsText(projection.summary, context.projectPath)}`,
         ].join("\n"),
       );
     }
     if (failure) {
       detailsParts.push(
-        `- failure: ${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactDetailsText(failure.reason, context.projectPath)}; cooldownUntil=${failure.cooldownUntil}`,
+        `- failure: ${failure.blocked ? "blocked" : "partial"}; ${sanitizeCompactDetailsText(failure.reason, context.projectPath)}; cooldown until ${failure.cooldownUntil}`,
       );
     }
   }
@@ -179,8 +176,8 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
       title: isEn ? "Context compact" : "上下文压缩",
       rows: [
         isEn
-          ? `Deep compact ${context.cache.deepCompact.createdAt}; scope=full transcript semantic compact`
-          : `Deep compact ${context.cache.deepCompact.createdAt}；scope=full transcript semantic compact`,
+          ? `Deep compact ${context.cache.deepCompact.createdAt}; scope full transcript semantic compact`
+          : `Deep compact ${context.cache.deepCompact.createdAt}；scope full transcript semantic compact`,
       ],
     });
     detailsParts.push("");
@@ -190,7 +187,7 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
         `- deep: ${context.cache.deepCompact.id}`,
         "- scope: full transcript semantic compact",
         `- trigger: ${context.cache.deepCompact.trigger}`,
-        `- evidenceRefs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
+        `- evidence refs: ${context.cache.deepCompact.preservedEvidenceRefs.join(", ") || "none"}`,
         `- files: ${context.cache.deepCompact.preservedFiles.join(", ") || "none"}`,
         `- summary: ${sanitizeCompactDetailsText(context.cache.deepCompact.summary, context.projectPath)}`,
         "- passEvidence: no; context continuity only",
@@ -230,9 +227,8 @@ export function buildToggleDetailsCommandPanel(context: TuiContext): CommandPane
       ...(backgroundCount > 0 ? ["/details background <id>"] : []),
     ],
     detailsText: detailsParts.join("\n"),
-    // D.14D — 默认折叠：主屏只显示 summary + 分区计数；Ctrl+O 再展开 detailsText
-    // （含 id/source）。这样首次 Ctrl+O 看摘要，再按一次才展开完整明细，避免
-    // 一上来就把内部 id / 完整正文糊一屏。
+    // D.14D — 默认折叠：主屏只显示 summary + 分区计数，panel 内显式展开
+    // detailsText（含 id/source）。避免一上来就把内部 id / 完整正文糊一屏。
     expanded: false,
   };
 }

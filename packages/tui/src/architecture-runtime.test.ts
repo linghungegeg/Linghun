@@ -138,12 +138,12 @@ describe("architecture card facts and formatting", () => {
   it("includes maturity defaults and long task hint in the directive", () => {
     const directive = createArchitectureRuntimeDirective(baseCard);
 
-    expect(directive).toContain("MaturityDefaults=");
+    expect(directive).toContain("Maturity defaults:");
     expect(directive).toContain("信息架构清晰");
     expect(directive).toContain("响应式布局");
     expect(directive).toContain("空态");
     expect(directive).toContain("错误态");
-    expect(directive).toContain("LongTaskHint=");
+    expect(directive).toContain("Long task hint:");
     expect(directive).toContain("/autopilot");
     expect(directive).toContain("/plan");
   });
@@ -151,7 +151,7 @@ describe("architecture card facts and formatting", () => {
   it("includes anti-code-blob engineering structure constraints in the directive", () => {
     const directive = createArchitectureRuntimeDirective(baseCard);
 
-    expect(directive).toContain("AntiCodeBlob=");
+    expect(directive).toContain("Anti code blob:");
     expect(directive).toContain("god file");
     expect(directive).toContain("code blob");
     expect(directive).toContain("超长函数");
@@ -168,7 +168,7 @@ describe("architecture card facts and formatting", () => {
     const directive = createArchitectureRuntimeDirective(baseCard);
 
     // 目录 / 标识
-    expect(directive).toContain("LegacyLargeFileDebt=");
+    expect(directive).toContain("Legacy large file debt:");
     expect(directive).toContain("packages/tui/src/index.ts");
     expect(directive).toContain("legacy-large-file");
     expect(directive).toContain("D.14");

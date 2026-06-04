@@ -403,7 +403,7 @@ function buildMobileSummary(
   const lines = [
     `Workflow: ${title}`,
     `Phase: ${meta.currentPhase}`,
-    `Slices: done=${meta.slicesDone} running=${meta.slicesRunning} blocked=${meta.slicesBlocked} queued=${meta.slicesQueued}`,
+    `Slices: done ${meta.slicesDone} running ${meta.slicesRunning} blocked ${meta.slicesBlocked} queued ${meta.slicesQueued}`,
     `Approval needed: ${summary.startGateNeeded > 0 ? "yes" : "no"}`,
     `Evidence: ${meta.evidenceCount} (${evidenceVerdict})`,
     `Next: ${meta.nextAction}`,

@@ -624,13 +624,13 @@ describe("D.14H-C workflow agent runtime bridge", () => {
 
     const summary = createAgentContextSummary(packet, "verify worker context", context);
 
-    expect(summary).toContain("language=en-US");
-    expect(summary).toContain("index=F-Linghun:ready");
-    expect(summary).toContain("cacheFreshness=changed=memoryHash,pluginListHash");
-    expect(summary).toContain("architecture=reuse handoff and bridge summaries");
-    expect(summary).toContain("failureLearning=1");
-    expect(summary).toContain("permission=default");
-    expect(summary).toContain("notIncluded=full transcript/full memory/full index/large logs");
+    expect(summary).toContain("language en-US");
+    expect(summary).toContain("index F-Linghun:ready");
+    expect(summary).toContain("cache freshness changed memoryHash, pluginListHash");
+    expect(summary).toContain("architecture reuse handoff and bridge summaries");
+    expect(summary).toContain("failure learning 1");
+    expect(summary).toContain("permission default");
+    expect(summary).toContain("not included: full transcript/full memory/full index/large logs");
     expect(summary).not.toMatch(/sourceRef|raw context|providerEnv|apiKey|baseUrl/iu);
   });
 
@@ -682,8 +682,8 @@ describe("D.14H-C workflow agent runtime bridge", () => {
 
     const summary = createAgentContextSummary(packet, "inspect index state", context);
 
-    expect(summary).toContain("index=unknown-project nodes=5 edges=4");
-    expect(summary).not.toContain("index=undefined:unknown");
+    expect(summary).toContain("index unknown-project nodes 5 edges 4");
+    expect(summary).not.toContain("index undefined:unknown");
     expect(summary).not.toContain("undefined");
   });
 });

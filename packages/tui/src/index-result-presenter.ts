@@ -48,7 +48,7 @@ export function summarizeIndexResult(
     return [
       "Index architecture（短摘要）",
       `- project: ${String(data.project ?? "unknown")}`,
-      `- nodes/edges: ${String(data.total_nodes ?? "-")}/${String(data.total_edges ?? "-")}`,
+      `- graph: ${String(data.total_nodes ?? "-")} nodes, ${String(data.total_edges ?? "-")} edges`,
       `- node labels: ${summarizeNamedCounts(data.node_labels)}`,
       `- edge types: ${summarizeNamedCounts(data.edge_types)}`,
     ].join("\n");
@@ -61,7 +61,7 @@ export function summarizeIndexResult(
     return [
       "Index search（语义符号搜索，最多 5 条）",
       `- total: ${String(data.total ?? raw.length)}`,
-      `- search_mode: ${String(data.search_mode ?? "bm25")}`,
+      `- search mode: ${String(data.search_mode ?? "bm25")}`,
       ...matches,
       matches.length === 0
         ? "- no matches"
@@ -92,12 +92,12 @@ function summarizeIndexSearchItem(item: unknown): string {
   const path = String(item.path ?? item.file ?? item.file_path ?? "unknown");
   const symbol = item.symbol ?? item.name ?? item.qualified_name;
   const kind = item.kind ?? item.type ?? item.label;
-  const parts = [`path=${truncateDisplay(path, 80)}`];
+  const parts = [`path ${truncateDisplay(path, 80)}`];
   if (symbol !== undefined) {
-    parts.push(`symbol=${truncateDisplay(String(symbol), 60)}`);
+    parts.push(`symbol ${truncateDisplay(String(symbol), 60)}`);
   }
   if (kind !== undefined) {
-    parts.push(`kind=${truncateDisplay(String(kind), 40)}`);
+    parts.push(`kind ${truncateDisplay(String(kind), 40)}`);
   }
   return parts.join(" ");
 }
@@ -112,7 +112,7 @@ function summarizeNamedCounts(value: unknown): string {
       if (!isRecord(item)) {
         return truncateDisplay(String(item), 32);
       }
-      return `${String(item.label ?? item.type ?? item.name ?? "?")}=${String(item.count ?? "?")}`;
+      return `${String(item.label ?? item.type ?? item.name ?? "?")} ${String(item.count ?? "?")}`;
     })
     .join(", ");
 }

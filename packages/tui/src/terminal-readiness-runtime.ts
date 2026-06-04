@@ -556,8 +556,8 @@ function createTerminalProblems(
       source: "background",
       severity: task.status === "failed" || task.status === "timeout" ? "error" : "warning",
       summary: `${task.kind} ${task.status}: ${task.userVisibleSummary}`,
-      nextAction: task.nextAction ?? `/details background ${task.id}`,
-      detailRef: `/details background ${task.id}`,
+      nextAction: task.nextAction ?? "/background",
+      detailRef: "/background",
     });
   }
   if (webSourceEvidence === "missing") {
@@ -574,7 +574,7 @@ function createTerminalProblems(
     problems.push({
       source: "index",
       severity: context.index.status === "error" ? "error" : "warning",
-      summary: `index status=${context.index.status}${context.index.staleHint ? ` ${context.index.staleHint}` : ""}`,
+      summary: `index status ${context.index.status}${context.index.staleHint ? `; ${context.index.staleHint}` : ""}`,
       nextAction: "/index doctor",
       detailRef: "/index status",
     });
@@ -583,7 +583,7 @@ function createTerminalProblems(
     problems.push({
       source: "project",
       severity: "warning",
-      summary: `Project Doctor Lite status=${lite.projectDoctor.status} unknown=${lite.projectDoctor.unknown.join(",") || "none"}`,
+      summary: `Project Doctor Lite ${lite.projectDoctor.status}; unknown ${lite.projectDoctor.unknown.join(",") || "none"}`,
       nextAction: "/doctor project",
     });
   }
@@ -591,7 +591,7 @@ function createTerminalProblems(
     problems.push({
       source: "drift",
       severity: "warning",
-      summary: `Source-of-Truth Drift Linter Lite issues=${lite.sourceDrift.issues.join(",") || "none"}`,
+      summary: `Source-of-Truth Drift Linter Lite issues ${lite.sourceDrift.issues.join(",") || "none"}`,
       nextAction: lite.sourceDrift.nextAction,
     });
   }
@@ -599,7 +599,7 @@ function createTerminalProblems(
     problems.push({
       source: "context",
       severity: "warning",
-      summary: `Context Picker Lite refs=${lite.contextPicker.refs.length} index=${lite.contextPicker.indexFreshness}`,
+      summary: `Context Picker Lite refs ${lite.contextPicker.refs.length}; index ${lite.contextPicker.indexFreshness}`,
       nextAction: "/doctor project",
     });
   }
@@ -607,7 +607,7 @@ function createTerminalProblems(
     problems.push({
       source: "rollback",
       severity: "info",
-      summary: `Rollback Coach Lite changedFiles=${lite.rollbackCoach.changedFiles} untracked=${lite.rollbackCoach.untrackedFiles} checkpoints=${lite.rollbackCoach.checkpoints}; read-only advice only`,
+      summary: `Rollback Coach Lite changed files ${lite.rollbackCoach.changedFiles}; untracked ${lite.rollbackCoach.untrackedFiles}; checkpoints ${lite.rollbackCoach.checkpoints}; read-only advice only`,
       nextAction: lite.rollbackCoach.nextAction,
     });
   }
@@ -615,7 +615,7 @@ function createTerminalProblems(
     problems.push({
       source: "cost",
       severity: "warning",
-      summary: `Task Cost Preview Lite level=${lite.costPreview.level}`,
+      summary: `Task Cost Preview Lite level ${lite.costPreview.level}`,
       nextAction: lite.costPreview.nextAction,
     });
   }

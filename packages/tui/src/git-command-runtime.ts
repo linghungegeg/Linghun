@@ -323,7 +323,7 @@ export async function renderCheckpointPanel(context: TuiContext, output: Writabl
     .slice(0, 5)
     .map(
       (checkpoint) =>
-        `${checkpoint.id}  ${checkpoint.createdAt}\n  reason: ${checkpoint.reason}\n  changedFiles: ${checkpoint.changedFiles.join(", ")}\n  restoreKind: ${checkpoint.restoreKind}`,
+        `${checkpoint.id}  ${checkpoint.createdAt}\n  reason: ${checkpoint.reason}\n  changed files: ${checkpoint.changedFiles.join(", ")}\n  restore kind: ${checkpoint.restoreKind}`,
     )
     .join("\n\n");
   showCommandPanel(context, output, {

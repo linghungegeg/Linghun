@@ -481,7 +481,7 @@ function formatHelpDetails(language: Language): string {
   if (language === "en-US") {
     return [
       "Details and debug commands:",
-      "  /details              Show evidence/background/details summary (Ctrl+O equivalent)",
+      "  /details              Open evidence/background/details panel",
       "  /diff                 Show changed file summary",
       "  /todo                 Show tasks",
       "  /todo add <text>      Add a task",
@@ -515,7 +515,7 @@ function formatHelpDetails(language: Language): string {
   }
   return [
     "详情与调试命令：",
-    "  /details              查看 evidence/background/details 摘要（等价 Ctrl+O）",
+    "  /details              打开 evidence/background/details 详情面板",
     "  /diff                 查看本轮工具改动摘要",
     "  /todo                 查看任务",
     "  /todo add <text>      添加任务",

@@ -16,7 +16,7 @@ export function formatUsage(context: TuiContext): string {
     `- provider: ${latest?.provider ?? "unknown"}`,
     `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
-    `- rawUsage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
+    `- raw usage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
     "- role usage (estimated):",
     ...formatRoleUsageLines(context),
     "- billing: 未记录真实账单字段；任何金额只能标记 estimated。",
@@ -29,7 +29,7 @@ export function formatRoleUsageLines(context: TuiContext): string[] {
   }
   return context.roleUsage.map(
     (usage) =>
-      `  - ${usage.role}/${usage.provider}/${usage.model}: input=${usage.inputTokens} output=${usage.outputTokens} cache_read=${usage.cacheReadTokens} cache_write=${usage.cacheWriteTokens} estimatedCny=${usage.estimatedCny.toFixed(4)} estimated createdAt=${usage.createdAt} fallbackUsed=${usage.fallbackUsed ? "yes" : "no"} budgetStop=${usage.budgetStop ? "yes" : "no"} contribution=${usage.contributionSummary}`,
+      `  - ${usage.role}/${usage.provider}/${usage.model}: input ${usage.inputTokens}; output ${usage.outputTokens}; cache read ${usage.cacheReadTokens}; cache write ${usage.cacheWriteTokens}; estimated CNY ${usage.estimatedCny.toFixed(4)}; created ${usage.createdAt}; fallback used ${usage.fallbackUsed ? "yes" : "no"}; budget stop ${usage.budgetStop ? "yes" : "no"}; contribution ${usage.contributionSummary}`,
   );
 }
 
@@ -51,11 +51,11 @@ export function formatStats(args: string[], context: TuiContext): string {
   return [
     "Stats",
     `- samples: ${context.cache.history.length}`,
-    `- elapsedMs: ${Date.now() - context.cache.startedAt}`,
+    `- elapsed ms: ${Date.now() - context.cache.startedAt}`,
     `- model: ${context.model}`,
     `- provider: ${provider}`,
-    `- hitRate: ${formatPercent(hitRate)}`,
-    `- tokens: input=${totals.inputTokens}, output=${totals.outputTokens}, cache_read=${totals.cacheReadTokens}, cache_write=${totals.cacheWriteTokens}`,
+    `- hit rate: ${formatPercent(hitRate)}`,
+    `- tokens: input ${totals.inputTokens}; output ${totals.outputTokens}; cache read ${totals.cacheReadTokens}; cache write ${totals.cacheWriteTokens}`,
     "- role/model/provider usage (estimated):",
     ...formatRoleUsageLines(context),
     "- cost: estimated unavailable（未配置价格；不伪装成真实账单；状态栏不显示金额）",
@@ -83,7 +83,7 @@ export function formatEndpointStats(history: CacheTurnStats[]): string {
         provider: items[0]?.provider ?? "unknown",
         model: items[0]?.model ?? "unknown",
       });
-      return `- ${endpoint}: samples=${items.length} hitRate=${formatPercent(hitRate)} input=${totals.inputTokens} output=${totals.outputTokens} cache_read=${totals.cacheReadTokens} cache_write=${totals.cacheWriteTokens}`;
+      return `- ${endpoint}: samples ${items.length}; hit rate ${formatPercent(hitRate)}; input ${totals.inputTokens}; output ${totals.outputTokens}; cache read ${totals.cacheReadTokens}; cache write ${totals.cacheWriteTokens}`;
     }),
   ].join("\n");
 }

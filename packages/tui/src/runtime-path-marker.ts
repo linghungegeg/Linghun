@@ -238,15 +238,15 @@ export function detectRuntimePathInflation(
  */
 export function formatRuntimePathMarker(marker: RuntimePathMarker): string {
   const parts = [
-    `path=${marker.path}`,
-    `kind=${marker.kind}`,
-    `detection=${marker.detectionMethod}`,
+    `path ${marker.path}`,
+    `kind ${marker.kind}`,
+    `detection ${marker.detectionMethod}`,
   ];
   if (marker.degradedReason) {
-    parts.push(`degraded=${marker.degradedReason}`);
+    parts.push(`degraded ${marker.degradedReason}`);
   }
   if (!marker.canClaimMature) {
-    parts.push("mature=not-claimable");
+    parts.push("mature not claimable");
   }
   return parts.join("; ");
 }
@@ -255,9 +255,9 @@ export function formatRuntimePathMarker(marker: RuntimePathMarker): string {
  * Format a startup path marker for log/report output.
  */
 export function formatStartupPathMarker(marker: StartupPathMarker): string {
-  const parts = [`entry=${marker.entryKind}`, `verified=${marker.isVerifiedCurrent}`];
+  const parts = [`entry ${marker.entryKind}`, `verified ${marker.isVerifiedCurrent}`];
   if (marker.staleRisk) {
-    parts.push(`stale-risk=${marker.staleReason ?? "true"}`);
+    parts.push(`stale risk ${marker.staleReason ?? "true"}`);
   }
   return parts.join("; ");
 }

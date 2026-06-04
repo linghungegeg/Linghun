@@ -195,10 +195,10 @@ export function formatMemoryStatus(context: TuiContext): string {
   const learningSource = context.memory.learningModeSource ?? "default";
   return [
     "Memory status",
-    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary=${formatProjectRulesContext(context)}`,
-    `- review queue: candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-    `- autoLearning: ${learningLabel}; autoAccept=no; source=${learningSource}; long-term memory requires /memory accept <id>`,
-    `- prompt injection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injected.items.length}; estimatedTokens=${estimateMemoryTokens(injected.text)}; details=/memory stats`,
+    `- LINGHUN.md: ${context.memory.projectRulesExists ? "found" : "missing"}; summary ${formatProjectRulesContext(context)}`,
+    `- review queue: candidates ${context.memory.candidates.length}; accepted ${context.memory.accepted.length}; disabled ${context.memory.disabled.length}; rejected ${context.memory.rejected.length}`,
+    `- auto learning: ${learningLabel}; auto accept no; source ${learningSource}; long-term memory requires /memory accept <id>`,
+    `- prompt injection: accepted-only topK ${MEMORY_PROMPT_TOP_K}; injected ${injected.items.length}; estimated tokens ${estimateMemoryTokens(injected.text)}; details /memory stats`,
     "- next: /memory review to accept/reject; /memory disable <id> to pause accepted memory; /memory rollback <id> to re-enable",
     `- lastHandoff: ${context.memory.lastHandoff ? context.memory.lastHandoff.createdAt : "none"}`,
     context.memory.projectRulesError
@@ -235,13 +235,13 @@ export function formatMemoryReview(context: TuiContext): string {
     .slice(0, 5)
     .map(
       (item) =>
-        `- accepted ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; disable=/memory disable ${item.id}`,
+        `- accepted ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; disable /memory disable ${item.id}`,
     );
   const disabled = context.memory.disabled
     .slice(0, 5)
     .map(
       (item) =>
-        `- disabled ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; rollback=/memory rollback ${item.id}; delete=/memory delete ${item.id}`,
+        `- disabled ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 96)}; rollback /memory rollback ${item.id}; delete /memory delete ${item.id}`,
     );
   if (context.memory.candidates.length === 0) {
     return [
@@ -259,7 +259,7 @@ export function formatMemoryReview(context: TuiContext): string {
       .slice(0, 8)
       .map(
         (item) =>
-          `- candidate ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 100)}; source=${truncateDisplay(item.source, 48)}; accept=/memory accept ${item.id}; reject=/memory reject ${item.id}`,
+          `- candidate ${item.id} [${item.scope}] ${truncateDisplay(item.summary, 100)}; source ${truncateDisplay(item.source, 48)}; accept /memory accept ${item.id}; reject /memory reject ${item.id}`,
       ),
     ...accepted,
     ...disabled,
@@ -273,31 +273,31 @@ export function formatMemoryStats(context: TuiContext): string {
   const candidateScopeCounts = countMemoryScopes(context.memory.candidates);
   const learningLabel = context.memory.learningMode === "active" ? "on" : "off";
   const lastRun = context.memory.lastLearningRun
-    ? `${context.memory.lastLearningRun.trigger}; candidates=${context.memory.lastLearningRun.candidatesCreated}; modelCalled=${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
+    ? `${context.memory.lastLearningRun.trigger}; candidates ${context.memory.lastLearningRun.candidatesCreated}; model called ${context.memory.lastLearningRun.modelCalled ? "yes" : "no"}`
     : "none";
   if (context.language === "en-US") {
     return [
       "Memory stats (controlled learning / cost guard)",
-      `- candidates=${context.memory.candidates.length}; accepted=${context.memory.accepted.length}; disabled=${context.memory.disabled.length}; rejected=${context.memory.rejected.length}`,
-      `- session-scope: accepted=${acceptedScopeCounts.session}; current TuiContext only, not persisted across new sessions`,
-      `- project/user persistent scope: accepted=${acceptedScopeCounts.project + acceptedScopeCounts.user} (project=${acceptedScopeCounts.project}; user=${acceptedScopeCounts.user}); accepted-only topK prompt injection`,
-      `- candidate scope: project=${candidateScopeCounts.project}; user=${candidateScopeCounts.user}; session=${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
-      `- promptInjection: acceptedOnly topK=${MEMORY_PROMPT_TOP_K}; injected=${injection.items.length}; chars=${injection.text.length}; estimatedTokens=${estimateMemoryTokens(injection.text)}`,
-      `- lastLearningRun: ${lastRun}`,
-      `- autoLearning: ${learningLabel}; autoAccept=no; toggle with /memory learn on|off`,
-      "- longTermWrite: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
+      `- candidates ${context.memory.candidates.length}; accepted ${context.memory.accepted.length}; disabled ${context.memory.disabled.length}; rejected ${context.memory.rejected.length}`,
+      `- session scope: accepted ${acceptedScopeCounts.session}; current TuiContext only, not persisted across new sessions`,
+      `- project/user persistent scope: accepted ${acceptedScopeCounts.project + acceptedScopeCounts.user} (project ${acceptedScopeCounts.project}; user ${acceptedScopeCounts.user}); accepted-only topK prompt injection`,
+      `- candidate scope: project ${candidateScopeCounts.project}; user ${candidateScopeCounts.user}; session ${candidateScopeCounts.session}; candidates are not auto-accepted or injected`,
+      `- prompt injection: accepted-only topK ${MEMORY_PROMPT_TOP_K}; injected ${injection.items.length}; chars ${injection.text.length}; estimated tokens ${estimateMemoryTokens(injection.text)}`,
+      `- last learning run: ${lastRun}`,
+      `- auto learning: ${learningLabel}; auto accept no; toggle with /memory learn on|off`,
+      "- long-term write: requires explicit /memory accept <id>; memory never bypasses Start Gate or permission mode",
       "- full candidates, transcripts, logs, and index dumps are not injected into the prompt",
     ].join("\n");
   }
   return [
     "Memory stats（受控学习 / 成本守卫）",
-    `- 候选=${context.memory.candidates.length}；已接受=${context.memory.accepted.length}；已禁用=${context.memory.disabled.length}；已拒绝=${context.memory.rejected.length}`,
-    `- session-scope：已接受=${acceptedScopeCounts.session}；仅当前 TuiContext / 当前会话生效，不跨新会话持久化`,
-    `- project/user persistent scope：已接受=${acceptedScopeCounts.project + acceptedScopeCounts.user}（project=${acceptedScopeCounts.project}；user=${acceptedScopeCounts.user}）；仅 accepted-only topK 注入 prompt`,
-    `- candidate：project=${candidateScopeCounts.project}；user=${candidateScopeCounts.user}；session=${candidateScopeCounts.session}；候选不会自动接受或注入`,
-    `- prompt 注入：acceptedOnly topK=${MEMORY_PROMPT_TOP_K}；injected=${injection.items.length}；chars=${injection.text.length}；estimatedTokens=${estimateMemoryTokens(injection.text)}`,
+    `- 候选 ${context.memory.candidates.length}；已接受 ${context.memory.accepted.length}；已禁用 ${context.memory.disabled.length}；已拒绝 ${context.memory.rejected.length}`,
+    `- session-scope：已接受 ${acceptedScopeCounts.session}；仅当前 TuiContext / 当前会话生效，不跨新会话持久化`,
+    `- project/user persistent scope：已接受 ${acceptedScopeCounts.project + acceptedScopeCounts.user}（project ${acceptedScopeCounts.project}；user ${acceptedScopeCounts.user}）；仅 accepted-only topK 注入 prompt`,
+    `- candidate：project ${candidateScopeCounts.project}；user ${candidateScopeCounts.user}；session ${candidateScopeCounts.session}；候选不会自动接受或注入`,
+    `- prompt 注入：accepted-only topK ${MEMORY_PROMPT_TOP_K}；injected ${injection.items.length}；chars ${injection.text.length}；estimated tokens ${estimateMemoryTokens(injection.text)}`,
     `- 上次学习：${lastRun}`,
-    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；autoAccept=no；切换：/memory learn on|off`,
+    `- 自动学习：${learningLabel === "on" ? "开启" : "关闭"}；auto accept no；切换：/memory learn on|off`,
     "- 长期写入：必须显式 /memory accept <id>；memory 不绕过 Start Gate 或权限模式",
     "- 完整候选、聊天、日志和索引 dump 不注入 prompt",
   ].join("\n");
@@ -417,20 +417,20 @@ export function formatMemoryLearningRun(run: MemoryLearningRun, language: Langua
   if (language === "en-US") {
     return [
       "Memory learn (controlled / candidate-only)",
-      `- source: bounded evidence/Todo/verification/handoff only; trigger=${run.trigger}`,
-      `- candidatesCreated: ${run.candidatesCreated}`,
-      `- modelCalled: ${run.modelCalled ? "yes" : "no"}`,
-      `- skippedReason: ${run.skippedReason ?? "none"}`,
-      "- next: review candidates with /memory review, then accept or reject. autoAccept=no.",
+      `- source: bounded evidence/Todo/verification/handoff only; trigger ${run.trigger}`,
+      `- candidates created: ${run.candidatesCreated}`,
+      `- model called: ${run.modelCalled ? "yes" : "no"}`,
+      `- skipped reason: ${run.skippedReason ?? "none"}`,
+      "- next: review candidates with /memory review, then accept or reject. auto accept no.",
     ].join("\n");
   }
   return [
     "Memory learn（受控 / 只生成候选）",
-    `- 来源：仅 bounded evidence/Todo/verification/handoff；trigger=${run.trigger}`,
+    `- 来源：仅 bounded evidence/Todo/verification/handoff；trigger ${run.trigger}`,
     `- 新候选：${run.candidatesCreated}`,
     `- 调用模型：${run.modelCalled ? "yes" : "no"}`,
     `- 跳过原因：${run.skippedReason ?? "none"}`,
-    "- 下一步：用 /memory review 查看候选，再 accept 或 reject；autoAccept=no。",
+    "- 下一步：用 /memory review 查看候选，再 accept 或 reject；auto accept no。",
   ].join("\n");
 }
 
@@ -446,7 +446,7 @@ export function createControlledMemoryInjection(context: TuiContext): {
     items
       .map(
         (item) =>
-          `- ${item.id} [${item.scope}] ${truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH)} (source=${truncateDisplay(item.source, 80)})`,
+          `- ${item.id} [${item.scope}] ${truncateDisplay(item.summary.replace(/\s+/g, " "), MEMORY_PROMPT_ITEM_WIDTH)} (source ${truncateDisplay(item.source, 80)})`,
       )
       .join("\n"),
     MEMORY_PROMPT_TOTAL_WIDTH,

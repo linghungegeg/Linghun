@@ -418,7 +418,7 @@ export async function handleJobCommand(
     await persistDurableJob(job);
     await appendJobLog(
       job,
-      `job ${action}: ${job.status}; pauseReason=${job.pauseReason ?? "none"}`,
+      `job ${action}: ${job.status}; pause reason ${job.pauseReason ?? "none"}`,
     );
     await writeDurableJobReport(job);
     const background = upsertJobBackgroundTask(context, job);
@@ -662,7 +662,7 @@ function ensureMinimalJobEvidence(
     id,
     kind: "user_provided",
     source: "/job preflight",
-    summary: `Minimal job preflight evidence for ${options.allowEdit || options.allowBash ? "bounded job" : "read-only audit"}; index=${formatIndexRuntimeRef(context.index)}.`,
+    summary: `Minimal job preflight evidence for ${options.allowEdit || options.allowBash ? "bounded job" : "read-only audit"}; index ${formatIndexRuntimeRef(context.index)}.`,
     supportsClaims: ["job-preflight-only"],
     createdAt: new Date().toISOString(),
   });
@@ -703,7 +703,7 @@ function formatInitialJobCapReason(
   ].filter(Boolean);
   if (status === "running") {
     const suffix = generated.length > 0 ? `;${generated.join(";")}` : "";
-    return `dynamic_cap:min(default=${input.runningCap}, requested=${input.requestedAgents})${suffix}`;
+    return `dynamic cap min(default ${input.runningCap}, requested ${input.requestedAgents})${suffix}`;
   }
   if (input.pauseReason) return input.pauseReason;
   if (status === "created") return "planned_not_started:/job create only";
@@ -761,14 +761,14 @@ function createDurableJobAgentContextSummary(
     : "none";
   return [
     "Job agent context package (trimmed)",
-    `handoff=${packet.id}`,
-    `summary=${truncateDisplay(packet.goal || job.goal, 160)}`,
-    `task=${truncateDisplay(assignment.task ?? assignment.goal, 200)}`,
-    `evidence=${evidence.join(";") || "none"}`,
-    `diff=${packet.changedFiles.slice(0, 8).join(",") || "none"}`,
-    `verification=${verification}`,
-    `keyFiles=${packet.keyFiles.slice(0, 8).join(",") || "none"}`,
-    "notIncluded=full transcript/full source/full index/full memory/raw tool_result",
+    `handoff ${packet.id}`,
+    `summary ${truncateDisplay(packet.goal || job.goal, 160)}`,
+    `task ${truncateDisplay(assignment.task ?? assignment.goal, 200)}`,
+    `evidence ${evidence.join("; ") || "none"}`,
+    `diff ${packet.changedFiles.slice(0, 8).join(", ") || "none"}`,
+    `verification ${verification}`,
+    `key files ${packet.keyFiles.slice(0, 8).join(", ") || "none"}`,
+    "not included: full transcript/full source/full index/full memory/raw tool_result",
   ].join(" | ");
 }
 
@@ -906,7 +906,7 @@ export async function resumeDurableJob(job: DurableJobState, context: TuiContext
     job.result = {
       status: job.status === "timeout" ? "timeout" : job.status === "failed" ? "failed" : "blocked",
       summary: `Resume refused for terminal ${job.status} job; no PASS evidence generated.`,
-      facts: [`terminalStatus=${job.status}`, job.pauseReason ?? "no pause reason"],
+      facts: [`terminal status ${job.status}`, job.pauseReason ?? "no pause reason"],
       evidenceRefs: job.evidenceRefs.map((item) => item.id),
       generatedAt: new Date().toISOString(),
     };
@@ -1027,7 +1027,7 @@ export async function transitionDurableJob(
     markUnstartedJobAgents(job, status, pauseReason);
   }
   rescheduleDurableJobAgents(job);
-  await appendJobLog(job, `job transition: ${status}; pauseReason=${pauseReason ?? "none"}`);
+  await appendJobLog(job, `job transition: ${status}; pause reason ${pauseReason ?? "none"}`);
   await persistDurableJob(job);
   await writeDurableJobReport(job);
   const background = upsertJobBackgroundTask(context, job);
@@ -1103,7 +1103,7 @@ export async function recoverDurableJobForContext(
     `Recovered ${job.status} job is conservative and not PASS evidence.`,
   ];
   rescheduleDurableJobAgents(job);
-  await appendJobLog(job, `job recovery: ${job.status}; pauseReason=${job.pauseReason ?? "none"}`);
+  await appendJobLog(job, `job recovery: ${job.status}; pause reason ${job.pauseReason ?? "none"}`);
   await persistDurableJob(job);
   await writeDurableJobReport(job);
   return job;
@@ -1149,7 +1149,7 @@ export async function runDurableJobLiteTick(
       job.result = {
         status: "blocked",
         summary: "Durable worker stopped at maxSteps; no PASS evidence generated.",
-        facts: [`maxSteps=${getDurableJobMaxSteps(job)}`, `plannedSteps=${job.plan.length}`],
+        facts: [`max steps ${getDurableJobMaxSteps(job)}`, `planned steps ${job.plan.length}`],
         evidenceRefs: job.evidenceRefs.map((item) => item.id),
         generatedAt: new Date().toISOString(),
       };
@@ -1218,7 +1218,7 @@ export async function runDurableJobLiteTick(
           job,
           context,
           "blocked",
-          `budget_exceeded:maxTokens=${job.budget.maxTokens}`,
+          `budget exceeded: max tokens ${job.budget.maxTokens}`,
         );
         return;
       }
@@ -1255,12 +1255,12 @@ export async function runDurableJobLiteTick(
         type: "system_event",
         id: randomUUID(),
         level: "info",
-        message: `${summary} facts=${stepFacts.join(" | ")}`,
+        message: `${summary} facts ${stepFacts.join(" | ")}`,
         createdAt: now,
       });
       await appendJobLog(
         job,
-        `agent step ${nextStepIndex + 1}/${job.agents.length}: ${assignment.id}/${assignment.type}; tokens=${estimatedTokens}; refs=${stepFacts.join(" | ")}`,
+        `agent step ${nextStepIndex + 1}/${job.agents.length}: ${assignment.id}/${assignment.type}; tokens ${estimatedTokens}; refs ${stepFacts.join(" | ")}`,
       );
       await persistDurableJobProgress(context, job, `worker step ${nextStepIndex + 1} persisted`);
 
@@ -1455,18 +1455,18 @@ export function createDurableJobStepFacts(
       ? "stale-fallback"
       : "ready";
   return [
-    `step=${stepIndex + 1}/${job.plan.length}`,
-    `agent=${assignment ? `${assignment.id}:${assignment.type}:${assignment.status}:run=${assignment.runId ?? "none"}` : "none"}`,
-    `goal=${truncateDisplay(job.goal, 120)}`,
-    `phase=${job.phase}`,
-    `target=${job.target}`,
-    `handoff=${job.handoffPacket?.id ?? "missing"}`,
-    `index=${formatIndexRuntimeRef(context.index)}`,
-    `workspaceCache=${workspaceRef?.source ?? "missing"};snapshot=${snapshotState}`,
-    `evidenceRefs=${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
-    `agents=${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
-    `effectiveCap=${getEffectiveAgentCap(job)};capReason=${job.capReason ?? "default"}`,
-    `logs=${job.logPath};report=${job.reportPath}`,
+    `step ${stepIndex + 1}/${job.plan.length}`,
+    `agent ${assignment ? `${assignment.id}:${assignment.type}:${assignment.status}:run ${assignment.runId ?? "none"}` : "none"}`,
+    `goal ${truncateDisplay(job.goal, 120)}`,
+    `phase ${job.phase}`,
+    `target ${job.target}`,
+    `handoff ${job.handoffPacket?.id ?? "missing"}`,
+    `index ${formatIndexRuntimeRef(context.index)}`,
+    `workspace cache ${workspaceRef?.source ?? "missing"}; snapshot ${snapshotState}`,
+    `evidence refs ${job.evidenceRefs.map((item) => item.id).join(",") || "none"}`,
+    `agents ${job.agents.filter((agent) => agent.status === "running").length}/${job.agents.length}`,
+    `effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
+    `logs ${job.logPath}; report ${job.reportPath}`,
   ];
 }
 
@@ -1489,7 +1489,7 @@ export async function applyDurableJobBudgetStop(
     job.result = {
       status: "timeout",
       summary: "Durable job exceeded maxRuntime/timeout; no PASS evidence generated.",
-      facts: [`runtimeMs=${runtimeMs}`, `maxRuntimeMs=${maxRuntimeMs}`],
+      facts: [`runtime ${runtimeMs}ms`, `max runtime ${maxRuntimeMs}ms`],
       evidenceRefs: job.evidenceRefs.map((item) => item.id),
       generatedAt: new Date().toISOString(),
     };
@@ -1705,7 +1705,7 @@ export async function handleForkCommand(
     type: "system_event",
     id: randomUUID(),
     level: "info",
-    message: `${agent.contextSummary} | cwd=${cwdResult.cwd} | isolation=${cwdResult.isolation ?? "none"} | registry=${agent.registryAgentId ?? "none"} | model=${agent.model} | maxTurns=${agent.maxTurns ?? AGENT_MAX_MODEL_TURNS} | allowedTools=${agent.allowedTools?.join(",") ?? "default"}`,
+    message: `${agent.contextSummary} | cwd ${cwdResult.cwd} | isolation ${cwdResult.isolation ?? "none"} | registry ${agent.registryAgentId ?? "none"} | model ${agent.model} | max turns ${agent.maxTurns ?? AGENT_MAX_MODEL_TURNS} | allowed tools ${agent.allowedTools?.join(",") ?? "default"}`,
     createdAt: now,
   });
   if (cwdResult.evidenceText) {
@@ -1994,7 +1994,7 @@ async function recordAgentProviderFallbackAttempt(
     type: "system_event",
     id: randomUUID(),
     level: input.status === "succeeded" ? "info" : "warning",
-    message: `provider_fallback_attempt from=${input.from.provider}/${input.from.model} to=${input.to.provider}/${input.to.model} reason=${input.kind} code=${input.code} status=${input.status}`,
+    message: `provider fallback attempt: from ${input.from.provider}/${input.from.model}; to ${input.to.provider}/${input.to.model}; reason ${input.kind}; code ${input.code}; status ${input.status}`,
     createdAt: new Date().toISOString(),
   });
   return summary;
@@ -2146,7 +2146,7 @@ export async function runModelBackedAgent(
           type: "system_event",
           id: randomUUID(),
           level: "warning",
-          message: `agent_child_provider_cooldown provider=${currentRuntime.provider} model=${currentRuntime.model} code=${cooldown.reasonCode}`,
+          message: `agent child provider cooldown: provider ${currentRuntime.provider}; model ${currentRuntime.model}; code ${cooldown.reasonCode}`,
           createdAt: new Date().toISOString(),
         });
         return {
@@ -2199,7 +2199,7 @@ export async function runModelBackedAgent(
             type: "system_event",
             id: randomUUID(),
             level: "warning",
-            message: `agent_child_provider_failure kind=${kind} code=${code} provider=${currentRuntime.provider} model=${currentRuntime.model}`,
+            message: `agent child provider failure: kind ${kind}; code ${code}; provider ${currentRuntime.provider}; model ${currentRuntime.model}`,
             createdAt: new Date().toISOString(),
           });
           const fallback = resolveAgentRuntimeFallback(
@@ -2226,7 +2226,7 @@ export async function runModelBackedAgent(
                 type: "system_event",
                 id: randomUUID(),
                 level: "warning",
-                message: `agent_child_provider_cooldown provider=${fallback.runtime.provider} model=${fallback.runtime.model} code=${fallbackCooldown.reasonCode}`,
+                message: `agent child provider cooldown: provider ${fallback.runtime.provider}; model ${fallback.runtime.model}; code ${fallbackCooldown.reasonCode}`,
                 createdAt: new Date().toISOString(),
               });
               return {
@@ -2614,7 +2614,7 @@ export async function resumeAgent(
   output: Writable,
 ): Promise<void> {
   if (agent.status !== "stale") {
-    writeLine(output, `agent ${agent.id} 当前状态为 ${agent.status}，无需 stale resume。`);
+    writeLine(output, `Agent 当前状态为 ${agent.status}，无需 stale resume。`);
     return;
   }
   const guard =
@@ -2851,7 +2851,7 @@ function formatAgentsList(context: TuiContext): string {
       ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18)
       : ".";
     lines.push(
-      `${agent.id}  ${label}  status=${agent.status}  type=${agent.type}  role=${agent.role}  name=${agent.addressableName ?? "-"}  team=${agent.teamName ?? "-"}  pending=${pending}  cwd=${cwd}`,
+      `${agent.id}  ${label}  status ${agent.status}  type ${agent.type}  role ${agent.role}  name ${agent.addressableName ?? "-"}  team ${agent.teamName ?? "-"}  pending ${pending}  cwd ${cwd}`,
     );
   }
   lines.push(
@@ -2877,9 +2877,9 @@ function formatAgentRegistryList(context: TuiContext): string {
     return lines.join("\n");
   }
   for (const agent of context.agentRegistry.agents) {
-    const tools = agent.allowedTools?.length ? ` tools=${agent.allowedTools.join(",")}` : "";
-    const turns = agent.maxTurns ? ` maxTurns=${agent.maxTurns}` : "";
-    const model = agent.model ? ` model=${agent.model}` : "";
+    const tools = agent.allowedTools?.length ? `; tools ${agent.allowedTools.join(",")}` : "";
+    const turns = agent.maxTurns ? `; max turns ${agent.maxTurns}` : "";
+    const model = agent.model ? `; model ${agent.model}` : "";
     lines.push(`- ${agent.id} ${agent.name}: ${agent.description}${model}${tools}${turns}`);
   }
   return lines.join("\n");

@@ -108,7 +108,7 @@ export async function handleModelCommand(
     const route = getRoleRoute(context.config, "executor");
     writeLine(
       output,
-      `已设置默认模型为 ${resolved.model}（provider=${route.provider}，role=executor）`,
+      `已设置默认模型为 ${resolved.model}（provider ${route.provider}，role executor）`,
     );
     if (resolved.legacyAlias) {
       writeLine(
@@ -119,7 +119,7 @@ export async function handleModelCommand(
     if (context.config.defaultModel !== resolved.model) {
       writeLine(
         output,
-        `说明：executor role 已设置为 ${resolved.model}，defaultModel=${context.config.defaultModel}`,
+        `说明：executor role 已设置为 ${resolved.model}，default model ${context.config.defaultModel}`,
       );
     }
     return;
@@ -128,14 +128,14 @@ export async function handleModelCommand(
   // D.13Q-UX Task Surface — /model 默认走降噪 CommandPanel：仅显示 role /
   // provider / model / reasoning，路由摘要和"运行 /model doctor"建议进 panel
   // actions / detailsText（Ctrl+O 展开），不再 writeLine 多行写进 transcript。
-  // body 仍保留 `reasoning=${runtime.reasoningStatus}` 字面量，让用户能在
+  // body 显示 reasoning status，让用户能在
   // detailsText（Ctrl+O 展开）里看到运行时决策。
   const isEn = context.language === "en-US";
-  const reasoningSegment = `reasoning=${runtime.reasoningStatus}`;
+  const reasoningSegment = `reasoning ${runtime.reasoningStatus}`;
   const summary: string[] = [
     isEn
-      ? `Model · ${runtime.provider}/${runtime.model}`
-      : `模型 · ${runtime.provider}/${runtime.model}`,
+        ? `Model · ${runtime.provider}/${runtime.model}`
+        : `模型 · ${runtime.provider}/${runtime.model}`,
     isEn
       ? `Role: ${runtime.role} · ${reasoningSegment}`
       : `角色：${runtime.role} · ${reasoningSegment}`,
@@ -143,8 +143,8 @@ export async function handleModelCommand(
   if (context.config.defaultModel && context.config.defaultModel !== runtime.model) {
     summary.push(
       isEn
-        ? `defaultModel=${context.config.defaultModel} (executor stays on ${runtime.model})`
-        : `defaultModel=${context.config.defaultModel}（实际 executor=${runtime.model}）`,
+        ? `default model ${context.config.defaultModel} (executor stays on ${runtime.model})`
+        : `default model ${context.config.defaultModel}（实际 executor ${runtime.model}）`,
     );
   }
   showCommandPanel(context, output, {
@@ -152,7 +152,7 @@ export async function handleModelCommand(
     tone: "neutral",
     summary,
     actions: ["/model doctor", "/model route", "/model setup"],
-    detailsText: `${deps().currentModelText(context)}：role=${runtime.role} provider=${runtime.provider} model=${runtime.model} ${reasoningSegment}\n\n${formatModelRouteSummary(context.config)}`,
+    detailsText: `${deps().currentModelText(context)}：role ${runtime.role} provider ${runtime.provider} model ${runtime.model} ${reasoningSegment}\n\n${formatModelRouteSummary(context.config)}`,
   });
   // Task-mode denoise: previously this called writeStatus(output, context),
   // which emits the full `[Linghun] 会话 …` line and is the dominant noise
@@ -333,7 +333,7 @@ export async function handleModelRouteCommand(
     }
     writeLine(
       output,
-      `已设置 ${role} role：provider=${route.provider || "未配置"} model=${route.primaryModel || "未配置"}`,
+      `已设置 ${role} role：provider ${route.provider || "未配置"} model ${route.primaryModel || "未配置"}`,
     );
     if (resolved.legacyAlias) {
       writeLine(
@@ -344,7 +344,7 @@ export async function handleModelRouteCommand(
     if (role === "executor" && context.config.defaultModel !== route.primaryModel) {
       writeLine(
         output,
-        `说明：defaultModel=${context.config.defaultModel}，普通开发请求将按 executor route=${route.provider}/${route.primaryModel} 执行。`,
+        `说明：default model ${context.config.defaultModel}，普通开发请求将按 executor route ${route.provider}/${route.primaryModel} 执行。`,
       );
     }
     if (role === "vision") {

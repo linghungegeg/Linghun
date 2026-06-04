@@ -7,7 +7,7 @@ export function formatRemoteStatus(remote: RemoteState): string {
   ];
   for (const channel of remote.channels) {
     lines.push(
-      `- ${channel.id}: ${channel.runtimeStatus}; binding=${channel.bindingStatus}; transport=${channel.config.transport}/${channel.transportStatus}; lastError=${channel.lastError ?? "none"}; next=${channel.nextAction}`,
+      `- ${channel.id}: ${channel.runtimeStatus}; binding ${channel.bindingStatus}; transport ${channel.config.transport}/${channel.transportStatus}; last error ${channel.lastError ?? "none"}; next ${channel.nextAction}`,
     );
   }
   if (remote.channels.some((channel) => channel.config.transport === "webhook_mock")) {
@@ -48,10 +48,10 @@ export function formatMcpTools(mcp: McpState): string {
   }
   return [
     "MCP tools（稳定排序摘要，不输出完整 schema）",
-    "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schemaLoaded=yes 只会在 discovery/doctor 成功后出现。",
+    "- placeholder 表示安全占位摘要：未加载、未信任、不可执行真实 schema；schema loaded 只有在 discovery/doctor 成功后才会开启。",
     ...mcp.tools.map(
       (tool) =>
-        `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery=${tool.discovery ?? "placeholder"}; trusted=${tool.trusted ? "yes" : "no"}; schemaLoaded=${tool.schemaLoaded ? "yes" : "no"}; runtime=${tool.runtimeVersion ?? "unknown"}`,
+        `- ${tool.server} :: ${tool.name} — ${tool.description}; discovery ${tool.discovery ?? "placeholder"}; trusted ${tool.trusted ? "yes" : "no"}; schema loaded ${tool.schemaLoaded ? "yes" : "no"}; runtime ${tool.runtimeVersion ?? "unknown"}`,
     ),
   ].join("\n");
 }

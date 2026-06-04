@@ -14,27 +14,28 @@ export type RuntimeStatusView = {
 };
 
 export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Language): string {
-  const session = truncateDisplay(view.session, 8);
   const model = truncateDisplay(sanitizeStatusValue(view.model), 20);
   const mode = formatPermissionModeLabel(view.mode, language);
   const cache = formatCacheHitRate(view.cacheHitRate, language);
   const index = formatIndexStatus(view.indexStatus, language);
-  const gate =
+  const waitState =
     view.gate === "waiting approval"
       ? language === "en-US"
-        ? "approval"
+        ? "waiting for approval"
         : "待批准"
       : view.gate === "waiting confirmation"
         ? language === "en-US"
-          ? "waiting"
+          ? "waiting for confirmation"
           : "待确认"
-        : language === "en-US"
-          ? "none"
-          : "无";
-  const line =
+        : undefined;
+  const parts =
     language === "en-US"
-      ? `Status: Session ${session} · Model ${model} · Mode ${mode} · ${cache} · ${index} · Gate ${gate} · BG ${view.background}`
-      : `[Linghun] 会话 ${session} · 模型 ${model} · 模式 ${mode} · ${cache} · ${index} · 确认 ${gate} · 后台 ${view.background}`;
+      ? [`Model ${model}`, `Mode ${mode}`, cache, index, `background ${view.background}`]
+      : [`模型 ${model}`, `模式 ${mode}`, cache, index, `后台 ${view.background}`];
+  if (waitState) {
+    parts.push(language === "en-US" ? waitState : `确认 ${waitState}`);
+  }
+  const line = language === "en-US" ? `Status: ${parts.join(" · ")}` : `[Linghun] ${parts.join(" · ")}`;
   return truncateDisplay(line, 100);
 }
 

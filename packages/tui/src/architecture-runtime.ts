@@ -111,17 +111,17 @@ export function collectArchitectureFacts(context: ArchitectureRuntimeContext): s
     const project = context.index.projectName ? `${context.index.projectName}: ` : "";
     const size =
       typeof context.index.nodes === "number" || typeof context.index.edges === "number"
-        ? ` nodes=${context.index.nodes ?? "unknown"} edges=${context.index.edges ?? "unknown"}`
+        ? ` nodes ${context.index.nodes ?? "unknown"} edges ${context.index.edges ?? "unknown"}`
         : "";
     const stale = context.index.staleHint
-      ? ` staleHint=${truncate(context.index.staleHint, 80)}`
+      ? ` stale hint ${truncate(context.index.staleHint, 80)}`
       : "";
-    facts.push(`index:${project}status=${context.index.status}${size}${stale}`);
+    facts.push(`index: ${project}status ${context.index.status}${size}${stale}`);
   }
 
   if (context.permissionMode) {
     facts.push(
-      `runtime: permissionMode=${context.permissionMode}; Architecture Runtime does not change it`,
+      `runtime: permission mode ${context.permissionMode}; Architecture Runtime does not change it`,
     );
   }
 
@@ -210,14 +210,14 @@ export function createArchitectureRuntimeDirective(card: ArchitectureCard): stri
   // 的检测器是 standalone helper / 报告用，主链 Write/Edit/MultiEdit/Bash 路径不会自动
   // 调用它阻断写入。下面文案只描述工程建议，不得被理解为会阻断写入的运行时闸门。
   return [
-    "ArchitectureRuntime=triggered",
+    "Architecture Runtime: triggered",
     "主屏只输出 1-2 行面向用户的行动摘要；不要把 Architecture Card、字段名或内部审计结构输出到主屏。",
     "后续动作必须保持与该 card 一致；完整 Architecture Card 仅用于内部记录、details/debug 或验证。",
     "Architecture Runtime 不授权写入、不改变权限模式、不替代 Plan approval、Freshness/Web Evidence 或 verifier。",
-    "MaturityDefaults=默认要求成熟方案：信息架构清晰、响应式布局、状态/空态/错误态/加载态完整、可读性优先、语义化结构。避免卡片流水席、营销式 hero、堆内部术语、无意义工程废话。用户不需要额外说'成熟'或'别做丑'。",
-    "AntiCodeBlob=新功能、新页面、新流程、长任务、UI 开发、跨文件改动时，默认不把逻辑堆进已有巨型文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。UI/状态/I-O/provider/runner/doctor/permission/cache/index/verification 等职责边界尽量分清。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。如果必须改大文件，保持局部最小改动并说明为什么不能放到已有更合适模块。不为了优雅新增无收益抽象。每个改动要有可验证边界：focused tests、typecheck、check。这不是授权大重构，仍遵守最小改动、权限管道和 evidence/verifier 边界。",
-    "LegacyLargeFileDebt=已知历史债：packages/tui/src/index.ts 属 legacy-large-file。老项目里大文件很常见，是 maintenance-risk signal / 维护风险信号，不是违规、不是 permission 拒绝、不是硬禁止（not a violation, not a permission denial）。Architecture Runtime 不授权写入、不改变权限模式、不替代 Start Gate 或 permission pipeline——does not grant write permission；现有 Start Gate / 权限管道仍生效。当任务需要触碰 index.ts 或其他巨型文件时，优先 prompt / ask user 询问用户在两条路径里选择：(1) continue minimal local change / 继续做当前任务的最小局部改动；(2) split plan / 输出拆分计划。用户明确选择继续、或当前修复必须触碰大文件时，可以继续，但保持最小改动、说明范围、跑 focused verification。用户选择拆分时只输出拆分计划，不自动重构。允许必要的 wiring 接线，但不要借机塞无关业务逻辑或大范围重构。modularization 计划仍在 D.14。",
-    "LongTaskHint=若任务涉及多步骤或预计超过 3 轮工具调用，主动提示用户可用 /autopilot 或 /plan 进入托管/规划模式，但不强制。",
+    "Maturity defaults: 默认要求成熟方案：信息架构清晰、响应式布局、状态/空态/错误态/加载态完整、可读性优先、语义化结构。避免卡片流水席、营销式 hero、堆内部术语、无意义工程废话。用户不需要额外说'成熟'或'别做丑'。",
+    "Anti code blob: 新功能、新页面、新流程、长任务、UI 开发、跨文件改动时，默认不把逻辑堆进已有巨型文件。避免 god file、code blob、超长函数（>200行）、深层嵌套（>3层）、无边界全局状态。UI/状态/I-O/provider/runner/doctor/permission/cache/index/verification 等职责边界尽量分清。优先复用项目已有模块、helper、presenter、runtime，不新建第二套系统。如果必须改大文件，保持局部最小改动并说明为什么不能放到已有更合适模块。不为了优雅新增无收益抽象。每个改动要有可验证边界：focused tests、typecheck、check。这不是授权大重构，仍遵守最小改动、权限管道和 evidence/verifier 边界。",
+    "Legacy large file debt: 已知历史债：packages/tui/src/index.ts 属 legacy-large-file。老项目里大文件很常见，是 maintenance-risk signal / 维护风险信号，不是违规、不是 permission 拒绝、不是硬禁止（not a violation, not a permission denial）。Architecture Runtime 不授权写入、不改变权限模式、不替代 Start Gate 或 permission pipeline——does not grant write permission；现有 Start Gate / 权限管道仍生效。当任务需要触碰 index.ts 或其他巨型文件时，优先 prompt / ask user 询问用户在两条路径里选择：(1) continue minimal local change / 继续做当前任务的最小局部改动；(2) split plan / 输出拆分计划。用户明确选择继续、或当前修复必须触碰大文件时，可以继续，但保持最小改动、说明范围、跑 focused verification。用户选择拆分时只输出拆分计划，不自动重构。允许必要的 wiring 接线，但不要借机塞无关业务逻辑或大范围重构。modularization 计划仍在 D.14。",
+    "Long task hint: 若任务涉及多步骤或预计超过 3 轮工具调用，主动提示用户可用 /autopilot 或 /plan 进入托管/规划模式，但不强制。",
     formatArchitectureCard(card),
   ].join("\n");
 }

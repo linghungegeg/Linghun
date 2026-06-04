@@ -205,11 +205,11 @@ export function formatModelSetupSummary(setup: PendingModelSetup, language: Lang
   const english = language === "en-US";
   return [
     english ? "Model setup summary" : "模型配置摘要",
-    "- provider=openai-compatible",
-    `- baseUrl=${setup.values.baseUrl ? "present" : "missing"}`,
-    `- apiKey=${setup.values.apiKey ? "present" : "missing"}`,
-    `- model=${setup.values.model ?? "missing"}`,
-    `- reasoningLevel=${setup.values.reasoningLevel ?? "Medium"}`,
+    "- provider openai-compatible",
+    `- base URL ${setup.values.baseUrl ? "present" : "missing"}`,
+    `- api key ${setup.values.apiKey ? "present" : "missing"}`,
+    `- model ${setup.values.model ?? "missing"}`,
+    `- reasoning level ${setup.values.reasoningLevel ?? "Medium"}`,
     `${english ? "- save location" : "- 写入位置"}：${setup.providerEnvPath}`,
     english
       ? "Type yes/save to save. The raw API key is not shown."

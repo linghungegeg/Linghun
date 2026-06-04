@@ -114,9 +114,9 @@ describe("selectInputOwner — panel second", () => {
     expect(selectInputOwner("", { ...noKey, escape: true }, ctx)).toBe("panel");
   });
 
-  it("panel owns Ctrl+O for details without blocking ordinary typing", () => {
+  it("panel does not own Ctrl+O; transcript expand stays global", () => {
     const ctx: OwnerContext = { ...idleCtx, panelActive: true };
-    expect(selectInputOwner("o", { ...noKey, ctrl: true }, ctx)).toBe("panel");
+    expect(selectInputOwner("o", { ...noKey, ctrl: true }, ctx)).toBe("composer");
     expect(selectInputOwner("a", noKey, ctx)).toBe("composer");
   });
 });

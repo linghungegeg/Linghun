@@ -183,7 +183,7 @@ describe("mcp-index-runtime", () => {
 
     expect(summary).toContain("Index search（语义符号搜索，最多 5 条）");
     expect(summary).toContain("total: 2");
-    expect(summary).toContain("search_mode: bm25");
+    expect(summary).toContain("search mode: bm25");
     expect(summary).toContain("OpenAiCompatibleProvider");
     expect(summary).toContain("packages/providers/src/index.ts");
     expect(summary).toContain("source: codebase-memory search_graph");
@@ -223,9 +223,9 @@ describe("mcp-index-runtime", () => {
 
     expect(summary).toContain("Index architecture（短摘要）");
     expect(summary).toContain("project: F-Linghun");
-    expect(summary).toContain("nodes/edges: 3725/8068");
-    expect(summary).toContain("Class=100");
-    expect(summary).toContain("CALLS=3000");
+    expect(summary).toContain("graph: 3725 nodes, 8068 edges");
+    expect(summary).toContain("Class 100");
+    expect(summary).toContain("CALLS 3000");
   });
 
   test("isSupportiveIndexEvidence rejects missing/stale/error/status-only summaries", () => {
@@ -256,7 +256,7 @@ describe("mcp-index-runtime", () => {
       isSupportiveIndexEvidence(
         context as never,
         "search OpenAiCompatibleProvider",
-        "Index search\n- #1 path=packages/providers/src/index.ts symbol=OpenAiCompatibleProvider",
+        "Index search\n- #1 path packages/providers/src/index.ts symbol OpenAiCompatibleProvider",
       ),
     ).toBe(true);
   });
@@ -270,7 +270,7 @@ describe("mcp-index-runtime", () => {
       isSupportiveIndexEvidence(
         context as never,
         "architecture",
-        "Index architecture\n- nodes/edges: 3725/8068\n- node labels: Class=100, Function=500\n- edge types: CALLS=3000, IMPORTS=2000",
+        "Index architecture\n- graph: 3725 nodes, 8068 edges\n- node labels: Class 100, Function 500\n- edge types: CALLS 3000, IMPORTS 2000",
       ),
     ).toBe(false);
   });

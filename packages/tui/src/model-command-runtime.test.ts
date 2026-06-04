@@ -93,7 +93,7 @@ describe("/model set command", () => {
     await handleModelCommand(["set", "gpt-4"], context, output);
 
     expect(output.lines).toContain(
-      "已设置默认模型为 gpt-4（provider=openai-compatible，role=executor）",
+      "已设置默认模型为 gpt-4（provider openai-compatible，role executor）",
     );
     expect(context.model).toBe("gpt-4");
 
@@ -133,7 +133,7 @@ describe("/model set command", () => {
   it("sets executor route to deepseek-chat and persists it", async () => {
     await handleModelCommand(["route", "set", "executor", "deepseek-chat"], context, output);
 
-    expect(output.lines).toContain("已设置 executor role：provider=deepseek model=deepseek-chat");
+    expect(output.lines).toContain("已设置 executor role：provider deepseek model deepseek-chat");
     expect(context.model).toBe("deepseek-chat");
 
     const reloaded = await loadConfig(projectPath);
@@ -158,7 +158,7 @@ describe("/model set command", () => {
   it("normalizes legacy DeepSeek alias before route persistence", async () => {
     await handleModelCommand(["route", "set", "executor", "deepseek-v4-flash"], context, output);
 
-    expect(output.lines).toContain("已设置 executor role：provider=deepseek model=deepseek-chat");
+    expect(output.lines).toContain("已设置 executor role：provider deepseek model deepseek-chat");
     expect(output.lines.some((line) => line.includes("legacy/display alias"))).toBe(true);
     const reloaded = await loadConfig(projectPath);
     const raw = await readFile(getProjectSettingsPath(projectPath), "utf8");

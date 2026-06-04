@@ -137,8 +137,8 @@ export async function runVerificationPlan(
         controller.signal,
       );
       const durationMs = Date.now() - stepStarted;
-      const runnerErrorLine = result.runnerError ? `runnerError=${result.runnerError}\n` : "";
-      const fullLog = `$ ${step.command}\nexitCode=${result.exitCode}\noutcome=${result.outcome}\n${runnerErrorLine}durationMs=${durationMs}\n\n${result.output}`;
+      const runnerErrorLine = result.runnerError ? `runner error ${result.runnerError}\n` : "";
+      const fullLog = `$ ${step.command}\nexit code ${result.exitCode}\noutcome ${result.outcome}\n${runnerErrorLine}duration ${durationMs}ms\n\n${result.output}`;
       await writeFile(logPath, fullLog, "utf8");
       const summary = summarizeVerificationOutput(
         result.output,
@@ -480,8 +480,8 @@ export function summarizeVerificationOutput(
   const tail = lines.slice(-6).join(" | ");
   const summary = tail ? truncateDisplay(tail, 240) : "无输出";
   return runnerError
-    ? `exitCode=${exitCode}; runner error=${runnerError}; ${summary}`
-    : `exitCode=${exitCode}; ${summary}`;
+    ? `exit code ${exitCode}; runner error ${runnerError}; ${summary}`
+    : `exit code ${exitCode}; ${summary}`;
 }
 
 export async function safeReadJson(path: string): Promise<Record<string, unknown> | null> {

@@ -204,18 +204,18 @@ describe("runtime-path-marker", () => {
     it("formats main path marker", () => {
       const marker = classifyRuntimePath({ isTTY: true, inkAvailable: true });
       const formatted = formatRuntimePathMarker(marker);
-      expect(formatted).toContain("path=ink");
-      expect(formatted).toContain("kind=main");
+      expect(formatted).toContain("path ink");
+      expect(formatted).toContain("kind main");
       expect(formatted).not.toContain("degraded");
     });
 
     it("formats fallback marker with degraded reason", () => {
       const marker = classifyRuntimePath({ isTTY: false });
       const formatted = formatRuntimePathMarker(marker);
-      expect(formatted).toContain("path=non-tty");
-      expect(formatted).toContain("kind=fallback");
-      expect(formatted).toContain("degraded=");
-      expect(formatted).toContain("mature=not-claimable");
+      expect(formatted).toContain("path non-tty");
+      expect(formatted).toContain("kind fallback");
+      expect(formatted).toContain("degraded ");
+      expect(formatted).toContain("mature not claimable");
     });
   });
 
@@ -223,16 +223,16 @@ describe("runtime-path-marker", () => {
     it("formats source entry", () => {
       const marker = classifyStartupPath({ isSourceExecution: true });
       const formatted = formatStartupPathMarker(marker);
-      expect(formatted).toContain("entry=source");
-      expect(formatted).toContain("verified=true");
+      expect(formatted).toContain("entry source");
+      expect(formatted).toContain("verified true");
     });
 
     it("formats stale dist entry", () => {
       const marker = classifyStartupPath({ isDistExecution: true });
       const formatted = formatStartupPathMarker(marker);
-      expect(formatted).toContain("entry=dist");
-      expect(formatted).toContain("verified=false");
-      expect(formatted).toContain("stale-risk=");
+      expect(formatted).toContain("entry dist");
+      expect(formatted).toContain("verified false");
+      expect(formatted).toContain("stale risk ");
     });
   });
 });

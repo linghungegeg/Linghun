@@ -225,9 +225,9 @@ export function formatIndexRuntimeRef(
   const project = index.projectName ? `${index.projectName}:` : "";
   const size =
     typeof index.nodes === "number" || typeof index.edges === "number"
-      ? ` nodes=${index.nodes ?? "unknown"} edges=${index.edges ?? "unknown"}`
+      ? ` nodes ${index.nodes ?? "unknown"} edges ${index.edges ?? "unknown"}`
       : "";
-  const stale = index.staleHint ? ` stale=${truncateIndexRef(index.staleHint, 80)}` : "";
+  const stale = index.staleHint ? ` stale ${truncateIndexRef(index.staleHint, 80)}` : "";
   return `${project}${index.status}${size}${stale}`;
 }
 

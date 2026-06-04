@@ -150,11 +150,11 @@ export async function handleSkillsCommand(
         output,
         [
           "Skill evolution candidates（不会自动启用）",
-          "- autoEnable=no; writesFiles=no; trustChanges=no",
+          "- auto enable no; writes files no; trust changes no",
           `- candidates: ${context.skills.evolutionCandidates.length}`,
           ...context.skills.evolutionCandidates.map(
             (item) =>
-              `  - ${item.id}: risk=${item.risk} trigger=${item.triggerCondition} suggestedPath=${item.suggestedPath} summary=${item.summary}`,
+              `  - ${item.id}: risk ${item.risk}; trigger ${item.triggerCondition}; suggested path ${item.suggestedPath}; summary ${item.summary}`,
           ),
           "- usage: /skills evolve candidate <summary> | /skills evolve reject <id>",
         ].join("\n"),
@@ -176,7 +176,7 @@ export async function handleSkillsCommand(
       await deps().appendSystemEvent(
         context,
         sessionId,
-        `skill_evolution action=rejected id=${candidate.id} source=${candidate.source}`,
+        `skill evolution: action rejected; id ${candidate.id}; source ${candidate.source}`,
         "info",
       );
       writeLine(output, `已拒绝 skill evolution candidate：${id}；不会生成或启用 skill。`);
@@ -203,7 +203,7 @@ export async function handleSkillsCommand(
     await deps().appendSystemEvent(
       context,
       sessionId,
-      `skill_evolution action=candidate id=${candidate.id} source=${candidate.source}`,
+      `skill evolution: action candidate; id ${candidate.id}; source ${candidate.source}`,
       "info",
     );
     writeLine(

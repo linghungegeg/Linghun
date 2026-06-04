@@ -79,7 +79,7 @@ export function shouldOwnerBePaste(
  *   1. permission（permissionActive）
  *      —— 权限卡占位时，所有按键都被 permission 选择器接管。
  *   2. panel
- *      —— 面板层存在时，至少 Esc/Ctrl+O 等面板键先由 panel 处理，不落到全局停止。
+ *      —— 面板层存在时，至少 Esc 等面板键先由 panel 处理，不落到全局停止。
  *   3. paste
  *      —— pastePending 期间 Enter / Esc 也算 paste owner（吞 Enter / 取消粘贴）；
  *         其他大 chunk 或聚合中按键继续 paste。
@@ -131,8 +131,8 @@ export function isNavigationKey(key: OwnerKeyShape): boolean {
   );
 }
 
-function isPanelKey(input: string, key: OwnerKeyShape): boolean {
-  return key.escape || (key.ctrl && input.toLowerCase() === "o");
+function isPanelKey(_input: string, key: OwnerKeyShape): boolean {
+  return key.escape;
 }
 
 /** 调试 / 测试辅助：返回 owner 选择的稳定优先级数组。 */

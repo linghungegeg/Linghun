@@ -23,8 +23,8 @@ import type { CommandPanelView, ShellController } from "../types.js";
  * 键盘：Esc 关闭面板（派发 command-panel-close）。其他键盘交给 Composer。
  */
 const HINT_TEXT = {
-  "zh-CN": "Esc 关闭面板 · Ctrl+O 展开详情",
-  "en-US": "Esc close · Ctrl+O details",
+  "zh-CN": "Esc 关闭面板",
+  "en-US": "Esc close",
 } as const;
 
 export function CommandPanel({

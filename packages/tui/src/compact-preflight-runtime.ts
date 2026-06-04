@@ -385,11 +385,11 @@ function createCompactProjection(
   const summary = truncateDisplay(
     [
       "Linghun compact summary",
-      "scope=provider-visible recent context projection",
-      `trigger=${input.trigger}`,
-      `userGoal=${sanitizeCompactSummaryText(context, context.memory.lastHandoff?.goal ?? "current interactive coding task", 220)}`,
-      `currentTask=${sanitizeCompactSummaryText(context, context.tools.todos.find((todo) => todo.status !== "completed")?.content ?? "continue the latest user request", 220)}`,
-      `decisions=${
+      "scope provider-visible recent context projection",
+      `trigger ${input.trigger}`,
+      `user goal ${sanitizeCompactSummaryText(context, context.memory.lastHandoff?.goal ?? "current interactive coding task", 220)}`,
+      `current task ${sanitizeCompactSummaryText(context, context.tools.todos.find((todo) => todo.status !== "completed")?.content ?? "continue the latest user request", 220)}`,
+      `decisions ${
         context.routeDecisions
           .slice(0, 3)
           .map(
@@ -398,14 +398,14 @@ function createCompactProjection(
           )
           .join("; ") || "none recorded"
       }`,
-      `filesOrEvidenceRefs=${[...files, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
-      `activeAgentsWorkflows=${[...activeAgents, ...activeWorkflows].join("; ") || "none"}`,
-      `pendingPermissionsToolCalls=${pending.join("; ") || "none"}`,
-      `failureLearning=${failureLearning.join("; ") || "none"}`,
-      "antiHallucination=do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
-      `indexCacheMemoryFreshness=index:${context.index.status}; cacheFreshness:${context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown"}; memory:${context.memory.accepted.length} accepted`,
-      `discardedScope=${risks.join("; ") || "older provider-visible recent context summarized"}`,
-      `toolPairingSafe=${input.pairingSafe ? "yes" : "no"}`,
+      `files or evidence refs ${[...files, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
+      `active agents/workflows ${[...activeAgents, ...activeWorkflows].join("; ") || "none"}`,
+      `pending permissions/tool calls ${pending.join("; ") || "none"}`,
+      `failure learning ${failureLearning.join("; ") || "none"}`,
+      "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",
+      `index/cache/memory freshness: index ${context.index.status}; cache freshness ${context.cache.lastFreshness?.changedKeys?.join(",") || "stable-or-unknown"}; memory ${context.memory.accepted.length} accepted`,
+      `discarded scope ${risks.join("; ") || "older provider-visible recent context summarized"}`,
+      `tool pairing safe ${input.pairingSafe ? "yes" : "no"}`,
     ].join("\n"),
     COMPACT_SUMMARY_MAX_CHARS,
   );
@@ -471,7 +471,7 @@ async function appendCompactProjectionEvents(
   );
   const evidence = createEvidenceRecord(
     "user_provided",
-    `compact boundary ${projection.boundaryId}; scope=provider-visible recent context projection; pressure=${projection.pressureRatio}; toolPairingSafe=${projection.toolPairingSafe ? "yes" : "no"}`,
+    `compact boundary ${projection.boundaryId}; scope provider-visible recent context projection; pressure ${projection.pressureRatio}; tool pairing safe ${projection.toolPairingSafe ? "yes" : "no"}`,
     `compact:${projection.boundaryId}`,
     ["context_compact_boundary"],
   );
@@ -497,7 +497,7 @@ async function recordCompactFailure(
   await deps.appendSystemEvent(
     context,
     sessionId,
-    `context_compact_failed blocked=${blocked ? "yes" : "no"} reason=${context.cache.compactFailure.reason} cooldownUntil=${context.cache.compactFailure.cooldownUntil}`,
+    `context compact failed: blocked ${blocked ? "yes" : "no"}; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
   );
   await deps.captureFailureLearning(context, sessionId, {

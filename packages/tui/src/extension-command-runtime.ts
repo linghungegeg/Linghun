@@ -64,38 +64,38 @@ export function formatConfigOverview(context: TuiContext): string {
     return [
       "配置概览（一站式只读）",
       `- 语言：${context.config.language}（用 /language en-US 切换）`,
-      `- 模型：${context.model}（执行器 allowTools=${onOff(Boolean(executor?.allowTools))}；用 /model、/model doctor、/model route 查看与诊断）`,
+      `- 模型：${context.model}（执行器工具 ${onOff(Boolean(executor?.allowTools))}；用 /model、/model doctor、/model route 查看与诊断）`,
       `- 权限模式：${context.permissionMode}（用 /mode 切换；规则用 /permissions）`,
       `- 工作区信任：${trustLabel}（用 /trust 调整）`,
       `- 索引：${indexStatus}（用 /index status、/index doctor、/index check）`,
-      `- MCP：启用=${mcpServers}（用 /mcp、/mcp doctor、/mcp tools）`,
+      `- MCP：已配置服务 ${mcpServers}（用 /mcp、/mcp doctor、/mcp tools）`,
       "- 记忆：用 /memory、/memory storage、/memory review、/memory learn",
-      `- 缓存：history=${cacheCount}（用 /cache status、/cache-log、/usage、/stats）`,
-      `- 后台：running=${bgRunning}（用 /background、/job、/details）`,
-      `- 远程：enabled=${onOff(remoteEnabled)}（用 /remote）`,
-      `- 钩子：enabled=${onOff(context.hooks.enabled)}；项目信任=${onOff(context.hooks.projectTrusted)}（用 /doctor hooks）`,
-      `- 插件：discover=${onOff(context.plugins.enabled)}；信任 id 数=${pluginsTrusted}（用 /plugins、/plugins doctor）`,
-      `- 技能：discover=${onOff(context.skills.enabled)}；信任 id 数=${skillsTrusted}（用 /skills、/skills status）`,
-      `- 工作流：discover=${onOff(context.workflows.enabled)}（用 /workflows）`,
+      `- 缓存：历史 ${cacheCount} 条（用 /cache status、/cache-log、/usage、/stats）`,
+      `- 后台：运行中 ${bgRunning}（用 /background、/job、/details）`,
+      `- 远程：${onOff(remoteEnabled)}（用 /remote）`,
+      `- 钩子：${onOff(context.hooks.enabled)}；项目信任 ${onOff(context.hooks.projectTrusted)}（用 /doctor hooks）`,
+      `- 插件：发现 ${onOff(context.plugins.enabled)}；信任 id 数 ${pluginsTrusted}（用 /plugins、/plugins doctor）`,
+      `- 技能：发现 ${onOff(context.skills.enabled)}；信任 id 数 ${skillsTrusted}（用 /skills、/skills status）`,
+      `- 工作流：发现 ${onOff(context.workflows.enabled)}（用 /workflows）`,
       "下一步：直接输入对应 slash 进入；用 /features 查看默认功能策略，用 /help all 查看完整命令表。",
     ].join("\n");
   }
   return [
     "Configuration overview (one-stop read-only)",
     `- language: ${context.config.language} (switch via /language en-US)`,
-    `- model: ${context.model} (executor allowTools=${onOff(Boolean(executor?.allowTools))}; use /model, /model doctor, /model route)`,
+    `- model: ${context.model} (executor tools ${onOff(Boolean(executor?.allowTools))}; use /model, /model doctor, /model route)`,
     `- permission mode: ${context.permissionMode} (switch via /mode; rules via /permissions)`,
     `- workspace trust: ${trustLabel} (adjust via /trust)`,
     `- index: ${indexStatus} (use /index status, /index doctor, /index check)`,
-    `- MCP: enabled=${mcpServers} (use /mcp, /mcp doctor, /mcp tools)`,
+    `- MCP: configured servers ${mcpServers} (use /mcp, /mcp doctor, /mcp tools)`,
     "- memory: use /memory, /memory storage, /memory review, /memory learn",
-    `- cache: history=${cacheCount} (use /cache status, /cache-log, /usage, /stats)`,
-    `- background: running=${bgRunning} (use /background, /job, /details)`,
-    `- remote: enabled=${onOff(remoteEnabled)} (use /remote)`,
-    `- hooks: enabled=${onOff(context.hooks.enabled)}; projectTrusted=${onOff(context.hooks.projectTrusted)} (use /doctor hooks)`,
-    `- plugins: discover=${onOff(context.plugins.enabled)}; trustedIds=${pluginsTrusted} (use /plugins, /plugins doctor)`,
-    `- skills: discover=${onOff(context.skills.enabled)}; trustedIds=${skillsTrusted} (use /skills, /skills status)`,
-    `- workflows: discover=${onOff(context.workflows.enabled)} (use /workflows)`,
+    `- cache: history ${cacheCount} (use /cache status, /cache-log, /usage, /stats)`,
+    `- background: running ${bgRunning} (use /background, /job, /details)`,
+    `- remote: ${onOff(remoteEnabled)} (use /remote)`,
+    `- hooks: ${onOff(context.hooks.enabled)}; project trusted ${onOff(context.hooks.projectTrusted)} (use /doctor hooks)`,
+    `- plugins: discover ${onOff(context.plugins.enabled)}; trusted ids ${pluginsTrusted} (use /plugins, /plugins doctor)`,
+    `- skills: discover ${onOff(context.skills.enabled)}; trusted ids ${skillsTrusted} (use /skills, /skills status)`,
+    `- workflows: discover ${onOff(context.workflows.enabled)} (use /workflows)`,
     "Next: type the slash to enter the panel. /features for default policy. /help all for the full command list.",
   ].join("\n");
 }
@@ -105,23 +105,23 @@ export function formatFeaturePolicy(context: TuiContext): string {
     "Feature policy（default CCB-style posture）",
     "Recommended foundation（default on / visible）",
     `- language: ${context.config.language}; en-US available via /language en-US`,
-    `- model/tool loop: enabled through provider tools=${context.config.modelRoutes.routes.find((route) => route.role === "executor")?.allowTools ? "yes" : "no"}; evidence and long output are kept in details, available via /details`,
-    `- cache/stats: /cache status, /break-cache status, /usage, /stats; history=${context.cache.history.length}`,
-    `- model doctor: /model doctor and /model route doctor; provider=${getRuntimeStatusProvider(context)} model=${context.model}`,
-    "- index: status/search/architecture are readonly; init fast/refresh are safe local actions with safety scan; auto full-repo index on startup=no",
-    `- codebase-memory MCP: discoverable/diagnosable via /mcp doctor; enabledServers=${context.config.mcp.enabledServers.join(",") || "none"}`,
-    `- permissions: project allowlist visible via /permissions; defaultMode=${context.permissionMode}`,
+    `- model/tool loop: provider tools ${context.config.modelRoutes.routes.find((route) => route.role === "executor")?.allowTools ? "yes" : "no"}; evidence and long output are kept in details, available via /details`,
+    `- cache/stats: /cache status, /break-cache status, /usage, /stats; history ${context.cache.history.length}`,
+    `- model doctor: /model doctor and /model route doctor; provider ${getRuntimeStatusProvider(context)} model ${context.model}`,
+    "- index: status/search/architecture are readonly; init fast/refresh are safe local actions with safety scan; auto full-repo index on startup no",
+    `- codebase-memory MCP: discoverable/diagnosable via /mcp doctor; enabled servers ${context.config.mcp.enabledServers.join(",") || "none"}`,
+    `- permissions: project allowlist visible via /permissions; default mode ${context.permissionMode}`,
     "Advanced/high-cost/automation（discoverable, not auto-run）",
-    "- memory: auto long-term extraction=no; autoAccept=no; review via /memory review",
-    `- skills: discover manifests=${context.skills.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.skills.trustedIds.join(",") || "none"}`,
-    `- workflows: discover templates=${context.workflows.enabled ? "yes" : "no"}; autoRun=no; /workflows <name> only shows Start Gate`,
-    `- plugins: discover manifests=${context.plugins.enabled ? "yes" : "no"}; autoExecute=no; trustedIds=${context.plugins.trustedIds.join(",") || "none"}`,
-    "- agents/background: manual commands only; verifier auto fork=no; coordinator/multi-worker=unsupported",
+    "- memory: auto long-term extraction no; auto accept no; review via /memory review",
+    `- skills: discover manifests ${context.skills.enabled ? "yes" : "no"}; auto execute no; trusted ids ${context.skills.trustedIds.join(",") || "none"}`,
+    `- workflows: discover templates ${context.workflows.enabled ? "yes" : "no"}; auto run no; /workflows <name> only shows Start Gate`,
+    `- plugins: discover manifests ${context.plugins.enabled ? "yes" : "no"}; auto execute no; trusted ids ${context.plugins.trustedIds.join(",") || "none"}`,
+    "- agents/background: manual commands only; verifier auto fork no; coordinator/multi-worker unsupported",
     "Dangerous defaults（off）",
     "- mode switching: direct /mode and Shift+Tab cycling; switching modes does not bypass hard denies, path safety, or the permission pipeline",
-    `- hooks: enabled=${context.hooks.enabled ? "yes" : "no"}; projectTrusted=${context.hooks.projectTrusted ? "yes" : "no"}; auto execution=no`,
-    "- auto accept all edits=no; auto dependency install=no; auto networking=no; delete/rename/restore auto execution=no",
-    "- plugin marketplace auto install/update=no; remote bridge/control auto connect=no; continuous phase progression=no",
+    `- hooks: enabled ${context.hooks.enabled ? "yes" : "no"}; project trusted ${context.hooks.projectTrusted ? "yes" : "no"}; auto execution no`,
+    "- auto accept all edits no; auto dependency install no; auto networking no; delete/rename/restore auto execution no",
+    "- plugin marketplace auto install/update no; remote bridge/control auto connect no; continuous phase progression no",
     "Unsupported / pending",
     "- remote channels, voice, computer-use/browser control, daemon jobs, plugin marketplace, and AI sessions auto injection are not default features.",
   ].join("\n");
@@ -133,7 +133,7 @@ export function formatSkills(context: TuiContext): string {
     `- projectDir: ${context.skills.projectDir}`,
     `- userDir: ${context.skills.userDir}`,
     `- enabled: ${context.skills.enabled ? "yes" : "no"}`,
-    `- evolutionCandidates: ${context.skills.evolutionCandidates.length}（candidate only; autoEnable=no）`,
+    `- evolution candidates: ${context.skills.evolutionCandidates.length}（candidate only; auto enable no）`,
   ];
   if (context.skills.lastError) {
     lines.push(`- lastError: ${context.skills.lastError}`);
@@ -144,9 +144,9 @@ export function formatSkills(context: TuiContext): string {
     );
   }
   for (const skill of context.skills.skills) {
-    const error = skill.lastError ? ` lastError=${skill.lastError}` : "";
+    const error = skill.lastError ? `; last error ${skill.lastError}` : "";
     lines.push(
-      `- ${skill.id}: ${skill.enabled ? "enabled" : "disabled"} trusted=${skill.trusted ? "yes" : "no"} source=${skill.source} scope=${skill.scope} version=${skill.version} triggers=${skill.triggers.join(",") || "-"} write=${skill.mayWrite ? "yes" : "no"} bash=${skill.mayExecute ? "yes" : "no"} network=${skill.mayNetwork ? "yes" : "no"} summary=${skill.summary}${error}`,
+      `- ${skill.id}: ${skill.enabled ? "enabled" : "disabled"}; trusted ${skill.trusted ? "yes" : "no"}; source ${skill.source}; scope ${skill.scope}; version ${skill.version}; triggers ${skill.triggers.join(",") || "-"}; write ${skill.mayWrite ? "yes" : "no"}; bash ${skill.mayExecute ? "yes" : "no"}; network ${skill.mayNetwork ? "yes" : "no"}; summary ${skill.summary}${error}`,
     );
   }
   lines.push(
@@ -177,7 +177,7 @@ export function formatWorkflows(context: TuiContext): string {
     "Workflows（本地模板与真实 runner 入口）",
     ...context.workflows.templates.map(
       (item) =>
-        `- ${item.id}: purpose=${item.purpose} risk=${item.risk} writesFiles=${item.writesFiles ? "yes" : "no"} validation=${item.recommendedValidation.join(" | ")}`,
+        `- ${item.id}: purpose ${item.purpose}; risk ${item.risk}; writes files ${item.writesFiles ? "yes" : "no"}; validation ${item.recommendedValidation.join(" | ")}`,
     ),
     "- preview: /workflows plan <goal> 只生成预览，不执行。",
     "- run: /workflows run <goal> 复用 durable job runner，写入真实 task/transcript/report。",
@@ -202,7 +202,7 @@ export function formatPlugins(context: TuiContext): string {
   }
   for (const plugin of context.plugins.plugins) {
     lines.push(
-      `- ${plugin.id}: ${plugin.enabled ? "enabled" : "disabled"} trusted=${plugin.trusted ? "yes" : "no"} source=${plugin.source} scope=${plugin.scope} version=${plugin.version} write=${plugin.mayWrite ? "yes" : "no"} bash=${plugin.mayExecute ? "yes" : "no"} network=${plugin.mayNetwork ? "yes" : "no"} commands=${plugin.contributions.commands.join(",") || "-"} hooks=${plugin.contributions.hooks.join(",") || "-"} workflows=${plugin.contributions.workflows.join(",") || "-"} skills=${plugin.contributions.skills.join(",") || "-"}`,
+      `- ${plugin.id}: ${plugin.enabled ? "enabled" : "disabled"}; trusted ${plugin.trusted ? "yes" : "no"}; source ${plugin.source}; scope ${plugin.scope}; version ${plugin.version}; write ${plugin.mayWrite ? "yes" : "no"}; bash ${plugin.mayExecute ? "yes" : "no"}; network ${plugin.mayNetwork ? "yes" : "no"}; commands ${plugin.contributions.commands.join(",") || "-"}; hooks ${plugin.contributions.hooks.join(",") || "-"}; workflows ${plugin.contributions.workflows.join(",") || "-"}; skills ${plugin.contributions.skills.join(",") || "-"}`,
     );
   }
   lines.push("- note: plugin 贡献项稳定排序；贡献工具仍走统一权限管道，加载失败隔离。");
@@ -213,12 +213,12 @@ export function formatPluginsDoctor(context: TuiContext): string {
   return [
     "Plugins doctor",
     `- manifest count: ${context.plugins.plugins.length}`,
-    `- disabledIds: ${context.plugins.disabledIds.join(",") || "none"}`,
-    `- trustedIds: ${context.plugins.trustedIds.join(",") || "none"}`,
+    `- disabled ids: ${context.plugins.disabledIds.join(",") || "none"}`,
+    `- trusted ids: ${context.plugins.trustedIds.join(",") || "none"}`,
     ...context.plugins.plugins.map((plugin) => {
       const risk = !plugin.trusted ? `BLOCK untrusted ${plugin.source}` : "ok";
-      const error = plugin.lastError ? ` lastError=${plugin.lastError}` : "";
-      return `- ${plugin.id}: ${risk} path=${plugin.path} permissions=${plugin.permissions.join(",") || "none"}${error}`;
+      const error = plugin.lastError ? `; last error ${plugin.lastError}` : "";
+      return `- ${plugin.id}: ${risk}; path ${plugin.path}; permissions ${plugin.permissions.join(",") || "none"}${error}`;
     }),
     "- boundary: 不执行远程安装/自动更新/完整沙箱；未信任 extension 不得写文件、联网或执行命令。",
   ].join("\n");
@@ -229,17 +229,17 @@ export function formatHooksDoctor(context: TuiContext): string {
   const lines = [
     "Hooks doctor",
     `- hooks enabled: ${context.hooks.enabled ? "yes" : "no"}（默认关闭）`,
-    `- projectTrusted: ${context.hooks.projectTrusted ? "yes" : "no"}`,
-    `- timeoutMs: ${context.hooks.timeoutMs}`,
-    `- outputLimitBytes: ${context.hooks.outputLimitBytes}`,
-    `- cacheImpactHash: ${cacheImpact}`,
+    `- project trusted: ${context.hooks.projectTrusted ? "yes" : "no"}`,
+    `- timeout: ${context.hooks.timeoutMs}ms`,
+    `- output limit: ${context.hooks.outputLimitBytes} bytes`,
+    `- cache impact hash: ${cacheImpact}`,
   ];
   if (context.hooks.hooks.length === 0) {
     lines.push("- hooks: none");
   }
   for (const hook of context.hooks.hooks) {
     lines.push(
-      `- ${hook.id}: event=${hook.event} enabled=${hook.enabled ? "yes" : "no"} trusted=${hook.trusted ? "yes" : "no"} source=${hook.source} scope=${hook.scope} path=${hook.path} timeoutMs=${hook.timeoutMs} outputLimitBytes=${hook.outputLimitBytes} permissions=${hook.permissions.join(",") || "none"} logPath=${hook.logPath ?? "-"} lastError=${hook.lastError ?? "none"}`,
+      `- ${hook.id}: event ${hook.event}; enabled ${hook.enabled ? "yes" : "no"}; trusted ${hook.trusted ? "yes" : "no"}; source ${hook.source}; scope ${hook.scope}; path ${hook.path}; timeout ${hook.timeoutMs}ms; output limit ${hook.outputLimitBytes} bytes; permissions ${hook.permissions.join(",") || "none"}; log ${hook.logPath ?? "-"}; last error ${hook.lastError ?? "none"}`,
     );
   }
   lines.push(
@@ -262,7 +262,7 @@ export function formatTrustNotice(
     `- installedAt: ${item.lifecycle.installedAt ?? "unknown"}`,
     `- permissions: ${item.permissions.join(",") || "none"}`,
     `- trust: ${item.trusted ? "trusted" : "untrusted"}`,
-    `- mayWrite=${item.mayWrite ? "yes" : "no"} mayExecute=${item.mayExecute ? "yes" : "no"} mayNetwork=${item.mayNetwork ? "yes" : "no"}`,
+    `- may write ${item.mayWrite ? "yes" : "no"}; may execute ${item.mayExecute ? "yes" : "no"}; may network ${item.mayNetwork ? "yes" : "no"}`,
     "- 未信任 extension 不得写文件、联网或执行命令；实际工具调用仍走权限管道。",
   ].join("\n");
 }
@@ -276,13 +276,13 @@ export function formatExtensionStatus(kind: ExtensionKind, context: TuiContext):
     title,
     "- lifecycle: add/install, validate, enable/disable, remove/update, trust notice, doctor/status",
     `- installed: ${items.length}`,
-    `- disabledIds: ${disabledIds.join(",") || "none"}`,
-    `- trustedIds: ${trustedIds.join(",") || "none"}`,
+    `- disabled ids: ${disabledIds.join(",") || "none"}`,
+    `- trusted ids: ${trustedIds.join(",") || "none"}`,
     ...items.map((item) => {
       const source = item.lifecycle.sourceUrl
-        ? `sourceUrl=${sanitizeDiagnosticText(item.lifecycle.sourceUrl)}`
-        : `localPath=${redactedPath(item.lifecycle.localPath)}`;
-      return `- ${item.id}: ${item.enabled ? "enabled" : "disabled"} trust=${item.lifecycle.trustLevel} ${source} ref=${item.lifecycle.ref ?? "-"} commit=${item.lifecycle.commit ?? "-"} permissions=${item.lifecycle.permissionSummary} discovered=${item.lifecycle.discovered ? "yes" : "no"} registered=${item.lifecycle.registered ? "yes" : "no"} schemaLoaded=${item.lifecycle.schemaLoaded ? "yes" : "no"} runtime=${item.lifecycle.runtimeVersion}${item.lastError ? ` loadError=${truncateDisplay(item.lastError, 80)}` : ""}`;
+        ? `source url ${sanitizeDiagnosticText(item.lifecycle.sourceUrl)}`
+        : `local path ${redactedPath(item.lifecycle.localPath)}`;
+      return `- ${item.id}: ${item.enabled ? "enabled" : "disabled"}; trust ${item.lifecycle.trustLevel}; ${source}; ref ${item.lifecycle.ref ?? "-"}; commit ${item.lifecycle.commit ?? "-"}; permissions ${item.lifecycle.permissionSummary}; discovered ${item.lifecycle.discovered ? "yes" : "no"}; registered ${item.lifecycle.registered ? "yes" : "no"}; schema loaded ${item.lifecycle.schemaLoaded ? "yes" : "no"}; runtime ${item.lifecycle.runtimeVersion}${item.lastError ? `; load error ${truncateDisplay(item.lastError, 80)}` : ""}`;
     }),
     "- boundary: Git/GitHub 安装只做受控 clone/fetch 和 manifest/SKILL.md 读取；不执行 postinstall、hook、仓库脚本或第三方代码。",
   ].join("\n");
@@ -402,7 +402,7 @@ export async function installExtensionFromRequest(
   }
   if (request.confirmNetwork) {
     await onNetworkConfirmed?.(
-      `connect_lite_network_start_gate_confirmed: kind=${kind} source=${request.source} scope=${request.scope} ref=${request.ref ?? "default"} locator=${sanitizeDiagnosticText(request.locator)} boundary=exact-command_start_gate_not_full_permission_approval`,
+      `connect_lite_network_start_gate_confirmed: kind ${kind}; source ${request.source}; scope ${request.scope}; ref ${request.ref ?? "default"}; locator ${sanitizeDiagnosticText(request.locator)}; boundary exact-command_start_gate_not_full_permission_approval`,
     );
   }
   if (!request.confirmNetwork) {
@@ -642,7 +642,7 @@ export function validateExtensionItems(
       if (!item.lifecycle.schemaLoaded) problems.push("schema not loaded");
       if (item.lifecycle.runtimeVersion !== "compatible") problems.push("runtime incompatible");
       if (item.lastError) problems.push("load error");
-      return `- ${item.id}: ${problems.length === 0 ? "ok" : problems.join("; ")} next=${problems.length === 0 ? "enable/use explicit command" : `run /${kind} doctor, then validate/enable after fixing`}`;
+      return `- ${item.id}: ${problems.length === 0 ? "ok" : problems.join("; ")}; next ${problems.length === 0 ? "enable/use explicit command" : `run /${kind} doctor, then validate/enable after fixing`}`;
     }),
   ].join("\n");
 }
@@ -678,7 +678,7 @@ export function validateExtensionContributionExecution(
   if (item.lifecycle.runtimeVersion !== "compatible") {
     return {
       ok: false,
-      summary: `Connect Lite guard: ${kind}:${id} runtimeVersion=${item.lifecycle.runtimeVersion} 不兼容，已拒绝执行。请 update 或 disable。`,
+      summary: `Connect Lite guard: ${kind}:${id} runtime version ${item.lifecycle.runtimeVersion} 不兼容，已拒绝执行。请 update 或 disable。`,
     };
   }
   if (kind === "skills") {

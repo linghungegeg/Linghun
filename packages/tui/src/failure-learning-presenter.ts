@@ -122,7 +122,7 @@ export function formatFailureLearningDetails(
     lines.push(`    ${isEn ? "root cause (inferred)" : "根因(推断)"}: ${r.rootCauseGuess}`);
     lines.push(`    ${isEn ? "avoid next time" : "下次避免"}: ${r.avoidNextTime}`);
     lines.push(
-      `    ${isEn ? "severity" : "严重度"}=${r.severity}; lastSeen=${r.lastSeen}; source=${r.sourceRef}`,
+      `    ${isEn ? "severity" : "严重度"} ${r.severity}; last seen ${r.lastSeen}; source ${r.sourceRef}`,
     );
   }
   lines.push(

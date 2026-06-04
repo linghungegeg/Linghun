@@ -130,7 +130,13 @@ const DEFAULT_TOOL_TEXT_LIMIT = 8_000;
 const BASH_PREVIEW_LIMIT = 4_000;
 const BASH_TIMEOUT_MS = 120_000;
 const MAX_TODO_ITEMS = 100;
-const SEARCH_EXCLUDED_DIRS = ["node_modules", "dist", ".git"];
+const SEARCH_EXCLUDED_DIR_NAMES = ["node_modules", "dist", ".git", ".codebase-memory"];
+const SEARCH_EXCLUDED_PATH_PREFIXES = [
+  ".linghun/logs",
+  ".linghun/agent-runs",
+  ".linghun/failures",
+];
+const SEARCH_EXCLUDED_FILE_SUFFIXES = [".tsbuildinfo"];
 const RG_TIMEOUT_MS = 30_000;
 
 export function createToolContext(workspaceRoot = process.cwd()): ToolContext {
@@ -545,7 +551,7 @@ async function readTool(input: ReadInput, context: ToolContext): Promise<ToolOut
   const textLines = selected.map((line, index) => `${offset + index + 1}\t${line}`);
   if (truncated) {
     textLines.push(
-      `...（Read window only: selectedLines=${selected.length}, windowLines=${selected.length}, totalLines=${lines.length}, contentLines=${lines.length}; not the full file）`,
+      `...（只显示读取窗口：选中 ${selected.length} 行 / 全文 ${lines.length} 行；不是完整文件）`,
     );
   }
   return {
@@ -745,13 +751,16 @@ async function bashTool(input: BashInput, context: ToolContext): Promise<ToolOut
   const adapterLines =
     adapted.command === input.command && adapted.adapter === "native"
       ? []
-      : [`adapter=${adapted.adapter}`, `originalCommand=${summarizeOriginalShellCommand(input.command)}`];
+      : [
+          `adapter ${adapted.adapter}`,
+          `original command ${summarizeOriginalShellCommand(input.command)}`,
+        ];
   const commandForLog = adapted.logCommand ?? adapted.command;
   const fullText = [
     `$ ${commandForLog}`,
     ...adapterLines,
-    `exitCode=${result.exitCode}`,
-    `outcome=${result.outcome}`,
+    `exit code ${result.exitCode}`,
+    `outcome ${result.outcome}`,
     "",
     result.output,
   ].join("\n");
@@ -1264,15 +1273,15 @@ function createEditOutput(
   const newlineAfter = detectNewlineStyle(after);
   const text = [
     `${operation} 已完成：${rel}`,
-    `- patch: +${summary.addedLines} -${summary.removedLines}`,
-    `- changedFiles: ${rel}`,
-    `- readGuard: ${readGuard.source}`,
-    `- newline: ${newlineBefore} -> ${newlineAfter}`,
+    `- 补丁：+${summary.addedLines} -${summary.removedLines}`,
+    `- 改动文件：${rel}`,
+    "- 读取保护：已启用",
+    `- 换行：${newlineBefore} -> ${newlineAfter}`,
     "- 下一步：用 Diff 或 /details 查看补丁摘要；需要继续编辑请基于最新内容。",
   ].join("\n");
   return {
     text,
-    summary: `${operation} ${rel}: +${summary.addedLines} -${summary.removedLines}; changedFiles=1`,
+    summary: `${operation} ${rel}: +${summary.addedLines} -${summary.removedLines}; changed files 1`,
     preview: text,
     details: createPatchDetails(operation, rel, before, after, readGuard, editCount),
     data: {
@@ -1329,8 +1338,8 @@ function createPatchDetails(
   return [
     `operation: ${operation}`,
     `file: ${rel}`,
-    `editCount: ${editCount}`,
-    `readGuard: ${readGuard.source}`,
+    `edit count: ${editCount}`,
+    "read protection: enabled",
     "encoding: utf8",
     `newline: ${detectNewlineStyle(before)} -> ${detectNewlineStyle(after)}`,
     "--- before (first changed context)",
@@ -1362,7 +1371,11 @@ function detectNewlineStyle(content: string): "lf" | "crlf" | "mixed" | "none" {
   return "none";
 }
 
-async function* listFiles(root: string, shouldStop?: () => boolean): AsyncGenerator<string> {
+async function* listFiles(
+  root: string,
+  shouldStop?: () => boolean,
+  searchRoot = root,
+): AsyncGenerator<string> {
   if (shouldStop?.()) return;
   const current = await stat(root);
   if (current.isFile()) {
@@ -1373,18 +1386,35 @@ async function* listFiles(root: string, shouldStop?: () => boolean): AsyncGenera
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     if (shouldStop?.()) return;
-    if (SEARCH_EXCLUDED_DIRS.includes(entry.name)) {
+    const entryPath = join(root, entry.name);
+    if (isDefaultSearchExcludedPath(entryPath, searchRoot, entry)) {
       continue;
     }
-    const entryPath = join(root, entry.name);
     if (entry.isDirectory()) {
-      yield* listFiles(entryPath, shouldStop);
+      yield* listFiles(entryPath, shouldStop, searchRoot);
       continue;
     }
     if (entry.isFile()) {
       yield entryPath;
     }
   }
+}
+
+function isDefaultSearchExcludedPath(
+  entryPath: string,
+  searchRoot: string,
+  entry: { name: string; isDirectory(): boolean; isFile(): boolean },
+): boolean {
+  if (entry.isDirectory() && SEARCH_EXCLUDED_DIR_NAMES.includes(entry.name)) {
+    return true;
+  }
+  if (entry.isFile() && SEARCH_EXCLUDED_FILE_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) {
+    return true;
+  }
+  const rel = stripCurrentDirectoryPrefix(relative(searchRoot, entryPath).replaceAll("\\", "/"));
+  return SEARCH_EXCLUDED_PATH_PREFIXES.some(
+    (prefix) => rel === prefix || rel.startsWith(`${prefix}/`),
+  );
 }
 
 async function safeReadText(filePath: string): Promise<string | null> {
@@ -1415,7 +1445,7 @@ async function tryRipgrepSearch(
     "--no-ignore",
     "--max-columns",
     "500",
-    ...createRgExcludeArgs(),
+    ...createRgExcludeArgs(root, context.workspaceRoot),
   ];
   const pattern = input.pattern.startsWith("(?i)") ? input.pattern.slice(4) : input.pattern;
   if (input.pattern.startsWith("(?i)")) {
@@ -1442,7 +1472,7 @@ async function tryRipgrepFiles(
     "never",
     "--hidden",
     "--no-ignore",
-    ...createRgExcludeArgs(),
+    ...createRgExcludeArgs(root, context.workspaceRoot),
   ];
   args.push(relativePath(context.workspaceRoot, root));
   const matcher = globToRegExp(input.pattern);
@@ -1454,8 +1484,29 @@ async function tryRipgrepFiles(
   return { matches: result.lines.slice(0, limit), truncated: result.truncated };
 }
 
-function createRgExcludeArgs(): string[] {
-  return SEARCH_EXCLUDED_DIRS.flatMap((dir) => ["--glob", `!**/${dir}/**`]);
+function createRgExcludeArgs(root: string, workspaceRoot: string): string[] {
+  const searchRootRel = stripCurrentDirectoryPrefix(
+    relative(workspaceRoot, root).replaceAll("\\", "/"),
+  );
+  return [
+    ...SEARCH_EXCLUDED_DIR_NAMES.filter((dir) => !isExplicitExcludedDirRoot(searchRootRel, dir)).map(
+      (dir) => `!**/${dir}/**`,
+    ),
+    ...SEARCH_EXCLUDED_PATH_PREFIXES.filter(
+      (path) => !isSameOrInside(searchRootRel, path),
+    ).map((path) => `!**/${path}/**`),
+    ...SEARCH_EXCLUDED_FILE_SUFFIXES.filter((suffix) => !searchRootRel.endsWith(suffix)).map(
+      (suffix) => `!**/*${suffix}`,
+    ),
+  ].flatMap((pattern) => ["--glob", pattern]);
+}
+
+function isExplicitExcludedDirRoot(searchRootRel: string, dir: string): boolean {
+  return searchRootRel === dir || searchRootRel.endsWith(`/${dir}`);
+}
+
+function isSameOrInside(value: string, parent: string): boolean {
+  return value === parent || value.startsWith(`${parent}/`);
 }
 
 function normalizeRgPath(line: string, workspaceRoot: string, root: string): string {

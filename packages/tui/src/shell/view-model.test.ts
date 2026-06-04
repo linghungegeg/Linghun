@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type TuiContext,
-  __testBuildToggleDetailsCommandPanel,
+  __testBuildExplicitDetailsCommandPanel,
   __testCreateShellBlockOutput,
 } from "../index.js";
 import { formatToolOutput } from "../tool-output-presenter.js";
@@ -189,7 +189,11 @@ describe("shell view model", () => {
       "en-US",
       "output-test",
     );
-    const view = createShellViewModel(createContext({ language: "en-US" }), {
+    const ctx = createContext({ language: "en-US" }) as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    ctx.ctrlOExpandState = { active: true, blockId: "output-test" };
+    const view = createShellViewModel(ctx, {
       outputBlocks: [block],
       width: 120,
     });
@@ -2254,10 +2258,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     const source = await readFile(join(SRC_ROOT, "model-doctor-runtime.ts"), "utf8");
     // doctor body must distinguish three states so users can tell whether
     // LINGHUN_INFERENCE_LEVEL=High actually flows to the request:
-    //   - configured + responses/permissive  → effective/sent level=X
+    //   - configured + responses/permissive  → effective/sent level X
     //   - configured + strict_openai_compatible → ignored/unsupported/未生效
     //   - not configured → not configured/未生效
-    expect(source).toContain("effective/sent level=");
+    expect(source).toContain("effective/sent level ");
     expect(source).toContain("ignored/unsupported/未生效");
     expect(source).toContain("not configured/未生效");
   });
@@ -2407,7 +2411,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(rendered).not.toContain("done");
   });
 
-  it("plain renderer Task shows fail/details hint", () => {
+  it("plain renderer Task folds fail details behind Ctrl+O", () => {
     // D.13Q-UX Real Smoke Fix v3：fail 块由调用方显式构造，不再依赖关键词扫描。
     // 多行 fail 正文才挂 Ctrl+O 错误展开 hint。
     const block: ProductBlockViewModel = {
@@ -2425,7 +2429,9 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
       outputBlocks: [block],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).not.toContain("Ctrl+O");
+    expect(rendered).toContain("Ctrl+O");
+    expect(rendered).toContain("exit 1");
+    expect(rendered).not.toContain("stderr line A");
     // fail status marker (✗ in color mode, [FAIL] in no-color)
     expect(rendered).toContain("\u2717");
   });
@@ -4190,7 +4196,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
   it("assistant_text block 在 plain renderer 中保留多行（不打平到首行）", () => {
     const block = createOutputBlock("段落一\n段落二\n段落三", "zh-CN", "out-multiline");
-    const view = createShellViewModel(createContext(), {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    ctx.ctrlOExpandState = { active: true, blockId: "out-multiline" };
+    const view = createShellViewModel(ctx, {
       outputBlocks: [block],
       width: 120,
       viewMode: "task",
@@ -4207,7 +4217,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
       "zh-CN",
       "out-code",
     );
-    const view = createShellViewModel(createContext(), {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    ctx.ctrlOExpandState = { active: true, blockId: "out-code" };
+    const view = createShellViewModel(ctx, {
       noColor: true,
       outputBlocks: [block],
       width: 120,
@@ -4223,12 +4237,20 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
 
   it("diff code fence 在 color 与 no-color plain renderer 中区分 +/-/context", () => {
     const diff = "```diff\n context line\n+added line\n-removed line\n```";
-    const colorView = createShellViewModel(createContext(), {
+    const colorCtx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    colorCtx.ctrlOExpandState = { active: true, blockId: "out-diff-color" };
+    const noColorCtx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    noColorCtx.ctrlOExpandState = { active: true, blockId: "out-diff-nocolor" };
+    const colorView = createShellViewModel(colorCtx, {
       outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-color")],
       width: 120,
       viewMode: "task",
     });
-    const noColorView = createShellViewModel(createContext(), {
+    const noColorView = createShellViewModel(noColorCtx, {
       noColor: true,
       outputBlocks: [createOutputBlock(diff, "zh-CN", "out-diff-nocolor")],
       width: 120,
@@ -4277,7 +4299,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
         messageKind: "local_command_output",
       },
     ];
-    const view = createShellViewModel(createContext(), {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    ctx.ctrlOExpandState = { active: true, blockId: "a1" };
+    const view = createShellViewModel(ctx, {
       noColor: true,
       outputBlocks: blocks,
       width: 120,
@@ -5066,6 +5092,106 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     expect(out?.nextAction).toContain("Ctrl+O");
   });
 
+  it("Ctrl+O 展开态在 transcript block 内显示 fullText，不创建 CommandPanel", () => {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    const block: ProductBlockViewModel = {
+      id: "multi",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "first line",
+      fullText: "first line\nsecond hidden line\nthird hidden line",
+      messageKind: "assistant_text",
+      ctrlOCollapsed: true,
+    };
+
+    const collapsed = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    expect(renderPlainShell(collapsed)).toContain("Ctrl+O");
+    expect(renderPlainShell(collapsed)).not.toContain("second hidden line");
+
+    ctx.ctrlOExpandState = { active: true, blockId: "multi" };
+    const expanded = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const rendered = renderPlainShell(expanded);
+    expect(expanded.commandPanel).toBeUndefined();
+    expect(rendered).toContain("second hidden line");
+    expect(rendered).not.toContain("Esc 关闭面板");
+    expect(rendered).not.toContain("Ctrl+O");
+  });
+
+  it("Ctrl+O 对 local/tool output 默认折叠 summary，展开后显示 fullText", () => {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    const block: ProductBlockViewModel = {
+      id: "local-long",
+      kind: "tool",
+      status: "pass",
+      title: "",
+      summary: "Bash completed",
+      fullText: "Bash completed\nhidden line 1\nhidden line 2",
+      messageKind: "local_command_output",
+    };
+
+    const collapsed = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const collapsedText = renderPlainShell(collapsed);
+    expect(collapsedText).toContain("Bash completed");
+    expect(collapsedText).toContain("Ctrl+O");
+    expect(collapsedText).not.toContain("hidden line 1");
+
+    ctx.ctrlOExpandState = { active: true, blockId: "local-long" };
+    const expanded = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    const expandedText = renderPlainShell(expanded);
+    expect(expanded.commandPanel).toBeUndefined();
+    expect(expandedText).toContain("hidden line 1");
+    expect(expandedText).not.toContain("Ctrl+O");
+  });
+
+  it("再次 Ctrl+O 收起后恢复 summary 展示", () => {
+    const ctx = createContext() as TuiContext & {
+      ctrlOExpandState?: { active: boolean; blockId?: string };
+    };
+    ctx.ctrlOExpandState = { active: false };
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [
+        {
+          id: "multi",
+          kind: "details",
+          status: "info",
+          title: "",
+          summary: "first line",
+          fullText: "first line\nsecond hidden line\nthird hidden line",
+          messageKind: "assistant_text",
+          ctrlOCollapsed: true,
+        },
+      ],
+    });
+
+    const rendered = renderPlainShell(view);
+    expect(rendered).toContain("first line");
+    expect(rendered).toContain("Ctrl+O");
+    expect(rendered).not.toContain("second hidden line");
+  });
+
   it("失败块若没有可折叠正文也不挂 Ctrl+O", () => {
     const block: ProductBlockViewModel = {
       id: "short-fail",
@@ -5165,7 +5291,7 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     expect(rendered).not.toContain("Ctrl+O");
   });
 
-  it("plain renderer hides Ctrl+O when multiline full text is already visible", () => {
+  it("plain renderer folds multiline message blocks with summary+fullText", () => {
     const block: ProductBlockViewModel = {
       id: "plain-visible-multiline",
       kind: "error",
@@ -5183,7 +5309,9 @@ describe("D.13Q-UX Real Smoke Fix v3 — Ctrl+O hint discipline", () => {
     });
     const rendered = renderPlainShell(view);
 
-    expect(rendered).not.toContain("Ctrl+O");
+    expect(rendered).toContain("Ctrl+O");
+    expect(rendered).toContain("exit 1");
+    expect(rendered).not.toContain("stderr line A");
   });
 
   it("plain renderer keeps Ctrl+O for real hidden summary-only details", () => {
@@ -5300,6 +5428,18 @@ describe("D.13Q-UX Task Surface — CommandPanel 装配", () => {
       viewMode: "task",
     });
     expect(view.commandPanel).toBeUndefined();
+  });
+
+  it("CommandPanel 提示只保留 Esc 关闭，不混入 Ctrl+O 展开", async () => {
+    const source = await readFile(
+      join(dirname(fileURLToPath(import.meta.url)), "components", "CommandPanel.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("Esc 关闭面板");
+    expect(source).toContain("Esc close");
+    expect(source).not.toContain("Ctrl+O 展开详情");
+    expect(source).not.toContain("Ctrl+O details");
   });
 
   it("D.14D-R P1-4: CommandPanel 空 title 不渲染顶部空框（无 ❯ 标题行）", async () => {
@@ -5420,7 +5560,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
   });
 });
 
-describe("D.14D Ctrl+O summary-first details viewer", () => {
+describe("D.14D explicit details summary-first panel", () => {
   it("D.14D-R2 P3-2: end-to-end presenter→block 同一工具输出块只剩一次 Ctrl+O（回归锁定）", () => {
     // CLOSED_BY_D14D_R 复核：真实 formatToolOutput 产出（含内嵌折叠提示）经
     // createOutputBlock 装配后，ink 主屏渲染层（fullText + nextAction）只出现一次 Ctrl+O。
@@ -5475,11 +5615,11 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
     ctx.lastFullOutput = "完整 /model doctor 多行输出\n provider.env merge=...\nproviders=...";
     ctx.evidence = [];
     ctx.backgroundTasks = [];
-    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
-    // 完整正文只进 detailsText（Ctrl+O 展开层），不进 summary/section 主屏行。
+    // 完整正文只进 detailsText（显式详情面板），不进 summary/section 主屏行。
     expect(panel?.detailsText).toContain("完整 /model doctor");
-    // D.14D：默认折叠（summary-first）；首次 Ctrl+O 看摘要，再按一次才展开。
+    // D.14D：默认折叠（summary-first）；默认看摘要，panel 内显式展开 detailsText。
     expect(panel?.expanded).toBe(false);
     expect(panel?.actions).toContain("/details");
     // 主屏 section 行不得包含完整正文。
@@ -5500,7 +5640,7 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
       },
     ] as unknown as TuiContext["evidence"];
     ctx.backgroundTasks = [];
-    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
     expect(
       panel?.sections?.some((s) => s.title?.includes("证据") || s.title?.includes("Evidence")),
@@ -5528,7 +5668,7 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
         userVisibleSummary: "running node --version",
       },
     ] as unknown as TuiContext["backgroundTasks"];
-    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
     expect(panel).toBeDefined();
     expect(
       panel?.sections?.some((s) => s.title?.includes("后台") || s.title?.includes("Background")),
@@ -5561,7 +5701,7 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
         userVisibleSummary: "build failed",
       },
     ] as unknown as TuiContext["backgroundTasks"];
-    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
     expect(panel?.sections?.length).toBe(3);
     // detailsText 只出现一次每个分区标题（无套娃重复）。
     const evidenceHeaders = (panel?.detailsText ?? "").match(/## (证据|Evidence)/g) ?? [];
@@ -5573,7 +5713,7 @@ describe("D.14D Ctrl+O summary-first details viewer", () => {
     ctx.lastFullOutput = undefined;
     ctx.evidence = [];
     ctx.backgroundTasks = [];
-    const panel = __testBuildToggleDetailsCommandPanel(ctx);
+    const panel = __testBuildExplicitDetailsCommandPanel(ctx);
     expect(panel).toBeUndefined();
   });
 });

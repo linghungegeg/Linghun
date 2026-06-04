@@ -59,6 +59,8 @@ export type ProductBlockViewModel = {
   summary: string;
   detail?: string;
   nextAction?: string;
+  /** True when Ctrl+O should reveal fullText from a summary-only rendering. */
+  ctrlOCollapsed?: boolean;
   /** Echo / informational blocks that should not be auto-pruned by the view model. */
   keep?: boolean;
   /**
@@ -73,6 +75,11 @@ export type ProductBlockViewModel = {
    * 着色；notification / status 等不进 transcript 主流。未设时回退到旧路径。
    */
   messageKind?: MessageBlockKind;
+};
+
+export type CtrlOExpandView = {
+  active: boolean;
+  blockId?: string;
 };
 
 /**
@@ -267,7 +274,7 @@ export type ConfigPanelView =
  *   - summary：短状态行（"MCP 已连接：3 / 3"），数组以支持多行轻摘要。
  *   - sections：分组小表（每组一个标题 + 若干行）。
  *   - actions：建议的下一步命令（"/mcp doctor"）。
- *   - detailsText：完整明细文本，供 Ctrl+O / /details 展开。
+ *   - detailsText：完整明细文本，供显式详情面板（如 /details）展开。
  *   - tone：neutral / warning / error，控制边框色与状态色。
  *   - cursor / scrollOffset：面板自身可滚动时使用。
  */
@@ -280,7 +287,7 @@ export type CommandPanelView = {
   tone?: "neutral" | "warning" | "error";
   cursor?: number;
   scrollOffset?: number;
-  /** 面板内部是否处于"展开 detailsText"状态（受 Ctrl+O toggle 影响）。 */
+  /** 面板内部是否处于"展开 detailsText"状态。 */
   expanded?: boolean;
 };
 
@@ -325,6 +332,7 @@ export type ShellViewModel = {
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
+  ctrlOExpand?: CtrlOExpandView;
   limitations: string[];
   /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */
   taskFooter?: TaskFooterView;

@@ -1157,7 +1157,7 @@ export function createModelCapabilitySummary(limit = 30): string {
   const result = getCommandCapabilityCatalog()
     .filter((item) => item.modelInvocable || item.bridgeSafe)
     .slice(0, limit)
-    .map((item) => `${item.slash} ${item.titleEn}: risk=${item.risk}; ${item.whenToUseEn}`)
+    .map((item) => `${item.slash} ${item.titleEn}: risk ${item.risk}; ${item.whenToUseEn}`)
     .join("\n");
   _capabilitySummaryCache.set(limit, result);
   return result;
@@ -1664,11 +1664,11 @@ function formatHumanRisk(c: CommandCapability | undefined, language: Language): 
 
 export function formatRiskLine(c: CommandCapability, language: Language): string {
   const details = [
-    `risk=${c.risk}`,
-    `readonly=${c.readonly ? "yes" : "no"}`,
-    `startGate=${c.requiresStartGate ? "yes" : "no"}`,
-    `writesConfig=${c.writesConfig ? "yes" : "no"}`,
-    `permissionPipeline=${c.entersPermissionPipeline ? "yes" : "no"}`,
+    `risk ${c.risk}`,
+    `readonly ${c.readonly ? "yes" : "no"}`,
+    `start gate ${c.requiresStartGate ? "yes" : "no"}`,
+    `writes config ${c.writesConfig ? "yes" : "no"}`,
+    `permission pipeline ${c.entersPermissionPipeline ? "yes" : "no"}`,
   ];
   const reason =
     c.risk === "dangerous"

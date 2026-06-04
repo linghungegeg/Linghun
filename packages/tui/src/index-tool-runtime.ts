@@ -131,11 +131,13 @@ export function summarizeIndexStatusInspect(
   const project = projectName ?? (isEn ? "(not selected)" : "（未选中）");
   const counts =
     nodes !== undefined || edges !== undefined
-      ? ` nodes=${nodes ?? "-"} edges=${edges ?? "-"}`
+      ? isEn
+        ? `; graph ${nodes ?? "-"} node(s), ${edges ?? "-"} edge(s)`
+        : `；图 ${nodes ?? "-"} 个节点、${edges ?? "-"} 条边`
       : "";
   return isEn
-    ? `Index status inspected (NOT refreshed): status=${status}; project=${project};${counts}`
-    : `已检查索引状态（未刷新）：状态=${status}；项目=${project};${counts}`;
+    ? `Index status inspected (not refreshed): status ${status}; project ${project}${counts}.`
+    : `已检查索引状态（未刷新）：状态 ${status}；项目 ${project}${counts}。`;
 }
 
 /**
@@ -165,5 +167,5 @@ export function summarizeIndexRefreshOutcome(
       : isEn
         ? "refreshed"
         : "已刷新";
-  return isEn ? `Index ${label}: status=${status}.` : `索引${label}：状态=${status}。`;
+  return isEn ? `Index ${label}: status ${status}.` : `索引${label}：状态 ${status}。`;
 }

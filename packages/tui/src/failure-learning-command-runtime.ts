@@ -65,7 +65,7 @@ async function updateStatus(
   await deps().appendSystemEvent(
     context,
     sessionId,
-    `failure_learning_status id=${record.id} status=${status} category=${record.category}`,
+    `failure learning status: id ${record.id}; status ${status}; category ${record.category}`,
     "info",
   );
   if (status === "resolved") {

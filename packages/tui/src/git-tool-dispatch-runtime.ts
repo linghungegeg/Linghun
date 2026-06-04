@@ -298,7 +298,7 @@ async function runGitStatusInspectTool(
   const worktreeContext = await computeWorktreeContext(context.projectPath);
   const summary =
     status.kind === "ok"
-      ? `branch=${status.branch ?? "(detached)"}; changed=${status.changedCount}; untracked=${status.untrackedCount}; head=${status.headShort ?? "?"}`
+      ? `branch ${status.branch ?? "(detached)"}; changed ${status.changedCount}; untracked ${status.untrackedCount}; head ${status.headShort ?? "?"}`
       : status.kind === "not_a_git_repo"
         ? "not a git repository"
         : `git unavailable: ${status.error}`;
@@ -472,7 +472,7 @@ export async function performStablePoint(
       context,
       sessionId,
       "stable_point_created",
-      `kind=git_commit sha=${outcome.sha} branch=${outcome.branch ?? "-"} changed=${outcome.changedCount}`,
+      `kind git commit; sha ${outcome.sha}; branch ${outcome.branch ?? "-"}; changed ${outcome.changedCount}`,
       ["stable_point_created"],
     );
     await appendGitOperationEvent(
@@ -523,7 +523,7 @@ export async function performStablePoint(
       context,
       sessionId,
       "stable_point_created",
-      `kind=snapshot reason=${reason}`,
+      `kind snapshot; reason ${reason}`,
       ["stable_point_created"],
     );
     await appendGitOperationEvent(
@@ -602,7 +602,7 @@ export async function performWorktreeCreate(
       context,
       sessionId,
       "worktree_created",
-      `name=${outcome.name} branch=${outcome.branch ?? "-"} from=${outcome.fromRef}`,
+      `name ${outcome.name}; branch ${outcome.branch ?? "-"}; from ${outcome.fromRef}`,
       ["worktree_created"],
     );
     await appendGitOperationEvent(
@@ -631,7 +631,7 @@ export async function performWorktreeCreate(
       context,
       sessionId,
       "worktree_resumed",
-      `name=${outcome.name} branch=${outcome.branch ?? "-"}`,
+      `name ${outcome.name}; branch ${outcome.branch ?? "-"}`,
       ["worktree_resumed"],
     );
     await appendGitOperationEvent(
@@ -766,7 +766,7 @@ export async function performWorktreeRemoveExecute(
       context,
       sessionId,
       "worktree_removed",
-      `name=${name} force=${force}`,
+      `name ${name}; force ${force}`,
       ["worktree_removed"],
     );
     await appendGitOperationEvent(

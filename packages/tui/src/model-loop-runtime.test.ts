@@ -808,7 +808,7 @@ describe("model-loop-runtime", () => {
           makeEvidence({
             kind: "index_query",
             source: "codebase-memory:F-Linghun:search X",
-            summary: "Index search - #1 path=packages/tui/src/model-loop-runtime.ts symbol=X",
+            summary: "Index search - #1 path packages/tui/src/model-loop-runtime.ts symbol X",
             supportsClaims: ["index_query", "index_code_fact", "search X"],
           }),
         ],
@@ -826,7 +826,7 @@ describe("model-loop-runtime", () => {
             kind: "index_query",
             source: "codebase-memory:F-Linghun:architecture",
             summary:
-              "Index architecture - nodes/edges: 3725/8068 - node labels: Class=100, Function=500",
+              "Index architecture - graph: 3725 nodes, 8068 edges - node labels: Class 100, Function 500",
             supportsClaims: ["index_query", "index_code_fact", "architecture"],
           }),
         ],

@@ -37,7 +37,7 @@ const CORE_ENTRIES_ZH: HelpPanelEntry[] = [
   { slash: "/mode", description: "切换权限模式（default / auto / plan / full-access）" },
   { slash: "/config", description: "打开配置面板（model / language / permissions 等）" },
   { slash: "/index", description: "查看代码索引状态与刷新入口" },
-  { slash: "/details", description: "展开最近一次正文（与 Ctrl+O 等价）" },
+  { slash: "/details", description: "打开最近输出 / evidence / background 详情面板" },
   { slash: "/exit", description: "退出 Linghun" },
 ];
 
@@ -48,7 +48,7 @@ const CORE_ENTRIES_EN: HelpPanelEntry[] = [
   { slash: "/mode", description: "Switch permission mode (default / auto / plan / full-access)" },
   { slash: "/config", description: "Open the config panel (model / language / permissions ...)" },
   { slash: "/index", description: "Show codebase index status and refresh entry" },
-  { slash: "/details", description: "Expand the most recent body (Ctrl+O equivalent)" },
+  { slash: "/details", description: "Open recent output / evidence / background details panel" },
   { slash: "/exit", description: "Exit Linghun" },
 ];
 

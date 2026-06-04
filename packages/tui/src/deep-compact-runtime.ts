@@ -161,7 +161,7 @@ export async function runDeepCompact(input: {
   await input.deps.appendSystemEvent(
     input.context,
     input.sessionId,
-    `deep_compact_success id=${packet.id} scope=${packet.scope} trigger=${packet.trigger}`,
+    `deep compact success: id ${packet.id}; scope ${packet.scope}; trigger ${packet.trigger}`,
     "info",
   );
   return { ok: true, packet };
@@ -196,20 +196,20 @@ export function formatDeepCompactPromptSummary(
   if (!packet) return undefined;
   return [
     `[Deep compact ${packet.id}]`,
-    `kind=${packet.kind}`,
-    `scope=${packet.scope}`,
-    `trigger=${packet.trigger}`,
-    `createdAt=${packet.createdAt}`,
-    `provider=${packet.provider}`,
-    `model=${packet.model}`,
-    `summary=${packet.summary}`,
-    `preservedEvidenceRefs=${packet.preservedEvidenceRefs.join(", ") || "none"}`,
-    `preservedFiles=${packet.preservedFiles.join(", ") || "none"}`,
-    `activeAgentsWorkflows=${packet.activeAgentsWorkflows.join("; ") || "none"}`,
-    `pendingItems=${packet.pendingItems.join("; ") || "none"}`,
-    `decisions=${packet.decisions.join("; ") || "none"}`,
-    `risks=${packet.risks.join("; ") || "none"}`,
-    "antiHallucination=Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
+    `kind ${packet.kind}`,
+    `scope ${packet.scope}`,
+    `trigger ${packet.trigger}`,
+    `created at ${packet.createdAt}`,
+    `provider ${packet.provider}`,
+    `model ${packet.model}`,
+    `summary ${packet.summary}`,
+    `preserved evidence refs ${packet.preservedEvidenceRefs.join(", ") || "none"}`,
+    `preserved files ${packet.preservedFiles.join(", ") || "none"}`,
+    `active agents/workflows ${packet.activeAgentsWorkflows.join("; ") || "none"}`,
+    `pending items ${packet.pendingItems.join("; ") || "none"}`,
+    `decisions ${packet.decisions.join("; ") || "none"}`,
+    `risks ${packet.risks.join("; ") || "none"}`,
+    "anti hallucination: Use deep compact only for context continuity; never treat it as PASS engineering evidence.",
   ].join("\n");
 }
 
@@ -296,13 +296,13 @@ function buildDeepCompactRequestMessages(
 ): ModelMessage[] {
   const outline = buildFullTranscriptSemanticOutline(context, transcript);
   const state = [
-    `trigger=${trigger}`,
-    `transcriptEventCount=${transcript.length}`,
-    `projectRules=${sanitizeDeepCompactText(context, context.memory.projectRulesSummary || "none", 300)}`,
-    `index=${formatIndexRuntimeRef(context.index)}`,
-    `cacheFreshness=${context.cache.lastFreshness?.changedKeys.join(",") || "stable-or-unknown"}`,
-    `memoryAccepted=${context.memory.accepted.length}`,
-    `failureLearning=${
+    `trigger ${trigger}`,
+    `transcript events ${transcript.length}`,
+    `project rules ${sanitizeDeepCompactText(context, context.memory.projectRulesSummary || "none", 300)}`,
+    `index ${formatIndexRuntimeRef(context.index)}`,
+    `cache freshness ${context.cache.lastFreshness?.changedKeys.join(", ") || "stable or unknown"}`,
+    `accepted memory ${context.memory.accepted.length}`,
+    `failure learning ${
       context.failureLearning.records
         .slice(0, 5)
         .map((item) => sanitizeDeepCompactText(context, item.avoidNextTime, 180))
@@ -367,18 +367,18 @@ function buildFullTranscriptSemanticOutline(
 
   return [
     "Full transcript semantic outline:",
-    `eventTypeCounts=${[...eventTypeCounts.entries()].map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
-    `firstUserGoal=${firstUser?.type === "user_message" ? sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT) : "none"}`,
-    `latestUserGoal=${latestUser?.type === "user_message" ? sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT) : "none"}`,
-    formatOutlineSection("keyUserRequirements", userMessages, 24),
-    formatOutlineSection("assistantDecisions", assistantDecisions, 24),
-    formatOutlineSection("toolCallsAndResults", toolSummaries, 28),
-    formatOutlineSection("evidenceRefs", evidenceRefs, 20),
-    formatOutlineSection("changedOrPreservedFiles", changedOrPreservedFiles, 20),
-    formatOutlineSection("agentWorkflowEvents", agentWorkflowEvents, 20),
-    formatOutlineSection("verificationAndFailureLearning", verificationFailures, 20),
-    formatOutlineSection("pendingPermissionsAndTodos", permissionsTodos, 20),
-    `recentTail=${recentTail.join("\n") || "none"}`,
+    `event type counts: ${[...eventTypeCounts.entries()].map(([type, count]) => `${type}:${count}`).join(", ") || "none"}`,
+    `first user goal: ${firstUser?.type === "user_message" ? sanitizeDeepCompactText(context, firstUser.text, EVENT_TEXT_LIMIT) : "none"}`,
+    `latest user goal: ${latestUser?.type === "user_message" ? sanitizeDeepCompactText(context, latestUser.text, EVENT_TEXT_LIMIT) : "none"}`,
+    formatOutlineSection("key user requirements", userMessages, 24),
+    formatOutlineSection("assistant decisions", assistantDecisions, 24),
+    formatOutlineSection("tool calls and results", toolSummaries, 28),
+    formatOutlineSection("evidence refs", evidenceRefs, 20),
+    formatOutlineSection("changed or preserved files", changedOrPreservedFiles, 20),
+    formatOutlineSection("agent workflow events", agentWorkflowEvents, 20),
+    formatOutlineSection("verification and failure learning", verificationFailures, 20),
+    formatOutlineSection("pending permissions and todos", permissionsTodos, 20),
+    `recent tail: ${recentTail.join("\n") || "none"}`,
   ];
 }
 
@@ -486,10 +486,10 @@ function pushEarlyAndRecent(items: string[], value: string, maxItems = 48): void
 }
 
 function formatOutlineSection(name: string, items: string[], maxItems: number): string {
-  if (items.length === 0) return `${name}=none`;
+  if (items.length === 0) return `${name}: none`;
   const shown = items.slice(0, maxItems);
   const omitted = Math.max(0, items.length - shown.length);
-  return `${name}=${shown.join("\n")}${omitted > 0 ? `\n${name}Omitted=${omitted}` : ""}`;
+  return `${name}: ${shown.join("\n")}${omitted > 0 ? `\n${name} omitted: ${omitted}` : ""}`;
 }
 
 function findLatestEvent<T extends TranscriptEvent["type"]>(
@@ -520,9 +520,9 @@ function summarizeTranscriptEvent(context: TuiContext, event: TranscriptEvent): 
     case "tool_call_start":
       return `tool_start:${event.name}:${sanitizeDeepCompactText(context, JSON.stringify(event.input), 220)}`;
     case "tool_result":
-      return `tool_result:${event.toolName}:isError=${event.isError ? "yes" : "no"} evidence=${event.evidenceId ?? "none"} summary=${sanitizeDeepCompactText(context, summarizeToolResultContent(event.content), EVENT_TEXT_LIMIT)}`;
+      return `tool_result:${event.toolName}:is error ${event.isError ? "yes" : "no"}; evidence ${event.evidenceId ?? "none"}; summary ${sanitizeDeepCompactText(context, summarizeToolResultContent(event.content), EVENT_TEXT_LIMIT)}`;
     case "tool_call_end":
-      return `tool_end:${event.id}:truncated=${event.output.truncated ? "yes" : "no"} fullOutputPath=${event.output.fullOutputPath ? "[artifact]" : "none"} summary=${sanitizeDeepCompactText(context, event.output.text, EVENT_TEXT_LIMIT)}`;
+      return `tool_end:${event.id}:truncated ${event.output.truncated ? "yes" : "no"}; full output path ${event.output.fullOutputPath ? "[artifact]" : "none"}; summary ${sanitizeDeepCompactText(context, event.output.text, EVENT_TEXT_LIMIT)}`;
     case "verification_end":
       return `verification:${event.report.status}:${sanitizeDeepCompactText(context, event.report.summary, EVENT_TEXT_LIMIT)}`;
     case "todo_update":
@@ -536,7 +536,7 @@ function summarizeTranscriptEvent(context: TuiContext, event: TranscriptEvent): 
     case "workflow_start":
       return `workflow_start:${sanitizeDeepCompactText(context, JSON.stringify(event.workflow), EVENT_TEXT_LIMIT)}`;
     case "workflow_step_result":
-      return `workflow_step:${event.status}:${sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT)} evidence=${event.evidenceRefs.join(",")}`;
+      return `workflow_step:${event.status}:${sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT)} evidence ${event.evidenceRefs.join(",")}`;
     case "workflow_end":
       return `workflow_end:${event.status}:${sanitizeDeepCompactText(context, event.summary, EVENT_TEXT_LIMIT)}`;
     case "permission_request":
@@ -632,7 +632,7 @@ function collectDecisions(context: TuiContext): string[] {
     .slice(0, 8)
     .map(
       (item) =>
-        `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"} fallback=${item.fallbackUsed ? "yes" : "no"}`,
+        `${item.role}:${item.selectedProvider || "paused"}/${item.selectedModel || "paused"} fallback ${item.fallbackUsed ? "yes" : "no"}`,
     );
 }
 
@@ -666,7 +666,7 @@ async function recordDeepCompactFailure(
   await deps.appendSystemEvent(
     context,
     sessionId,
-    `deep_compact_failed blocked=yes reason=${context.cache.compactFailure.reason} cooldownUntil=${context.cache.compactFailure.cooldownUntil}`,
+    `deep compact failed: blocked yes; reason ${context.cache.compactFailure.reason}; cooldown until ${context.cache.compactFailure.cooldownUntil}`,
     "warning",
   );
   await deps.captureFailureLearning(context, sessionId, {
