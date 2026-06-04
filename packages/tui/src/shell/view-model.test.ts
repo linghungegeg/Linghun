@@ -3583,7 +3583,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(Object.values(footer).join(" ")).not.toContain("正在运行 Bash");
   });
 
-  it("task footer keeps stale jobs out of the ordinary background summary", () => {
+  it("Phase 6.6: task footer does NOT show workspaceStatus / runtimeStatus by default (moved to /details /status path)", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,
       viewMode: "task",
@@ -3599,12 +3599,12 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       ],
     });
 
-    expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
+    expect(view.taskFooter?.workspaceStatus).toBeUndefined();
     expect(view.taskFooter?.runtimeStatus).toBeUndefined();
     expect(view.taskRuntimeSummary).toBeUndefined();
   });
 
-  it("task footer shows workspace above a denoised blocked background summary", () => {
+  it("Phase 6.6: task footer stays minimal even with background summaries (workspace/runtime details are opt-in)", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,
       viewMode: "task",
@@ -3620,22 +3620,17 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
       ],
     });
 
-    expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
-    expect(view.taskFooter?.runtimeStatus).toContain("后台 1");
-    expect(view.taskFooter?.runtimeStatus).toContain("阻塞 1");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("可恢复");
-    expect(view.taskFooter?.runtimeStatus).toContain("详情 /background");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("运行中 0");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("待确认 0");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("job 1");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("task-724a5c-worker");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("stale/resumable");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("上次会话恢复的后台任务");
-    expect(view.taskFooter?.runtimeStatus).not.toContain("0/1");
+    expect(view.taskFooter?.workspaceStatus).toBeUndefined();
+    expect(view.taskFooter?.runtimeStatus).toBeUndefined();
+    // Footer still has essential fields: permission mode, model, cache, index.
+    expect(view.taskFooter?.permissionMode).toBeDefined();
+    expect(view.taskFooter?.model).toBeDefined();
+    expect(view.taskFooter?.cache).toBeDefined();
+    expect(view.taskFooter?.index).toBeDefined();
 
     const rendered = renderPlainShell(view);
-    expect(rendered.indexOf("工作树：")).toBeGreaterThanOrEqual(0);
-    expect(rendered.indexOf("后台 1")).toBeGreaterThan(rendered.indexOf("工作树："));
+    expect(rendered).not.toContain("工作树：");
+    expect(rendered).not.toContain("后台 1");
   });
 
   it("D13E-P3: index 'unknown' renders as '索引?' / 'Index?' (no 'unknown' leak)", () => {
@@ -4461,8 +4456,10 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
     expect(hintIdx).toBeGreaterThan(assistantIdx);
     expect(composerSeparatorIdx).toBeGreaterThan(hintIdx);
     expect(footerIdx).toBeGreaterThan(composerSeparatorIdx);
-    expect(workspaceIdx).toBeGreaterThan(footerIdx);
-    expect(runtimeIdx).toBeGreaterThan(footerIdx);
+    // Phase 6.6: workspaceStatus / runtimeStatus are no longer rendered
+    // by default in the footer. They move to /details / /status / doctor paths.
+    expect(workspaceIdx).toBe(-1);
+    expect(runtimeIdx).toBe(-1);
     expect(text).not.toContain("失败/阻塞 1");
     expect(text).not.toContain("Agent cli-tui-worker · blocked");
     expect(text).not.toContain("上次会话恢复的后台任务");

@@ -138,6 +138,64 @@ describe("TUI Interaction Contract — 滚动语义", () => {
       },
     );
   });
+
+  // ─── Phase 6.6: wheel scroll & stick-to-bottom semantics ───
+
+  it("wheelUp 按 wheelStep/1 行离开底部（stickToBottom=false）", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 20,
+      contentHeight: 80,
+    });
+    const up = reduceTranscriptScroll(measured, { type: "scroll", action: "wheelUp" });
+    expect(up.scrollOffset).toBe(1);
+    expect(up.stickToBottom).toBe(false);
+  });
+
+  it("wheelDown 滚到底部时恢复 stickToBottom=true", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 20,
+      contentHeight: 80,
+    });
+    const up = reduceTranscriptScroll(measured, { type: "scroll", action: "wheelUp" });
+    const down = reduceTranscriptScroll(up, { type: "scroll", action: "wheelDown" });
+    expect(down.scrollOffset).toBe(0);
+    expect(down.stickToBottom).toBe(true);
+  });
+
+  it("连续 wheelUp 累加 offset（不超出 maxOffset）", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 15,
+      contentHeight: 25,
+    });
+    let s = measured;
+    for (let i = 0; i < 20; i++) {
+      s = reduceTranscriptScroll(s, { type: "scroll", action: "wheelUp" });
+    }
+    expect(s.scrollOffset).toBeLessThanOrEqual(10);
+    expect(s.stickToBottom).toBe(false);
+    expect(s.scrollOffset).toBe(10);
+  });
+
+  it("脱底后新输出不强制跳底（scrollOffset>0 保持 stickToBottom=false）", () => {
+    const measured = reduceTranscriptScroll(createInitialTranscriptScroll(), {
+      type: "measure",
+      viewportHeight: 10,
+      contentHeight: 50,
+    });
+    const scrolled = reduceTranscriptScroll(measured, { type: "scroll", action: "halfPageUp" });
+    expect(scrolled.stickToBottom).toBe(false);
+    // 模拟新一轮 measure（内容增长），offset 仍非零，stickToBottom 保持不变。
+    const remeasured = reduceTranscriptScroll(scrolled, {
+      type: "measure",
+      viewportHeight: 10,
+      contentHeight: 70,
+    });
+    expect(remeasured.stickToBottom).toBe(false);
+    expect(remeasured.scrollOffset).toBeGreaterThan(0);
+  });
 });
 
 describe("TUI Interaction Contract — 输入归属", () => {

@@ -380,14 +380,10 @@ export function createShellViewModel(
             reasoningLevel: options.reasoningLevel,
             reasoningSent: options.reasoningSent,
           }).view,
-          workspaceStatus: formatFooterWorkspaceStatus(context, projectName, language),
-          runtimeStatus: taskRuntimeSummary
-            ? formatFooterRuntimeStatus(
-                taskRuntimeSummary,
-                language,
-                options.backgroundSummaries ?? [],
-              )
-            : undefined,
+          // Phase 6.6: workspaceStatus / runtimeStatus are no longer default
+          // in the footer. They surface via /details, /status, /doctor or
+          // explicit expand paths instead. The formatting functions remain
+          // available for those commands to populate the fields.
         };
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
