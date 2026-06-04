@@ -6016,7 +6016,7 @@ async function executePermissionApprove(
     writeLine(
       output,
       result.ok
-        ? `agent ${agent.id} 已执行 ${approval.toolName}；子 agent 仍保持 blocked，可检查 /agents show ${agent.id}。`
+        ? `agent ${agent.id} 已执行 ${approval.toolName}；子 agent 已继续处理，当前状态 ${agent.status}。可检查 /agents show ${agent.id}。`
         : `agent ${agent.id} 执行 ${approval.toolName} 失败：${truncateDisplay(result.text, 160)}`,
     );
     writeStatus(output, context);
@@ -11974,7 +11974,7 @@ async function executeLinghunControlToolUse(
       const before = new Set(context.agents.map((agent) => agent.id));
       await handleForkCommand(buildForkArgsFromStartAgentInput(input, context), context, output);
       const agent = context.agents.find((item) => !before.has(item.id));
-      const ok = agent?.status === "completed" || agent?.status === "running";
+      const ok = agent?.status === "completed" || agent?.status === "idle" || agent?.status === "running";
       const text = agent
         ? `Agent ${agent.status}: ${agent.summary}`
         : formatStartAgentDidNotStartMessage(input, context);
@@ -12000,6 +12000,20 @@ async function executeLinghunControlToolUse(
           {
             total: context.agents.length,
             cancellable: cancellable.map((agent) => ({ id: agent.id, status: agent.status })),
+            teammates: context.agents.map((agent) => ({
+              id: agent.id,
+              role: agent.role,
+              team: agent.teamName ?? null,
+              status: agent.status,
+              activity: agent.activityStatus ?? null,
+              queuedMessages:
+                agent.mailbox?.filter((message) => (message.status ?? "pending") === "pending")
+                  .length ?? 0,
+              activeTask: agent.activeTask
+                ? { id: agent.activeTask.id, status: agent.activeTask.status }
+                : null,
+              recentResult: agent.lastResultSummary ?? agent.summary,
+            })),
           },
         );
       }
@@ -12339,6 +12353,8 @@ function parseSendMessageToolInput(input: unknown):
       team_name?: string;
       targetType?: "id" | "name" | "team";
       broadcastTeam?: boolean;
+      kind?: "message" | "task";
+      taskId?: string;
       message: string;
     }
   | { ok: false; text: string } {
@@ -12368,6 +12384,12 @@ function parseSendMessageToolInput(input: unknown):
       : {}),
     ...(targetType ? { targetType } : {}),
     ...(obj.broadcastTeam === true || obj.broadcast_team === true ? { broadcastTeam: true } : {}),
+    ...(obj.kind === "message" || obj.kind === "task" ? { kind: obj.kind } : {}),
+    ...(typeof obj.taskId === "string" && obj.taskId.trim()
+      ? { taskId: obj.taskId.trim() }
+      : typeof obj.task_id === "string" && obj.task_id.trim()
+        ? { taskId: obj.task_id.trim() }
+        : {}),
     message: message.trim(),
   };
 }

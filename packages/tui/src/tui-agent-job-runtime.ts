@@ -137,8 +137,8 @@ export function createAgentBackgroundTask(
   const isTerminal =
     agent.status === "blocked" ||
     agent.status === "cancelled" ||
-    agent.status === "failed" ||
-    agent.status === "completed";
+    agent.status === "failed";
+  const isIdle = agent.status === "idle" || agent.status === "completed";
   const backgroundStatus: BackgroundTaskState["status"] = isTerminal
     ? agent.status === "blocked"
       ? "blocked"
@@ -147,30 +147,38 @@ export function createAgentBackgroundTask(
         : agent.status === "failed"
           ? "failed"
           : "completed"
+    : isIdle
+      ? "completed"
     : agent.status === "stale"
       ? "stale"
       : "running";
   const backgroundResult: BackgroundTaskState["result"] = isTerminal
-    ? agent.status === "completed"
-      ? mapAgentBackgroundResult(agent, undefined)
-      : agent.status === "cancelled"
+    ? agent.status === "cancelled"
         ? "cancelled"
       : "fail"
+    : isIdle
+      ? mapAgentBackgroundResult(agent, undefined)
     : agent.status === "stale"
       ? "partial"
       : undefined;
   const currentStep = isTerminal
     ? agent.status
+    : isIdle
+      ? agent.activitySummary
+        ? `idle: ${agent.activitySummary}`
+        : "idle"
     : agent.status === "stale"
       ? "stale/resumable"
       : isEn
         ? `running ${agent.type}`
         : `正在运行 ${agent.type}`;
-  const progress = isTerminal
+  const progress = isTerminal || isIdle
     ? { completed: 1, total: 1, label }
     : { completed: 0, total: 1, label };
   const userVisibleSummary = isTerminal
     ? agent.summary
+    : isIdle
+      ? agent.summary
     : agent.status === "stale"
       ? agent.summary
       : isEn
@@ -224,6 +232,8 @@ export function findAgent(context: TuiContext, id: string | undefined): AgentRun
   }
   return (
     context.agents.find((agent) => agent.status === "running") ??
+    context.agents.find((agent) => agent.status === "idle") ??
+    context.agents.find((agent) => agent.status === "completed") ??
     context.agents.find((agent) => agent.status === "stale") ??
     context.agents.find((agent) => agent.status === "blocked") ??
     context.agents[0]

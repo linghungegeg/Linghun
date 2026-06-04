@@ -4759,6 +4759,119 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("tool_result");
   });
 
+  it("wakes idle teammate for mailbox messages and prevents duplicate shared task assignment", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-teammate-idle-task-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    const timer = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((handler: unknown) => {
+        if (typeof handler === "function") void handler();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      });
+    const startedAt = new Date().toISOString();
+    const idleAgent: AgentRun = {
+      id: "agent-idle-a",
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: "idle teammate",
+      model: "route-model",
+      permissionMode: "default",
+      status: "idle",
+      activityStatus: "idle",
+      activitySummary: "waiting for teammate work",
+      transcriptPath: join(project, "agent-idle-a.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: "last result ready",
+      lastResultSummary: "last result ready",
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+    };
+    const busyAgent: AgentRun = {
+      ...idleAgent,
+      id: "agent-busy-b",
+      status: "running",
+      activityStatus: "processing",
+      addressableName: "busy",
+      transcriptPath: join(project, "agent-busy-b.jsonl"),
+      activeTask: {
+        id: "task-busy",
+        summary: "busy task",
+        assignedBy: "model",
+        assignedAt: startedAt,
+        status: "running",
+      },
+    };
+    idleAgent.addressableName = "idle";
+    idleAgent.teamName = "core";
+    busyAgent.teamName = "core";
+    context.agents = [idleAgent, busyAgent];
+    context.backgroundTasks = context.agents.map((agent) =>
+      createBackgroundTaskFixture("agent", { id: agent.id, title: `Agent ${agent.id}` }),
+    );
+    mockOpenAiTextFetch("idle teammate handled mailbox");
+
+    const { sendAgentMessage } = await import("./job-agent-command-runtime.js");
+    const assigned = await sendAgentMessage(context, {
+      team: "core",
+      kind: "task",
+      taskId: "shared-1",
+      message: "共享任务只应分配给空闲 teammate",
+    });
+    timer.mockRestore();
+
+    expect(assigned.ok).toBe(true);
+    expect(assigned.delivered).toEqual(["agent-idle-a"]);
+    await waitForTestCondition(() => idleAgent.mailbox[0]?.status === "consumed");
+    await waitForTestCondition(() => idleAgent.status === "idle");
+    expect(idleAgent.mailbox[0]).toMatchObject({
+      kind: "task",
+      taskId: "shared-1",
+      status: "consumed",
+    });
+    expect(idleAgent.status).toBe("idle");
+    expect(idleAgent.activityStatus).toBe("idle");
+    expect(idleAgent.lastResultSummary).toContain("idle teammate handled mailbox");
+    expect(busyAgent.mailbox).toHaveLength(0);
+    expect(context.backgroundTasks.filter((task) => task.status === "running")).toHaveLength(1);
+
+    busyAgent.activeTask = {
+      id: "shared-2",
+      summary: "already assigned",
+      assignedBy: "model",
+      assignedAt: startedAt,
+      status: "running",
+    };
+    const duplicate = await sendAgentMessage(context, {
+      team: "core",
+      kind: "task",
+      taskId: "shared-2",
+      message: "不能重复抢任务",
+    });
+    expect(duplicate.ok).toBe(false);
+    expect(duplicate.text).toContain("already assigned");
+
+    await handleSlashCommand(`/agents show ${idleAgent.id}`, context, output);
+    expect(output.text).toContain("- teammate: role executor, team core, idle");
+    expect(output.text).toContain("- recent result: worker completed");
+    expect(output.text).not.toContain("tool_result");
+  });
+
   it("consumes bounded mailbox messages and records consumed status/evidence", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-agent-mailbox-bounded-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -4924,8 +5037,9 @@ describe("Phase 06 TUI slash commands", () => {
       "approved by parent\n",
     );
     expect(context.pendingLocalApproval).toBeUndefined();
-    expect(agent?.status).toBe("blocked");
-    expect(agent?.summary).toContain("approved Write executed");
+    expect(agent?.status).toBe("idle");
+    expect(agent?.activityStatus).toBe("idle");
+    expect(agent?.summary).toContain("unused child final");
     expect(context.evidence.some((item) => item.summary.includes("Write:"))).toBe(true);
     const transcript = (await store.resume(agent?.transcriptSessionId ?? "")).transcript;
     expect(
@@ -4940,6 +5054,40 @@ describe("Phase 06 TUI slash commands", () => {
           event.type === "system_event" && event.message.includes("agent_permission_approved"),
       ),
     ).toBe(true);
+  });
+
+  it("does not report approved child agent tool as failed when continuation blocks again", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agent-permission-approve-reblocks-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const context = await createTestContext(project, store, session, config);
+    context.modelGateway = createModelGateway(config);
+    mockOpenAiToolSequence([
+      { toolName: "Write", input: { path: "agent-approved.txt", content: "approved\n" } },
+      { toolName: "Write", input: { path: "agent-needs-second-approval.txt", content: "later\n" } },
+    ]);
+
+    await handleSlashCommand(
+      "/fork worker write approved file --name approval-agent",
+      context,
+      output,
+    );
+    const agent = context.agents[0];
+    expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
+
+    await handleNaturalInput("yes", context, context.modelGateway, output);
+
+    await expect(readFile(join(project, "agent-approved.txt"), "utf8")).resolves.toBe(
+      "approved\n",
+    );
+    await expect(readFile(join(project, "agent-needs-second-approval.txt"), "utf8")).rejects.toThrow();
+    expect(agent?.status).toBe("blocked");
+    expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
+    expect(output.text).toContain("已执行 Write");
+    expect(output.text).toContain("当前状态 blocked");
+    expect(output.text).not.toContain("执行 Write 失败");
   });
 
   it("bridges child agent Write permission denial without executing the tool", async () => {
@@ -15119,6 +15267,15 @@ describe("Phase 06 TUI slash commands", () => {
 
     output.text = "";
     context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { status: "completed", currentStep: "idle" }),
+      createBackgroundTaskFixture("agent"),
+      createBackgroundTaskFixture("agent"),
+    ];
+    await handleSlashCommand("/fork explorer inspect idle cap", context, output);
+    expect(output.text).not.toContain("最多同时运行 3 个 agent");
+
+    output.text = "";
+    context.backgroundTasks = [
       createBackgroundTaskFixture("agent", { status: "stale" }),
       createBackgroundTaskFixture("agent", { status: "stale" }),
       createBackgroundTaskFixture("agent", { status: "stale" }),
@@ -15130,6 +15287,29 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
     expect(output.text).toContain("已有 verification 重任务正在运行");
     expect(context.permissionMode).toBe("full-access");
+  });
+
+  it("/background includes idle teammate summaries without making them active", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-background-idle-teammate-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-idle-summary",
+        title: "Agent idle",
+        status: "completed",
+        currentStep: "idle: last result",
+        userVisibleSummary: "last result",
+      }),
+    ];
+
+    await handleSlashCommand("/background", context, output);
+
+    expect(output.text).toContain("Agent idle");
+    expect(output.text).toContain("idle: last result");
+    expect(context.backgroundTasks.filter((task) => task.status === "running")).toHaveLength(0);
   });
 
   it("does not let a workflow-owned running agent heavy guard block another agent in the same workflow cap", async () => {
@@ -16278,6 +16458,85 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("Agent list inspected: 2 agent(s); cancellable 1");
     expect(output.text).toContain("agent-list-running:running");
     expect(output.text).not.toContain("agent-list-stale:stale");
+  });
+
+  it("model-facing SendMessage assigns shared task to one idle teammate", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-sendmessage-task-tool-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    const startedAt = new Date().toISOString();
+    const makeAgent = (id: string, status: AgentRun["status"]): AgentRun => ({
+      id,
+      type: "worker",
+      role: "executor",
+      provider: "openai-compatible",
+      parentSessionId: session.id,
+      task: id,
+      model: "route-model",
+      permissionMode: "default",
+      status,
+      activityStatus: status === "idle" ? "idle" : "processing",
+      transcriptPath: join(project, `${id}.jsonl`),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: `${id} ${status}`,
+      contextSummary: "agent context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt,
+      updatedAt: startedAt,
+      teamName: "tool-team",
+    });
+    context.agents = [makeAgent("agent-tool-idle", "idle"), makeAgent("agent-tool-busy", "running")];
+    context.agents[1]!.activeTask = {
+      id: "busy-task",
+      summary: "busy",
+      assignedBy: "model",
+      assignedAt: startedAt,
+      status: "running",
+    };
+    context.backgroundTasks = context.agents.map((agent) =>
+      createBackgroundTaskFixture("agent", { id: agent.id, title: `Agent ${agent.id}` }),
+    );
+    const timer = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((() => 0) as unknown as typeof setTimeout);
+    mockOpenAiToolFetch(
+      "SendMessage",
+      {
+        team: "tool-team",
+        kind: "task",
+        taskId: "tool-task-1",
+        message: "模型分配 shared task",
+      },
+      "已分配。",
+    );
+
+    await __testSendMessage("把任务分配给 team", context, gateway, output);
+    timer.mockRestore();
+
+    expect(context.agents[0]?.mailbox[0]).toMatchObject({
+      kind: "task",
+      taskId: "tool-task-1",
+      status: "pending",
+    });
+    expect(context.agents[0]?.activeTask).toMatchObject({
+      id: "tool-task-1",
+      status: "running",
+    });
+    expect(context.agents[0]?.status).toBe("running");
+    expect(context.agents[1]?.mailbox).toHaveLength(0);
+    expect(output.text).toContain("SendMessage task assigned to agent-tool-idle");
   });
 
   it("/agents cancel all cancels only running agents and leaves stale/terminal out of background cap", async () => {

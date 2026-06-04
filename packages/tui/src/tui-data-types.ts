@@ -338,9 +338,22 @@ export type AgentMailboxMessage = {
   createdAt: string;
   status: "pending" | "consumed" | "failed";
   summary: string;
+  kind?: "message" | "task";
+  taskId?: string;
   consumedAt?: string;
   failedAt?: string;
   error?: string;
+};
+
+export type AgentSharedTask = {
+  id: string;
+  summary: string;
+  assignedBy: AgentMailboxMessage["from"];
+  assignedAt: string;
+  status: "assigned" | "running" | "blocked" | "completed" | "cancelled";
+  messageId?: string;
+  completedAt?: string;
+  resultSummary?: string;
 };
 
 export type RoleUsage = {
@@ -434,9 +447,11 @@ export type AgentRun = {
   allowedTools?: ToolName[];
   maxTurns?: number;
   permissionMode: PermissionMode;
-  status: "running" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
-  activityStatus?: "processing" | "waiting_mailbox" | "blocked" | "cancelled" | "completed";
+  status: "running" | "idle" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
+  activityStatus?: "processing" | "idle" | "waiting_mailbox" | "blocked" | "cancelled" | "completed";
   activitySummary?: string;
+  activeTask?: AgentSharedTask;
+  lastResultSummary?: string;
   transcriptPath: string;
   transcriptSessionId: string;
   mailbox: AgentMailboxMessage[];

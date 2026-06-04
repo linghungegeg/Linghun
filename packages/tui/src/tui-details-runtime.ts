@@ -104,6 +104,10 @@ export function formatAgentDetails(agent: AgentRun, context: TuiContext): string
     failed: mailbox.filter((message) => message.status === "failed").length,
   };
   const mailboxTail = mailbox.slice(-5);
+  const activity = agent.activityStatus ?? (agent.status === "idle" ? "idle" : "unknown");
+  const activeTask = agent.activeTask
+    ? `${agent.activeTask.id} ${agent.activeTask.status}: ${agent.activeTask.summary}`
+    : "none";
   const lines = [
     `Agent ${agent.id} (${label})`,
     `- display name: ${label}`,
@@ -116,7 +120,10 @@ export function formatAgentDetails(agent: AgentRun, context: TuiContext): string
     `- max turns: ${agent.maxTurns ?? "default"}`,
     `- allowed tools: ${agent.allowedTools?.join(",") ?? "default"}`,
     `- status: ${agent.status}`,
-    `- activity: ${agent.activityStatus ?? "unknown"}${agent.activitySummary ? ` — ${sanitizeDisplayPaths(agent.activitySummary, context.projectPath)}` : ""}`,
+    `- activity: ${activity}${agent.activitySummary ? ` — ${sanitizeDisplayPaths(agent.activitySummary, context.projectPath)}` : ""}`,
+    `- teammate: role ${agent.role}, team ${agent.teamName ?? "none"}, ${activity}, queued messages ${mailboxCounts.pending}`,
+    `- active task: ${sanitizeDisplayPaths(activeTask, context.projectPath)}`,
+    `- recent result: ${sanitizeDisplayPaths(agent.lastResultSummary ?? agent.summary, context.projectPath)}`,
     `- task: ${truncateDisplay(agent.task, 120)}`,
     `- parent session: ${agent.parentSessionId ?? "none"}`,
     `- transcript: ${formatDisplayPath(agent.transcriptPath, context.projectPath)}`,
