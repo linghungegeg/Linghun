@@ -84,6 +84,8 @@ describe("D.14H-B workflow plan schema", () => {
 
     expect(result.plan.budget.maxRunningAgents).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
     expect(result.plan.phases[0]?.slices[0]?.allowedToolClasses).toEqual(["readonly", "details"]);
+    expect(result.plan.phases[0]?.slices[0]?.dependsOnSliceIds).toEqual([]);
+    expect(result.plan.phases[0]?.slices[0]?.independent).toBe(false);
 
     const projection = projectWorkflowPlan(result.plan);
     expect(projection.surface).toBe("task-summary");
@@ -92,7 +94,7 @@ describe("D.14H-B workflow plan schema", () => {
     expect(projection.summary.evidenceCount).toBe(2);
     expect(projection.summaryText).toContain("Current phase: Audit-shaped plan");
     expect(projection.detailsText).toContain(
-      "phase | slice | role | status | evidence refs | budget | next action",
+      "phase | slice | role | status | dependsOn | parallel | evidence refs | budget | next action",
     );
     expect(projection.mobileSummary).toContain("Agents done/running/blocked: 0/1/0");
   });
@@ -369,6 +371,72 @@ describe("D.14H-B workflow plan schema", () => {
     const statuses = result.plan.phases[0]?.slices.map((slice) => slice.status);
     expect(statuses.filter((status) => status === "running")).toHaveLength(3);
     expect(statuses.slice(3)).toEqual(["queued", "queued"]);
+  });
+
+  it("requires explicit independent semantics for parallel slices", () => {
+    const valid = normalizeWorkflowPlan(
+      createValidPlan({
+        phases: [
+          {
+            id: "phase-a",
+            title: "Independent slices",
+            status: "running",
+            stopPoint: {
+              required: true,
+              confirmationRequired: true,
+              reason: "Stop before execution.",
+            },
+            slices: [
+              {
+                id: "slice-a",
+                title: "A",
+                role: "explorer",
+                independent: true,
+                canRunInParallel: true,
+                targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(valid.ok).toBe(true);
+    if (valid.ok) {
+      expect(valid.plan.phases[0]?.slices[0]?.dependsOnSliceIds).toEqual([]);
+      expect(valid.plan.phases[0]?.slices[0]?.canRunInParallel).toBe(true);
+    }
+
+    const errors = expectInvalid(
+      createValidPlan({
+        phases: [
+          {
+            id: "phase-a",
+            title: "Bad parallel slices",
+            stopPoint: { required: true, confirmationRequired: true, reason: "Stop." },
+            slices: [
+              {
+                id: "slice-a",
+                title: "A",
+                role: "explorer",
+                independent: true,
+                canRunInParallel: true,
+                dependsOnSliceIds: ["slice-b"],
+                targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              },
+              {
+                id: "slice-b",
+                title: "B",
+                role: "explorer",
+                canRunInParallel: true,
+                targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(errors).toContain("independent slices must not declare dependsOnSliceIds");
+    expect(errors).toContain("canRunInParallel requires independent=true");
   });
 
   it("rejects mutating proposals in plan mode", () => {

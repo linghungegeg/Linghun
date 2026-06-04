@@ -34,6 +34,7 @@ export type WorkflowMainChainRequest =
       phase: string;
       target: string;
       requestedAgents?: number;
+      runningCap?: number;
       maxTokens?: number;
       maxDurationMs?: number;
     }
@@ -158,6 +159,7 @@ export type WorkflowAgentRuntimeBridgeResult = {
   workflowId: string;
   currentPhaseId: string;
   runningCap: number;
+  runnableSlots: number;
   phaseStopPointConfirmed: boolean;
   requests: WorkflowBridgeRequestProposal[];
   phaseStatuses: WorkflowBridgePhaseStatus[];
@@ -261,6 +263,7 @@ export function bridgeWorkflowPlanToMainChainRequests(
       workflowId: plan.id,
       currentPhaseId,
       runningCap,
+      runnableSlots: 0,
       phaseStopPointConfirmed,
       requests: [],
       phaseStatuses,
@@ -272,6 +275,7 @@ export function bridgeWorkflowPlanToMainChainRequests(
     0,
     runningCap - currentPhase.slices.filter((slice) => slice.status === "running").length,
   );
+  const initialRunnableSlots = runnableSlots;
 
   const requests = currentPhase.slices.map((slice) => {
     const contextRefs = createContextRefs(plan, slice);
@@ -466,6 +470,7 @@ export function bridgeWorkflowPlanToMainChainRequests(
     workflowId: plan.id,
     currentPhaseId,
     runningCap,
+    runnableSlots: initialRunnableSlots,
     phaseStopPointConfirmed,
     requests,
     phaseStatuses,
@@ -566,7 +571,8 @@ function createMainChainRequest(
         action === "status" || action === "report" ? (slice.nextAction ?? "latest") : undefined,
       phase: phaseTitle,
       target: "workflow-agent-runtime-bridge",
-      requestedAgents: slice.budget?.maxRunningAgents,
+      requestedAgents: slice.budget?.requestedAgents,
+      runningCap: slice.budget?.maxRunningAgents,
       maxTokens: slice.budget?.maxTokens,
       maxDurationMs: slice.budget?.maxDurationMs,
     };

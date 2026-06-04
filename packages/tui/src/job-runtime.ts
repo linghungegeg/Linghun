@@ -82,6 +82,7 @@ export type ParsedJobRunOptions = {
   maxTokens: number;
   maxSteps: number;
   requestedAgents: number;
+  runningCap?: number;
   timeoutMs: number;
   allowEdit: boolean;
   allowBash: boolean;
@@ -106,6 +107,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   let phase = "Phase 17A";
   let target = "local-durable-jobs";
   let requestedAgents = 1;
+  let runningCap: number | undefined;
   let maxTokens = DEFAULT_JOB_BUDGET_TOKENS;
   let maxSteps = DEFAULT_JOB_MAX_STEPS;
   let timeoutMs = DEFAULT_JOB_TIMEOUT_MS;
@@ -130,6 +132,11 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     }
     if (arg === "--agents") {
       requestedAgents = clampPositiveInt(args[index + 1], 1, MAX_AGENTS);
+      index += 1;
+      continue;
+    }
+    if (arg === "--running-cap" || arg === "--runningCap" || arg === "--cap") {
+      runningCap = clampPositiveInt(args[index + 1], DEFAULT_JOB_RUNNING_AGENT_CAP, MAX_AGENTS);
       index += 1;
       continue;
     }
@@ -180,6 +187,7 @@ export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
     maxTokens,
     maxSteps,
     requestedAgents: normalizedAgents,
+    runningCap,
     timeoutMs,
     allowEdit,
     allowBash,

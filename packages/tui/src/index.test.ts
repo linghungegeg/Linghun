@@ -50,6 +50,7 @@ import {
   __testCreateShellBlockOutput,
   __testCreateVerificationLevelForReadiness,
   __testFormatStartAgentDidNotStartMessage,
+  __testParseRunWorkflowToolInput,
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
   __testSendMessage,
@@ -1196,7 +1197,12 @@ function createNestedJobWorkflowPlan(permissionMode: TuiContext["permissionMode"
             status: "queued",
             targetRuntime: { kind: "slash", slash: "/job", action: "run", mutating: true },
             nextAction: "run nested durable job from workflow",
-            budget: { maxTokens: 1200, maxDurationMs: 30_000, maxRunningAgents: 1 },
+            budget: {
+              maxTokens: 1200,
+              maxDurationMs: 30_000,
+              requestedAgents: 4,
+              maxRunningAgents: 2,
+            },
             evidence: [
               {
                 ref: "nested-job-plan-evidence",
@@ -1209,7 +1215,7 @@ function createNestedJobWorkflowPlan(permissionMode: TuiContext["permissionMode"
         ],
       },
     ],
-    budget: { maxRunningAgents: 1 },
+    budget: { maxRunningAgents: 2 },
     references: [],
     evidence: [],
     stopConditions: ["no PASS from workflow completion"],
@@ -5362,6 +5368,363 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("PASS：");
   });
 
+  it("parses RunWorkflow multi-agent fields for auditable workflow input", () => {
+    const parsed = __testParseRunWorkflowToolInput({
+      goal: "audit workflow slices",
+      agents: 4.8,
+      multiAgent: true,
+      runningCap: 2.2,
+      team_name: "audit-team",
+      run_in_background: true,
+    });
+    const aliasParsed = __testParseRunWorkflowToolInput({
+      goal: "audit aliases",
+      agents: 2,
+      multi_agent: false,
+      running_cap: 1.9,
+      teamName: "alias-team",
+    });
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      goal: "audit workflow slices",
+      agents: 4,
+      multiAgent: true,
+      runningCap: 2,
+      teamName: "audit-team",
+      runInBackground: true,
+    });
+    expect(aliasParsed).toMatchObject({
+      ok: true,
+      agents: 2,
+      multiAgent: true,
+      runningCap: 1,
+      teamName: "alias-team",
+    });
+  });
+
+  it("runs only explicit independent workflow slices in cap-controlled batches", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-batch-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    context.evidence.push(
+      {
+        id: "ev-a",
+        kind: "command_output",
+        summary: "A",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ev-b",
+        kind: "command_output",
+        summary: "B",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ev-c",
+        kind: "command_output",
+        summary: "C",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+    );
+    const plan = normalizeWorkflowPlan({
+      id: "wf-independent-batch",
+      title: "Independent batch",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-batch",
+      phases: [
+        {
+          id: "phase-batch",
+          title: "Batch phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: ["a", "b", "c"].map((id) => ({
+            id: `slice-${id}`,
+            title: `Slice ${id}`,
+            role: "explorer" as const,
+            status: "queued" as const,
+            dependsOnSliceIds: [],
+            independent: true,
+            canRunInParallel: true,
+            targetRuntime: { kind: "details" as const, view: "evidence" as const, mutating: false },
+            references: [{ kind: "evidence" as const, ref: `ev-${id}` }],
+          })),
+        },
+      ],
+      budget: { maxRunningAgents: 2 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid independent batch plan");
+
+    await __testRunWorkflowStepsWithPlan("independent cap batch", plan.plan, context, output, {
+      runningCap: 2,
+    });
+
+    const steps = context.workflows.activeRun?.steps ?? [];
+    expect(steps.map((step) => step.status)).toEqual(["completed", "completed", "completed"]);
+    expect(steps.map((step) => step.batchId)).toEqual(["batch-1", "batch-1", "batch-2"]);
+    const transcript = (await store.resume(session.id)).transcript;
+    const startEvents = transcript.filter((event) => event.type === "workflow_step_start") as Array<{
+      type: "workflow_step_start";
+      step: { id: string; batchId?: string; independent?: boolean; dependsOnSliceIds?: string[] };
+    }>;
+    expect(startEvents.filter((event) => event.step.batchId === "batch-1")).toHaveLength(2);
+    expect(startEvents.find((event) => event.step.id === "slice-a")?.step.independent).toBe(true);
+    expect(startEvents.find((event) => event.step.id === "slice-a")?.step.dependsOnSliceIds).toEqual([]);
+  });
+
+  it("keeps dependent workflow slices serial even when running cap allows more", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-serial-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    context.evidence.push(
+      {
+        id: "ev-root",
+        kind: "command_output",
+        summary: "root",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ev-child",
+        kind: "command_output",
+        summary: "child",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+    );
+    const plan = normalizeWorkflowPlan({
+      id: "wf-dependent-serial",
+      title: "Dependent serial",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-serial",
+      phases: [
+        {
+          id: "phase-serial",
+          title: "Serial phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: [
+            {
+              id: "slice-root",
+              title: "Root",
+              role: "explorer",
+              status: "queued",
+              dependsOnSliceIds: [],
+              independent: true,
+              canRunInParallel: true,
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              references: [{ kind: "evidence", ref: "ev-root" }],
+            },
+            {
+              id: "slice-child",
+              title: "Child",
+              role: "explorer",
+              status: "queued",
+              dependsOnSliceIds: ["slice-root"],
+              targetRuntime: { kind: "details", view: "evidence", mutating: false },
+              references: [{ kind: "evidence", ref: "ev-child" }],
+            },
+          ],
+        },
+      ],
+      budget: { maxRunningAgents: 3 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid dependent serial plan");
+
+    await __testRunWorkflowStepsWithPlan("dependent serial", plan.plan, context, output, {
+      runningCap: 3,
+    });
+
+    const steps = context.workflows.activeRun?.steps ?? [];
+    expect(steps.map((step) => step.batchId)).toEqual(["batch-1", "batch-2"]);
+    expect(steps[1]?.dependsOnSliceIds).toEqual(["slice-root"]);
+  });
+
+  it("keeps independent workflow slices serial unless canRunInParallel is explicit", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-explicit-parallel-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    context.evidence.push(
+      {
+        id: "ev-left",
+        kind: "command_output",
+        summary: "left",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "ev-right",
+        kind: "command_output",
+        summary: "right",
+        source: "test",
+        supportsClaims: [],
+        createdAt: new Date().toISOString(),
+      },
+    );
+    const plan = normalizeWorkflowPlan({
+      id: "wf-independent-not-parallel",
+      title: "Independent but not parallel",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-explicit",
+      phases: [
+        {
+          id: "phase-explicit",
+          title: "Explicit phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: ["left", "right"].map((id) => ({
+            id: `slice-${id}`,
+            title: `Slice ${id}`,
+            role: "explorer" as const,
+            status: "queued" as const,
+            dependsOnSliceIds: [],
+            independent: true,
+            canRunInParallel: false,
+            targetRuntime: { kind: "details" as const, view: "evidence" as const, mutating: false },
+            references: [{ kind: "evidence" as const, ref: `ev-${id}` }],
+          })),
+        },
+      ],
+      budget: { maxRunningAgents: 2 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid explicit parallel plan");
+
+    await __testRunWorkflowStepsWithPlan("independent not parallel", plan.plan, context, output, {
+      runningCap: 2,
+    });
+
+    expect(context.workflows.activeRun?.steps.map((step) => step.batchId)).toEqual([
+      "batch-1",
+      "batch-2",
+    ]);
+  });
+
+  it("blocks workflow /fork slices when workflow-owned running agents reach cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-fork-cap-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const workflowRunId = "workflow-cap-fixture";
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-existing",
+        workflowRunId,
+      }),
+    ];
+    const plan = normalizeWorkflowPlan({
+      id: "wf-fork-cap",
+      title: "Fork cap",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "full-access",
+      currentPhaseId: "phase-fork",
+      phases: [
+        {
+          id: "phase-fork",
+          title: "Fork phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: [
+            {
+              id: "slice-fork",
+              title: "Fork worker",
+              role: "worker",
+              status: "queued",
+              targetRuntime: { kind: "slash", slash: "/fork", role: "worker", mutating: true },
+              nextAction: "try workflow fork after cap",
+            },
+          ],
+        },
+      ],
+      budget: { maxRunningAgents: 1 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid fork cap plan");
+
+    await __testRunWorkflowStepsWithPlan("fork cap", plan.plan, context, output, {
+      runningCap: 1,
+      __testRunId: workflowRunId,
+    });
+
+    expect(context.workflows.activeRun).toMatchObject({ status: "blocked", result: "blocked" });
+    expect(context.workflows.activeRun?.steps[0]?.summary).toContain("workflow runningCap 1 reached");
+  });
+
+  it("marks workflow blocked when one slice cannot produce a main-chain request", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-blocked-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+    const plan = normalizeWorkflowPlan({
+      id: "wf-blocked-slice",
+      title: "Blocked slice",
+      source: "manual",
+      createdAt: new Date().toISOString(),
+      permissionMode: "default",
+      currentPhaseId: "phase-blocked",
+      phases: [
+        {
+          id: "phase-blocked",
+          title: "Blocked phase",
+          status: "running",
+          stopPoint: { required: true, confirmationRequired: true, reason: "confirmed" },
+          slices: [
+            {
+              id: "slice-blocked",
+              title: "Blocked missing target",
+              role: "explorer",
+              status: "queued",
+              dependsOnSliceIds: [],
+              independent: true,
+            },
+          ],
+        },
+      ],
+      budget: { maxRunningAgents: 2 },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error("invalid blocked workflow plan");
+
+    await __testRunWorkflowStepsWithPlan("blocked slice", plan.plan, context, output);
+
+    expect(context.workflows.activeRun).toMatchObject({ status: "blocked", result: "blocked" });
+    expect(context.workflows.activeRun?.steps[0]).toMatchObject({ status: "blocked" });
+    expect(context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id)).toMatchObject({
+      status: "failed",
+      result: "partial",
+    });
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(transcript.some((event) => event.type === "workflow_end" && event.status === "blocked")).toBe(
+      true,
+    );
+  });
+
   it("executes slice-architecture-review with boundary-check evidence instead of proposal-only state", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-workflow-arch-review-"));
     await mkdir(join(project, "packages", "tui", "src"), { recursive: true });
@@ -5796,8 +6159,16 @@ describe("Phase 06 TUI slash commands", () => {
       jobs[0]?.id ?? "missing",
       "state.json",
     );
-    const state = JSON.parse(await readFile(statePath, "utf8")) as { id?: string; status?: string };
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      agents?: unknown[];
+      budget?: { maxRunningAgents?: number };
+      effectiveAgentCap?: number;
+      status?: string;
+    };
     expect(state.status).toBe("blocked");
+    expect(state.agents).toHaveLength(4);
+    expect(state.budget?.maxRunningAgents).toBe(2);
+    expect(state.effectiveAgentCap).toBe(2);
     expect(output.text).toContain("durable job");
     expect(output.text).not.toContain("PASS：");
   });
@@ -14411,6 +14782,45 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
     expect(output.text).toContain("已有 verification 重任务正在运行");
     expect(context.permissionMode).toBe("full-access");
+  });
+
+  it("does not let a workflow-owned running agent heavy guard block another agent in the same workflow cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-workflow-agent-guard-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+    context.permissionMode = "full-access";
+    context.workflows.activeRun = {
+      id: "workflow-owner",
+      goal: "parallel agents",
+      planId: "wf-owner",
+      status: "running",
+      steps: [],
+      startedAt: new Date().toISOString(),
+      result: "partial",
+    };
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", {
+        id: "agent-owned",
+        workflowRunId: "workflow-owner",
+      }),
+    ];
+
+    await handleSlashCommand("/fork explorer same workflow cap", context, output);
+
+    expect(output.text).not.toContain("已有 agent 重任务正在运行");
+    expect(output.text).not.toContain("agent 后台任务已达到上限 3");
+    expect(context.backgroundTasks.filter((task) => task.kind === "agent")).toHaveLength(2);
+    expect(
+      context.backgroundTasks.filter(
+        (task) => task.kind === "agent" && task.workflowRunId === "workflow-owner",
+      ),
+    ).toHaveLength(2);
+
+    context.workflows.activeRun = undefined;
+    await handleSlashCommand("/fork explorer outside workflow blocked", context, output);
+    expect(output.text).toContain("已有 agent 重任务正在运行");
   });
 
   it("marks stale background tasks and preserves log traceability", async () => {

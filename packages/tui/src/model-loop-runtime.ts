@@ -213,7 +213,7 @@ export const SEND_MESSAGE_DESCRIPTION =
   "Send a text message to a running Linghun agent or team by id/name/team. The message enters the target agent mailbox and transcript; fail closed if no running target is found.";
 
 export const RUN_WORKFLOW_DESCRIPTION =
-  "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs.";
+  "Run a real Linghun workflow for requests such as splitting work into a workflow or executing workflow steps. Supports explicit multi-agent intent (agents/multiAgent/runningCap/teamName) and records that intent in workflow/tool transcript events. Emits workflow start/step/result/failure events and returns completed/partial/blocked status with evidence refs.";
 
 export const INDEX_OPERATION_DESCRIPTION =
   "Run a real Linghun index operation for requests such as inspect index status, refresh index, initialize fast index, or repair index ignore rules. Mutating operations use the existing permission pipeline.";
@@ -320,6 +320,13 @@ export function createRunWorkflowInputSchema(): unknown {
       inputs: { type: "object", additionalProperties: true },
       runInBackground: { type: "boolean" },
       run_in_background: { type: "boolean" },
+      agents: { type: "number" },
+      multiAgent: { type: "boolean" },
+      multi_agent: { type: "boolean" },
+      runningCap: { type: "number" },
+      running_cap: { type: "number" },
+      teamName: { type: "string" },
+      team_name: { type: "string" },
     },
   };
 }

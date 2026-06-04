@@ -52,6 +52,7 @@ export type BackgroundTaskState = {
   staleAfterMs: number;
   logPath?: string;
   outputPath?: string;
+  workflowRunId?: string;
   hasOutput: boolean;
   result?: "pass" | "fail" | "partial" | "cancelled" | "timeout" | "stale";
   userVisibleSummary: string;
@@ -73,6 +74,10 @@ export type WorkflowStepState = {
   runtime: "agent" | "job" | "verification" | "details";
   summary?: string;
   evidenceRefs: string[];
+  dependsOnSliceIds?: string[];
+  independent?: boolean;
+  canRunInParallel?: boolean;
+  batchId?: string;
   startedAt?: string;
   endedAt?: string;
 };

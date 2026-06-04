@@ -428,7 +428,7 @@ export async function handleJobCommand(
     if (!options.goal) {
       writeLine(
         output,
-        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
+        "用法：/job run <goal> [--phase <phase>] [--target <target>] [--agents <n>] [--running-cap <n>] [--tokens <n>] [--max-steps <n>] [--timeout <ms>] [--allow-edit] [--allow-bash] [--multi-agent]",
       );
       return;
     }
@@ -552,7 +552,10 @@ export async function createDurableJob(
     ? (deps().checkResourceGuard(context, "model") ??
       deps().checkBackgroundStartGuard(context, "job", true))
     : null;
-  const runningCap = DEFAULT_JOB_RUNNING_AGENT_CAP;
+  const runningCap = Math.max(
+    1,
+    Math.min(options.runningCap ?? DEFAULT_JOB_RUNNING_AGENT_CAP, DEFAULT_JOB_RUNNING_AGENT_CAP),
+  );
   const status: DurableJobStatus = !start
     ? "created"
     : missing.length > 0
@@ -585,7 +588,10 @@ export async function createDurableJob(
       maxTokens: options.maxTokens,
       maxRunningAgents: runningCap,
       maxSteps: options.maxSteps,
-      note: `${runningCap} running agents is the default cap; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only, not default.`,
+      note:
+        options.runningCap !== undefined
+          ? `${runningCap} running agents requested for this job; ${DEFAULT_JOB_RUNNING_AGENT_CAP} remains the default cap and ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only.`
+          : `${runningCap} running agents is the default cap; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} is benchmark/high-config candidate only, not default.`,
       usedTokens: 0,
       remainingTokens: options.maxTokens,
       usedSteps: 0,
@@ -1642,6 +1648,7 @@ export async function handleForkCommand(
   args: string[],
   context: TuiContext,
   output: Writable,
+  runtimeOptions: { workflowRunId?: string } = {},
 ): Promise<void> {
   const options = parseForkCommandArgs(args);
   const registryAgent = resolveForkRegistryAgent(context, options.rawType);
@@ -1655,7 +1662,8 @@ export async function handleForkCommand(
     return;
   }
   const workflowTaskId =
-    context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined;
+    runtimeOptions.workflowRunId ??
+    (context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined);
   const guard = deps().checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
@@ -1727,6 +1735,7 @@ export async function handleForkCommand(
   context.agents.unshift(agent);
   context.agents = context.agents.slice(0, MAX_AGENTS);
   const background = createAgentBackgroundTask(agent, context);
+  if (workflowTaskId) background.workflowRunId = workflowTaskId;
   rememberBackgroundTask(context, background);
   registerBackgroundAbortController(context, agent.id);
   await persistAgentRun(context, agent);

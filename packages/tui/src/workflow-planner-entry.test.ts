@@ -252,6 +252,39 @@ describe("D.14H-F workflow planner core-system wiring", () => {
     expect(archIdx).toBeLessThan(implIdx);
   });
 
+  it("generates explicit independent slices and durable /job target for multi-agent goals", () => {
+    const result = generateWorkflowPlanPreview(
+      goal({
+        goal: "复杂审计 workflow 多智能体分片实现",
+        permissionMode: "full-access",
+        agents: 4,
+        multiAgent: true,
+        runningCap: 2,
+        teamName: "workflow-team",
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const slices = result.plan.phases[0].slices;
+    const independent = slices.filter((slice) => slice.independent);
+    expect(independent.length).toBeGreaterThanOrEqual(2);
+    expect(independent.every((slice) => slice.canRunInParallel)).toBe(true);
+    expect(independent.every((slice) => (slice.dependsOnSliceIds ?? []).length === 0)).toBe(true);
+    const implement = slices.find((slice) => slice.id === "slice-implement");
+    expect(implement?.targetRuntime).toMatchObject({
+      kind: "slash",
+      slash: "/job",
+      action: "run",
+      mutating: true,
+    });
+    expect(implement?.budget?.maxRunningAgents).toBe(2);
+    expect(implement?.budget?.requestedAgents).toBe(4);
+    expect(result.bridgeResult.runningCap).toBe(2);
+    expect(result.bridgeResult.requests.some((request) => request.sliceId === "slice-implement")).toBe(
+      true,
+    );
+  });
+
   it("does not generate mutating implement slice for explicit readonly audit goals", () => {
     const result = generateWorkflowPlanPreview(
       goal({

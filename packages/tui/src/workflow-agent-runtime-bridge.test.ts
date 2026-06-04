@@ -151,6 +151,43 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     expect(result.summary.runnable).toBe(2);
   });
 
+  it("keeps requested agents separate from running cap in /job proposals", () => {
+    const result = bridge(
+      createPlan({
+        phases: [
+          {
+            id: "phase-c",
+            title: "Runtime bridge",
+            status: "running",
+            stopPoint: {
+              required: true,
+              confirmationRequired: true,
+              reason: "Confirm.",
+            },
+            slices: [
+              {
+                id: "slice-job",
+                title: "Run job",
+                role: "planner",
+                status: "queued",
+                targetRuntime: { kind: "slash", slash: "/job", action: "run", mutating: true },
+                nextAction: "Run durable job for bridge checks.",
+                budget: { requestedAgents: 4, maxRunningAgents: 2 },
+              },
+            ],
+          },
+        ],
+      }),
+      { confirmedPhaseStopPoints: ["phase-c"], runningCap: 2 },
+    );
+
+    expect(requestBySlice(result.requests, "slice-job").request).toMatchObject({
+      mainChain: "job",
+      requestedAgents: 4,
+      runningCap: 2,
+    });
+  });
+
   it("blocks dependency-unsatisfied slices without creating runnable requests", () => {
     const result = bridge(
       createPlan({
@@ -225,9 +262,20 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     );
 
     expect(result.runningCap).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
+    expect(result.runnableSlots).toBe(DEFAULT_WORKFLOW_RUNNING_CAP);
     expect(result.summary.runnable).toBe(3);
     expect(result.summary.queued).toBe(1);
     expect(requestBySlice(result.requests, "slice-4").reason).toContain("running cap 3 reached");
+  });
+
+  it("exposes runnable slots when explicit runningCap is passed to the bridge", () => {
+    const result = bridge(createPlan(), {
+      confirmedPhaseStopPoints: ["phase-c"],
+      runningCap: 2,
+    });
+
+    expect(result.runningCap).toBe(2);
+    expect(result.runnableSlots).toBe(2);
   });
 
   it("requires confirmed phase stopPoint before mutating proposals become runnable", () => {

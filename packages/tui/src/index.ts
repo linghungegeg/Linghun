@@ -3417,11 +3417,16 @@ async function runWorkflowSteps(
   goal: string,
   context: TuiContext,
   output: Writable,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
   const { generateWorkflowPlanPreview } = await import("./workflow-planner-entry.js");
   const preview = generateWorkflowPlanPreview({
     goal,
     permissionMode: context.permissionMode,
+    agents: options.agents,
+    multiAgent: options.multiAgent,
+    runningCap: options.runningCap,
+    teamName: options.teamName,
     ...buildWorkflowPlannerContextInput(context),
   });
   if (!preview.ok) {
@@ -3439,6 +3444,10 @@ async function runWorkflowSteps(
   const confirmed = generateWorkflowPlanPreview({
     goal,
     permissionMode: context.permissionMode,
+    agents: options.agents,
+    multiAgent: options.multiAgent,
+    runningCap: options.runningCap,
+    teamName: options.teamName,
     ...buildWorkflowPlannerContextInput(context),
     confirmedPhaseStopPoints: [phase.id],
   });
@@ -3447,16 +3456,30 @@ async function runWorkflowSteps(
     return;
   }
 
-  await runWorkflowPlanSteps(goal, confirmed.plan, context, output);
+  await runWorkflowPlanSteps(goal, confirmed.plan, context, output, options);
 }
+
+type RunWorkflowExecutionOptions = {
+  agents?: number;
+  multiAgent?: boolean;
+  runningCap?: number;
+  teamName?: string;
+  __testRunId?: string;
+};
+
+type WorkflowBatchItem = {
+  step: WorkflowStepState;
+  request: WorkflowBridgeRequestProposal;
+};
 
 export async function __testRunWorkflowStepsWithPlan(
   goal: string,
   plan: NormalizedWorkflowPlan,
   context: TuiContext,
   output: Writable,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
-  await runWorkflowPlanSteps(goal, plan, context, output);
+  await runWorkflowPlanSteps(goal, plan, context, output, options);
 }
 
 async function runWorkflowPlanSteps(
@@ -3464,6 +3487,7 @@ async function runWorkflowPlanSteps(
   plan: NormalizedWorkflowPlan,
   context: TuiContext,
   output: Writable,
+  options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
   const phase = plan.phases.find((item) => item.id === plan.currentPhaseId) ?? plan.phases[0];
   if (!phase) {
@@ -3472,7 +3496,7 @@ async function runWorkflowPlanSteps(
   }
 
   const sessionId = await ensureSession(context);
-  const runId = `workflow-${randomUUID().slice(0, 8)}`;
+  const runId = options.__testRunId ?? `workflow-${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
   const executableSlices = plan.phases.flatMap((item) => item.slices);
   const stepStates: WorkflowStepState[] = executableSlices.map((slice) => ({
@@ -3481,6 +3505,9 @@ async function runWorkflowPlanSteps(
     status: "queued",
     runtime: workflowRuntimeKind(getCurrentWorkflowStepRequest(plan, phase.id, [], slice.id)),
     evidenceRefs: (slice.evidence ?? []).map((item) => item.ref),
+    dependsOnSliceIds: slice.dependsOnSliceIds ?? [],
+    independent: slice.independent === true,
+    canRunInParallel: slice.canRunInParallel === true,
   }));
   const workflowTask: BackgroundTaskState = {
     id: runId,
@@ -3516,7 +3543,16 @@ async function runWorkflowPlanSteps(
   await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
   await context.store.appendEvent(sessionId, {
     type: "workflow_start",
-    workflow: { id: runId, goal, planId: plan.id, steps: stepStates },
+    workflow: {
+      id: runId,
+      goal,
+      planId: plan.id,
+      steps: stepStates,
+      multiAgent: options.multiAgent === true,
+      agents: options.agents,
+      runningCap: normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
+      teamName: options.teamName,
+    },
     createdAt: startedAt,
   });
   await appendBackgroundTaskEvent(context, sessionId, workflowTask);
@@ -3531,54 +3567,106 @@ async function runWorkflowPlanSteps(
   );
 
   let completed = 0;
-  for (const step of stepStates) {
+  let batchIndex = 0;
+  while (stepStates.some((step) => step.status === "queued")) {
     if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
-    const request = getCurrentWorkflowStepRequest(plan, phase.id, stepStates, step.id);
+    const batch = selectRunnableWorkflowBatch(plan, phase.id, stepStates, options);
+    if (batch.length === 0) {
+      const blocked = stepStates.find((step) => step.status === "queued");
+      const summary = formatWorkflowStepSummary(
+        blocked?.id ?? "workflow",
+        "blocked",
+        "no runnable workflow slice; dependencies or running cap left all remaining slices waiting",
+        context.language,
+      );
+      if (blocked) {
+        blocked.status = "blocked";
+        blocked.summary = summary;
+        blocked.endedAt = new Date().toISOString();
+      }
+      await finishWorkflowRun(runId, "blocked", summary, context, sessionId, workflowTask);
+      return;
+    }
+    batchIndex += 1;
     const stepStartedAt = new Date().toISOString();
-    step.status = "running";
-    step.startedAt = stepStartedAt;
-    workflowTask.currentStep = step.title;
-    workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
+    for (const item of batch) {
+      item.step.status = "running";
+      item.step.startedAt = stepStartedAt;
+      item.step.batchId = `batch-${batchIndex}`;
+    }
+    workflowTask.currentStep =
+      batch.length === 1
+        ? batch[0]?.step.title
+        : `workflow batch ${batchIndex}: ${batch.map((item) => item.step.title).join(", ")}`;
+    workflowTask.progress = {
+      completed,
+      total: stepStates.length,
+      label: batch.length === 1 ? (batch[0]?.step.runtime ?? "workflow") : "workflow-batch",
+    };
     workflowTask.updatedAt = stepStartedAt;
     await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
-    await context.store.appendEvent(sessionId, {
-      type: "workflow_step_start",
-      workflowId: runId,
-      step,
-      createdAt: stepStartedAt,
-    });
+    for (const item of batch) {
+      await context.store.appendEvent(sessionId, {
+        type: "workflow_step_start",
+        workflowId: runId,
+        step: item.step,
+        createdAt: stepStartedAt,
+      });
+    }
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
-    const result = await executeWorkflowStep(request, context, output);
+    const results = await Promise.all(
+      batch.map(async (item) => ({
+        step: item.step,
+        result: await executeWorkflowStep(
+          item.request,
+          context,
+          output,
+          runId,
+          normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
+        ),
+      })),
+    );
     if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
     const stepEndedAt = new Date().toISOString();
-    step.status = result.status;
-    step.summary = result.summary;
-    step.evidenceRefs = result.evidenceRefs;
-    step.endedAt = stepEndedAt;
-    if (result.status === "completed" || result.status === "partial") completed += 1;
-    workflowTask.currentStep = result.summary;
-    workflowTask.progress = { completed, total: stepStates.length, label: step.runtime };
+    for (const item of results) {
+      item.step.status = item.result.status;
+      item.step.summary = item.result.summary;
+      item.step.evidenceRefs = item.result.evidenceRefs;
+      item.step.endedAt = stepEndedAt;
+      if (item.result.status === "completed" || item.result.status === "partial") completed += 1;
+    }
+    const terminal = results.find(
+      (item) => item.result.status !== "completed" && item.result.status !== "partial",
+    );
+    workflowTask.currentStep =
+      terminal?.result.summary ??
+      (results.length === 1
+        ? (results[0]?.result.summary ?? "workflow step completed")
+        : `workflow batch ${batchIndex} completed`);
+    workflowTask.progress = { completed, total: stepStates.length, label: "workflow" };
     workflowTask.updatedAt = stepEndedAt;
     workflowTask.lastOutputAt = stepEndedAt;
     workflowTask.hasOutput = true;
     await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
-    await context.store.appendEvent(sessionId, {
-      type: "workflow_step_result",
-      workflowId: runId,
-      stepId: step.id,
-      status: result.status,
-      summary: result.summary,
-      evidenceRefs: result.evidenceRefs,
-      createdAt: stepEndedAt,
-    });
+    for (const item of results) {
+      await context.store.appendEvent(sessionId, {
+        type: "workflow_step_result",
+        workflowId: runId,
+        stepId: item.step.id,
+        status: item.result.status,
+        summary: item.result.summary,
+        evidenceRefs: item.result.evidenceRefs,
+        createdAt: stepEndedAt,
+      });
+    }
     await appendBackgroundTaskEvent(context, sessionId, workflowTask);
 
-    if (result.status !== "completed" && result.status !== "partial") {
+    if (terminal) {
       await finishWorkflowRun(
         runId,
-        result.status,
-        result.summary,
+        terminal.result.status,
+        terminal.result.summary,
         context,
         sessionId,
         workflowTask,
@@ -4034,6 +4122,8 @@ async function executeWorkflowStep(
   request: WorkflowBridgeRequestProposal,
   context: TuiContext,
   output: Writable,
+  workflowRunId?: string,
+  workflowRunningCap?: number,
 ): Promise<{
   status: WorkflowStepTerminalStatus;
   summary: string;
@@ -4067,9 +4157,39 @@ async function executeWorkflowStep(
       return await executeWorkflowArchitectureReviewStep(request, context);
     }
     if (req.mainChain === "fork") {
+      const activeWorkflowAgents =
+        workflowRunId && workflowRunningCap
+          ? context.backgroundTasks.filter(
+              (task) =>
+                task.kind === "agent" &&
+                task.workflowRunId === workflowRunId &&
+                isRuntimeActiveBackgroundTask(task),
+            ).length
+          : 0;
+      if (workflowRunningCap && activeWorkflowAgents >= workflowRunningCap) {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          `workflow runningCap ${workflowRunningCap} reached; wait for existing workflow agents before starting another /fork`,
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return {
+          status: "blocked",
+          summary,
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
+      }
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand([req.role, req.task], context, output);
+      await handleForkCommand([req.role, req.task], context, output, { workflowRunId });
       const agent = context.agents.find((item) => !previousAgentIds.has(item.id));
+      const agentTask = agent
+        ? context.backgroundTasks.find((task) => task.id === agent.id)
+        : undefined;
+      if (agentTask && workflowRunId) {
+        agentTask.workflowRunId = workflowRunId;
+        await appendBackgroundTaskEvent(context, await ensureSession(context), agentTask);
+      }
       if (!agent) {
         const summary = formatWorkflowStepSummary(
           request.sliceId,
@@ -4086,7 +4206,6 @@ async function executeWorkflowStep(
           evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
         };
       }
-      const agentTask = context.backgroundTasks.find((task) => task.id === agent.id);
       if (!agentTask) {
         const summary = formatWorkflowStepSummary(
           request.sliceId,
@@ -4165,6 +4284,7 @@ async function executeWorkflowStep(
             req.target,
             ...(req.maxTokens ? ["--tokens", String(req.maxTokens)] : []),
             ...(req.maxDurationMs ? ["--timeout", String(req.maxDurationMs)] : []),
+            ...(req.runningCap ? ["--running-cap", String(req.runningCap)] : []),
             ...(req.requestedAgents && req.requestedAgents > 1
               ? ["--multi-agent", "--agents", String(req.requestedAgents)]
               : []),
@@ -4470,6 +4590,7 @@ function getCurrentWorkflowStepRequest(
   phaseId: string,
   steps: WorkflowStepState[],
   stepId: string,
+  options: RunWorkflowExecutionOptions = {},
 ): WorkflowBridgeRequestProposal {
   const satisfied = new Map(
     steps
@@ -4497,12 +4618,16 @@ function getCurrentWorkflowStepRequest(
                 : slice.status === "blocked"
                   ? "queued"
                   : (slice.status ?? "queued"),
+        dependsOnSliceIds: slice.dependsOnSliceIds ?? [],
+        independent: slice.independent === true,
+        canRunInParallel: slice.canRunInParallel === true,
       })),
     })),
   };
   const bridge = bridgeWorkflowPlanToMainChainRequests(runningPlan, {
     currentPhaseId: phaseId,
     confirmedPhaseStopPoints: [phaseId],
+    runningCap: normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
   });
   return (
     bridge.requests.find((request) => request.sliceId === stepId) ?? {
@@ -4546,6 +4671,55 @@ function getCurrentWorkflowStepRequest(
       },
     }
   );
+}
+
+function selectRunnableWorkflowBatch(
+  plan: NormalizedWorkflowPlan,
+  phaseId: string,
+  steps: WorkflowStepState[],
+  options: RunWorkflowExecutionOptions,
+): WorkflowBatchItem[] {
+  const cap = normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents);
+  const batch: WorkflowBatchItem[] = [];
+  const candidates = steps.filter((step) => {
+    if (step.status !== "queued") return false;
+    const deps = step.dependsOnSliceIds ?? [];
+    return deps.every((depId) => {
+      const dep = steps.find((item) => item.id === depId);
+      return dep?.status === "completed" || dep?.status === "partial";
+    });
+  });
+  for (const step of candidates) {
+    if (batch.length >= cap) {
+      break;
+    }
+    const request = getCurrentWorkflowStepRequest(plan, phaseId, steps, step.id, options);
+    if (!request.executable || !request.request) {
+      return [{ step, request }];
+    }
+    const mutating = request.safety.mutating;
+    if (mutating && batch.filter((item) => item.request.safety.mutating).length >= cap) {
+      continue;
+    }
+    if (
+      batch.length > 0 &&
+      (mutating || !step.independent || step.canRunInParallel !== true)
+    ) {
+      break;
+    }
+    batch.push({ step, request });
+    if (mutating || !step.independent || step.canRunInParallel !== true) {
+      break;
+    }
+  }
+  return batch;
+}
+
+function normalizeWorkflowRunningCap(value: number | undefined): number {
+  if (!Number.isFinite(value) || value === undefined || value < 1) {
+    return DEFAULT_JOB_RUNNING_AGENT_CAP;
+  }
+  return Math.max(1, Math.floor(value));
 }
 
 async function runWorkflowVerificationStep(
@@ -6578,8 +6752,11 @@ function checkResourceGuard(
   if (activeTasks.length >= BACKGROUND_RUNNING_GLOBAL_CAP) {
     return `并发上限：后台任务已达到全局上限 ${BACKGROUND_RUNNING_GLOBAL_CAP}；请等待完成、查看 /background，或用 /interrupt 取消卡住任务。这是 resource/concurrency cap，不是权限拒绝。`;
   }
+  const capTasks = activeTasks.filter(
+    (task) => !ignoreTaskId || task.workflowRunId !== ignoreTaskId || task.kind !== "agent",
+  );
   if (kind === "heavy") {
-    const heavy = activeTasks.find(
+    const heavy = capTasks.find(
       (task) =>
         task.kind === "verification" ||
         task.kind === "index" ||
@@ -6592,7 +6769,7 @@ function checkResourceGuard(
       : null;
   }
   const cap = BACKGROUND_KIND_CAPS[kind];
-  if (cap !== undefined && activeTasks.filter((task) => task.kind === kind).length >= cap) {
+  if (cap !== undefined && capTasks.filter((task) => task.kind === kind).length >= cap) {
     return `并发上限：${kind} 后台任务已达到上限 ${cap}；请等待完成、查看 /background，或用 /interrupt 取消后重试。这是 resource/concurrency cap，不是权限拒绝。`;
   }
   return null;
@@ -11711,7 +11888,7 @@ async function executeLinghunControlToolUse(
           );
         }
       } else {
-        await runWorkflowSteps(input.goal ?? "", context, output);
+        await runWorkflowSteps(input.goal ?? "", context, output, input);
       }
       const run = context.workflows.activeRun;
       const ok =
@@ -11732,6 +11909,10 @@ async function executeLinghunControlToolUse(
         workflowId: run?.id,
         status: run?.status ?? "blocked",
         result: run?.result ?? "blocked",
+        agents: input.agents,
+        multiAgent: input.multiAgent,
+        runningCap: input.runningCap,
+        teamName: input.teamName,
       });
     }
     if (toolCall.name === INDEX_OPERATION_TOOL_NAME) {
@@ -11986,6 +12167,10 @@ function parseRunWorkflowToolInput(input: unknown):
       workflowId?: string;
       inputs?: Record<string, unknown>;
       runInBackground: boolean;
+      agents?: number;
+      multiAgent: boolean;
+      runningCap?: number;
+      teamName?: string;
     }
   | { ok: false; text: string } {
   const obj =
@@ -11999,6 +12184,14 @@ function parseRunWorkflowToolInput(input: unknown):
       : typeof obj.workflow_id === "string" && obj.workflow_id.trim()
         ? obj.workflow_id.trim()
         : undefined;
+  const agents = normalizePositiveToolInt(obj.agents);
+  const runningCap = normalizePositiveToolInt(obj.runningCap ?? obj.running_cap);
+  const teamName =
+    typeof obj.teamName === "string" && obj.teamName.trim()
+      ? obj.teamName.trim()
+      : typeof obj.team_name === "string" && obj.team_name.trim()
+        ? obj.team_name.trim()
+        : undefined;
   if (!goal && !workflowId) {
     return { ok: false, text: "RunWorkflow requires goal or workflowId." };
   }
@@ -12010,7 +12203,22 @@ function parseRunWorkflowToolInput(input: unknown):
       ? { inputs: obj.inputs as Record<string, unknown> }
       : {}),
     runInBackground: obj.runInBackground === true || obj.run_in_background === true,
+    ...(agents ? { agents } : {}),
+    multiAgent: obj.multiAgent === true || obj.multi_agent === true || Boolean(agents && agents > 1),
+    ...(runningCap ? { runningCap } : {}),
+    ...(teamName ? { teamName } : {}),
   };
+}
+
+export function __testParseRunWorkflowToolInput(input: unknown): ReturnType<typeof parseRunWorkflowToolInput> {
+  return parseRunWorkflowToolInput(input);
+}
+
+function normalizePositiveToolInt(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
+    return undefined;
+  }
+  return Math.max(1, Math.floor(value));
 }
 
 function parseStringFieldToolInput(

@@ -113,6 +113,7 @@ export type WorkflowBudget = {
   maxDurationMs?: number;
   maxCostCny?: number;
   maxRunningAgents?: number;
+  requestedAgents?: number;
 };
 
 export type WorkflowStopPoint = {
@@ -127,6 +128,8 @@ export type WorkflowSlice = {
   role: AgentType;
   status?: WorkflowSliceStatus;
   dependsOnSliceIds?: string[];
+  independent?: boolean;
+  canRunInParallel?: boolean;
   allowedToolClasses?: WorkflowToolClass[];
   toolProposals?: WorkflowToolProposal[];
   targetRuntime?: WorkflowRuntimeTarget;
@@ -172,6 +175,9 @@ export type NormalizedWorkflowPlan = WorkflowPlan & {
       slices: Array<
         WorkflowSlice & {
           status: WorkflowSliceStatus;
+          dependsOnSliceIds: string[];
+          independent: boolean;
+          canRunInParallel: boolean;
           allowedToolClasses: WorkflowToolClass[];
           evidence: WorkflowEvidenceRequirement[];
           references: WorkflowReference[];
@@ -324,6 +330,9 @@ export function normalizeWorkflowPlan(
       return {
         ...slice,
         status,
+        dependsOnSliceIds: slice.dependsOnSliceIds ?? [],
+        independent: slice.independent === true,
+        canRunInParallel: slice.canRunInParallel === true,
         allowedToolClasses: slice.allowedToolClasses ?? [],
         evidence: slice.evidence ?? [],
         references: slice.references ?? [],
@@ -403,7 +412,7 @@ export function projectWorkflowPlan(plan: NormalizedWorkflowPlan): WorkflowPlanP
 
   const detailsText = [
     `Workflow Matrix details for ${plan.title}`,
-    "phase | slice | role | status | evidence refs | budget | next action",
+    "phase | slice | role | status | dependsOn | parallel | evidence refs | budget | next action",
     ...plan.phases.flatMap((phase) =>
       phase.slices.map((slice) =>
         [
@@ -411,6 +420,8 @@ export function projectWorkflowPlan(plan: NormalizedWorkflowPlan): WorkflowPlanP
           slice.title,
           slice.role,
           slice.status,
+          (slice.dependsOnSliceIds ?? []).join(",") || "none",
+          slice.independent || slice.canRunInParallel ? "yes" : "no",
           (slice.evidence ?? []).map((item) => item.ref).join(",") || "none",
           formatSliceBudget(slice),
           slice.nextAction ?? phase.stopPoint.reason,
@@ -494,6 +505,19 @@ function validateSlice(
     }
   }
   validateBudget(slice.budget, `${path}.budget`, errors);
+  const dependsOnSliceIds = slice.dependsOnSliceIds ?? [];
+  if (slice.independent === true && dependsOnSliceIds.length > 0) {
+    errors.push({
+      path: `${path}.independent`,
+      message: "independent slices must not declare dependsOnSliceIds",
+    });
+  }
+  if (slice.canRunInParallel === true && slice.independent !== true) {
+    errors.push({
+      path: `${path}.canRunInParallel`,
+      message: "canRunInParallel requires independent=true",
+    });
+  }
   validateToolClasses(slice.allowedToolClasses ?? [], `${path}.allowedToolClasses`, errors);
   validateToolProposals(slice.toolProposals ?? [], `${path}.toolProposals`, errors);
   validateEvidence(slice.evidence ?? [], `${path}.evidence`, errors);

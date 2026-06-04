@@ -33,6 +33,10 @@ export type WorkflowPlannerGoal = {
   goal: string;
   permissionMode: PermissionMode;
   confirmedPhaseStopPoints?: string[];
+  agents?: number;
+  multiAgent?: boolean;
+  runningCap?: number;
+  teamName?: string;
   controlledMemoryRef?: { rulesFound: boolean; summary?: string };
   selfLearningHints?: string[];
   failureLearningRefs?: Array<{ lesson: string; source: string }>;
@@ -85,6 +89,8 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
   const sanitizedGoal = sanitizeGoalText(goal);
   const planId = `wf-plan-${Date.now()}`;
   const phaseId = "phase-1";
+  const requestedAgents = normalizePositiveInt(input.agents);
+  const runningCap = normalizePositiveInt(input.runningCap) ?? 3;
 
   const references: WorkflowPlan["references"] = [];
   const evidence: WorkflowPlan["evidence"] = [];
@@ -180,33 +186,84 @@ function buildConservativePlan(input: WorkflowPlannerGoal): WorkflowPlan {
           reason: "Confirm plan before any execution.",
         },
         budget: { maxTokens: 10_000 },
-        slices: buildSlicesForGoal(sanitizedGoal, permissionMode),
+        slices: buildSlicesForGoal(sanitizedGoal, permissionMode, {
+          requestedAgents,
+          runningCap,
+          multiAgent: input.multiAgent === true,
+          teamName: input.teamName,
+        }),
       },
     ],
-    budget: { maxRunningAgents: 3 },
+    budget: { maxRunningAgents: runningCap },
     evidence,
     references,
     stopConditions: ["stop after each phase and wait for explicit user confirmation"],
   };
 }
 
-function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
+function buildSlicesForGoal(
+  goal: string,
+  permissionMode: PermissionMode,
+  options: { requestedAgents?: number; runningCap: number; multiAgent: boolean; teamName?: string },
+) {
+  const readonlyAuditGoal = isReadonlyAuditGoal(goal);
+  const multiSliceGoal =
+    options.multiAgent ||
+    (options.requestedAgents ?? 0) > 1 ||
+    isComplexOrMultiSliceGoal(goal) ||
+    readonlyAuditGoal;
+  const exploreSlices: WorkflowPlan["phases"][number]["slices"] = multiSliceGoal
+    ? [
+        {
+          id: "slice-explore-source",
+          title: "Explore source surface",
+          role: "explorer",
+          status: "queued",
+          dependsOnSliceIds: [],
+          independent: true,
+          canRunInParallel: true,
+          targetRuntime: { kind: "details", view: "evidence", mutating: false },
+          acceptanceCriteria: ["locate relevant source and ownership boundaries"],
+          nextAction: "Read source-facing evidence refs and gather bounded context.",
+        },
+        {
+          id: "slice-explore-verification",
+          title: "Explore verification surface",
+          role: "verifier",
+          status: "queued",
+          dependsOnSliceIds: [],
+          independent: true,
+          canRunInParallel: true,
+          targetRuntime: { kind: "details", view: "evidence", mutating: false },
+          acceptanceCriteria: ["locate relevant tests, scripts, or verification entry points"],
+          nextAction: "Inspect verification evidence refs without running broad commands.",
+        },
+      ]
+    : [
+        {
+          id: "slice-explore",
+          title: "Explore context",
+          role: "explorer",
+          status: "queued",
+          dependsOnSliceIds: [],
+          independent: true,
+          canRunInParallel: false,
+          targetRuntime: { kind: "details", view: "evidence", mutating: false },
+          acceptanceCriteria: ["locate relevant code"],
+          nextAction: "Read relevant files and gather evidence.",
+        },
+      ];
+  const exploreDeps = exploreSlices.map((slice) => slice.id);
   const slices: WorkflowPlan["phases"][number]["slices"] = [
-    {
-      id: "slice-explore",
-      title: "Explore context",
-      role: "explorer",
-      status: "queued",
-      targetRuntime: { kind: "details", view: "evidence", mutating: false },
-      acceptanceCriteria: ["locate relevant code"],
-      nextAction: "Read relevant files and gather evidence.",
-    },
+    ...exploreSlices,
     {
       id: "slice-architecture-review",
       title: "Architecture review",
       role: "planner",
       status: "queued",
-      dependsOnSliceIds: ["slice-explore"],
+      dependsOnSliceIds: exploreDeps,
+      independent: false,
+      canRunInParallel: false,
       targetRuntime: { kind: "details", view: "evidence", mutating: false },
       acceptanceCriteria: [
         "confirm architecture boundaries respected",
@@ -226,18 +283,34 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     },
   ];
 
-  const readonlyAuditGoal = isReadonlyAuditGoal(goal);
   if (permissionMode !== "plan" && !readonlyAuditGoal) {
+    const useDurableJobBatch = multiSliceGoal && (options.multiAgent || (options.requestedAgents ?? 0) > 1);
     slices.push({
       id: "slice-implement",
-      title: "Implement changes",
+      title: useDurableJobBatch ? "Run durable multi-agent job batch" : "Implement changes",
       role: "worker",
       status: "queued",
       dependsOnSliceIds: ["slice-architecture-review"],
-      targetRuntime: { kind: "slash", slash: "/fork", role: "worker", mutating: true },
-      budget: { maxTokens: 5000, maxDurationMs: 120_000 },
+      independent: false,
+      canRunInParallel: false,
+      targetRuntime: useDurableJobBatch
+        ? { kind: "slash", slash: "/job", action: "run", mutating: true }
+        : { kind: "slash", slash: "/fork", role: "worker", mutating: true },
+      budget: {
+        maxTokens: 5000,
+        maxDurationMs: 120_000,
+        ...(useDurableJobBatch
+          ? {
+              requestedAgents: options.requestedAgents ?? options.runningCap,
+              maxRunningAgents: options.runningCap,
+            }
+          : {}),
+      },
       acceptanceCriteria: ["apply changes after approval"],
-      nextAction: goal.slice(0, 200) || "Apply changes after approval.",
+      nextAction:
+        useDurableJobBatch && options.teamName
+          ? `${goal.slice(0, 180) || "Apply changes after approval."} team ${sanitizeRefText(options.teamName).slice(0, 40)}`
+          : goal.slice(0, 200) || "Apply changes after approval.",
     });
   }
 
@@ -252,6 +325,8 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     role: "verifier",
     status: "queued",
     dependsOnSliceIds: [lastExecutionSlice],
+    independent: false,
+    canRunInParallel: false,
     targetRuntime: { kind: "details", view: "evidence", mutating: false },
     acceptanceCriteria: [
       "suggest git stable point check (proposal only, no auto-commit or snapshot)",
@@ -266,6 +341,8 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
     role: "verifier",
     status: "queued",
     dependsOnSliceIds: ["slice-stable-point"],
+    independent: false,
+    canRunInParallel: false,
     targetRuntime: { kind: "verification", level: "typecheck", mutating: false },
     acceptanceCriteria: readonlyAuditGoal
       ? ["run lightweight verification after readonly audit"]
@@ -276,6 +353,19 @@ function buildSlicesForGoal(goal: string, permissionMode: PermissionMode) {
   });
 
   return slices;
+}
+
+function isComplexOrMultiSliceGoal(goal: string): boolean {
+  return /(?:复杂|审计|多切片|多智能体|并发|workflow|工作流|multi[-\s]?agent|parallel|batch|audit|slice)/iu.test(
+    goal,
+  );
+}
+
+function normalizePositiveInt(value: number | undefined): number | undefined {
+  if (!Number.isFinite(value) || value === undefined || value < 1) {
+    return undefined;
+  }
+  return Math.max(1, Math.floor(value));
 }
 
 function isReadonlyAuditGoal(goal: string): boolean {

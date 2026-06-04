@@ -136,6 +136,19 @@ describe("parseJobRunOptions", () => {
     expect(result.allowMultiAgent).toBe(true);
   });
 
+  it("parses explicit running cap separately from requested agents", () => {
+    const result = parseJobRunOptions([
+      "--multi-agent",
+      "--agents",
+      "5",
+      "--running-cap",
+      "2",
+      "do stuff",
+    ]);
+    expect(result.requestedAgents).toBe(5);
+    expect(result.runningCap).toBe(2);
+  });
+
   it("parses --tokens flag", () => {
     const result = parseJobRunOptions(["--tokens", "500000"]);
     expect(result.maxTokens).toBe(500000);

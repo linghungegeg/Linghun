@@ -167,6 +167,25 @@ describe("model-loop-runtime", () => {
       expect(workflowSchema.properties?.inputs?.additionalProperties).toBe(true);
     });
 
+    it("exposes RunWorkflow multi-agent fields explicitly", () => {
+      const workflowSchema = createModelToolDefinitions().find((d) => d.name === "RunWorkflow")
+        ?.inputSchema as {
+        properties?: Record<string, unknown>;
+      };
+
+      expect(Object.keys(workflowSchema.properties ?? {})).toEqual(
+        expect.arrayContaining([
+          "agents",
+          "multiAgent",
+          "multi_agent",
+          "runningCap",
+          "running_cap",
+          "teamName",
+          "team_name",
+        ]),
+      );
+    });
+
     it("Mature UX Cutback: index tool descriptions match auto-review permission behavior", () => {
       const defs = createModelToolDefinitions();
       const refresh = defs.find((d) => d.name === "IndexRefresh")?.description ?? "";
