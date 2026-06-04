@@ -5370,7 +5370,10 @@ function hasActiveInterruptibleWork(context: TuiContext): boolean {
   if (context.interrupt?.type === "running") return true;
   if (
     context.backgroundTasks.some(
-      (task) => isRuntimeActiveBackgroundTask(task) || task.status === "paused",
+      (task) =>
+        isRuntimeActiveBackgroundTask(task) ||
+        task.status === "paused" ||
+        task.status === "blocked",
     )
   ) {
     return true;
@@ -13691,11 +13694,8 @@ function formatShellBackgroundSummaries(context: TuiContext): BackgroundTaskSumm
     .filter(
       (task) =>
         task.status === "running" ||
-        task.status === "completed" ||
-        task.status === "failed" ||
-        task.status === "timeout" ||
         task.status === "paused" ||
-        task.status === "stale",
+        task.status === "blocked",
     )
     .map((task) => ({
       id: task.id,

@@ -257,7 +257,7 @@ export function createShellViewModel(
     effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
       ? mapBackgroundSummariesToBlocks(
           options.backgroundSummaries.filter(
-            (s) => s.status === "running" || s.status === "paused" || s.status === "stale",
+            (s) => s.status === "running" || s.status === "paused" || s.status === "blocked",
           ),
           language,
         )[0]
@@ -1194,14 +1194,12 @@ function mapBackgroundSummariesToBlocks(
   if (visibleSummaries.length === 0) return [];
   const zh = language === "zh-CN";
   const running = visibleSummaries.filter((s) => s.status === "running").length;
-  const needConfirm = visibleSummaries.filter(
-    (s) => s.status === "paused" || s.status === "stale",
-  ).length;
-  const stale = visibleSummaries.filter((s) => s.status === "stale").length;
+  const needConfirm = visibleSummaries.filter((s) => s.status === "paused").length;
+  const blocked = visibleSummaries.filter((s) => s.status === "blocked").length;
   const agents = visibleSummaries.filter((s) => s.kind === "agent").length;
   const current =
     visibleSummaries.find((s) => s.status === "running") ??
-    visibleSummaries.find((s) => s.status === "stale") ??
+    visibleSummaries.find((s) => s.status === "blocked") ??
     visibleSummaries[0];
   const nextAction =
     createBackgroundNextAction(current, language) ??
@@ -1212,10 +1210,10 @@ function mapBackgroundSummariesToBlocks(
     {
       id: "bg-summary",
       kind: "run",
-      status: stale > 0 ? "blocked" : running > 0 ? "running" : "partial",
+      status: blocked > 0 ? "blocked" : running > 0 ? "running" : "partial",
       title: zh
-        ? `后台 ${visibleSummaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
-        : `Background ${visibleSummaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
+        ? `后台 ${visibleSummaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${blocked > 0 ? ` · 阻塞 ${blocked}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
+        : `Background ${visibleSummaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${blocked > 0 ? ` · blocked ${blocked}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
       summary: current
         ? summarizeBackgroundStep(current, language)
         : zh
@@ -1232,7 +1230,7 @@ function createBackgroundNextAction(
 ): string | undefined {
   if (!task) return undefined;
   const zh = language === "zh-CN";
-  if (task.status === "stale") {
+  if (task.status === "blocked") {
     if (task.kind === "agent") {
       return zh ? "后台 agent 需要确认；用 /agents 或 /background 查看。" : "Background agent needs attention; use /agents or /background.";
     }
@@ -1256,14 +1254,14 @@ function formatFooterRuntimeStatus(
     (summary) => summary.kind !== "agent" || summary.status === "running",
   );
   const running = visibleSummaries.filter((task) => task.status === "running").length;
-  const needConfirm = visibleSummaries.filter(
-    (task) => task.status === "paused" || task.status === "stale",
-  ).length;
+  const needConfirm = visibleSummaries.filter((task) => task.status === "paused").length;
+  const blocked = visibleSummaries.filter((task) => task.status === "blocked").length;
   const total = visibleSummaries.length;
   const agents = visibleSummaries.filter((task) => task.kind === "agent").length;
   const pieces = [zh ? `后台 ${total}` : `background ${total}`];
   if (agents > 0) pieces.push(zh ? `智能体 ${agents}` : `agents ${agents}`);
   if (needConfirm > 0) pieces.push(zh ? `需要确认 ${needConfirm}` : `need attention ${needConfirm}`);
+  if (blocked > 0) pieces.push(zh ? `阻塞 ${blocked}` : `blocked ${blocked}`);
   if (running > 0) pieces.push(zh ? `运行中 ${running}` : `running ${running}`);
   pieces.push(zh ? "详情 /background" : "details /background");
   return pieces.join(" · ");

@@ -32,6 +32,7 @@ export type BackgroundTaskStatus =
   | "paused"
   | "completed"
   | "failed"
+  | "blocked"
   | "cancelled"
   | "timeout"
   | "stale";
@@ -215,6 +216,8 @@ export type DeepCompactPacket = {
   preservedEvidenceRefs: string[];
   preservedFiles: string[];
   activeAgentsWorkflows: string[];
+  needsAttentionAgentsWorkflows?: string[];
+  staleResumableAgentsWorkflows?: string[];
   pendingItems: string[];
   decisions: string[];
   risks: string[];

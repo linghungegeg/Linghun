@@ -272,9 +272,7 @@ export async function handleBackgroundCommand(
 ): Promise<void> {
   await hydrateDurableJobBackgroundTasks(context);
   deps().refreshBackgroundLifecycle(context);
-  const tasks = context.backgroundTasks.filter(
-    (task) => task.kind !== "agent" || task.status === "running",
-  );
+  const tasks = context.backgroundTasks.filter(isDefaultBackgroundListTask);
   // D.13Q-UX Task Surface — ink session 走降噪 CommandPanel；
   // plain TUI / 非交互保留旧 writeLine 行为，避免破坏既有字符串断言。
   if (context.isInkSession) {
@@ -290,9 +288,7 @@ export async function handleBackgroundCommand(
     }
     const running = tasks.filter((t) => t.status === "running").length;
     const needConfirm = tasks.filter((t) => t.status === "paused").length;
-    const failedOrBlocked = tasks.filter(
-      (t) => t.status === "failed" || t.status === "timeout" || t.status === "stale",
-    ).length;
+    const failedOrBlocked = tasks.filter((t) => t.status === "blocked").length;
     const completed = tasks.filter((t) => t.status === "completed").length;
     const summary: string[] = [
       isEn
@@ -2708,7 +2704,9 @@ export async function resumeAgent(
   agent.heartbeatAt = now;
   agent.updatedAt = now;
   agent.summary =
-    "agent stale resume restarted with a fresh provider turn; old tool_result events are not replayed.";
+    context.language === "en-US"
+      ? "Resumed with a fresh provider turn; old stream events are not replayed."
+      : "已用新的 provider turn 恢复；不会回放旧 stream。";
   const background =
     context.backgroundTasks.find((task) => task.id === agent.id) ??
     createAgentBackgroundTask(agent, context);
@@ -2735,7 +2733,7 @@ export function syncBackgroundWithAgentStatus(
   if (TERMINAL_AGENT_STATUSES.has(agent.status)) {
     background.status =
       agent.status === "blocked"
-        ? "failed"
+        ? "blocked"
         : agent.status === "cancelled"
           ? "cancelled"
           : agent.status === "failed"
@@ -2838,7 +2836,7 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
         updatedAt: now,
       };
       context.agents.push(agent);
-      if (agent.status === "running") {
+      if (agent.status === "running" || agent.status === "stale") {
         const background = createAgentBackgroundTask(agent, context);
         syncBackgroundWithAgentStatus(background, agent);
         rememberBackgroundTask(context, background);
@@ -2848,6 +2846,13 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       }
     } catch {}
   }
+}
+
+function isDefaultBackgroundListTask(task: BackgroundTaskState): boolean {
+  if (task.kind === "agent") {
+    return task.status === "running";
+  }
+  return task.status === "running" || task.status === "paused" || task.status === "blocked";
 }
 
 async function persistAgentRun(context: TuiContext, agent: AgentRun): Promise<void> {

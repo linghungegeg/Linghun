@@ -68,9 +68,10 @@ export function formatJobRunnerReportLine(job: DurableJobState): string {
 export function mapDurableJobToBackgroundStatus(
   status: DurableJobState["status"],
 ): BackgroundTaskStatus {
-  if (status === "created" || status === "sleeping" || status === "blocked") {
+  if (status === "created" || status === "sleeping") {
     return "paused";
   }
+  if (status === "blocked") return "blocked";
   return status === "completed" ||
     status === "failed" ||
     status === "cancelled" ||
@@ -269,6 +270,7 @@ function formatPanelProgress(task: BackgroundTaskState): string {
 function normalizePanelStatus(status: BackgroundTaskState["status"], language: Language): string {
   const isEn = language === "en-US";
   if (status === "paused") return isEn ? "needs attention" : "待确认";
+  if (status === "blocked") return isEn ? "blocked" : "阻塞";
   if (status === "stale") return isEn ? "blocked" : "阻塞";
   if (status === "timeout") return isEn ? "blocked" : "阻塞";
   if (status === "failed") return isEn ? "failed" : "失败";

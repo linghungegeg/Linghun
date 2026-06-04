@@ -112,7 +112,15 @@ export type TranscriptEvent =
         id: string;
         kind: "bash" | "verification" | "compact" | "agent" | "job" | "mcp" | "index";
         title: string;
-        status: "running" | "paused" | "completed" | "failed" | "cancelled" | "timeout" | "stale";
+        status:
+          | "running"
+          | "paused"
+          | "completed"
+          | "failed"
+          | "blocked"
+          | "cancelled"
+          | "timeout"
+          | "stale";
         currentStep?: string;
         progress?: { completed: number; total?: number; label?: string };
         startedAt: string;

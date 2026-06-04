@@ -42,6 +42,7 @@ export type RuntimeStatusSnapshot = {
   activeWorkflow?: RuntimeTaskSnapshot;
   activeAgents: RuntimeTaskSnapshot[];
   activeBackgroundTasks: RuntimeTaskSnapshot[];
+  needsAttentionTasks: RuntimeTaskSnapshot[];
   staleResumableTasks: RuntimeTaskSnapshot[];
   recentTerminalTasks: RuntimeTaskSnapshot[];
 };
@@ -54,12 +55,13 @@ export function createRuntimeStatusSnapshot(
     input.workflow && isActiveWorkflowStatus(input.workflow.status)
       ? mapWorkflow(input.workflow, input.language)
       : undefined;
-  const activeTasks = input.backgroundTasks.filter(
-    (task) => task.status === "running" || task.status === "paused",
+  const activeTasks = input.backgroundTasks.filter((task) => task.status === "running");
+  const needsAttentionTasks = input.backgroundTasks.filter(
+    (task) => task.status === "paused" || task.status === "blocked",
   );
   const staleTasks = input.backgroundTasks.filter((task) => task.status === "stale");
   const terminalTasks = input.backgroundTasks
-    .filter((task) => !isActiveBackgroundStatus(task.status))
+    .filter((task) => isTerminalBackgroundStatus(task.status))
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
     .slice(0, 3)
     .map((task) => mapBackgroundTask(task, input.language, false));
@@ -95,6 +97,9 @@ export function createRuntimeStatusSnapshot(
     activeBackgroundTasks: activeTasks
       .filter((task) => task.kind !== "agent")
       .map((task) => mapBackgroundTask(task, input.language, true)),
+    needsAttentionTasks: needsAttentionTasks.map((task) =>
+      mapBackgroundTask(task, input.language, true),
+    ),
     staleResumableTasks: staleTasks.map((task) => mapBackgroundTask(task, input.language, true)),
     recentTerminalTasks: recentTerminalTasks.slice(0, 3),
   };
@@ -114,6 +119,10 @@ export function formatRuntimeStatusSnapshotForBtw(
   for (const task of [...snapshot.activeAgents, ...snapshot.activeBackgroundTasks]) {
     if (lines.length >= 3) break;
     lines.push(formatTaskLine(language, "active", task));
+  }
+  for (const task of snapshot.needsAttentionTasks) {
+    if (lines.length >= 3) break;
+    lines.push(formatTaskLine(language, "attention", task));
   }
   for (const task of snapshot.staleResumableTasks) {
     if (lines.length >= 3) break;
@@ -204,7 +213,7 @@ function formatRequestActivityLine(snapshot: RuntimeStatusSnapshot, language: La
 
 function formatTaskLine(
   language: Language,
-  mode: "active" | "resumable",
+  mode: "active" | "attention" | "resumable",
   task: RuntimeTaskSnapshot,
 ): string {
   const label =
@@ -212,6 +221,10 @@ function formatTaskLine(
       ? language === "en-US"
         ? "Running"
         : "正在运行"
+      : mode === "attention"
+        ? language === "en-US"
+          ? "Needs attention"
+          : "需处理"
       : language === "en-US"
         ? "Resumable"
         : "可恢复";
@@ -232,8 +245,13 @@ function isActiveWorkflowStatus(
   return status === "running" || status === "blocked";
 }
 
-function isActiveBackgroundStatus(status: BackgroundTaskState["status"]): boolean {
-  return status === "running" || status === "paused" || status === "stale";
+function isTerminalBackgroundStatus(status: BackgroundTaskState["status"]): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "timeout"
+  );
 }
 
 function formatTaskKind(kind: RuntimeTaskSnapshot["kind"]): string {

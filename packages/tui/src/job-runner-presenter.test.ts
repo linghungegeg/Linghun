@@ -169,7 +169,7 @@ describe("job runner presenters", () => {
 
   it("formats durable job background status summaries with status, next action, and artifact refs only", () => {
     expect(mapDurableJobToBackgroundStatus("running")).toBe("running");
-    expect(mapDurableJobToBackgroundStatus("blocked")).toBe("paused");
+    expect(mapDurableJobToBackgroundStatus("blocked")).toBe("blocked");
     expect(mapDurableJobToBackgroundResult("completed")).toBe("partial");
     expect(mapDurableJobToBackgroundResult("timeout")).toBe("timeout");
     expect(formatJobNextAction(baseJob, "en-US")).toContain("/job cancel job-test");

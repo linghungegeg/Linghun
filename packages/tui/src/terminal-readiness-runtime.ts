@@ -6,14 +6,18 @@ import { formatCooldownDoctorLine } from "./provider-circuit-breaker.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import type { TerminalProblemView, TerminalReadinessView } from "./terminal-readiness-presenter.js";
 import { getSelectedModelRuntime } from "./tui-model-runtime.js";
+import type { BackgroundTaskState } from "./tui-data-types.js";
 import { classifyVerificationLevel } from "./verification-level.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
 export function createTerminalReadinessView(context: TuiContext): TerminalReadinessView {
   const runtime = getSelectedModelRuntime(context);
   const latestCache = context.cache.history.at(-1);
-  const blockedBackground = context.backgroundTasks.filter((task) =>
-    ["failed", "cancelled", "timeout", "stale"].includes(task.status),
+  const runtimeVisibleBackground = context.backgroundTasks.filter(
+    isReadinessRuntimeVisibleBackgroundTask,
+  );
+  const needsAttentionBackground = context.backgroundTasks.filter((task) =>
+    isReadinessNeedsAttentionBackgroundTask(task),
   );
   const webSourceEvidence = context.evidence.some((evidence) => evidence.kind === "web_source")
     ? "present"
@@ -66,9 +70,9 @@ export function createTerminalReadinessView(context: TuiContext): TerminalReadin
       errors: context.mcp.servers.filter((server) => server.status === "error").length,
     },
     background: {
-      total: context.backgroundTasks.length,
-      running: context.backgroundTasks.filter((task) => task.status === "running").length,
-      blocked: blockedBackground.length,
+      total: runtimeVisibleBackground.length,
+      running: runtimeVisibleBackground.filter((task) => task.status === "running").length,
+      blocked: needsAttentionBackground.length,
     },
     verification: context.lastVerification
       ? {
@@ -407,7 +411,7 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
       : "clean"
     : "unavailable";
   const hasBlockedWork = context.backgroundTasks.some((task) =>
-    ["failed", "cancelled", "timeout", "stale"].includes(task.status),
+    ["blocked", "failed", "timeout", "stale"].includes(task.status),
   );
   const status: TerminalReadinessView["rollbackCoach"]["status"] =
     gitStatus === "unavailable"
@@ -433,12 +437,15 @@ function createRollbackCoachLite(context: TuiContext): TerminalReadinessView["ro
 
 function createTaskCostPreviewLite(context: TuiContext): TerminalReadinessView["costPreview"] {
   const labels = ["local-only", "no-network", "no-real-smoke", "advisory-estimate"];
+  const visibleBackgroundCount = context.backgroundTasks.filter(
+    isReadinessRuntimeVisibleBackgroundTask,
+  ).length;
   if (context.lastVerification) labels.push("may-run-tests");
-  if (context.backgroundTasks.length > 0) labels.push("background-visible");
+  if (visibleBackgroundCount > 0) labels.push("background-visible");
   if (context.lastProviderFailure) labels.push("provider-diagnostic-only");
   return {
     status: "partial",
-    level: context.lastVerification || context.backgroundTasks.length > 0 ? "medium" : "light",
+    level: context.lastVerification || visibleBackgroundCount > 0 ? "medium" : "light",
     labels,
     nextAction:
       "advisory estimate only; confirm before tests, provider calls, network, or release actions",
@@ -549,9 +556,7 @@ function createTerminalProblems(
       nextAction: "/model doctor",
     });
   }
-  for (const task of context.backgroundTasks.filter((item) =>
-    ["failed", "cancelled", "timeout", "stale"].includes(item.status),
-  )) {
+  for (const task of context.backgroundTasks.filter(isReadinessProblemBackgroundTask)) {
     problems.push({
       source: "background",
       severity: task.status === "failed" || task.status === "timeout" ? "error" : "warning",
@@ -620,4 +625,21 @@ function createTerminalProblems(
     });
   }
   return problems;
+}
+
+function isReadinessRuntimeVisibleBackgroundTask(task: BackgroundTaskState): boolean {
+  return task.status === "running" || task.status === "paused" || task.status === "blocked";
+}
+
+function isReadinessNeedsAttentionBackgroundTask(task: BackgroundTaskState): boolean {
+  return task.status === "paused" || task.status === "blocked" || task.status === "stale";
+}
+
+function isReadinessProblemBackgroundTask(task: BackgroundTaskState): boolean {
+  return (
+    task.status === "blocked" ||
+    task.status === "failed" ||
+    task.status === "timeout" ||
+    task.status === "stale"
+  );
 }

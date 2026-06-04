@@ -24,12 +24,19 @@ function task(overrides: Partial<BackgroundTaskState>): BackgroundTaskState {
 }
 
 describe("runtime status snapshot", () => {
-  it("separates active, stale/resumable, and terminal history", () => {
+  it("separates active, needs-attention, stale/resumable, and terminal history", () => {
     const now = new Date().toISOString();
     const snapshot = createRuntimeStatusSnapshot({
       language: "zh-CN",
       backgroundTasks: [
         task({ id: "agent-active", kind: "agent", status: "running", currentStep: "coding" }),
+        task({
+          id: "job-blocked",
+          kind: "job",
+          status: "blocked",
+          currentStep: "needs handoff",
+          nextAction: "/job report job-blocked",
+        }),
         task({
           id: "job-stale",
           kind: "job",
@@ -49,11 +56,14 @@ describe("runtime status snapshot", () => {
     });
 
     expect(snapshot.activeAgents.map((item) => item.id)).toEqual(["agent-active"]);
+    expect(snapshot.activeBackgroundTasks).toEqual([]);
+    expect(snapshot.needsAttentionTasks.map((item) => item.id)).toEqual(["job-blocked"]);
     expect(snapshot.staleResumableTasks.map((item) => item.id)).toEqual(["job-stale"]);
     expect(snapshot.recentTerminalTasks.map((item) => item.id)).toEqual(["job-done"]);
 
     const text = formatRuntimeStatusSnapshotForBtw(snapshot, "zh-CN");
     expect(text).toContain("正在运行：agent 运行中");
+    expect(text).toContain("需处理：job 阻塞");
     expect(text).toContain("可恢复：job 可恢复");
     expect(text).not.toContain("raw");
   });

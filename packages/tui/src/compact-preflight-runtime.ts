@@ -340,7 +340,7 @@ function createCompactProjection(
     input.originalMessages.length - input.compactedMessages.length,
   );
   const activeAgents = context.agents
-    .filter((agent) => agent.status === "running" || agent.status === "stale")
+    .filter((agent) => agent.status === "running")
     .slice(0, 5)
     .map(
       (agent) =>
@@ -348,9 +348,23 @@ function createCompactProjection(
     );
   const activeWorkflows = context.backgroundTasks
     .filter((task) => task.kind === "job" || task.kind === "agent")
-    .filter(
-      (task) => task.status === "running" || task.status === "paused" || task.status === "stale",
-    )
+    .filter((task) => task.status === "running")
+    .slice(0, 5)
+    .map(
+      (task) =>
+        `${task.kind}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+    );
+  const needsAttentionWorkflows = context.backgroundTasks
+    .filter((task) => task.kind === "job" || task.kind === "agent")
+    .filter((task) => task.status === "paused" || task.status === "blocked")
+    .slice(0, 5)
+    .map(
+      (task) =>
+        `${task.kind}:${task.status}:${sanitizeCompactSummaryText(context, task.userVisibleSummary, 80)}`,
+    );
+  const staleResumableWorkflows = context.backgroundTasks
+    .filter((task) => task.kind === "job" || task.kind === "agent")
+    .filter((task) => task.status === "stale")
     .slice(0, 5)
     .map(
       (task) =>
@@ -400,6 +414,8 @@ function createCompactProjection(
       }`,
       `files or evidence refs ${[...files, ...evidenceRefs.map((id) => `evidence:${id}`)].join(", ") || "none"}`,
       `active agents/workflows ${[...activeAgents, ...activeWorkflows].join("; ") || "none"}`,
+      `needs-attention agents/workflows ${needsAttentionWorkflows.join("; ") || "none"}`,
+      `stale resumable agents/workflows ${staleResumableWorkflows.join("; ") || "none"}`,
       `pending permissions/tool calls ${pending.join("; ") || "none"}`,
       `failure learning ${failureLearning.join("; ") || "none"}`,
       "anti hallucination: do not claim compact failure as PASS evidence; preserve evidence-bound claims only",

@@ -35,6 +35,10 @@ import {
 } from "./final-answer-gate.js";
 import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
 import {
+  createDeepCompactPacket,
+  formatDeepCompactPromptSummary,
+} from "./deep-compact-runtime.js";
+import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
   type DurableJobState,
@@ -2545,6 +2549,99 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("default");
   });
 
+  it("keeps stale and blocked work out of deep compact active summary", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-status-split-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deep-compact-model" });
+    const context = await createTestContext(project, store, session);
+    const now = new Date().toISOString();
+    context.agents.push({
+      id: "agent-stale",
+      type: "explorer",
+      role: "executor",
+      provider: "deepseek",
+      task: "stale research",
+      model: "deepseek-v4-flash",
+      permissionMode: "default",
+      status: "stale",
+      transcriptPath: join(project, "agent-stale.jsonl"),
+      transcriptSessionId: session.id,
+      mailbox: [],
+      summary: "stale agent summary",
+      contextSummary: "stale context",
+      cost: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: 0,
+      },
+      startedAt: now,
+      updatedAt: now,
+    });
+    context.backgroundTasks.push(
+      {
+        id: "job-running",
+        kind: "job",
+        title: "running job",
+        status: "running",
+        startedAt: now,
+        updatedAt: now,
+        heartbeatIntervalMs: 30_000,
+        staleAfterMs: 120_000,
+        hasOutput: false,
+        userVisibleSummary: "running job summary",
+      },
+      {
+        id: "job-blocked",
+        kind: "job",
+        title: "blocked job",
+        status: "blocked",
+        startedAt: now,
+        updatedAt: now,
+        heartbeatIntervalMs: 30_000,
+        staleAfterMs: 120_000,
+        hasOutput: false,
+        userVisibleSummary: "blocked job summary",
+      },
+      {
+        id: "job-stale",
+        kind: "job",
+        title: "stale job",
+        status: "stale",
+        startedAt: now,
+        updatedAt: now,
+        heartbeatIntervalMs: 30_000,
+        staleAfterMs: 120_000,
+        hasOutput: false,
+        userVisibleSummary: "stale job summary",
+      },
+    );
+
+    const packet = createDeepCompactPacket({
+      context,
+      transcript: [],
+      summary: "summary",
+      runtime: { role: "executor", provider: "deepseek", model: "deepseek-v4-flash" },
+      trigger: "manual",
+    });
+    const text = formatDeepCompactPromptSummary(packet) ?? "";
+
+    expect(packet.activeAgentsWorkflows).toEqual([
+      expect.stringContaining("job:job-running:running"),
+    ]);
+    expect(packet.needsAttentionAgentsWorkflows).toEqual([
+      expect.stringContaining("job:job-blocked:blocked"),
+    ]);
+    expect(packet.staleResumableAgentsWorkflows).toEqual([
+      expect.stringContaining("agent:agent-stale:stale"),
+      expect.stringContaining("job:job-stale:stale"),
+    ]);
+    expect(text).toContain("active agents/workflows job:job-running:running");
+    expect(text).toContain("needs-attention agents/workflows job:job-blocked:blocked");
+    expect(text).toContain("stale resumable agents/workflows agent:agent-stale:stale");
+  });
+
   it("deep compact semantic outline includes early transcript events beyond the recent tail", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-compact-full-transcript-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -4510,7 +4607,8 @@ describe("Phase 06 TUI slash commands", () => {
     ) as { mailbox?: Array<{ consumedAt?: string }> };
     expect(persistedAgent.mailbox?.[0]?.consumedAt).toBeDefined();
     await handleSlashCommand(`/agents cancel ${agent?.id}`, context, output);
-    expect(agent?.status).toBe("cancelled");
+    expect(agent?.status).toBe("failed");
+    expect(output.text).toContain("无需取消");
 
     await handleSlashCommand("/fork worker unsafe cwd --cwd ..", context, output);
     expect(output.text).toContain("已拒绝非法 agent cwd");
@@ -4519,7 +4617,7 @@ describe("Phase 06 TUI slash commands", () => {
     const { hydratePersistentAgents } = await import("./job-agent-command-runtime.js");
     await hydratePersistentAgents(freshContext);
     const stale = freshContext.agents.find((item) => item.addressableName === "alice");
-    expect(stale?.status).toBe("cancelled");
+    expect(stale?.status).toBe("failed");
 
     await handleSlashCommand(
       "/fork worker stale hydrate --background --name stale-one",
@@ -4690,9 +4788,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(restoredCompleted?.status).toBe("completed");
     expect(restoredRunning?.status).toBe("stale"); // running -> stale on restore
 
-    // Verify main-screen background task restoration. Terminal history stays in
-    // context.agents for /agents, but does not pollute taskRuntimeSummary via
-    // context.backgroundTasks on a new TUI startup.
+    // Verify background task restoration. Terminal history stays in context.agents
+    // for /agents, while stale/resumable also reaches runtime snapshot. Ordinary
+    // /background/footer filters keep it out of the main-screen summary.
     const bgBlocked = context.backgroundTasks.find((t) => t.id === "agent-blocked-01");
     const bgCancelled = context.backgroundTasks.find((t) => t.id === "agent-cancelled-02");
     const bgFailed = context.backgroundTasks.find((t) => t.id === "agent-failed-03");
@@ -4704,9 +4802,26 @@ describe("Phase 06 TUI slash commands", () => {
     expect(bgFailed).toBeUndefined();
     expect(bgCompleted).toBeUndefined();
 
-    // running->stale remains visible in /agents, but does not pollute
-    // background/footer/cap on a new TUI startup.
-    expect(bgStale).toBeUndefined();
+    expect(bgStale).toEqual(
+      expect.objectContaining({
+        id: "agent-running-05",
+        kind: "agent",
+        status: "stale",
+        result: "partial",
+      }),
+    );
+
+    const backgroundOutput = new MemoryOutput();
+    await handleSlashCommand("/background", context, backgroundOutput);
+    expect(backgroundOutput.text).toContain("没有后台任务");
+    expect(backgroundOutput.text).not.toContain("agent-running-05");
+
+    const snapshot = (await import("./runtime-status-snapshot.js")).createRuntimeStatusSnapshot({
+      language: context.language,
+      backgroundTasks: context.backgroundTasks,
+    });
+    expect(snapshot.activeAgents).toEqual([]);
+    expect(snapshot.staleResumableTasks.map((item) => item.id)).toEqual(["agent-running-05"]);
   });
 
   it("hydrateDurableJobBackgroundTasks shows recoverable jobs and keeps terminal jobs out of main-screen background tasks", async () => {
@@ -4733,7 +4848,7 @@ describe("Phase 06 TUI slash commands", () => {
       expect.objectContaining({
         id: blocked.id,
         kind: "job",
-        status: "paused",
+        status: "blocked",
       }),
     );
   });
@@ -4868,7 +4983,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(fullOutput).not.toContain("full source");
 
     expect(context.backgroundTasks).toContainEqual(
-      expect.objectContaining({ id: jobId, kind: "job", status: "paused", result: "partial" }),
+      expect.objectContaining({ id: jobId, kind: "job", status: "blocked", result: "partial" }),
     );
     expect(context.backgroundTasks.filter((task) => task.kind === "job")).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
@@ -5121,7 +5236,55 @@ describe("Phase 06 TUI slash commands", () => {
     expect(worker?.status).toBe("blocked");
     expect(worker?.summary).toContain("Bash 需要用户确认");
     expect(context.backgroundTasks.find((task) => task.id === jobId)).toEqual(
-      expect.objectContaining({ status: "paused", result: "partial" }),
+      expect.objectContaining({ status: "blocked", result: "partial" }),
+    );
+  });
+
+  it("stale agent/job background history does not reduce durable job running cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-stale-cap-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence = [
+      {
+        id: "e-stale-cap",
+        kind: "user_provided",
+        source: "test",
+        summary: "fixture evidence",
+        supportsClaims: ["job can start"],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    context.backgroundTasks = [
+      createBackgroundTaskFixture("agent", { id: "agent-stale-cap", status: "stale" }),
+      createBackgroundTaskFixture("job", { id: "job-stale-cap", status: "stale" }),
+    ];
+
+    await handleSlashCommand(
+      "/job run stale history should not take agent slots --multi-agent --agents 5 --tokens 50000",
+      context,
+      output,
+    );
+
+    const jobId = context.backgroundTasks.find(
+      (task) => task.kind === "job" && task.id !== "job-stale-cap" && task.logPath,
+    )?.id;
+    expect(jobId).toBeDefined();
+    const job = await readDurableJobState(
+      join(resolveStoragePaths(config, project).jobs, jobId ?? "missing", "state.json"),
+    );
+    expect(job?.effectiveAgentCap).toBe(3);
+    expect(job?.capReason).toContain("runtime_dynamic_cap");
+    expect(context.backgroundTasks.find((task) => task.id === "job-stale-cap")?.status).toBe(
+      "stale",
     );
   });
 
@@ -6248,7 +6411,10 @@ describe("Phase 06 TUI slash commands", () => {
     expect(freshContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
-    expect(freshOutput.text).toContain("stale");
+    expect(freshOutput.text).toContain("没有后台任务");
+    const staleDetails = new MemoryOutput();
+    await handleSlashCommand(`/details background ${jobId}`, freshContext, staleDetails);
+    expect(staleDetails.text).toContain("stale");
   });
 
   it("keeps Phase 17A cross-session resource guard and budget stops conservative", async () => {
@@ -14282,7 +14448,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(context.backgroundTasks.find((task) => task.id === "bash-stale")?.status).toBe("stale");
     expect(output.text).toContain("stale");
-    expect(output.text).toContain("timeout");
+    expect(output.text).not.toContain("timeout");
     expect(output.text).not.toContain("agent cancelled");
     expect(output.text).toContain("bash-stale.log");
     expect(output.text).toContain("Background output bash-stale");
@@ -15823,7 +15989,8 @@ describe("Phase 06 TUI slash commands", () => {
     await running;
 
     const verificationTask = context.backgroundTasks.find((item) => item.kind === "verification");
-    expect(backgroundOutput.text).toContain("stale");
+    expect(backgroundOutput.text).toContain("没有后台任务");
+    expect(backgroundOutput.text).not.toContain("stale");
     expect(context.lastVerification?.status).toBe("stale");
     expect(verificationTask?.status).toBe("stale");
     expect(verificationTask?.result).toBe("stale");
@@ -21932,7 +22099,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
       id: "job-blocked",
       kind: "job",
       title: "Job",
-      status: "paused",
+      status: "blocked",
       result: "partial",
       currentStep: "等待用户确认后继续",
       startedAt: new Date(Date.now() - 45_000).toISOString(),
@@ -21952,7 +22119,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     await handleSlashCommand("/btw 目前状态", context, output);
 
     expect(output.text).toContain("当前：正在等待你的确认");
-    expect(output.text).toContain("正在运行：job 已暂停 · 等待用户确认后继续");
+    expect(output.text).toContain("需处理：job 阻塞 · 等待用户确认后继续");
     expect(output.text).not.toContain("break_cache_mutation");
     expect(output.text).not.toContain("sessionId");
     expect(output.text).not.toContain("内部 transcript");
@@ -24000,7 +24167,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(failed?.status).toBe("blocked");
     expect(output.text).toContain("worker blocked：模型网关未就绪");
     const agentTask = context.backgroundTasks.find((task) => task.id === failed?.id);
-    expect(agentTask?.status).toBe("failed");
+    expect(agentTask?.status).toBe("blocked");
     expect(agentTask?.result).toBe("partial");
 
     // 真实失败搭车进 D.14B：落盘一条 tool_failure 教训；不进 context.evidence。

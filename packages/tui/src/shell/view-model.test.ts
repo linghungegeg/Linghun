@@ -1613,7 +1613,7 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
     expect(bgBlock).toBeUndefined();
   });
 
-  it("running/stale jobs fold into one task summary without terminal failed noise", () => {
+  it("running/blocked jobs fold into one task summary while stale stays out of the ordinary summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -1621,15 +1621,18 @@ describe("D.12B — P1-4: completed job hidden from task output", () => {
         { id: "j2", title: "test", status: "running" },
         { id: "j3", title: "deploy", status: "failed" },
         { id: "j4", title: "health", status: "stale" },
+        { id: "j5", title: "blocked job", status: "blocked" },
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
+    expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("health");
   });
 });
 
@@ -1692,7 +1695,7 @@ describe("D.12B — P3-2: plain status tray total length control", () => {
 });
 
 describe("D.12B — P2-5: no-color does not force white", () => {
-  it("no-color plain render still has text markers for status", () => {
+  it("no-color plain render keeps stale background history out of the ordinary summary", () => {
     const view = createShellViewModel(createContext(), {
       noColor: true,
       width: 80,
@@ -1700,10 +1703,10 @@ describe("D.12B — P2-5: no-color does not force white", () => {
       backgroundSummaries: [{ id: "nc1", title: "task", status: "stale" }],
     });
     const rendered = renderPlainShell(view);
-    expect(rendered).toContain("后台 1");
-    expect(rendered).toContain("需要确认 1");
+    expect(rendered).not.toContain("后台 1");
+    expect(rendered).not.toContain("需要确认 1");
     expect(rendered).not.toContain("可恢复");
-    expect(rendered).toContain("详情 /background");
+    expect(rendered).not.toContain("详情 /background");
     expect(rendered).not.toContain("上次会话恢复的后台任务");
     expect(rendered).toContain("LingHun");
   });
@@ -2030,7 +2033,7 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
     expect(bgBlocks).toHaveLength(0);
   });
 
-  it("Task folds running/stale background into one summary and ignores terminal history", () => {
+  it("Task folds running/blocked background into one summary and ignores stale/terminal history", () => {
     const view = createShellViewModel(createContext(), {
       width: 80,
       viewMode: "task",
@@ -2039,16 +2042,19 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
         { id: "bg2", title: "deploy", status: "failed" },
         { id: "bg3", title: "health", status: "timeout" },
         { id: "bg4", title: "old", status: "stale" },
+        { id: "bg5", title: "blocked", status: "blocked" },
       ],
     });
     expect(view.blocks.filter((b) => b.id.startsWith("bg-"))).toHaveLength(0);
     expect(view.taskRuntimeSummary?.status).toBe("blocked");
     expect(view.taskRuntimeSummary?.title).toContain("后台 2");
-    expect(view.taskRuntimeSummary?.title).toContain("需要确认 1");
+    expect(view.taskRuntimeSummary?.title).toContain("阻塞 1");
     expect(view.taskRuntimeSummary?.title).toContain("运行中 1");
+    expect(view.taskRuntimeSummary?.title).not.toContain("需要确认");
     expect(view.taskRuntimeSummary?.title).not.toContain("可恢复");
     expect(view.taskRuntimeSummary?.summary).not.toContain("deploy");
     expect(view.taskRuntimeSummary?.summary).not.toContain("health");
+    expect(view.taskRuntimeSummary?.summary).not.toContain("old");
   });
 
   it("fail/blocking output prioritized over normal output", () => {
@@ -3577,7 +3583,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(Object.values(footer).join(" ")).not.toContain("正在运行 Bash");
   });
 
-  it("task footer shows workspace above a denoised background summary", () => {
+  it("task footer keeps stale jobs out of the ordinary background summary", () => {
     const view = createShellViewModel(createContext(), {
       width: 120,
       viewMode: "task",
@@ -3594,8 +3600,29 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     });
 
     expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
+    expect(view.taskFooter?.runtimeStatus).toBeUndefined();
+    expect(view.taskRuntimeSummary).toBeUndefined();
+  });
+
+  it("task footer shows workspace above a denoised blocked background summary", () => {
+    const view = createShellViewModel(createContext(), {
+      width: 120,
+      viewMode: "task",
+      backgroundSummaries: [
+        {
+          id: "job-724a5c-worker",
+          kind: "job",
+          title: "Job task-724a5c-worker",
+          status: "blocked",
+          currentStep: "needs handoff repair",
+          progress: { completed: 0, total: 1 },
+        },
+      ],
+    });
+
+    expect(view.taskFooter?.workspaceStatus).toBe("工作树：这是一个很长很长的 Linghun 项目路径");
     expect(view.taskFooter?.runtimeStatus).toContain("后台 1");
-    expect(view.taskFooter?.runtimeStatus).toContain("需要确认 1");
+    expect(view.taskFooter?.runtimeStatus).toContain("阻塞 1");
     expect(view.taskFooter?.runtimeStatus).not.toContain("可恢复");
     expect(view.taskFooter?.runtimeStatus).toContain("详情 /background");
     expect(view.taskFooter?.runtimeStatus).not.toContain("运行中 0");
@@ -4400,11 +4427,11 @@ describe("D.13Q-UX — assistant_text 不卡片化 / Markdown 多行 / footer se
               status: "failed",
             },
             {
-              id: "job-stale-visible",
+              id: "job-blocked-visible",
               kind: "job",
               title: "Job active worker",
-              status: "stale",
-              currentStep: "stale/resumable",
+              status: "blocked",
+              currentStep: "needs handoff repair",
             },
           ],
         }),

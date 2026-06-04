@@ -350,7 +350,8 @@ export function createReadinessItems(view: TerminalReadinessView): TerminalReadi
         view.language === "en-US"
           ? `total ${view.background.total}; running ${view.background.running}; blocked ${view.background.blocked}`
           : `总数 ${view.background.total}；运行中 ${view.background.running}；阻塞 ${view.background.blocked}`,
-      nextAction: view.background.total > 0 ? "/background" : "no action",
+      nextAction:
+        view.background.total > 0 ? "/background" : view.background.blocked > 0 ? "/problems" : "no action",
     },
     {
       id: "verification",

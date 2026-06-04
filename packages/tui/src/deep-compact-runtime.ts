@@ -206,6 +206,8 @@ export function formatDeepCompactPromptSummary(
     `preserved evidence refs ${packet.preservedEvidenceRefs.join(", ") || "none"}`,
     `preserved files ${packet.preservedFiles.join(", ") || "none"}`,
     `active agents/workflows ${packet.activeAgentsWorkflows.join("; ") || "none"}`,
+    `needs-attention agents/workflows ${packet.needsAttentionAgentsWorkflows?.join("; ") || "none"}`,
+    `stale resumable agents/workflows ${packet.staleResumableAgentsWorkflows?.join("; ") || "none"}`,
     `pending items ${packet.pendingItems.join("; ") || "none"}`,
     `decisions ${packet.decisions.join("; ") || "none"}`,
     `risks ${packet.risks.join("; ") || "none"}`,
@@ -257,6 +259,8 @@ export function createDeepCompactPacket(input: {
       .map((file) => sanitizeDeepCompactText(context, file, 180))
       .slice(0, 20),
     activeAgentsWorkflows: collectActiveAgentsWorkflows(context),
+    needsAttentionAgentsWorkflows: collectNeedsAttentionAgentsWorkflows(context),
+    staleResumableAgentsWorkflows: collectStaleResumableAgentsWorkflows(context),
     pendingItems: collectPendingItems(context),
     decisions: collectDecisions(context),
     risks: collectRisks(context),
@@ -596,15 +600,47 @@ export function sanitizeDeepCompactText(
 function collectActiveAgentsWorkflows(context: TuiContext): string[] {
   return [
     ...context.agents
-      .filter((agent) => agent.status === "running" || agent.status === "stale")
+      .filter((agent) => agent.status === "running")
       .map(
         (agent) =>
           `agent:${agent.id}:${agent.status}:${sanitizeDeepCompactText(context, agent.summary || agent.task, 140)}`,
       ),
     ...context.backgroundTasks
-      .filter(
-        (task) => task.status === "running" || task.status === "paused" || task.status === "stale",
-      )
+      .filter((task) => task.status === "running")
+      .map(
+        (task) =>
+          `${task.kind}:${task.id}:${task.status}:${sanitizeDeepCompactText(context, task.userVisibleSummary, 140)}`,
+      ),
+  ].slice(0, 12);
+}
+
+function collectNeedsAttentionAgentsWorkflows(context: TuiContext): string[] {
+  return [
+    ...context.agents
+      .filter((agent) => agent.status === "blocked")
+      .map(
+        (agent) =>
+          `agent:${agent.id}:${agent.status}:${sanitizeDeepCompactText(context, agent.summary || agent.task, 140)}`,
+      ),
+    ...context.backgroundTasks
+      .filter((task) => task.status === "paused" || task.status === "blocked")
+      .map(
+        (task) =>
+          `${task.kind}:${task.id}:${task.status}:${sanitizeDeepCompactText(context, task.userVisibleSummary, 140)}`,
+      ),
+  ].slice(0, 12);
+}
+
+function collectStaleResumableAgentsWorkflows(context: TuiContext): string[] {
+  return [
+    ...context.agents
+      .filter((agent) => agent.status === "stale")
+      .map(
+        (agent) =>
+          `agent:${agent.id}:${agent.status}:${sanitizeDeepCompactText(context, agent.summary || agent.task, 140)}`,
+      ),
+    ...context.backgroundTasks
+      .filter((task) => task.status === "stale")
       .map(
         (task) =>
           `${task.kind}:${task.id}:${task.status}:${sanitizeDeepCompactText(context, task.userVisibleSummary, 140)}`,

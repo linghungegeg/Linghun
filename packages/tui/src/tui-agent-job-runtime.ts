@@ -141,7 +141,7 @@ export function createAgentBackgroundTask(
     agent.status === "completed";
   const backgroundStatus: BackgroundTaskState["status"] = isTerminal
     ? agent.status === "blocked"
-      ? "failed"
+      ? "blocked"
       : agent.status === "cancelled"
         ? "cancelled"
         : agent.status === "failed"
@@ -249,14 +249,11 @@ export function findBackgroundTask(
 }
 
 export function isActiveBackgroundStatus(status: BackgroundTaskStatus): boolean {
-  return status === "running" || status === "stale";
+  return status === "running";
 }
 
 export function isRuntimeActiveBackgroundTask(task: BackgroundTaskState): boolean {
-  if (task.kind === "agent") {
-    return task.status === "running";
-  }
-  return isActiveBackgroundStatus(task.status);
+  return task.status === "running";
 }
 
 export function rememberBackgroundTask(context: TuiContext, task: BackgroundTaskState): void {
