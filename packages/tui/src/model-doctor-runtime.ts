@@ -26,7 +26,7 @@ import {
   resolveProviderRuntimeContract,
 } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
-import { isDeepSeekApiModel, normalizeDeepSeekModelName } from "@linghun/shared";
+import { normalizeDeepSeekModelName } from "@linghun/shared";
 import {
   type ProviderCircuitBreakerState,
   formatCooldownDoctorLine,
@@ -97,12 +97,17 @@ export function maskSecret(secret: string): string {
   return `${secret.slice(0, 3)}…${secret.slice(-4)}`;
 }
 
+function getProviderEnvKeyName(providerType: string): string {
+  return providerType === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+}
+
 export function getProviderKeySource(
   providerId: string,
+  providerType: string,
   projectSettingsApiKeyProviders: Set<string>,
   providerEnvApiKeyProviders: Set<string>,
 ): string {
-  const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
+  const envName = getProviderEnvKeyName(providerType);
   if (process.env[envName]) return "env";
   if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
@@ -169,9 +174,12 @@ export function getRoleRoute(config: LinghunConfig, role: ModelRole): RoleModelR
   };
 }
 
-export function isDefaultExecutorRoute(route: RoleModelRoute, config: LinghunConfig): boolean {
+export function isDefaultExecutorRoute(route: RoleModelRoute, _config: LinghunConfig): boolean {
+  const defaultExecutorRoute = defaultConfig.modelRoutes.routes.find((r) => r.role === "executor");
+  if (!defaultExecutorRoute) return false;
   return (
-    route.provider === "deepseek" && route.primaryModel === defaultConfig.providers.deepseek.model
+    route.provider === defaultExecutorRoute.provider &&
+    route.primaryModel === defaultExecutorRoute.primaryModel
   );
 }
 
@@ -402,7 +410,7 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       endpointProfile as EndpointProfile,
     );
     const keySource = provider.apiKey
-      ? getProviderKeySource(providerId, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
+      ? getProviderKeySource(providerId, provider.type, projectSettingsApiKeyProviders, providerEnvApiKeyProviders)
       : undefined;
     // 决策器输出：source / reason / warnings 让 /model doctor 显示"为什么是这个 endpoint"。
     // 仅作只读摘要追加，不改 contract / endpointProfile / endpointPath 主行的信号。
@@ -752,5 +760,5 @@ export function inferProviderForRouteModel(model: string, config: LinghunConfig)
       return providerId;
     }
   }
-  return isDeepSeekApiModel(normalized) ? "deepseek" : "openai-compatible";
+  return "openai-compatible";
 }

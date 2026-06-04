@@ -307,7 +307,7 @@ describe("config directories", () => {
   });
 
   it("loads openai endpoint profile and inference level from env", async () => {
-    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://sub2api.toioto.org/v1");
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://api.example.com/v1");
     vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", " Responses ");
     vi.stubEnv("LINGHUN_INFERENCE_LEVEL", "Medium");
     vi.stubEnv("LINGHUN_OPENAI_INCLUDE_USAGE", " True ");
@@ -318,7 +318,7 @@ describe("config directories", () => {
 
     const config = await envLoadConfig(project);
 
-    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://sub2api.toioto.org/v1");
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://api.example.com/v1");
     expect(config.providers["openai-compatible"]?.endpointProfile).toBe("responses");
     expect(config.providers["openai-compatible"]?.reasoningLevel).toBe("Medium");
     expect(config.providers["openai-compatible"]?.includeUsage).toBe(true);
@@ -508,7 +508,7 @@ describe("config directories", () => {
     expect(path).toBe(envGetProviderEnvPath(home));
     expect(await envProviderEnvExists(home)).toBe(true);
     const template = await readFile(path, "utf8");
-    expect(template).toContain("#   LINGHUN_OPENAI_BASE_URL=https://hk.geek2api.com");
+    expect(template).toContain("#   LINGHUN_OPENAI_BASE_URL=https://api.example.com/v1");
     expect(template).toContain("#   LINGHUN_OPENAI_MODEL=gpt-5.5");
     expect(template).toContain("LINGHUN_OPENAI_ENDPOINT_PROFILE=responses");
     expect(template).toContain("LINGHUN_INFERENCE_LEVEL=High");

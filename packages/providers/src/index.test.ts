@@ -518,7 +518,7 @@ describe("OpenAI compatible provider", () => {
   it.each([
     ["https://example.com/v1", "chat_completions", "https://example.com/v1/chat/completions"],
     ["https://example.com/v1", "responses", "https://example.com/v1/responses"],
-    ["https://sub2api.toioto.org/v1", "responses", "https://sub2api.toioto.org/v1/responses"],
+    ["https://api.example.com/v1", "responses", "https://api.example.com/v1/responses"],
     ["https://example.com/v1/responses", "responses", "https://example.com/v1/responses"],
   ] as const)(
     "normalizes endpoint URL for %s with %s",

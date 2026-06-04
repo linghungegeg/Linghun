@@ -36,6 +36,9 @@ export const NATIVE_RUNNER_PROCESS_GUARD_CONTRACT = [
   "Parent death cleanup is only proven by a real native runner smoke; Node tests do not prove orphan cleanup.",
 ] as const;
 
+/** Tracks native runner process PIDs for orphan cleanup when the runner binary is unavailable. */
+const _runnerPids = new Map<string, number>();
+
 const NATIVE_RUNNER_APPROVED_TASK_SCRIPT = [
   "const durationMs = Number(process.argv[1] || '1000');",
   "const heartbeatMs = 100;",
@@ -493,6 +496,7 @@ async function startApprovedRunnerSpec(
       // The adapter observes missing state below and falls back to Node/TUI.
     });
     child.unref();
+    if (child.pid) _runnerPids.set(spec.id, child.pid);
   } catch (error) {
     return {
       status: "node_fallback",
@@ -678,6 +682,7 @@ export async function stopRunnerForDurableJob(
   }
   const resolution = resolveNativeRunner(context.config);
   let stopRequested = false;
+  let fallbackKillAttempted = false;
   if (resolution.status === "available" && resolution.path) {
     const stopCommand = createNativeRunnerCommand(resolution.path, [
       "stop",
@@ -692,13 +697,28 @@ export async function stopRunnerForDurableJob(
       windowsHide: true,
     });
     stopRequested = true;
+  } else {
+    const pid = _runnerPids.get(job.runner.spec.id);
+    if (pid !== undefined) {
+      try {
+        if (process.platform === "win32") {
+          spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+        } else {
+          try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+        }
+        fallbackKillAttempted = true;
+      } catch { /* fallback kill failed */ }
+    }
   }
+  _runnerPids.delete(job.runner.spec.id);
   markJobRunnerTerminal(job, "cancelled", "user_cancelled");
   await deps.appendJobLog(
     job,
     stopRequested
-      ? "runner stop --id requested; no historical pid/taskkill fallback used; cancelled is non-PASS"
-      : "runner stop unavailable; no historical pid/taskkill fallback used; cancelled is non-PASS",
+      ? "runner stop --id requested; cancelled is non-PASS"
+      : fallbackKillAttempted
+        ? "runner binary unavailable; fallback pid/taskkill used; cancelled is non-PASS"
+        : "runner stop unavailable; no pid/taskkill fallback available; cancelled is non-PASS",
   );
 }
 

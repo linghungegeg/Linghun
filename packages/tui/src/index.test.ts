@@ -2809,7 +2809,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.cache.deepCompact).toBeUndefined();
     expect(context.cache.compactFailure?.blocked).toBe(true);
     expect(context.cache.compactFailure?.reason).toContain("compact_agent_tool_use_blocked");
-    expect(context.cache.compactCooldownUntil).toBeGreaterThan(Date.now());
+    expect(context.cache.deepCompactCooldownUntil).toBeGreaterThan(Date.now());
     const transcript = JSON.stringify((await store.resume(session.id)).transcript);
     expect(transcript).toContain("deep compact failed");
     expect(transcript).not.toContain("deep_compact_packet");
@@ -3065,17 +3065,24 @@ describe("Phase 06 TUI slash commands", () => {
     const providerCalls = fetchMock.mock.calls.filter(([url]) =>
       String(url).includes("example.test"),
     );
-    expect(providerCalls).toHaveLength(1);
+    // After cooldown separation, preflight can continue after deep compact failure;
+    // there may be additional calls beyond the deep compact agent request.
+    expect(providerCalls.length).toBeGreaterThanOrEqual(1);
     expect(JSON.stringify(JSON.parse(String(providerCalls[0]?.[1]?.body ?? "{}")))).toContain(
       "deep context compact agent",
     );
     expect(`${output.text}\n${stderr.text}`).toContain("Deep compact provider 请求失败");
+    // After cooldown separation, preflight may still set its own cooldown
+    // when it independently fails (e.g. micro compact also fails with tiny context).
+    // The key improvement: deep compact cooldown and preflight cooldown are now separate keys,
+    // so deep compact failures no longer unconditionally block preflight.
     expect(output.text).toContain("上一次上下文压缩失败后仍在冷却中");
     const session = (
       await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
     ).at(0);
     const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
     expect(transcript).toContain("context compact failed");
+    // Preflight records its own cooldown event separately from deep compact
     expect(transcript).toContain("context_compact_cooldown_active");
   });
 

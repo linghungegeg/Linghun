@@ -188,6 +188,7 @@ export type CacheState = {
   compactPressure?: CompactPressureSnapshot;
   compactFailure?: CompactFailureState;
   compactCooldownUntil?: number;
+  deepCompactCooldownUntil?: number;
   workspaceReference: WorkspaceReferenceCache;
   startedAt: number;
 };

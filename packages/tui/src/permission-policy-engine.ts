@@ -11,14 +11,11 @@
 //                                outside_workspace / sensitive_path / unknown_path)
 //     → policy decision (auto_allow_readonly / require_permission / hard_deny)
 //
-// Behavioral references (CCB only — no source copied):
-//   F:\ccb-source\src\utils\shell\readOnlyCommandValidation.ts (readonly maps,
-//     EXTERNAL_READONLY_COMMANDS, containsVulnerableUncPath)
-//   F:\ccb-source\src\utils\permissions\dangerousPatterns.ts (CROSS_PLATFORM_CODE_EXEC)
-//   F:\ccb-source\src\utils\permissions\filesystem.ts (DANGEROUS_FILES,
-//     DANGEROUS_DIRECTORIES, sensitive-path patterns)
-//   F:\ccb-source\src\components\permissions\BashPermissionRequest\
-//     BashPermissionRequest.tsx (allow once / always / deny / cancel UX)
+// Behavioral references (no source copied):
+//   - Read-only shell command validation patterns
+//   - Cross-platform code execution detection
+//   - Sensitive file path / dangerous directory patterns
+//   - Interactive permission UX (allow once / always / deny / cancel)
 //
 // Hard boundary: this module is **pure** logic — no fs / no network / no
 // TuiContext mutation. Callers (index.ts) are responsible for converting

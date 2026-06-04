@@ -104,23 +104,23 @@ describe("model-doctor-runtime", () => {
 
     it("returns env when shell env is set", () => {
       process.env[envKey] = "test";
-      expect(getProviderKeySource("deepseek", new Set(), new Set())).toBe("env");
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set())).toBe("env");
     });
     it("returns user-provider-env when in provider env set", () => {
       delete (process.env as Record<string, string | undefined>)[envKey];
-      expect(getProviderKeySource("deepseek", new Set(), new Set(["deepseek"]))).toBe(
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set(["deepseek"]))).toBe(
         "user-provider-env",
       );
     });
     it("returns project-settings-legacy when in project settings", () => {
       delete (process.env as Record<string, string | undefined>)[envKey];
-      expect(getProviderKeySource("deepseek", new Set(["deepseek"]), new Set())).toBe(
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(["deepseek"]), new Set())).toBe(
         "project-settings-legacy",
       );
     });
     it("returns merged-config as fallback", () => {
       delete (process.env as Record<string, string | undefined>)[envKey];
-      expect(getProviderKeySource("deepseek", new Set(), new Set())).toBe("merged-config");
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set())).toBe("merged-config");
     });
   });
 
@@ -567,8 +567,8 @@ describe("model-doctor-runtime", () => {
       expect(inferProviderForRouteModel("deepseek-chat", baseConfig)).toBe("deepseek");
       expect(inferProviderForRouteModel("gpt-4o", baseConfig)).toBe("openai-compatible");
     });
-    it("infers deepseek for deepseek- prefix", () => {
-      expect(inferProviderForRouteModel("deepseek-reasoner", baseConfig)).toBe("deepseek");
+    it("defaults to openai-compatible for models without a matching provider", () => {
+      expect(inferProviderForRouteModel("deepseek-reasoner", baseConfig)).toBe("openai-compatible");
     });
     it("defaults to openai-compatible for unknown models", () => {
       expect(inferProviderForRouteModel("llama-3-70b", baseConfig)).toBe("openai-compatible");

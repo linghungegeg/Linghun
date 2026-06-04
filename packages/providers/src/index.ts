@@ -959,7 +959,7 @@ export type EffectiveEndpointProfileResult = {
   warnings: string[];
 };
 
-const CLAUDE_MODEL_PATTERN = /^claude[-_]/i;
+const CLAUDE_MODEL_PATTERN = /^claude[-_](?:3|4|5|opus|sonnet|haiku)/i;
 
 export function resolveEffectiveEndpointProfile(input: {
   requestEndpointProfile?: EndpointProfile;

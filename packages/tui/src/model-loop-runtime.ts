@@ -1059,11 +1059,11 @@ function evidenceSupportsExternalCurrent(record: EvidenceRecord): boolean {
 
 function evidenceSupportsCcbParity(record: EvidenceRecord): boolean {
   const tokens = evidenceTokens(record);
-  if (/(?:ccb_parity_verified|ccb_audit)/iu.test(tokens)) return true;
-  // /ccb-source \u8def\u5f84\u4e0b\u7684 file_read / grep_result \u4e5f\u7b97
+  if (/(?:reference_parity_verified|reference_audit)/iu.test(tokens)) return true;
+  // file_read / grep_result evidence also counts if tagged as reference_parity
   if (
     (record.kind === "file_read" || record.kind === "grep_result") &&
-    /ccb-source|\bccb\b/iu.test(tokens)
+    /reference[-_]parity/iu.test(tokens)
   ) {
     return true;
   }
@@ -1133,7 +1133,7 @@ const REQUIRED_EVIDENCE_LABEL: Record<FinalAnswerClaimKind, string> = {
   completion_pass: "test/build/typecheck/diff-check/smoke",
   code_fact: "Read/Grep/index",
   external_current_fact: "web_source",
-  ccb_parity: "ccb-source \u672c\u5730\u8bc1\u636e\u6216 web_source",
+  ccb_parity: "reference parity evidence (local or web_source)",
   beta_readiness: "Beta readiness verdict (real-tui report-generation PASS)",
   git_operation: "git_operation evidence (real stable point / worktree create / worktree remove)",
   action_executed: "real successful command_output (install / Bash / Write / index refresh)",

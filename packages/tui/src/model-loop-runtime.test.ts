@@ -1393,8 +1393,8 @@ describe("model-loop-runtime", () => {
         makeEvidence({
           kind: "file_read",
           supportsClaims: ["Read", "local_read"],
-          source: "F:/ccb-source/packages/cli/index.ts",
-          summary: "Read ccb-source file for parity check",
+          source: "F:/reference-parity/packages/cli/index.ts",
+          summary: "Read reference_parity file for parity check",
           createdAt: hoursAgo(72),
         }),
       ];

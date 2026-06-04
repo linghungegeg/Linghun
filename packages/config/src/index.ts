@@ -375,7 +375,7 @@ export const providerEnvTemplate = `# Linghun private provider config. Do not co
 # Standard OpenAI-compatible / Responses setup.
 # Use the root API base URL; do not append /v1/chat/completions or /responses.
 # Example:
-#   LINGHUN_OPENAI_BASE_URL=https://hk.geek2api.com
+#   LINGHUN_OPENAI_BASE_URL=https://api.example.com/v1
 #   LINGHUN_OPENAI_MODEL=gpt-5.5
 LINGHUN_OPENAI_BASE_URL=
 LINGHUN_OPENAI_API_KEY=
@@ -1341,7 +1341,8 @@ export async function saveUserLanguage(language: Language, home = homedir()): Pr
   const current = await readUserSettings(home);
   await mkdir(dirname(settingsPath), { recursive: true });
   const tempPath = `${settingsPath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify({ ...current, language }, null, 2)}\n`, "utf8");
+  const safe = removeSensitiveProjectSettings(current, { includeLanguage: false });
+  await writeFile(tempPath, `${JSON.stringify({ ...safe, language }, null, 2)}\n`, "utf8");
   await rename(tempPath, settingsPath);
 }
 
@@ -1403,17 +1404,19 @@ async function writeConfig(
 }
 
 function removeSensitiveProjectSettings(
-  config: LinghunConfig,
+  config: Partial<LinghunConfig>,
   options: { includeLanguage?: boolean } = {},
-): LinghunConfig | Omit<LinghunConfig, "language"> {
-  const safeConfig: LinghunConfig = {
+): Partial<LinghunConfig> {
+  const safeConfig: Partial<LinghunConfig> = {
     ...config,
-    providers: Object.fromEntries(
-      Object.entries(config.providers).map(([providerId, provider]) => {
-        const { apiKey: _apiKey, ...safeProvider } = provider;
-        return [providerId, safeProvider];
-      }),
-    ),
+    providers: config.providers
+      ? Object.fromEntries(
+          Object.entries(config.providers).map(([providerId, provider]) => {
+            const { apiKey: _apiKey, ...safeProvider } = provider;
+            return [providerId, safeProvider];
+          }),
+        )
+      : config.providers,
   };
   if (options.includeLanguage) {
     return safeConfig;

@@ -103,6 +103,7 @@ export function createCacheState(
     compactPressure: undefined,
     compactFailure: undefined,
     compactCooldownUntil: undefined,
+    deepCompactCooldownUntil: undefined,
     workspaceReference: createWorkspaceReferenceCache(),
     startedAt: Date.now(),
   };

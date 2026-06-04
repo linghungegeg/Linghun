@@ -9176,8 +9176,7 @@ export async function handleNaturalInput(
     return "handled";
   }
 
-  // D.14D — CCB 输入路由边界（源码对照 F:\ccb-source\src\utils\processUserInput\
-  // processUserInput.ts:546-550：plain text 永远进模型，唯一分支是 "/" 前缀）。
+  // D.14D — 输入路由边界（参考：plain text 永远进模型，唯一分支是 "/" 前缀）。
   // 普通自然语言（不以 "/" 开头、无 pending approval / 无 pending Start Gate）默认必须
   // 发送给模型。这里**不再**做任何本地 NL 关键词截胡：
   //   - 已移除 workspace-trust NL Start Gate（"信任这个项目"等）；

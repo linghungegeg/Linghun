@@ -76,7 +76,7 @@ export async function runDeepCompact(input: {
   deps: DeepCompactRuntimeDeps;
 }): Promise<DeepCompactRunResult> {
   const now = Date.now();
-  if (input.context.cache.compactCooldownUntil && input.context.cache.compactCooldownUntil > now) {
+  if (input.context.cache.deepCompactCooldownUntil && input.context.cache.deepCompactCooldownUntil > now) {
     return failMessage(
       input.context,
       "Deep compact is cooling down after a previous compact failure.",
@@ -151,7 +151,7 @@ export async function runDeepCompact(input: {
   input.context.cache.deepCompact = packet;
   input.context.cache.compacted = true;
   input.context.cache.compactFailure = undefined;
-  input.context.cache.compactCooldownUntil = undefined;
+  input.context.cache.deepCompactCooldownUntil = undefined;
   input.deps.refreshCacheFreshness(input.context);
   await input.context.store.appendEvent(input.sessionId, {
     type: DEEP_COMPACT_EVENT_TYPE,
@@ -692,7 +692,7 @@ async function recordDeepCompactFailure(
   deps: DeepCompactRuntimeDeps,
 ): Promise<void> {
   const cooldownUntilMs = Date.now() + DEEP_COMPACT_FAILURE_COOLDOWN_MS;
-  context.cache.compactCooldownUntil = cooldownUntilMs;
+  context.cache.deepCompactCooldownUntil = cooldownUntilMs;
   context.cache.compactFailure = {
     at: new Date().toISOString(),
     reason: sanitizeDeepCompactText(context, reason, 220),
