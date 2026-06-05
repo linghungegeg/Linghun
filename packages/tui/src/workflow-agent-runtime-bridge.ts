@@ -25,7 +25,16 @@ export type WorkflowBridgeRequestStatus =
 export type WorkflowMainChainRequest =
   | {
       mainChain: "job";
-      action: "create" | "run" | "status" | "report";
+      action:
+        | "list"
+        | "create"
+        | "run"
+        | "status"
+        | "report"
+        | "logs"
+        | "pause"
+        | "resume"
+        | "cancel";
       workflowId: string;
       phaseId: string;
       sliceId: string;
@@ -49,11 +58,19 @@ export type WorkflowMainChainRequest =
     }
   | {
       mainChain: "agents";
-      action: "list" | "show";
+      action: "list" | "show" | "cancel";
       workflowId: string;
       phaseId: string;
       sliceId: string;
       agentRef?: string;
+    }
+  | {
+      mainChain: "workflows";
+      action: "list" | "start_gate";
+      workflowId: string;
+      phaseId: string;
+      sliceId: string;
+      goal?: string;
     }
   | {
       mainChain: "verification";
@@ -539,7 +556,9 @@ function createBackgroundProjection(input: {
       ? "job"
       : input.request?.mainChain === "fork"
         ? "agent"
-        : "verification";
+        : input.request?.mainChain === "agents" || input.request?.mainChain === "workflows"
+          ? "verification"
+          : "verification";
   return {
     source: "background-task-projection",
     kind,
@@ -558,17 +577,54 @@ function createMainChainRequest(
   const target = slice.targetRuntime;
   if (!target) return null;
   if (target.kind === "slash" && target.slash === "/job") {
-    if (!["create", "run", "status", "report"].includes(target.action)) return null;
-    const action = target.action as "create" | "run" | "status" | "report";
+    if (
+      !["list", "create", "run", "status", "report", "logs", "pause", "resume", "cancel"].includes(
+        target.action,
+      )
+    )
+      return null;
+    const action = target.action as WorkflowMainChainRequest & { mainChain: "job" } extends {
+      mainChain: "job";
+    }
+      ? {
+          action:
+            | "list"
+            | "create"
+            | "run"
+            | "status"
+            | "report"
+            | "logs"
+            | "pause"
+            | "resume"
+            | "cancel";
+        }["action"]
+      : never;
+    const mutating = ["create", "run", "pause", "resume", "cancel"].includes(target.action);
     return {
       mainChain: "job",
-      action,
+      action: target.action as
+        | "list"
+        | "create"
+        | "run"
+        | "status"
+        | "report"
+        | "logs"
+        | "pause"
+        | "resume"
+        | "cancel",
       workflowId: plan.id,
       phaseId,
       sliceId: slice.id,
-      goal: action === "create" || action === "run" ? (slice.nextAction ?? slice.title) : undefined,
+      goal: mutating ? (slice.nextAction ?? slice.title) : undefined,
       jobRef:
-        action === "status" || action === "report" ? (slice.nextAction ?? "latest") : undefined,
+        target.action === "status" ||
+        target.action === "report" ||
+        target.action === "logs" ||
+        target.action === "pause" ||
+        target.action === "resume" ||
+        target.action === "cancel"
+          ? (slice.nextAction ?? "latest")
+          : undefined,
       phase: phaseTitle,
       target: "workflow-agent-runtime-bridge",
       requestedAgents: slice.budget?.requestedAgents,
@@ -589,14 +645,26 @@ function createMainChainRequest(
     };
   }
   if (target.kind === "slash" && target.slash === "/agents") {
-    if (!["list", "show"].includes(target.action)) return null;
+    if (!["list", "show", "cancel"].includes(target.action)) return null;
     return {
       mainChain: "agents",
-      action: target.action as "list" | "show",
+      action: target.action as "list" | "show" | "cancel",
       workflowId: plan.id,
       phaseId,
       sliceId: slice.id,
-      agentRef: target.action === "show" ? slice.nextAction : undefined,
+      agentRef:
+        target.action === "show" || target.action === "cancel" ? slice.nextAction : undefined,
+    };
+  }
+  if (target.kind === "slash" && target.slash === "/workflows") {
+    if (!["list", "start_gate"].includes(target.action)) return null;
+    return {
+      mainChain: "workflows",
+      action: target.action as "list" | "start_gate",
+      workflowId: plan.id,
+      phaseId,
+      sliceId: slice.id,
+      goal: target.action === "start_gate" ? (slice.nextAction ?? slice.title) : undefined,
     };
   }
   if (target.kind === "verification") {

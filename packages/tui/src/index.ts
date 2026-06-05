@@ -81,6 +81,7 @@ import {
   type BoundaryEditPreflightResult,
   checkBoundaries,
   checkBoundaryEditPreflight,
+  detectBashFileWriteTargets,
   estimateFileMetrics,
 } from "./architecture-boundary.js";
 import {
@@ -220,6 +221,11 @@ import {
   readLogArtifactSlice,
 } from "./log-artifact.js";
 import {
+  evaluateMetaScheduler,
+  formatMetaSchedulerDirective,
+  verifyFailureLearningContract,
+} from "./meta-scheduler-runtime.js";
+import {
   formatModelRouteDoctor,
   formatModelRouteSummary,
   formatModelRoutes,
@@ -285,7 +291,6 @@ import {
   parseModelSetupPrefill,
   validateModelSetupPartial,
 } from "./model-setup-runtime.js";
-import { evaluateMetaScheduler, formatMetaSchedulerDirective } from "./meta-scheduler-runtime.js";
 import {
   type NaturalIntent,
   type PendingNaturalCommand,
@@ -441,8 +446,8 @@ import {
   handleSkillsCommand,
 } from "./extension-slash-runtime.js";
 import {
-  cancelAllAgents,
   cancelAgentByRef,
+  cancelAllAgents,
   configureJobAgentCommandRuntime,
   denyAgentToolUse,
   executeApprovedAgentToolUse,
@@ -567,9 +572,9 @@ import {
   formatToolStart,
 } from "./tool-output-presenter.js";
 import {
-  applyToolResultBudgetToMessages,
   type ToolResultBudgetRecord,
   type ToolResultBudgetState,
+  applyToolResultBudgetToMessages,
   formatToolResultBudgetEvidenceSummary,
   formatToolResultBudgetSystemEvent,
 } from "./tool-result-budget.js";
@@ -715,6 +720,7 @@ import {
   createFailureLearningState,
   loadFailureRecords,
   mergeFailureRecord,
+  recordFailureLearningDegradedWarning,
   writeFailureRecord,
 } from "./failure-learning-runtime.js";
 export { createFailureLearningState } from "./failure-learning-runtime.js";
@@ -1419,6 +1425,11 @@ export type TuiContext = {
   recentlyMentionedFiles: string[];
   lastProviderFailure?: ProviderFailureSummary;
   lastProviderFallbackAttempt?: ProviderFallbackAttemptSummary;
+  /** meta-scheduler failure-learning contract tracking */
+  lastMetaSchedulerFailureLearningRequired?: boolean;
+  lastMetaSchedulerFailureLearningFulfilled?: boolean;
+  /** most recent tool failure captured for meta-scheduler input */
+  lastToolFailure?: { toolName: string; summary: string };
   providerBreaker: ProviderCircuitBreakerState;
   solutionCompleteness: SolutionCompletenessStatus;
   currentArchitectureCard?: ArchitectureCard;
@@ -4283,6 +4294,21 @@ async function executeWorkflowStep(
       await handleSlashCommand(formatWorkflowDetailsSlashCommand(req), context, output);
     } else if (req.mainChain === "agents") {
       await handleAgentsCommand([req.action, req.agentRef ?? ""].filter(Boolean), context, output);
+    } else if (req.mainChain === "workflows") {
+      if (req.action === "list") {
+        await handleWorkflowsCommand(["registry"], context, output);
+      } else {
+        const summary = formatWorkflowStepSummary(
+          request.sliceId,
+          "blocked",
+          context.language === "en-US"
+            ? "workflows start_gate is proposal-only; no runtime execution path available"
+            : "workflows start_gate 目前仅作为 proposal，无运行时执行路径",
+          context.language,
+        );
+        await captureWorkflowFailureLearning(request, summary, context);
+        return { status: "blocked", summary, evidenceRefs: request.taskSurfaceInput.evidenceRefs };
+      }
     } else if (req.mainChain === "job") {
       const beforeJobIds = new Set((await listDurableJobs(context)).map((job) => job.id));
       if (req.action === "run" || req.action === "create") {
@@ -4310,6 +4336,19 @@ async function executeWorkflowStep(
           context,
           output,
         );
+      }
+      const readonlyJobActions = new Set(["list", "logs"]);
+      if (readonlyJobActions.has(req.action)) {
+        return {
+          status: "completed",
+          summary: formatWorkflowStepSummary(
+            request.sliceId,
+            "completed",
+            `job ${req.action} completed; see output above`,
+            context.language,
+          ),
+          evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+        };
       }
       const jobs = await listDurableJobs(context);
       const job =
@@ -4713,10 +4752,7 @@ function selectRunnableWorkflowBatch(
     if (mutating && batch.filter((item) => item.request.safety.mutating).length >= cap) {
       continue;
     }
-    if (
-      batch.length > 0 &&
-      (mutating || !step.independent || step.canRunInParallel !== true)
-    ) {
+    if (batch.length > 0 && (mutating || !step.independent || step.canRunInParallel !== true)) {
       break;
     }
     batch.push({ step, request });
@@ -4874,6 +4910,9 @@ function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowSt
   if (request.request?.mainChain === "job") return "job";
   if (request.request?.mainChain === "verification") return "verification";
   if (request.request?.mainChain === "details") return "details";
+  if (request.request?.mainChain === "workflows") return "details";
+  if (request.request?.mainChain === "agents") return "agent";
+  if (request.request?.mainChain === "fork") return "agent";
   return "agent";
 }
 
@@ -9798,6 +9837,40 @@ async function sendMessage(
   await refreshWorkspaceReferenceCache(context, runtimeStatus);
   // D.14G — 最小 WorktreeContext（redacted，无 provider/baseUrl）；仅隔离 worktree 内注入。
   const worktreeContext = await computeWorktreeContext(context.projectPath);
+
+  // Verify previous turn's failure-learning contract before starting new evaluation.
+  if (
+    context.lastMetaSchedulerFailureLearningRequired &&
+    !context.lastMetaSchedulerFailureLearningFulfilled
+  ) {
+    const preCount = context.failureLearning.records.length;
+    const contract = verifyFailureLearningContract({
+      decision: {
+        shouldCaptureFailureLearning: true,
+        shouldRunFinalAnswerGate: false,
+        shouldPreferVerifier: false,
+        shouldUseRetryGuard: false,
+        shouldCompactBeforeProvider: false,
+        shouldStopForBlockedRuntime: false,
+        indexStrategy: "ready",
+        directives: [],
+        internalEvents: [],
+      },
+      preTurnRecordCount: preCount,
+      postTurnRecordCount: preCount,
+      failureKind: "tool",
+    });
+    if (!contract.satisfied) {
+      await appendSystemEvent(
+        context,
+        sessionId,
+        `meta_scheduler:failure_learning_contract_unfulfilled reason=${contract.reason}`,
+        "warning",
+      );
+      recordFailureLearningDegradedWarning(context.failureLearning, contract.reason);
+    }
+  }
+
   const metaSchedulerDecision = evaluateMetaScheduler({
     language: context.language,
     userText: text,
@@ -9806,7 +9879,20 @@ async function sendMessage(
     failureLearning: context.failureLearning,
     backgroundTasks: context.backgroundTasks,
     workflow: context.workflows.activeRun,
+    ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
+    ...(context.lastProviderFailure
+      ? {
+          providerFailure: {
+            provider: context.lastProviderFailure.provider,
+            model: context.lastProviderFailure.model,
+            message: context.lastProviderFailure.summary,
+          },
+        }
+      : {}),
   });
+  context.lastMetaSchedulerFailureLearningRequired =
+    metaSchedulerDecision.shouldCaptureFailureLearning;
+  context.lastMetaSchedulerFailureLearningFulfilled = false;
   for (const event of metaSchedulerDecision.internalEvents) {
     await appendSystemEvent(context, sessionId, event, "info");
   }
@@ -11526,6 +11612,9 @@ async function runBoundaryEditPreflight(
   toolName: ToolName,
   context: TuiContext,
 ): Promise<BoundaryEditPreflightResult> {
+  if (toolName === "Bash") {
+    return runBoundaryBashPreflight(toolCall, context);
+  }
   if (toolName !== "Write" && toolName !== "Edit" && toolName !== "MultiEdit") {
     return { decision: "allow", reason: "not an edit tool" };
   }
@@ -11556,6 +11645,44 @@ function isReportArtifactPath(path: string): boolean {
   const normalized = path.replaceAll("\\", "/").toLowerCase();
   const fileName = normalized.split("/").pop() ?? normalized;
   return /\.md$/u.test(fileName) && (fileName === "report.md" || /report|报告/u.test(fileName));
+}
+
+async function runBoundaryBashPreflight(
+  toolCall: ModelToolCall,
+  context: TuiContext,
+): Promise<BoundaryEditPreflightResult> {
+  const command = extractBashCommand(toolCall.input);
+  if (!command) return { decision: "allow", reason: "no readable command" };
+  const targets = detectBashFileWriteTargets(command);
+  if (targets.length === 0) return { decision: "allow", reason: "no file-write pattern detected" };
+  for (const target of targets) {
+    const absolutePath = resolve(context.projectPath, target);
+    try {
+      const source = await readFile(absolutePath, "utf8");
+      const result = checkBoundaryEditPreflight({
+        toolName: "Bash",
+        path: target,
+        existingSource: source,
+        targetExists: true,
+        input: toolCall.input,
+        reportArtifact: false,
+      });
+      if (result.decision === "confirm") return result;
+    } catch {}
+  }
+  return { decision: "allow", reason: "no target matched large-file thresholds" };
+}
+
+function extractBashCommand(input: unknown): string | undefined {
+  if (typeof input === "object" && input !== null) {
+    const raw = input as Record<string, unknown>;
+    if (typeof raw.command === "string" && raw.command.trim()) return raw.command.trim();
+    if (typeof raw.command === "object" && raw.command !== null) {
+      const cmdObj = raw.command as Record<string, unknown>;
+      if (typeof cmdObj.command === "string" && cmdObj.command.trim()) return cmdObj.command.trim();
+    }
+  }
+  return undefined;
 }
 
 function formatBoundaryEditPreflightPrompt(
@@ -12008,7 +12135,8 @@ async function executeLinghunControlToolUse(
       const before = new Set(context.agents.map((agent) => agent.id));
       await handleForkCommand(buildForkArgsFromStartAgentInput(input, context), context, output);
       const agent = context.agents.find((item) => !before.has(item.id));
-      const ok = agent?.status === "completed" || agent?.status === "idle" || agent?.status === "running";
+      const ok =
+        agent?.status === "completed" || agent?.status === "idle" || agent?.status === "running";
       const text = agent
         ? `Agent ${agent.status}: ${agent.summary}`
         : formatStartAgentDidNotStartMessage(input, context);
@@ -12472,13 +12600,16 @@ function parseRunWorkflowToolInput(input: unknown):
       : {}),
     runInBackground: obj.runInBackground === true || obj.run_in_background === true,
     ...(agents ? { agents } : {}),
-    multiAgent: obj.multiAgent === true || obj.multi_agent === true || Boolean(agents && agents > 1),
+    multiAgent:
+      obj.multiAgent === true || obj.multi_agent === true || Boolean(agents && agents > 1),
     ...(runningCap ? { runningCap } : {}),
     ...(teamName ? { teamName } : {}),
   };
 }
 
-export function __testParseRunWorkflowToolInput(input: unknown): ReturnType<typeof parseRunWorkflowToolInput> {
+export function __testParseRunWorkflowToolInput(
+  input: unknown,
+): ReturnType<typeof parseRunWorkflowToolInput> {
   return parseRunWorkflowToolInput(input);
 }
 
@@ -13923,6 +14054,13 @@ async function captureFailureLearning(
   sessionId: string,
   input: FailureLearningInput,
 ): Promise<void> {
+  context.lastMetaSchedulerFailureLearningFulfilled = true;
+  if (input.category === "tool_failure") {
+    context.lastToolFailure = {
+      toolName: input.relatedTarget ?? "unknown",
+      summary: input.failureSummary,
+    };
+  }
   let record: FailureLearningRecord | undefined;
   try {
     ({ record } = mergeFailureRecord(context.failureLearning, input));
@@ -14168,10 +14306,7 @@ function formatShellBackgroundSummaries(context: TuiContext): BackgroundTaskSumm
   return context.backgroundTasks
     .filter((task) => task.kind !== "agent" || task.status === "running")
     .filter(
-      (task) =>
-        task.status === "running" ||
-        task.status === "paused" ||
-        task.status === "blocked",
+      (task) => task.status === "running" || task.status === "paused" || task.status === "blocked",
     )
     .map((task) => ({
       id: task.id,

@@ -94,7 +94,7 @@ export type ChangeDeclaration = {
 };
 
 export type BoundaryEditPreflightInput = {
-  toolName: "Write" | "Edit" | "MultiEdit";
+  toolName: "Write" | "Edit" | "MultiEdit" | "Bash";
   path: string;
   existingSource?: string;
   targetExists: boolean;
@@ -127,6 +127,33 @@ export const DEFAULT_THRESHOLDS: BoundaryThresholds = {
 
 const SUBSTANTIAL_ADDED_LINES = 40;
 const MULTI_EDIT_SUBSTANTIAL_COUNT = 3;
+
+const BASH_FILE_WRITE_PATTERN =
+  /(?:^|\s|[;&|]\s*)(>>?|tee(?:\s+-a)?)\s+(\S+)|cat\s+<<\s*\S+\s*>>?\s*(\S+)/giu;
+
+/**
+ * Conservative detection of Bash commands that write to workspace files.
+ * Only catches clear redirect / tee / heredoc patterns. Does not attempt
+ * to fully parse Bash; complex pipes, variable indirection, and encrypted
+ * or encoded payloads are not guaranteed to be caught.
+ */
+export function detectBashFileWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+  const cleaned = command.replace(/^```(?:bash|sh|shell)?\s*/iu, "").replace(/```\s*$/u, "");
+  const regex = BASH_FILE_WRITE_PATTERN;
+  for (const match of cleaned.matchAll(regex)) {
+    const target = (match[2] ?? match[3] ?? "").replace(/^["']|["']$/gu, "");
+    if (
+      target &&
+      !target.startsWith("/dev/") &&
+      !target.startsWith("$") &&
+      !target.startsWith("~")
+    ) {
+      targets.push(target);
+    }
+  }
+  return targets;
+}
 
 /**
  * Layer ordering for cross-layer import detection.
@@ -383,6 +410,17 @@ export function checkBoundaryEditPreflight(
       metrics.lineCount > thresholds.maxFileLines);
   if (!isLargeFile) {
     return { decision: "allow", reason: "target is below large-file thresholds" };
+  }
+
+  if (request.toolName === "Bash") {
+    return {
+      decision: "confirm",
+      reason: "large-file-boundary",
+      path: request.path,
+      lineCount: metrics.lineCount,
+      threshold: thresholds.maxFileLines,
+      estimatedAddedLines: 0,
+    };
   }
 
   const estimatedAddedLines = estimateAddedLines(request.toolName, request.input);

@@ -485,6 +485,75 @@ describe("D.14H-C workflow agent runtime bridge", () => {
     expect(write.executable).toBe(true);
   });
 
+  it("bridges /job logs action", () => {
+    const plan = normalize(createPlan());
+    const slice = plan.phases[0]?.slices[0];
+    if (slice) {
+      slice.targetRuntime = { kind: "slash", slash: "/job", action: "logs", mutating: false };
+      slice.allowedToolClasses = ["job-control"];
+    }
+    const result = bridge(plan);
+    const req = requestBySlice(result.requests, "slice-fork");
+    expect(req.request?.mainChain).toBe("job");
+    expect((req.request as { action?: string })?.action).toBe("logs");
+    expect(req.executable).toBe(true);
+  });
+
+  it("bridges /job cancel action as mutating", () => {
+    const plan = normalize(createPlan());
+    const slice = plan.phases[0]?.slices[0];
+    if (slice) {
+      slice.targetRuntime = { kind: "slash", slash: "/job", action: "cancel", mutating: true };
+      slice.allowedToolClasses = ["job-control"];
+    }
+    const result = bridge(plan);
+    const req = requestBySlice(result.requests, "slice-fork");
+    expect(req.request?.mainChain).toBe("job");
+    expect((req.request as { action?: string })?.action).toBe("cancel");
+  });
+
+  it("bridges /agents cancel action", () => {
+    const plan = normalize(createPlan());
+    const slice = plan.phases[0]?.slices[0];
+    if (slice) {
+      slice.targetRuntime = { kind: "slash", slash: "/agents", action: "cancel", mutating: true };
+      slice.allowedToolClasses = ["agent-control"];
+    }
+    const result = bridge(plan);
+    const req = requestBySlice(result.requests, "slice-fork");
+    expect(req.request?.mainChain).toBe("agents");
+    expect((req.request as { action?: string })?.action).toBe("cancel");
+  });
+
+  it("bridges /workflows list action", () => {
+    const plan = normalize(createPlan());
+    const slice = plan.phases[0]?.slices[0];
+    if (slice) {
+      slice.targetRuntime = { kind: "slash", slash: "/workflows", action: "list", mutating: false };
+    }
+    const result = bridge(plan);
+    const req = requestBySlice(result.requests, "slice-fork");
+    expect(req.request?.mainChain).toBe("workflows");
+    expect((req.request as { action?: string })?.action).toBe("list");
+    expect(req.executable).toBe(true);
+  });
+
+  it("returns null for unknown job action", () => {
+    const plan = normalize(createPlan());
+    const slice = plan.phases[0]?.slices[0];
+    if (slice) {
+      slice.targetRuntime = {
+        kind: "slash",
+        slash: "/job",
+        action: "unknown-action" as unknown as "list",
+        mutating: false,
+      };
+    }
+    const result = bridge(plan);
+    const req = requestBySlice(result.requests, "slice-fork");
+    expect(req.request).toBeNull();
+  });
+
   it("rejects raw command strings even if they are forced into a normalized plan", () => {
     const plan = normalize(createPlan());
     const slice0 = plan.phases[0]?.slices[0];

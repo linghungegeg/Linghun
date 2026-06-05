@@ -1824,7 +1824,9 @@ export async function handleAgentsCommand(
           ? ["/agents show <id>", "/agents cancel <id>", "/agents cancel all"]
           : total > 0
             ? ["/agents show <id>"]
-            : ["/fork explorer|planner|verifier|worker <task>"],
+            : context.agentRegistry.agents.length > 0
+              ? ["/agents registry", "/fork explorer|planner|verifier|worker|<custom-agent-id> <task>"]
+              : ["/fork explorer|planner|verifier|worker <task>"],
       detailsText: formatAgentsList(context),
     });
     return;
@@ -1911,10 +1913,12 @@ export async function handleForkCommand(
   const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
   const task = options.task;
   if (!type || !isAgentType(type) || !task) {
-    writeLine(
-      output,
-      "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]",
-    );
+    const baseHelp = "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]";
+    const registryHint =
+      context.agentRegistry.agents.length > 0
+        ? `\n已加载 ${context.agentRegistry.agents.length} 个自定义 agent，/agents registry 查看详情。`
+        : "\n暂无自定义 agent，可在 .linghun/agents/ 下放置 JSON/MD 定义文件。";
+    writeLine(output, `${baseHelp}${registryHint}`);
     return;
   }
   const workflowTaskId =

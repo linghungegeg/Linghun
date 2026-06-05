@@ -25268,6 +25268,40 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(runtimeSrc).toContain("export function failureDedupeHash");
     expect(runtimeSrc).toContain("export function buildFailureLearningSummaryForPrompt");
   });
+
+  it("D.14B: meta-scheduler receives lastToolFailure from captureFailureLearning and lastProviderFailure from provider path", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    // captureFailureLearning sets lastToolFailure for category === "tool_failure".
+    const captureFn = indexSrc.slice(
+      indexSrc.indexOf("async function captureFailureLearning"),
+      indexSrc.indexOf("  let record: FailureLearningRecord | undefined;"),
+    );
+    expect(captureFn).toContain("lastToolFailure");
+    expect(captureFn).toContain('"tool_failure"');
+
+    // evaluateMetaScheduler receives both lastToolFailure and lastProviderFailure from context.
+    const metaCall = indexSrc.slice(
+      indexSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
+      indexSrc.indexOf("context.lastMetaSchedulerFailureLearningRequired ="),
+    );
+    expect(metaCall).toContain("lastToolFailure");
+    expect(metaCall).toContain("lastProviderFailure");
+
+    // Provider failure tracking: lastProviderFailure is set in the provider error handler.
+    const providerFailBlock = indexSrc.slice(
+      indexSrc.indexOf("context.lastProviderFailure = {"),
+      indexSrc.indexOf("context.lastProviderFailure = {") + 200,
+    );
+    expect(providerFailBlock).toContain("lastProviderFailure");
+
+    // Contract verification happens before new meta-scheduler evaluation.
+    const contractBlock = indexSrc.slice(
+      indexSrc.indexOf("Verify previous turn's failure-learning contract"),
+      indexSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
+    );
+    expect(contractBlock).toContain("verifyFailureLearningContract({");
+    expect(contractBlock).toContain("recordFailureLearningDegradedWarning");
+  });
 });
 
 describe("D.14C Multi-Agent baseline closure — agent failure wiring & source invariants", () => {
@@ -25419,5 +25453,75 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
     expect(agentSrc).not.toContain("const DEFAULT_JOB_RUNNING_AGENT_CAP = 3");
     expect(agentSrc).not.toContain("const MAX_AGENTS = 20");
     expect(agentSrc).not.toContain("const BACKGROUND_KIND_CAPS");
+  });
+
+  it("D.14C: workflowRuntimeKind classifies workflows as details and agents as agent", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    // workflowRuntimeKind must handle all 5 mainChain types now.
+    const fn = indexSrc.slice(
+      indexSrc.indexOf("function workflowRuntimeKind"),
+      indexSrc.indexOf("function findWorkflowSliceTitle"),
+    );
+    expect(fn).toContain('"workflows"');
+    expect(fn).toContain('"agents"');
+    expect(fn).toContain('"fork"');
+    expect(fn).toContain('"job"');
+    expect(fn).toContain('"verification"');
+    expect(fn).toContain('"details"');
+  });
+
+  it("D.14C: executeWorkflowStep handles workflows mainChain", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const fn = indexSrc.slice(
+      indexSrc.indexOf("async function executeWorkflowStep"),
+      indexSrc.indexOf("async function runNestedWorkflowJobCommand"),
+    );
+    expect(fn).toContain('"workflows"');
+    expect(fn).toContain('"blocked"');
+    expect(fn).toContain("proposal-only");
+  });
+
+  it("D.14C: executeWorkflowStep has readonly job action guard", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const fn = indexSrc.slice(
+      indexSrc.indexOf("async function executeWorkflowStep"),
+      indexSrc.indexOf("async function runNestedWorkflowJobCommand"),
+    );
+    expect(fn).toContain("readonlyJobActions");
+    expect(fn).toContain('"list"');
+    expect(fn).toContain('"logs"');
+    // Guard must sit before the second listDurableJobs call that persists jobs.
+    const guardStart = fn.indexOf("readonlyJobActions");
+    const secondListDurableJobs = fn.indexOf("const jobs = await listDurableJobs");
+    expect(guardStart).toBeGreaterThan(0);
+    expect(secondListDurableJobs).toBeGreaterThan(guardStart);
+  });
+
+  it("D.14C: verifyFailureLearningContract is imported and called in main chain", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    expect(indexSrc).toContain("verifyFailureLearningContract");
+    // Contract verifier must appear after the import and be called at runtime.
+    const afterImport = indexSrc.slice(indexSrc.indexOf("verifyFailureLearningContract"));
+    expect(afterImport).toContain("verifyFailureLearningContract({");
+  });
+
+  it("D.14C: captureFailureLearning sets lastToolFailure for meta-scheduler", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const fn = indexSrc.slice(
+      indexSrc.indexOf("async function captureFailureLearning"),
+      indexSrc.indexOf("  let record: FailureLearningRecord | undefined;"),
+    );
+    expect(fn).toContain("lastToolFailure");
+    expect(fn).toContain("lastMetaSchedulerFailureLearningFulfilled");
+  });
+
+  it("D.14C: evaluateMetaScheduler receives lastToolFailure and lastProviderFailure from context", async () => {
+    const indexSrc = await readFile(srcPath("index.ts"), "utf8");
+    const metaBlock = indexSrc.slice(
+      indexSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
+      indexSrc.indexOf("context.lastMetaSchedulerFailureLearningRequired ="),
+    );
+    expect(metaBlock).toContain("lastToolFailure");
+    expect(metaBlock).toContain("lastProviderFailure");
   });
 });

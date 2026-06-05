@@ -4,6 +4,7 @@ import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
+  verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
 import type {
   BackgroundTaskState,
@@ -111,6 +112,65 @@ describe("Meta scheduler runtime", () => {
     expect(sanitized).not.toContain("gateId");
     expect(sanitized).not.toContain("raw evidence");
     expect(sanitized).toContain("Final answer.");
+  });
+
+  describe("verifyFailureLearningContract", () => {
+    it("satisfied when capture was not required", () => {
+      const decision = evaluateMetaScheduler(baseInput());
+      const result = verifyFailureLearningContract({
+        decision,
+        preTurnRecordCount: 0,
+        postTurnRecordCount: 0,
+        failureKind: "tool",
+      });
+      expect(result.satisfied).toBe(true);
+    });
+
+    it("satisfied when capture was required and new records added", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        lastToolFailure: { toolName: "Bash", summary: "exit code 1" },
+      });
+      const result = verifyFailureLearningContract({
+        decision,
+        preTurnRecordCount: 0,
+        postTurnRecordCount: 1,
+        failureKind: "tool",
+      });
+      expect(result.satisfied).toBe(true);
+    });
+
+    it("unsatisfied when capture was required but no new records added", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        lastToolFailure: { toolName: "Bash", summary: "exit code 1" },
+      });
+      const result = verifyFailureLearningContract({
+        decision,
+        preTurnRecordCount: 2,
+        postTurnRecordCount: 2,
+        failureKind: "tool",
+      });
+      expect(result.satisfied).toBe(false);
+      if (!result.satisfied) {
+        expect(result.reason).toContain("degraded state recorded");
+      }
+    });
+
+    it("satisfied when provider failure is detected and captured", () => {
+      const decision = evaluateMetaScheduler({
+        ...baseInput(),
+        providerFailure: { provider: "deepseek", model: "v4", code: "429", message: "rate limit" },
+      });
+      expect(decision.shouldCaptureFailureLearning).toBe(true);
+      const result = verifyFailureLearningContract({
+        decision,
+        preTurnRecordCount: 1,
+        postTurnRecordCount: 2,
+        failureKind: "provider",
+      });
+      expect(result.satisfied).toBe(true);
+    });
   });
 });
 

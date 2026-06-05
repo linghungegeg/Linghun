@@ -1,7 +1,7 @@
+import type { ModelMessage } from "@linghun/providers";
 import type { Language } from "@linghun/shared";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import type { IndexState } from "./index-runtime.js";
-import type { ModelMessage } from "@linghun/providers";
 import type {
   BackgroundTaskState,
   EvidenceRecord,
@@ -44,7 +44,11 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
   const blockedRuntime = hasBlockedAgentOrWorkflow(input.backgroundTasks, input.workflow);
-  const pressure = computeContextPressure(input.messages, input.contextMaxChars, input.triggerChars);
+  const pressure = computeContextPressure(
+    input.messages,
+    input.contextMaxChars,
+    input.triggerChars,
+  );
   const indexStrategy = classifyIndexStrategy(input.index);
 
   if (highRiskClaim) {
@@ -94,6 +98,34 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
   ].join("\n");
 }
 
+export type FailureLearningContractResult =
+  | { satisfied: true }
+  | { satisfied: false; reason: string };
+
+/**
+ * Enforce the meta-scheduler's failure-learning directive at runtime.
+ * Call this after the model turn when tool/provider failures were detected.
+ * If the directive required capture but no new record was added, the contract
+ * is unsatisfied and the caller MUST record a degraded state event.
+ */
+export function verifyFailureLearningContract(input: {
+  decision: MetaSchedulerDecision;
+  preTurnRecordCount: number;
+  postTurnRecordCount: number;
+  failureKind: "tool" | "provider" | "workflow" | "verification" | "final_gate";
+}): FailureLearningContractResult {
+  if (!input.decision.shouldCaptureFailureLearning) {
+    return { satisfied: true };
+  }
+  if (input.postTurnRecordCount > input.preTurnRecordCount) {
+    return { satisfied: true };
+  }
+  return {
+    satisfied: false,
+    reason: `meta-scheduler required failure learning capture for ${input.failureKind} failure but no new record was added; degraded state recorded`,
+  };
+}
+
 function hasHighRiskCompletionClaim(text: string): boolean {
   return /(?:\bPASS\b|\bpassed\b|\bverified\b|\btests?\s+pass(?:ed)?\b|\bfixed\b|\bcompleted\b|已完成|已修复|已验证|验证通过|测试通过|可以进入下一阶段|ready\s+for|可进入)/iu.test(
     text,
@@ -101,12 +133,13 @@ function hasHighRiskCompletionClaim(text: string): boolean {
 }
 
 function lacksVerificationEvidence(evidence: EvidenceRecord[]): boolean {
-  return !evidence.some((item) =>
-    item.kind === "test_result" ||
-    (item.kind === "command_output" &&
-      /test|typecheck|build|lint|smoke|verification|验证|测试/iu.test(
-        [item.source, item.summary, ...item.supportsClaims].join(" "),
-      )),
+  return !evidence.some(
+    (item) =>
+      item.kind === "test_result" ||
+      (item.kind === "command_output" &&
+        /test|typecheck|build|lint|smoke|verification|验证|测试/iu.test(
+          [item.source, item.summary, ...item.supportsClaims].join(" "),
+        )),
   );
 }
 

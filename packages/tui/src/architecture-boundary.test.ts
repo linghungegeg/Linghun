@@ -5,6 +5,7 @@ import {
   checkBoundaries,
   checkBoundaryEditPreflight,
   checkFileBoundaries,
+  detectBashFileWriteTargets,
   detectCircularDependencyRisk,
   detectCrossLayerImports,
   estimateFileMetrics,
@@ -400,6 +401,75 @@ describe("architecture-boundary", () => {
       ].join("\n");
       const metrics = estimateFileMetrics("test.ts", source);
       expect(metrics.maxNestingDepth).toBeGreaterThanOrEqual(4);
+    });
+  });
+
+  describe("detectBashFileWriteTargets", () => {
+    it("detects redirect > target", () => {
+      const targets = detectBashFileWriteTargets("echo content > packages/tui/src/big.ts");
+      expect(targets).toContain("packages/tui/src/big.ts");
+    });
+
+    it("detects append >> target", () => {
+      const targets = detectBashFileWriteTargets("echo more >> packages/tui/src/index.ts");
+      expect(targets).toContain("packages/tui/src/index.ts");
+    });
+
+    it("detects tee target", () => {
+      const targets = detectBashFileWriteTargets("cat data | tee packages/tui/src/out.ts");
+      expect(targets).toContain("packages/tui/src/out.ts");
+    });
+
+    it("ignores /dev/ targets", () => {
+      const targets = detectBashFileWriteTargets("echo x > /dev/null");
+      expect(targets).toHaveLength(0);
+    });
+
+    it("ignores variable-based targets", () => {
+      const targets = detectBashFileWriteTargets("echo x > $OUTPUT_FILE");
+      expect(targets).toHaveLength(0);
+    });
+
+    it("ignores commands without write patterns", () => {
+      const targets = detectBashFileWriteTargets("npm test");
+      expect(targets).toHaveLength(0);
+    });
+  });
+
+  describe("checkBoundaryEditPreflight (Bash)", () => {
+    const largeSource = Array.from({ length: 900 }, (_, i) => `line ${i}`).join("\n");
+    const smallSource = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
+
+    it("confirms for Bash write to existing large file", () => {
+      const result = checkBoundaryEditPreflight({
+        toolName: "Bash",
+        path: "packages/tui/src/big.ts",
+        existingSource: largeSource,
+        targetExists: true,
+        input: { command: "echo x > packages/tui/src/big.ts" },
+      });
+      expect(result.decision).toBe("confirm");
+    });
+
+    it("allows Bash write to small file", () => {
+      const result = checkBoundaryEditPreflight({
+        toolName: "Bash",
+        path: "packages/tui/src/small.ts",
+        existingSource: smallSource,
+        targetExists: true,
+        input: { command: "echo x > packages/tui/src/small.ts" },
+      });
+      expect(result.decision).toBe("allow");
+    });
+
+    it("allows Bash with no existing source", () => {
+      const result = checkBoundaryEditPreflight({
+        toolName: "Bash",
+        path: "packages/tui/src/out.ts",
+        targetExists: true,
+        input: { command: "echo x > packages/tui/src/out.ts" },
+      });
+      expect(result.decision).toBe("allow");
     });
   });
 });
