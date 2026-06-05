@@ -141,8 +141,10 @@ function printProviderFailure(error) {
 }
 
 async function readProviderEnv() {
+  const configDir = process.env.LINGHUN_CONFIG_DIR;
+  const dir = configDir ? configDir : join(homedir(), ".linghun");
   try {
-    const raw = await readFile(join(homedir(), ".linghun", "provider.env"), "utf8");
+    const raw = await readFile(join(dir, "provider.env"), "utf8");
     const values = {};
     for (const line of raw.split(/\r?\n/u)) {
       const trimmed = line.trim();
@@ -175,7 +177,7 @@ function envValue(key, providerEnv) {
 
 function providerEnvSource(key, providerEnv) {
   if (process.env[key]) return "shell-env";
-  if (providerEnv[key]) return "user-provider-env";
+  if (providerEnv[key]) return process.env.LINGHUN_CONFIG_DIR ? "config-dir-provider-env" : "user-provider-env";
   return "missing";
 }
 

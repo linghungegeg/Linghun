@@ -416,6 +416,11 @@ async function persistWorkflowRunState(
 export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
   const root = getWorkflowRunsRoot(context);
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const candidates: Array<{
+    run: NonNullable<WorkflowState["activeRun"]>;
+    state: DurableWorkflowRunState;
+    background: BackgroundTaskState;
+  }> = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const state = await readWorkflowRunState(join(root, entry.name, "state.json"));
@@ -426,7 +431,6 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
       continue;
     }
     const run = recoverWorkflowRunState(state);
-    context.workflows.activeRun = run;
     const background = createWorkflowBackgroundProjection(state.backgroundTask, run);
     upsertWorkflowBackgroundTask(context, background);
     if (
@@ -435,7 +439,34 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
     ) {
       await persistWorkflowRunState(context, run, background);
     }
+    candidates.push({ run, state, background });
   }
+  // D.14H Phase 7.5-C：多个 persisted workflow run 存在时，确定性选择 activeRun。
+  // 优先未终态（running/blocked/pending），其次 updatedAt 最新。
+  if (candidates.length > 0) {
+    context.workflows.activeRun = selectActiveWorkflowRun(candidates).run;
+  }
+}
+
+const ACTIVE_RUN_PREFERRED_STATUSES = new Set(["running", "blocked", "pending"]);
+
+function selectActiveWorkflowRun(
+  candidates: Array<{
+    run: NonNullable<WorkflowState["activeRun"]>;
+    state: DurableWorkflowRunState;
+    background: BackgroundTaskState;
+  }>,
+): (typeof candidates)[0] {
+  const nonTerminal = candidates.filter((c) =>
+    ACTIVE_RUN_PREFERRED_STATUSES.has(c.run.status),
+  );
+  const pool = nonTerminal.length > 0 ? nonTerminal : candidates;
+  return pool
+    .slice()
+    .sort(
+      (a, b) =>
+        new Date(b.state.updatedAt).getTime() - new Date(a.state.updatedAt).getTime(),
+    )[0]!;
 }
 
 async function readWorkflowRunState(path: string): Promise<DurableWorkflowRunState | null> {

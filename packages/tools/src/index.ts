@@ -1609,13 +1609,20 @@ async function runRipgrep(
 }
 
 function globToRegExp(pattern: string): RegExp {
+  const startsWithDoubleStarSlash = pattern.startsWith("**/");
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*/g, "::DOUBLE_STAR::")
     .replace(/\*/g, "[^/]*")
     .replace(/::DOUBLE_STAR::/g, ".*")
     .replace(/\?/g, ".");
-  return new RegExp(`^${escaped}$`);
+  let result = `^${escaped}$`;
+  // D.14H Phase 7.5-C：**/ 开头的 pattern 应同时匹配根目录文件和子目录文件。
+  // globToRegExp 会把 **/ 转成 .*/，导致根目录文件被排除。
+  if (startsWithDoubleStarSlash) {
+    result = result.replace(/^\^\.\*\//u, "^(?:.*/)?");
+  }
+  return new RegExp(result);
 }
 
 function runShell(
@@ -1706,13 +1713,15 @@ function runShell(
     }
     signal?.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
+    // D.14H Phase 7.5-C：Windows 控制台输出可能为 GBK/GB18030 编码，
+    // UTF-8 decode 会产生 � 或 mojibake。优先 UTF-8，检测到问题时回退 GB18030。
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = decodeShellChunk(chunk);
       output += text;
       onProgress?.("stdout", text);
     });
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = decodeShellChunk(chunk);
       output += text;
       onProgress?.("stderr", text);
     });
@@ -1727,6 +1736,24 @@ function runShell(
       finish(1, `命令执行失败：${error.message}`);
     });
   });
+}
+
+function decodeShellChunk(chunk: Buffer): string {
+  const utf8 = chunk.toString("utf8");
+  if (process.platform !== "win32") return utf8;
+  if (!utf8.includes("�")) return utf8;
+
+  try {
+    const decoder = new TextDecoder("gb18030", { fatal: false });
+    const gbk = decoder.decode(chunk);
+    const utf8Errors = utf8.split("�").length - 1;
+    const gbkErrors = gbk.split("�").length - 1;
+    if (gbkErrors < utf8Errors) return gbk;
+  } catch {
+    // TextDecoder("gb18030") not available on this runtime
+  }
+
+  return utf8;
 }
 
 async function stopWindowsProcessTree(rootPid: number, cwd: string): Promise<void> {
@@ -1839,3 +1866,7 @@ function formatTodos(items: TodoItem[]): string {
 function unique(items: string[]): string[] {
   return [...new Set(items)];
 }
+
+// D.14H Phase 7.5-C test entry points
+export const __testGlobToRegExp = globToRegExp;
+export const __testDecodeShellChunk = decodeShellChunk;

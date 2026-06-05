@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
+import { __testDecodeShellChunk, __testGlobToRegExp, adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
 
 describe("Phase 05 core tools", () => {
   it("reads, searches, edits, tracks todo, runs bash, and summarizes diff", async () => {
@@ -880,6 +880,53 @@ describe("Phase 05 core tools", () => {
     expect(multiline.command).toContain("Unsupported multi-line Unix shell syntax");
     expect(multiline.command).not.toContain("secret raw script");
     expect(multiline.logCommand).not.toContain("secret raw script");
+  });
+
+  // D.14H Phase 7.5-C：Glob("**/*") 修复——根目录文件不应被 globToRegExp 漏掉。
+  it("D.14H: globToRegExp with **/* includes root-level files", () => {
+    const regex = __testGlobToRegExp("**/*");
+    expect(regex.test("README.md")).toBe(true);
+    expect(regex.test("package.json")).toBe(true);
+    expect(regex.test("src/a.ts")).toBe(true);
+    expect(regex.test("src/deep/b.ts")).toBe(true);
+    expect(regex.test(".git/config")).toBe(true);
+  });
+
+  it("D.14H: globToRegExp with **/*.ts includes root-level .ts", () => {
+    const regex = __testGlobToRegExp("**/*.ts");
+    expect(regex.test("index.ts")).toBe(true);
+    expect(regex.test("src/a.ts")).toBe(true);
+    expect(regex.test("README.md")).toBe(false);
+  });
+
+  it("D.14H: globToRegExp keeps existing pattern behavior", () => {
+    // src/**/*.ts 需要 src/ 下面至少一级子目录（**/ 匹配 0+ 目录的历史行为）
+    const regex = __testGlobToRegExp("src/**/*.ts");
+    expect(regex.test("src/subdir/a.ts")).toBe(true);
+    expect(regex.test("index.ts")).toBe(false);
+    const simpleRegex = __testGlobToRegExp("*.txt");
+    expect(simpleRegex.test("readme.txt")).toBe(true);
+    expect(simpleRegex.test("src/readme.txt")).toBe(false);
+  });
+
+  // D.14H Phase 7.5-C：Windows Bash CJK 解码——GB18030 bytes 应正确解码。
+  it("D.14H: decodeShellChunk handles GB18030 CJK bytes on Windows", () => {
+    // "fixture CJK 空格" 的 GB18030 bytes
+    const gbkBytes = Buffer.from([
+      0x66, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x20, // "fixture "
+      0x43, 0x4A, 0x4B, 0x20, // "CJK "
+      0xBF, 0xD5, 0xB8, 0xF1, // "空格" in GBK/GB18030
+    ]);
+    const result = __testDecodeShellChunk(gbkBytes);
+    expect(result).toContain("fixture");
+    expect(result).toContain("CJK");
+    expect(result).toContain("空格");
+  });
+
+  it("D.14H: decodeShellChunk passes through normal UTF-8", () => {
+    const utf8Bytes = Buffer.from("hello world 测试 UTF-8", "utf8");
+    const result = __testDecodeShellChunk(utf8Bytes);
+    expect(result).toBe("hello world 测试 UTF-8");
   });
 });
 

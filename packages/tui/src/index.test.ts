@@ -4081,6 +4081,102 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("缺少证据");
   });
 
+  // ── D.14H Phase 7.5-C.1：纯中文 claim \b 修复 ──
+  // JS \b 是 ASCII 单词边界，CJK 字符全部是 \W，\b 永不命中。
+  // 下列纯自然语言、无 LinghunFinalAnswerClaims 的中文高风险 claim 必须拦截。
+
+  it("D.14H C.1: blocks pure Chinese '测试通过' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 测试通过", context, output);
+
+    expect(output.text).toContain("缺少证据");
+    expect(output.text).not.toContain("Claim Checker：通过");
+  });
+
+  it("D.14H C.1: blocks pure Chinese '已完成' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 已完成", context, output);
+
+    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("缺少证据");
+  });
+
+  it("D.14H C.1: blocks pure Chinese '已修复并已验证' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 已修复并已验证", context, output);
+
+    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("缺少证据");
+  });
+
+  it("D.14H C.1: blocks pure Chinese '全部通过' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 全部通过", context, output);
+
+    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("缺少证据");
+  });
+
+  it("D.14H C.1: blocks pure Chinese '可上线' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check 可上线", context, output);
+
+    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("缺少证据");
+  });
+
+  it("D.14H C.1: blocks pure Chinese 'smoke 通过' without evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    await handleSlashCommand("/claim-check smoke 通过", context, output);
+
+    expect(output.text).not.toContain("Claim Checker：通过");
+    expect(output.text).toContain("缺少证据");
+  });
+
+  it("D.14H C.1: low-risk Chinese text still passes", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    // "README 提到了测试命令" 不包含任何完整的 claim 短语
+    await handleSlashCommand("/claim-check README 提到了测试命令", context, output);
+
+    expect(output.text).toContain("Claim Checker：通过");
+    expect(output.text).not.toContain("缺少证据");
+  });
+
   it("D.13U: source has no FreshnessLite gate restored and has Final Answer Gate wired", async () => {
     const fs = await import("node:fs/promises");
     const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");

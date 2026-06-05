@@ -247,6 +247,11 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
   }
 
   if (structuredClaims.length === 0) {
+    // D.14H Phase 7.5-C：纯自然语言高风险 claim 兜底识别。
+    // 无结构化 claim 时，对"测试通过 / PASS / 已完成"等无证据高风险表述
+    // 做最小匹配；普通低风险文本不误伤。
+    const nlCheck = detectNaturalLanguageHighRiskClaims(claim);
+    if (nlCheck.status !== "passed") return nlCheck;
     return { status: "passed", unsupportedClaims: [] };
   }
   if (
@@ -270,6 +275,73 @@ export function checkClaimSupport(claim: string, context: TuiContext): ClaimChec
     status: "needs_disclaimer",
     unsupportedClaims: structuredClaims.map((item) => item.phrase),
   };
+}
+
+// D.14H Phase 7.5-C：纯自然语言高风险 claim 最小兜底识别。
+// 无结构化 LinghunFinalAnswerClaims 时，对无证据的高风险完成/通过声明做匹配。
+// 只拦截明确的自夸式 claim；普通陈述（如"当前分支是 master"）不误伤。
+//
+// D.14H Phase 7.5-C.1：JS 的 \b 是 ASCII 单词边界，CJK 全部是 \W，
+// \b 包住中文短语永远不会命中。中文 pattern 去掉 \b，英文保留。
+const HIGH_RISK_NL_CLAIM_PATTERNS: Array<{ regex: RegExp; label: string }> = [
+  // ── Chinese patterns（无 \b，CJK 字符无需 ASCII 单词边界）──
+  {
+    regex: /(?:测试(?:都|全部|已经|已)?通过|全部测试通过|所有测试(?:都)?通过)/iu,
+    label: "测试通过",
+  },
+  {
+    regex: /(?:已完成|已修复并已验证|已修复且已验证|已经完成修复|已经修复)/iu,
+    label: "已完成/已修复",
+  },
+  {
+    regex: /已修复/iu,
+    label: "已修复",
+  },
+  {
+    regex: /(?:全部通过|全部完成|完全通过)/iu,
+    label: "全部通过",
+  },
+  {
+    regex: /(?:可上线|可以上线|达到上线标准)/iu,
+    label: "可上线",
+  },
+  {
+    regex: /(?:全部(?:单元)?测试(?:已|已经)?通过|所有(?:单元)?测试(?:已|已经)?通过)/iu,
+    label: "测试通过",
+  },
+  // ── English / mixed patterns（保留 \b，避免误伤普通词）──
+  {
+    regex: /\b(?:beta\s*ready|ready\s*for\s*beta|production\s*ready)\b/iu,
+    label: "beta ready",
+  },
+  {
+    regex: /\b(?:smoke\s*(?:test\s*)?pass(?:ed)?)\b/iu,
+    label: "smoke pass",
+  },
+  {
+    regex: /smoke\s*通过/iu,
+    label: "smoke pass",
+  },
+  {
+    regex: /\bPASS\b/u,
+    label: "PASS",
+  },
+];
+
+function detectNaturalLanguageHighRiskClaims(text: string): ClaimCheck {
+  const hitLabels = new Set<string>();
+  for (const { regex, label } of HIGH_RISK_NL_CLAIM_PATTERNS) {
+    if (regex.test(text)) {
+      hitLabels.add(label);
+    }
+  }
+  if (hitLabels.size > 0) {
+    return {
+      status: "needs_disclaimer",
+      unsupportedClaims: Array.from(hitLabels),
+    };
+  }
+  return { status: "passed", unsupportedClaims: [] };
 }
 
 export function formatClaimCheck(result: ClaimCheck, language: Language): string {
