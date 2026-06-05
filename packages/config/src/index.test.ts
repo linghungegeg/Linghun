@@ -563,6 +563,47 @@ describe("config directories", () => {
     );
   });
 
+  it("config dir keeps LINGHUN_CONFIG_DIR provider.env isolated from home provider.env", async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const configDir = await mkdtemp(join(tmpdir(), "linghun-config-dir-"));
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    vi.stubEnv("LINGHUN_CONFIG_DIR", configDir);
+    for (const key of [
+      "LINGHUN_OPENAI_BASE_URL",
+      "LINGHUN_OPENAI_API_KEY",
+      "LINGHUN_OPENAI_MODEL",
+      "LINGHUN_DEEPSEEK_BASE_URL",
+      "LINGHUN_DEEPSEEK_API_KEY",
+      "LINGHUN_DEEPSEEK_MODEL",
+      "LINGHUN_DEFAULT_MODEL",
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    await mkdir(join(home, ".linghun"), { recursive: true });
+    await writeFile(
+      join(home, ".linghun", "provider.env"),
+      [
+        "LINGHUN_OPENAI_BASE_URL=https://home-provider.invalid/v1",
+        "LINGHUN_OPENAI_API_KEY=sk-home-provider-secret",
+        "LINGHUN_OPENAI_MODEL=home-provider-model",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const indexModule = await import("./index.js");
+    const config = await indexModule.loadConfig(project);
+
+    expect(config.providers["openai-compatible"]?.apiKey).toBeUndefined();
+    expect(config.providers["openai-compatible"]?.model).toBe("openai-compatible-model");
+    expect(config.defaultModel).toBe("deepseek-chat");
+    expect(indexModule.lastProviderEnvMerge?.applied).toBe(false);
+  });
+
   it("Run 2 Closure: concurrent provider.env writes do not collide on temp path", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));

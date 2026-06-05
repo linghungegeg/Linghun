@@ -328,8 +328,10 @@ function getProviderKeySource(
 ): string {
   if (!hasApiKey) return "missing";
   const envName = providerId === "deepseek" ? "LINGHUN_DEEPSEEK_API_KEY" : "LINGHUN_OPENAI_API_KEY";
-  if (process.env[envName]) return "env";
-  if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
+  if (process.env[envName]) return "shell-env";
+  if (providerEnvApiKeyProviders.has(providerId)) {
+    return process.env.LINGHUN_CONFIG_DIR ? "config-dir-provider-env" : "user-provider-env";
+  }
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
   return "missing";
 }

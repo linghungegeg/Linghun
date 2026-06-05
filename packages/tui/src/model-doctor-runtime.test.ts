@@ -93,6 +93,7 @@ describe("model-doctor-runtime", () => {
   describe("getProviderKeySource", () => {
     const envKey = "LINGHUN_DEEPSEEK_API_KEY";
     const originalValue = process.env[envKey];
+    const originalConfigDir = process.env.LINGHUN_CONFIG_DIR;
 
     afterEach(() => {
       if (originalValue === undefined) {
@@ -100,16 +101,31 @@ describe("model-doctor-runtime", () => {
       } else {
         process.env[envKey] = originalValue;
       }
+      if (originalConfigDir === undefined) {
+        delete (process.env as Record<string, string | undefined>).LINGHUN_CONFIG_DIR;
+      } else {
+        process.env.LINGHUN_CONFIG_DIR = originalConfigDir;
+      }
     });
 
-    it("returns env when shell env is set", () => {
+    it("returns shell-env when shell env is set", () => {
       process.env[envKey] = "test";
-      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set())).toBe("env");
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set())).toBe(
+        "shell-env",
+      );
     });
     it("returns user-provider-env when in provider env set", () => {
       delete (process.env as Record<string, string | undefined>)[envKey];
+      delete (process.env as Record<string, string | undefined>).LINGHUN_CONFIG_DIR;
       expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set(["deepseek"]))).toBe(
         "user-provider-env",
+      );
+    });
+    it("returns config-dir-provider-env when provider env comes from LINGHUN_CONFIG_DIR", () => {
+      delete (process.env as Record<string, string | undefined>)[envKey];
+      process.env.LINGHUN_CONFIG_DIR = "isolated-config-dir";
+      expect(getProviderKeySource("deepseek", "deepseek", new Set(), new Set(["deepseek"]))).toBe(
+        "config-dir-provider-env",
       );
     });
     it("returns project-settings-legacy when in project settings", () => {
@@ -142,6 +158,32 @@ describe("model-doctor-runtime", () => {
 
       expect(providers.has("openai-compatible")).toBe(true);
       expect(providers.has("deepseek")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps empty LINGHUN_CONFIG_DIR isolated from home provider.env", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-doctor-home-"));
+    const configDir = await mkdtemp(join(tmpdir(), "linghun-doctor-config-dir-"));
+    try {
+      vi.stubEnv("HOME", home);
+      vi.stubEnv("USERPROFILE", home);
+      vi.stubEnv("LINGHUN_CONFIG_DIR", configDir);
+      await mkdir(join(home, ".linghun"), { recursive: true });
+      await writeFile(
+        join(home, ".linghun", "provider.env"),
+        [
+          "LINGHUN_OPENAI_API_KEY=sk-home-openai-secret",
+          "LINGHUN_DEEPSEEK_API_KEY=sk-home-deepseek-secret",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const providers = await readProviderEnvApiKeyProviders();
+
+      expect(providers.has("openai-compatible")).toBe(false);
+      expect(providers.has("deepseek")).toBe(false);
     } finally {
       vi.unstubAllEnvs();
     }

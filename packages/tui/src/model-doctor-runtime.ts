@@ -108,8 +108,10 @@ export function getProviderKeySource(
   providerEnvApiKeyProviders: Set<string>,
 ): string {
   const envName = getProviderEnvKeyName(providerType);
-  if (process.env[envName]) return "env";
-  if (providerEnvApiKeyProviders.has(providerId)) return "user-provider-env";
+  if (process.env[envName]) return "shell-env";
+  if (providerEnvApiKeyProviders.has(providerId)) {
+    return process.env.LINGHUN_CONFIG_DIR ? "config-dir-provider-env" : "user-provider-env";
+  }
   if (projectSettingsApiKeyProviders.has(providerId)) return "project-settings-legacy";
   return "merged-config";
 }

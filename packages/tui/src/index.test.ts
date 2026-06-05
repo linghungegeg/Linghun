@@ -2025,7 +2025,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/model doctor", context, output);
 
-    expect(output.text).toContain("source user-provider-env");
+    expect(output.text).toContain("source config-dir-provider-env");
     expect(output.text).toContain("reasoning ignored/unsupported");
     expect(output.text).toContain("api key present");
     expect(output.text).not.toContain("sk-provider-env-secret");
@@ -14106,7 +14106,7 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
-    expect(output.text).toContain("api key present source project-settings");
+    expect(output.text).toContain("api key present source project-settings-legacy");
     expect(output.text).toContain(
       "WARN: project settings provider openai-compatible contains apiKey",
     );
@@ -14146,7 +14146,7 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(output.text).toContain("api key present source env");
+    expect(output.text).toContain("api key present source shell-env");
     expect(output.text).toContain("masked sk-…cret");
     expect(output.text).toContain(
       "WARN: project settings provider openai-compatible contains apiKey",

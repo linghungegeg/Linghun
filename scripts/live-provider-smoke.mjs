@@ -57,6 +57,7 @@ async function main() {
     : {
         id: "deepseek",
         type: "deepseek",
+        baseUrl: envValue("LINGHUN_DEEPSEEK_BASE_URL", providerEnv),
         apiKey: deepSeekApiKey,
         model: deepSeekModel,
         supportsTools: false,
@@ -160,6 +161,9 @@ async function readProviderEnv() {
           "LINGHUN_OPENAI_MODEL",
           "LINGHUN_OPENAI_ENDPOINT_PROFILE",
           "LINGHUN_INFERENCE_LEVEL",
+          "LINGHUN_DEEPSEEK_BASE_URL",
+          "LINGHUN_DEEPSEEK_API_KEY",
+          "LINGHUN_DEEPSEEK_MODEL",
         ].includes(key)
       ) {
         values[key] = unquote(value);

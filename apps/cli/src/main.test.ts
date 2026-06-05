@@ -208,7 +208,7 @@ describe("CLI", () => {
 
       const doctor = await runCli(["/model", "doctor"]);
 
-      expect(doctor.stdout).toContain("apiKey=present source=env");
+      expect(doctor.stdout).toContain("apiKey=present source=shell-env");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("WARN: project-settings provider=deepseek contains apiKey");
       // 同上：doctor 报告 route/defaultModel（真实默认 deepseek-chat），不是 settings provider.model。
@@ -248,7 +248,7 @@ describe("CLI", () => {
       const doctor = await runCli(["model", "doctor"]);
 
       expect(doctor.stdout).toContain("provider=openai-compatible model=provider-cli-model");
-      expect(doctor.stdout).toContain("apiKey=present source=user-provider-env");
+      expect(doctor.stdout).toContain("apiKey=present source=config-dir-provider-env");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).toContain("endpointProfile=chat_completions");
       expect(doctor.stdout).toContain("endpointPath=/v1/chat/completions");
@@ -278,9 +278,38 @@ describe("CLI", () => {
       const doctor = await runCli(["model", "doctor"]);
 
       expect(doctor.stdout).toContain("provider=deepseek model=deepseek-chat");
-      expect(doctor.stdout).toContain("apiKey=present source=user-provider-env");
+      expect(doctor.stdout).toContain("apiKey=present source=config-dir-provider-env");
       expect(doctor.stdout).toContain("masked=sk-…cret");
       expect(doctor.stdout).not.toContain("sk-cli-deepseek-secret");
+      expect(doctor.exitCode).toBe(0);
+    });
+  });
+
+  it("config dir isolation: does not read home provider.env when LINGHUN_CONFIG_DIR points to an empty dir", async () => {
+    await withIsolatedCliConfig(async ({ project }) => {
+      const realHome = await mkdtemp(join(tmpdir(), "linghun-cli-real-home-"));
+      vi.stubEnv("HOME", realHome);
+      vi.stubEnv("USERPROFILE", realHome);
+      await mkdir(join(realHome, ".linghun"), { recursive: true });
+      await writeFile(
+        join(realHome, ".linghun", "provider.env"),
+        [
+          "LINGHUN_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1",
+          "LINGHUN_DEEPSEEK_API_KEY=sk-cli-home-deepseek-secret",
+          "LINGHUN_DEEPSEEK_MODEL=deepseek-chat",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const doctor = await runCli(["model", "doctor"]);
+
+      expect(doctor.stdout).toContain("provider=deepseek model=deepseek-chat");
+      expect(doctor.stdout).toContain("apiKey=missing source=missing");
+      expect(doctor.stdout).not.toContain("source=user-provider-env");
+      expect(doctor.stdout).not.toContain("source=config-dir-provider-env");
+      expect(doctor.stdout).not.toContain("sk-cli-home-deepseek-secret");
+      expect(doctor.stdout).not.toContain(project);
       expect(doctor.exitCode).toBe(0);
     });
   });
