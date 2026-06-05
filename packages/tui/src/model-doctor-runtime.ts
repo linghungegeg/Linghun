@@ -287,34 +287,14 @@ export async function formatModelRouteDoctor(context: ModelDoctorContext): Promi
       `WARN: provider.env 读取失败；路径 ${lastProviderEnvWarning.path}；原因 ${lastProviderEnvWarning.reason}；请修正后重启 Linghun 或重新运行 /model setup。`,
     );
   }
-  // D.13J Block 1：provider.env 合并可见化。
-  // 用户在 ~/.linghun/provider.env 写的内容会覆盖项目级 modelRoutes/defaultModel/providers，
-  // 之前没有任何 doctor 输出能告诉用户"被覆盖了"——sm​oke 第一次请求 404 才发现。
-  // 现在 doctor 摘要明确给出 applied 状态、是否覆盖了 modelRoutes/defaultModel、引入了哪些 provider id。
-  // 仅记录布尔与 provider id 列表，**不**输出任何 apiKey/baseUrl/model 值。
   if (lastProviderEnvMerge?.applied) {
     const ids = lastProviderEnvMerge.providerIds;
     lines.push(
-      `- provider.env merge: applied yes; overrode model routes ${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"}; overrode default model ${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"}; providers ${ids.length > 0 ? ids.join(",") : "none"} (~/.linghun/provider.env 优先级最高，会覆盖项目 settings.json；如果 smoke 出现 404，请检查该文件是否存在、确认 provider id、或临时改名。安全提示：provider.env 含敏感凭据，不要 cat/type 到主屏、日志或报告)`,
+      `- provider.env merge: applied yes; overrode model routes ${lastProviderEnvMerge.overrodeModelRoutes ? "yes" : "no"}; overrode default model ${lastProviderEnvMerge.overrodeDefaultModel ? "yes" : "no"}; providers ${ids.length > 0 ? ids.join(",") : "none"} (provider.env / complete shell env can select the fresh-project default route; explicit project modelRoutes stay project-scoped. 安全提示：provider.env 含敏感凭据，不要 cat/type 到主屏、日志或报告)`,
     );
   } else if (lastProviderEnvMerge && !lastProviderEnvMerge.applied) {
     lines.push(
       "- provider.env merge: applied no (~/.linghun/provider.env 未覆盖项目 settings；如需切换 provider 请使用 /model setup)",
-    );
-  }
-  const hasShellOpenAiEnv = Boolean(
-    process.env.LINGHUN_OPENAI_BASE_URL ||
-      process.env.LINGHUN_OPENAI_API_KEY ||
-      process.env.LINGHUN_OPENAI_MODEL,
-  );
-  const executorRoute = getRoleRoute(context.config, "executor");
-  if (
-    hasShellOpenAiEnv &&
-    !lastProviderEnvMerge?.applied &&
-    executorRoute.provider !== "openai-compatible"
-  ) {
-    lines.push(
-      "- shell env routing: LINGHUN_OPENAI_* is present, but shell env only fills the openai-compatible provider fields; executor still uses the configured route. Use /model route set executor <model> or /model setup/provider.env to switch the text route.",
     );
   }
   // D.13J Block 1：占位 / 未成熟模型名 doctor 标记。

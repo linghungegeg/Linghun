@@ -91,18 +91,32 @@ async function main() {
   let text = "";
   let tool = false;
   let hadReasoning = false;
+  let eventCount = 0;
+  let usageSeen = false;
+  let finishReason = "";
+  const maxOutputTokens = parseOptionalPositiveInt(
+    envValue("LINGHUN_SMOKE_MAX_OUTPUT_TOKENS", providerEnv),
+    "LINGHUN_SMOKE_MAX_OUTPUT_TOKENS",
+  );
+  if (maxOutputTokens === undefined && envValue("LINGHUN_SMOKE_MAX_OUTPUT_TOKENS", providerEnv)) {
+    return 1;
+  }
 
   try {
+    const request = {
+      messages: [{ role: "user", content: "用一句中文回复：Linghun live provider smoke" }],
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    };
     for await (const event of provider.stream(
-      {
-        messages: [{ role: "user", content: "用一句中文回复：Linghun live provider smoke" }],
-        maxOutputTokens: 64,
-      },
+      request,
       new AbortController().signal,
     )) {
+      eventCount += 1;
       if (event.type === "assistant_text_delta") text += event.text;
       if (event.type === "assistant_thinking_delta") hadReasoning = true;
       if (event.type === "tool_use") tool = true;
+      if (event.type === "usage") usageSeen = true;
+      if (event.type === "message_stop") finishReason = event.finishReason ?? "";
       if (event.type === "error") {
         printProviderFailure(event.error);
         return 1;
@@ -114,23 +128,47 @@ async function main() {
   }
 
   if (text) {
-    console.log("PASS live provider smoke: text response");
+    console.log(formatSmokeResult("PASS live provider smoke: text response", {
+      eventCount,
+      usageSeen,
+      finishReason,
+      maxOutputTokens,
+    }));
     return 0;
   }
 
   if (tool) {
-    console.log("PASS live provider smoke: tool response");
+    console.log(formatSmokeResult("PASS live provider smoke: tool response", {
+      eventCount,
+      usageSeen,
+      finishReason,
+      maxOutputTokens,
+    }));
     return 0;
   }
 
   if (hadReasoning) {
-    console.log(
-      "PASS live provider smoke: reasoning stream observed; no final text within smoke budget",
+    console.error(formatSmokeResult(
+      "FAIL live provider smoke: reasoning stream observed but no final text",
+      {
+        eventCount,
+        usageSeen,
+        finishReason,
+        maxOutputTokens,
+      },
+    ));
+    console.error(
+      "diagnosis: provider/model reached reasoning output but did not produce final assistant text; this is a smoke-harness/provider-output diagnostic, not proof that the Linghun main chain failed.",
     );
-    return 0;
+    return 1;
   }
 
-  console.error("FAIL live provider smoke: empty provider response");
+  console.error(formatSmokeResult("FAIL live provider smoke: empty provider response", {
+    eventCount,
+    usageSeen,
+    finishReason,
+    maxOutputTokens,
+  }));
   return 1;
 }
 
@@ -183,6 +221,25 @@ function providerEnvSource(key, providerEnv) {
   if (process.env[key]) return "shell-env";
   if (providerEnv[key]) return process.env.LINGHUN_CONFIG_DIR ? "config-dir-provider-env" : "user-provider-env";
   return "missing";
+}
+
+function parseOptionalPositiveInt(value, name) {
+  if (!value) return undefined;
+  if (!/^[1-9]\d*$/u.test(value.trim())) {
+    console.error(`FAIL live provider smoke: ${name} must be a positive integer when set.`);
+    return undefined;
+  }
+  return Number(value.trim());
+}
+
+function formatSmokeResult(prefix, details) {
+  return [
+    prefix,
+    `events=${details.eventCount}`,
+    `usage=${details.usageSeen ? "reported" : "missing"}`,
+    `finishReason=${details.finishReason || "unknown"}`,
+    `maxOutputTokens=${details.maxOutputTokens ? "explicit" : "provider-default"}`,
+  ].join(" ");
 }
 
 function normalizeEndpointProfile(value) {

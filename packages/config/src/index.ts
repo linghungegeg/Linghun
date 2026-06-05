@@ -980,11 +980,25 @@ function unquoteProviderEnvValue(value: string, path: string, line: number): str
 }
 
 function providerEnvToConfig(values: Record<string, string>): Partial<LinghunConfig> {
+  const hasCompleteShellOpenAiProvider = Boolean(
+    process.env.LINGHUN_OPENAI_BASE_URL &&
+      process.env.LINGHUN_OPENAI_API_KEY &&
+      process.env.LINGHUN_OPENAI_MODEL,
+  );
+  const hasCompleteShellDeepSeekProvider = Boolean(
+    process.env.LINGHUN_DEEPSEEK_BASE_URL &&
+      process.env.LINGHUN_DEEPSEEK_API_KEY &&
+      process.env.LINGHUN_DEEPSEEK_MODEL,
+  );
   const hasMainProviderValue = Boolean(
-    values.LINGHUN_OPENAI_BASE_URL || values.LINGHUN_OPENAI_API_KEY || values.LINGHUN_OPENAI_MODEL,
+    hasCompleteShellOpenAiProvider ||
+      values.LINGHUN_OPENAI_BASE_URL ||
+      values.LINGHUN_OPENAI_API_KEY ||
+      values.LINGHUN_OPENAI_MODEL,
   );
   const hasDeepSeekProviderValue = Boolean(
-    values.LINGHUN_DEEPSEEK_BASE_URL ||
+    hasCompleteShellDeepSeekProvider ||
+      values.LINGHUN_DEEPSEEK_BASE_URL ||
       values.LINGHUN_DEEPSEEK_API_KEY ||
       values.LINGHUN_DEEPSEEK_MODEL,
   );
@@ -1035,12 +1049,17 @@ function providerEnvToConfig(values: Record<string, string>): Partial<LinghunCon
       ...deepSeekProvider,
     };
   }
+  const routeProvider = hasCompleteShellOpenAiProvider
+    ? "openai-compatible"
+    : hasCompleteShellDeepSeekProvider
+      ? "deepseek"
+      : hasMainProviderValue
+        ? "openai-compatible"
+        : "deepseek";
   const model =
-    process.env.LINGHUN_OPENAI_MODEL ??
-    openAiProvider.model ??
-    process.env.LINGHUN_DEEPSEEK_MODEL ??
-    deepSeekProvider.model;
-  const routeProvider = hasMainProviderValue ? "openai-compatible" : "deepseek";
+    routeProvider === "openai-compatible"
+      ? (process.env.LINGHUN_OPENAI_MODEL ?? openAiProvider.model)
+      : (process.env.LINGHUN_DEEPSEEK_MODEL ?? deepSeekProvider.model);
   return {
     ...(model ? { defaultModel: model } : {}),
     providers: providerConfig,
@@ -1070,19 +1089,20 @@ async function readProviderEnvConfig(home = homedir()): Promise<Partial<LinghunC
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       lastProviderEnvWarning = undefined;
-      return {};
+      return providerEnvToConfig({});
     }
     lastProviderEnvWarning = {
       path: getProviderEnvPath(home),
       reason: error instanceof Error ? error.message : String(error),
     };
-    return {};
+    return providerEnvToConfig({});
   }
 }
 
 function mergeProviderEnvConfig(
   projectSettings: Partial<LinghunConfig>,
   providerEnv: Partial<LinghunConfig>,
+  options: { preserveExistingModelRoutes?: boolean } = { preserveExistingModelRoutes: true },
 ): Partial<LinghunConfig> {
   // D.13J Block 1：记录 provider.env 在本次合并中真正覆盖了哪些字段。
   // doctor 据此对用户说明"~/.linghun/provider.env 已合并/覆盖了 modelRoutes/defaultModel/providers"。
@@ -1093,11 +1113,16 @@ function mergeProviderEnvConfig(
     Boolean(providerEnv.modelRoutes) ||
     providerEnvProviderIds.length > 0;
   if (applied) {
+    const preservedProjectModelRoutes = Boolean(
+      options.preserveExistingModelRoutes && projectSettings.modelRoutes,
+    );
     lastProviderEnvMerge = {
       applied: true,
-      overrodeModelRoutes: Boolean(providerEnv.modelRoutes) && Boolean(projectSettings.modelRoutes),
+      overrodeModelRoutes: Boolean(providerEnv.modelRoutes) && !preservedProjectModelRoutes,
       overrodeDefaultModel:
-        Boolean(providerEnv.defaultModel) && Boolean(projectSettings.defaultModel),
+        Boolean(providerEnv.defaultModel) &&
+        Boolean(projectSettings.defaultModel) &&
+        !preservedProjectModelRoutes,
       providerIds: providerEnvProviderIds,
     };
   } else {
@@ -1108,15 +1133,29 @@ function mergeProviderEnvConfig(
       providerIds: [],
     };
   }
+  const preserveProjectRoutes = Boolean(
+    options.preserveExistingModelRoutes && projectSettings.modelRoutes,
+  );
+  const envConfig = preserveProjectRoutes ? omitModelRouteOverrides(providerEnv) : providerEnv;
   return {
     ...projectSettings,
-    ...providerEnv,
+    ...envConfig,
     providers: {
       ...projectSettings.providers,
-      ...providerEnv.providers,
+      ...envConfig.providers,
     },
-    modelRoutes: providerEnv.modelRoutes ?? projectSettings.modelRoutes,
+    modelRoutes:
+      projectSettings.modelRoutes ??
+      providerEnv.modelRoutes ??
+      (providerEnv.defaultModel ? undefined : projectSettings.modelRoutes),
   };
+}
+
+function omitModelRouteOverrides(config: Partial<LinghunConfig>): Partial<LinghunConfig> {
+  const next = { ...config };
+  delete next.defaultModel;
+  delete next.modelRoutes;
+  return next;
 }
 
 async function readUserSettings(home = homedir()): Promise<Partial<LinghunConfig>> {

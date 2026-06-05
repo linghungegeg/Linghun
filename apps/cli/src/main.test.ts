@@ -347,6 +347,22 @@ describe("CLI", () => {
     });
   });
 
+  it("uses complete shell OpenAI env as the active headless doctor route", async () => {
+    await withIsolatedCliConfig(async () => {
+      vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://shell.invalid/v1");
+      vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-cli-shell-secret");
+      vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+
+      const doctor = await runCli(["model", "doctor"]);
+
+      expect(doctor.stdout).toContain("provider=openai-compatible model=gpt-5.5");
+      expect(doctor.stdout).toContain("apiKey=present source=shell-env");
+      expect(doctor.stdout).not.toContain("deepseek-chat");
+      expect(doctor.stdout).not.toContain("sk-cli-shell-secret");
+      expect(doctor.exitCode).toBe(0);
+    });
+  });
+
   it("creates, lists, resumes, and summarizes a session", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-cli-project-"));
     const previousCwd = process.cwd();

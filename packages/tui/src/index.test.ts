@@ -2033,7 +2033,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("sk-provider-env-secret");
   });
 
-  it("clarifies shell LINGHUN_OPENAI env does not switch executor route without provider.env or route set", async () => {
+  it("uses complete shell LINGHUN_OPENAI env in a fresh project without setup-needed", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-shell-env-route-"));
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
@@ -2049,11 +2049,15 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/model doctor", context, output);
 
     expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.provider).toBe(
-      "deepseek",
+      "openai-compatible",
     );
-    expect(output.text).toContain("shell env routing");
-    expect(output.text).toContain("executor still uses the configured route");
-    expect(output.text).toContain("/model route set executor <model>");
+    expect(config.modelRoutes.routes.find((route) => route.role === "executor")?.primaryModel).toBe(
+      "gpt-5.5",
+    );
+    expect(output.text).toContain("provider openai-compatible");
+    expect(output.text).toContain("model gpt-5.5");
+    expect(output.text).toContain("source shell-env");
+    expect(output.text).not.toContain("setup-needed");
     expect(output.text).not.toContain("sk-shell-env-secret");
   });
 

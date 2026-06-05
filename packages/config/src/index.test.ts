@@ -306,6 +306,94 @@ describe("config directories", () => {
     expect(config.providers["openai-compatible"]?.model).toBe("gpt-5.5");
   });
 
+  it("uses complete shell OpenAI env as the fresh project default route", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://shell.invalid/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-shell-openai-secret");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+    const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+
+    expect(config.defaultModel).toBe("gpt-5.5");
+    expect(config.providers["openai-compatible"]?.baseUrl).toBe("https://shell.invalid/v1");
+    expect(config.providers["openai-compatible"]?.apiKey).toBe("sk-shell-openai-secret");
+    expect(config.providers["openai-compatible"]?.model).toBe("gpt-5.5");
+    expect(executor?.provider).toBe("openai-compatible");
+    expect(executor?.primaryModel).toBe("gpt-5.5");
+  });
+
+  it("uses complete shell DeepSeek env as the fresh project default route", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1");
+    vi.stubEnv("LINGHUN_DEEPSEEK_API_KEY", "sk-shell-deepseek-secret");
+    vi.stubEnv("LINGHUN_DEEPSEEK_MODEL", "deepseek-reasoner");
+    vi.resetModules();
+    const { loadConfig: envLoadConfig } = await import("./index.js");
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+
+    const config = await envLoadConfig(project);
+    const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+
+    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(config.providers.deepseek.apiKey).toBe("sk-shell-deepseek-secret");
+    expect(config.providers.deepseek.model).toBe("deepseek-reasoner");
+    expect(executor?.provider).toBe("deepseek");
+    expect(executor?.primaryModel).toBe("deepseek-reasoner");
+  });
+
+  it("keeps explicit project routes when shell provider env is complete", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-config-"));
+    vi.stubEnv("LINGHUN_CONFIG_DIR", join(home, ".linghun"));
+    vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://shell.invalid/v1");
+    vi.stubEnv("LINGHUN_OPENAI_API_KEY", "sk-shell-openai-secret");
+    vi.stubEnv("LINGHUN_OPENAI_MODEL", "gpt-5.5");
+    vi.resetModules();
+    const {
+      getProjectConfigDir: envGetProjectConfigDir,
+      getProjectSettingsPath: envGetProjectSettingsPath,
+      loadConfig: envLoadConfig,
+    } = await import("./index.js");
+    await mkdir(envGetProjectConfigDir(project), { recursive: true });
+    await writeFile(
+      envGetProjectSettingsPath(project),
+      JSON.stringify({
+        defaultModel: "deepseek-reasoner",
+        modelRoutes: {
+          defaultModel: "deepseek-reasoner",
+          routes: [
+            {
+              role: "executor",
+              provider: "deepseek",
+              primaryModel: "deepseek-reasoner",
+              fallbackModels: [],
+              requiredCapabilities: ["text"],
+              allowTools: true,
+              allowWrite: true,
+              allowBash: true,
+              requireApprovalBeforeRun: true,
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await envLoadConfig(project);
+    const executor = config.modelRoutes.routes.find((route) => route.role === "executor");
+
+    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(config.providers["openai-compatible"]?.apiKey).toBe("sk-shell-openai-secret");
+    expect(executor?.provider).toBe("deepseek");
+    expect(executor?.primaryModel).toBe("deepseek-reasoner");
+  });
+
   it("loads openai endpoint profile and inference level from env", async () => {
     vi.stubEnv("LINGHUN_OPENAI_BASE_URL", "https://api.example.com/v1");
     vi.stubEnv("LINGHUN_OPENAI_ENDPOINT_PROFILE", " Responses ");
