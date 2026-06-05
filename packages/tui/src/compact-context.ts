@@ -171,11 +171,13 @@ function estimateToolCallsChars(
   return size;
 }
 
+const DEEP_INPUT_ESTIMATE_BOUND = 2_000;
+
 function estimateInputChars(value: unknown, depth = 0): number {
   if (value === null || value === undefined) return 4;
   if (typeof value === "string") return value.length + 2;
   if (typeof value === "number" || typeof value === "boolean") return String(value).length;
-  if (depth > 6) return 16;
+  if (depth > 6) return boundedJsonEstimate(value);
   if (Array.isArray(value)) {
     let s = 2;
     for (const item of value) {
@@ -192,6 +194,15 @@ function estimateInputChars(value: unknown, depth = 0): number {
     return s;
   }
   return 8;
+}
+
+function boundedJsonEstimate(value: unknown): number {
+  try {
+    const json = JSON.stringify(value);
+    return Math.min(json.length, DEEP_INPUT_ESTIMATE_BOUND);
+  } catch {
+    return DEEP_INPUT_ESTIMATE_BOUND;
+  }
 }
 
 type MessageGroup = { messages: ModelMessage[] };

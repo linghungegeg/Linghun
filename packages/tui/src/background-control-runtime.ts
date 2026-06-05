@@ -308,6 +308,9 @@ async function stopSingleBackgroundTask(
   if (task.kind === "job") {
     const job = await findDurableJob(context, task.id);
     if (job) {
+      if (job.runner) {
+        await stopRunnerForDurableJob(context, job);
+      }
       await transitionDurableJob(
         job,
         context,
@@ -342,6 +345,14 @@ async function stopSingleBackgroundTask(
         : `${task.title} 没有可用取消 controller；已标记为 stale。`,
   );
   return true;
+}
+
+export async function __testStopSingleBackgroundTask(
+  taskId: string,
+  context: TuiContext,
+  output: Writable,
+): Promise<boolean> {
+  return stopSingleBackgroundTask(taskId, context, output);
 }
 
 export async function handleInterruptCommand(

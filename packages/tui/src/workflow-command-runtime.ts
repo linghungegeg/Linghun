@@ -480,6 +480,8 @@ function recoverWorkflowRunState(
     startedAt: state.startedAt,
     endedAt: state.endedAt,
     result: status === "completed" ? "partial" : status === "stale" ? "stale" : state.result,
+    // Preserve persisted gate state; default false for old state files that lack the field.
+    phaseGateConfirmed: state.phaseGateConfirmed === true,
   };
 }
 
@@ -710,6 +712,10 @@ type RunWorkflowExecutionOptions = {
   runningCap?: number;
   teamName?: string;
   __testRunId?: string;
+  /** Propagated from activeRun.phaseGateConfirmed. When true, the bridge
+   *  marks mutating requests as executable (per-tool permission still applies).
+   *  When false/undefined, mutating requests stay blocked at the bridge layer. */
+  phaseGateConfirmed?: boolean;
 };
 
 type WorkflowBatchItem = {
@@ -725,6 +731,16 @@ export async function __testRunWorkflowStepsWithPlan(
   options: RunWorkflowExecutionOptions = {},
 ): Promise<void> {
   await runWorkflowPlanSteps(goal, plan, context, output, options);
+}
+
+export function __testGetCurrentWorkflowStepRequest(
+  plan: NormalizedWorkflowPlan,
+  phaseId: string,
+  steps: WorkflowStepState[],
+  stepId: string,
+  options: RunWorkflowExecutionOptions = {},
+): WorkflowBridgeRequestProposal {
+  return getCurrentWorkflowStepRequest(plan, phaseId, steps, stepId, options);
 }
 
 async function runWorkflowPlanSteps(
@@ -783,6 +799,7 @@ async function runWorkflowPlanSteps(
     steps: stepStates,
     startedAt,
     result: "partial",
+    phaseGateConfirmed: true,
   };
   rememberBackgroundTask(context, workflowTask);
   await persistWorkflowRunState(context, context.workflows.activeRun, workflowTask);
@@ -813,9 +830,13 @@ async function runWorkflowPlanSteps(
 
   let completed = 0;
   let batchIndex = 0;
+  const gateOptions: RunWorkflowExecutionOptions = {
+    ...options,
+    phaseGateConfirmed: context.workflows.activeRun?.phaseGateConfirmed === true,
+  };
   while (stepStates.some((step) => step.status === "queued")) {
     if (isWorkflowRunTerminal(context, runId, workflowTask)) return;
-    const batch = selectRunnableWorkflowBatch(plan, phase.id, stepStates, options);
+    const batch = selectRunnableWorkflowBatch(plan, phase.id, stepStates, gateOptions);
     if (batch.length === 0) {
       const blocked = stepStates.find((step) => step.status === "queued");
       const summary = formatWorkflowStepSummary(
@@ -1071,6 +1092,7 @@ export async function runRegistryWorkflow(
     steps: stepStates,
     startedAt,
     result: "partial",
+    phaseGateConfirmed: true,
   };
   rememberBackgroundTask(context, task);
   await persistWorkflowRunState(context, context.workflows.activeRun, task);
@@ -1212,6 +1234,39 @@ async function executeRegistryWorkflowStep(
 }> {
   const beforeEvidence = context.evidence.map((item) => item.id);
   try {
+    // Mutating registry steps must first pass the workflow-level gate.
+    // Readonly steps (details/index/verification) pass straight through.
+    // Per-tool decidePermission still gates every Write/Bash/Agent fork.
+    const isRegistryMutating =
+      step.action === "write" || step.action === "bash" || step.action === "agent";
+    if (isRegistryMutating) {
+      if (context.permissionMode === "plan") {
+        return {
+          status: "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            "blocked",
+            "plan mode cannot produce executable mutating workflow proposals",
+            context.language,
+          ),
+          evidenceRefs: [],
+        };
+      }
+      if (context.workflows.activeRun?.phaseGateConfirmed !== true) {
+        return {
+          status: "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            "blocked",
+            context.language === "en-US"
+              ? "workflow start gate not confirmed; mutating registry steps require an explicit /workflows run invocation"
+              : "workflow start gate 未确认；mutating registry step 需要明确的 /workflows run 调用",
+            context.language,
+          ),
+          evidenceRefs: [],
+        };
+      }
+    }
     if (step.action === "agent") {
       const role = step.role ?? "worker";
       const task = step.task ?? (goal || workflow.description);
@@ -1274,18 +1329,21 @@ async function executeRegistryWorkflowStep(
         };
       await handleToolCommand("Bash", [step.command], context, output);
     } else if (step.action === "write") {
-      return {
-        status: "blocked",
-        summary: formatWorkflowStepSummary(
-          step.id,
-          "blocked",
-          context.language === "en-US"
-            ? "write registry step requires existing Write tool input and is not auto-synthesized"
-            : "write registry step 需要现有 Write 工具输入，不能自动合成",
-          context.language,
-        ),
-        evidenceRefs: [],
-      };
+      if (!step.path || !step.content) {
+        return {
+          status: "blocked",
+          summary: formatWorkflowStepSummary(
+            step.id,
+            "blocked",
+            context.language === "en-US"
+              ? "write registry step requires path and content; add path/content to the step definition"
+              : "write registry step 需要 path 和 content；请在 step 定义中添加 path 和 content",
+            context.language,
+          ),
+          evidenceRefs: [],
+        };
+      }
+      await handleToolCommand("Write", [step.path, step.content], context, output);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1374,9 +1432,10 @@ async function executeWorkflowStep(
   summary: string;
   evidenceRefs: string[];
 }> {
+  const phaseGateConfirmed = context.workflows.activeRun?.phaseGateConfirmed === true;
   const capability = decideWorkflowStepCapability({
     permissionMode: context.permissionMode,
-    phaseStopPointConfirmed: true,
+    phaseStopPointConfirmed: phaseGateConfirmed,
     target:
       request.safety.mutating || request.request
         ? ({ kind: "details", view: "evidence", mutating: request.safety.mutating } as never)
@@ -1899,7 +1958,7 @@ function getCurrentWorkflowStepRequest(
   };
   const bridge = bridgeWorkflowPlanToMainChainRequests(runningPlan, {
     currentPhaseId: phaseId,
-    confirmedPhaseStopPoints: [phaseId],
+    confirmedPhaseStopPoints: options.phaseGateConfirmed === true ? [phaseId] : [],
     runningCap: normalizeWorkflowRunningCap(options.runningCap ?? plan.budget.maxRunningAgents),
   });
   return (

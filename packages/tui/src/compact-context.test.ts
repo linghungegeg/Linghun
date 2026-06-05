@@ -141,4 +141,55 @@ describe("Compact Lite context boundaries", () => {
     expect(result.messages.at(-1)?.content).toBe("current request");
     assertNoSplitToolPairs(result.messages);
   });
+
+  it("estimateModelMessagesChars does not underestimate deeply nested tool input (depth > 6)", () => {
+    const bigString = "x".repeat(5_000);
+    const deepInput = {
+      level1: {
+        level2: { level3: { level4: { level5: { level6: { level7: { bigString } } } } } },
+      },
+    };
+    const toolCalls = [{ id: "call-deep", name: "test", input: deepInput }];
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "testing deep input", toolCalls },
+      { role: "tool", tool_call_id: "call-deep", content: "ok" },
+    ];
+    const estimate = estimateModelMessagesChars(messages);
+    // The deep input contains a 5000-char string; the old depth>6→16 guard would
+    // report ~137 chars for this tool input. The bounded JSON estimate must
+    // capture at least DEEP_INPUT_ESTIMATE_BOUND (2000) worth of real content.
+    expect(estimate).toBeGreaterThan(2_000);
+    // The estimate must NOT exceed the actual JSON size, proving we don't inflate.
+    const actualJson = JSON.stringify(deepInput);
+    expect(estimate).toBeLessThanOrEqual(actualJson.length + 200);
+  });
+
+  it("deep estimate is capped at DEEP_INPUT_ESTIMATE_BOUND for huge objects", () => {
+    const huge: Record<string, string> = {};
+    for (let i = 0; i < 1_000; i++) {
+      huge[`key_${i}`] = "x".repeat(100);
+    }
+    const toolCalls = [
+      { id: "call-huge", name: "test", input: { deep: Array.from({ length: 100 }, () => huge) } },
+    ];
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: "testing huge input", toolCalls },
+      { role: "tool", tool_call_id: "call-huge", content: "ok" },
+    ];
+    const result = microCompactMessages(
+      [
+        { role: "system", content: "test" },
+        ...messages,
+        { role: "user", content: "current request ".repeat(50) },
+      ],
+      {
+        maxChars: 500,
+        preserveRecentMessages: 2,
+        kind: "micro",
+      },
+    );
+    // The huge deep input should not cause OOM or hang; estimate stays bounded.
+    expect(result.changed).toBe(true);
+    expect(estimateModelMessagesChars(messages)).toBeGreaterThan(1_000);
+  });
 });

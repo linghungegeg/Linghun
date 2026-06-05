@@ -832,6 +832,7 @@ export {
 
 import {
   __testStopCommandPanelSelection,
+  __testStopSingleBackgroundTask,
   __testToggleCommandPanelSelection,
   __testUpdateCommandPanelSelection,
   handleInterruptCommand,
@@ -1021,6 +1022,7 @@ export {
 } from "./compact-cache-command-runtime.js";
 export {
   __testStopCommandPanelSelection,
+  __testStopSingleBackgroundTask,
   __testToggleCommandPanelSelection,
   __testUpdateCommandPanelSelection,
   interruptAllActiveWork,
@@ -1051,7 +1053,10 @@ import {
   runWorkflowVerificationStep,
   upsertWorkflowBackgroundTask,
 } from "./workflow-command-runtime.js";
-export { __testRunWorkflowStepsWithPlan } from "./workflow-command-runtime.js";
+export {
+  __testGetCurrentWorkflowStepRequest,
+  __testRunWorkflowStepsWithPlan,
+} from "./workflow-command-runtime.js";
 export type {
   AgentRun,
   AgentType,

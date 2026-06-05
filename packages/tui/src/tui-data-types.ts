@@ -449,7 +449,13 @@ export type AgentRun = {
   maxTurns?: number;
   permissionMode: PermissionMode;
   status: "running" | "idle" | "completed" | "failed" | "blocked" | "cancelled" | "stale";
-  activityStatus?: "processing" | "idle" | "waiting_mailbox" | "blocked" | "cancelled" | "completed";
+  activityStatus?:
+    | "processing"
+    | "idle"
+    | "waiting_mailbox"
+    | "blocked"
+    | "cancelled"
+    | "completed";
   activitySummary?: string;
   activeTask?: AgentSharedTask;
   lastResultSummary?: string;
@@ -976,6 +982,10 @@ export type WorkflowState = {
     startedAt: string;
     endedAt?: string;
     result: "partial" | "failed" | "blocked" | "cancelled" | "stale";
+    /** Set to true when the user explicitly invoked /workflows run. Mutating steps
+     *  are still gated by per-tool decidePermission; this only satisfies the
+     *  workflow-level Start Gate so the bridge does not permanently block them. */
+    phaseGateConfirmed?: boolean;
   };
 };
 

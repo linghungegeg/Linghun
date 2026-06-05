@@ -21,6 +21,8 @@ export type RegistryWorkflowStep = {
   task?: string;
   level?: "smoke" | "focused" | "typecheck" | "test" | "build" | "lint";
   command?: string;
+  path?: string;
+  content?: string;
 };
 
 export type RegistryWorkflowDefinition = {
@@ -178,6 +180,8 @@ function parseWorkflowStep(value: unknown, index: number): RegistryWorkflowStep 
     step.level = obj.level as RegistryWorkflowStep["level"];
   }
   if (typeof obj.command === "string") step.command = obj.command.trim();
+  if (typeof obj.path === "string") step.path = obj.path.trim();
+  if (typeof obj.content === "string") step.content = obj.content.trim();
   return step;
 }
 
