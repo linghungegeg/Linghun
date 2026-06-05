@@ -11073,7 +11073,221 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("NOT written / NOT created");
     expect(output.text).not.toContain("auto-review 不会静默执行本次动作");
     await expect(readFile(join(project, "report.md"), "utf8")).resolves.toBe("# Report");
-  });
+  }, 10_000);
+
+  it("auto-review report Write final answer is corrected when the model contradicts write evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-report-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-report-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "package.json"), JSON.stringify({ name: "demo" }), "utf8");
+    const contradictoryFinal =
+      "未完成保存：当前没有 Write 能力，无法写入 report.md。\n\n已按要求保存 report.md。";
+    mockOpenAiReportReadThenWriteFlow("# Report", contradictoryFinal);
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["请生成 report.md\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("已保存：report.md。");
+    expect(output.text).toContain("证据：Write:");
+    await expect(readFile(join(project, "report.md"), "utf8")).resolves.toBe("# Report");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    expect(transcript).toContain("final_answer_coherence_guard");
+    expect(transcript).toContain("已保存：report.md。");
+    const assistantEvents = transcript
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line) as { type?: string; text?: string })
+      .filter((event) => event.type === "assistant_text_delta");
+    expect(assistantEvents.at(-1)?.text).toContain("已保存：report.md。");
+    expect(assistantEvents.at(-1)?.text).not.toContain("未完成保存");
+  }, 10_000);
+
+  it("auto-review Edit final answer is corrected when stale no-tool text contradicts edit evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-edit-coherence-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-edit-coherence-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(join(project, "note.txt"), "old value", "utf8");
+    mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "note.txt" } },
+        { toolName: "Edit", input: { path: "note.txt", oldText: "old", newText: "new" } },
+      ],
+      "无法修改 note.txt：没有任何工具可用。\n\n已按要求修改 note.txt。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["修改 note.txt\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("已修改：note.txt。");
+    expect(output.text).toContain("证据：Edit:");
+    await expect(readFile(join(project, "note.txt"), "utf8")).resolves.toBe("new value");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    const assistantEvents = transcript
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line) as { type?: string; text?: string })
+      .filter((event) => event.type === "assistant_text_delta");
+    expect(assistantEvents.at(-1)?.text).toContain("已修改：note.txt。");
+    expect(assistantEvents.at(-1)?.text).not.toContain("无法修改");
+  }, 10_000);
+
+  it("Bash final answer is corrected when stale no-bash text contradicts exit-0 evidence", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-bash-coherence-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-bash-coherence-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiToolFetch(
+      "Bash",
+      { command: "echo coherence-ok" },
+      "未运行命令：没有 Bash 能力。\n\n命令已完成，退出码 0。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["运行 echo 检查\nyes\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(output.text).toContain("已执行请求的命令。");
+    expect(output.text).toContain("证据：Bash:");
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    const assistantEvents = transcript
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line) as { type?: string; text?: string })
+      .filter((event) => event.type === "assistant_text_delta");
+    expect(assistantEvents.at(-1)?.text).toContain("已执行请求的命令。");
+    expect(assistantEvents.at(-1)?.text).not.toContain("未运行命令");
+  }, 10_000);
+
+  it("continuation final answer is corrected before transcript append when Bash evidence contradicts stale failure text", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "gpt-4.1" });
+    const output = new MemoryOutput();
+    const config = createTestModelConfig({
+      providers: {
+        "openai-compatible": {
+          ...defaultConfig.providers["openai-compatible"],
+          apiKey: "test-openai-key",
+          baseUrl: "https://example.test/v1",
+          model: "gpt-4.1",
+        },
+      },
+    });
+    const context = await createTestContext(project, store, session, config);
+    const requests = mockOpenAiToolSequenceWithFinalCalls(
+      [],
+      "没有 Bash 能力，未运行命令。\n\n命令已完成，退出码 0。",
+    );
+    const gateway = createModelGateway(config);
+    context.pendingLocalApproval = {
+      kind: "model_tool_use",
+      toolName: "Bash",
+      toolCall: {
+        id: "call-pending-bash-coherence",
+        name: "Bash",
+        input: { command: "echo continuation-ok" },
+      },
+      sessionId: session.id,
+      continuation: {
+        provider: "openai-compatible",
+        model: "gpt-4.1",
+        endpointProfile: "chat_completions",
+        reasoningSent: false,
+        messages: [
+          { role: "user", content: "run local verification" },
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call-pending-bash-coherence",
+                name: "Bash",
+                input: { command: "echo continuation-ok" },
+              },
+            ],
+          },
+        ],
+      },
+    } as NonNullable<TuiContext["pendingLocalApproval"]>;
+
+    const result = await handleNaturalInput("yes", context, gateway, output);
+
+    expect(result).toBe("handled");
+    expect(requests).toHaveLength(1);
+    expect(output.text).toContain("已执行请求的命令。");
+    const transcript = (await store.resume(session.id)).transcript;
+    const assistantEvents = transcript
+      .filter((event) => event.type === "assistant_text_delta")
+      .map((event) => event as { text?: string });
+    expect(assistantEvents.at(-1)?.text).toContain("已执行请求的命令。");
+    expect(assistantEvents.at(-1)?.text).not.toContain("未运行命令");
+  }, 10_000);
 
   it("plain yes without pending write approval is not sent to the model", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -12338,7 +12552,138 @@ describe("Phase 06 TUI slash commands", () => {
     expect(JSON.stringify(toolEndEvent?.output)).not.toContain(
       "READ_BUDGET_END_SHOULD_NOT_REACH_PROVIDER",
     );
-    expect(JSON.stringify(toolEndEvent?.output)).toContain("transcript-tool-output-truncated");
+    expect(JSON.stringify(toolEndEvent?.output)).not.toContain("<persisted-tool-result>");
+    expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
+  });
+
+  it("keeps StartAgent child Read large output budgeted without duplicating tool_call_end and tool_result", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-tool-observation-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    const large = `AGENT_TOOL_OBSERVATION_START\n${"x".repeat(60_000)}\nAGENT_TOOL_OBSERVATION_END_SHOULD_NOT_DUPLICATE`;
+    await writeFile(join(project, "a.txt"), large, "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "agent-tool-observation-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "agent-tool-observation-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const requests = mockOpenAiStartAgentChildToolSequence(1, "子 agent 已读取大文件。");
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["多开智能体读取大文件\n/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    const parentSession = (await store.list()).at(0);
+    const parentTranscript = (await store.resume(parentSession?.id ?? "")).transcript;
+    const agentStart = parentTranscript.find((event) => event.type === "agent_start") as
+      | { agent?: { transcriptSessionId?: string } }
+      | undefined;
+    const childTranscript = (await store.resume(agentStart?.agent?.transcriptSessionId ?? ""))
+      .transcript;
+    const toolEndEvent = childTranscript.find((event) => event.type === "tool_call_end") as
+      | { output?: ToolOutput }
+      | undefined;
+    const toolResultEvent = childTranscript.find((event) => event.type === "tool_result") as
+      | { content?: unknown }
+      | undefined;
+    expect(toolEndEvent).toBeDefined();
+    expect(toolResultEvent).toBeDefined();
+    expect(JSON.stringify(toolEndEvent?.output)).not.toContain(
+      "AGENT_TOOL_OBSERVATION_END_SHOULD_NOT_DUPLICATE",
+    );
+    expect(JSON.stringify(toolEndEvent?.output)).not.toContain("<persisted-tool-result>");
+    expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
+    expect((toolEndEvent?.output as ToolOutput | undefined)?.details).toBeUndefined();
+    expect(JSON.stringify(toolResultEvent?.content)).toContain("<persisted-tool-result>");
+    expect(JSON.stringify(toolResultEvent?.content)).not.toContain(
+      "AGENT_TOOL_OBSERVATION_END_SHOULD_NOT_DUPLICATE",
+    );
+    const childTranscriptText = JSON.stringify(childTranscript);
+    expect(childTranscriptText).toContain("tool_result_budget_persisted");
+    const artifact = await expectBudgetArtifact(project, childTranscriptText);
+    expect(artifact).toContain("AGENT_TOOL_OBSERVATION_END_SHOULD_NOT_DUPLICATE");
+  }, 10_000);
+
+  it("stores Write tool_call_end as summary metadata instead of duplicating tool_result content", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-tool-observation-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(join(project, "note.txt"), "old", "utf8");
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "tool-observation-model",
+        permission: { ...defaultConfig.permission, defaultMode: "auto-review" },
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "tool-observation-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    const content = "WRITE_CANONICAL_CONTENT_ONLY_IN_TOOL_RESULT";
+    mockOpenAiToolSequence(
+      [
+        { toolName: "Read", input: { path: "note.txt" } },
+        { toolName: "Write", input: { path: "note.txt", content } },
+      ],
+      "写入完成。",
+    );
+    const output = new MemoryOutput();
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["更新 note.txt\n", "/exit\n"]),
+      stdout: output,
+      stderr: new MemoryOutput(),
+    });
+
+    const session = (
+      await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+    ).at(0);
+    const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+    const transcriptEvents = transcript
+      .trim()
+      .split(/\n/u)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type?: string;
+            content?: unknown;
+            output?: ToolOutput;
+            toolName?: string;
+          },
+      );
+    const toolResultEvent = transcriptEvents.find(
+      (event) => event.type === "tool_result" && event.toolName === "Write",
+    );
+    const toolEndEvent = transcriptEvents.find(
+      (event) =>
+        event.type === "tool_call_end" && JSON.stringify(event.output).includes("Write note.txt"),
+    );
+
+    expect(JSON.stringify(toolResultEvent?.content)).toContain(content);
+    expect(JSON.stringify(toolEndEvent?.output)).not.toContain(content);
+    expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
+    expect((toolEndEvent?.output as ToolOutput | undefined)?.details).toBeUndefined();
   });
 
   it("budgets legacy raw tool_result from transcript before the next provider request", async () => {
@@ -14914,6 +15259,45 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/bash node --version", context, output);
     expect(output.text).toContain("Plan 模式禁止写入");
     expect(await readFile(join(project, "sample.txt"), "utf8")).toBe("alpha");
+  });
+
+  it("plain natural input clears stale advanced panels before model handling", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-panel-clear-"));
+    await mkdir(join(project, ".linghun"), { recursive: true });
+    await writeFile(
+      join(project, ".linghun", "settings.json"),
+      JSON.stringify({
+        defaultModel: "panel-clear-model",
+        providers: {
+          deepseek: { model: "different-model" },
+          "openai-compatible": {
+            baseUrl: "https://example.test/v1",
+            apiKey: "sk-test",
+            model: "panel-clear-model",
+          },
+        },
+      }),
+      "utf8",
+    );
+    mockOpenAiTextFetch("普通回复。");
+
+    await runTui({
+      projectPath: project,
+      stdin: Readable.from(["/background\n你好\n/exit\n"]),
+      stdout: new MemoryOutput(),
+      stderr: new MemoryOutput(),
+    });
+
+    const indexSrc = await readSrc("index.ts");
+    const naturalPath = indexSrc.slice(
+      indexSrc.indexOf('if (commandResult === "message")'),
+      indexSrc.indexOf("const naturalResult", indexSrc.indexOf('if (commandResult === "message")')),
+    );
+    expect(naturalPath).toContain("context.commandPanelState = undefined");
+    expect(naturalPath).toContain("context.helpPanelState = undefined");
+    expect(naturalPath).toContain("context.configPanelState = undefined");
+    expect(naturalPath).toContain("context.btwPanelState = undefined");
+    expect(naturalPath).toContain("context.sessionsPanelState = undefined");
   });
 
   it("shows only canonical modes and normalizes legacy aliases", async () => {
@@ -23875,7 +24259,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(ctx, blocks);
     const id = "assistant-stream-test-1";
     output.beginAssistantStream(id);
-    output.appendAssistantDelta("已完成所有测试，PASS。");
+    output.appendAssistantDelta("已完成所有测试，PASS。\n半截");
     expect(blocks).toHaveLength(1);
     expect(blocks[0]?.fullText).toContain("已完成");
     expect(ctx.lastFullOutput).toContain("已完成");
@@ -23885,9 +24269,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks[0]?.summary).toBe("");
     expect(ctx.lastFullOutput).toBeUndefined();
 
-    output.appendAssistantDelta("我没有跑测试，无法确认。");
-    expect(blocks[0]?.fullText).toBe("我没有跑测试，无法确认。");
-    expect(ctx.lastFullOutput).toBe("我没有跑测试，无法确认。");
+    output.appendAssistantDelta("我没有跑测试，无法确认。\n");
+    expect(blocks[0]?.fullText).toBe("我没有跑测试，无法确认。\n");
+    expect(ctx.lastFullOutput).toBe("我没有跑测试，无法确认。\n");
   });
 
   it("replaceAssistantBlockContent 用降级文本替换 fullText/summary 与 lastFullOutput", () => {
@@ -23896,7 +24280,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(ctx, blocks);
     const id = "assistant-stream-test-2";
     output.beginAssistantStream(id);
-    output.appendAssistantDelta("测试已通过，可以发布。");
+    output.appendAssistantDelta("测试已通过，可以发布。\n半截");
     expect(blocks[0]?.fullText).toContain("测试已通过");
     expect(ctx.lastFullOutput).toContain("测试已通过");
 
@@ -23914,9 +24298,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(ctx, blocks);
     const id = "assistant-stream-test-3";
     output.beginAssistantStream(id);
-    output.appendAssistantDelta("已完成，所有 build/test 已通过。");
+    output.appendAssistantDelta("已完成，所有 build/test 已通过。\n半截");
     output.discardAssistantBlock(id);
-    output.appendAssistantDelta("我没有调用任何工具，无法确认 build/test 状态。");
+    output.appendAssistantDelta("我没有调用任何工具，无法确认 build/test 状态。\n");
 
     expect(blocks).toHaveLength(1);
     const fullText = blocks[0]?.fullText ?? "";
@@ -23936,7 +24320,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const output = __testCreateShellBlockOutput(ctx, blocks);
     const id = "assistant-stream-test-4";
     output.beginAssistantStream(id);
-    output.appendAssistantDelta("已完成，PASS。");
+    output.appendAssistantDelta("已完成，PASS。\n");
     expect(ctx.lastFullOutput).toBe("preserved");
 
     output.discardAssistantBlock(id);
@@ -23981,14 +24365,14 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     output.beginAssistantStream(id);
 
     // 模拟 35K 字符的大量输出（超 MAX_STREAMING_FULL_TEXT_CHARS=32_000）
-    const largeText = "x".repeat(35_000);
+    const largeText = `${"x".repeat(35_000)}\n`;
     output.appendAssistantDelta(largeText);
 
     // block 应存在且 fullText 保持为完整文本（compaction 异步触发）
     const block = blocks.find((b) => b.id === id);
     expect(block).toBeTruthy();
     if (!block) throw new Error("missing streaming block");
-    expect(block.fullText?.length).toBe(35_000);
+    expect(block.fullText?.length).toBe(35_001);
 
     // compaction 完成后，block.fullText 应为 bounded preview
     await output.compactOutputMemory();
@@ -24007,7 +24391,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     output.beginAssistantStream(id);
 
     // 写一个超长单行（600 chars，超 MAX_STREAMING_SUMMARY_CHARS=500）
-    const longLine = "L".repeat(600);
+    const longLine = `${"L".repeat(600)}\n`;
     output.appendAssistantDelta(longLine);
 
     const block = blocks.find((b) => b.id === id);

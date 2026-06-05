@@ -352,9 +352,9 @@ describe("Ink shell selection", () => {
     expect(widths).toContain(40);
     expect(heights).toContain(24);
     expect(heights).toContain(15);
-    // alternateScreen 进入和退出
-    expect(output.text).toContain("\u001B[?1049h");
-    expect(output.text).toContain("\u001B[?1049l");
+    // Phase 7.10: ordinary main screen leaves terminal-native scrollback intact.
+    expect(output.text).not.toContain("\u001B[?1049h");
+    expect(output.text).not.toContain("\u001B[?1049l");
     expect(resizeCallbacks).toBe(0);
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
   });
@@ -388,7 +388,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("enables SGR mouse tracking in alt-screen Ink and restores it on exit", async () => {
+  it("does not enable SGR mouse tracking in ordinary main-screen Ink", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -408,9 +408,8 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).toContain("\x1B[?1002h\x1B[?1006h");
-    expect(output.text).toContain("\x1B[?1002l\x1B[?1006l");
-    expect(output.text.indexOf("\x1B[?1002h")).toBeLessThan(output.text.lastIndexOf("\x1B[?1002l"));
+    expect(output.text).not.toContain("\x1B[?1002h\x1B[?1006h");
+    expect(output.text).not.toContain("\x1B[?1002l\x1B[?1006l");
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -917,9 +916,8 @@ describe("home → task view mode transition", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    // Brand should appear but NOT be duplicated (alternateScreen handles clearing)
+    // Brand should appear but NOT be duplicated by ShellApp-level clears.
     const brandMatches = output.text.split("技术普惠会越来越成熟");
-    // With alternateScreen, Ink clears before re-render, so no duplication
     // The text may appear multiple times in raw output due to initial + re-render,
     // but the key assertion is no stdout.write("\x1b[2J\x1b[H") from ShellApp
     expect(output.text).not.toContain("\x1b[2J\x1b[H");
@@ -3942,10 +3940,10 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
     // Output region uses flexGrow=1; the composer band uses flexShrink=0.
-    // D.14D-C2: overflow="hidden" culling moved into the measured TranscriptViewport
-    // (TaskLayout delegates the output region to it), so it lives there now.
+    // Phase 7.10: the ordinary main screen does not mount TranscriptViewport,
+    // so terminal-native scrollback and selection remain available.
     expect(body).toContain("flexGrow={1}");
-    expect(body).toContain("<TranscriptViewport");
+    expect(body).not.toContain("<TranscriptViewport");
     expect(body).toContain("flexShrink={0}");
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
@@ -4001,7 +3999,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     } as unknown as TuiContext;
   }
 
-  it("两段 assistant_text_delta 必须拼成完整正文（'连' + '接成功' === '连接成功'）", () => {
+  it("appendAssistantDelta 只预览完整行，完成后 replace 由正式 block 接管", () => {
     const blocks: ProductBlockViewModel[] = [];
     let renderCount = 0;
     const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
@@ -4010,43 +4008,56 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     output.beginAssistantStream("assistant-stream-test-1");
     output.appendAssistantDelta("连");
-    output.appendAssistantDelta("接成功");
+    expect(blocks.find((b) => b.id === "assistant-stream-test-1")).toBeUndefined();
+    output.appendAssistantDelta("接成功\n尾");
+    expect(blocks.find((b) => b.id === "assistant-stream-test-1")?.fullText).toBe("连接成功\n");
     output.endAssistantStream();
+    output.replaceAssistantBlockContent("assistant-stream-test-1", "连接成功\n尾部完成");
 
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-1");
     expect(streamingBlock).toBeDefined();
     expect(streamingBlock?.keep).toBe(true);
-    expect(streamingBlock?.fullText).toBe("连接成功");
+    expect(streamingBlock?.fullText).toBe("连接成功\n尾部完成");
     expect(streamingBlock?.summary).toBe("连接成功");
-    // begin / 2 deltas / end —— 每次都触发 onWrite 重渲染。
-    expect(renderCount).toBeGreaterThanOrEqual(3);
+    expect(blocks.filter((b) => b.id === "assistant-stream-test-1")).toHaveLength(1);
+    expect(renderCount).toBeGreaterThanOrEqual(4);
   });
 
-  it("appendAssistantDelta 可见渲染合批，但 endAssistantStream 会 flush 最新正文", () => {
-    vi.useFakeTimers();
-    try {
-      const blocks: ProductBlockViewModel[] = [];
-      let renderCount = 0;
-      const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
-        renderCount += 1;
-      });
+  it("appendAssistantDelta 不做 16ms 合帧；只在完整行可见时触发渲染", () => {
+    const blocks: ProductBlockViewModel[] = [];
+    let renderCount = 0;
+    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
+      renderCount += 1;
+    });
 
-      output.beginAssistantStream("assistant-stream-coalesce");
-      output.appendAssistantDelta("A");
-      output.appendAssistantDelta("B");
-      output.appendAssistantDelta("C");
-      expect(blocks[0]?.fullText).toBe("ABC");
-      expect(renderCount).toBe(1);
+    output.beginAssistantStream("assistant-stream-complete-line");
+    output.appendAssistantDelta("A");
+    output.appendAssistantDelta("B");
+    expect(blocks.find((b) => b.id === "assistant-stream-complete-line")).toBeUndefined();
+    expect(renderCount).toBe(1);
 
-      vi.advanceTimersByTime(16);
-      expect(renderCount).toBe(2);
-      output.appendAssistantDelta("D");
-      output.endAssistantStream();
-      expect(blocks[0]?.fullText).toBe("ABCD");
-      expect(renderCount).toBeGreaterThanOrEqual(3);
-    } finally {
-      vi.useRealTimers();
-    }
+    output.appendAssistantDelta("\nC");
+    expect(blocks[0]?.fullText).toBe("AB\n");
+    expect(renderCount).toBe(2);
+
+    output.endAssistantStream();
+    expect(blocks[0]?.fullText).toBe("AB\n");
+    expect(renderCount).toBe(3);
+  });
+
+  it("endAssistantStream 模拟中断时只保留已可见完整行，不补出半行", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-interrupt");
+    output.appendAssistantDelta("第一行可见\n第二行半截");
+    output.endAssistantStream();
+
+    const streamingBlock = blocks.find((b) => b.id === "assistant-stream-interrupt");
+    expect(streamingBlock?.fullText).toBe("第一行可见\n");
+    expect(streamingBlock?.fullText).not.toContain("第二行半截");
+    expect(ctx.lastFullOutput).toBe("第一行可见\n");
   });
 
   it("普通 writeLine 后再开 streaming block，writeLine 不再被 ephemeral splice 淘汰；keep streaming block 保留", () => {
@@ -4056,7 +4067,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // 1) 先开 streaming block —— keep:true
     output.beginAssistantStream("assistant-stream-test-2");
     output.appendAssistantDelta("hello ");
-    output.appendAssistantDelta("world");
+    output.appendAssistantDelta("world\n");
     output.endAssistantStream();
 
     // 2) 再写两条普通 writeLine（_write 路径）
@@ -4066,7 +4077,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // streaming block 必须留下，且 fullText 不丢
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-2");
     expect(streamingBlock).toBeDefined();
-    expect(streamingBlock?.fullText).toBe("hello world");
+    expect(streamingBlock?.fullText).toBe("hello world\n");
     // D.13Q-UX Real Smoke Fix v3：ShellBlockOutput 不再做 ephemeral splice，
     // 两条 ephemeral 按 append 时间顺序保留；view-model 才负责 cap 限流。
     const ephemeralBlocks = blocks.filter((b) => !b.keep);
@@ -4093,14 +4104,14 @@ describe("ShellBlockOutput — assistant streaming block", () => {
 
     output.beginAssistantStream("assistant-stream-test-3");
     output.appendAssistantDelta("连");
-    expect(ctx.lastFullOutput).toBe("连");
-    output.appendAssistantDelta("接成功");
-    expect(ctx.lastFullOutput).toBe("连接成功");
+    expect(ctx.lastFullOutput).toBeUndefined();
+    output.appendAssistantDelta("接成功\n");
+    expect(ctx.lastFullOutput).toBe("连接成功\n");
 
     // 切换到 suppress 模式后，新的 delta 不能再覆盖 lastFullOutput。
     ctx.suppressLastFullOutputCapture = true;
-    output.appendAssistantDelta("后续");
-    expect(ctx.lastFullOutput).toBe("连接成功");
+    output.appendAssistantDelta("后续\n");
+    expect(ctx.lastFullOutput).toBe("连接成功\n");
     output.endAssistantStream();
   });
 
@@ -4135,6 +4146,7 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     // 普通 assistant 多行正文直接展示，不再自动折成 Ctrl+O。
     output.appendAssistantDelta("第一行\n第二行\n第三行");
     output.endAssistantStream();
+    output.replaceAssistantBlockContent("assistant-stream-ctrl-o", "第一行\n第二行\n第三行");
 
     const streaming = blocks.find((b) => b.id === "assistant-stream-ctrl-o");
     expect(streaming).toBeDefined();
@@ -5656,7 +5668,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.transcriptScroll?.stickToBottom).toBe(true);
   });
 
-  it("transcriptSelectionState 给对应 block 行挂 selectionLineIndexes，不改 fullText", () => {
+  it("transcriptSelectionState 不再给普通主屏 block 挂蓝底 selectionLineIndexes", () => {
     const ctx = createContext() as TuiContext & {
       transcriptSelectionState?: {
         dragging: boolean;
@@ -5684,7 +5696,7 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
       viewMode: "task",
       outputBlocks: [block],
     });
-    expect(view.blocks[0]?.selectionLineIndexes).toEqual([0, 1]);
+    expect(view.blocks[0]?.selectionLineIndexes).toBeUndefined();
     expect(view.blocks[0]?.fullText).toBe("第一行\n第二行\n第三行");
   });
 });

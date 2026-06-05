@@ -164,7 +164,8 @@ export type MetaSchedulerDecision = {
 export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerDecision {
   const internalEvents: string[] = [];
   const directives: string[] = [];
-  const highRiskClaim = hasHighRiskCompletionClaim(input.assistantText ?? input.userText);
+  const highRiskClaim =
+    typeof input.assistantText === "string" && hasHighRiskCompletionClaim(input.assistantText);
   const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
   const blockedRuntime = hasBlockedAgentOrWorkflow(input.backgroundTasks, input.workflow);

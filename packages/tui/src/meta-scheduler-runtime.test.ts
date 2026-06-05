@@ -29,6 +29,18 @@ describe("Meta scheduler runtime", () => {
     expect(formatMetaSchedulerDirective(decision)).toContain("final-answer-gate");
   });
 
+  it("does not treat user questions about completion as assistant high-risk claims", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "请核对是否已完成，没验证通过就不要说 PASS。",
+    });
+
+    expect(decision.shouldRunFinalAnswerGate).toBe(false);
+    expect(decision.shouldPreferVerifier).toBe(false);
+    expect(decision.policyDecision.riskLevel).toBe("low");
+    expect(decision.policyDecision.executionPlan.requireFinalGate).toBe(false);
+  });
+
   it("does not let tool failures become fake completion", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),

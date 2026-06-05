@@ -40,8 +40,8 @@ export class ShellBlockOutput extends Writable {
    */
   private assistantBlockId: string | undefined;
   private compactOutputMemoryQueue: Promise<void> = Promise.resolve();
-  private assistantRenderTimer: ReturnType<typeof setTimeout> | undefined;
-  private assistantRenderPending = false;
+  private assistantStreamText = "";
+  private assistantPreviewText = "";
 
   constructor(
     private readonly context: TuiContext,
@@ -116,10 +116,10 @@ export class ShellBlockOutput extends Writable {
   }
 
   /**
-   * 将一段 assistant_text_delta 追加到当前 streaming block。
-   * - 第一次收到非空 delta 时才创建 keep:true block（避免空占位行）
-   * - fullText 累计完整正文
-   * - summary 取累计正文的首个非空行
+   * 将一段 assistant_text_delta 追加到当前 streaming preview。
+   * - 第一次出现完整换行文本时才创建 keep:true preview block
+   * - 流式期间只展示完整行，不把半行/逐字 delta 写入正式 assistant block
+   * - 正式 assistant block 在 end/replace 时一次性接管，避免重复显示
    * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
    */
   appendAssistantDelta(text: string): void {
@@ -129,28 +129,18 @@ export class ShellBlockOutput extends Writable {
       this._write(text, "utf8", () => {});
       return;
     }
-    const block = this.ensureAssistantBlock(id);
-    if (!block) {
-      this.assistantBlockId = undefined;
-      this._write(text, "utf8", () => {});
-      return;
-    }
-    const nextFull = `${block.fullText ?? ""}${text}`;
-    const firstLine = nextFull.split("\n").find((line) => line.trim()) ?? nextFull;
-    block.fullText = nextFull;
-    block.summary =
-      firstLine.length > MAX_STREAMING_SUMMARY_CHARS
-        ? `${firstLine.slice(0, MAX_STREAMING_SUMMARY_CHARS)}…`
-        : firstLine;
-    if (!this.context.suppressLastFullOutputCapture) {
-      this.context.lastFullOutput = nextFull;
-    }
+    this.assistantStreamText += text;
+    const visiblePreview = completeLinePrefix(this.assistantStreamText);
+    if (!visiblePreview) return;
+    this.assistantPreviewText = visiblePreview;
+    this.commitAssistantBlock(id, visiblePreview);
     trimOutputBlocks(this.blocks);
     // Phase 6.5: 流式累积超过阈值时立即触发 artifact 落盘，不等流结束。
-    if (nextFull.length >= MAX_STREAMING_FULL_TEXT_CHARS) {
+    // 这里仍按完整累计文本判断；可见 preview 只显示完整行。
+    if (this.assistantStreamText.length >= MAX_STREAMING_FULL_TEXT_CHARS) {
       void this.compactOutputMemory();
     }
-    this.scheduleAssistantRender();
+    this.onWrite();
   }
 
   /**
@@ -159,8 +149,14 @@ export class ShellBlockOutput extends Writable {
    * 只清掉 active id，下一轮 beginAssistantStream 会换新 id。
    */
   endAssistantStream(): void {
-    this.flushAssistantRender();
+    const id = this.assistantBlockId;
+    if (id) {
+      const visibleText = this.assistantPreviewText;
+      this.commitAssistantBlock(id, visibleText);
+    }
     this.assistantBlockId = undefined;
+    this.assistantStreamText = "";
+    this.assistantPreviewText = "";
     void this.compactOutputMemory();
     this.onWrite();
   }
@@ -171,7 +167,10 @@ export class ShellBlockOutput extends Writable {
    * 同时清掉 lastFullOutput 中可能残留的违规原文，避免 Ctrl+O / details 拉到。
    */
   discardAssistantBlock(id: string): void {
-    this.flushAssistantRender();
+    if (this.assistantBlockId === id) {
+      this.assistantStreamText = "";
+      this.assistantPreviewText = "";
+    }
     const block = this.blocks.find((b) => b.id === id);
     if (block) {
       block.fullText = "";
@@ -189,13 +188,11 @@ export class ShellBlockOutput extends Writable {
    * lastFullOutput 同步为同一份安全文本，让 Ctrl+O / details 也只看降级版。
    */
   replaceAssistantBlockContent(id: string, text: string): void {
-    this.flushAssistantRender();
-    const block = this.blocks.find((b) => b.id === id);
-    if (block) {
-      block.fullText = text;
-      const firstLine = text.split("\n").find((line) => line.trim()) ?? text;
-      block.summary = firstLine || block.summary;
+    if (this.assistantBlockId === id) {
+      this.assistantStreamText = "";
+      this.assistantPreviewText = "";
     }
+    this.commitAssistantBlock(id, text);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
     }
@@ -307,6 +304,22 @@ export class ShellBlockOutput extends Writable {
     return this.compactOutputMemoryQueue;
   }
 
+  private commitAssistantBlock(id: string, text: string): ProductBlockViewModel | undefined {
+    if (!text) return undefined;
+    const block = this.ensureAssistantBlock(id);
+    if (!block) return undefined;
+    const firstLine = text.split("\n").find((line) => line.trim()) ?? text;
+    block.fullText = text;
+    block.summary =
+      firstLine.length > MAX_STREAMING_SUMMARY_CHARS
+        ? `${firstLine.slice(0, MAX_STREAMING_SUMMARY_CHARS)}…`
+        : firstLine;
+    if (!this.context.suppressLastFullOutputCapture) {
+      this.context.lastFullOutput = text;
+    }
+    return block;
+  }
+
   private async compactOutputMemoryOnce(): Promise<void> {
     trimOutputBlocks(this.blocks);
     try {
@@ -317,30 +330,12 @@ export class ShellBlockOutput extends Writable {
       compactLastFullOutputInMemory(this.context, error);
     }
   }
+}
 
-  private scheduleAssistantRender(): void {
-    if (this.assistantRenderTimer) {
-      this.assistantRenderPending = true;
-      return;
-    }
-    this.assistantRenderTimer = setTimeout(() => {
-      this.assistantRenderTimer = undefined;
-      const shouldRender = this.assistantRenderPending;
-      this.assistantRenderPending = false;
-      if (shouldRender) this.onWrite();
-    }, 16);
-    this.assistantRenderPending = true;
-  }
-
-  private flushAssistantRender(): void {
-    if (this.assistantRenderTimer) {
-      clearTimeout(this.assistantRenderTimer);
-      this.assistantRenderTimer = undefined;
-    }
-    if (!this.assistantRenderPending) return;
-    this.assistantRenderPending = false;
-    this.onWrite();
-  }
+function completeLinePrefix(text: string): string {
+  const lastNewline = text.lastIndexOf("\n");
+  if (lastNewline < 0) return "";
+  return text.slice(0, lastNewline + 1);
 }
 
 function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {

@@ -41,7 +41,11 @@ export function renderInkShell(
   const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
   const enableKittyKeyboard =
     capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
-  const enableMouseTracking = capability.alternateScreen;
+  // Phase 7.10: the ordinary main screen must leave selection/copy and
+  // scrollback to the terminal. App-owned SGR mouse tracking is reserved for
+  // future explicit transcript/detail views, not enabled by default.
+  const enableMouseTracking = false;
+  const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 
   try {
@@ -56,7 +60,7 @@ export function renderInkShell(
       stdout,
       stderr: options.stderr as NodeJS.WriteStream | undefined,
       exitOnCtrlC: false,
-      alternateScreen: capability.alternateScreen,
+      alternateScreen: useAlternateScreen,
       kittyKeyboard: enableKittyKeyboard ? { mode: "auto" } : undefined,
     });
   } catch (error) {

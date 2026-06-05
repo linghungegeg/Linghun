@@ -974,6 +974,21 @@ export async function sendMessage(
         assistantText = visibleAssistantText;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
+      const coherentAssistantText = enforceSuccessfulToolCoherence(assistantText, context);
+      if (coherentAssistantText !== assistantText) {
+        await appendSystemEvent(
+          context,
+          sessionId,
+          "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
+          "warning",
+        );
+        assistantText = coherentAssistantText;
+        replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+        if (!(output instanceof ShellBlockOutput)) {
+          output.write("\n");
+          writeLine(output, assistantText);
+        }
+      }
     }
     // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
     // （RuntimeStatusForModel= / ControlledMemorySummary= / MemoryBoundary= /
@@ -987,6 +1002,7 @@ export async function sendMessage(
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
     }
+    replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     output.write("\n");
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
@@ -1638,7 +1654,10 @@ async function streamFinalModelAnswerWithoutTools(
     }
   }
   if (assistantText) {
-    writeAssistantDelta(output, assistantStreamBlockId, assistantText);
+    replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    if (!(output instanceof ShellBlockOutput)) {
+      writeAssistantDelta(output, assistantStreamBlockId, assistantText);
+    }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
@@ -1695,6 +1714,110 @@ async function downgradeUnsupportedFinalAnswer(
     });
   }
   return downgraded;
+}
+
+type SuccessfulToolCoherenceKind = "write" | "edit" | "bash";
+
+function enforceSuccessfulToolCoherence(assistantText: string, context: TuiContext): string {
+  const kind = detectContradictorySuccessfulToolClaim(assistantText);
+  if (!kind) return assistantText;
+
+  const evidence = context.evidence.find((record) => isSuccessfulToolEvidence(record, kind));
+  if (!evidence) return assistantText;
+
+  const filePath =
+    kind === "bash"
+      ? undefined
+      : (evidence.supportsClaims
+          .find((claim) => claim.startsWith("file:"))
+          ?.slice("file:".length) ?? extractToolEvidencePath(evidence.summary));
+  if (context.language === "en-US") {
+    const action =
+      kind === "bash"
+        ? "Ran the requested command."
+        : filePath
+          ? kind === "edit"
+            ? `Modified: ${filePath}.`
+            : `Saved: ${filePath}.`
+          : kind === "edit"
+            ? "Modified the requested file."
+            : "Saved the requested file.";
+    return [
+      action,
+      `Evidence: ${evidence.summary}`,
+      "Note: I replaced a contradictory draft final answer that also claimed the tool could not run or modify files.",
+    ].join("\n\n");
+  }
+  const action =
+    kind === "bash"
+      ? "已执行请求的命令。"
+      : filePath
+        ? kind === "edit"
+          ? `已修改：${filePath}。`
+          : `已保存：${filePath}。`
+        : kind === "edit"
+          ? "已修改请求的文件。"
+          : "已保存请求的文件。";
+  return [
+    action,
+    `证据：${evidence.summary}`,
+    "说明：已用本地证据替换一段自相矛盾的草稿最终回复；该草稿同时声称工具不可用或无法完成修改。",
+  ].join("\n\n");
+}
+
+function detectContradictorySuccessfulToolClaim(
+  assistantText: string,
+): SuccessfulToolCoherenceKind | undefined {
+  const staleFailure =
+    /(未完成(?:保存|写入|修改|编辑|执行|运行)|无法(?:真实)?(?:写入|保存|修改|编辑|执行|运行)|不能(?:真实)?(?:写入|保存|修改|编辑|执行|运行)|没有(?:任何)?\s*(?:工具|tool)|没有\s*`?(?:Write|Edit|MultiEdit|Bash|写入|编辑|修改|命令|终端)`?\s*能力|未(?:执行|运行)|没有\s*Bash\s*能力|cannot\s+(?:run|execute|modify|edit|write|save)|can't\s+(?:run|execute|modify|edit|write|save)|could\s+not\s+(?:run|execute|modify|edit|write|save)|no\s+(?:tools?|tooling|bash|write|edit)\s+(?:available|capability|access)|not\s+(?:run|executed|modified|edited|saved|written))/iu.test(
+      assistantText,
+    );
+  if (!staleFailure) return undefined;
+  const hasWriteSuccess =
+    /(已(?:按要求)?(?:保存|写入|落盘)|Write\s+已完成|saved|written|file\s+(?:saved|written))/iu.test(
+      assistantText,
+    );
+  const hasEditSuccess =
+    /(已(?:按要求)?(?:修改|编辑|更新)|(?:Edit|MultiEdit)\s+已完成|modified|edited|updated|file\s+(?:modified|edited|updated))/iu.test(
+      assistantText,
+    );
+  const hasBashSuccess =
+    /(已(?:运行|执行)(?:请求的)?命令|命令已(?:完成|执行|运行)|Bash\s+已(?:完成|执行|运行)|退出码\s*0|exit\s+code\s+0|command\s+(?:ran|executed|completed)|ran\s+the\s+(?:command|requested command)|executed\s+the\s+(?:command|requested command))/iu.test(
+      assistantText,
+    );
+  if (hasBashSuccess) return "bash";
+  if (hasEditSuccess) return "edit";
+  if (hasWriteSuccess) return "write";
+  return undefined;
+}
+
+function isSuccessfulToolEvidence(
+  record: { summary: string; supportsClaims: string[] },
+  kind: SuccessfulToolCoherenceKind,
+): boolean {
+  if (kind === "bash") {
+    return (
+      record.supportsClaims.includes("Bash") &&
+      record.supportsClaims.includes("command_ran") &&
+      record.supportsClaims.includes("bash_exit_0")
+    );
+  }
+  if (kind === "edit") {
+    return (
+      record.supportsClaims.includes("file_written") &&
+      (record.supportsClaims.includes("Edit") ||
+        record.supportsClaims.includes("MultiEdit") ||
+        /^(?:Edit|MultiEdit):/iu.test(record.summary))
+    );
+  }
+  return (
+    record.supportsClaims.includes("file_written") &&
+    (record.supportsClaims.includes("Write") || /^Write:/iu.test(record.summary))
+  );
+}
+
+function extractToolEvidencePath(summary: string): string | undefined {
+  return summary.match(/[A-Za-z0-9_.\\/-]+\.[A-Za-z0-9]{1,12}/u)?.[0];
 }
 
 export async function continueModelAfterToolResults(
@@ -2061,6 +2184,21 @@ export async function continueModelAfterToolResults(
           assistantText = visibleAssistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
+        const coherentAssistantText = enforceSuccessfulToolCoherence(assistantText, context);
+        if (coherentAssistantText !== assistantText) {
+          await appendSystemEvent(
+            context,
+            sessionId,
+            "final_answer_coherence_guard: replaced contradictory pre-tool failure/success text with evidence-backed final answer",
+            "warning",
+          );
+          assistantText = coherentAssistantText;
+          replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+          if (!(output instanceof ShellBlockOutput)) {
+            output.write("\n");
+            writeLine(output, assistantText);
+          }
+        }
       }
       // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
       // 同样在 assistant 文本进主屏前清掉内部 system-prompt 字段复述；必须在
@@ -2072,6 +2210,7 @@ export async function continueModelAfterToolResults(
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
       }
+      replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       output.write("\n");
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",

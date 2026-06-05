@@ -3,7 +3,6 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { type ModelRole, type RoleModelRoute, resolveStoragePaths } from "@linghun/config";
-import type { TranscriptEvent } from "@linghun/core";
 import type {
   EndpointProfile,
   ModelGateway,
@@ -17,6 +16,7 @@ import type {
   CompactPreflightRuntime,
   ProviderPreflightCompactResult,
 } from "./compact-preflight-runtime.js";
+import { appendToolResultEvent, createToolEndEvent } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { createManagedWorktree } from "./git-operation-runtime.js";
 import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
@@ -3090,14 +3090,14 @@ async function appendAgentToolResultEvent(
   content: unknown,
   isError: boolean,
 ): Promise<void> {
-  await context.store.appendEvent(agent.transcriptSessionId, {
-    type: "tool_result",
+  await appendToolResultEvent(
+    context,
+    agent.transcriptSessionId,
     toolUseId,
-    toolName: toolName as ToolName,
+    toolName as ToolName,
     content,
     isError,
-    createdAt: new Date().toISOString(),
-  });
+  );
 }
 
 export async function cancelAgent(
@@ -3901,13 +3901,4 @@ async function runAgentToolInCwd(
     ),
   );
   return result;
-}
-
-function createToolEndEvent(id: string, output: ToolOutput): TranscriptEvent {
-  return {
-    type: "tool_call_end",
-    id,
-    output,
-    createdAt: new Date().toISOString(),
-  };
 }

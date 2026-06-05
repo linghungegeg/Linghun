@@ -429,8 +429,21 @@ export function createToolEndEvent(id: string, output: ToolOutput): TranscriptEv
   return {
     type: "tool_call_end",
     id,
-    output: compactToolOutputForTranscript(output),
+    output: summarizeToolEndOutputForTranscript(output),
     createdAt: new Date().toISOString(),
+  };
+}
+
+function summarizeToolEndOutputForTranscript(output: ToolOutput): ToolOutput {
+  const text = output.summary || output.preview || output.text || "tool call completed";
+  return {
+    text,
+    summary: output.summary,
+    preview: output.preview,
+    truncated: output.truncated,
+    fullOutputPath: output.fullOutputPath,
+    evidenceId: output.evidenceId,
+    changedFiles: output.changedFiles,
   };
 }
 
