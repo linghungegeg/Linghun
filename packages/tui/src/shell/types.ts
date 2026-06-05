@@ -75,6 +75,8 @@ export type ProductBlockViewModel = {
    * 着色；notification / status 等不进 transcript 主流。未设时回退到旧路径。
    */
   messageKind?: MessageBlockKind;
+  /** Line indexes highlighted by the app-owned transcript selection substrate. */
+  selectionLineIndexes?: number[];
 };
 
 export type CtrlOExpandView = {
@@ -316,6 +318,22 @@ export type TranscriptScrollView = {
   wheelStep?: number;
 };
 
+export type TranscriptViewportGeometryView = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  contentHeight: number;
+  topOffset: number;
+};
+
+export type TranscriptMouseEventView = {
+  x: number;
+  y: number;
+  button: "left" | "wheel-up" | "wheel-down" | "other";
+  action: "down" | "drag" | "up" | "wheel";
+};
+
 /** Legacy task-scroll model shape; main transcript wiring uses TranscriptScrollView. */
 export type TaskScrollView = TranscriptScrollView;
 
@@ -474,6 +492,8 @@ export type ShellInputEvent =
     }
   | { type: "transcript-scroll"; delta: number }
   | { type: "transcript-scroll-measure"; viewportHeight: number; contentHeight: number }
+  | { type: "transcript-viewport-geometry"; geometry: TranscriptViewportGeometryView }
+  | { type: "transcript-mouse"; event: TranscriptMouseEventView }
   | { type: "transcript-scroll-end" }
   | { type: "transcript-scroll-top" }
   | { type: "command-panel-close" }

@@ -2,7 +2,7 @@ import { Box, type DOMElement } from "ink";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { computeScrollViewportOffset } from "../models/transcript-scroll-state.js";
-import type { TranscriptScrollView } from "../types.js";
+import type { TranscriptScrollView, TranscriptViewportGeometryView } from "../types.js";
 
 /**
  * D.14D-C2 — Measured, clamped scroll viewport (standard ink).
@@ -38,11 +38,13 @@ export function TranscriptViewport({
   scroll,
   onOverflowChange,
   onMeasure,
+  onGeometry,
   children,
 }: {
   scroll: TranscriptScrollView | undefined;
   onOverflowChange?: (hasOverflow: boolean) => void;
   onMeasure?: (measurement: { viewportHeight: number; contentHeight: number }) => void;
+  onGeometry?: (geometry: TranscriptViewportGeometryView) => void;
   children: React.ReactNode;
 }): React.ReactNode {
   const viewportRef = useRef<DOMElement | null>(null);
@@ -50,6 +52,7 @@ export function TranscriptViewport({
   const [maxOffset, setMaxOffset] = useState(0);
   const lastReportedOverflow = useRef<boolean | undefined>(undefined);
   const lastReportedMeasure = useRef<string | undefined>(undefined);
+  const lastReportedGeometry = useRef<string | undefined>(undefined);
 
   // Measure after layout. measureElement() returns 0 during render, so we read
   // the computed yoga layout in a post-render effect and store maxOffset. The
@@ -61,12 +64,30 @@ export function TranscriptViewport({
     const contentNode = contentRef.current?.yogaNode;
     if (!viewportNode || !contentNode) return;
     const viewportHeight = viewportNode.getComputedHeight();
+    const viewportWidth = viewportNode.getComputedWidth();
     const contentHeight = contentNode.getComputedHeight();
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
+    const nextOffset = computeScrollViewportOffset(nextMax, scroll);
     const measureKey = `${viewportHeight}:${contentHeight}`;
     if (onMeasure && lastReportedMeasure.current !== measureKey) {
       lastReportedMeasure.current = measureKey;
       onMeasure({ viewportHeight, contentHeight });
+    }
+    if (onGeometry) {
+      const origin = computeAbsolutePosition(viewportRef.current);
+      const geometry: TranscriptViewportGeometryView = {
+        x: Math.floor(origin.x),
+        y: Math.floor(origin.y),
+        width: Math.floor(viewportWidth),
+        height: Math.floor(viewportHeight),
+        contentHeight: Math.floor(contentHeight),
+        topOffset: nextOffset.topOffset,
+      };
+      const geometryKey = `${geometry.x}:${geometry.y}:${geometry.width}:${geometry.height}:${geometry.contentHeight}:${geometry.topOffset}`;
+      if (lastReportedGeometry.current !== geometryKey) {
+        lastReportedGeometry.current = geometryKey;
+        onGeometry(geometry);
+      }
     }
     setMaxOffset((prev) => (prev === nextMax ? prev : nextMax));
     const hasOverflow = nextMax > 0;
@@ -85,4 +106,16 @@ export function TranscriptViewport({
       </Box>
     </Box>
   );
+}
+
+function computeAbsolutePosition(node: DOMElement | null): { x: number; y: number } {
+  let current: DOMElement | undefined = node ?? undefined;
+  let x = 0;
+  let y = 0;
+  while (current?.yogaNode) {
+    x += current.yogaNode.getComputedLeft();
+    y += current.yogaNode.getComputedTop();
+    current = current.parentNode;
+  }
+  return { x, y };
 }

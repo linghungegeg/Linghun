@@ -24,6 +24,7 @@ import {
   LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
 } from "./runtime-budget.js";
 import type { ConfigPanelId } from "./shell/models/config-control-plane.js";
+import type { TranscriptSelectionState } from "./shell/models/transcript-selection-state.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import type { ToolResultBudgetState } from "./tool-result-budget.js";
 import type {
@@ -391,6 +392,10 @@ export type TuiContext = {
    * 单条主显，绝不进 transcript（与 ShellBlockOutput 隔离）。
    */
   notifications?: import("./shell/types.js").NotificationView[];
+  /** Phase 7.9 — app-owned transcript mouse selection state for alt-screen TUI. */
+  transcriptSelectionState?: TranscriptSelectionState;
+  /** Phase 7.9 — measured transcript viewport geometry used by mouse selection. */
+  transcriptViewportGeometry?: import("./shell/types.js").TranscriptViewportGeometryView;
   /**
    * D.13Q-UX Closure — HelpPanel 状态。打开时显示三组 Tab + 命令列表。
    */

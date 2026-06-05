@@ -10,6 +10,12 @@ import {
   createInitialTranscriptScroll,
   reduceTranscriptScroll,
 } from "./transcript-scroll-state.js";
+import {
+  buildTranscriptTextRows,
+  parseSgrMouseEvent,
+  reduceTranscriptSelection,
+  selectedTextFromRows,
+} from "./transcript-selection-state.js";
 
 type ShellViewModelContext = Parameters<typeof import("../view-model.js").createShellViewModel>[0];
 
@@ -195,6 +201,80 @@ describe("TUI Interaction Contract — 滚动语义", () => {
     });
     expect(remeasured.stickToBottom).toBe(false);
     expect(remeasured.scrollOffset).toBeGreaterThan(0);
+  });
+});
+
+describe("TUI Interaction Contract — 自研拖选复制语义", () => {
+  it("解析 SGR mouse down/drag/up 与滚轮事件", () => {
+    expect(parseSgrMouseEvent("\x1B[<0;10;5M")).toMatchObject({
+      x: 9,
+      y: 4,
+      button: "left",
+      action: "down",
+    });
+    expect(parseSgrMouseEvent("[<32;10;6M")).toMatchObject({
+      x: 9,
+      y: 5,
+      button: "left",
+      action: "drag",
+    });
+    expect(parseSgrMouseEvent("\x1B[<0;10;6m")).toMatchObject({
+      x: 9,
+      y: 5,
+      button: "left",
+      action: "up",
+    });
+    expect(parseSgrMouseEvent("\x1B[<64;1;1M")).toMatchObject({
+      button: "wheel-up",
+      action: "wheel",
+    });
+  });
+
+  it("拖选文本投影可跨越当前视口外的 transcript 行", () => {
+    const rows = buildTranscriptTextRows([
+      {
+        id: "assistant",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "line 1",
+        fullText: "line 1\nline 2\nline 3\nline 4\nline 5",
+        messageKind: "assistant_text",
+      },
+    ]);
+    expect(selectedTextFromRows(rows, { row: 1, column: 0 }, { row: 4, column: 6 })).toBe(
+      "line 2\nline 3\nline 4\nline 5",
+    );
+  });
+
+  it("拖到视口上/下边缘时给出 bounded autoscroll delta 并保持 selectedText", () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({ index, text: `row ${index}` }));
+    const geometry = { x: 0, y: 0, width: 20, height: 4, contentHeight: 20, topOffset: 10 };
+    const down = reduceTranscriptSelection({
+      state: undefined,
+      event: { x: 1, y: 1, button: "left", action: "down" },
+      rows,
+      geometry,
+      scroll: { scrollOffset: 4, stickToBottom: false, viewportHeight: 4, contentHeight: 20 },
+    });
+    const dragUp = reduceTranscriptSelection({
+      state: down.state,
+      event: { x: 1, y: -1, button: "left", action: "drag" },
+      rows,
+      geometry,
+      scroll: { scrollOffset: 4, stickToBottom: false, viewportHeight: 4, contentHeight: 20 },
+    });
+    expect(dragUp.scrollDelta).toBe(2);
+    expect(dragUp.state?.selectedText).toContain("ow 10");
+
+    const dragDown = reduceTranscriptSelection({
+      state: down.state,
+      event: { x: 1, y: 10, button: "left", action: "drag" },
+      rows,
+      geometry,
+      scroll: { scrollOffset: 4, stickToBottom: false, viewportHeight: 4, contentHeight: 20 },
+    });
+    expect(dragDown.scrollDelta).toBe(-2);
   });
 });
 

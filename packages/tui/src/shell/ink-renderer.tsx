@@ -7,6 +7,8 @@ import type { ShellController, ShellRenderOptions } from "./types.js";
 
 const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
+export const ENABLE_SGR_MOUSE = "\x1B[?1002h\x1B[?1006h";
+export const DISABLE_SGR_MOUSE = "\x1B[?1002l\x1B[?1006l";
 
 export type InkShellInstance = {
   rerender: () => void;
@@ -39,11 +41,15 @@ export function renderInkShell(
   const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
   const enableKittyKeyboard =
     capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
+  const enableMouseTracking = capability.alternateScreen;
   let instance: ReturnType<typeof render>;
 
   try {
     if (enableModifyOtherKeys) {
       writeBestEffort(stdout, ENABLE_MODIFY_OTHER_KEYS);
+    }
+    if (enableMouseTracking) {
+      writeBestEffort(stdout, ENABLE_SGR_MOUSE);
     }
     instance = render(<ShellApp controller={controller} capability={capability} />, {
       stdin: options.stdin as NodeJS.ReadStream | undefined,
@@ -54,6 +60,9 @@ export function renderInkShell(
       kittyKeyboard: enableKittyKeyboard ? { mode: "auto" } : undefined,
     });
   } catch (error) {
+    if (enableMouseTracking) {
+      writeBestEffort(stdout, DISABLE_SGR_MOUSE);
+    }
     if (enableModifyOtherKeys) {
       writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
     }
@@ -84,6 +93,9 @@ export function renderInkShell(
     }
     if (enableModifyOtherKeys) {
       writeBestEffort(stdout, DISABLE_MODIFY_OTHER_KEYS);
+    }
+    if (enableMouseTracking) {
+      writeBestEffort(stdout, DISABLE_SGR_MOUSE);
     }
     showTerminalCursor(stdout);
     // Unref stdin to prevent the process from hanging on exit

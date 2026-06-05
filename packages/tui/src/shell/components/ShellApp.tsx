@@ -1,5 +1,6 @@
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import type React from "react";
+import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import {
   brandWordmark,
@@ -32,6 +33,12 @@ export function ShellApp({
 }): React.ReactNode {
   const view = controller.getViewModel();
   const theme = createShellTheme(view.themeMode === "no-color");
+  useInput((input) => {
+    if (!isSgrMouseInput(input)) return;
+    const event = parseSgrMouseEvent(input);
+    if (!event) return;
+    void controller.onInput({ type: "transcript-mouse", event });
+  });
 
   if (view.viewMode === "task" || view.viewMode === "pending") {
     return <TaskLayout view={view} theme={theme} controller={controller} capability={capability} />;
@@ -171,6 +178,9 @@ function TaskLayout({
           onMeasure={(measurement) =>
             void controller.onInput({ type: "transcript-scroll-measure", ...measurement })
           }
+          onGeometry={(geometry) =>
+            void controller.onInput({ type: "transcript-viewport-geometry", geometry })
+          }
         >
           {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
             ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
@@ -212,12 +222,7 @@ function TaskLayout({
             </Box>
           ) : null}
         </TranscriptViewport>
-        <PanelLayer
-          view={view}
-          controller={controller}
-          width={view.width - 4}
-          noColor={noColor}
-        />
+        <PanelLayer view={view} controller={controller} width={view.width - 4} noColor={noColor} />
       </Box>
 
       {/* Composer band — pinned bottom, left-aligned. flexShrink=0 prevents

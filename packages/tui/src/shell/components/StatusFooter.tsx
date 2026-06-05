@@ -57,7 +57,7 @@ export function StatusFooter({
     return (
       <Box flexDirection="column" width={width} paddingX={2} paddingTop={1}>
         <Text>
-          <Text color={theme.muted}>{footer.permissionMode}</Text>
+          <Text>{footer.permissionMode}</Text>
           <Text color={theme.dim ?? theme.muted} dimColor>
             {footer.cyclePermHint}
           </Text>
@@ -88,7 +88,7 @@ export function StatusFooter({
       <Box width="100%">
         <Box flexGrow={1} flexShrink={1}>
           <Text>
-            <Text color={theme.muted}>{footer.permissionMode}</Text>
+            <Text>{footer.permissionMode}</Text>
             <Text color={theme.dim ?? theme.muted} dimColor>
               {fittedLeft.slice(footer.permissionMode.length)}
             </Text>
@@ -143,5 +143,5 @@ function pickColor(
 ): string | undefined {
   if (tone === "warning") return theme.warning ?? theme.status.fail;
   if (tone === "dim") return theme.dim ?? theme.muted;
-  return theme.muted;
+  return undefined;
 }

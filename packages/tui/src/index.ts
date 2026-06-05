@@ -517,11 +517,20 @@ import {
 } from "./runtime-budget.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
+import { writeTextToClipboard } from "./shell/clipboard.js";
 import {
   createCommandBlock,
   createUserTextBlock,
 } from "./shell/models/command-transcript-presenter.js";
 import { type ConfigPanelId, reduceConfigState } from "./shell/models/config-control-plane.js";
+import {
+  computeScrollViewportOffset,
+  reduceTranscriptScroll,
+} from "./shell/models/transcript-scroll-state.js";
+import {
+  buildTranscriptTextRows,
+  reduceTranscriptSelection,
+} from "./shell/models/transcript-selection-state.js";
 import { computeHomePromptPrefix, writePlainShell } from "./shell/plain-renderer.js";
 import type {
   BackgroundTaskSummary,
@@ -1553,6 +1562,8 @@ async function runInkShell(
   let submittedPending = false;
   let submittedPendingStartedAt: number | undefined;
   let activityTicker: ReturnType<typeof setInterval> | undefined;
+  let selectionAutoScrollTimer: ReturnType<typeof setInterval> | undefined;
+  let selectionAutoScrollDelta = 0;
   // D.13E Step 2 — command transcript 行序号；createCommandBlock 用 sequence 生成稳定 id。
   let commandSequence = 0;
   let resolveExit: (code: number) => void = () => undefined;
@@ -1561,6 +1572,57 @@ async function runInkShell(
   });
   const shellOutput = new ShellBlockOutput(context, blocks, () => shell?.rerender());
   context.compactOutputMemory = () => shellOutput.compactOutputMemory();
+  const stopSelectionAutoScroll = () => {
+    if (selectionAutoScrollTimer) {
+      clearInterval(selectionAutoScrollTimer);
+      selectionAutoScrollTimer = undefined;
+    }
+    selectionAutoScrollDelta = 0;
+  };
+  const tickSelectionAutoScroll = () => {
+    if (!selectionAutoScrollDelta) return;
+    context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+      type: "scroll",
+      delta: selectionAutoScrollDelta,
+    });
+    const geometry = context.transcriptViewportGeometry;
+    const selection = context.transcriptSelectionState;
+    if (geometry && selection?.dragging) {
+      const maxOffset = Math.max(0, geometry.contentHeight - geometry.height);
+      const { topOffset } = computeScrollViewportOffset(maxOffset, context.transcriptScrollState);
+      const nextGeometry = { ...geometry, topOffset };
+      const rows = buildTranscriptTextRows(controller.getViewModel().blocks);
+      const dragEvent = {
+        x: geometry.x + (selection.focus?.column ?? selection.anchor?.column ?? 0),
+        y:
+          selectionAutoScrollDelta > 0
+            ? geometry.y
+            : Math.max(geometry.y, geometry.y + geometry.height - 1),
+        button: "left" as const,
+        action: "drag" as const,
+      };
+      const result = reduceTranscriptSelection({
+        state: selection,
+        event: dragEvent,
+        rows,
+        geometry: nextGeometry,
+        scroll: context.transcriptScrollState,
+      });
+      context.transcriptViewportGeometry = nextGeometry;
+      context.transcriptSelectionState = result.state;
+    }
+    shell?.rerender();
+  };
+  const updateSelectionAutoScroll = (delta: number) => {
+    selectionAutoScrollDelta = delta;
+    if (!delta) {
+      stopSelectionAutoScroll();
+      return;
+    }
+    if (!selectionAutoScrollTimer) {
+      selectionAutoScrollTimer = setInterval(tickSelectionAutoScroll, 80);
+    }
+  };
   const controller: ShellController = {
     getViewModel: () => {
       const runtime = getSelectedModelRuntime(context);
@@ -1743,9 +1805,6 @@ async function runInkShell(
       }
       // ─── Main transcript scroll ─────────────────────────────────────────────
       if (event.type === "transcript-scroll") {
-        const { reduceTranscriptScroll } = await import(
-          "./shell/models/transcript-scroll-state.js"
-        );
         context.transcriptScrollState =
           "action" in event
             ? reduceTranscriptScroll(context.transcriptScrollState, {
@@ -1761,9 +1820,6 @@ async function runInkShell(
         return;
       }
       if (event.type === "transcript-scroll-measure") {
-        const { reduceTranscriptScroll } = await import(
-          "./shell/models/transcript-scroll-state.js"
-        );
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "measure",
           viewportHeight: event.viewportHeight,
@@ -1773,10 +1829,62 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "transcript-viewport-geometry") {
+        context.transcriptViewportGeometry = event.geometry;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type === "transcript-mouse") {
+        if (event.event.action === "wheel") {
+          context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+            type: "scroll",
+            action: event.event.button === "wheel-down" ? "wheelDown" : "wheelUp",
+          });
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+          return;
+        }
+        const rows = buildTranscriptTextRows(controller.getViewModel().blocks);
+        const result = reduceTranscriptSelection({
+          state: context.transcriptSelectionState,
+          event: event.event,
+          rows,
+          geometry: context.transcriptViewportGeometry,
+          scroll: context.transcriptScrollState,
+        });
+        if (!result.consumed) return;
+        context.transcriptSelectionState = result.state;
+        updateSelectionAutoScroll(result.scrollDelta ?? 0);
+        if (event.event.action === "up") {
+          stopSelectionAutoScroll();
+        }
+        if (result.copyText) {
+          const copyResult = await writeTextToClipboard(result.copyText);
+          context.notifications ??= [];
+          context.notifications = context.notifications.filter(
+            (item) => item.key !== "selection-copied",
+          );
+          context.notifications.push({
+            key: "selection-copied",
+            text: copyResult.ok
+              ? context.language === "en-US"
+                ? `Selection copied (${result.copyText.length} chars).`
+                : `已复制选区（${result.copyText.length} 字符）。`
+              : context.language === "en-US"
+                ? `Selection captured, clipboard unavailable: ${copyResult.error}`
+                : `已捕获选区，剪贴板不可用：${copyResult.error}`,
+            priority: copyResult.ok ? "low" : "medium",
+            timeoutMs: 4000,
+            createdAt: Date.now(),
+            tone: copyResult.ok ? "success" : "warning",
+          });
+        }
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       if (event.type === "transcript-scroll-end") {
-        const { reduceTranscriptScroll } = await import(
-          "./shell/models/transcript-scroll-state.js"
-        );
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "end",
         });
@@ -1785,9 +1893,6 @@ async function runInkShell(
         return;
       }
       if (event.type === "transcript-scroll-top") {
-        const { reduceTranscriptScroll } = await import(
-          "./shell/models/transcript-scroll-state.js"
-        );
         context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "top",
         });
@@ -2175,6 +2280,7 @@ async function runInkShell(
         shell?.rerender();
       }
       if (result === "exit") {
+        stopSelectionAutoScroll();
         shell?.unmount();
         resolveExit(0);
         return;
@@ -2209,12 +2315,14 @@ async function runInkShell(
     );
     writePlainShell(output, controller.getViewModel());
     if (activityTicker) clearInterval(activityTicker);
+    stopSelectionAutoScroll();
     return await runPlainTui(input, output, context, gateway, store, startup, sigintHandler);
   }
   try {
     return await exitPromise;
   } finally {
     if (activityTicker) clearInterval(activityTicker);
+    stopSelectionAutoScroll();
   }
 }
 

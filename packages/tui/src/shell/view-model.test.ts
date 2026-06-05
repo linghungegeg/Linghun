@@ -388,6 +388,31 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
+  it("enables SGR mouse tracking in alt-screen Ink and restores it on exit", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
+    const output = new TestTtyOutput();
+    const input = createTtyInput();
+    const controller = {
+      getViewModel: () => createShellViewModel(createContext(), { width: output.columns }),
+      onInput: () => undefined,
+    };
+
+    const shell = renderInkShell(controller, {
+      stdin: input,
+      stdout: output,
+      stderr: new TestTtyOutput(),
+    });
+    await shell.waitUntilRenderFlush();
+    shell.unmount();
+    await shell.waitUntilExit();
+
+    expect(output.text).toContain("\x1B[?1002h\x1B[?1006h");
+    expect(output.text).toContain("\x1B[?1002l\x1B[?1006l");
+    expect(output.text.indexOf("\x1B[?1002h")).toBeLessThan(output.text.lastIndexOf("\x1B[?1002l"));
+  });
+
   it("does not add beforeExit listener when waiting after unmount", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
@@ -3997,6 +4022,33 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(renderCount).toBeGreaterThanOrEqual(3);
   });
 
+  it("appendAssistantDelta 可见渲染合批，但 endAssistantStream 会 flush 最新正文", () => {
+    vi.useFakeTimers();
+    try {
+      const blocks: ProductBlockViewModel[] = [];
+      let renderCount = 0;
+      const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
+        renderCount += 1;
+      });
+
+      output.beginAssistantStream("assistant-stream-coalesce");
+      output.appendAssistantDelta("A");
+      output.appendAssistantDelta("B");
+      output.appendAssistantDelta("C");
+      expect(blocks[0]?.fullText).toBe("ABC");
+      expect(renderCount).toBe(1);
+
+      vi.advanceTimersByTime(16);
+      expect(renderCount).toBe(2);
+      output.appendAssistantDelta("D");
+      output.endAssistantStream();
+      expect(blocks[0]?.fullText).toBe("ABCD");
+      expect(renderCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("普通 writeLine 后再开 streaming block，writeLine 不再被 ephemeral splice 淘汰；keep streaming block 保留", () => {
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(makeFakeContext(), blocks);
@@ -5602,6 +5654,38 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.transcriptScroll).toBeDefined();
     expect(view.transcriptScroll?.scrollOffset).toBe(0);
     expect(view.transcriptScroll?.stickToBottom).toBe(true);
+  });
+
+  it("transcriptSelectionState 给对应 block 行挂 selectionLineIndexes，不改 fullText", () => {
+    const ctx = createContext() as TuiContext & {
+      transcriptSelectionState?: {
+        dragging: boolean;
+        anchor: { row: number; column: number };
+        focus: { row: number; column: number };
+      };
+    };
+    ctx.transcriptSelectionState = {
+      dragging: true,
+      anchor: { row: 0, column: 0 },
+      focus: { row: 1, column: 4 },
+    };
+    const block = {
+      id: "assistant-selection",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "第一行",
+      fullText: "第一行\n第二行\n第三行",
+      messageKind: "assistant_text",
+    } satisfies ProductBlockViewModel;
+
+    const view = createShellViewModel(ctx, {
+      width: 80,
+      viewMode: "task",
+      outputBlocks: [block],
+    });
+    expect(view.blocks[0]?.selectionLineIndexes).toEqual([0, 1]);
+    expect(view.blocks[0]?.fullText).toBe("第一行\n第二行\n第三行");
   });
 });
 

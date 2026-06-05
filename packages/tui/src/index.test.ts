@@ -20674,8 +20674,18 @@ describe("D.8 provider circuit breaker integration", () => {
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const context = await createTestContext(project, store, session);
-    recordProviderFailure(context.providerBreaker, "deepseek", "deepseek-v4-flash", "PROVIDER_RATE_LIMITED");
-    recordProviderFailure(context.providerBreaker, "deepseek", "deepseek-v4-flash", "PROVIDER_RATE_LIMITED");
+    recordProviderFailure(
+      context.providerBreaker,
+      "deepseek",
+      "deepseek-v4-flash",
+      "PROVIDER_RATE_LIMITED",
+    );
+    recordProviderFailure(
+      context.providerBreaker,
+      "deepseek",
+      "deepseek-v4-flash",
+      "PROVIDER_RATE_LIMITED",
+    );
     const gateway = {
       stream: vi.fn(async function* () {
         yield { type: "assistant_text_delta", text: "should not stream" } as const;
@@ -23511,7 +23521,9 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
 });
 
 describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
-  function createTextGateway(text = "我会先读取关键文件再回答。"): Parameters<typeof __testSendMessage>[2] {
+  function createTextGateway(
+    text = "我会先读取关键文件再回答。",
+  ): Parameters<typeof __testSendMessage>[2] {
     return {
       stream: vi.fn(async function* () {
         yield { type: "assistant_text_delta", text } as const;
@@ -23520,7 +23532,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     } as unknown as Parameters<typeof __testSendMessage>[2];
   }
 
-  it("Policy: code fact request emits source-first hint and system_event before model answer", async () => {
+  it("Policy: code fact request keeps source-first in system_event, not main notifications", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-source-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -23535,14 +23547,14 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：源码优先，先读取关键文件。");
+    expect(notifications).not.toContain("策略：源码优先，先读取关键文件。");
     expect(notifications).not.toContain("PolicyDecision");
     expect(notifications).not.toContain("policy_decision");
     const transcript = (await store.resume(session.id)).transcript;
     expect(JSON.stringify(transcript)).toContain("strategy: 策略：源码优先");
   });
 
-  it("Policy: English source-first hint stays human-facing", async () => {
+  it("Policy: English source-first stays in system_event without notification noise", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-en-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -23557,11 +23569,13 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: source-first; reading key files before answering.",
     );
     expect(notifications).not.toContain("MetaSchedulerForModel");
     expect(notifications).not.toContain("raw evidence");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("hints=source-first");
   });
 
   it("Policy: high-risk completion and historical failure produce verification/failure hints", async () => {
@@ -23588,10 +23602,14 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
     expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
-    expect(notifications).toContain("策略：参考历史失败，只作为风险提示。");
+    expect(notifications).not.toContain("策略：参考历史失败，只作为风险提示。");
     const transcript = (await store.resume(session.id)).transcript;
-    expect(JSON.stringify(transcript)).toContain("final_answer_gate_required");
-    expect(JSON.stringify(transcript)).toContain("strategy: 策略：源码优先");
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("final_answer_gate_required");
+    expect(raw).toContain("source-first");
+    expect(raw).toContain("verification-required");
+    expect(raw).toContain("failure-learning");
+    expect(raw).toContain("strategy: 策略：源码优先");
   });
 
   it("Policy: context pressure and blocked workflow emit typed strategy hints", async () => {
@@ -23671,7 +23689,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
     expect(notifications).toContain("策略：检测到权限风险，写入前会请求确认。");
-    expect(notifications).toContain("策略：Windows 环境，优先使用兼容命令。");
+    expect(notifications).not.toContain("策略：Windows 环境，优先使用兼容命令。");
     expect(notifications).toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("PolicyDecision");
     expect(notifications).not.toContain("MetaSchedulerForModel");
@@ -23680,6 +23698,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(raw).toContain("verification=focused");
     expect(raw).toContain("permission_gate=yes");
     expect(raw).toContain("windows_safe=yes");
+    expect(raw).toContain("windows-safe");
   });
 
   it("Policy: English edit hints stay human-facing without internal labels", async () => {
@@ -23700,7 +23719,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(notifications).toContain(
       "Strategy: permission risk detected; write actions will ask before running.",
     );
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: Windows environment; using compatible commands first.",
     );
     expect(notifications).toContain(
@@ -23708,6 +23727,8 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
     expect(notifications).not.toContain("policy_decision");
     expect(notifications).not.toContain("Typed policy route");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("windows_safe=yes");
   });
 });
 
@@ -23725,7 +23746,9 @@ describe("Phase 7.7 Policy Kernel gate invariants", () => {
     expect(feedbackIdx).toBeGreaterThan(approvedIdx);
     expect(src).toContain("policy_tool_feedback");
     expect(src).toContain("appendSystemEvent(context, sessionId, `policy_tool_feedback");
-    expect(src).not.toContain("policyDecision.permissionSignal.requireExplicitGate && permission.decision");
+    expect(src).not.toContain(
+      "policyDecision.permissionSignal.requireExplicitGate && permission.decision",
+    );
   });
 
   it("Policy: workflow and final-answer gates remain real evidence boundaries", () => {
@@ -23733,7 +23756,9 @@ describe("Phase 7.7 Policy Kernel gate invariants", () => {
     const streamSrc = readFileSync(join(__dirname, "model-stream-runtime.ts"), "utf8");
 
     expect(workflowSrc).toContain("phaseGateConfirmed");
-    expect(workflowSrc).toContain("Per-tool decidePermission still gates every Write/Bash/Agent fork");
+    expect(workflowSrc).toContain(
+      "Per-tool decidePermission still gates every Write/Bash/Agent fork",
+    );
     expect(streamSrc).toContain("evaluateFinalAnswerClaims");
     expect(streamSrc).toContain("runArchitectureAndCompletenessFinalGate");
     expect(streamSrc).not.toContain("policyDecision.executionPlan.requireFinalGate = false");

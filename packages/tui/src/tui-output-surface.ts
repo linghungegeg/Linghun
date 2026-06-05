@@ -20,7 +20,9 @@ const MAX_STREAMING_SUMMARY_CHARS = 500;
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
+  if (line.startsWith("[Linghun] 模型 ") && line.includes(" · 后台 ")) return true;
   if (line.startsWith("Status: Session ")) return true;
+  if (line.startsWith("Status: Model ") && line.includes(" · background ")) return true;
   if (line.includes("确认 ") && line.includes("后台 ")) return true;
   if (line.includes("Gate ") && line.includes("BG ")) return true;
   return false;
@@ -38,6 +40,8 @@ export class ShellBlockOutput extends Writable {
    */
   private assistantBlockId: string | undefined;
   private compactOutputMemoryQueue: Promise<void> = Promise.resolve();
+  private assistantRenderTimer: ReturnType<typeof setTimeout> | undefined;
+  private assistantRenderPending = false;
 
   constructor(
     private readonly context: TuiContext,
@@ -146,7 +150,7 @@ export class ShellBlockOutput extends Writable {
     if (nextFull.length >= MAX_STREAMING_FULL_TEXT_CHARS) {
       void this.compactOutputMemory();
     }
-    this.onWrite();
+    this.scheduleAssistantRender();
   }
 
   /**
@@ -155,6 +159,7 @@ export class ShellBlockOutput extends Writable {
    * 只清掉 active id，下一轮 beginAssistantStream 会换新 id。
    */
   endAssistantStream(): void {
+    this.flushAssistantRender();
     this.assistantBlockId = undefined;
     void this.compactOutputMemory();
     this.onWrite();
@@ -166,6 +171,7 @@ export class ShellBlockOutput extends Writable {
    * 同时清掉 lastFullOutput 中可能残留的违规原文，避免 Ctrl+O / details 拉到。
    */
   discardAssistantBlock(id: string): void {
+    this.flushAssistantRender();
     const block = this.blocks.find((b) => b.id === id);
     if (block) {
       block.fullText = "";
@@ -183,6 +189,7 @@ export class ShellBlockOutput extends Writable {
    * lastFullOutput 同步为同一份安全文本，让 Ctrl+O / details 也只看降级版。
    */
   replaceAssistantBlockContent(id: string, text: string): void {
+    this.flushAssistantRender();
     const block = this.blocks.find((b) => b.id === id);
     if (block) {
       block.fullText = text;
@@ -309,6 +316,30 @@ export class ShellBlockOutput extends Writable {
       compactBlockFullTextInMemory(this.blocks, error);
       compactLastFullOutputInMemory(this.context, error);
     }
+  }
+
+  private scheduleAssistantRender(): void {
+    if (this.assistantRenderTimer) {
+      this.assistantRenderPending = true;
+      return;
+    }
+    this.assistantRenderTimer = setTimeout(() => {
+      this.assistantRenderTimer = undefined;
+      const shouldRender = this.assistantRenderPending;
+      this.assistantRenderPending = false;
+      if (shouldRender) this.onWrite();
+    }, 16);
+    this.assistantRenderPending = true;
+  }
+
+  private flushAssistantRender(): void {
+    if (this.assistantRenderTimer) {
+      clearTimeout(this.assistantRenderTimer);
+      this.assistantRenderTimer = undefined;
+    }
+    if (!this.assistantRenderPending) return;
+    this.assistantRenderPending = false;
+    this.onWrite();
   }
 }
 

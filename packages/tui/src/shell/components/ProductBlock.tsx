@@ -49,7 +49,10 @@ function hasHiddenContent(block: ProductBlockViewModel, renderedBody?: string): 
   return nonEmptyLines >= 2 || fullText.length > summary.length + 16;
 }
 
-function visibleNextAction(block: ProductBlockViewModel, renderedBody?: string): string | undefined {
+function visibleNextAction(
+  block: ProductBlockViewModel,
+  renderedBody?: string,
+): string | undefined {
   if (!block.nextAction) return undefined;
   if (!/Ctrl\+O/i.test(block.nextAction)) return block.nextAction;
   return hasHiddenContent(block, renderedBody) ? block.nextAction : undefined;
@@ -142,6 +145,7 @@ export function ProductBlock({
               dim={dim}
               tone={tone}
               wrapWidth={Math.max(8, width - 6)}
+              selectionLineIndexes={block.selectionLineIndexes}
             />
           </Box>
         ) : (
@@ -151,6 +155,7 @@ export function ProductBlock({
             dim={dim}
             tone={tone}
             wrapWidth={Math.max(8, width)}
+            selectionLineIndexes={block.selectionLineIndexes}
           />
         )}
         {nextAction ? (
@@ -171,7 +176,13 @@ export function ProductBlock({
         <Text color={theme.dim ?? theme.muted} italic dimColor>
           {"∴ "}
         </Text>
-        <MessageMarkdown text={body} theme={theme} dim wrapWidth={Math.max(8, width)} />
+        <MessageMarkdown
+          text={body}
+          theme={theme}
+          dim
+          wrapWidth={Math.max(8, width)}
+          selectionLineIndexes={block.selectionLineIndexes}
+        />
         {nextAction ? (
           <CtrlOToExpand theme={theme} hint={fitText(nextAction, Math.max(8, width - 2))} />
         ) : null}
@@ -228,7 +239,13 @@ export function ProductBlock({
           </Text>
         ) : null}
         {body ? (
-          <MessageMarkdown text={body} theme={theme} tone="error" wrapWidth={innerWidth} />
+          <MessageMarkdown
+            text={body}
+            theme={theme}
+            tone="error"
+            wrapWidth={innerWidth}
+            selectionLineIndexes={block.selectionLineIndexes}
+          />
         ) : null}
         {nextAction ? <CtrlOToExpand theme={theme} hint={fitText(nextAction, innerWidth)} /> : null}
       </Box>

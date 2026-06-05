@@ -7,12 +7,13 @@ import {
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
+import { isSgrMouseInput } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
 import type {
-  PermissionActionId,
   CommandPanelView,
+  PermissionActionId,
   ShellInputEvent,
   ShellViewModel,
   TaskPermissionView,
@@ -639,6 +640,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
+      if (isSgrMouseInput(input)) return;
       // D.13E Step 2 — Owner-priority dispatcher 显式化：
       // 用 selectInputOwner 决定本次事件归属，permission > panel > paste > slash > composer。
       const owner = selectInputOwner(input, key, {

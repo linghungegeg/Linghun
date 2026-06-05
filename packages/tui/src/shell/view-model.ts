@@ -21,6 +21,11 @@ import {
   explainSemantic,
 } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
+import {
+  type TranscriptSelectionState,
+  buildTranscriptTextRows,
+  selectionLineIndexesForBlock,
+} from "./models/transcript-selection-state.js";
 import { charWidth, displayWidth } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
@@ -319,7 +324,14 @@ export function createShellViewModel(
     });
   }
 
-  const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
+  const fittedBlocks = applyTranscriptSelection(
+    blocks.map((block) => fitBlockToWidth(block, width)),
+    (
+      context as {
+        transcriptSelectionState?: TranscriptSelectionState;
+      }
+    ).transcriptSelectionState,
+  );
 
   const viewMode = effectiveViewMode;
 
@@ -524,6 +536,18 @@ export function createShellViewModel(
       return live.length > 0 ? [...live] : undefined;
     })(),
   };
+}
+
+function applyTranscriptSelection(
+  blocks: ProductBlockViewModel[],
+  selection: TranscriptSelectionState | undefined,
+): ProductBlockViewModel[] {
+  if (!selection?.anchor || !selection.focus) return blocks;
+  const rows = buildTranscriptTextRows(blocks);
+  return blocks.map((block) => {
+    const selectionLineIndexes = selectionLineIndexesForBlock(selection, rows, block.id);
+    return selectionLineIndexes.length > 0 ? { ...block, selectionLineIndexes } : block;
+  });
 }
 
 /**

@@ -48,6 +48,7 @@ export type MessageMarkdownProps = {
   /** 错误正文走 error 色而不是默认色。 */
   tone?: "default" | "error" | "diagnostic";
   wrapWidth?: number;
+  selectionLineIndexes?: number[];
 };
 
 type MdLine =
@@ -106,12 +107,14 @@ function InlineRow({
   dim,
   tone,
   wrapWidth,
+  selected,
 }: {
   value: string;
   theme: ShellTheme;
   dim: boolean;
   tone: MessageMarkdownProps["tone"];
   wrapWidth?: number;
+  selected?: boolean;
 }): React.ReactNode {
   const rows = wrapWidth ? wrapText(value, wrapWidth) : [value];
   const baseColor = dim
@@ -127,19 +130,33 @@ function InlineRow({
       {rows.map((row, rowIndex) => {
         const tokens = tokenizeInline(row);
         return (
-          <Text key={`${rowIndex}-${row}`} color={baseColor} dimColor={dim}>
+          <Text
+            key={`${rowIndex}-${row}`}
+            color={selected ? "white" : baseColor}
+            backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+            dimColor={selected ? false : dim}
+          >
             {tokens.map((token, tokenIndex) => {
               const key = `${rowIndex}-${tokenIndex}-${token.kind}-${token.value}`;
               if (token.kind === "code") {
                 return (
-                  <Text key={key} color={codeColor} dimColor={dim}>
+                  <Text
+                    key={key}
+                    color={selected ? "white" : codeColor}
+                    dimColor={selected ? false : dim}
+                  >
                     {token.value}
                   </Text>
                 );
               }
               if (token.kind === "bold") {
                 return (
-                  <Text key={key} bold color={baseColor} dimColor={dim}>
+                  <Text
+                    key={key}
+                    bold
+                    color={selected ? "white" : baseColor}
+                    dimColor={selected ? false : dim}
+                  >
                     {token.value}
                   </Text>
                 );
@@ -166,11 +183,13 @@ function CodeLine({
   lang,
   theme,
   dim,
+  selected,
 }: {
   line: string;
   lang?: string;
   theme: ShellTheme;
   dim: boolean;
+  selected?: boolean;
 }): React.ReactNode {
   const isDiff = lang === "diff" || lang === "patch";
   const color =
@@ -181,7 +200,11 @@ function CodeLine({
         : (theme.diagnostic ?? theme.accent);
   const dimLine = dim || (isDiff && !line.startsWith("+") && !line.startsWith("-"));
   return (
-    <Text color={color} dimColor={dimLine}>
+    <Text
+      color={selected ? "white" : color}
+      backgroundColor={selected && theme.mode !== "no-color" ? "blue" : undefined}
+      dimColor={selected ? false : dimLine}
+    >
       {line.length === 0 ? " " : line}
     </Text>
   );
@@ -193,13 +216,15 @@ export function MessageMarkdown({
   dim = false,
   tone = "default",
   wrapWidth,
+  selectionLineIndexes,
 }: MessageMarkdownProps): React.ReactNode {
   if (!text || text.length === 0) return null;
   const lines = text.replace(/\r/g, "").split("\n");
+  const selectedLines = new Set(selectionLineIndexes ?? []);
   const rendered: React.ReactNode[] = [];
   let inCode = false;
   let codeLang: string | undefined;
-  let codeBuffer: string[] = [];
+  let codeBuffer: { line: string; lineIndex: number }[] = [];
   let blockIndex = 0;
 
   const flushCode = (): void => {
@@ -209,10 +234,16 @@ export function MessageMarkdown({
         <Text color={theme.dim ?? theme.muted} dimColor={dim}>
           {`  \u250C${codeLang ? ` ${codeLang} ` : ""}`}
         </Text>
-        {codeBuffer.map((line) => (
-          <Box key={`code-line-${line}`} flexDirection="row">
+        {codeBuffer.map(({ line, lineIndex }) => (
+          <Box key={`code-line-${lineIndex}-${line}`} flexDirection="row">
             {codePrefix(theme, dim)}
-            <CodeLine line={line} lang={codeLang} theme={theme} dim={dim} />
+            <CodeLine
+              line={line}
+              lang={codeLang}
+              theme={theme}
+              dim={dim}
+              selected={selectedLines.has(lineIndex)}
+            />
           </Box>
         ))}
         <Text color={theme.dim ?? theme.muted} dimColor={dim}>
@@ -224,7 +255,8 @@ export function MessageMarkdown({
     codeLang = undefined;
   };
 
-  for (const raw of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const raw = lines[lineIndex] ?? "";
     const cls = classifyLine(raw);
     if (cls.kind === "code-fence") {
       if (inCode) {
@@ -237,7 +269,7 @@ export function MessageMarkdown({
       continue;
     }
     if (inCode) {
-      codeBuffer.push(raw);
+      codeBuffer.push({ line: raw, lineIndex });
       continue;
     }
     if (cls.kind === "blank") {
@@ -247,7 +279,13 @@ export function MessageMarkdown({
     if (cls.kind === "list") {
       rendered.push(
         <Box key={`list-${blockIndex++}`} flexDirection="row">
-          <Text color={dim ? theme.dim : theme.muted} dimColor={dim}>
+          <Text
+            color={selectedLines.has(lineIndex) ? "white" : dim ? theme.dim : theme.muted}
+            backgroundColor={
+              selectedLines.has(lineIndex) && theme.mode !== "no-color" ? "blue" : undefined
+            }
+            dimColor={selectedLines.has(lineIndex) ? false : dim}
+          >
             {cls.bullet}{" "}
           </Text>
           <InlineRow
@@ -256,6 +294,7 @@ export function MessageMarkdown({
             dim={dim}
             tone={tone}
             wrapWidth={wrapWidth ? Math.max(8, wrapWidth - 2) : undefined}
+            selected={selectedLines.has(lineIndex)}
           />
         </Box>,
       );
@@ -269,6 +308,7 @@ export function MessageMarkdown({
         dim={dim}
         tone={tone}
         wrapWidth={wrapWidth}
+        selected={selectedLines.has(lineIndex)}
       />,
     );
   }

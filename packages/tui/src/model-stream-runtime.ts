@@ -1095,6 +1095,7 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   context.notifications ??= [];
   const existing = new Set(context.notifications.map((item) => item.key));
   const visibleHints = decision.hints
+    .filter((hint) => shouldSurfacePolicyHint(hint.id))
     .slice()
     .sort((a, b) => policyHintPriority(b) - policyHintPriority(a))
     .slice(0, 3);
@@ -1111,6 +1112,18 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
     });
     existing.add(key);
   }
+}
+
+function shouldSurfacePolicyHint(id: string): boolean {
+  return (
+    id === "permission-risk" ||
+    id === "blocked-runtime" ||
+    id === "provider-cooldown" ||
+    id === "compact-before-provider" ||
+    id === "verification-required" ||
+    id === "provider-fallback" ||
+    id === "background-occupancy"
+  );
 }
 
 function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
@@ -1153,7 +1166,7 @@ async function appendPolicyDecisionEvent(
   await appendSystemEvent(
     context,
     sessionId,
-    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}`,
+    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; hints=${decision.hints.map((hint) => hint.id).join(",") || "none"}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}`,
     decision.riskLevel === "high" || decision.providerPlan === "cooldownBlocked"
       ? "warning"
       : "info",
