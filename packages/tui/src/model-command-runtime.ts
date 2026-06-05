@@ -134,8 +134,8 @@ export async function handleModelCommand(
   const reasoningSegment = `reasoning ${runtime.reasoningStatus}`;
   const summary: string[] = [
     isEn
-        ? `Model · ${runtime.provider}/${runtime.model}`
-        : `模型 · ${runtime.provider}/${runtime.model}`,
+      ? `Model · ${runtime.provider}/${runtime.model}`
+      : `模型 · ${runtime.provider}/${runtime.model}`,
     isEn
       ? `Role: ${runtime.role} · ${reasoningSegment}`
       : `角色：${runtime.role} · ${reasoningSegment}`,

@@ -13,7 +13,6 @@ import type {
 import type { ToolName, ToolOutput } from "@linghun/tools";
 import { builtInTools, createToolContext, runTool } from "@linghun/tools";
 import { showCommandPanel } from "./command-panel-runtime.js";
-import type { CommandPanelRow, CommandPanelSection } from "./shell/types.js";
 import type {
   CompactPreflightRuntime,
   ProviderPreflightCompactResult,
@@ -76,6 +75,7 @@ import {
   stopRunnerForDurableJob as stopRunnerForDurableJobImpl,
 } from "./runner-runtime.js";
 import { LINGHUN_MAX_AGENT_CHILD_TURNS } from "./runtime-budget.js";
+import type { CommandPanelRow, CommandPanelSection } from "./shell/types.js";
 import { truncateDisplay, writeLine } from "./startup-runtime.js";
 import type { ToolResultBudgetRecord } from "./tool-result-budget.js";
 import {
@@ -342,10 +342,7 @@ function setAgentIdle(
   agent.updatedAt = now;
 }
 
-function ensureAgentBackgroundTask(
-  agent: AgentRun,
-  context: TuiContext,
-): BackgroundTaskState {
+function ensureAgentBackgroundTask(agent: AgentRun, context: TuiContext): BackgroundTaskState {
   const existing = context.backgroundTasks.find((task) => task.id === agent.id);
   if (existing) return existing;
   const created = createAgentBackgroundTask(agent, context);
@@ -418,7 +415,10 @@ async function enqueueAgentSystemMailbox(
   );
 }
 
-function normalizeMailboxMessage(agent: AgentRun, message: AgentMailboxMessage): AgentMailboxMessage {
+function normalizeMailboxMessage(
+  agent: AgentRun,
+  message: AgentMailboxMessage,
+): AgentMailboxMessage {
   const consumedAt = message.consumedAt;
   const failedAt = message.failedAt;
   const status = message.status ?? (failedAt ? "failed" : consumedAt ? "consumed" : "pending");
@@ -1809,7 +1809,9 @@ export async function handleAgentsCommand(
     const isEn = context.language === "en-US";
     const total = context.agents.length;
     const running = context.agents.filter((a) => a.status === "running").length;
-    const idle = context.agents.filter((a) => a.status === "idle" || a.status === "completed").length;
+    const idle = context.agents.filter(
+      (a) => a.status === "idle" || a.status === "completed",
+    ).length;
     const cancellable = listCancellableAgents(context);
     showCommandPanel(context, output, {
       title: "/agents",
@@ -1825,7 +1827,10 @@ export async function handleAgentsCommand(
           : total > 0
             ? ["/agents show <id>"]
             : context.agentRegistry.agents.length > 0
-              ? ["/agents registry", "/fork explorer|planner|verifier|worker|<custom-agent-id> <task>"]
+              ? [
+                  "/agents registry",
+                  "/fork explorer|planner|verifier|worker|<custom-agent-id> <task>",
+                ]
               : ["/fork explorer|planner|verifier|worker <task>"],
       detailsText: formatAgentsList(context),
     });
@@ -1834,7 +1839,10 @@ export async function handleAgentsCommand(
   if (action === "send") {
     const parsed = parseAgentsSendArgs(args.slice(1));
     if (!parsed) {
-      writeLine(output, "用法：/agents send <id|name> <message> 或 /agents send --team <team> <message>");
+      writeLine(
+        output,
+        "用法：/agents send <id|name> <message> 或 /agents send --team <team> <message>",
+      );
       return;
     }
     const result = await sendAgentMessage(context, { ...parsed, from: "user" });
@@ -1913,7 +1921,8 @@ export async function handleForkCommand(
   const type = registryAgent ? mapRegistryAgentType(registryAgent) : options.type;
   const task = options.task;
   if (!type || !isAgentType(type) || !task) {
-    const baseHelp = "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]";
+    const baseHelp =
+      "用法：/fork explorer|planner|verifier|worker|<custom-agent-id> <task> [--background] [--name <name>] [--team <team>] [--cwd <path>] [--isolation worktree]";
     const registryHint =
       context.agentRegistry.agents.length > 0
         ? `\n已加载 ${context.agentRegistry.agents.length} 个自定义 agent，/agents registry 查看详情。`
@@ -1923,7 +1932,9 @@ export async function handleForkCommand(
   }
   const workflowTaskId =
     runtimeOptions.workflowRunId ??
-    (context.workflows.activeRun?.status === "running" ? context.workflows.activeRun.id : undefined);
+    (context.workflows.activeRun?.status === "running"
+      ? context.workflows.activeRun.id
+      : undefined);
   const guard = deps().checkBackgroundStartGuard(context, "agent", true, workflowTaskId);
   if (guard) {
     writeLine(output, guard);
@@ -2052,10 +2063,7 @@ export async function completeAgent(
     await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
     return;
   }
-  setAgentBusy(
-    agent,
-    `${wakeMode} processing; pending mailbox ${countPendingMailbox(agent)}`,
-  );
+  setAgentBusy(agent, `${wakeMode} processing; pending mailbox ${countPendingMailbox(agent)}`);
   syncBackgroundWithAgentStatus(task, agent);
   await deps().appendBackgroundTaskEvent(context, parentSessionId, task);
   let result: AgentWorkResult;
@@ -2811,7 +2819,14 @@ export async function executeApprovedAgentToolUse(
       createdAt: now,
     });
     const result = await runAgentToolInCwd(toolName, toolCall.input, agent, context);
-    await appendAgentToolEvents(agent, context, toolName, toolCall.input, result.output, toolCall.id);
+    await appendAgentToolEvents(
+      agent,
+      context,
+      toolName,
+      toolCall.input,
+      result.output,
+      toolCall.id,
+    );
     const evidenceId = await deps().recordAgentToolEvidence(
       context,
       parentSessionId,
@@ -3234,13 +3249,11 @@ export function syncBackgroundWithAgentStatus(
           : agent.status === "failed"
             ? "failed"
             : "completed";
-    background.currentStep = activitySummary ? `${agent.status}: ${activitySummary}` : `${agent.status}`;
+    background.currentStep = activitySummary
+      ? `${agent.status}: ${activitySummary}`
+      : `${agent.status}`;
     background.result =
-      agent.status === "cancelled"
-          ? "cancelled"
-          : agent.status === "blocked"
-            ? "partial"
-            : "fail";
+      agent.status === "cancelled" ? "cancelled" : agent.status === "blocked" ? "partial" : "fail";
     background.progress = {
       completed: 1,
       total: 1,
@@ -3257,7 +3270,9 @@ export function syncBackgroundWithAgentStatus(
     };
   } else if (agent.status === "stale") {
     background.status = "stale";
-    background.currentStep = activitySummary ? `stale/resumable: ${activitySummary}` : "stale/resumable";
+    background.currentStep = activitySummary
+      ? `stale/resumable: ${activitySummary}`
+      : "stale/resumable";
     background.result = "partial";
     background.progress = {
       completed: 0,
@@ -3269,7 +3284,9 @@ export function syncBackgroundWithAgentStatus(
     background.currentStep = activitySummary ?? `running ${agent.type}`;
     background.result = undefined;
   }
-  background.userVisibleSummary = activitySummary ? `${activitySummary}; ${agent.summary}` : agent.summary;
+  background.userVisibleSummary = activitySummary
+    ? `${activitySummary}; ${agent.summary}`
+    : agent.summary;
   background.updatedAt = agent.updatedAt;
 }
 
@@ -3338,11 +3355,11 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
             ? "blocked"
             : parsed.status === "idle"
               ? "idle"
-            : parsed.status === "completed"
-              ? "idle"
-              : parsed.status === "cancelled"
-                ? "cancelled"
-                : parsed.activityStatus,
+              : parsed.status === "completed"
+                ? "idle"
+                : parsed.status === "cancelled"
+                  ? "cancelled"
+                  : parsed.activityStatus,
         staleReason:
           parsed.status === "running" ? "hydrate_running_agent_after_restart" : parsed.staleReason,
         summary:
@@ -3353,7 +3370,7 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       };
       agent.mailbox = normalizeAgentMailbox({ ...agent, mailbox: parsed.mailbox ?? [] });
       context.agents.push(agent);
-      if (agent.status === "running" || agent.status === "stale" || isAgentIdle(agent)) {
+      if (agent.status === "stale") {
         const background = createAgentBackgroundTask(agent, context);
         syncBackgroundWithAgentStatus(background, agent);
         rememberBackgroundTask(context, background);
@@ -3467,7 +3484,11 @@ export async function sendAgentMessage(
     await persistAgentRun(context, agent);
   }
   for (const target of wakeTargets) {
-    setAgentBusy(target.agent, `mailbox wake; pending mailbox ${countPendingMailbox(target.agent)}`, now);
+    setAgentBusy(
+      target.agent,
+      `mailbox wake; pending mailbox ${countPendingMailbox(target.agent)}`,
+      now,
+    );
     syncBackgroundWithAgentStatus(target.background, target.agent);
     registerBackgroundAbortController(context, target.agent.id);
     await persistAgentRun(context, target.agent);
@@ -3698,9 +3719,7 @@ function formatAgentsList(context: TuiContext): string {
     );
     const pending = countPendingMailbox(agent);
     const activity = agent.activityStatus ?? (isAgentIdle(agent) ? "idle" : "unknown");
-    const task = agent.activeTask
-      ? ` task ${agent.activeTask.id}:${agent.activeTask.status}`
-      : "";
+    const task = agent.activeTask ? ` task ${agent.activeTask.id}:${agent.activeTask.status}` : "";
     const cwd = agent.cwd
       ? truncateDisplay(relative(context.projectPath, agent.cwd) || ".", 18)
       : ".";

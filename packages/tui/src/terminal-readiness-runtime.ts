@@ -5,8 +5,8 @@ import type { TuiContext } from "./index.js";
 import { formatCooldownDoctorLine } from "./provider-circuit-breaker.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
 import type { TerminalProblemView, TerminalReadinessView } from "./terminal-readiness-presenter.js";
-import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import type { BackgroundTaskState } from "./tui-data-types.js";
+import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { classifyVerificationLevel } from "./verification-level.js";
 import { isFallbackWorkspaceReferenceSnapshot } from "./workspace-reference-cache.js";
 
@@ -628,11 +628,23 @@ function createTerminalProblems(
 }
 
 function isReadinessRuntimeVisibleBackgroundTask(task: BackgroundTaskState): boolean {
-  return task.status === "running" || task.status === "paused" || task.status === "blocked";
+  return (
+    task.status === "running" ||
+    task.status === "paused" ||
+    task.status === "blocked" ||
+    task.status === "failed" ||
+    task.status === "timeout"
+  );
 }
 
 function isReadinessNeedsAttentionBackgroundTask(task: BackgroundTaskState): boolean {
-  return task.status === "paused" || task.status === "blocked" || task.status === "stale";
+  return (
+    task.status === "paused" ||
+    task.status === "blocked" ||
+    task.status === "failed" ||
+    task.status === "timeout" ||
+    task.status === "stale"
+  );
 }
 
 function isReadinessProblemBackgroundTask(task: BackgroundTaskState): boolean {

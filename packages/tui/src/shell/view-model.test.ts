@@ -2287,10 +2287,10 @@ describe("D.13 — Home + Task Product Shell Mature Closure", () => {
 
   it("D13E-P3 #5: /model echo prints 'reasoning=<status>' so users see runtime decision", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    const source = await readFile(join(SRC_ROOT, "model-command-runtime.ts"), "utf8");
     // /model body must include reasoning status so the user has a fast surface
     // outside the (size-limited) footer.
-    expect(source).toMatch(/reasoning=\$\{runtime\.reasoningStatus\}/);
+    expect(source).toMatch(/reasoning \${runtime\.reasoningStatus}/);
   });
 
   it("D13E-P3 #6: useAnchoredCursor no longer gates render on hasMeasured (first-frame focus)", async () => {
@@ -2709,14 +2709,14 @@ describe("Windows TTY terminal capability detection", () => {
     // On non-Windows CI, we use LINGHUN_TERMINAL_TIER=basic to simulate.
     if (process.platform === "win32") {
       // Remove all terminal indicators to simulate bare cmd.exe
-      delete process.env.LINGHUN_TERMINAL_TIER;
-      delete process.env.WT_SESSION;
-      delete process.env.TERM_PROGRAM;
-      delete process.env.TERM;
-      delete process.env.ConEmuPID;
-      delete process.env.CONEMUDIR;
-      delete process.env.MSYSTEM;
-      delete process.env.ALACRITTY_WINDOW_ID;
+      vi.stubEnv("LINGHUN_TERMINAL_TIER", undefined);
+      vi.stubEnv("WT_SESSION", undefined);
+      vi.stubEnv("TERM_PROGRAM", undefined);
+      vi.stubEnv("TERM", undefined);
+      vi.stubEnv("ConEmuPID", undefined);
+      vi.stubEnv("CONEMUDIR", undefined);
+      vi.stubEnv("MSYSTEM", undefined);
+      vi.stubEnv("ALACRITTY_WINDOW_ID", undefined);
       resetTerminalCapabilityCache();
       expect(
         shouldUseInkShell(
@@ -3895,7 +3895,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 
   it("/model handler no longer calls writeStatus (Task-mode denoise)", async () => {
     const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    const source = await readFile(join(SRC_ROOT, "model-command-runtime.ts"), "utf8");
     // Locate the handleModelCommand body and verify the closing writeStatus
     // call was removed. The function body ends right after the
     // "/model doctor" hint line.
@@ -5079,20 +5079,21 @@ describe("D.13Q-UX Real Smoke Fix v3 — diagnostic 不被关键词误伤", () =
 describe("D.13Q-UX Real Smoke Fix v3 — RuntimeIdentityRule provider 隐藏", () => {
   it("createModelSystemPrompt 包含 RuntimeIdentityRule（自然语言当前模型回答里禁止 provider 括号）", async () => {
     const fs = await import("node:fs");
-    const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
-    expect(indexSource).toContain("RuntimeIdentityRule=");
-    expect(indexSource).toMatch(/Do not include provider, endpointProfile, route role, baseUrl/);
-    expect(indexSource).toContain("(provider: ...)");
-    expect(indexSource).toContain("openai-compatible");
+    const promptSource = fs.readFileSync(join(SRC_ROOT, "model-prompt-runtime.ts"), "utf8");
+    expect(promptSource).toContain("RuntimeIdentityRule=");
+    expect(promptSource).toMatch(/Do not include provider, endpointProfile, route role, baseUrl/);
+    expect(promptSource).toContain("(provider: ...)");
+    expect(promptSource).toContain("openai-compatible");
   });
 
   it("RuntimeIdentityRule 仍允许 /model doctor 与 /model route doctor 暴露 provider", async () => {
     const fs = await import("node:fs");
-    const indexSource = fs.readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
+    const promptSource = fs.readFileSync(join(SRC_ROOT, "model-prompt-runtime.ts"), "utf8");
+    const doctorSource = fs.readFileSync(join(SRC_ROOT, "model-doctor-runtime.ts"), "utf8");
     // RuntimeIdentityRule 显式允许 /model doctor / /model route doctor 暴露 provider
-    expect(indexSource).toMatch(/runs \/model doctor or \/model route doctor/);
+    expect(promptSource).toMatch(/runs \/model doctor or \/model route doctor/);
     // 自然语言问"当前模型"被规则拦截，但 /model doctor 显式命令仍能输出 provider 字段。
-    expect(indexSource).toMatch(/provider=\$\{runtime\.provider\}/);
+    expect(doctorSource).toMatch(/provider \${providerId}/);
   });
 });
 
