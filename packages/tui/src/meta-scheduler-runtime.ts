@@ -11,6 +11,8 @@ import type {
   WorkflowState,
 } from "./tui-data-types.js";
 
+type ActiveWorkflowRun = NonNullable<WorkflowState["activeRun"]>;
+
 export type MetaSchedulerInput = {
   language: Language;
   userText: string;
@@ -25,8 +27,20 @@ export type MetaSchedulerInput = {
   memoryAcceptedCount?: number;
   memoryCandidateCount?: number;
   memoryAutoLearningActive?: boolean;
+  lastVerificationStatus?:
+    | "pass"
+    | "fail"
+    | "partial"
+    | "skipped"
+    | "stale"
+    | "cancelled"
+    | "timeout";
+  pendingApproval?: boolean;
+  activeAgentCount?: number;
+  activeJobCount?: number;
+  activeWorkflowStatus?: "running" | "blocked" | "stale" | "paused";
   backgroundTasks: BackgroundTaskState[];
-  workflow?: WorkflowState["activeRun"];
+  workflow?: ActiveWorkflowRun;
   lastToolFailure?: { toolName: string; summary: string };
   providerFailure?: { provider: string; model: string; code?: string; message: string };
   providerCooldownBlocked?: boolean;
@@ -57,6 +71,7 @@ export type PolicyDecision = {
     recentDeniedCount: number;
     expectedMutating: boolean;
     requireExplicitGate: boolean;
+    pendingApproval: boolean;
   };
   modelRouteSignal: {
     role: ModelRole;
@@ -71,6 +86,7 @@ export type PolicyDecision = {
     required: boolean;
     recommendedLevel: "focused" | "basic" | "full";
     reason: "mutating" | "high_risk_claim" | "requested" | "normal";
+    lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
   };
   memorySignal: {
     accepted: boolean;
@@ -88,6 +104,12 @@ export type PolicyDecision = {
     cardPresent: boolean;
     guardReminder: boolean;
     driftPending: boolean;
+  };
+  runtimeSignal: {
+    runningAgents: number;
+    runningJobs: number;
+    workflowStatus?: "running" | "blocked" | "stale" | "paused";
+    resourceCapPressure: boolean;
   };
   platformSignal: {
     platform: NodeJS.Platform | "unknown";
@@ -146,6 +168,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
   const blockedRuntime = hasBlockedAgentOrWorkflow(input.backgroundTasks, input.workflow);
+  const runtimeSignal = summarizeRuntimeSignal(input);
   const pressure = computeContextPressure(
     input.messages,
     input.estimatedContextChars,
@@ -158,7 +181,11 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
   const failureSignal = summarizeFailureSignal(input.failureLearning);
   const preferSourceFirst = shouldPreferSourceFirst(taskKind, indexStrategy);
-  const requireVerification = highRiskClaim || taskKind === "verification" || expectedMutating;
+  const requireVerification =
+    highRiskClaim ||
+    taskKind === "verification" ||
+    expectedMutating ||
+    isRiskyVerificationStatus(input.lastVerificationStatus);
   const surfaceWindowsSafeHint = shouldSurfaceWindowsSafeHint({
     userText: input.userText,
     taskKind,
@@ -225,7 +252,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     requireVerification,
     requireFinalGate: highRiskClaim,
     expectedMutating,
-    requireExplicitGate: expectedMutating || blockedRuntime,
+    requireExplicitGate: expectedMutating || blockedRuntime || Boolean(input.pendingApproval),
     providerPlan,
     blockedRuntime,
     toolFailure,
@@ -236,7 +263,12 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       recentDenied: recentDeniedCount > 0,
       recentDeniedCount,
       expectedMutating,
-      requireExplicitGate: expectedMutating || blockedRuntime || recentDeniedCount > 0,
+      requireExplicitGate:
+        expectedMutating ||
+        blockedRuntime ||
+        recentDeniedCount > 0 ||
+        Boolean(input.pendingApproval),
+      pendingApproval: Boolean(input.pendingApproval),
     },
     modelRouteSignal: {
       role: input.currentRole ?? "executor",
@@ -254,6 +286,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
         expectedMutating,
         taskKind,
         blockedRuntime,
+        lastStatus: input.lastVerificationStatus,
       }),
       reason: highRiskClaim
         ? "high_risk_claim"
@@ -262,7 +295,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
           : expectedMutating
             ? "mutating"
             : "normal",
+      ...(input.lastVerificationStatus ? { lastStatus: input.lastVerificationStatus } : {}),
     },
+    runtimeSignal,
     memorySignal: {
       accepted: (input.memoryAcceptedCount ?? 0) > 0,
       acceptedCount: input.memoryAcceptedCount ?? 0,
@@ -493,10 +528,71 @@ function classifyVerificationLevel(input: {
   expectedMutating: boolean;
   taskKind: PolicyDecision["taskKind"];
   blockedRuntime: boolean;
+  lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
 }): PolicyDecision["verificationSignal"]["recommendedLevel"] {
   if (input.highRiskClaim || input.blockedRuntime) return "full";
+  if (
+    input.lastStatus === "fail" ||
+    input.lastStatus === "timeout" ||
+    input.lastStatus === "stale"
+  ) {
+    return "full";
+  }
+  if (
+    input.lastStatus === "partial" ||
+    input.lastStatus === "cancelled" ||
+    input.lastStatus === "skipped"
+  ) {
+    return "focused";
+  }
   if (input.expectedMutating || input.taskKind === "verification") return "focused";
   return "basic";
+}
+
+function isRiskyVerificationStatus(status: MetaSchedulerInput["lastVerificationStatus"]): boolean {
+  return (
+    status === "fail" ||
+    status === "partial" ||
+    status === "stale" ||
+    status === "cancelled" ||
+    status === "timeout"
+  );
+}
+
+function summarizeRuntimeSignal(input: {
+  backgroundTasks: BackgroundTaskState[];
+  workflow?: ActiveWorkflowRun;
+  activeAgentCount?: number;
+  activeJobCount?: number;
+  activeWorkflowStatus?: MetaSchedulerInput["activeWorkflowStatus"];
+}): PolicyDecision["runtimeSignal"] {
+  const runningAgents =
+    input.activeAgentCount ??
+    input.backgroundTasks.filter((task) => task.kind === "agent" && task.status === "running")
+      .length;
+  const runningJobs =
+    input.activeJobCount ??
+    input.backgroundTasks.filter((task) => task.kind === "job" && task.status === "running").length;
+  const workflowStatus =
+    input.activeWorkflowStatus ??
+    normalizeWorkflowRuntimeStatus(input.workflow?.status, input.workflow?.steps);
+  return {
+    runningAgents,
+    runningJobs,
+    ...(workflowStatus ? { workflowStatus } : {}),
+    resourceCapPressure: runningAgents > 0 || runningJobs > 0,
+  };
+}
+
+function normalizeWorkflowRuntimeStatus(
+  status: ActiveWorkflowRun["status"] | undefined,
+  steps: ActiveWorkflowRun["steps"] | undefined,
+): PolicyDecision["runtimeSignal"]["workflowStatus"] | undefined {
+  if (status === "blocked") return "blocked";
+  if (status === "running") return "running";
+  if (steps?.some((step) => step.status === "stale")) return "stale";
+  if (steps?.some((step) => step.status === "blocked")) return "blocked";
+  return undefined;
 }
 
 function createPolicyDecision(input: {
@@ -525,6 +621,7 @@ function createPolicyDecision(input: {
   architectureSignal: PolicyDecision["architectureSignal"];
   platformSignal: PolicyDecision["platformSignal"];
   budgetSignal: PolicyDecision["budgetSignal"];
+  runtimeSignal: PolicyDecision["runtimeSignal"];
 }): PolicyDecision {
   const hints: PolicyHint[] = [];
   if (input.permissionSignal.requireExplicitGate) {
@@ -603,6 +700,16 @@ function createPolicyDecision(input: {
       },
     });
   }
+  if (input.runtimeSignal.resourceCapPressure) {
+    hints.push({
+      id: "background-occupancy",
+      severity: "info",
+      text: {
+        "zh-CN": "策略：已有后台 agent/job 占用，先避免重复启动。",
+        "en-US": "Strategy: background agent/job is already running; avoiding duplicate starts.",
+      },
+    });
+  }
   if (input.providerPlan === "fallbackCandidate") {
     hints.push({
       id: "provider-fallback",
@@ -654,6 +761,7 @@ function createPolicyDecision(input: {
     architectureSignal: input.architectureSignal,
     platformSignal: input.platformSignal,
     budgetSignal: input.budgetSignal,
+    runtimeSignal: input.runtimeSignal,
     contextPlan: {
       includeMemory: input.includeMemory,
       includeFailureLearning: input.includeFailureLearning,

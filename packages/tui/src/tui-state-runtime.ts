@@ -304,7 +304,7 @@ export async function createMemoryState(
     disabled: await loadMemoryByStatus(paths, "disabled"),
     retired: await loadMemoryByStatus(paths, "retired"),
     ...((await loadMemoryLearningMode(paths)) ?? {
-      learningMode: "off" as const,
+      learningMode: "active" as const,
       learningModeSource: "default" as const,
     }),
   };

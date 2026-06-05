@@ -45,6 +45,7 @@ import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
 import {
+  type MetaSchedulerInput,
   type PolicyDecision,
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
@@ -269,7 +270,10 @@ export async function handleNaturalInput(
     return "handled";
   }
   if (context.memory.learningMode === "active") {
-    await runAutoLearningOnTurnEnd(context, text);
+    const run = await runAutoLearningOnTurnEnd(context, text);
+    if (run.candidatesCreated > 0) {
+      enqueueMemoryCandidateHint(context, run.candidatesCreated);
+    }
   }
   return "message";
 }
@@ -1023,7 +1027,7 @@ function createMetaSchedulerInput(
   runtime: ReturnType<typeof getSelectedModelRuntime>,
   userText: string,
   providerCooldownBlocked: boolean,
-) {
+): MetaSchedulerInput {
   return {
     language: context.language,
     userText,
@@ -1054,6 +1058,21 @@ function createMetaSchedulerInput(
     usageSampleCount: context.cache.history.length,
     roleBudgetStop: context.roleUsage.some((item) => item.budgetStop),
     toolResultBudgetPersistedCount: context.toolResultBudgetState?.replacements.size ?? 0,
+    lastVerificationStatus: context.lastVerification?.status,
+    pendingApproval: Boolean(context.pendingLocalApproval),
+    activeAgentCount: context.backgroundTasks.filter(
+      (task) => task.kind === "agent" && task.status === "running",
+    ).length,
+    activeJobCount: context.backgroundTasks.filter(
+      (task) => task.kind === "job" && task.status === "running",
+    ).length,
+    activeWorkflowStatus:
+      context.workflows.activeRun?.status === "running" ||
+      context.workflows.activeRun?.status === "blocked"
+        ? context.workflows.activeRun.status
+        : context.workflows.activeRun?.steps.some((step) => step.status === "stale")
+          ? "stale"
+          : undefined,
     ...(providerCooldownBlocked ? { providerCooldownBlocked: true } : {}),
   };
 }
@@ -1094,6 +1113,23 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   }
 }
 
+function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
+  const key = "memory:auto-learning-candidates";
+  context.notifications ??= [];
+  if (context.notifications.some((item) => item.key === key)) return;
+  context.notifications.push({
+    key,
+    text:
+      context.language === "en-US"
+        ? `Memory: ${count} candidate(s) created; review with /memory review.`
+        : `记忆：已生成 ${count} 条候选；用 /memory review 查看。`,
+    priority: "low",
+    timeoutMs: 5000,
+    createdAt: Date.now(),
+    tone: "dim",
+  });
+}
+
 function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
   if (hint.id === "permission-risk") return 105;
   if (hint.id === "blocked-runtime") return 100;
@@ -1105,6 +1141,7 @@ function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
   if (hint.id === "failure-learning") return 75;
   if (hint.id === "provider-fallback") return 70;
   if (hint.id === "source-first") return 60;
+  if (hint.id === "background-occupancy") return 50;
   return 10;
 }
 

@@ -1149,7 +1149,8 @@ async function createTestContext(
       rejected: [],
       disabled: [],
       retired: [],
-      learningMode: "off",
+      learningMode: "active",
+      learningModeSource: "default",
     },
     failureLearning: createFailureLearningState(project),
     skills: await createSkillState(config, project),
@@ -3305,9 +3306,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(prompt).toContain("ControlledMemorySummary=");
     expect(prompt).toContain("项目约定：只把经确认的长期规则注入 prompt");
     expect(prompt).toContain("MemoryBoundary=acceptedOnly");
-    expect(output.text).toContain("auto learning: off; auto accept no");
+    expect(output.text).toContain("auto learning: on; auto accept no");
     expect(output.text).toContain("accept=写入长期且可被 topK 注入；reject=丢弃候选");
-    expect(output.text).toContain("自动学习：关闭；auto accept no；切换：/memory learn on|off");
+    expect(output.text).toContain("自动学习：开启；auto accept no；切换：/memory learn on|off");
     expect(output.text).toContain(
       "session-scope：已接受 0；仅当前 TuiContext / 当前会话生效，不跨新会话持久化",
     );
@@ -3406,22 +3407,24 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("auto accept no");
   });
 
-  it("D.14B: defaults to learning mode off and does not auto-generate candidates", async () => {
+  it("D.14B: defaults to active candidate-only learning", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
-    expect(context.memory.learningMode).toBe("off");
+    context.memory = await createMemoryState(defaultConfig, project);
+    expect(context.memory.learningMode).toBe("active");
+    expect(context.memory.learningModeSource).toBe("default");
 
-    const result = await runAutoLearningOnTurnEnd(context, "用 vitest 跑测试");
-    expect(result.candidatesCreated).toBe(0);
-    expect(result.skippedReason).toBe("learning_mode=off");
-    expect(context.memory.candidates).toHaveLength(0);
+    const result = await runAutoLearningOnTurnEnd(context, "我习惯用 vitest 跑测试");
+    expect(result.candidatesCreated).toBeGreaterThan(0);
+    expect(context.memory.candidates[0]?.status).toBe("candidate");
+    expect(context.memory.accepted).toHaveLength(0);
   });
 
-  it("D.14B: /memory learn on enables auto-learning, /memory learn off disables it", async () => {
+  it("D.14B: /memory learn off disables auto-learning and persists user choice", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -3429,13 +3432,15 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
     context.memory = await createMemoryState(defaultConfig, project);
 
-    await handleSlashCommand("/memory learn on", context, output);
     expect(context.memory.learningMode).toBe("active");
-    expect(output.text).toContain("自动学习已开启");
 
     await handleSlashCommand("/memory learn off", context, output);
     expect(context.memory.learningMode).toBe("off");
     expect(output.text).toContain("自动学习已关闭");
+
+    const reloaded = await createMemoryState(defaultConfig, project);
+    expect(reloaded.learningMode).toBe("off");
+    expect(reloaded.learningModeSource).toBe("persisted");
   });
 
   it("persists /memory learn on across memory state reloads and shows persisted source", async () => {
@@ -3692,7 +3697,7 @@ describe("Phase 06 TUI slash commands", () => {
     const context = await createTestContext(project, store, session);
 
     await handleSlashCommand("/memory", context, output);
-    expect(output.text).toContain("auto learning: off");
+    expect(output.text).toContain("auto learning: on");
 
     await handleSlashCommand("/memory learn on", context, output);
     await handleSlashCommand("/memory", context, output);
@@ -3724,13 +3729,14 @@ describe("Phase 06 TUI slash commands", () => {
     expect(containsSecret("prefer pnpm over npm")).toBe(false);
   });
 
-  it("D.14B: real input path does NOT generate candidate when learning is off", async () => {
+  it("D.14B: real input path does NOT generate candidate when learning is explicitly off", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
     const output = new MemoryOutput();
     const context = await createTestContext(project, store, session);
 
+    context.memory.learningMode = "off";
     expect(context.memory.learningMode).toBe("off");
     const result = await handleNaturalInput("我习惯用 pnpm 而不是 npm", context, output);
     expect(result).toBe("message");
@@ -3750,6 +3756,29 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.memory.candidates.length).toBeGreaterThan(0);
     expect(context.memory.candidates[0]?.inferred).toBe(true);
     expect(context.memory.candidates[0]?.status).toBe("candidate");
+  });
+
+  it("D.14B: auto-learning candidate light hint is once-only and candidate stays out of prompt", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session);
+
+    context.memory.learningMode = "active";
+    await handleNaturalInput("我偏好：简短中文回答", context, output);
+    await handleNaturalInput("我习惯：先读源码再回答", context, output);
+
+    expect(context.memory.candidates.length).toBeGreaterThan(0);
+    const notifications = context.notifications?.map((item) => item.text) ?? [];
+    expect(notifications.filter((text) => text.includes("记忆：已生成"))).toHaveLength(1);
+
+    const prompt = createModelSystemPrompt("继续", context, {
+      memory: { candidates: context.memory.candidates.length, accepted: 0 },
+    });
+    expect(prompt).toContain("candidateOnlyLearning");
+    expect(prompt).not.toContain("简短中文回答");
+    expect(prompt).not.toContain("先读源码再回答");
   });
 
   it("D.14B: slash/control commands do NOT trigger auto-learning", async () => {
@@ -4245,7 +4274,7 @@ describe("Phase 06 TUI slash commands", () => {
       "好的，翻译成人话：",
       'RuntimeStatusForModel={"memory":{"linghunMd":"missing"},"index":{"status":"ready"}}',
       "ControlledMemorySummary=accepted:0 candidates:0",
-      "MemoryBoundary=acceptedOnly; topK=3; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
+      "MemoryBoundary=acceptedOnly; topK=3; candidateOnlyLearning; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
       "EvidenceSummary=[]",
       "你的环境基本正常。",
     ].join("\n");
@@ -23598,6 +23627,28 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("compact_required");
     expect(raw).toContain("blocked_runtime_stop");
+  });
+
+  it("Policy: latest verification and running background tasks become risk signals", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-78-signals-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.lastVerification = createVerificationReportFixture("fail");
+    context.backgroundTasks.push(createBackgroundTaskFixture("agent", { status: "running" }));
+
+    await __testSendMessage(
+      "继续处理当前任务",
+      context,
+      createTextGateway("先处理已有风险。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
+    expect(notifications).toContain("策略：已有后台 agent/job 占用，先避免重复启动。");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("verification=full");
   });
 
   it("Policy: edit request emits permission risk, Windows-safe, and focused verification hints", async () => {

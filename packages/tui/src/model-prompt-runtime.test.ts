@@ -20,7 +20,7 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     const text = [
       "解释如下：",
       "ControlledMemorySummary=accepted:0 candidates:0",
-      "MemoryBoundary=acceptedOnly; topK=3; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
+      "MemoryBoundary=acceptedOnly; topK=3; candidateOnlyLearning; doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
       "EvidenceSummary=[]",
       "CommandCapabilitySummary=",
       "/help Help: risk=readonly",

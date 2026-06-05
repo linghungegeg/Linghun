@@ -1,18 +1,18 @@
-import { describe, expect, it } from "vitest";
 import type { ModelMessage } from "@linghun/providers";
-import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
+import { describe, expect, it } from "vitest";
+import type { IndexState } from "./index-runtime.js";
 import {
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
+import { sanitizeMainScreenLeakage } from "./model-prompt-runtime.js";
 import type {
   BackgroundTaskState,
   EvidenceRecord,
   FailureLearningState,
   WorkflowState,
 } from "./tui-data-types.js";
-import type { IndexState } from "./index-runtime.js";
 
 describe("Meta scheduler runtime", () => {
   it("requires verifier/final-answer gate for high-risk completion claims without PASS evidence", () => {
@@ -56,9 +56,9 @@ describe("Meta scheduler runtime", () => {
 
     expect(decision.shouldCompactBeforeProvider).toBe(true);
     expect(decision.policyDecision.contextPlan.compactBeforeProvider).toBe(true);
-    expect(decision.policyDecision.hints.some((hint) => hint.id === "compact-before-provider")).toBe(
-      true,
-    );
+    expect(
+      decision.policyDecision.hints.some((hint) => hint.id === "compact-before-provider"),
+    ).toBe(true);
     expect(decision.internalEvents).toContain("meta_scheduler:compact_required");
   });
 
@@ -96,6 +96,7 @@ describe("Meta scheduler runtime", () => {
       recentDeniedCount: 1,
       expectedMutating: true,
       requireExplicitGate: true,
+      pendingApproval: false,
     });
     expect(decision.policyDecision.executionPlan.requireVerification).toBe(true);
     expect(decision.policyDecision.verificationSignal).toMatchObject({
@@ -216,6 +217,58 @@ describe("Meta scheduler runtime", () => {
     });
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("windows-safe");
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("architecture-guard");
+  });
+
+  it("projects latest verification, pending approval, and background occupancy signals", () => {
+    const backgroundTasks: BackgroundTaskState[] = [
+      {
+        id: "agent-running",
+        kind: "agent",
+        title: "agent",
+        status: "running",
+        startedAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        heartbeatIntervalMs: 1000,
+        staleAfterMs: 1000,
+        hasOutput: false,
+        userVisibleSummary: "running agent",
+      },
+      {
+        id: "job-running",
+        kind: "job",
+        title: "job",
+        status: "running",
+        startedAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+        heartbeatIntervalMs: 1000,
+        staleAfterMs: 1000,
+        hasOutput: false,
+        userVisibleSummary: "running job",
+      },
+    ];
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "继续处理当前任务",
+      lastVerificationStatus: "fail",
+      pendingApproval: true,
+      backgroundTasks,
+    });
+
+    expect(decision.policyDecision.verificationSignal).toMatchObject({
+      required: true,
+      recommendedLevel: "full",
+      lastStatus: "fail",
+    });
+    expect(decision.policyDecision.permissionSignal).toMatchObject({
+      requireExplicitGate: true,
+      pendingApproval: true,
+    });
+    expect(decision.policyDecision.runtimeSignal).toMatchObject({
+      runningAgents: 1,
+      runningJobs: 1,
+      resourceCapPressure: true,
+    });
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("background-occupancy");
   });
 
   it("shows Windows-safe hint for Windows edit and verification requests", () => {
@@ -343,7 +396,7 @@ describe("Meta scheduler runtime", () => {
 
   it("keeps policy internals off the main screen while preserving light hint wording", () => {
     const sanitized = sanitizeMainScreenLeakage(
-      "PolicyDecision={\"taskKind\":\"edit\"}\npolicy_decision: {\"risk\":\"high\"}\nTyped policy route: task edit\nStrategy: source-first; reading key files before answering.",
+      'PolicyDecision={"taskKind":"edit"}\npolicy_decision: {"risk":"high"}\nTyped policy route: task edit\nStrategy: source-first; reading key files before answering.',
       "en-US",
     );
 
