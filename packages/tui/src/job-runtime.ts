@@ -26,6 +26,7 @@ import {
 } from "./job-runner-presenter.js";
 import { formatApprovedRunnerSpecLine } from "./runner-runtime.js";
 import { formatDisplayPath, truncateDisplay } from "./startup-runtime.js";
+import { isRecord } from "./tui-state-runtime.js";
 
 const appendFileAsync = promisify(fsAppendFile);
 
@@ -42,14 +43,6 @@ export const JOB_RECOVERY_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
 export const DEFAULT_JOB_MAX_STEPS = 4;
 export const MAX_JOB_MAX_STEPS = 20;
 export const MAX_AGENTS = 20;
-
-// ---------------------------------------------------------------------------
-// Private utility copies (avoid circular import from index.ts)
-// ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 // ---------------------------------------------------------------------------
 // Types

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
 import { findKnownModel } from "@linghun/providers";
@@ -9,6 +8,7 @@ import {
   injectDeepCompactSummary,
   maybeRunDeepCompactBeforeProvider,
 } from "./deep-compact-runtime.js";
+import { createEvidenceRecord, rememberEvidence } from "./evidence-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import type { TuiContext } from "./index.js";
 import { getRoleRoute } from "./model-doctor-runtime.js";
@@ -22,7 +22,6 @@ import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
 } from "./tool-result-budget.js";
-import type { EvidenceRecord } from "./tui-data-types.js";
 import type { CompactProjection } from "./tui-data-types.js";
 
 export type CompactPreflightRuntime = {
@@ -70,7 +69,6 @@ const COMPACT_SUMMARY_MAX_CHARS = 3_200;
 const COMPACT_SUMMARY_TARGET_RESERVE_CHARS = 4_000;
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
 const MAX_COMPACT_BOUNDARIES = 20;
-const MAX_EVIDENCE_RECORDS = 50;
 
 export async function prepareMessagesForProviderPreflight(input: {
   messages: ModelMessage[];
@@ -526,27 +524,6 @@ async function recordCompactFailure(
     relatedTarget: "context compact",
     severity: "medium",
   });
-}
-
-function createEvidenceRecord(
-  kind: EvidenceRecord["kind"],
-  summary: string,
-  source: string,
-  supportsClaims: string[],
-): EvidenceRecord {
-  return {
-    id: randomUUID(),
-    kind,
-    summary: truncateDisplay(summary.replace(/\s+/g, " "), 180),
-    source,
-    supportsClaims,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {
-  context.evidence.unshift(evidence);
-  context.evidence = context.evidence.slice(0, MAX_EVIDENCE_RECORDS);
 }
 
 export function getProviderContextMaxChars(

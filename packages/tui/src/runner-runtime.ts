@@ -15,6 +15,7 @@ import type {
   NativeRunnerResolutionStatus,
 } from "./index.js";
 import { formatJobRunnerInline } from "./job-runner-presenter.js";
+import { isRecord } from "./tui-state-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -137,10 +138,6 @@ function redactedPath(path: string | undefined): string {
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +373,7 @@ export function formatApprovedRunnerSpecLine(job: DurableJobState): string {
     return `- approved spec: none\n${formatNativeRunnerProcessGuardContract()}`;
   }
   return [
-    `- approved spec: id ${spec.id}; task kind ${spec.approvedTaskKind}; cwd ref ${redactedPath(spec.cwd)}; timeout ${spec.timeoutMs}ms; expected protocol ${spec.expectedProtocol}; env allowlist ${spec.envAllowlist.join(",") || "none"}; redacted env refs ${spec.redactedEnvRefs.join(",") || "none"}; evidence refs ${spec.evidenceRefs.join(",") || "none"}; log refs state/stdout/stderr/jobLog/fullOutput/report`,
+    `- approved spec: id=${spec.id}; taskKind=${spec.approvedTaskKind}; cwdRef=${redactedPath(spec.cwd)}; timeoutMs=${spec.timeoutMs}; expectedProtocol=${spec.expectedProtocol}; envAllowlist=${spec.envAllowlist.join(",") || "none"}; redactedEnvRefs=${spec.redactedEnvRefs.join(",") || "none"}; evidenceRefs=${spec.evidenceRefs.join(",") || "none"}; logRefs=state/stdout/stderr/jobLog/fullOutput/report`,
     formatNativeRunnerProcessGuardContract(),
   ].join("\n");
 }
@@ -704,10 +701,16 @@ export async function stopRunnerForDurableJob(
         if (process.platform === "win32") {
           spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
         } else {
-          try { process.kill(-pid, "SIGKILL"); } catch { process.kill(pid, "SIGKILL"); }
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            process.kill(pid, "SIGKILL");
+          }
         }
         fallbackKillAttempted = true;
-      } catch { /* fallback kill failed */ }
+      } catch {
+        /* fallback kill failed */
+      }
     }
   }
   _runnerPids.delete(job.runner.spec.id);

@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { LinghunConfig } from "@linghun/config";
+import { isRecord } from "./tui-state-runtime.js";
 
 export type CodebaseMemoryBinarySource = "env" | "bundled" | "managed" | "path" | "missing";
 export type CodebaseMemoryBinaryStatus =
@@ -96,7 +97,8 @@ export async function readLocalIndexArtifactState(
       return { status: "corrupt", artifactPath: graphPath, error: "graph.db.zst is empty" };
     }
   } catch (error) {
-    const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    const code =
+      typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
     if (code === "ENOENT") {
       return { status: "missing", artifactPath: graphPath };
     }
@@ -124,7 +126,8 @@ async function readLocalIndexArtifactMetadata(
   try {
     raw = await readFile(artifactJsonPath, "utf8");
   } catch (error) {
-    const code = typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
+    const code =
+      typeof error === "object" && error !== null ? (error as { code?: string }).code : "";
     return code === "ENOENT"
       ? {}
       : {
@@ -197,18 +200,13 @@ export function createCurrentIndexProjectNameCandidates(projectPath: string): Se
   return candidates;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
 }
 
-export function createIndexStatusSnapshot(index: IndexState): Pick<
-  IndexState,
-  "projectName" | "status" | "nodes" | "edges" | "changedFiles" | "staleHint"
-> {
+export function createIndexStatusSnapshot(
+  index: IndexState,
+): Pick<IndexState, "projectName" | "status" | "nodes" | "edges" | "changedFiles" | "staleHint"> {
   return {
     projectName: index.projectName,
     status: index.status,

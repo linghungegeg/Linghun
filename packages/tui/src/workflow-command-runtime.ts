@@ -14,6 +14,7 @@ import type {
 import { checkBoundaries, estimateFileMetrics } from "./architecture-boundary.js";
 import { summarizeArchitectureCard } from "./architecture-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import { createEvidenceRecord } from "./evidence-runtime.js";
 import { formatWorkflows } from "./extension-command-runtime.js";
 import type { FailureLearningInput } from "./failure-learning-runtime.js";
 import { formatIndexRuntimeRef } from "./index-runtime.js";
@@ -74,12 +75,6 @@ export type WorkflowCommandRuntimeDeps = {
     sessionId: string,
     input: FailureLearningInput,
   ) => Promise<void>;
-  createEvidenceRecord: (
-    kind: EvidenceRecord["kind"],
-    summary: string,
-    source: string,
-    supportsClaims: string[],
-  ) => EvidenceRecord;
   rememberEvidence: (context: TuiContext, evidence: EvidenceRecord) => void;
   handleSlashCommand: (
     text: string,
@@ -143,15 +138,6 @@ function captureFailureLearning(
   input: FailureLearningInput,
 ): Promise<void> {
   return getWorkflowDeps().captureFailureLearning(context, sessionId, input);
-}
-
-function createEvidenceRecord(
-  kind: EvidenceRecord["kind"],
-  summary: string,
-  source: string,
-  supportsClaims: string[],
-): EvidenceRecord {
-  return getWorkflowDeps().createEvidenceRecord(kind, summary, source, supportsClaims);
 }
 
 function rememberEvidence(context: TuiContext, evidence: EvidenceRecord): void {

@@ -4,7 +4,8 @@
     "enabled": false
   },
   "files": {
-    "ignore": ["dist", "node_modules", ".codebase-memory", ".linghun", ".claude"]
+    "ignore": ["dist", "node_modules", ".codebase-memory", ".linghun", ".claude"],
+    "maxSize": 2097152
   },
   "formatter": {
     "enabled": true,

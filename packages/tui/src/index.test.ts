@@ -19,10 +19,11 @@ import {
 import { SessionStore } from "@linghun/core";
 import { computePromptCacheHitRate } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
-import { createToolContext, type ToolOutput } from "@linghun/tools";
+import { type ToolOutput, createToolContext } from "@linghun/tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatCompactStatus } from "./cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
+import { createDeepCompactPacket, formatDeepCompactPromptSummary } from "./deep-compact-runtime.js";
 import {
   buildFailureLearningSummaryForPrompt,
   loadFailureRecords,
@@ -34,10 +35,6 @@ import {
   needsSolutionCompletenessReportClosure,
 } from "./final-answer-gate.js";
 import { createHandoffPacket, hydrateResumeContext } from "./handoff-session-runtime.js";
-import {
-  createDeepCompactPacket,
-  formatDeepCompactPromptSummary,
-} from "./deep-compact-runtime.js";
 import {
   type BackgroundTaskState,
   type DeferredToolDescriptor,
@@ -2231,7 +2228,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(items.find((item) => item.id === "mcp")?.status).toBe("partial");
     expect(items.find((item) => item.id === "freshness")?.status).toBe("partial");
-    expect(items.find((item) => item.id === "freshness")?.summary).toContain("本地存在不等于来源已验证");
+    expect(items.find((item) => item.id === "freshness")?.summary).toContain(
+      "本地存在不等于来源已验证",
+    );
     // D.14A-R-Fix P1-5 — baseView.providerLiveVerified=false → provider 不 pass
     const providerItem = items.find((item) => item.id === "provider");
     expect(providerItem?.status).toBe("partial");
@@ -4083,7 +4082,7 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("D.13U: source has no FreshnessLite gate restored and has Final Answer Gate wired", async () => {
     const fs = await import("node:fs/promises");
-    const runtimeSrc = await fs.readFile(srcPath("slash-command-runtime.ts"), "utf8");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     expect(runtimeSrc).not.toMatch(/needsFreshnessLiteBoundary\s*\(/);
     expect(runtimeSrc).not.toMatch(/formatFreshnessLitePrimaryWarning\s*\(/);
     expect(runtimeSrc).toContain("evaluateFinalAnswerClaims(assistantText, context.evidence)");
@@ -4537,7 +4536,9 @@ describe("Phase 06 TUI slash commands", () => {
     ).transcript;
 
     expect(output.text).toContain("Agent context package (trimmed)");
-    expect(output.text).toContain("not included: full transcript/full memory/full index/large logs");
+    expect(output.text).toContain(
+      "not included: full transcript/full memory/full index/large logs",
+    );
     expect(output.text).toContain("explorer blocked：模型网关未就绪");
     expect(output.text).toContain("planner blocked：模型网关未就绪");
     expect(output.text).toContain("verifier 已运行真实验证");
@@ -4663,10 +4664,7 @@ describe("Phase 06 TUI slash commands", () => {
       createOpenAiRegistryAgentConfig("route-model"),
     );
     const startedAt = new Date().toISOString();
-    const makeAgent = (
-      id: string,
-      overrides: Partial<AgentRun> = {},
-    ): AgentRun => ({
+    const makeAgent = (id: string, overrides: Partial<AgentRun> = {}): AgentRun => ({
       id,
       type: "worker",
       role: "executor",
@@ -4781,12 +4779,10 @@ describe("Phase 06 TUI slash commands", () => {
     const config = createOpenAiRegistryAgentConfig("route-model");
     const context = await createTestContext(project, store, session, config);
     context.modelGateway = createModelGateway(config);
-    const timer = vi
-      .spyOn(globalThis, "setTimeout")
-      .mockImplementation((handler: unknown) => {
-        if (typeof handler === "function") void handler();
-        return 0 as unknown as ReturnType<typeof setTimeout>;
-      });
+    const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler: unknown) => {
+      if (typeof handler === "function") void handler();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
     const startedAt = new Date().toISOString();
     const idleAgent: AgentRun = {
       id: "agent-idle-a",
@@ -5093,10 +5089,10 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleNaturalInput("yes", context, context.modelGateway, output);
 
-    await expect(readFile(join(project, "agent-approved.txt"), "utf8")).resolves.toBe(
-      "approved\n",
-    );
-    await expect(readFile(join(project, "agent-needs-second-approval.txt"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(project, "agent-approved.txt"), "utf8")).resolves.toBe("approved\n");
+    await expect(
+      readFile(join(project, "agent-needs-second-approval.txt"), "utf8"),
+    ).rejects.toThrow();
     expect(agent?.status).toBe("blocked");
     expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
     expect(output.text).toContain("已执行 Write");
@@ -5118,11 +5114,7 @@ describe("Phase 06 TUI slash commands", () => {
       "unused child final",
     );
 
-    await handleSlashCommand(
-      "/fork worker write denied file --name denied-agent",
-      context,
-      output,
-    );
+    await handleSlashCommand("/fork worker write denied file --name denied-agent", context, output);
     const agent = context.agents[0];
     expect(context.pendingLocalApproval?.kind).toBe("agent_tool_use");
 
@@ -5402,8 +5394,7 @@ describe("Phase 06 TUI slash commands", () => {
     const keyLines = output.text
       .split("\n")
       .filter(
-        (line) =>
-          line.includes("repair-extremely-long-verifier") || line.includes("display name"),
+        (line) => line.includes("repair-extremely-long-verifier") || line.includes("display name"),
       );
     expect(keyLines.every((line) => line.length <= 160)).toBe(true);
   });
@@ -5984,13 +5975,17 @@ describe("Phase 06 TUI slash commands", () => {
     expect(steps.map((step) => step.status)).toEqual(["completed", "completed", "completed"]);
     expect(steps.map((step) => step.batchId)).toEqual(["batch-1", "batch-1", "batch-2"]);
     const transcript = (await store.resume(session.id)).transcript;
-    const startEvents = transcript.filter((event) => event.type === "workflow_step_start") as Array<{
+    const startEvents = transcript.filter(
+      (event) => event.type === "workflow_step_start",
+    ) as Array<{
       type: "workflow_step_start";
       step: { id: string; batchId?: string; independent?: boolean; dependsOnSliceIds?: string[] };
     }>;
     expect(startEvents.filter((event) => event.step.batchId === "batch-1")).toHaveLength(2);
     expect(startEvents.find((event) => event.step.id === "slice-a")?.step.independent).toBe(true);
-    expect(startEvents.find((event) => event.step.id === "slice-a")?.step.dependsOnSliceIds).toEqual([]);
+    expect(
+      startEvents.find((event) => event.step.id === "slice-a")?.step.dependsOnSliceIds,
+    ).toEqual([]);
   });
 
   it("keeps dependent workflow slices serial even when running cap allows more", async () => {
@@ -6182,7 +6177,9 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(context.workflows.activeRun).toMatchObject({ status: "blocked", result: "blocked" });
-    expect(context.workflows.activeRun?.steps[0]?.summary).toContain("workflow runningCap 1 reached");
+    expect(context.workflows.activeRun?.steps[0]?.summary).toContain(
+      "workflow runningCap 1 reached",
+    );
   });
 
   it("marks workflow blocked when one slice cannot produce a main-chain request", async () => {
@@ -6225,14 +6222,16 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(context.workflows.activeRun).toMatchObject({ status: "blocked", result: "blocked" });
     expect(context.workflows.activeRun?.steps[0]).toMatchObject({ status: "blocked" });
-    expect(context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id)).toMatchObject({
+    expect(
+      context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id),
+    ).toMatchObject({
       status: "failed",
       result: "partial",
     });
     const transcript = (await store.resume(session.id)).transcript;
-    expect(transcript.some((event) => event.type === "workflow_end" && event.status === "blocked")).toBe(
-      true,
-    );
+    expect(
+      transcript.some((event) => event.type === "workflow_end" && event.status === "blocked"),
+    ).toBe(true);
   });
 
   it("executes slice-architecture-review with boundary-check evidence instead of proposal-only state", async () => {
@@ -6530,7 +6529,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(plan.ok).toBe(true);
     if (!plan.ok) throw new Error("invalid denoise plan");
 
-    await __testRunWorkflowStepsWithPlan("explore with Grep Glob provider abort", plan.plan, context, output);
+    await __testRunWorkflowStepsWithPlan(
+      "explore with Grep Glob provider abort",
+      plan.plan,
+      context,
+      output,
+    );
 
     const firstBlock = output.text.slice(0, output.text.indexOf("Evidence ev-target"));
     expect(firstBlock).toContain("workflow 已启动。");
@@ -6916,7 +6920,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.workflows.activeRun?.planId).toBe("registry-internal-check-123456");
     expect(context.workflows.activeRun?.status).toBe("completed");
     expect(context.workflows.activeRun?.result).toBe("partial");
-    const workflowTask = context.backgroundTasks.find((task) => task.id === context.workflows.activeRun?.id);
+    const workflowTask = context.backgroundTasks.find(
+      (task) => task.id === context.workflows.activeRun?.id,
+    );
     expect(workflowTask).toMatchObject({
       kind: "job",
       result: "partial",
@@ -8411,7 +8417,7 @@ describe("Phase 06 TUI slash commands", () => {
     //
     // 这里通过源码扫描断言 gate 在主仓库源码里彻底不存在；不依赖 runTui 全流程，
     // 也不让 user provider.env 注入的 anthropic_messages provider 干扰断言。
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
     const loopSrc = await readFile(srcPath("model-loop-runtime.ts"), "utf8");
     const promptSrc = await readSrc("model-prompt-runtime.ts");
 
@@ -10193,7 +10199,7 @@ describe("Phase 06 TUI slash commands", () => {
   it("runtime budgets are layered instead of one short guard for every failure mode", async () => {
     const budgetSrc = await readFile(srcPath("runtime-budget.ts"), "utf8");
     const contextSrc = await readSrc("tui-context-runtime.ts");
-    const mainLoopSrc = await readSrc("slash-command-runtime.ts");
+    const mainLoopSrc = await readSrc("model-stream-runtime.ts");
     const agentSrc = await readFile(srcPath("job-agent-command-runtime.ts"), "utf8");
 
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENTIC_TURNS = 100");
@@ -10202,7 +10208,9 @@ describe("Phase 06 TUI slash commands", () => {
     expect(budgetSrc).toContain("LINGHUN_MAX_AGENT_CHILD_TOOL_ROUNDS = 40");
     expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_TOKENS = 100_000");
     expect(budgetSrc).toContain("LINGHUN_MAX_TOOL_RESULT_BYTES");
-    expect(contextSrc).toContain("export const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS");
+    expect(contextSrc).toContain(
+      "export const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS",
+    );
     expect(mainLoopSrc).toContain("MAX_MODEL_TOTAL_TOOL_ROUNDS");
     expect(`${contextSrc}\n${mainLoopSrc}`).not.toContain(
       "const MAX_MODEL_TOOL_ROUNDS = LINGHUN_MAX_EVIDENCE_TOOL_ROUNDS",
@@ -11946,9 +11954,7 @@ describe("Phase 06 TUI slash commands", () => {
     const showOutput = new MemoryOutput();
     await handleSlashCommand(`/agents show ${context.agents[0]?.id}`, context, showOutput);
     expect(showOutput.text).toContain("- model route: openai-compatible / child-fallback-model");
-    expect(showOutput.text).not.toContain(
-      "- model route: openai-compatible / child-primary-model",
-    );
+    expect(showOutput.text).not.toContain("- model route: openai-compatible / child-primary-model");
     expect(
       context.roleUsage.some(
         (usage) =>
@@ -12276,11 +12282,12 @@ describe("Phase 06 TUI slash commands", () => {
     expect(toolMessage?.content).not.toContain("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
     const assistantSummary = (first.messages ?? []).find(
       (message) =>
-        message.role === "assistant" &&
-        message.content?.includes("legacy-unpaired-read"),
+        message.role === "assistant" && message.content?.includes("legacy-unpaired-read"),
     );
     expect(assistantSummary?.content).toContain("<persisted-tool-result>");
-    expect(assistantSummary?.content).not.toContain("LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER");
+    expect(assistantSummary?.content).not.toContain(
+      "LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER",
+    );
 
     const transcript = await readFile(session.transcriptPath, "utf8");
     expect(transcript).toContain("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
@@ -12291,9 +12298,11 @@ describe("Phase 06 TUI slash commands", () => {
     const artifacts = await Promise.all(
       (await readdir(artifactDir)).map((entry) => readFile(join(artifactDir, entry), "utf8")),
     );
-    expect(artifacts.some((artifact) => artifact.includes("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER"))).toBe(
-      true,
-    );
+    expect(
+      artifacts.some((artifact) =>
+        artifact.includes("LEGACY_BUDGET_END_SHOULD_NOT_REACH_PROVIDER"),
+      ),
+    ).toBe(true);
     expect(
       artifacts.some((artifact) =>
         artifact.includes("LEGACY_UNPAIRED_END_SHOULD_NOT_REACH_PROVIDER"),
@@ -14898,7 +14907,9 @@ describe("Phase 06 TUI slash commands", () => {
   it("source: Composer Ctrl+C dispatches interrupt instead of escape", async () => {
     const text = await readFile(srcPath("shell/components/Composer.tsx"), "utf8");
     expect(text).toContain('void onInput({ type: "interrupt" });');
-    expect(text).not.toContain('void onInput({ type: "escape" });\n        return;\n      }\n\n      // Ctrl+V');
+    expect(text).not.toContain(
+      'void onInput({ type: "escape" });\n        return;\n      }\n\n      // Ctrl+V',
+    );
   });
 
   it("/mode full-access switches without local opt-in", async () => {
@@ -16517,8 +16528,13 @@ describe("Phase 06 TUI slash commands", () => {
       updatedAt: startedAt,
       teamName: "tool-team",
     });
-    context.agents = [makeAgent("agent-tool-idle", "idle"), makeAgent("agent-tool-busy", "running")];
-    context.agents[1]!.activeTask = {
+    context.agents = [
+      makeAgent("agent-tool-idle", "idle"),
+      makeAgent("agent-tool-busy", "running"),
+    ];
+    const busyAgent = context.agents[1];
+    if (!busyAgent) throw new Error("missing busy agent");
+    busyAgent.activeTask = {
       id: "busy-task",
       summary: "busy",
       assignedBy: "model",
@@ -19258,13 +19274,15 @@ describe("Phase 06 TUI slash commands", () => {
 
   it("D.14E source invariant: remote inbound business logic lives in remote-command-runtime; index.ts only glues", async () => {
     const indexSrc = await readSrc("index.ts");
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
-    // index.ts exports the inbound glue; slash-command-runtime reuses the existing local
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
+    // index.ts exports the inbound glue; model-stream-runtime reuses the existing local
     // resolvers / model chain.
     expect(indexSrc).toContain("handleRemoteInboundMessage,");
     expect(runtimeSrc).toContain("export async function handleRemoteInboundMessage");
     expect(runtimeSrc).toContain("processRemoteInbound(context, message)");
-    expect(runtimeSrc).toContain("await sendMessage(decision.routedText, context, gateway, output)");
+    expect(runtimeSrc).toContain(
+      "await sendMessage(decision.routedText, context, gateway, output)",
+    );
     expect(runtimeSrc).toContain("executePermissionApprove(approval, context, gateway, output)");
     // No second executor / keyword interception for remote natural language.
     expect(runtimeSrc).not.toContain("routedText.includes(");
@@ -22937,8 +22955,9 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     });
     expect(JSON.stringify(backgroundEvents)).not.toContain("TUI_LONG_499");
     const deltas = transcript.filter((event) => event.type === "tool_call_delta");
-    expect(deltas.every((event) => event.type === "tool_call_delta" && event.message.length <= 501))
-      .toBe(true);
+    expect(
+      deltas.every((event) => event.type === "tool_call_delta" && event.message.length <= 501),
+    ).toBe(true);
   });
 
   it("slash Bash recreates a stale session before writing background events", async () => {
@@ -23052,7 +23071,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
   });
 
   it("source invariant: handleNaturalInput main path does not call Natural Command Bridge", async () => {
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
     const start = runtimeSrc.indexOf("export async function handleNaturalInput(");
     const end = runtimeSrc.indexOf("\nexport async function", start + 1);
     const body = runtimeSrc.slice(start, end);
@@ -23472,7 +23491,8 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(blocks[0]?.fullText).toContain("测试已通过");
     expect(ctx.lastFullOutput).toContain("测试已通过");
 
-    const downgraded = "当前证据不足，不能给出已验证的最终结论。\n缺少证据：test/build/typecheck/diff-check/smoke。";
+    const downgraded =
+      "当前证据不足，不能给出已验证的最终结论。\n缺少证据：test/build/typecheck/diff-check/smoke。";
     output.replaceAssistantBlockContent(id, downgraded);
     expect(blocks[0]?.fullText).toBe(downgraded);
     expect(blocks[0]?.summary).toContain("当前证据不足");
@@ -23519,7 +23539,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
 
   it("源码：streamFinalModelAnswerWithoutTools 复用外层 assistantStreamBlockId", async () => {
     const fs = await import("node:fs/promises");
-    const runtimeSrc = await fs.readFile(srcPath("slash-command-runtime.ts"), "utf8");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     expect(runtimeSrc).toContain("reuseAssistantStreamBlockId");
     expect(runtimeSrc).toMatch(
       /assistantStreamBlockId\s*=\s*\n?\s*reuseAssistantStreamBlockId\s*\?\?/,
@@ -23531,7 +23551,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
 
   it("源码：sendMessage / continueModelAfterToolResults 在 retry 后调 discardAssistantBlock", async () => {
     const fs = await import("node:fs/promises");
-    const runtimeSrc = await fs.readFile(srcPath("slash-command-runtime.ts"), "utf8");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     const occurrences = runtimeSrc.match(
       /discardAssistantBlock\(output, assistantStreamBlockId\)/g,
     );
@@ -23545,9 +23565,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
   // Phase 6.5 — 长上下文/长输出 Streaming Memory Guard 测试
   it("Phase 6.5: appendAssistantDelta 触发流式 compaction（block.fullText 超阈值时写 artifact）", async () => {
     const fs = await import("node:fs/promises");
-    const { createShellBlockOutputForTest } = await import(
-      "../src/tui-output-surface.js"
-    );
+    const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
     const blocks: ProductBlockViewModel[] = [];
     const id = "streaming-burst-test";
     const output = createShellBlockOutputForTest(makeFakeContext(), blocks);
@@ -23560,20 +23578,20 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     // block 应存在且 fullText 保持为完整文本（compaction 异步触发）
     const block = blocks.find((b) => b.id === id);
     expect(block).toBeTruthy();
-    expect(block!.fullText?.length).toBe(35_000);
+    if (!block) throw new Error("missing streaming block");
+    expect(block.fullText?.length).toBe(35_000);
 
     // compaction 完成后，block.fullText 应为 bounded preview
     await output.compactOutputMemory();
     const compacted = blocks.find((b) => b.id === id);
     expect(compacted).toBeTruthy();
-    expect(compacted!.fullText!.length).toBeLessThan(3_000);
-    expect(compacted!.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
+    if (!compacted?.fullText) throw new Error("missing compacted streaming block text");
+    expect(compacted.fullText.length).toBeLessThan(3_000);
+    expect(compacted.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
   });
 
   it("Phase 6.5: summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {
-    const { createShellBlockOutputForTest } = await import(
-      "../src/tui-output-surface.js"
-    );
+    const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
     const blocks: ProductBlockViewModel[] = [];
     const id = "long-summary-test";
     const output = createShellBlockOutputForTest(makeFakeContext(), blocks);
@@ -23585,8 +23603,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
 
     const block = blocks.find((b) => b.id === id);
     expect(block).toBeTruthy();
-    expect(block!.summary!.length).toBeLessThanOrEqual(504); // 500 + "…"
-    expect(block!.summary).toContain("…");
+    if (!block?.summary) throw new Error("missing long summary block");
+    expect(block.summary.length).toBeLessThanOrEqual(504); // 500 + "…"
+    expect(block.summary).toContain("…");
   });
 
   it("Phase 6.5: 默认 max_tokens 写入 Amazon chat 请求", async () => {
@@ -23621,18 +23640,17 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
   });
 
   it("Phase 6.5: truncateRoundAssistantForProvider 超长截断为 head+tail", async () => {
-    const runtimeSrc = await (await import("node:fs/promises")).readFile(
-      srcPath("slash-command-runtime.ts"),
-      "utf8",
-    );
-    expect(runtimeSrc).toContain("truncateRoundAssistantForProvider");
-    expect(runtimeSrc).toContain("MAX_ROUND_ASSISTANT_CHARS_FOR_PROVIDER");
-    expect(runtimeSrc).toContain("中间省略");
+    const fs = await import("node:fs/promises");
+    const streamSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
+    const evidenceSrc = await fs.readFile(srcPath("evidence-runtime.ts"), "utf8");
+    expect(streamSrc).toContain("truncateRoundAssistantForProvider");
+    expect(evidenceSrc).toContain("truncateRoundAssistantForProvider");
+    expect(evidenceSrc).toContain("中间省略");
   });
 
   it("Phase 6.5: abort 路径调 endAssistantStream 清理 streaming 状态", async () => {
     const fs = await import("node:fs/promises");
-    const runtimeSrc = await fs.readFile(srcPath("slash-command-runtime.ts"), "utf8");
+    const runtimeSrc = await fs.readFile(srcPath("model-stream-runtime.ts"), "utf8");
     // controller.signal.aborted 检查后面的代码块必须包含 endAssistantStream
     const abortBlocks = runtimeSrc.match(
       /if \(controller\.signal\.aborted\)[\s\S]*?endAssistantStream\(output\)/g,
@@ -24180,14 +24198,14 @@ describe("D.13M Anthropic thinking SSE → TUI behavior", () => {
 // `controller.signal.aborted` 的早返回守卫。这是 invariant test，不是镜像。
 describe("D.13O safety boundary — provider abort early-return guard", () => {
   it("source: sendMessage main loop has aborted early-return", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-stream-runtime.ts");
     // 主流定位：`controller.signal.aborted` + `t(context, "toolInterrupted")`
     expect(text).toContain("if (controller.signal.aborted) {");
     expect(text).toMatch(/D\.13O[\s\S]*abort[\s\S]*continuation/iu);
   });
 
   it("source: continueModelAfterToolResults has aborted early-return", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-stream-runtime.ts");
     const continuationStart = text.indexOf("async function continueModelAfterToolResults");
     expect(continuationStart).toBeGreaterThan(-1);
     const continuationBody = text.slice(continuationStart, continuationStart + 4000);
@@ -24213,10 +24231,10 @@ describe("D.13O safety boundary — UNC/WebDAV hard deny", () => {
 // 这里只锁定接入点位与降噪点位不被悄悄回退。
 describe("D.13V-B/C source invariants", () => {
   it("source: sendMessage 接入 architecture/completeness final gate", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-stream-runtime.ts");
     expect(text).toContain("runArchitectureAndCompletenessFinalGate");
     // D.14A-2：gate 判定核心移至 final-answer-gate.ts（行为不变）；
-    // slash-command-runtime.ts 负责把 runArchitectureAndCompletenessFinalGate 接入主链。
+    // model-stream-runtime.ts 负责把 runArchitectureAndCompletenessFinalGate 接入主链。
     const gate = await readFile(srcPath("final-answer-gate.ts"), "utf8");
     expect(gate).toContain("runArchitectureAndCompletenessFinalGate");
     expect(gate).toContain("evaluateArchitectureAndCompletenessClaims");
@@ -24229,7 +24247,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: continueModelAfterToolResults 镜像同一 gate", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-stream-runtime.ts");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
@@ -24238,7 +24256,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: continueModelAfterToolResults does not append keyword-driven closure blocks", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-stream-runtime.ts");
     const start = text.indexOf("async function continueModelAfterToolResults");
     expect(start).toBeGreaterThan(-1);
     const body = text.slice(start, start + 30000);
@@ -24285,7 +24303,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: deferred tool 主屏 writeLine 走 sanitizeDeferredToolPrimaryText", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("model-tool-runtime.ts");
     // executeDeferredDispatchToolUse 不应再出现 `writeLine(output, result.text)`
     // 直接传 raw text 的写法（这会泄漏 SearchExtraTools/ExecuteExtraTool 字面）。
     const dispatchStart = text.indexOf("async function executeDeferredDispatchToolUse");
@@ -24298,7 +24316,7 @@ describe("D.13V-B/C source invariants", () => {
   });
 
   it("source: resource guard 文案标注 concurrency cap，不是权限拒绝", async () => {
-    const text = await readSrc("slash-command-runtime.ts");
+    const text = await readSrc("background-control-runtime.ts");
     expect(text).toContain("RESOURCE_GUARD_KIND");
     // checkResourceGuard 的所有用户可见返回都应明确"并发上限/不是权限拒绝"。
     const guardStart = text.indexOf("function checkResourceGuard");
@@ -24383,7 +24401,7 @@ describe("D.13V-B/C source invariants", () => {
     expect(promptSrc).toContain("EngineeringStructure=");
     expect(archSrc).toContain("Anti code blob:");
     // 主链只允许接入 conservative preflight，不允许自动重构或扩大成全量边界阻断。
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-tool-runtime.ts");
     expect(runtimeSrc).toContain("runBoundaryEditPreflight");
     expect(runtimeSrc).toContain("checkBoundaryEditPreflight");
     expect(runtimeSrc).not.toMatch(/checkFileBoundaries\(/);
@@ -25274,15 +25292,21 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
 
   it("D.14B source invariant: business logic lives in failure-learning modules, index.ts only glues", async () => {
     const indexSrc = await readSrc("index.ts");
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
-    // index.ts keeps top-level dispatch; slash-command-runtime wires capture/projection.
+    const streamSrc = await readSrc("model-stream-runtime.ts");
+    const toolSrc = await readSrc("model-tool-runtime.ts");
+    const evidenceSrc = await readSrc("evidence-runtime.ts");
+    // index.ts keeps top-level dispatch; owner runtimes wire capture/projection.
     expect(indexSrc).toContain("handleFailuresCommand(rest, context, output)");
-    expect(runtimeSrc).toContain("captureFailureLearning(context, sessionId");
-    expect(runtimeSrc).toContain("buildFailureLearningSummaryForPrompt(context.failureLearning)");
-    // 业务逻辑（脱敏 / 去重 / 投影构建）不在 slash-command-runtime.ts 重新实现。
-    expect(runtimeSrc).not.toContain("function sanitizeFailureText");
-    expect(runtimeSrc).not.toContain("function failureDedupeHash");
-    expect(runtimeSrc).not.toContain("function buildFailureLearningSummaryForPrompt");
+    expect(`${streamSrc}\n${toolSrc}`).toContain("captureFailureLearning(context, sessionId");
+    expect(streamSrc).toContain("buildFailureLearningSummaryForPrompt(context.failureLearning)");
+    // 业务逻辑（脱敏 / 去重 / 投影构建）不在拆分 owner runtime 重新实现。
+    expect(`${streamSrc}\n${toolSrc}\n${evidenceSrc}`).not.toContain(
+      "function sanitizeFailureText",
+    );
+    expect(`${streamSrc}\n${toolSrc}\n${evidenceSrc}`).not.toContain("function failureDedupeHash");
+    expect(`${streamSrc}\n${toolSrc}\n${evidenceSrc}`).not.toContain(
+      "function buildFailureLearningSummaryForPrompt",
+    );
 
     const failureRuntimeSrc = await readFile(srcPath("failure-learning-runtime.ts"), "utf8");
     expect(failureRuntimeSrc).toContain("export function sanitizeFailureText");
@@ -25291,11 +25315,15 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
   });
 
   it("D.14B: meta-scheduler receives lastToolFailure from captureFailureLearning and lastProviderFailure from provider path", async () => {
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
+    const evidenceSrc = await readSrc("evidence-runtime.ts");
     // captureFailureLearning sets lastToolFailure for category === "tool_failure".
-    const captureFn = runtimeSrc.slice(
-      runtimeSrc.indexOf("async function captureFailureLearning"),
-      runtimeSrc.indexOf("  let record: FailureLearningRecord | undefined;"),
+    const captureFn = evidenceSrc.slice(
+      evidenceSrc.indexOf("export async function captureFailureLearning"),
+      evidenceSrc.indexOf(
+        "  const inputText",
+        evidenceSrc.indexOf("export async function captureFailureLearning"),
+      ),
     );
     expect(captureFn).toContain("lastToolFailure");
     expect(captureFn).toContain('"tool_failure"');
@@ -25309,9 +25337,9 @@ describe("D.14B Failure Learning Runtime — main-chain wiring", () => {
     expect(metaCall).toContain("lastProviderFailure");
 
     // Provider failure tracking: lastProviderFailure is set in the provider error handler.
-    const providerFailBlock = runtimeSrc.slice(
-      runtimeSrc.indexOf("context.lastProviderFailure = {"),
-      runtimeSrc.indexOf("context.lastProviderFailure = {") + 200,
+    const providerFailBlock = evidenceSrc.slice(
+      evidenceSrc.indexOf("context.lastProviderFailure = {"),
+      evidenceSrc.indexOf("context.lastProviderFailure = {") + 200,
     );
     expect(providerFailBlock).toContain("lastProviderFailure");
 
@@ -25520,7 +25548,7 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
   });
 
   it("D.14C: verifyFailureLearningContract is imported and called in main chain", async () => {
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
     expect(runtimeSrc).toContain("verifyFailureLearningContract");
     // Contract verifier must appear after the import and be called at runtime.
     const afterImport = runtimeSrc.slice(runtimeSrc.indexOf("verifyFailureLearningContract"));
@@ -25528,17 +25556,20 @@ describe("D.14C Multi-Agent baseline closure — agent failure wiring & source i
   });
 
   it("D.14C: captureFailureLearning sets lastToolFailure for meta-scheduler", async () => {
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("evidence-runtime.ts");
     const fn = runtimeSrc.slice(
-      runtimeSrc.indexOf("async function captureFailureLearning"),
-      runtimeSrc.indexOf("  let record: FailureLearningRecord | undefined;"),
+      runtimeSrc.indexOf("export async function captureFailureLearning"),
+      runtimeSrc.indexOf(
+        "  const inputText",
+        runtimeSrc.indexOf("export async function captureFailureLearning"),
+      ),
     );
     expect(fn).toContain("lastToolFailure");
     expect(fn).toContain("lastMetaSchedulerFailureLearningFulfilled");
   });
 
   it("D.14C: evaluateMetaScheduler receives lastToolFailure and lastProviderFailure from context", async () => {
-    const runtimeSrc = await readSrc("slash-command-runtime.ts");
+    const runtimeSrc = await readSrc("model-stream-runtime.ts");
     const metaBlock = runtimeSrc.slice(
       runtimeSrc.indexOf("const metaSchedulerDecision = evaluateMetaScheduler({"),
       runtimeSrc.indexOf("context.lastMetaSchedulerFailureLearningRequired ="),
