@@ -3062,7 +3062,21 @@ async function handleWorkflowsCommand(
     return;
   }
   if (name === "registry" || name === "list") {
-    writeLine(output, formatWorkflowRegistryList(context));
+    const isEn = context.language === "en-US";
+    const agentCount = context.agentRegistry.agents.length;
+    const workflowCount = context.workflowRegistry.workflows.length;
+    const errorCount = context.agentRegistry.errors.length + context.workflowRegistry.errors.length;
+    showCommandPanel(context, output, {
+      title: "/workflows registry",
+      tone: errorCount > 0 ? "warning" : "neutral",
+      summary: [
+        isEn
+          ? `Registry · ${agentCount} agent${agentCount === 1 ? "" : "s"}, ${workflowCount} workflow${workflowCount === 1 ? "" : "s"}${errorCount > 0 ? ` · ${errorCount} schema error${errorCount === 1 ? "" : "s"}` : ""} — Ctrl+O for details.`
+          : `Registry · ${agentCount} 个 agent、${workflowCount} 个 workflow${errorCount > 0 ? ` · ${errorCount} 个 schema 错误` : ""} — Ctrl+O 查看详情。`,
+      ],
+      actions: ["/workflows plan <goal>", "/workflows run <id>", "/workflows status"],
+      detailsText: formatWorkflowRegistryList(context),
+    });
     return;
   }
   if (name === "plan") {
@@ -3084,7 +3098,24 @@ async function handleWorkflowsCommand(
       permissionMode: context.permissionMode,
       ...buildWorkflowPlannerContextInput(context),
     });
-    writeLine(output, formatWorkflowPlanPreview(result, context.language));
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/workflows plan",
+      tone: result.ok ? "neutral" : "warning",
+      summary: [
+        result.ok
+          ? isEn
+            ? `Plan for "${goal}" generated — Ctrl+O for details.`
+            : `已为 "${goal}" 生成计划 — Ctrl+O 查看详情。`
+          : isEn
+            ? `Plan for "${goal}" has warnings — Ctrl+O for details.`
+            : `"${goal}" 的计划存在警告 — Ctrl+O 查看详情。`,
+      ],
+      actions: result.ok
+        ? ["/workflows run <goal>", "/workflows status", "/workflows registry"]
+        : ["/workflows plan <goal>", "/workflows registry"],
+      detailsText: formatWorkflowPlanPreview(result, context.language),
+    });
     if (result.ok) {
       context.lastFullOutput = result.detailsText;
       await recordWorkflowPlanPreviewEvidence(context, await ensureSession(context), result);

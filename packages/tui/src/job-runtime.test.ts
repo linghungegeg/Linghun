@@ -99,7 +99,7 @@ describe("parseJobRunOptions", () => {
   it("parses empty args with defaults", () => {
     const result = parseJobRunOptions([]);
     expect(result.goal).toBe("");
-    expect(result.phase).toBe("Phase 17A");
+    expect(result.phase).toBe("default");
     expect(result.target).toBe("local-durable-jobs");
     expect(result.maxTokens).toBe(DEFAULT_JOB_BUDGET_TOKENS);
     expect(result.maxSteps).toBe(DEFAULT_JOB_MAX_STEPS);
@@ -196,15 +196,15 @@ describe("parseJobRunOptions", () => {
 });
 
 describe("D.14D-R P1-5 job budget display semantics", () => {
-  it("default job (no explicit budget) shows 预算：未设置, not default max numbers", () => {
+  it("default job (no explicit budget) shows budget not set, not default max numbers", () => {
     const job = createMinimalJob();
-    job.budget.explicit = undefined; // 旧 state.json / 未设置
+    job.budget.explicit = undefined; // old state.json / not set
     const status = formatJobStatus(job);
-    expect(status).toContain("预算：未设置");
+    expect(status).toContain("budget not set");
     // formatJobBudgetLine 用空格分隔 key value；非 = 格式。
-    expect(status).toContain("tokens 0/未设置");
-    expect(status).toContain("steps 0/未设置");
-    expect(status).toContain("timeout 未设置");
+    expect(status).toContain("tokens 0/not set");
+    expect(status).toContain("steps 0/not set");
+    expect(status).toContain("timeout not set");
     // 不展示默认 max 数值。
     expect(status).not.toContain("/120000");
   });
@@ -217,7 +217,7 @@ describe("D.14D-R P1-5 job budget display semantics", () => {
     const status = formatJobStatus(job);
     expect(status).toContain("tokens 0/50000");
     expect(status).toContain("steps 0/2");
-    expect(status).not.toContain("预算：未设置");
+    expect(status).not.toContain("budget not set");
   });
 });
 

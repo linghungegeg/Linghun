@@ -69,7 +69,7 @@ export type ParsedJobRunOptions = {
   allowBash: boolean;
   allowMultiAgent: boolean;
   // P1-5 — 仅当用户显式传入 --tokens / --max-steps / --timeout 时为 true。
-  // 未显式设置时 /job 没有用户可见预算，enforcement 不触发，UI 显示"预算：未设置"。
+  // 未显式设置时 /job 没有用户可见预算，enforcement 不触发，UI 显示"budget: not set"。
   budgetExplicit: { tokens: boolean; steps: boolean; runtime: boolean };
 };
 
@@ -85,7 +85,7 @@ export type JobContext = {
 
 export function parseJobRunOptions(args: string[]): ParsedJobRunOptions {
   const goalParts: string[] = [];
-  let phase = "Phase 17A";
+  let phase = "default";
   let target = "local-durable-jobs";
   let requestedAgents = 1;
   let runningCap: number | undefined;
@@ -198,23 +198,23 @@ export function getDurableJobMaxSteps(job: DurableJobState): number {
 }
 
 // P1-5 — 预算只指用户主动设置的预算（--tokens / --max-steps / --timeout）。
-// 未显式设置时 /job 没有用户可见预算，状态/报告显示"预算：未设置"，不展示默认 max。
+// 未显式设置时 /job 没有用户可见预算，状态/报告显示"budget not set"，不展示默认 max。
 function formatJobBudgetLine(job: DurableJobState): string {
   const explicit = job.budget.explicit;
   const parts: string[] = [];
   if (explicit?.tokens === true) {
     parts.push(`tokens ${job.budget.usedTokens ?? 0}/${job.budget.maxTokens}`);
   } else {
-    parts.push(`tokens ${job.budget.usedTokens ?? 0}/未设置`);
+    parts.push(`tokens ${job.budget.usedTokens ?? 0}/not set`);
   }
   if (explicit?.steps === true) {
     parts.push(`steps ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`);
   } else {
-    parts.push(`steps ${job.budget.usedSteps ?? 0}/未设置`);
+    parts.push(`steps ${job.budget.usedSteps ?? 0}/not set`);
   }
-  parts.push(explicit?.runtime === true ? `timeout ${job.timeoutMs}ms` : "timeout 未设置");
+  parts.push(explicit?.runtime === true ? `timeout ${job.timeoutMs}ms` : "timeout not set");
   const anyExplicit = Boolean(explicit?.tokens || explicit?.steps || explicit?.runtime);
-  const prefix = anyExplicit ? "budget" : "budget(预算：未设置)";
+  const prefix = anyExplicit ? "budget" : "budget not set";
   return `- ${prefix}: ${parts.join("; ")}`;
 }
 

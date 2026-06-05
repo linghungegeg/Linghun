@@ -867,7 +867,7 @@ export async function createDurableJob(
     evidenceRefs: context.evidence
       .map((item) => ({ id: item.id, kind: item.kind, source: item.source, summary: item.summary }))
       .slice(0, 8),
-    verification: { status: "not_run", summary: "not run in Phase 17A Lite job loop" },
+    verification: { status: "not_run", summary: "verification not run in default Lite job loop" },
     adoptedConclusions: [],
     rejectedConclusions:
       status === "blocked" || status === "sleeping"
