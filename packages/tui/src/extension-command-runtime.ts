@@ -173,15 +173,24 @@ export function createSkillEvolutionCandidate(
 }
 
 export function formatWorkflows(context: TuiContext): string {
+  const isEn = context.language === "en-US";
   return [
-    "Workflows（本地模板与真实 runner 入口）",
+    isEn
+      ? "Workflows (local templates + real runner entry)"
+      : "Workflows（本地模板与真实 runner 入口）",
     ...context.workflows.templates.map(
       (item) =>
         `- ${item.id}: purpose ${item.purpose}; risk ${item.risk}; writes files ${item.writesFiles ? "yes" : "no"}; validation ${item.recommendedValidation.join(" | ")}`,
     ),
-    "- preview: /workflows plan <goal> 只生成预览，不执行。",
-    "- run: /workflows run <goal> 复用 durable job runner，写入真实 task/transcript/report。",
-    "- gate: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
+    isEn
+      ? "- preview: /workflows plan <goal> generates preview only, no execution."
+      : "- preview: /workflows plan <goal> 只生成预览，不执行。",
+    isEn
+      ? "- run: /workflows run <goal> reuses durable job runner, writes real task/transcript/report."
+      : "- run: /workflows run <goal> 复用 durable job runner，写入真实 task/transcript/report。",
+    isEn
+      ? "- gate: /workflows <name> enters start confirmation; write/bash/network/install still go through permission pipeline."
+      : "- gate: /workflows <name> 只进入启动确认说明；写文件/Bash/联网/安装依赖仍走权限管道。",
   ].join("\n");
 }
 

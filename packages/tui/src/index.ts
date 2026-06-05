@@ -3018,11 +3018,47 @@ async function handleWorkflowsCommand(
   await hydrateWorkflowRuns(context);
   const name = args[0];
   if (!name) {
-    writeLine(output, formatWorkflows(context));
+    const isEn = context.language === "en-US";
+    showCommandPanel(context, output, {
+      title: "/workflows",
+      tone: "neutral",
+      summary: [
+        isEn
+          ? `Workflows · ${context.workflows.templates.length} template${context.workflows.templates.length === 1 ? "" : "s"} — Ctrl+O for details.`
+          : `Workflows · ${context.workflows.templates.length} 个模板 — Ctrl+O 查看详情。`,
+      ],
+      actions: [
+        "/workflows plan <goal>",
+        "/workflows run <goal>",
+        "/workflows status",
+        "/workflows registry",
+      ],
+      detailsText: formatWorkflows(context),
+    });
     return;
   }
   if (name === "status") {
-    writeLine(output, formatWorkflowStatus(context));
+    const isEn = context.language === "en-US";
+    const run = context.workflows.activeRun;
+    showCommandPanel(context, output, {
+      title: "/workflows status",
+      tone: run?.status === "blocked" || run?.status === "failed" ? "warning" : "neutral",
+      summary: run
+        ? [
+            isEn
+              ? `Workflow ${run.id} · ${run.status} · ${run.result} — Ctrl+O for details.`
+              : `Workflow ${run.id} · ${run.status} · ${run.result} — Ctrl+O 查看详情。`,
+          ]
+        : [
+            isEn
+              ? "No active workflow run — Ctrl+O for details."
+              : "没有 active workflow run — Ctrl+O 查看详情。",
+          ],
+      actions: run
+        ? ["/workflows status", "/background", "/details background <id>"]
+        : ["/workflows plan <goal>", "/workflows registry"],
+      detailsText: formatWorkflowStatus(context),
+    });
     return;
   }
   if (name === "registry" || name === "list") {

@@ -6965,7 +6965,9 @@ describe("Phase 06 TUI slash commands", () => {
     await handleSlashCommand("/workflows run agents", context, output);
 
     expect(context.agents).toHaveLength(2);
-    expect(context.agents.map((agent) => agent.status)).toEqual(["completed", "completed"]);
+    // 真实 AgentRun 生命周期：completeAgent 在 result.status === "completed" 后调
+    // setAgentIdle，agent 完成工作后转 idle（可接受新任务），不会停留在 completed。
+    expect(context.agents.map((agent) => agent.status)).toEqual(["idle", "idle"]);
     expect(context.backgroundTasks.filter((task) => task.kind === "agent")).toHaveLength(2);
     expect(context.workflows.activeRun?.status).toBe("completed");
     expect(context.workflows.activeRun?.steps.map((step) => step.status)).toEqual([

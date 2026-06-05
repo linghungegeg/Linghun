@@ -291,7 +291,7 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
     return "schema";
   }
   if (code === "PROVIDER_STREAM_ERROR") {
-    return "gateway";
+    return "transit";
   }
   return "generic";
 }
