@@ -1,4 +1,5 @@
 import type { Language, PermissionMode } from "@linghun/shared";
+import { truncateDisplay } from "./startup-runtime.js";
 
 export type RuntimeStatusView = {
   session: string;
@@ -35,8 +36,9 @@ export function formatRuntimeStatusLine(view: RuntimeStatusView, language: Langu
   if (waitState) {
     parts.push(language === "en-US" ? waitState : `确认 ${waitState}`);
   }
-  const line = language === "en-US" ? `Status: ${parts.join(" · ")}` : `[Linghun] ${parts.join(" · ")}`;
-  return truncateDisplay(line, 100);
+  const line =
+    language === "en-US" ? `Status: ${parts.join(" · ")}` : `[Linghun] ${parts.join(" · ")}`;
+  return truncateDisplay(line, 99);
 }
 
 export function formatPermissionModeLabel(mode: PermissionMode, language: Language): string {
@@ -79,9 +81,4 @@ function sanitizeStatusValue(value: string): string {
       .replace(/\s+/gu, " ")
       .trim() || "unknown"
   );
-}
-
-function truncateDisplay(value: string, max: number): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, Math.max(0, max - 1))}…`;
 }

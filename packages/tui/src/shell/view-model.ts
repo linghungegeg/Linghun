@@ -21,6 +21,7 @@ import {
   explainSemantic,
 } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
+import { charWidth, displayWidth } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
   CommandPanelView,
@@ -1056,9 +1057,7 @@ export function mapPendingApprovalToPermission(
         approval.toolCall?.input,
       ),
       actions:
-        approval.kind === "model_tool_use"
-          ? []
-          : buildOneShotPermissionActions(context.language),
+        approval.kind === "model_tool_use" ? [] : buildOneShotPermissionActions(context.language),
       explanationLines:
         approval.kind === "agent_tool_use"
           ? [
@@ -1241,10 +1240,14 @@ function createBackgroundNextAction(
   const zh = language === "zh-CN";
   if (task.status === "blocked") {
     if (task.kind === "agent") {
-      return zh ? "后台 agent 需要确认；用 /agents 或 /background 查看。" : "Background agent needs attention; use /agents or /background.";
+      return zh
+        ? "后台 agent 需要确认；用 /agents 或 /background 查看。"
+        : "Background agent needs attention; use /agents or /background.";
     }
     if (task.kind === "job") {
-      return zh ? "后台 job 需要确认；用 /job report 或 /background 查看。" : "Background job needs attention; use /job report or /background.";
+      return zh
+        ? "后台 job 需要确认；用 /job report 或 /background 查看。"
+        : "Background job needs attention; use /job report or /background.";
     }
     return zh
       ? "后台任务需要确认；用 /background 查看。"
@@ -1269,7 +1272,8 @@ function formatFooterRuntimeStatus(
   const agents = visibleSummaries.filter((task) => task.kind === "agent").length;
   const pieces = [zh ? `后台 ${total}` : `background ${total}`];
   if (agents > 0) pieces.push(zh ? `智能体 ${agents}` : `agents ${agents}`);
-  if (needConfirm > 0) pieces.push(zh ? `需要确认 ${needConfirm}` : `need attention ${needConfirm}`);
+  if (needConfirm > 0)
+    pieces.push(zh ? `需要确认 ${needConfirm}` : `need attention ${needConfirm}`);
   if (blocked > 0) pieces.push(zh ? `阻塞 ${blocked}` : `blocked ${blocked}`);
   if (running > 0) pieces.push(zh ? `运行中 ${running}` : `running ${running}`);
   pieces.push(zh ? "详情 /background" : "details /background");
@@ -1315,7 +1319,10 @@ function cleanBackgroundDisplayText(value: string, fallback: string): string {
       "",
     )
     .replace(/\b(workflow|agent|job|run|plan)-[A-Za-z0-9_-]{6,}\b/giu, "$1")
-    .replace(/\b[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\b/gu, "id")
+    .replace(
+      /\b[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\b/gu,
+      "id",
+    )
     .replace(/\s+/gu, " ")
     .trim();
   if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;
@@ -1441,19 +1448,4 @@ function sliceDisplayEnd(value: string, max: number): string {
     width = next;
   }
   return result;
-}
-
-const CJK_WIDE_CHAR_RE =
-  /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u;
-
-function displayWidth(value: string): number {
-  let width = 0;
-  for (const char of value) {
-    width += CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
-  }
-  return width;
-}
-
-function charWidth(char: string): number {
-  return CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
 }

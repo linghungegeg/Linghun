@@ -57,15 +57,17 @@ export function readOutputRows(output: Writable): number {
 // Display utilities
 // ---------------------------------------------------------------------------
 
+import { charWidth } from "./shell/text-utils.js";
+
 export function truncateDisplay(text: string, maxWidth: number): string {
   let width = 0;
   let result = "";
   for (const char of stripAnsi(text)) {
-    const charWidth = char.charCodeAt(0) > 0xff ? 2 : 1;
-    if (width + charWidth > maxWidth) {
+    const cw = charWidth(char);
+    if (width + cw > maxWidth) {
       return `${result}…`;
     }
-    width += charWidth;
+    width += cw;
     result += char;
   }
   return result;

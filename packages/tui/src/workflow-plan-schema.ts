@@ -223,7 +223,7 @@ const ALLOWED_TOOL_CLASSES = new Set<WorkflowToolClass>([
   "mcp-local-stdio",
 ]);
 
-const PASS_BANNED_EVIDENCE_KINDS = new Set<WorkflowEvidenceKind>([
+export const PASS_BANNED_EVIDENCE_KINDS = new Set<WorkflowEvidenceKind>([
   "agent_summary",
   "job_completed",
   "remote_event",

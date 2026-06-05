@@ -43,12 +43,35 @@ export function wrapText(value: string, max: number): string[] {
   return out.length > 0 ? out : [""];
 }
 
+const CJK_WIDE_CHAR_RE =
+  /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u;
+
 export function charWidth(char: string): number {
-  return /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(
-    char,
-  )
-    ? 2
-    : 1;
+  return CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
+}
+
+export function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) width += charWidth(char);
+  return width;
+}
+
+export function truncateDisplay(value: string, max: number): string {
+  const normalized = String(value || "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (displayWidth(normalized) <= max) return normalized;
+  if (max <= 0) return "";
+  const chars = Array.from(normalized);
+  let width = 0;
+  let result = "";
+  for (const char of chars) {
+    const next = width + charWidth(char);
+    if (next > max) return `${result}\u2026`;
+    result += char;
+    width = next;
+  }
+  return result;
 }
 
 /** Shared composer width formula, kept consistent across Ink and plain renderer. */

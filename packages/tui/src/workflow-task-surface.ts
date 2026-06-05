@@ -8,6 +8,7 @@ import type {
   WorkflowEvidenceKind,
   WorkflowPlanProjection,
 } from "./workflow-plan-schema.js";
+import { PASS_BANNED_EVIDENCE_KINDS } from "./workflow-plan-schema.js";
 
 export type EvidenceMergeVerdict = "PASS" | "PARTIAL" | "BLOCKED";
 
@@ -57,13 +58,6 @@ const PASS_ELIGIBLE_KINDS = new Set<WorkflowEvidenceKind>([
   "verification",
   "provider",
   "architecture",
-]);
-
-const PASS_BANNED_KINDS = new Set<WorkflowEvidenceKind>([
-  "agent_summary",
-  "job_completed",
-  "remote_event",
-  "failure_learning",
 ]);
 
 export function projectWorkflowTaskSurface(
@@ -161,7 +155,7 @@ function buildEvidenceMergeRows(
   }>,
 ): EvidenceMergeRow[] {
   return evidenceRefs.map((ev) => {
-    if (PASS_BANNED_KINDS.has(ev.kind)) {
+    if (PASS_BANNED_EVIDENCE_KINDS.has(ev.kind)) {
       return {
         ...ev,
         verdict: "PARTIAL" as const,

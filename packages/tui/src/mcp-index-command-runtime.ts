@@ -1,12 +1,9 @@
 import { basename } from "node:path";
 import type { TuiContext } from "./index.js";
+import { redactedPath } from "./process-command-runtime.js";
 import type { CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText, truncateDisplay } from "./startup-runtime.js";
 const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
-function redactedPath(path: string | undefined): string {
-  if (!path) return "-";
-  return `present:${sanitizeDiagnosticText(basename(path))}`;
-}
 
 /**
  * D.13Q-UX Task Surface — /mcp status 的降噪 CommandPanel 视图。

@@ -11,6 +11,7 @@ import type {
   WorkflowSliceStatus,
   WorkflowToolClass,
 } from "./workflow-plan-schema.js";
+import { PASS_BANNED_EVIDENCE_KINDS } from "./workflow-plan-schema.js";
 
 export type WorkflowBridgePermissionAction = "Write" | "Bash" | "Git" | "network" | "none";
 
@@ -209,12 +210,6 @@ type BridgeWorkflowPhase = Omit<WorkflowPhase, "slices"> & {
 };
 
 const ELIGIBLE_SLICE_STATUSES = new Set(["queued", "created", "sleeping"]);
-const PASS_BANNED_EVIDENCE_KINDS = new Set<WorkflowEvidenceKind>([
-  "agent_summary",
-  "job_completed",
-  "remote_event",
-  "failure_learning",
-]);
 const SAFE_CONTEXT_REF_KINDS = new Set<WorkflowReference["kind"]>([
   "evidence",
   "workspace_cache",

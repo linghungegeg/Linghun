@@ -1,4 +1,5 @@
 import type { Language } from "@linghun/shared";
+import { charWidth, displayWidth } from "../text-utils.js";
 import type { TaskFooterView } from "../types.js";
 
 /**
@@ -144,14 +145,6 @@ export function buildFooterView(input: FooterViewInput): {
   };
 }
 
-const CJK_WIDE_CHAR_RE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦]/u;
-
-function displayWidth(value: string): number {
-  let width = 0;
-  for (const char of value) width += CJK_WIDE_CHAR_RE.test(char) ? 2 : 1;
-  return width;
-}
-
 function truncateMiddle(value: string, max: number): string {
   const normalized = String(value || "")
     .replace(/\s+/gu, " ")
@@ -167,7 +160,7 @@ function sliceFront(value: string, max: number): string {
   let width = 0;
   let result = "";
   for (const char of value) {
-    const next = width + (CJK_WIDE_CHAR_RE.test(char) ? 2 : 1);
+    const next = width + charWidth(char);
     if (next > max) break;
     result += char;
     width = next;
@@ -181,7 +174,7 @@ function sliceBack(value: string, max: number): string {
   let result = "";
   for (let i = chars.length - 1; i >= 0; i--) {
     const char = chars[i] ?? "";
-    const next = width + (CJK_WIDE_CHAR_RE.test(char) ? 2 : 1);
+    const next = width + charWidth(char);
     if (next > max) break;
     result = `${char}${result}`;
     width = next;

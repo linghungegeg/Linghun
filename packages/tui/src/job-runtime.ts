@@ -25,7 +25,7 @@ import {
   mapDurableJobToBackgroundStatus,
 } from "./job-runner-presenter.js";
 import { formatApprovedRunnerSpecLine } from "./runner-runtime.js";
-import { formatDisplayPath } from "./startup-runtime.js";
+import { formatDisplayPath, truncateDisplay } from "./startup-runtime.js";
 
 const appendFileAsync = promisify(fsAppendFile);
 
@@ -49,25 +49,6 @@ export const MAX_AGENTS = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stripAnsi(text: string): string {
-  const escapeChar = String.fromCharCode(27);
-  return text.replace(new RegExp(`${escapeChar}\\[[0-9;]*m`, "g"), "");
-}
-
-function truncateDisplay(text: string, maxWidth: number): string {
-  let width = 0;
-  let result = "";
-  for (const char of stripAnsi(text)) {
-    const charWidth = char.charCodeAt(0) > 0xff ? 2 : 1;
-    if (width + charWidth > maxWidth) {
-      return `${result}\u2026`;
-    }
-    width += charWidth;
-    result += char;
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------
