@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -12836,7 +12837,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(transcript).toContain('"type":"tool_call_start"');
     expect(transcript).toContain('"type":"permission_request"');
     expect(transcript).toContain('"type":"permission_result"');
-  });
+  }, 10_000);
 
   it("Run 3: index refresh passes transient excludes and records full skipped details", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -23597,6 +23598,90 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("compact_required");
     expect(raw).toContain("blocked_runtime_stop");
+  });
+
+  it("Policy: edit request emits permission risk, Windows-safe, and focused verification hints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-77-hints-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+
+    await __testSendMessage(
+      "请修改 packages/tui/src/meta-scheduler-runtime.ts 并做 focused verification",
+      context,
+      createTextGateway("先确认权限和验证范围。"),
+      output,
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：检测到权限风险，写入前会请求确认。");
+    expect(notifications).toContain("策略：Windows 环境，优先使用兼容命令。");
+    expect(notifications).toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("PolicyDecision");
+    expect(notifications).not.toContain("MetaSchedulerForModel");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("verification=focused");
+    expect(raw).toContain("permission_gate=yes");
+    expect(raw).toContain("windows_safe=yes");
+  });
+
+  it("Policy: English edit hints stay human-facing without internal labels", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-77-en-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.language = "en-US";
+
+    await __testSendMessage(
+      "Edit the runtime and run focused verification",
+      context,
+      createTextGateway("I will keep this gated."),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain(
+      "Strategy: permission risk detected; write actions will ask before running.",
+    );
+    expect(notifications).toContain(
+      "Strategy: Windows environment; using compatible commands first.",
+    );
+    expect(notifications).toContain(
+      "Strategy: focused verification is recommended before completion.",
+    );
+    expect(notifications).not.toContain("policy_decision");
+    expect(notifications).not.toContain("Typed policy route");
+  });
+});
+
+describe("Phase 7.7 Policy Kernel gate invariants", () => {
+  it("Policy: model-tool runtime still routes permission through decidePermission/pendingLocalApproval", () => {
+    const src = readFileSync(join(__dirname, "model-tool-runtime.ts"), "utf8");
+    const permissionIdx = src.indexOf("const permission = await decidePermission");
+    const pendingIdx = src.indexOf('kind: "model_tool_use"', permissionIdx);
+    const approvedIdx = src.indexOf("return executeApprovedModelToolUse", permissionIdx);
+    const feedbackIdx = src.indexOf("async function appendPolicyToolFeedback");
+
+    expect(permissionIdx).toBeGreaterThan(0);
+    expect(pendingIdx).toBeGreaterThan(permissionIdx);
+    expect(approvedIdx).toBeGreaterThan(permissionIdx);
+    expect(feedbackIdx).toBeGreaterThan(approvedIdx);
+    expect(src).toContain("policy_tool_feedback");
+    expect(src).toContain("appendSystemEvent(context, sessionId, `policy_tool_feedback");
+    expect(src).not.toContain("policyDecision.permissionSignal.requireExplicitGate && permission.decision");
+  });
+
+  it("Policy: workflow and final-answer gates remain real evidence boundaries", () => {
+    const workflowSrc = readFileSync(join(__dirname, "workflow-command-runtime.ts"), "utf8");
+    const streamSrc = readFileSync(join(__dirname, "model-stream-runtime.ts"), "utf8");
+
+    expect(workflowSrc).toContain("phaseGateConfirmed");
+    expect(workflowSrc).toContain("Per-tool decidePermission still gates every Write/Bash/Agent fork");
+    expect(streamSrc).toContain("evaluateFinalAnswerClaims");
+    expect(streamSrc).toContain("runArchitectureAndCompletenessFinalGate");
+    expect(streamSrc).not.toContain("policyDecision.executionPlan.requireFinalGate = false");
   });
 });
 

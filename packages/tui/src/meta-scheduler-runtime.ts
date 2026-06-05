@@ -1,7 +1,9 @@
+import type { ModelRole } from "@linghun/config";
 import type { ModelMessage } from "@linghun/providers";
-import type { Language } from "@linghun/shared";
+import type { Language, PermissionMode } from "@linghun/shared";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import type { IndexState } from "./index-runtime.js";
+import type { TerminalCapability } from "./shell/terminal-capability.js";
 import type {
   BackgroundTaskState,
   EvidenceRecord,
@@ -21,16 +23,83 @@ export type MetaSchedulerInput = {
   evidence: EvidenceRecord[];
   failureLearning: FailureLearningState;
   memoryAcceptedCount?: number;
+  memoryCandidateCount?: number;
+  memoryAutoLearningActive?: boolean;
   backgroundTasks: BackgroundTaskState[];
   workflow?: WorkflowState["activeRun"];
   lastToolFailure?: { toolName: string; summary: string };
   providerFailure?: { provider: string; model: string; code?: string; message: string };
   providerCooldownBlocked?: boolean;
+  permissionMode?: PermissionMode;
+  recentDeniedCount?: number;
+  currentRole?: ModelRole;
+  currentProvider?: string;
+  currentModel?: string;
+  routeFallbackUsed?: boolean;
+  routeProviderCooldown?: boolean;
+  routeProviderFailure?: boolean;
+  currentArchitectureCard?: boolean;
+  architectureDriftPending?: boolean;
+  terminalCapability?: Pick<TerminalCapability, "tier" | "alternateScreen" | "cursorPositioning">;
+  platform?: NodeJS.Platform;
+  shellFamily?: "powershell" | "cmd" | "bash" | "zsh" | "sh" | "unknown";
+  usageSampleCount?: number;
+  roleBudgetStop?: boolean;
+  toolResultBudgetPersistedCount?: number;
 };
 
 export type PolicyDecision = {
   taskKind: "chat" | "code_fact" | "edit" | "workflow" | "agent" | "verification";
   riskLevel: "low" | "medium" | "high";
+  permissionSignal: {
+    permissionMode: PermissionMode;
+    recentDenied: boolean;
+    recentDeniedCount: number;
+    expectedMutating: boolean;
+    requireExplicitGate: boolean;
+  };
+  modelRouteSignal: {
+    role: ModelRole;
+    provider: string;
+    model: string;
+    fallback: boolean;
+    providerCooldown: boolean;
+    providerFailure: boolean;
+    suggestedRole?: "planner" | "verifier";
+  };
+  verificationSignal: {
+    required: boolean;
+    recommendedLevel: "focused" | "basic" | "full";
+    reason: "mutating" | "high_risk_claim" | "requested" | "normal";
+  };
+  memorySignal: {
+    accepted: boolean;
+    acceptedCount: number;
+    candidateCount: number;
+    autoLearningActive: boolean;
+  };
+  failureSignal: {
+    activeCount: number;
+    highSeverityCount: number;
+    mediumSeverityCount: number;
+    categories: string[];
+  };
+  architectureSignal: {
+    cardPresent: boolean;
+    guardReminder: boolean;
+    driftPending: boolean;
+  };
+  platformSignal: {
+    platform: NodeJS.Platform | "unknown";
+    shellFamily: "powershell" | "cmd" | "bash" | "zsh" | "sh" | "unknown";
+    terminalTier: TerminalCapability["tier"] | "unknown";
+    windowsSafeHint: boolean;
+  };
+  budgetSignal: {
+    contextPressure: boolean;
+    usageNearLimit: boolean;
+    toolResultBudgetPressure: boolean;
+  };
   contextPlan: {
     includeMemory: boolean;
     includeFailureLearning: boolean;
@@ -87,8 +156,24 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const taskKind = classifyTaskKind(input.userText);
   const expectedMutating = expectsMutatingAction(input.userText, taskKind);
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
+  const failureSignal = summarizeFailureSignal(input.failureLearning);
   const preferSourceFirst = shouldPreferSourceFirst(taskKind, indexStrategy);
   const requireVerification = highRiskClaim || taskKind === "verification" || expectedMutating;
+  const surfaceWindowsSafeHint = shouldSurfaceWindowsSafeHint({
+    userText: input.userText,
+    taskKind,
+    expectedMutating,
+    blockedRuntime,
+    toolFailure,
+    providerFailure,
+    providerCooldownBlocked: Boolean(input.providerCooldownBlocked || input.routeProviderCooldown),
+  });
+  const suggestedRole = highRiskClaim
+    ? "verifier"
+    : taskKind === "workflow" || taskKind === "agent"
+      ? "planner"
+      : undefined;
+  const recentDeniedCount = input.recentDeniedCount ?? 0;
   const providerPlan = input.providerCooldownBlocked
     ? "cooldownBlocked"
     : providerFailure
@@ -145,6 +230,62 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     blockedRuntime,
     toolFailure,
     providerFailure,
+    surfaceWindowsSafeHint,
+    permissionSignal: {
+      permissionMode: input.permissionMode ?? "default",
+      recentDenied: recentDeniedCount > 0,
+      recentDeniedCount,
+      expectedMutating,
+      requireExplicitGate: expectedMutating || blockedRuntime || recentDeniedCount > 0,
+    },
+    modelRouteSignal: {
+      role: input.currentRole ?? "executor",
+      provider: input.currentProvider ?? "unknown",
+      model: input.currentModel ?? "unknown",
+      fallback: Boolean(input.routeFallbackUsed || providerPlan === "fallbackCandidate"),
+      providerCooldown: Boolean(input.routeProviderCooldown || input.providerCooldownBlocked),
+      providerFailure: Boolean(input.routeProviderFailure || providerFailure),
+      suggestedRole,
+    },
+    verificationSignal: {
+      required: requireVerification,
+      recommendedLevel: classifyVerificationLevel({
+        highRiskClaim,
+        expectedMutating,
+        taskKind,
+        blockedRuntime,
+      }),
+      reason: highRiskClaim
+        ? "high_risk_claim"
+        : taskKind === "verification"
+          ? "requested"
+          : expectedMutating
+            ? "mutating"
+            : "normal",
+    },
+    memorySignal: {
+      accepted: (input.memoryAcceptedCount ?? 0) > 0,
+      acceptedCount: input.memoryAcceptedCount ?? 0,
+      candidateCount: input.memoryCandidateCount ?? 0,
+      autoLearningActive: Boolean(input.memoryAutoLearningActive),
+    },
+    failureSignal,
+    architectureSignal: {
+      cardPresent: Boolean(input.currentArchitectureCard),
+      guardReminder: Boolean(input.currentArchitectureCard && (expectedMutating || blockedRuntime)),
+      driftPending: Boolean(input.architectureDriftPending),
+    },
+    platformSignal: {
+      platform: input.platform ?? "unknown",
+      shellFamily: input.shellFamily ?? "unknown",
+      terminalTier: input.terminalCapability?.tier ?? "unknown",
+      windowsSafeHint: (input.platform ?? "unknown") === "win32",
+    },
+    budgetSignal: {
+      contextPressure: pressure.shouldCompact,
+      usageNearLimit: Boolean(input.roleBudgetStop),
+      toolResultBudgetPressure: (input.toolResultBudgetPersistedCount ?? 0) > 0,
+    },
   });
 
   return {
@@ -192,6 +333,16 @@ export function formatPolicyDecisionSummary(decision: PolicyDecision, language: 
   }
   if (decision.executionPlan.preferAgent) {
     parts.push(language === "en-US" ? "agent route" : "agent 路线");
+  }
+  if (decision.platformSignal.windowsSafeHint) {
+    parts.push(language === "en-US" ? "Windows-safe shell" : "Windows 兼容命令");
+  }
+  if (decision.modelRouteSignal.suggestedRole) {
+    parts.push(
+      language === "en-US"
+        ? `suggest ${decision.modelRouteSignal.suggestedRole}`
+        : `建议 ${decision.modelRouteSignal.suggestedRole}`,
+    );
   }
   const summary =
     parts.length > 0
@@ -277,6 +428,24 @@ function expectsMutatingAction(userText: string, taskKind: PolicyDecision["taskK
   );
 }
 
+function shouldSurfaceWindowsSafeHint(input: {
+  userText: string;
+  taskKind: PolicyDecision["taskKind"];
+  expectedMutating: boolean;
+  blockedRuntime: boolean;
+  toolFailure: boolean;
+  providerFailure: boolean;
+  providerCooldownBlocked: boolean;
+}): boolean {
+  if (input.expectedMutating || input.taskKind === "verification") return true;
+  if (input.taskKind === "workflow" || input.taskKind === "agent") return true;
+  if (input.blockedRuntime || input.toolFailure || input.providerFailure) return true;
+  if (input.providerCooldownBlocked) return true;
+  return /(?:\bbash\b|\bshell\b|\bcmd\b|powershell|pwsh|terminal|命令行|终端|命令|路径|执行(?:命令|脚本|测试|验证)|运行(?:命令|脚本|测试|验证)|\bpath\b|\bcommand\b|\bexecute\b|\bpnpm\b|\bnpm\b|\bnpx\b|\bnode\b|\bpython\b|\bgit\b|\brun\b\s+(?:test|build|lint|script|command|shell|bash|pnpm|npm|npx|node|python|git))/iu.test(
+    input.userText,
+  );
+}
+
 function hasActiveFailureLearning(state: FailureLearningState): boolean {
   return state.records.some(
     (record) => record.status === "active" && record.projectScope === state.projectScope,
@@ -306,6 +475,30 @@ function classifyRiskLevel(input: {
   return "low";
 }
 
+function summarizeFailureSignal(state: FailureLearningState): PolicyDecision["failureSignal"] {
+  const active = state.records.filter(
+    (record) => record.status === "active" && record.projectScope === state.projectScope,
+  );
+  const categories = [...new Set(active.map((record) => record.category))].sort();
+  return {
+    activeCount: active.length,
+    highSeverityCount: active.filter((record) => record.severity === "high").length,
+    mediumSeverityCount: active.filter((record) => record.severity === "medium").length,
+    categories,
+  };
+}
+
+function classifyVerificationLevel(input: {
+  highRiskClaim: boolean;
+  expectedMutating: boolean;
+  taskKind: PolicyDecision["taskKind"];
+  blockedRuntime: boolean;
+}): PolicyDecision["verificationSignal"]["recommendedLevel"] {
+  if (input.highRiskClaim || input.blockedRuntime) return "full";
+  if (input.expectedMutating || input.taskKind === "verification") return "focused";
+  return "basic";
+}
+
 function createPolicyDecision(input: {
   taskKind: PolicyDecision["taskKind"];
   riskLevel: PolicyDecision["riskLevel"];
@@ -323,8 +516,37 @@ function createPolicyDecision(input: {
   blockedRuntime: boolean;
   toolFailure: boolean;
   providerFailure: boolean;
+  surfaceWindowsSafeHint: boolean;
+  permissionSignal: PolicyDecision["permissionSignal"];
+  modelRouteSignal: PolicyDecision["modelRouteSignal"];
+  verificationSignal: PolicyDecision["verificationSignal"];
+  memorySignal: PolicyDecision["memorySignal"];
+  failureSignal: PolicyDecision["failureSignal"];
+  architectureSignal: PolicyDecision["architectureSignal"];
+  platformSignal: PolicyDecision["platformSignal"];
+  budgetSignal: PolicyDecision["budgetSignal"];
 }): PolicyDecision {
   const hints: PolicyHint[] = [];
+  if (input.permissionSignal.requireExplicitGate) {
+    hints.push({
+      id: "permission-risk",
+      severity: "warning",
+      text: {
+        "zh-CN": "策略：检测到权限风险，写入前会请求确认。",
+        "en-US": "Strategy: permission risk detected; write actions will ask before running.",
+      },
+    });
+  }
+  if (input.platformSignal.windowsSafeHint && input.surfaceWindowsSafeHint) {
+    hints.push({
+      id: "windows-safe",
+      severity: "info",
+      text: {
+        "zh-CN": "策略：Windows 环境，优先使用兼容命令。",
+        "en-US": "Strategy: Windows environment; using compatible commands first.",
+      },
+    });
+  }
   if (input.preferSourceFirst) {
     hints.push({
       id: "source-first",
@@ -340,8 +562,24 @@ function createPolicyDecision(input: {
       id: "verification-required",
       severity: input.riskLevel === "high" ? "warning" : "info",
       text: {
-        "zh-CN": "策略：高风险结论需要验证后再说通过。",
-        "en-US": "Strategy: high-risk claims need verification before PASS.",
+        "zh-CN":
+          input.verificationSignal.recommendedLevel === "focused"
+            ? "策略：建议先做 focused verification。"
+            : "策略：高风险结论需要验证后再说通过。",
+        "en-US":
+          input.verificationSignal.recommendedLevel === "focused"
+            ? "Strategy: focused verification is recommended before completion."
+            : "Strategy: high-risk claims need verification before PASS.",
+      },
+    });
+  }
+  if (input.architectureSignal.guardReminder) {
+    hints.push({
+      id: "architecture-guard",
+      severity: "warning",
+      text: {
+        "zh-CN": "策略：已有架构卡片，写入会继续走架构边界检查。",
+        "en-US": "Strategy: architecture card is active; edits keep architecture guard checks.",
       },
     });
   }
@@ -408,6 +646,14 @@ function createPolicyDecision(input: {
   return {
     taskKind: input.taskKind,
     riskLevel: input.riskLevel,
+    permissionSignal: input.permissionSignal,
+    modelRouteSignal: input.modelRouteSignal,
+    verificationSignal: input.verificationSignal,
+    memorySignal: input.memorySignal,
+    failureSignal: input.failureSignal,
+    architectureSignal: input.architectureSignal,
+    platformSignal: input.platformSignal,
+    budgetSignal: input.budgetSignal,
     contextPlan: {
       includeMemory: input.includeMemory,
       includeFailureLearning: input.includeFailureLearning,

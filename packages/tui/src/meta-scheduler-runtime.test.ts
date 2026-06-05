@@ -81,6 +81,8 @@ describe("Meta scheduler runtime", () => {
   it("marks mutating edit requests as explicit-gate and verification policy", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
+      permissionMode: "default",
+      recentDeniedCount: 1,
       userText: "fix the bug and edit the runtime file",
     });
 
@@ -88,7 +90,20 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.riskLevel).toBe("medium");
     expect(decision.policyDecision.permissionPlan.expectedMutating).toBe(true);
     expect(decision.policyDecision.permissionPlan.requireExplicitGate).toBe(true);
+    expect(decision.policyDecision.permissionSignal).toMatchObject({
+      permissionMode: "default",
+      recentDenied: true,
+      recentDeniedCount: 1,
+      expectedMutating: true,
+      requireExplicitGate: true,
+    });
     expect(decision.policyDecision.executionPlan.requireVerification).toBe(true);
+    expect(decision.policyDecision.verificationSignal).toMatchObject({
+      required: true,
+      recommendedLevel: "focused",
+      reason: "mutating",
+    });
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("permission-risk");
   });
 
   it("uses accepted memory and active failure lessons as context policy only", () => {
@@ -113,11 +128,25 @@ describe("Meta scheduler runtime", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
       memoryAcceptedCount: 1,
+      memoryCandidateCount: 2,
+      memoryAutoLearningActive: true,
       failureLearning,
     });
 
     expect(decision.policyDecision.contextPlan.includeMemory).toBe(true);
     expect(decision.policyDecision.contextPlan.includeFailureLearning).toBe(true);
+    expect(decision.policyDecision.memorySignal).toMatchObject({
+      accepted: true,
+      acceptedCount: 1,
+      candidateCount: 2,
+      autoLearningActive: true,
+    });
+    expect(decision.policyDecision.failureSignal).toMatchObject({
+      activeCount: 1,
+      mediumSeverityCount: 1,
+      highSeverityCount: 0,
+      categories: ["tool_failure"],
+    });
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("memory");
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("failure-learning");
   });
@@ -126,16 +155,129 @@ describe("Meta scheduler runtime", () => {
     const cooldown = evaluateMetaScheduler({
       ...baseInput(),
       providerCooldownBlocked: true,
+      currentRole: "executor",
+      currentProvider: "deepseek",
+      currentModel: "v4",
     });
     expect(cooldown.policyDecision.providerPlan).toBe("cooldownBlocked");
+    expect(cooldown.policyDecision.modelRouteSignal).toMatchObject({
+      role: "executor",
+      provider: "deepseek",
+      model: "v4",
+      fallback: false,
+      providerCooldown: true,
+      providerFailure: false,
+    });
     expect(cooldown.policyDecision.hints.map((hint) => hint.id)).toContain("provider-cooldown");
 
     const fallback = evaluateMetaScheduler({
       ...baseInput(),
       providerFailure: { provider: "p1", model: "m1", code: "429", message: "rate limit" },
+      routeFallbackUsed: true,
     });
     expect(fallback.policyDecision.providerPlan).toBe("fallbackCandidate");
+    expect(fallback.policyDecision.modelRouteSignal.fallback).toBe(true);
+    expect(fallback.policyDecision.modelRouteSignal.providerFailure).toBe(true);
     expect(fallback.policyDecision.hints.map((hint) => hint.id)).toContain("provider-fallback");
+  });
+
+  it("projects architecture, platform, and budget signals from existing runtime state", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "修改 model-stream-runtime.ts 并验证",
+      currentArchitectureCard: true,
+      architectureDriftPending: true,
+      platform: "win32",
+      shellFamily: "powershell",
+      terminalCapability: {
+        tier: "basic",
+        alternateScreen: true,
+        cursorPositioning: true,
+      },
+      roleBudgetStop: true,
+      toolResultBudgetPersistedCount: 2,
+    });
+
+    expect(decision.policyDecision.architectureSignal).toMatchObject({
+      cardPresent: true,
+      guardReminder: true,
+      driftPending: true,
+    });
+    expect(decision.policyDecision.platformSignal).toMatchObject({
+      platform: "win32",
+      shellFamily: "powershell",
+      terminalTier: "basic",
+      windowsSafeHint: true,
+    });
+    expect(decision.policyDecision.budgetSignal).toMatchObject({
+      contextPressure: false,
+      usageNearLimit: true,
+      toolResultBudgetPressure: true,
+    });
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("windows-safe");
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("architecture-guard");
+  });
+
+  it("shows Windows-safe hint for Windows edit and verification requests", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "请修改 meta-scheduler-runtime.ts 并运行 verification",
+      platform: "win32",
+      shellFamily: "powershell",
+    });
+
+    expect(decision.policyDecision.platformSignal.windowsSafeHint).toBe(true);
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("windows-safe");
+  });
+
+  it("keeps Windows-safe as a bottom signal without showing a hint for ordinary chat", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "你好，聊聊今天的工作节奏",
+      platform: "win32",
+      shellFamily: "powershell",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("chat");
+    expect(decision.policyDecision.platformSignal.windowsSafeHint).toBe(true);
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).not.toContain("windows-safe");
+  });
+
+  it("does not show Windows-safe hint for ordinary source fact checks without command or path risk", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "请基于源码确认模型流的调用链",
+      platform: "win32",
+      shellFamily: "powershell",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("code_fact");
+    expect(decision.policyDecision.platformSignal.windowsSafeHint).toBe(true);
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).not.toContain("windows-safe");
+    expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("source-first");
+  });
+
+  it("suggests verifier/planner roles without changing the selected model route", () => {
+    const verifierDecision = evaluateMetaScheduler({
+      ...baseInput(),
+      assistantText: "All fixed. PASS.",
+    });
+    expect(verifierDecision.shouldPreferVerifier).toBe(true);
+    expect(verifierDecision.policyDecision.modelRouteSignal.suggestedRole).toBe("verifier");
+
+    const plannerDecision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "多开 agent 处理这个 workflow",
+      currentRole: "executor",
+      currentProvider: "deepseek",
+      currentModel: "v4",
+    });
+    expect(plannerDecision.policyDecision.modelRouteSignal).toMatchObject({
+      role: "executor",
+      provider: "deepseek",
+      model: "v4",
+      suggestedRole: "planner",
+    });
   });
 
   it.each([

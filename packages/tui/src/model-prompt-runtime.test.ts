@@ -58,6 +58,23 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).toContain("Internal runtime context was omitted");
   });
 
+  it("strips Phase 7.7 typed policy signal labels if a model echoes them", () => {
+    const text = [
+      "PolicyDecision={}",
+      'permissionSignal: {"requireExplicitGate":true}',
+      'modelRouteSignal: {"suggestedRole":"verifier"}',
+      'verificationSignal: {"recommendedLevel":"focused"}',
+      "给用户的人话结论。",
+    ].join("\n");
+    const result = sanitizeMainScreenLeakage(text, "zh-CN");
+
+    expect(result).not.toContain("permissionSignal");
+    expect(result).not.toContain("modelRouteSignal");
+    expect(result).not.toContain("verificationSignal");
+    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).toContain("给用户的人话结论。");
+  });
+
   it("does not falsely strip ordinary prose that merely mentions the word model or memory", () => {
     const text = "你的 model 配置看起来正常，memory 也没问题。";
     expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);

@@ -116,6 +116,7 @@ import {
   LINGHUN_MAX_AGENTIC_TURNS,
   LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
 } from "./runtime-budget.js";
+import { detectTerminalCapability } from "./shell/terminal-capability.js";
 import { addRoleUsage } from "./slash-command-runtime.js";
 import { handleSlashCommand } from "./slash-command-runtime.js";
 import { formatError, writeLine } from "./startup-runtime.js";
@@ -469,18 +470,9 @@ export async function sendMessage(
   }
 
   const metaSchedulerDecision = evaluateMetaScheduler({
-    language: context.language,
+    ...createMetaSchedulerInput(context, selectedRuntime, text, false),
     userText: text,
     messages: createPolicyContextPressureMessages(runtimeStatus, text),
-    estimatedContextChars: context.cache.compactPressure?.estimatedChars,
-    contextMaxChars: getProviderContextMaxChars(context, selectedRuntime),
-    triggerChars: getAutoCompactTriggerChars(context, selectedRuntime),
-    index: context.index,
-    evidence: context.evidence,
-    failureLearning: context.failureLearning,
-    memoryAcceptedCount: context.memory.accepted.length,
-    backgroundTasks: context.backgroundTasks,
-    workflow: context.workflows.activeRun,
     ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
     ...(context.lastProviderFailure
       ? {
@@ -1026,6 +1018,58 @@ function createPolicyContextPressureMessages(
   ];
 }
 
+function createMetaSchedulerInput(
+  context: TuiContext,
+  runtime: ReturnType<typeof getSelectedModelRuntime>,
+  userText: string,
+  providerCooldownBlocked: boolean,
+) {
+  return {
+    language: context.language,
+    userText,
+    estimatedContextChars: context.cache.compactPressure?.estimatedChars,
+    contextMaxChars: getProviderContextMaxChars(context, runtime),
+    triggerChars: getAutoCompactTriggerChars(context, runtime),
+    index: context.index,
+    evidence: context.evidence,
+    failureLearning: context.failureLearning,
+    memoryAcceptedCount: context.memory.accepted.length,
+    memoryCandidateCount: context.memory.candidates.length,
+    memoryAutoLearningActive: context.memory.learningMode === "active",
+    backgroundTasks: context.backgroundTasks,
+    workflow: context.workflows.activeRun,
+    permissionMode: context.permissionMode,
+    recentDeniedCount: context.permissions.recentDenied.length,
+    currentRole: runtime.role,
+    currentProvider: runtime.provider,
+    currentModel: runtime.model,
+    routeFallbackUsed: context.lastProviderFallbackAttempt?.status === "attempted",
+    routeProviderCooldown: providerCooldownBlocked,
+    routeProviderFailure: Boolean(context.lastProviderFailure),
+    currentArchitectureCard: Boolean(context.currentArchitectureCard),
+    architectureDriftPending: context.pendingLocalApproval?.kind === "architecture_drift",
+    terminalCapability: detectTerminalCapability(),
+    platform: process.platform,
+    shellFamily: detectShellFamily(process.env),
+    usageSampleCount: context.cache.history.length,
+    roleBudgetStop: context.roleUsage.some((item) => item.budgetStop),
+    toolResultBudgetPersistedCount: context.toolResultBudgetState?.replacements.size ?? 0,
+    ...(providerCooldownBlocked ? { providerCooldownBlocked: true } : {}),
+  };
+}
+
+function detectShellFamily(
+  env: NodeJS.ProcessEnv,
+): "powershell" | "cmd" | "bash" | "zsh" | "sh" | "unknown" {
+  const shell = `${env.SHELL ?? ""} ${env.ComSpec ?? ""} ${env.PSModulePath ?? ""}`.toLowerCase();
+  if (shell.includes("powershell") || shell.includes("pwsh")) return "powershell";
+  if (shell.includes("cmd.exe")) return "cmd";
+  if (shell.includes("bash")) return "bash";
+  if (shell.includes("zsh")) return "zsh";
+  if (shell.includes("/sh") || shell.endsWith(" sh")) return "sh";
+  return process.platform === "win32" ? "powershell" : "unknown";
+}
+
 function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void {
   if (decision.hints.length === 0) return;
   const now = Date.now();
@@ -1034,7 +1078,7 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   const visibleHints = decision.hints
     .slice()
     .sort((a, b) => policyHintPriority(b) - policyHintPriority(a))
-    .slice(0, 2);
+    .slice(0, 3);
   for (const hint of visibleHints) {
     const key = `policy:${hint.id}`;
     if (existing.has(key)) continue;
@@ -1051,10 +1095,13 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
 }
 
 function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
+  if (hint.id === "permission-risk") return 105;
   if (hint.id === "blocked-runtime") return 100;
   if (hint.id === "provider-cooldown") return 95;
   if (hint.id === "compact-before-provider") return 90;
   if (hint.id === "verification-required") return 80;
+  if (hint.id === "windows-safe") return 78;
+  if (hint.id === "architecture-guard") return 77;
   if (hint.id === "failure-learning") return 75;
   if (hint.id === "provider-fallback") return 70;
   if (hint.id === "source-first") return 60;
@@ -1069,7 +1116,7 @@ async function appendPolicyDecisionEvent(
   await appendSystemEvent(
     context,
     sessionId,
-    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}`,
+    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}`,
     decision.riskLevel === "high" || decision.providerPlan === "cooldownBlocked"
       ? "warning"
       : "info",
@@ -1087,18 +1134,9 @@ async function appendRuntimePolicyHint(
 ): Promise<void> {
   const runtime = getSelectedModelRuntime(context);
   const decision = evaluateMetaScheduler({
-    language: context.language,
+    ...createMetaSchedulerInput(context, runtime, userText, Boolean(extra.providerCooldownBlocked)),
     userText,
     messages: createPolicyContextPressureMessages(undefined, userText),
-    estimatedContextChars: context.cache.compactPressure?.estimatedChars,
-    contextMaxChars: getProviderContextMaxChars(context, runtime),
-    triggerChars: getAutoCompactTriggerChars(context, runtime),
-    index: context.index,
-    evidence: context.evidence,
-    failureLearning: context.failureLearning,
-    memoryAcceptedCount: context.memory.accepted.length,
-    backgroundTasks: context.backgroundTasks,
-    workflow: context.workflows.activeRun,
     ...extra,
   }).policyDecision;
   enqueuePolicyHints(context, decision);

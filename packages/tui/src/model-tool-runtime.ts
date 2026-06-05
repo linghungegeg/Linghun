@@ -305,6 +305,12 @@ export async function executeModelToolUse(
           ? `Scope change requires confirmation before this tool use: ${drift.warnings.join("; ")}`
           : `本次工具调用改变约定范围，需要确认后才能执行：${drift.warnings.join("；")}`;
       await appendSystemEvent(context, sessionId, warning, "warning");
+      await appendPolicyToolFeedback(
+        context,
+        sessionId,
+        `architecture drift pending: tool ${toolName}; warnings ${drift.warnings.join("|")}`,
+        "warning",
+      );
       writeLine(
         output,
         context.language === "en-US"
@@ -357,6 +363,12 @@ export async function executeModelToolUse(
     reason: permission.reason,
     createdAt: new Date().toISOString(),
   });
+  await appendPolicyToolFeedback(
+    context,
+    sessionId,
+    `permission verdict: tool ${toolName}; decision ${permission.decision}; risk ${permission.request.risk}; mode ${permission.request.mode}`,
+    permission.decision === "allow" ? "info" : "warning",
+  );
   if (permission.autoAllowReadonly) {
     // D.13N — engine short-circuited this tool to auto_allow_readonly.
     // Record a structured event for transparency. Payload is sanitized: the
@@ -646,6 +658,12 @@ export async function executeApprovedModelToolUse(
         relatedTarget: toolName,
         severity: "medium",
       });
+      await appendPolicyToolFeedback(
+        context,
+        sessionId,
+        `tool failure: tool ${toolName}; evidence ${evidence?.id ?? "none"}`,
+        "warning",
+      );
     }
     clearBackgroundAbortController(context, task?.id ?? "");
     if (backgroundController) {
@@ -690,8 +708,23 @@ export async function executeApprovedModelToolUse(
       relatedTarget: toolName,
       severity: "medium",
     });
+    await appendPolicyToolFeedback(
+      context,
+      sessionId,
+      `tool failure: tool ${toolName}; evidence ${evidence.id}`,
+      "warning",
+    );
     return { ok: false, tool: toolName, text, evidenceId: evidence.id };
   }
+}
+
+async function appendPolicyToolFeedback(
+  context: TuiContext,
+  sessionId: string,
+  summary: string,
+  level: "info" | "warning" = "info",
+): Promise<void> {
+  await appendSystemEvent(context, sessionId, `policy_tool_feedback: ${summary}`, level);
 }
 
 // Module 3 — toPermissionPromptView 已移至 ./tui-permission-runtime.ts。
@@ -1169,6 +1202,12 @@ export async function executeLinghunControlToolUse(
       const text = report
         ? `Verification ${report.status.toUpperCase()}: ${report.summary}`
         : "Verification runner did not produce a report.";
+      await appendPolicyToolFeedback(
+        context,
+        sessionId,
+        `verification result: level ${input.level}; status ${report?.status ?? "partial"}; report ${report?.id ?? "none"}`,
+        ok ? "info" : "warning",
+      );
       return await finishControlToolResult(toolCall, context, sessionId, output, text, !ok, {
         status: report?.status ?? "partial",
         reportId: report?.id,
