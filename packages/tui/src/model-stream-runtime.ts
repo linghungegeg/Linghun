@@ -19,6 +19,7 @@ import {
 } from "./compact-cache-command-runtime.js";
 import { prepareMessagesForProviderPreflight } from "./compact-preflight-runtime.js";
 import { getProviderContextMaxChars } from "./compact-preflight-runtime.js";
+import { getAutoCompactTriggerChars } from "./compact-preflight-runtime.js";
 import { estimateModelMessageChars } from "./context-estimator.js";
 import { createUserMessageEvent, ensureSession, t, writeStatus } from "./details-status-runtime.js";
 import {
@@ -44,8 +45,10 @@ import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
 import {
+  type PolicyDecision,
   evaluateMetaScheduler,
   formatMetaSchedulerDirective,
+  formatPolicyDecisionSummary,
   verifyFailureLearningContract,
 } from "./meta-scheduler-runtime.js";
 import { startModelSetup } from "./model-command-runtime.js";
@@ -374,6 +377,10 @@ export async function sendMessage(
   }
   const selectedRuntimeForCooldown = getSelectedModelRuntime(context);
   if (checkAndWriteProviderCooldown(context, selectedRuntimeForCooldown, output)) {
+    const cooldownSessionId = await ensureSession(context);
+    await appendRuntimePolicyHint(context, cooldownSessionId, text, {
+      providerCooldownBlocked: true,
+    });
     return;
   }
   const sessionId = await ensureSession(context);
@@ -464,9 +471,14 @@ export async function sendMessage(
   const metaSchedulerDecision = evaluateMetaScheduler({
     language: context.language,
     userText: text,
+    messages: createPolicyContextPressureMessages(runtimeStatus, text),
+    estimatedContextChars: context.cache.compactPressure?.estimatedChars,
+    contextMaxChars: getProviderContextMaxChars(context, selectedRuntime),
+    triggerChars: getAutoCompactTriggerChars(context, selectedRuntime),
     index: context.index,
     evidence: context.evidence,
     failureLearning: context.failureLearning,
+    memoryAcceptedCount: context.memory.accepted.length,
     backgroundTasks: context.backgroundTasks,
     workflow: context.workflows.activeRun,
     ...(context.lastToolFailure ? { lastToolFailure: context.lastToolFailure } : {}),
@@ -486,6 +498,8 @@ export async function sendMessage(
   for (const event of metaSchedulerDecision.internalEvents) {
     await appendSystemEvent(context, sessionId, event, "info");
   }
+  enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
+  await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
   const systemPrompt = createModelSystemPrompt(
     text,
     context,
@@ -659,6 +673,14 @@ export async function sendMessage(
               kind: fallback.kind,
               code: fallback.code,
               status: "attempted",
+            });
+            await appendRuntimePolicyHint(context, sessionId, text, {
+              providerFailure: {
+                provider: selectedRuntime.provider,
+                model: selectedRuntime.model,
+                code: fallback.code,
+                message: fallback.kind,
+              },
             });
             writeLine(
               output,
@@ -988,6 +1010,99 @@ export async function __testSendMessage(
   output: Writable,
 ): Promise<void> {
   await sendMessage(text, context, gateway, output);
+}
+
+function createPolicyContextPressureMessages(
+  runtimeStatus: unknown,
+  userText: string,
+): ModelMessage[] {
+  return [
+    {
+      role: "system",
+      content:
+        typeof runtimeStatus === "string" ? runtimeStatus : JSON.stringify(runtimeStatus ?? {}),
+    },
+    { role: "user", content: userText },
+  ];
+}
+
+function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void {
+  if (decision.hints.length === 0) return;
+  const now = Date.now();
+  context.notifications ??= [];
+  const existing = new Set(context.notifications.map((item) => item.key));
+  const visibleHints = decision.hints
+    .slice()
+    .sort((a, b) => policyHintPriority(b) - policyHintPriority(a))
+    .slice(0, 2);
+  for (const hint of visibleHints) {
+    const key = `policy:${hint.id}`;
+    if (existing.has(key)) continue;
+    context.notifications.push({
+      key,
+      text: hint.text[context.language],
+      priority: hint.severity === "warning" ? "medium" : "low",
+      timeoutMs: 5000,
+      createdAt: now,
+      tone: hint.severity === "warning" ? "warning" : "dim",
+    });
+    existing.add(key);
+  }
+}
+
+function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
+  if (hint.id === "blocked-runtime") return 100;
+  if (hint.id === "provider-cooldown") return 95;
+  if (hint.id === "compact-before-provider") return 90;
+  if (hint.id === "verification-required") return 80;
+  if (hint.id === "failure-learning") return 75;
+  if (hint.id === "provider-fallback") return 70;
+  if (hint.id === "source-first") return 60;
+  return 10;
+}
+
+async function appendPolicyDecisionEvent(
+  context: TuiContext,
+  sessionId: string,
+  decision: PolicyDecision,
+): Promise<void> {
+  await appendSystemEvent(
+    context,
+    sessionId,
+    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}`,
+    decision.riskLevel === "high" || decision.providerPlan === "cooldownBlocked"
+      ? "warning"
+      : "info",
+  );
+}
+
+async function appendRuntimePolicyHint(
+  context: TuiContext,
+  sessionId: string,
+  userText: string,
+  extra: {
+    providerFailure?: { provider: string; model: string; code?: string; message: string };
+    providerCooldownBlocked?: boolean;
+  },
+): Promise<void> {
+  const runtime = getSelectedModelRuntime(context);
+  const decision = evaluateMetaScheduler({
+    language: context.language,
+    userText,
+    messages: createPolicyContextPressureMessages(undefined, userText),
+    estimatedContextChars: context.cache.compactPressure?.estimatedChars,
+    contextMaxChars: getProviderContextMaxChars(context, runtime),
+    triggerChars: getAutoCompactTriggerChars(context, runtime),
+    index: context.index,
+    evidence: context.evidence,
+    failureLearning: context.failureLearning,
+    memoryAcceptedCount: context.memory.accepted.length,
+    backgroundTasks: context.backgroundTasks,
+    workflow: context.workflows.activeRun,
+    ...extra,
+  }).policyDecision;
+  enqueuePolicyHints(context, decision);
+  await appendPolicyDecisionEvent(context, sessionId, decision);
 }
 
 // D.14E — 远程入站消息进入本地主链的唯一 glue。校验交给 processRemoteInbound（纯
@@ -1333,6 +1448,14 @@ async function streamFinalModelAnswerWithoutTools(
           code: fallback.code,
           status: "attempted",
         });
+        await appendRuntimePolicyHint(context, sessionId, "continuation", {
+          providerFailure: {
+            provider: currentRuntime.provider,
+            model: currentRuntime.model,
+            code: fallback.code,
+            message: fallback.kind,
+          },
+        });
         writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
         continuation.provider = fallback.runtime.provider;
         continuation.model = fallback.runtime.model;
@@ -1611,6 +1734,14 @@ export async function continueModelAfterToolResults(
               kind: fallback.kind,
               code: fallback.code,
               status: "attempted",
+            });
+            await appendRuntimePolicyHint(context, sessionId, "continuation", {
+              providerFailure: {
+                provider: currentRuntime.provider,
+                model: currentRuntime.model,
+                code: fallback.code,
+                message: fallback.kind,
+              },
             });
             writeLine(output, context.lastProviderFallbackAttempt?.summary ?? "");
             continuation.provider = fallback.runtime.provider;

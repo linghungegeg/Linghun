@@ -20635,6 +20635,29 @@ describe("D.8 provider circuit breaker integration", () => {
     }
   });
 
+  it("Policy: provider cooldown records a strategy hint without calling the gateway", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tui-policy-cooldown-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    recordProviderFailure(context.providerBreaker, "deepseek", "deepseek-v4-flash", "PROVIDER_RATE_LIMITED");
+    recordProviderFailure(context.providerBreaker, "deepseek", "deepseek-v4-flash", "PROVIDER_RATE_LIMITED");
+    const gateway = {
+      stream: vi.fn(async function* () {
+        yield { type: "assistant_text_delta", text: "should not stream" } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+
+    await __testSendMessage("请继续", context, gateway, new MemoryOutput());
+
+    expect(gateway.stream).not.toHaveBeenCalled();
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：Provider 冷却中");
+    expect(notifications).not.toContain("policy_decision");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("provider 冷却阻塞");
+  });
+
   it("PROVIDER_AUTH_ERROR and PROVIDER_SCHEMA_ERROR do not trigger breaker", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-breaker-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -23450,6 +23473,130 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
     expect(detailsOut.text).toContain("关键证据 Y");
     // /details 默认分支当然也不能把 lastFullOutput 改写
     expect(context.lastFullOutput).toBe(assistantBody);
+  });
+});
+
+describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
+  function createTextGateway(text = "我会先读取关键文件再回答。"): Parameters<typeof __testSendMessage>[2] {
+    return {
+      stream: vi.fn(async function* () {
+        yield { type: "assistant_text_delta", text } as const;
+        yield { type: "message_stop", chunkCount: 1, hadUsage: false } as const;
+      }),
+    } as unknown as Parameters<typeof __testSendMessage>[2];
+  }
+
+  it("Policy: code fact request emits source-first hint and system_event before model answer", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-source-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+
+    await __testSendMessage(
+      "请基于源码确认 model-stream-runtime.ts 的调用链",
+      context,
+      createTextGateway(),
+      output,
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：源码优先，先读取关键文件。");
+    expect(notifications).not.toContain("PolicyDecision");
+    expect(notifications).not.toContain("policy_decision");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("strategy: 策略：源码优先");
+  });
+
+  it("Policy: English source-first hint stays human-facing", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-en-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.language = "en-US";
+
+    await __testSendMessage(
+      "Inspect the source file before answering",
+      context,
+      createTextGateway("Reading files first."),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain(
+      "Strategy: source-first; reading key files before answering.",
+    );
+    expect(notifications).not.toContain("MetaSchedulerForModel");
+    expect(notifications).not.toContain("raw evidence");
+  });
+
+  it("Policy: high-risk completion and historical failure produce verification/failure hints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-risk-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    mergeFailureRecord(context.failureLearning, {
+      category: "tool_failure",
+      failureSummary: "previous Bash failed",
+      rootCauseGuess: "command exited non-zero",
+      avoidNextTime: "inspect output before claiming pass",
+      sourceRef: "evidence:prev",
+      relatedTarget: "Bash",
+      severity: "medium",
+    });
+
+    await __testSendMessage(
+      "已完成，测试通过，可以进入下一阶段",
+      context,
+      createTextGateway("我还需要验证后再确认。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
+    expect(notifications).toContain("策略：参考历史失败，只作为风险提示。");
+    const transcript = (await store.resume(session.id)).transcript;
+    expect(JSON.stringify(transcript)).toContain("final_answer_gate_required");
+    expect(JSON.stringify(transcript)).toContain("strategy: 策略：源码优先");
+  });
+
+  it("Policy: context pressure and blocked workflow emit typed strategy hints", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-policy-pressure-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.cache.compactPressure = {
+      estimatedChars: 600_000,
+      maxChars: 500_000,
+      triggerChars: 450_000,
+      ratio: 1.2,
+      toolPairingSafe: true,
+      updatedAt: new Date().toISOString(),
+    };
+    context.workflows.activeRun = {
+      id: "wf-blocked",
+      goal: "ship",
+      planId: "plan",
+      status: "blocked",
+      steps: [],
+      startedAt: new Date().toISOString(),
+      result: "blocked",
+    };
+
+    await __testSendMessage(
+      "继续 workflow 状态处理",
+      context,
+      createTextGateway("先检查 workflow 状态。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
+    expect(notifications).toContain("策略：上下文接近上限，先压缩再请求模型。");
+    expect(notifications).toContain("策略：已有任务阻塞，先检查 workflow/agent 状态。");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("compact_required");
+    expect(raw).toContain("blocked_runtime_stop");
   });
 });
 
