@@ -59,7 +59,7 @@ export function formatPendingApprovalDetails(
         ].join("\n");
   }
   if (approval.kind === "architecture_drift") {
-    const warnings = approval.warnings.map((item) => truncateDisplay(item, 120)).join("；") || "-";
+    const warnings = approval.warnings?.map((item) => truncateDisplay(item, 120)).join("；") || "-";
     return context.language === "en-US"
       ? [
           "Pending permission details",

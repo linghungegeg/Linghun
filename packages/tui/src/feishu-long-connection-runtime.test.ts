@@ -1,12 +1,14 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as Lark from "@larksuiteoapi/node-sdk";
 import { type LinghunConfig, defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
 import { createToolContext } from "@linghun/tools";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFailureLearningState } from "./failure-learning-runtime.js";
 import { createIndexState } from "./index-runtime.js";
+import { startFeishuLongConnection } from "./feishu-long-connection-runtime.js";
 import {
   type TuiContext,
   createRemotePairing,
@@ -39,7 +41,50 @@ class MemoryOutput {
 
 describe("Feishu real inbound adapter", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
+  });
+
+  it("long connection close is awaitable and idempotent", async () => {
+    const dispatcherInstances: Array<{ handles: Map<string, unknown> }> = [];
+    const close = vi.fn();
+    const start = vi.fn();
+    vi.spyOn(Lark, "EventDispatcher").mockImplementation(function EventDispatcherMock(this: {
+      handles: Map<string, unknown>;
+      register: (handles: Record<string, unknown>) => unknown;
+    }) {
+      this.handles = new Map();
+      dispatcherInstances.push(this);
+      this.register = (handles: Record<string, unknown>) => {
+        for (const [key, value] of Object.entries(handles)) {
+          this.handles.set(key, value);
+        }
+        return this;
+      };
+      return this;
+    } as never);
+    vi.spyOn(Lark, "WSClient").mockImplementation(function WSClientMock(this: {
+      start: () => Promise<void>;
+      close: (params?: { force?: boolean }) => void;
+    }) {
+      this.start = start.mockResolvedValue(undefined);
+      this.close = close;
+      return this;
+    } as never);
+
+    const handle = await startFeishuLongConnection({
+      appId: "app-id",
+      appSecret: "app-secret",
+      onMessage: async () => undefined,
+    });
+
+    expect(dispatcherInstances[0]?.handles.has("im.message.receive_v1")).toBe(true);
+    await handle.close();
+    await handle.close();
+
+    expect(dispatcherInstances[0]?.handles.has("im.message.receive_v1")).toBe(false);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith({ force: true });
   });
 
   it("converts im.message.receive_v1 to RemoteInboundMessage without exposing secrets", () => {
@@ -170,7 +215,7 @@ describe("Feishu real inbound adapter", () => {
       }),
       startFeishuLongConnection: async () => {
         calls.push("start");
-        return { close: () => undefined };
+        return { close: async () => undefined };
       },
     });
 
@@ -211,7 +256,7 @@ describe("Feishu real inbound adapter", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
           origin: "adapter",
         });
-        return { close: () => closeCalls.push("closed") };
+        return { close: async () => void closeCalls.push("closed") };
       },
     });
 
@@ -240,7 +285,9 @@ describe("Feishu real inbound adapter", () => {
         summary: "routed",
         evidenceCreated: false,
       }),
-      startFeishuLongConnection: async () => ({ close: () => closeCalls.push("closed") }),
+      startFeishuLongConnection: async () => ({
+        close: async () => void closeCalls.push("closed"),
+      }),
     });
 
     await handleRemoteCommand(["bot", "start", "feishu"], context, output as never);

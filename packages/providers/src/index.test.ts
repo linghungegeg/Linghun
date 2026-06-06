@@ -1305,6 +1305,14 @@ describe("ModelGateway", () => {
     expect(JSON.stringify(events[0])).not.toContain("sk-secret123");
   });
 
+  it("redacts secret fragments from generic provider errors", () => {
+    const error = normalizeProviderError(new Error("upstream leaked sk-secret123 in message"));
+
+    expect(error.code).toBe("PROVIDER_ERROR");
+    expect(error.message).toContain("sk-***");
+    expect(error.message).not.toContain("sk-secret123");
+  });
+
   it("keeps LinghunError provider failures readable", () => {
     const error = normalizeProviderError(
       new LinghunError({
@@ -2997,6 +3005,21 @@ describe("D.13G Anthropic tools contract + builder + stream parser", () => {
       name: "Read",
       input: { path: "README.md" },
     });
+  });
+
+  it("stream parser: unfinished Anthropic tool_use emits PROVIDER_PARTIAL_TOOL_CALL", async () => {
+    const events = await collectAnthropicEvents([
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_partial"}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-open","name":"Read"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]);
+    const error = events.find(
+      (event): event is Extract<LinghunEvent, { type: "error" }> => event.type === "error",
+    );
+
+    expect(error?.error.code).toBe("PROVIDER_PARTIAL_TOOL_CALL");
+    expect(events.at(-1)?.type).toBe("message_stop");
   });
 
   it("stream parser: mixed text_delta + tool_use stream emits both event types in order", async () => {

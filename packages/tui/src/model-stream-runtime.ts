@@ -1319,10 +1319,10 @@ export async function handleRemoteInboundMessage(
   if (decision.kind === "natural_language_message" && decision.routedText) {
     const inbox = decideRemoteInbox(context.remote, message, {
       activeModelTurn: Boolean(context.activeAbortController),
-      activeJob: context.backgroundTasks.some(
+      activeJob: context.backgroundTasks?.some(
         (task) => task.kind === "job" && task.status === "running",
       ),
-      toolRunning: context.backgroundTasks.some(
+      toolRunning: context.backgroundTasks?.some(
         (task) => task.kind !== "job" && task.status === "running",
       ),
       pendingApproval: Boolean(context.pendingLocalApproval),

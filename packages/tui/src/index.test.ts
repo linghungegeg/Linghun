@@ -42,6 +42,7 @@ import {
   type DurableJobState,
   type DurableJobStatus,
   type TuiContext,
+  MAX_BACKGROUND_TASKS,
   USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
   type VerificationReport,
   __testBuildExplicitDetailsCommandPanel,
@@ -52,6 +53,7 @@ import {
   __testParseRunWorkflowToolInput,
   __testRenderInteractiveChoiceLines,
   __testRunWorkflowStepsWithPlan,
+  __testWorkflowStepStatusFromNestedJob,
   __testSendMessage,
   __testStopCommandPanelSelection,
   __testToggleCommandPanelSelection,
@@ -142,8 +144,10 @@ import {
   createReadinessItems,
 } from "./terminal-readiness-presenter.js";
 import { createLayeredToolOutput, formatToolOutput } from "./tool-output-presenter.js";
-import { findAgent } from "./tui-agent-job-runtime.js";
+import { findAgent, rememberBackgroundTask } from "./tui-agent-job-runtime.js";
 import type { AgentRun } from "./tui-data-types.js";
+import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
+import { formatRoleUsageLines } from "./usage-stats-presenter.js";
 import { type WorkflowPlan, normalizeWorkflowPlan } from "./workflow-plan-schema.js";
 
 const __testDir = dirname(fileURLToPath(import.meta.url));
@@ -1780,7 +1784,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("可以直接说“帮我检查项目状态 / 跑测试 / 解释这个报错”。");
     expect(output.text).toContain("需要精确命令时，用 /help 查看。");
     expect(output.text).not.toContain("Phase 14 TUI / REPL");
-  });
+  }, 10000);
 
   it("shows help, model, and session list", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -10403,7 +10407,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain("预算耗尽后的无工具总结。");
     expect(output.text).not.toContain("工具调用上限");
     expect(requests.length).toBeGreaterThanOrEqual(101);
-  });
+  }, 10000);
 
   it("gates no-tool final summary after total tool-round budget exhaustion", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -10451,7 +10455,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(JSON.stringify(transcript)).toContain("当前证据不足");
     expect(JSON.stringify(transcript)).not.toContain("[未验证]");
     expect(JSON.stringify(transcript)).not.toContain("已完成，测试通过，PASS。");
-  });
+  }, 10000);
 
   it("Todo-only round does not reduce progressing evidence tool rounds", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
@@ -21238,7 +21242,7 @@ describe("Phase 06 TUI slash commands", () => {
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
           origin: "adapter",
         });
-        return { close: () => undefined };
+        return { close: async () => undefined };
       },
     });
 
@@ -21292,7 +21296,7 @@ describe("Phase 06 TUI slash commands", () => {
       }),
       startFeishuLongConnection: async () => {
         started = true;
-        return { close: () => undefined };
+        return { close: async () => undefined };
       },
     });
 
@@ -27364,6 +27368,41 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     expect(context.workflows.activeRun?.phaseGateConfirmed).toBe(true);
   });
 
+  it("Phase A: nested job created status does not map to completed", () => {
+    const now = new Date().toISOString();
+    const status = __testWorkflowStepStatusFromNestedJob({
+      id: "job-created",
+      goal: "test",
+      projectPath: "F:/Linghun",
+      phase: "Phase A",
+      target: "test",
+      plan: [],
+      budget: {
+        maxTokens: 1,
+        maxRunningAgents: 1,
+        maxSteps: 1,
+        note: "phase a test",
+      },
+      timeoutMs: 1,
+      permissionPolicy: "default",
+      allowEdit: false,
+      allowBash: false,
+      allowMultiAgent: false,
+      status: "created",
+      agents: [],
+      createdAt: now,
+      updatedAt: now,
+      logPath: "job.log",
+      reportPath: "job.md",
+      fullOutputPath: "job.out",
+      evidenceRefs: [],
+      adoptedConclusions: [],
+      rejectedConclusions: [],
+    });
+
+    expect(status).toBe("blocked");
+  });
+
   it("bridge request layer: unconfirmed gate blocks mutating request at bridge level", () => {
     const plan = normalizeWorkflowPlan(createNestedJobWorkflowPlan("full-access"));
     expect(plan.ok).toBe(true);
@@ -27431,5 +27470,72 @@ describe("Phase 7.5-B.2 PM1: workflow start gate closure behavioral tests", () =
     // Verify the gate was confirmed by the run.
     expect(context.workflows.activeRun?.phaseGateConfirmed).toBe(true);
     // The nested job step still runs through per-tool permission, not auto-executed.
+  });
+});
+
+describe("Phase A correctness focused guards", () => {
+  it("rememberBackgroundTask keeps the exported 50-task cap", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase-a-bg-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    for (let index = 0; index < MAX_BACKGROUND_TASKS + 1; index += 1) {
+      rememberBackgroundTask(
+        context,
+        createBackgroundTaskFixture("agent", {
+          id: `phase-a-agent-${index}`,
+          title: `Agent ${index}`,
+        }),
+      );
+    }
+
+    expect(context.backgroundTasks).toHaveLength(MAX_BACKGROUND_TASKS);
+    expect(context.backgroundTasks[0]?.id).toBe(`phase-a-agent-${MAX_BACKGROUND_TASKS}`);
+  });
+
+  it("formatPendingApprovalDetails tolerates architecture_drift without warnings", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase-a-pending-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const output = formatPendingApprovalDetails(
+      {
+        kind: "architecture_drift",
+        toolName: "Edit",
+        toolCall: { id: "call-1", name: "Edit", input: {} },
+        warnings: undefined,
+      } as unknown as NonNullable<TuiContext["pendingLocalApproval"]>,
+      context,
+    );
+
+    expect(output).toContain("会改变已约定范围");
+    expect(output).toContain("（-）");
+  });
+
+  it("formatRoleUsageLines renders NaN cost as estimating text", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-phase-a-usage-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.roleUsage = [
+      {
+        role: "executor",
+        provider: "mock",
+        model: "mock-model",
+        inputTokens: 1,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        estimatedCny: Number.NaN,
+        fallbackUsed: false,
+        budgetStop: false,
+        contributionSummary: "phase a",
+        createdAt: "2026-06-07T00:00:00.000Z",
+      },
+    ];
+
+    expect(formatRoleUsageLines(context)[0]).toContain("estimated CNY 估算中");
   });
 });

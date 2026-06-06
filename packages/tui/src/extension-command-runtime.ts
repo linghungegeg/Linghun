@@ -611,11 +611,18 @@ export async function updateExtension(
     return `未找到 ${kind === "skills" ? "skill" : "plugin"}：${id}`;
   }
   const source = item.lifecycle.sourceUrl ? "git" : "local";
+  const refIndex = args.indexOf("--ref");
+  if (refIndex !== -1) {
+    const refValue = args[refIndex + 1];
+    if (refValue === undefined || refValue.trim().length === 0 || refValue.startsWith("--")) {
+      return "--ref 需要提供非空 ref，例如 --ref v1.0.0。";
+    }
+  }
   const request: ExtensionInstallRequest = {
     source,
     locator: item.lifecycle.sourceUrl ?? item.lifecycle.localPath ?? item.path,
     scope: item.scope,
-    ref: args.includes("--ref") ? args[args.indexOf("--ref") + 1] : item.lifecycle.ref,
+    ref: refIndex === -1 ? item.lifecycle.ref : args[refIndex + 1],
     confirmNetwork: args.includes("--confirm-network"),
   };
   if (source === "git" && !request.confirmNetwork) {

@@ -318,7 +318,7 @@ async function handleRemoteBotCommand(
   }
   if (action === "stop") {
     const channelArg = normalizeRemoteChannelId(args[1] ?? "");
-    const stopped = stopRemoteBotChannel(channelArg);
+    const stopped = await stopRemoteBotChannel(channelArg);
     showCommandPanel(context, output, {
       title: `/remote bot stop ${channelArg || "<channel>"}`,
       tone: "neutral",
@@ -775,10 +775,10 @@ function formatFeishuBotStartReadiness(readiness: FeishuBotStartReadiness): stri
   return lines.join("\n");
 }
 
-function stopRemoteBotChannel(channelId: string): boolean {
+async function stopRemoteBotChannel(channelId: string): Promise<boolean> {
   const handle = feishuLongConnectionHandles.get(channelId);
   if (!handle) return false;
-  handle.close();
+  await handle.close();
   feishuLongConnectionHandles.delete(channelId);
   return true;
 }

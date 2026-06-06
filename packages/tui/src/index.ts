@@ -1059,6 +1059,7 @@ import {
 export {
   __testGetCurrentWorkflowStepRequest,
   __testRunWorkflowStepsWithPlan,
+  __testWorkflowStepStatusFromNestedJob,
 } from "./workflow-command-runtime.js";
 export type {
   AgentRun,
@@ -1959,6 +1960,15 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "sessions-open") {
+        blocks.push(createCommandBlock(commandSequence++, "/sessions"));
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        await processTuiLine("/sessions", context, gateway, shellOutput, store);
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
       if (event.type === "sessions-move") {
         if (!context.sessionsPanelState) return;
         const total = context.sessionsPanelState.entries.length;
@@ -2191,6 +2201,25 @@ async function runInkShell(
           });
           return;
         }
+        return;
+      }
+      if (event.type === "empty-submit") {
+        submittedPending = false;
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
+        return;
+      }
+      if (event.type !== "submit") {
+        submittedPending = false;
+        const sessionId = context.sessionId ?? (await ensureSession(context));
+        await appendSystemEvent(
+          context,
+          sessionId,
+          `ink shell ignored unrecognized input event: ${(event as { type?: string }).type ?? "unknown"}`,
+          "warning",
+        );
+        shell?.rerender();
+        await shell?.waitUntilRenderFlush();
         return;
       }
       // P1-6: immediately enter pending state to prevent home flicker

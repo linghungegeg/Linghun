@@ -1268,6 +1268,7 @@ async function executeRegistryWorkflowStep(
   evidenceRefs: string[];
 }> {
   const beforeEvidence = context.evidence.map((item) => item.id);
+  let handledKnownAction = false;
   try {
     // Mutating registry steps must first pass the workflow-level gate.
     // Readonly steps (details/index/verification) pass straight through.
@@ -1303,6 +1304,7 @@ async function executeRegistryWorkflowStep(
       }
     }
     if (step.action === "agent") {
+      handledKnownAction = true;
       const role = step.role ?? "worker";
       const task = step.task ?? (goal || workflow.description);
       const previousAgentIds = new Set(context.agents.map((agent) => agent.id));
@@ -1337,6 +1339,7 @@ async function executeRegistryWorkflowStep(
         };
       }
     } else if (step.action === "verification") {
+      handledKnownAction = true;
       const report = await runWorkflowVerificationStep(step.level ?? "focused", context, output);
       const status = workflowStepStatusFromVerification(report.status);
       if (status !== "completed") {
@@ -1352,10 +1355,13 @@ async function executeRegistryWorkflowStep(
         };
       }
     } else if (step.action === "details") {
+      handledKnownAction = true;
       await handleSlashCommand("/details", context, output);
     } else if (step.action === "index") {
+      handledKnownAction = true;
       await handleSlashCommand("/index status", context, output);
     } else if (step.action === "bash") {
+      handledKnownAction = true;
       if (!step.command)
         return {
           status: "blocked",
@@ -1364,6 +1370,7 @@ async function executeRegistryWorkflowStep(
         };
       await handleToolCommand("Bash", [step.command], context, output);
     } else if (step.action === "write") {
+      handledKnownAction = true;
       if (!step.path || !step.content) {
         return {
           status: "blocked",
@@ -1388,14 +1395,28 @@ async function executeRegistryWorkflowStep(
       evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
     };
   }
+  if (handledKnownAction) {
+    return {
+      status: "completed",
+      summary: formatWorkflowStepSummary(
+        step.id,
+        "completed",
+        context.language === "en-US"
+          ? `registry action completed: ${step.action}`
+          : `registry 操作已完成：${step.action}`,
+        context.language,
+      ),
+      evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
+    };
+  }
   return {
-    status: "completed",
+    status: "blocked",
     summary: formatWorkflowStepSummary(
       step.id,
-      "completed",
+      "blocked",
       context.language === "en-US"
-        ? `completed via registry ${step.action}`
-        : `已通过 registry ${step.action} 完成`,
+        ? `unknown registry action: ${step.action}`
+        : `未知 registry 操作：${step.action}`,
       context.language,
     ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
@@ -1448,14 +1469,20 @@ function workflowStepStatusFromNestedJob(job: DurableJobState): WorkflowStepTerm
   if (job.status === "blocked" || job.status === "sleeping" || job.status === "stale") {
     return "blocked";
   }
-  if (resultStatus === "failed" || resultStatus === "timeout" || resultStatus === "overbudget") {
-    return "failed";
+  if (job.status === "completed" || job.status === "running") {
+    if (resultStatus === "failed" || resultStatus === "timeout" || resultStatus === "overbudget") {
+      return "failed";
+    }
+    if (resultStatus === "partial") return "partial";
+    if (resultStatus === "cancelled") return "cancelled";
+    if (resultStatus === "blocked" || resultStatus === "stale") return "blocked";
+    if (resultStatus === "completed" || resultStatus === "pass") return "completed";
+    return "blocked";
   }
-  if (resultStatus === "partial") return "partial";
-  if (resultStatus === "cancelled") return "cancelled";
-  if (resultStatus === "blocked" || resultStatus === "stale") return "blocked";
-  return "completed";
+  return "blocked";
 }
+
+export const __testWorkflowStepStatusFromNestedJob = workflowStepStatusFromNestedJob;
 
 async function executeWorkflowStep(
   request: WorkflowBridgeRequestProposal,

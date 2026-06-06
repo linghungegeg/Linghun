@@ -820,6 +820,22 @@ describe("config directories", () => {
     expect(await providerEnvExists(home)).toBe(false);
   });
 
+  it("rejects undefined provider API key as a structured validation error", async () => {
+    const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
+
+    await expect(
+      saveProviderEnvSetup(
+        {
+          baseUrl: "https://provider.invalid/v1",
+          apiKey: undefined as unknown as string,
+          model: "provider-model",
+        },
+        home,
+      ),
+    ).rejects.toThrow("API key 不能为空。");
+    expect(await providerEnvExists(home)).toBe(false);
+  });
+
   it("records actionable warning for broken provider.env and falls back", async () => {
     const home = await mkdtemp(join(tmpdir(), "linghun-home-"));
     const project = await mkdtemp(join(tmpdir(), "linghun-config-"));

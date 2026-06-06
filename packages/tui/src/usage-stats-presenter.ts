@@ -29,7 +29,7 @@ export function formatRoleUsageLines(context: TuiContext): string[] {
   }
   return context.roleUsage.map(
     (usage) =>
-      `  - ${usage.role}/${usage.provider}/${usage.model}: input ${usage.inputTokens}; output ${usage.outputTokens}; cache read ${usage.cacheReadTokens}; cache write ${usage.cacheWriteTokens}; estimated CNY ${usage.estimatedCny.toFixed(4)}; created ${usage.createdAt}; fallback used ${usage.fallbackUsed ? "yes" : "no"}; budget stop ${usage.budgetStop ? "yes" : "no"}; contribution ${usage.contributionSummary}`,
+      `  - ${usage.role}/${usage.provider}/${usage.model}: input ${usage.inputTokens}; output ${usage.outputTokens}; cache read ${usage.cacheReadTokens}; cache write ${usage.cacheWriteTokens}; estimated CNY ${Number.isNaN(usage.estimatedCny) ? "估算中" : usage.estimatedCny.toFixed(4)}; created ${usage.createdAt}; fallback used ${usage.fallbackUsed ? "yes" : "no"}; budget stop ${usage.budgetStop ? "yes" : "no"}; contribution ${usage.contributionSummary}`,
   );
 }
 

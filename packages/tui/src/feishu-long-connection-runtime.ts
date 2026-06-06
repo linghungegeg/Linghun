@@ -14,7 +14,7 @@ export type FeishuLongConnectionOptions = {
 };
 
 export type FeishuLongConnectionHandle = {
-  close: () => void;
+  close: () => Promise<void>;
 };
 
 export async function startFeishuLongConnection(
@@ -27,14 +27,32 @@ export async function startFeishuLongConnection(
     appSecret: options.appSecret,
     loggerLevel: Lark.LoggerLevel.error,
   });
+  const onMessage = async (data: FeishuReceiveMessageEvent) => {
+    const event = feishuReceiveMessageToBridgeEvent(data, options.nowMs?.() ?? Date.now());
+    await options.onMessage(feishuBridgeAdapter(event));
+  };
   const dispatcher = new Lark.EventDispatcher({}).register({
-    "im.message.receive_v1": async (data: FeishuReceiveMessageEvent) => {
-      const event = feishuReceiveMessageToBridgeEvent(data, options.nowMs?.() ?? Date.now());
-      await options.onMessage(feishuBridgeAdapter(event));
-    },
-  });
+    "im.message.receive_v1": onMessage,
+  } as Record<string, (data: unknown) => Promise<void>>);
   await wsClient.start({ eventDispatcher: dispatcher });
+  let closed = false;
+  let closePromise: Promise<void> | undefined;
   return {
-    close: () => wsClient.close({ force: true }),
+    close: async () => {
+      if (closed) {
+        await closePromise;
+        return;
+      }
+      closed = true;
+      dispatcher.handles.delete("im.message.receive_v1");
+      try {
+        wsClient.close({ force: true });
+        closePromise = Promise.resolve();
+      } catch (error) {
+        closePromise = Promise.reject(error);
+        throw error;
+      }
+      await closePromise;
+    },
   };
 }

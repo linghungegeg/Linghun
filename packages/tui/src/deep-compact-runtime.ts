@@ -83,7 +83,6 @@ export async function runDeepCompact(input: {
     );
   }
 
-  const controller = new AbortController();
   const requestMessages = buildDeepCompactRequestMessages(
     input.context,
     input.transcript,
@@ -98,7 +97,7 @@ export async function runDeepCompact(input: {
         model: input.runtime.model,
         toolChoice: "none",
       },
-      controller.signal,
+      new AbortController().signal,
     )) {
       if (event.type === "assistant_text_delta") {
         summary += event.text;

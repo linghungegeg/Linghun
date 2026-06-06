@@ -897,6 +897,9 @@ function validateProviderBaseUrl(value: string): void {
 }
 
 function validateProviderApiKey(value: string): void {
+  if (!value) {
+    throw new Error("API key 不能为空。");
+  }
   if (!value.trim()) {
     throw new Error("API key 不能为空。");
   }

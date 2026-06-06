@@ -1902,6 +1902,20 @@ export async function* parseAnthropicMessagesStream(
     }
   }
 
+  if (state.pendingToolUses.size > 0) {
+    state.pendingToolUses.clear();
+    yield {
+      type: "error",
+      error: new LinghunError({
+        code: "PROVIDER_PARTIAL_TOOL_CALL",
+        message: "模型请求失败：Anthropic 流结束时仍有未完成的 tool_use。",
+        suggestion:
+          "请重试；如持续出现，运行 /model doctor 检查 provider 的 Anthropic Messages tool_use 流式兼容性或切换 provider/model。",
+        recoverable: true,
+      }),
+    };
+  }
+
   yield {
     type: "message_stop",
     id: state.lastId,
@@ -2536,7 +2550,7 @@ export function normalizeProviderError(error: unknown): LinghunError {
     }
     return new LinghunError({
       code: "PROVIDER_ERROR",
-      message: `模型请求失败：${error.message}`,
+      message: `模型请求失败：${maskSensitiveFragments(error.message)}`,
       suggestion: "请运行 /model doctor 检查当前 provider 配置。",
       cause: error,
       recoverable: true,

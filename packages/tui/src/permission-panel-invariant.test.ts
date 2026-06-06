@@ -24,19 +24,20 @@ function readSrc(file: string): string {
 }
 
 describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
-  const src = readSrc("index.ts");
+  const modelToolSrc = readSrc("model-tool-runtime.ts");
+  const slashCommandSrc = readSrc("slash-command-runtime.ts");
   const gitDispatchSrc = readSrc("git-tool-dispatch-runtime.ts");
 
   it("model-tool permission prompt writeLine is gated behind !isInkSession", () => {
     // The formatModelToolPermissionPrompt writeLine must be reachable only when
     // NOT an ink session; ink mode renders the PermissionPanel instead.
-    expect(src).toContain("if (!(context.isInkSession && isAskWithPanel)) {");
+    expect(modelToolSrc).toContain("if (!(context.isInkSession && isAskWithPanel)) {");
     // Guard precedes the writeLine(formatModelToolPermissionPrompt) call in the model-tool path.
     // We need to find the occurrence that has isAskWithPanel in context.
-    const guardIdx = src.indexOf("if (!(context.isInkSession && isAskWithPanel)) {");
+    const guardIdx = modelToolSrc.indexOf("if (!(context.isInkSession && isAskWithPanel)) {");
     expect(guardIdx).toBeGreaterThan(0);
     // Find the next formatModelToolPermissionPrompt after the guard.
-    const promptIdx = src.indexOf(
+    const promptIdx = modelToolSrc.indexOf(
       "formatModelToolPermissionPrompt(toPermissionPromptView(permission)",
       guardIdx,
     );
@@ -45,15 +46,15 @@ describe("D.14D-R P0-1 permission PermissionPanel invariant", () => {
 
   it("index ignore-write permission prompt writeLine is gated behind !isInkSession", () => {
     // runIndexIgnoreWritePlan must not bare-writeLine the prompt in ink mode.
-    expect(src).toContain('kind: "index_ignore_write", plan }');
-    expect(src).toMatch(
+    expect(slashCommandSrc).toContain('kind: "index_ignore_write", plan }');
+    expect(slashCommandSrc).toMatch(
       /context\.pendingLocalApproval = \{ kind: "index_ignore_write", plan \};[\s\S]{0,260}if \(!context\.isInkSession\) \{/,
     );
   });
 
   it("ask paths set pendingLocalApproval as the panel render source", () => {
-    expect(src).toContain('kind: "model_tool_use"');
-    expect(src).toContain("pendingApproval: true");
+    expect(modelToolSrc).toContain('kind: "model_tool_use"');
+    expect(modelToolSrc).toContain("pendingApproval: true");
   });
 
   it("D.14D-R2: model GitStablePointCreate default ask path sets pendingLocalApproval before performStablePoint", () => {

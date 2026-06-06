@@ -2172,7 +2172,17 @@ export async function handleForkCommand(
         : `后台 agent 已启动：${agent.id}。可用 /agents show ${agent.id} 或 /agents cancel ${agent.id}。`,
     );
     setTimeout(() => {
-      void completeAgent(agent, background, context, output);
+      void completeAgent(agent, background, context, output).catch((error: unknown) => {
+        const message = `background agent complete failed: ${error instanceof Error ? error.message : String(error)}`;
+        background.status = "failed";
+        background.result = "fail";
+        background.currentStep = message;
+        background.updatedAt = new Date().toISOString();
+        background.userVisibleSummary = message;
+        void deps()
+          .appendBackgroundTaskEvent(context, parentSessionId ?? "", background)
+          .catch(() => undefined);
+      });
     }, 0);
     return;
   }
@@ -3633,7 +3643,19 @@ export async function sendAgentMessage(
     await persistAgentRun(context, target.agent);
     await deps().appendBackgroundTaskEvent(context, parentSessionId, target.background);
     setTimeout(() => {
-      void completeAgent(target.agent, target.background, context, createSilentOutput(), "mailbox");
+      void completeAgent(target.agent, target.background, context, createSilentOutput(), "mailbox").catch(
+        (error: unknown) => {
+          const message = `mailbox wake agent complete failed: ${error instanceof Error ? error.message : String(error)}`;
+          target.background.status = "failed";
+          target.background.result = "fail";
+          target.background.currentStep = message;
+          target.background.updatedAt = new Date().toISOString();
+          target.background.userVisibleSummary = message;
+          void deps()
+            .appendBackgroundTaskEvent(context, parentSessionId, target.background)
+            .catch(() => undefined);
+        },
+      );
     }, 0);
   }
   const delivered = targets.map((agent) => agent.id);

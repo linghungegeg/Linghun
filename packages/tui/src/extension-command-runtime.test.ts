@@ -13,6 +13,7 @@ import {
   readExtensionSourceManifest,
   validateExtensionContributionExecution,
   validateExtensionItems,
+  updateExtension,
 } from "./extension-command-runtime.js";
 import type { TuiContext } from "./index.js";
 import { createPluginState, createSkillState } from "./tui-state-runtime.js";
@@ -405,6 +406,45 @@ describe("extension-command-runtime", () => {
 
       const output = validateExtensionItems("skills", context, "test");
       expect(output).toContain("ok");
+    });
+  });
+
+  describe("updateExtension", () => {
+    it("returns an actionable error when --ref has no value", async () => {
+      const context = createMinimalContext();
+      context.skills.skills = [
+        {
+          id: "test",
+          name: "Test",
+          description: "Test skill",
+          triggers: [],
+          summary: "Test skill",
+          source: "third-party",
+          scope: "project",
+          path: join(projectPath, ".linghun", "skills", "test.json"),
+          version: "1.0.0",
+          enabled: true,
+          trusted: true,
+          permissions: [],
+          mayWrite: false,
+          mayExecute: false,
+          mayNetwork: false,
+          lifecycle: {
+            sourceUrl: "https://example.com/repo.git",
+            ref: "main",
+            trustLevel: "trusted",
+            permissionSummary: "read",
+            discovered: true,
+            registered: true,
+            schemaLoaded: true,
+            runtimeVersion: "compatible",
+          },
+        },
+      ];
+
+      const result = await updateExtension("skills", "test", context, ["--ref"]);
+
+      expect(result).toContain("--ref 需要提供非空 ref");
     });
   });
 

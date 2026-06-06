@@ -56,10 +56,9 @@ import type {
   HandoffPacket,
 } from "./tui-data-types.js";
 
-// MAX_BACKGROUND_TASKS lives in index.ts; re-imported via parameter to avoid
-// duplicating the constant. Module-private mirror keeps rememberBackgroundTask
-// self-contained.
-const MAX_BACKGROUND_TASKS = 8;
+// MAX_BACKGROUND_TASKS lives in tui-context-runtime.ts; re-exported to keep
+// rememberBackgroundTask self-contained. Module-private shadow removed.
+import { MAX_BACKGROUND_TASKS } from "./tui-context-runtime.js";
 
 export function isAgentType(value: string): value is AgentType {
   return value === "explorer" || value === "worker" || value === "verifier" || value === "planner";
