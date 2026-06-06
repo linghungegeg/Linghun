@@ -532,13 +532,16 @@ export async function handleBackgroundCommand(
       return;
     }
     const running = tasks.filter((t) => t.status === "running").length;
-    const needConfirm = tasks.filter((t) => t.status === "paused").length;
-    const failedOrBlocked = tasks.filter((t) => t.status === "blocked").length;
-    const completed = tasks.filter((t) => t.status === "completed").length;
+    const sleeping = tasks.filter((t) => t.status === "paused").length;
+    const blocked = tasks.filter((t) => t.status === "blocked").length;
+    const stale = tasks.filter((t) => t.status === "stale").length;
+    const timeout = tasks.filter((t) => t.status === "timeout").length;
+    const cancelled = tasks.filter((t) => t.status === "cancelled").length;
+    const needsAttention = blocked + stale + timeout;
     const summary: string[] = [
       isEn
-        ? `Tasks · ${running} running · ${needConfirm} need attention · ${failedOrBlocked} failed/blocked · ${completed} done`
-        : `任务 · 运行中 ${running} · 待确认 ${needConfirm} · 失败/阻塞 ${failedOrBlocked} · 已完成 ${completed}`,
+        ? `Tasks · ${running} running · ${sleeping} sleeping · ${blocked} blocked · ${stale} stale · ${timeout} timeout · ${cancelled} cancelled`
+        : `任务 · running ${running} · sleeping ${sleeping} · blocked ${blocked} · stale ${stale} · timeout ${timeout} · cancelled ${cancelled}`,
     ];
     const sections = buildBackgroundPanelSections(tasks, context.language, context.projectPath);
     const detailsText = tasks
@@ -546,7 +549,7 @@ export async function handleBackgroundCommand(
       .join("\n\n");
     showCommandPanel(context, output, {
       title: "/background",
-      tone: failedOrBlocked > 0 ? "warning" : "neutral",
+      tone: needsAttention > 0 ? "warning" : "neutral",
       summary,
       sections,
       detailsText,
@@ -757,26 +760,153 @@ export async function handleJobCommand(
       return;
     }
     if (action === "pause") {
+      const noop = formatPauseJobNoop(job, action, context);
+      if (noop) {
+        writeLine(output, noop);
+        return;
+      }
       await transitionDurableJob(job, context, "sleeping", "user_paused");
-      writeLine(output, formatJobPrimary(job, context));
+      writeLine(output, formatJobPrimaryWithAttention(job, context));
       return;
     }
     if (action === "resume") {
+      const noop = formatResumeJobNoop(job, action, context);
+      if (noop) {
+        writeLine(output, noop);
+        return;
+      }
       await resumeDurableJob(job, context);
-      writeLine(output, formatJobPrimary(job, context));
+      writeLine(output, formatJobPrimaryWithAttention(job, context));
+      return;
+    }
+    const noop = formatCancelJobNoop(job, action, context);
+    if (noop) {
+      writeLine(output, noop);
       return;
     }
     if (job.runner) {
       await stopRunnerForDurableJob(context, job);
     }
     await transitionDurableJob(job, context, "cancelled", "user_cancelled");
-    writeLine(output, formatJobPrimary(job, context));
+    writeLine(output, formatJobPrimaryWithAttention(job, context));
     return;
   }
   writeLine(
     output,
     "用法：/job list | /job run <goal> | /job create <goal> | /job status <id> | /job logs <id> | /job report <id> | /job pause <id> | /job resume <id> | /job cancel <id>",
   );
+}
+
+function formatPauseJobNoop(
+  job: DurableJobState,
+  action: string,
+  context: TuiContext,
+): string | undefined {
+  if (job.status === "running") return undefined;
+  if (job.status === "sleeping") {
+    return formatActiveJobNoop(job, action, context, "already paused/sleeping");
+  }
+  if (job.status === "blocked" || job.status === "stale") {
+    return formatAttentionJobNoop(job, action, context);
+  }
+  if (isTerminalDurableJobStatus(job.status)) {
+    return formatTerminalJobNoop(job, action, context);
+  }
+  return undefined;
+}
+
+function formatResumeJobNoop(
+  job: DurableJobState,
+  action: string,
+  context: TuiContext,
+): string | undefined {
+  if (job.status === "running") {
+    return formatActiveJobNoop(job, action, context, "already running");
+  }
+  if (isTerminalDurableJobStatus(job.status)) {
+    return formatTerminalJobNoop(job, action, context);
+  }
+  return undefined;
+}
+
+function formatCancelJobNoop(
+  job: DurableJobState,
+  action: string,
+  context: TuiContext,
+): string | undefined {
+  if (isTerminalDurableJobStatus(job.status)) {
+    return formatTerminalJobNoop(job, action, context);
+  }
+  return undefined;
+}
+
+function isTerminalDurableJobStatus(status: DurableJobStatus): boolean {
+  return (
+    status === "cancelled" || status === "timeout" || status === "failed" || status === "completed"
+  );
+}
+
+function formatJobPrimaryWithAttention(job: DurableJobState, context: TuiContext): string {
+  const attention = formatAttentionJobNext(job, context);
+  return attention
+    ? `${formatJobPrimary(job, context)}\n${attention}`
+    : formatJobPrimary(job, context);
+}
+
+function formatActiveJobNoop(
+  job: DurableJobState,
+  action: string,
+  context: TuiContext,
+  reason: string,
+): string {
+  if (context.language === "en-US") {
+    return [
+      `[job] ${job.id} · ${job.status} · unchanged`,
+      `- ${action}: ${reason}; no lifecycle transition was written.`,
+      `- next: /job report ${job.id}; /job logs ${job.id}; /job pause ${job.id}; /job cancel ${job.id}.`,
+    ].join("\n");
+  }
+  return [
+    `[job] ${job.id} · ${job.status} · 状态未改变`,
+    `- ${action}：${reason}；未写入生命周期转换。`,
+    `- next：/job report ${job.id}；/job logs ${job.id}；/job pause ${job.id}；/job cancel ${job.id}。`,
+  ].join("\n");
+}
+
+function formatAttentionJobNoop(job: DurableJobState, action: string, context: TuiContext): string {
+  return [
+    context.language === "en-US"
+      ? `[job] ${job.id} · ${job.status} · unchanged`
+      : `[job] ${job.id} · ${job.status} · 状态未改变`,
+    context.language === "en-US"
+      ? `- ${action}: ${job.status} already needs attention; no lifecycle transition was written.`
+      : `- ${action}：${job.status} 已停在需处理状态；未写入生命周期转换。`,
+    `- pause reason: ${job.pauseReason ?? "no pause reason"}`,
+    formatAttentionJobNext(job, context),
+  ].join("\n");
+}
+
+function formatAttentionJobNext(job: DurableJobState, context: TuiContext): string | undefined {
+  if (job.status !== "blocked" && job.status !== "stale") return undefined;
+  const repair = job.status === "stale" ? "owner/heartbeat/runtime state" : "blocked reason";
+  return context.language === "en-US"
+    ? `- next: inspect /job report ${job.id} and /job logs ${job.id}; after fixing ${repair}, run /job resume ${job.id}, or /job cancel ${job.id}.`
+    : `- next：先看 /job report ${job.id} 和 /job logs ${job.id}；修复 ${repair} 后用 /job resume ${job.id}，或用 /job cancel ${job.id} 放弃。`;
+}
+
+function formatTerminalJobNoop(job: DurableJobState, action: string, context: TuiContext): string {
+  if (context.language === "en-US") {
+    return [
+      `Job ${job.id} is already ${job.status}; /job ${action} did not start a new action.`,
+      "- lifecycle terminal states are not verification evidence.",
+      `- next: inspect /job report ${job.id} or /job logs ${job.id}; create/run a new job if needed.`,
+    ].join("\n");
+  }
+  return [
+    `Job ${job.id} 已是 ${job.status}；/job ${action} 不会启动新动作。`,
+    "- terminal lifecycle 不是验证证据。",
+    `- 下一步：查看 /job report ${job.id} 或 /job logs ${job.id}；如需继续请新建/运行 job。`,
+  ].join("\n");
 }
 
 export async function createDurableJob(
@@ -871,7 +1001,7 @@ export async function createDurableJob(
     adoptedConclusions: [],
     rejectedConclusions:
       status === "blocked" || status === "sleeping"
-        ? ["No PASS evidence is generated for blocked/sleeping jobs."]
+        ? ["No evidence that verification passed is generated for blocked/sleeping jobs."]
         : [],
   };
 }
@@ -905,7 +1035,7 @@ function ensureMinimalJobVerification(context: TuiContext, options: ParsedJobRun
     id: `job-preflight-${randomUUID().slice(0, 8)}`,
     status: "partial",
     summary:
-      "Minimal job preflight snapshot: no verification command has run yet; read-only audit may start, and completion is not PASS evidence.",
+      "Minimal job preflight snapshot: no verification command has run yet; read-only audit may start, and completion is not verification evidence.",
     commands: [],
     unverified: ["job preflight generated without running verification commands"],
     risk: [
@@ -955,7 +1085,7 @@ function syncJobPreflightPacket(
   if (generatedVerification) {
     packet.pending = [
       ...packet.pending,
-      "Job preflight generated minimal verification snapshot; it is not PASS evidence.",
+      "Job preflight generated minimal verification snapshot; it is not verification evidence.",
     ];
   }
 }
@@ -1180,14 +1310,14 @@ export async function resumeDurableJob(job: DurableJobState, context: TuiContext
   ) {
     job.result = {
       status: job.status === "timeout" ? "timeout" : job.status === "failed" ? "failed" : "blocked",
-      summary: `Resume refused for terminal ${job.status} job; no PASS evidence generated.`,
+      summary: `Resume refused for terminal ${job.status} job; no evidence that verification passed was generated.`,
       facts: [`terminal status ${job.status}`, job.pauseReason ?? "no pause reason"],
       evidenceRefs: job.evidenceRefs.map((item) => item.id),
       generatedAt: new Date().toISOString(),
     };
     job.rejectedConclusions = [
       ...job.rejectedConclusions,
-      `Terminal ${job.status} job was not upgraded by resume and is not PASS evidence.`,
+      `Terminal ${job.status} job was not upgraded by resume and is not verification evidence.`,
     ];
     await persistDurableJobProgress(
       context,
@@ -1283,7 +1413,7 @@ export async function transitionDurableJob(
   ) {
     job.result = {
       status: status === "blocked" ? "blocked" : status,
-      summary: `Durable job moved to ${status}; no PASS evidence generated.`,
+      summary: `Durable job moved to ${status}; no evidence that verification passed was generated.`,
       facts: [pauseReason ?? "no pause reason", formatJobRunnerInline(job)],
       evidenceRefs: job.evidenceRefs.map((item) => item.id),
       generatedAt: now,
@@ -1294,7 +1424,7 @@ export async function transitionDurableJob(
       ...job.worker,
       status: "blocked",
       endedAt: now,
-      summary: `Durable job blocked; ${pauseReason ?? "no pause reason"}. No PASS evidence generated.`,
+      summary: `Durable job blocked; ${pauseReason ?? "no pause reason"}. No evidence that verification passed was generated.`,
     };
   }
   if (status === "cancelled" || status === "timeout" || status === "failed" || status === "stale") {
@@ -1364,7 +1494,7 @@ export async function recoverDurableJobForContext(
   job.endedAt = job.status === "stale" ? now : job.endedAt;
   job.result = {
     status: job.status === "blocked" ? "blocked" : "stale",
-    summary: `Recovered job moved to ${job.status}; no PASS evidence generated.`,
+    summary: `Recovered job moved to ${job.status}; no evidence that verification passed was generated.`,
     facts: ["startup recovery", job.pauseReason ?? "no pause reason"],
     evidenceRefs: job.evidenceRefs.map((item) => item.id),
     generatedAt: now,
@@ -1375,7 +1505,7 @@ export async function recoverDurableJobForContext(
   }
   job.rejectedConclusions = [
     ...job.rejectedConclusions,
-    `Recovered ${job.status} job is conservative and not PASS evidence.`,
+    `Recovered ${job.status} job is conservative and not verification evidence.`,
   ];
   rescheduleDurableJobAgents(job);
   await appendJobLog(job, `job recovery: ${job.status}; pause reason ${job.pauseReason ?? "none"}`);
@@ -1423,7 +1553,8 @@ export async function runDurableJobLiteTick(
     if (job.budget.explicit?.steps === true && stepIndex >= getDurableJobMaxSteps(job)) {
       job.result = {
         status: "blocked",
-        summary: "Durable worker stopped at maxSteps; no PASS evidence generated.",
+        summary:
+          "Durable worker stopped at maxSteps; no evidence that verification passed was generated.",
         facts: [`max steps ${getDurableJobMaxSteps(job)}`, `planned steps ${job.plan.length}`],
         evidenceRefs: job.evidenceRefs.map((item) => item.id),
         generatedAt: new Date().toISOString(),
@@ -1476,7 +1607,7 @@ export async function runDurableJobLiteTick(
         job.result = {
           status: "overbudget",
           summary:
-            "Durable worker stopped before the next step because maxTokens would be exceeded; no PASS evidence generated.",
+            "Durable worker stopped before the next step because maxTokens would be exceeded; no evidence that verification passed was generated.",
           facts: stepFacts,
           evidenceRefs: job.evidenceRefs.map((item) => item.id),
           generatedAt: new Date().toISOString(),
@@ -1522,7 +1653,7 @@ export async function runDurableJobLiteTick(
       };
       job.verification = {
         status: "partial",
-        summary: "Bounded worker output is structured but not verification PASS.",
+        summary: "Bounded worker output is structured but not verification evidence.",
       };
       job.heartbeatAt = now;
       job.updatedAt = now;
@@ -1594,8 +1725,8 @@ export async function runDurableJobLiteTick(
         status: "partial",
         summary:
           item.assignment.type === "verifier"
-            ? "Verifier agent used real verification, but durable job lifecycle is not PASS evidence."
-            : "Agent output is partial until explicit verification/final gate evidence proves PASS.",
+            ? "Verifier agent used real verification, but durable job lifecycle is not verification evidence."
+            : "Agent output is partial until explicit verification/final gate evidence proves the work passed.",
       };
       await persistDurableJobProgress(
         context,
@@ -1670,7 +1801,7 @@ export async function runDurableJobLiteTick(
   job.verification = {
     status: "partial",
     summary:
-      "Job completion only means scheduled AgentRun subtasks ended; it is not PASS evidence, verification PASS, or smoke-ready proof.",
+      "Job completion only means scheduled AgentRun subtasks ended; it is not verification evidence or smoke-ready proof.",
   };
   job.status = "completed";
   job.pauseReason = undefined;
@@ -1683,14 +1814,14 @@ export async function runDurableJobLiteTick(
   ];
   job.rejectedConclusions = [
     ...job.rejectedConclusions,
-    "Completed job lifecycle only means the bounded worker loop ended; it is not PASS evidence, not Beta readiness, and not smoke-ready proof.",
+    "Completed job lifecycle only means the bounded worker loop ended; it is not verification evidence, not Beta readiness, and not smoke-ready proof.",
   ];
   rescheduleDurableJobAgents(job);
   await appendJobLog(job, `agent scheduler completed: session=${workerSession.id}`);
   await persistDurableJobProgress(
     context,
     job,
-    "agent scheduler completed without verification PASS",
+    "agent scheduler completed without verification evidence",
   );
 }
 
@@ -1763,7 +1894,8 @@ export async function applyDurableJobBudgetStop(
     );
     job.result = {
       status: "timeout",
-      summary: "Durable job exceeded maxRuntime/timeout; no PASS evidence generated.",
+      summary:
+        "Durable job exceeded maxRuntime/timeout; no evidence that verification passed was generated.",
       facts: [`runtime ${runtimeMs}ms`, `max runtime ${maxRuntimeMs}ms`],
       evidenceRefs: job.evidenceRefs.map((item) => item.id),
       generatedAt: new Date().toISOString(),
@@ -3384,9 +3516,16 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
 
 function isDefaultBackgroundListTask(task: BackgroundTaskState): boolean {
   if (task.kind === "agent") {
-    return task.status === "running" || task.status === "completed";
+    return task.status === "running";
   }
-  return task.status === "running" || task.status === "paused" || task.status === "blocked";
+  return (
+    task.status === "running" ||
+    task.status === "paused" ||
+    task.status === "blocked" ||
+    task.status === "stale" ||
+    task.status === "timeout" ||
+    task.status === "cancelled"
+  );
 }
 
 async function persistAgentRun(context: TuiContext, agent: AgentRun): Promise<void> {

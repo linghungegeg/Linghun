@@ -254,14 +254,10 @@ export function createShellViewModel(
   if (options.projectRouteProblem) {
     blocks.push(createProjectRouteBlock(language, options.projectRouteProblem));
   }
+  const backgroundSummaryInput = selectBackgroundSummaryInput(options.backgroundSummaries, context);
   const taskRuntimeSummary =
-    effectiveViewMode !== "home" && !setupActiveFlow && options.backgroundSummaries?.length
-      ? mapBackgroundSummariesToBlocks(
-          options.backgroundSummaries.filter(
-            (s) => s.status === "running" || s.status === "paused" || s.status === "blocked",
-          ),
-          language,
-        )[0]
+    effectiveViewMode !== "home" && !setupActiveFlow && backgroundSummaryInput.length > 0
+      ? mapBackgroundSummariesToBlocks(backgroundSummaryInput, language)[0]
       : undefined;
   if (!options.permission && !setupActiveFlow) {
     const allOutputBlocks = options.outputBlocks ?? [];
@@ -1194,22 +1190,57 @@ function createProjectRouteBlock(language: Language, problem: string): ProductBl
   };
 }
 
+function selectBackgroundSummaryInput(
+  summaries: BackgroundTaskSummary[] | undefined,
+  context: TuiContext,
+): BackgroundTaskSummary[] {
+  if (summaries === undefined) return [];
+  const selected: BackgroundTaskSummary[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: Partial<BackgroundTaskSummary>): void => {
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.title !== "string" ||
+      typeof candidate.status !== "string" ||
+      seen.has(candidate.id)
+    ) {
+      return;
+    }
+    seen.add(candidate.id);
+    selected.push(candidate as BackgroundTaskSummary);
+  };
+  for (const summary of summaries) add(summary);
+  for (const summary of context.backgroundTasks ?? []) {
+    if (isMainScreenBackgroundSummary(summary)) add(summary);
+  }
+  return selected;
+}
+
 function mapBackgroundSummariesToBlocks(
   summaries: BackgroundTaskSummary[],
   language: Language,
 ): ProductBlockViewModel[] {
-  const visibleSummaries = summaries.filter(
-    (summary) => summary.kind !== "agent" || summary.status === "running",
-  );
+  const visibleSummaries = summaries.filter(isMainScreenBackgroundSummary);
   if (visibleSummaries.length === 0) return [];
   const zh = language === "zh-CN";
   const running = visibleSummaries.filter((s) => s.status === "running").length;
   const needConfirm = visibleSummaries.filter((s) => s.status === "paused").length;
   const blocked = visibleSummaries.filter((s) => s.status === "blocked").length;
+  const stale = visibleSummaries.filter((s) => s.status === "stale").length;
+  const timeout = visibleSummaries.filter((s) => s.status === "timeout").length;
+  const failed = visibleSummaries.filter((s) => s.status === "failed").length;
+  const cancelled = visibleSummaries.filter((s) => s.status === "cancelled").length;
+  const completed = visibleSummaries.filter((s) => s.status === "completed").length;
   const agents = visibleSummaries.filter((s) => s.kind === "agent").length;
   const current =
-    visibleSummaries.find((s) => s.status === "running") ??
     visibleSummaries.find((s) => s.status === "blocked") ??
+    visibleSummaries.find((s) => s.status === "running") ??
+    visibleSummaries.find((s) => s.status === "paused") ??
+    visibleSummaries.find((s) => s.status === "stale") ??
+    visibleSummaries.find((s) => s.status === "timeout") ??
+    visibleSummaries.find((s) => s.status === "failed") ??
+    visibleSummaries.find((s) => s.status === "cancelled") ??
+    visibleSummaries.find((s) => s.status === "completed") ??
     visibleSummaries[0];
   const nextAction =
     createBackgroundNextAction(current, language) ??
@@ -1220,10 +1251,30 @@ function mapBackgroundSummariesToBlocks(
     {
       id: "bg-summary",
       kind: "run",
-      status: blocked > 0 ? "blocked" : running > 0 ? "running" : "partial",
-      title: zh
-        ? `后台 ${visibleSummaries.length}${agents > 0 ? ` · 智能体 ${agents}` : ""}${needConfirm > 0 ? ` · 需要确认 ${needConfirm}` : ""}${blocked > 0 ? ` · 阻塞 ${blocked}` : ""}${running > 0 ? ` · 运行中 ${running}` : ""}`
-        : `Background ${visibleSummaries.length}${agents > 0 ? ` · agents ${agents}` : ""}${needConfirm > 0 ? ` · need attention ${needConfirm}` : ""}${blocked > 0 ? ` · blocked ${blocked}` : ""}${running > 0 ? ` · running ${running}` : ""}`,
+      status: backgroundBlockStatus({
+        running,
+        needConfirm,
+        blocked,
+        stale,
+        timeout,
+        failed,
+        cancelled,
+      }),
+      title: formatBackgroundSummaryTitle(
+        {
+          total: visibleSummaries.length,
+          agents,
+          needConfirm,
+          blocked,
+          running,
+          stale,
+          timeout,
+          failed,
+          cancelled,
+          completed,
+        },
+        language,
+      ),
       summary: current
         ? summarizeBackgroundStep(current, language)
         : zh
@@ -1240,22 +1291,9 @@ function createBackgroundNextAction(
 ): string | undefined {
   if (!task) return undefined;
   const zh = language === "zh-CN";
-  if (task.status === "blocked") {
-    if (task.kind === "agent") {
-      return zh
-        ? "后台 agent 需要确认；用 /agents 或 /background 查看。"
-        : "Background agent needs attention; use /agents or /background.";
-    }
-    if (task.kind === "job") {
-      return zh
-        ? "后台 job 需要确认；用 /job report 或 /background 查看。"
-        : "Background job needs attention; use /job report or /background.";
-    }
-    return zh
-      ? "后台任务需要确认；用 /background 查看。"
-      : "Background task needs attention; use /background.";
-  }
-  return task.nextAction;
+  return zh
+    ? "查看 /background；完整排查入口在 /details、/job report 或日志。"
+    : "Use /background; full troubleshooting lives in /details, /job report, or logs.";
 }
 
 function formatFooterRuntimeStatus(
@@ -1295,40 +1333,103 @@ function formatFooterWorkspaceStatus(
 
 function summarizeBackgroundStep(task: BackgroundTaskSummary, language: Language): string {
   const zh = language === "zh-CN";
-  const title = cleanBackgroundDisplayText(task.title, zh ? "后台任务" : "Background task");
-  const step = cleanBackgroundDisplayText(
-    task.currentStep ?? (zh ? "等待下一步" : "Waiting for next step"),
-    zh ? "等待下一步" : "Waiting for next step",
+  switch (task.status) {
+    case "running":
+      return zh
+        ? "后台任务正在运行；详情、日志和报告请到展开入口查看。"
+        : "Background task is running; use details, logs, or report for full output.";
+    case "blocked":
+    case "paused":
+      return zh
+        ? "后台任务需要处理；主屏只显示摘要。"
+        : "Background task needs attention; the main screen shows only a summary.";
+    case "stale":
+      return zh
+        ? "后台任务可能卡住或长时间无输出；请查看详情或日志。"
+        : "Background task may be stale or quiet; inspect details or logs.";
+    case "timeout":
+      return zh
+        ? "后台任务已超时；不要把它当作通过。"
+        : "Background task timed out; do not treat it as passed.";
+    case "cancelled":
+      return zh
+        ? "后台任务已取消；需要时从详情或日志继续排查。"
+        : "Background task was cancelled; inspect details or logs if needed.";
+    case "completed":
+      return zh
+        ? "后台任务已结束；结果以详情、日志或报告为准。"
+        : "Background task completed; trust details, logs, or report for the result.";
+    case "failed":
+      return zh
+        ? "后台任务异常结束；请查看详情、日志或报告。"
+        : "Background task ended with a problem; inspect details, logs, or report.";
+    default:
+      return zh
+        ? "后台任务摘要已折叠；完整内容在详情、日志或报告。"
+        : "Background task summary is folded; full content is in details, logs, or report.";
+  }
+}
+
+function isMainScreenBackgroundSummary(summary: BackgroundTaskSummary): boolean {
+  return (
+    summary.status === "running" ||
+    summary.status === "paused" ||
+    summary.status === "blocked" ||
+    summary.status === "stale" ||
+    summary.status === "cancelled" ||
+    summary.status === "timeout" ||
+    summary.status === "completed" ||
+    summary.status === "failed"
   );
-  const progress = formatBackgroundProgress(task.progress);
-  const summary = progress ? `${title} · ${step} · ${progress}` : `${title} · ${step}`;
-  return zh ? `后台任务 · ${summary}` : `Background task · ${summary}`;
 }
 
-function formatBackgroundProgress(
-  progress: BackgroundTaskSummary["progress"] | undefined,
-): string | undefined {
-  if (!progress) return undefined;
-  const total = typeof progress.total === "number" ? progress.total : undefined;
-  const ratio = total ? `${progress.completed}/${total}` : `${progress.completed}`;
-  return progress.label ? `${ratio} ${progress.label}` : ratio;
+function backgroundBlockStatus(counts: {
+  running: number;
+  needConfirm: number;
+  blocked: number;
+  stale: number;
+  timeout: number;
+  failed: number;
+  cancelled: number;
+}): ProductBlockViewModel["status"] {
+  if (counts.blocked > 0 || counts.needConfirm > 0 || counts.stale > 0) return "blocked";
+  if (counts.timeout > 0 || counts.failed > 0) return "fail";
+  if (counts.running > 0) return "running";
+  if (counts.cancelled > 0) return "partial";
+  return "info";
 }
 
-function cleanBackgroundDisplayText(value: string, fallback: string): string {
-  const cleaned = String(value || "")
-    .replace(
-      /\b(sourceRef|schema|debug|gate retry|passEvidence|raw evidence|tool_result raw|raw tool result|endpoint|runner=|evidenceRefs?|planId|runId|workflowId|forkId|threadId|system_event|provider abort|provider_abort|abort signal)\b/giu,
-      "",
-    )
-    .replace(/\b(workflow|agent|job|run|plan)-[A-Za-z0-9_-]{6,}\b/giu, "$1")
-    .replace(
-      /\b[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\b/gu,
-      "id",
-    )
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (!cleaned || cleaned.toLowerCase() === "unknown") return fallback;
-  return cleaned;
+function formatBackgroundSummaryTitle(
+  counts: {
+    total: number;
+    agents: number;
+    needConfirm: number;
+    blocked: number;
+    running: number;
+    stale: number;
+    timeout: number;
+    failed: number;
+    cancelled: number;
+    completed: number;
+  },
+  language: Language,
+): string {
+  const zh = language === "zh-CN";
+  const pieces = [zh ? `后台 ${counts.total}` : `Background ${counts.total}`];
+  if (counts.agents > 0) pieces.push(zh ? `智能体 ${counts.agents}` : `agents ${counts.agents}`);
+  if (counts.needConfirm > 0)
+    pieces.push(zh ? `需要确认 ${counts.needConfirm}` : `need attention ${counts.needConfirm}`);
+  if (counts.blocked > 0) pieces.push(zh ? `阻塞 ${counts.blocked}` : `blocked ${counts.blocked}`);
+  if (counts.running > 0)
+    pieces.push(zh ? `运行中 ${counts.running}` : `running ${counts.running}`);
+  if (counts.stale > 0) pieces.push(zh ? `可能卡住 ${counts.stale}` : `stale ${counts.stale}`);
+  if (counts.timeout > 0) pieces.push(zh ? `超时 ${counts.timeout}` : `timeout ${counts.timeout}`);
+  if (counts.failed > 0) pieces.push(zh ? `异常 ${counts.failed}` : `failed ${counts.failed}`);
+  if (counts.cancelled > 0)
+    pieces.push(zh ? `已取消 ${counts.cancelled}` : `cancelled ${counts.cancelled}`);
+  if (counts.completed > 0)
+    pieces.push(zh ? `已结束 ${counts.completed}` : `completed ${counts.completed}`);
+  return pieces.join(" · ");
 }
 
 function formatTrust(context: TuiContext, language: Language): string {

@@ -135,9 +135,7 @@ export function createAgentBackgroundTask(
   const label = agent.displayName ?? deriveAgentDisplayName(agent.type, agent.task);
   const isEn = context.language === "en-US";
   const isTerminal =
-    agent.status === "blocked" ||
-    agent.status === "cancelled" ||
-    agent.status === "failed";
+    agent.status === "blocked" || agent.status === "cancelled" || agent.status === "failed";
   const isIdle = agent.status === "idle" || agent.status === "completed";
   const backgroundStatus: BackgroundTaskState["status"] = isTerminal
     ? agent.status === "blocked"
@@ -149,41 +147,40 @@ export function createAgentBackgroundTask(
           : "completed"
     : isIdle
       ? "completed"
-    : agent.status === "stale"
-      ? "stale"
-      : "running";
+      : agent.status === "stale"
+        ? "stale"
+        : "running";
   const backgroundResult: BackgroundTaskState["result"] = isTerminal
     ? agent.status === "cancelled"
-        ? "cancelled"
+      ? "cancelled"
       : "fail"
     : isIdle
       ? mapAgentBackgroundResult(agent, undefined)
-    : agent.status === "stale"
-      ? "partial"
-      : undefined;
+      : agent.status === "stale"
+        ? "partial"
+        : undefined;
   const currentStep = isTerminal
     ? agent.status
     : isIdle
       ? agent.activitySummary
         ? `idle: ${agent.activitySummary}`
         : "idle"
-    : agent.status === "stale"
-      ? "stale/resumable"
-      : isEn
-        ? `running ${agent.type}`
-        : `正在运行 ${agent.type}`;
-  const progress = isTerminal || isIdle
-    ? { completed: 1, total: 1, label }
-    : { completed: 0, total: 1, label };
+      : agent.status === "stale"
+        ? "stale/resumable"
+        : isEn
+          ? `running ${agent.type}`
+          : `正在运行 ${agent.type}`;
+  const progress =
+    isTerminal || isIdle ? { completed: 1, total: 1, label } : { completed: 0, total: 1, label };
   const userVisibleSummary = isTerminal
     ? agent.summary
     : isIdle
       ? agent.summary
-    : agent.status === "stale"
-      ? agent.summary
-      : isEn
-        ? `Started ${label}. Use /agents show ${agent.id}.`
-        : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`;
+      : agent.status === "stale"
+        ? agent.summary
+        : isEn
+          ? `Started ${label}. Use /agents show ${agent.id}.`
+          : `已启动 ${label}。可用 /agents show ${agent.id} 查看。`;
   return {
     id: agent.id,
     kind: "agent",
@@ -376,7 +373,7 @@ export function createJobBackgroundTask(
     userVisibleSummary:
       job.status === "running"
         ? `Job running with ${runningAgents}/${job.agents.length} agents under cap ${job.budget.maxRunningAgents}; output stays in logs.`
-        : `Job ${job.status}; ${job.pauseReason ?? "no PASS evidence generated"}.`,
+        : `Job ${job.status}; ${job.pauseReason ?? "no evidence that verification passed was generated"}.`,
     nextAction: formatJobNextAction(job, context.language),
   };
 }

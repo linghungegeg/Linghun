@@ -25,7 +25,7 @@ import {
   mapDurableJobToBackgroundStatus,
 } from "./job-runner-presenter.js";
 import { formatApprovedRunnerSpecLine } from "./runner-runtime.js";
-import { formatDisplayPath, truncateDisplay } from "./startup-runtime.js";
+import { formatDisplayPath, sanitizeDisplayPaths, truncateDisplay } from "./startup-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
 
 const appendFileAsync = promisify(fsAppendFile);
@@ -384,7 +384,7 @@ export function createDurableJobAgentTasks(goal: string, total: number): string[
   const templates = [
     `planner subtask: turn the job goal into a concise execution plan. Goal: ${goal}`,
     `worker subtask: execute the next bounded work item with real tools when available. Goal: ${goal}`,
-    `verifier subtask: run real verification only; do not treat job lifecycle completion as PASS. Goal: ${goal}`,
+    `verifier subtask: run real verification only; do not treat job lifecycle completion as verified. Goal: ${goal}`,
   ];
   for (let index = templates.length; index < total; index += 1) {
     templates.push(
@@ -504,7 +504,9 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     formatJobRunnerReportLine(job),
     formatApprovedRunnerSpecLine(job),
     `- handoff: ${job.handoffPacket?.id ?? "missing"}`,
+    `- summary: lifecycle ${job.status}; result ${formatJobResultStatus(job)}; next ${formatJobNextAction(job, "en-US")}`,
     `- status semantics: ${formatJobLifecycleLegend()}`,
+    "- evidence boundary: lifecycle/status lines are not verification evidence; use verification report/evidence refs before claiming work passed.",
     `- evidence refs: ${job.evidenceRefs.map((item) => item.id).join(", ") || "none"}`,
     `- logs: ${formatDisplayPath(job.logPath, job.projectPath)}`,
     `- fullOutput: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
@@ -521,7 +523,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     "## Worker result",
     `- status: ${job.result?.status ?? "not_run"}`,
     `- summary: ${job.result?.summary ?? "Worker loop has not produced a result yet."}`,
-    `- lifecycle: ${job.status === "completed" ? "completed means the bounded worker loop ended; verification remains partial and is not PASS/smoke-ready" : job.status}`,
+    `- lifecycle: ${job.status === "completed" ? "completed means the bounded worker loop ended; verification remains partial until evidence is reviewed" : job.status}`,
     `- facts: ${job.result?.facts.join(" | ") ?? "none"}`,
     `- evidence refs: ${job.result?.evidenceRefs.join(", ") ?? "none"}`,
     "",
@@ -529,7 +531,7 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     `- used tokens: ${job.budget.usedTokens ?? 0}`,
     `- remaining tokens: ${job.budget.remainingTokens ?? job.budget.maxTokens}`,
     `- max runtime ms: ${job.budget.maxRuntimeMs ?? job.timeoutMs}`,
-    "- conservative: overbudget/timeout/stale/blocked states do not generate PASS evidence.",
+    "- conservative: overbudget/timeout/stale/blocked states do not generate evidence that verification passed.",
     "",
     "## Adopted conclusions",
     ...(job.adoptedConclusions.length > 0 ? job.adoptedConclusions : ["- none"]),
@@ -537,11 +539,13 @@ export async function writeDurableJobReport(job: DurableJobState): Promise<void>
     "## Rejected conclusions",
     ...(job.rejectedConclusions.length > 0
       ? job.rejectedConclusions.map((item) => `- ${item}`)
-      : ["- No blocked/cancelled/timeout/stale state is treated as PASS evidence."]),
+      : [
+          "- No blocked/cancelled/timeout/stale state is treated as evidence that verification passed.",
+        ]),
     "",
     "## Boundaries",
     "- Node/TUI runtime remains default and explicit fallback; Phase 17C only adds a gated native runner resolver/adapter for approved durable job specs.",
-    "- Native runner lifecycle completion is not verification PASS; failed/timeout/cancelled/stale/crash/protocol mismatch paths do not create PASS evidence.",
+    "- Native runner lifecycle completion is not verification evidence; failed/timeout/cancelled/stale/crash/protocol mismatch paths do not create evidence that verification passed.",
     "- DEFERRED: managed/bundled binary distribution, signing/AV/install matrix, real native-runner process-guard smoke, and parent hard-kill/crash proof.",
     "- Remote channels / Phase 17B, Fast Workspace Scanner, and Phase 18 desktop are NOT entered.",
     "- Agent context is trimmed to handoff/evidence/cache/index refs; no full transcript/source/index/log output is injected.",
@@ -565,11 +569,11 @@ export function formatJobList(jobs: DurableJobState[], context: JobContext): str
     ...jobs.map((job) => {
       const counts = countDurableJobAgents(job);
       const label = job.agents[0]?.displayName ?? deriveAgentDisplayName("worker", job.goal);
-      return `${job.id}  ${job.status}  label ${label}  agents ${job.agents.length}/${counts.running}  queued ${counts.queued} skipped ${counts.skipped} limited ${counts.budget_limited + counts.resource_limited} blocked ${counts.blocked} stale ${counts.stale}  effective cap ${getEffectiveAgentCap(job)} cap reason ${job.capReason ?? "default"}  step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal ${truncateDisplay(job.goal, 42)}  next /job status ${job.id}`;
+      return `${job.id}  lifecycle ${formatJobStateSummary(job.status)}  result ${formatJobResultStatus(job)}  label ${label}  agents ${job.agents.length}/${counts.running}  queued ${counts.queued} sleeping ${counts.sleeping} blocked ${counts.blocked} stale ${counts.stale}  step ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}  goal ${truncateDisplay(job.goal, 42)}  next /job status ${job.id}`;
     }),
     context.language === "en-US"
-      ? `Running cap ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} remains benchmark-only. Details: /job report <id> or /job logs <id>.`
-      : `\u771F\u5B9E\u8FD0\u884C\u4E0A\u9650 ${DEFAULT_JOB_RUNNING_AGENT_CAP}\uFF1B${JOB_AGENT_HIGH_CONFIG_CANDIDATE} \u4ECD\u662F benchmark \u5019\u9009\u3002\u8BE6\u60C5\uFF1A/job report <id> \u6216 /job logs <id>\u3002`,
+      ? `Running cap ${DEFAULT_JOB_RUNNING_AGENT_CAP}; ${JOB_AGENT_HIGH_CONFIG_CANDIDATE} remains benchmark-only. Full troubleshooting is only in /job status <id>, /job report <id>, or /job logs <id>.`
+      : `\u771F\u5B9E\u8FD0\u884C\u4E0A\u9650 ${DEFAULT_JOB_RUNNING_AGENT_CAP}\uFF1B${JOB_AGENT_HIGH_CONFIG_CANDIDATE} \u4ECD\u662F benchmark \u5019\u9009\u3002\u5B8C\u6574\u6392\u67E5\u5165\u53E3\u53EA\u5728 /job status <id>\u3001/job report <id> \u6216 /job logs <id>\u3002`,
   ].join("\n");
 }
 
@@ -582,12 +586,12 @@ export function formatJobPrimary(job: DurableJobState, context: JobContext): str
       ? `- goal: ${truncateDisplay(job.goal, 72)}`
       : `- \u76EE\u6807\uFF1A${truncateDisplay(job.goal, 72)}`,
     context.language === "en-US"
-      ? "- scope: local durable metadata + unified background task; no remote channel, Phase 18, Beta PASS, or smoke-ready claim."
-      : "- \u8303\u56F4\uFF1A\u672C\u5730 durable metadata + \u7EDF\u4E00\u540E\u53F0\u4EFB\u52A1\uFF1B\u672A\u8FDB\u5165 remote\u3001Phase 18\u3001Beta PASS \u6216 smoke-ready\u3002",
+      ? "- scope: local durable metadata + unified background task; no remote channel, Phase 18, Beta readiness, or smoke-ready claim."
+      : "- \u8303\u56F4\uFF1A\u672C\u5730 durable metadata + \u7EDF\u4E00\u540E\u53F0\u4EFB\u52A1\uFF1B\u672A\u8FDB\u5165 remote\u3001Phase 18\u3001Beta readiness \u6216 smoke-ready\u3002",
     `- agents: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${runningAgents}; queued ${job.agents.filter((agent) => agent.status === "queued").length}; skipped ${job.agents.filter((agent) => agent.status === "skipped").length}; limited ${job.agents.filter((agent) => agent.status === "budget_limited" || agent.status === "resource_limited").length}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}.`,
     `- status semantics: ${formatJobLifecycleLegend()}`,
     `- runner: ${formatJobRunnerInline(job)}`,
-    `- verification: ${job.verification?.status ?? "not_run"}; completed/cancelled/timeout/stale/blocked never equals verification PASS.`,
+    `- verification: ${job.verification?.status ?? "not_run"}; lifecycle states never equal verification evidence.`,
     `- next: ${formatJobNextAction(job, context.language)}`,
     `- details: /job report ${job.id}; logs: /job logs ${job.id}; background: /background`,
   ].join("\n");
@@ -597,7 +601,9 @@ export function formatJobStatus(job: DurableJobState): string {
   const counts = countDurableJobAgents(job);
   return [
     `Job ${job.id}`,
-    `- status: ${job.status}`,
+    `- status: ${formatJobStateSummary(job.status)}`,
+    `- result: ${formatJobResultStatus(job)}`,
+    `- next action: ${formatJobNextAction(job, "en-US")}`,
     `- pause reason: ${job.pauseReason ?? "-"}`,
     "- resume check: handoff/evidence/index/resource guard before any worker step",
     `- goal: ${truncateDisplay(job.goal, 120)}`,
@@ -609,10 +615,9 @@ export function formatJobStatus(job: DurableJobState): string {
     formatJobBudgetLine(job),
     `- worker: ${job.worker?.status ?? "not_started"}; step ${job.worker?.completedSteps ?? job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}; session ${job.worker?.sessionId ?? "-"}; ${truncateDisplay(job.worker?.summary ?? "-", 120)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
+    `- evidence boundary: status/result lines are not proof that verification passed; inspect /job report ${job.id} before using conclusions.`,
     `- permission: ${job.permissionPolicy}; edit ${job.allowEdit}; bash ${job.allowBash}; multi-agent ${job.allowMultiAgent}`,
-    `- log path: ${formatDisplayPath(job.logPath, job.projectPath)}`,
-    `- full output path: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
-    `- report path: ${formatDisplayPath(job.reportPath, job.projectPath)}`,
+    `- troubleshooting: /job report ${job.id}; /job logs ${job.id}; /details background ${job.id}`,
   ].join("\n");
 }
 
@@ -620,17 +625,20 @@ export function formatJobReport(job: DurableJobState): string {
   const counts = countDurableJobAgents(job);
   return [
     `Job report ${job.id}`,
-    `- status: ${job.status}; pause reason ${job.pauseReason ?? "-"}`,
+    `- status: ${formatJobStateSummary(job.status)}; result ${formatJobResultStatus(job)}; pause reason ${job.pauseReason ?? "-"}`,
     `- conclusion: ${formatJobReportConclusion(job)}`,
+    `- next action: ${formatJobNextAction(job, "en-US")}`,
     `- task graph: ${job.plan.length} steps; worker ${job.worker?.status ?? "not_started"}; used steps ${job.budget.usedSteps ?? 0}/${getDurableJobMaxSteps(job)}`,
     `- agent assignment: ${formatJobAgentLabels(job.agents)}`,
     `- agent counts: planned ${job.agents.length}; scheduled ${job.agents.filter((agent) => agent.runId).length}; started ${job.agents.filter((agent) => agent.startedAt).length}; running ${counts.running}; completed ${counts.completed}; queued ${counts.queued}; sleeping ${counts.sleeping}; skipped ${counts.skipped}; budget limited ${counts.budget_limited}; resource limited ${counts.resource_limited}; blocked ${counts.blocked}; stale ${counts.stale}; cap ${job.budget.maxRunningAgents}; effective cap ${getEffectiveAgentCap(job)}; cap reason ${job.capReason ?? "default"}`,
     `- status semantics: ${formatJobLifecycleLegend()}`,
     formatJobBudgetLine(job),
     `- verification: ${job.verification?.status ?? "not_run"}; ${truncateDisplay(job.verification?.summary ?? "-", 120)}`,
+    "- evidence boundary: report summarizes bounded job evidence only; full diagnostics stay in redacted/relative paths below.",
+    `- evidence refs: ${formatJobEvidenceRefs(job)}`,
     `- runner: ${formatJobRunnerInline(job)}`,
     `- adopted: ${job.adoptedConclusions.join("; ") || "none"}`,
-    `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never PASS"}`,
+    `- rejected: ${job.rejectedConclusions.join("; ") || "blocked/cancelled/timeout/stale are never verification pass evidence"}`,
     `- log path: ${formatDisplayPath(job.logPath, job.projectPath)}`,
     `- full output path: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
     `- report path: ${formatDisplayPath(job.reportPath, job.projectPath)}`,
@@ -638,7 +646,38 @@ export function formatJobReport(job: DurableJobState): string {
 }
 
 function formatJobLifecycleLegend(): string {
-  return "planned means durable assignments only; scheduled means real AgentRun exists; started means AgentRun has a start timestamp; running means currently active; completed means lifecycle ended, not verification PASS; blocked requires a concrete preflight/resource/provider reason.";
+  return "running active now; queued waiting for an execution slot; sleeping paused by user/resource guard; blocked needs a concrete fix; stale lost owner/heartbeat freshness; cancelled stopped by user; timeout hit runtime limit; completed lifecycle ended only; partial means incomplete or unverified evidence.";
+}
+
+function formatJobStateSummary(status: DurableJobStatus | DurableJobAgentStatus | string): string {
+  return `${status} (${formatJobStateMeaning(status)})`;
+}
+
+function formatJobStateMeaning(status: string): string {
+  if (status === "running") return "active now";
+  if (status === "queued") return "waiting for execution slot";
+  if (status === "sleeping" || status === "created") return "paused or not started";
+  if (status === "blocked") return "needs a concrete fix before resume";
+  if (status === "stale") return "owner or heartbeat freshness is missing";
+  if (status === "cancelled") return "stopped by user";
+  if (status === "timeout") return "runtime limit reached";
+  if (status === "completed") return "lifecycle ended; review evidence separately";
+  if (status === "partial") return "incomplete or unverified evidence";
+  if (status === "failed") return "runtime error; inspect logs";
+  return "durable job lifecycle state";
+}
+
+function formatJobResultStatus(job: DurableJobState): string {
+  return formatJobStateSummary(job.result?.status ?? "partial");
+}
+
+function formatJobEvidenceRefs(job: DurableJobState): string {
+  if (job.evidenceRefs.length === 0 && !job.result?.evidenceRefs?.length) return "none";
+  const durableRefs = job.evidenceRefs.map(
+    (item) => `${item.id}:${item.kind}:${truncateDisplay(item.summary, 56)}`,
+  );
+  const resultRefs = job.result?.evidenceRefs.map((item) => `${item}:worker-result`) ?? [];
+  return [...durableRefs, ...resultRefs].join(", ");
 }
 
 export function formatJobAgentLabels(agents: DurableJobAgent[]): string {
@@ -658,7 +697,7 @@ export function formatJobReportConclusion(job: DurableJobState): string {
     return "stale because heartbeat/owner recovery failed; /job resume first rechecks handoff, evidence/index state, and resource guard.";
   }
   if (job.status === "blocked") {
-    return "blocked until handoff/evidence/index/resource guard is repaired; no PASS evidence generated.";
+    return "blocked until handoff/evidence/index/resource guard is repaired; no evidence that verification passed was generated.";
   }
   if (job.status === "cancelled" || job.status === "timeout" || job.status === "completed") {
     return `${job.status} is terminal or conservative; inspect verification before treating it as useful evidence.`;
@@ -668,12 +707,17 @@ export function formatJobReportConclusion(job: DurableJobState): string {
 
 export async function formatJobLogs(job: DurableJobState): Promise<string> {
   const content = await readFile(job.logPath, "utf8").catch(() => "");
-  const tail = content.split(/\r?\n/u).filter(Boolean).slice(-JOB_LOG_TAIL_LINES);
+  const tail = content
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .slice(-JOB_LOG_TAIL_LINES)
+    .map((line) => sanitizeDisplayPaths(line, job.projectPath));
   return [
     `Job logs ${job.id}`,
     `- path: ${formatDisplayPath(job.logPath, job.projectPath)}`,
-    `- fullOutputPath: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
-    `- tailLines: ${tail.length}/${JOB_LOG_TAIL_LINES}`,
+    `- full output path: ${formatDisplayPath(job.fullOutputPath, job.projectPath)}`,
+    `- tail: bounded last ${tail.length}/${JOB_LOG_TAIL_LINES} lines; full troubleshooting uses the redacted/relative paths above`,
+    `- status: ${formatJobStateSummary(job.status)}; result ${formatJobResultStatus(job)}`,
     tail.length > 0
       ? tail.join("\n")
       : "\u65E5\u5FD7\u4E3A\u7A7A\uFF1Bjob \u53EF\u80FD\u5C1A\u672A\u5199\u5165\u8F93\u51FA\u3002",

@@ -317,8 +317,11 @@ describe("formatJobReport/List/Status", () => {
     expect(status).not.toContain(root);
     expect(report).not.toContain(root);
     expect(logs).not.toContain(root);
-    expect(status).toContain(".linghun/jobs/job-test1234/job.log");
-    expect(status).toMatch(/\[(?:local-path|user-home)\]\/.*report\.md/u);
+    expect(status).toContain("/job report job-test1234");
+    expect(status).toContain("/job logs job-test1234");
+    expect(status).not.toContain(".linghun/jobs/job-test1234/job.log");
+    expect(report).toContain(".linghun/jobs/job-test1234/job.log");
+    expect(report).toMatch(/\[(?:local-path|user-home)\]\/.*report\.md/u);
     expect(logs).toContain(".linghun/jobs/job-test1234/job.log");
   });
 
@@ -340,6 +343,46 @@ describe("formatJobReport/List/Status", () => {
     const job = createMinimalJob();
     const result = formatJobList([job], context);
     expect(result).toContain("job-test1234");
+    expect(result).toContain("lifecycle running (active now)");
+    expect(result).toContain("result partial (incomplete or unverified evidence)");
+    expect(result).not.toContain("/tmp/test-project");
+    expect(result).not.toContain(".linghun/jobs/job-test1234/job.log");
+  });
+
+  it("Phase 7.12: job lifecycle statuses use consistent non-PASS wording", () => {
+    const context = createTestJobContext();
+    for (const status of [
+      "running",
+      "blocked",
+      "stale",
+      "cancelled",
+      "timeout",
+      "completed",
+    ] as const) {
+      const job = createMinimalJob({
+        id: `job-${status}`,
+        status,
+        result:
+          status === "running"
+            ? undefined
+            : {
+                status: status === "completed" ? "partial" : status,
+                summary: `${status} fixture`,
+                facts: [],
+                evidenceRefs: [],
+                generatedAt: "2025-01-01T00:00:02.000Z",
+              },
+      });
+      const list = formatJobList([job], context);
+      const statusText = formatJobStatus(job);
+      const report = formatJobReport(job);
+      const combined = `${list}\n${statusText}\n${report}`;
+
+      expect(combined).toContain(`lifecycle ${status}`);
+      expect(combined).toContain("evidence boundary");
+      expect(combined).not.toContain("verification PASS");
+      expect(combined).not.toContain("PASS evidence");
+    }
   });
 
   it("formatJobPrimary includes goal and status", () => {
@@ -360,6 +403,95 @@ describe("formatJobReport/List/Status", () => {
     const job = createMinimalJob({ status: "blocked" });
     const result = formatJobReportConclusion(job);
     expect(result).toContain("blocked");
+  });
+
+  it("Phase 7.12: status gives state and next step without full troubleshooting paths", () => {
+    const job = createMinimalJob({
+      status: "completed",
+      verification: { status: "partial", summary: "worker completed; verification pending" },
+      result: {
+        status: "partial",
+        summary: "bounded worker ended",
+        facts: ["fact one"],
+        evidenceRefs: ["worker-evidence"],
+        generatedAt: "2025-01-01T00:00:02.000Z",
+      },
+    });
+
+    const result = formatJobStatus(job);
+
+    expect(result).toContain("- status: completed (lifecycle ended; review evidence separately)");
+    expect(result).toContain("- result: partial (incomplete or unverified evidence)");
+    expect(result).toContain("- next action: Review /job report job-test1234");
+    expect(result).toContain("/job logs job-test1234");
+    expect(result).toContain("/details background job-test1234");
+    expect(result).not.toContain("- log path:");
+    expect(result).not.toContain("- report path:");
+    expect(result).not.toContain("- full output path:");
+    expect(result).not.toContain("verification PASS");
+  });
+
+  it("Phase 7.12: report summarizes evidence boundary and redacted artifact refs", () => {
+    const job = createMinimalJob({
+      status: "completed",
+      verification: { status: "partial", summary: "not verified yet" },
+      evidenceRefs: [
+        {
+          id: "evidence-1",
+          kind: "test_result",
+          source: "local",
+          summary: "unit checks not run; report is bounded",
+        },
+      ],
+      result: {
+        status: "partial",
+        summary: "bounded worker ended",
+        facts: ["fact one"],
+        evidenceRefs: ["worker-evidence"],
+        generatedAt: "2025-01-01T00:00:02.000Z",
+      },
+    });
+
+    const result = formatJobReport(job);
+
+    expect(result).toContain(
+      "- status: completed (lifecycle ended; review evidence separately); result partial (incomplete or unverified evidence)",
+    );
+    expect(result).toContain("- evidence boundary: report summarizes bounded job evidence only");
+    expect(result).toContain("evidence-1:test_result");
+    expect(result).toContain("worker-evidence:worker-result");
+    expect(result).toContain("- log path: .linghun/jobs/job-test1234/job.log");
+    expect(result).not.toContain("/tmp/test-project");
+    expect(result).not.toContain("verification PASS");
+  });
+
+  it("Phase 7.12: logs show bounded tail only and sanitize absolute paths inside log lines", async () => {
+    const root = await mkdtemp(join(tmpdir(), "job-rt-test-"));
+    const project = join(root, "project");
+    const job = createMinimalJob({
+      projectPath: project,
+      logPath: join(project, ".linghun", "jobs", "job-test1234", "job.log"),
+      reportPath: join(project, ".linghun", "jobs", "job-test1234", "report.md"),
+      fullOutputPath: join(project, ".linghun", "jobs", "job-test1234", "full-output.log"),
+    });
+    await mkdir(join(project, ".linghun", "jobs", "job-test1234"), { recursive: true });
+    await writeFile(
+      job.logPath,
+      Array.from({ length: 45 }, (_, index) => {
+        const line = index + 1;
+        return `line ${line} at ${join(project, "secret", `file-${line}.txt`)}`;
+      }).join("\n"),
+      "utf8",
+    );
+
+    const result = await formatJobLogs(job);
+
+    expect(result).toContain("- tail: bounded last 40/40 lines");
+    expect(result).not.toContain("line 1 at");
+    expect(result).toContain("line 6 at");
+    expect(result).toContain(".linghun/jobs/job-test1234/job.log");
+    expect(result).not.toContain(project);
+    expect(result).not.toContain(root);
   });
 });
 

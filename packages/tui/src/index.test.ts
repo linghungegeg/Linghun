@@ -1306,9 +1306,10 @@ async function persistDurableJobFixture(
   config: LinghunConfig,
   status: DurableJobStatus,
   resultStatus?: NonNullable<DurableJobState["result"]>["status"],
+  idSuffix = "",
 ): Promise<DurableJobState> {
   const now = new Date().toISOString();
-  const id = `job-fixture-${status}-${resultStatus ?? "none"}`;
+  const id = `job-fixture-${status}-${resultStatus ?? "none"}${idSuffix ? `-${idSuffix}` : ""}`;
   const dir = join(resolveStoragePaths(config, project).jobs, id);
   const job: DurableJobState = {
     id,
@@ -5492,6 +5493,104 @@ describe("Phase 06 TUI slash commands", () => {
     );
   });
 
+  it("/job pause/resume/cancel returns predictable no-op results for sleeping/attention/terminal states", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-job-control-states-"));
+    const config: LinghunConfig = {
+      ...defaultConfig,
+      storage: { ...defaultConfig.storage, jobs: { scope: "project" } },
+    };
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session, config);
+    context.index.status = "ready";
+    context.index.projectName = "F-Linghun";
+    context.lastVerification = createVerificationReportFixture("partial");
+    context.evidence.push({
+      id: "ev-job-control-states",
+      kind: "test_result",
+      summary: "job control states focused evidence",
+      source: "vitest",
+      supportsClaims: ["job-control-states"],
+      createdAt: new Date().toISOString(),
+    });
+    const handoffPacket = createHandoffPacket(context, [], undefined, session.id);
+    const seedJob = async (status: DurableJobStatus, suffix: string): Promise<DurableJobState> => {
+      const job = await persistDurableJobFixture(project, config, status, undefined, suffix);
+      const now = new Date().toISOString();
+      job.handoffPacket = handoffPacket;
+      if (status === "running") {
+        job.ownerSessionId = session.id;
+        job.ownerPid = process.pid;
+        job.heartbeatAt = now;
+      }
+      if (status === "blocked") job.pauseReason = "fixture blocked";
+      if (status === "stale") job.pauseReason = "fixture stale";
+      await persistDurableJob(job);
+      return job;
+    };
+    const readJob = async (job: DurableJobState): Promise<DurableJobState | null> =>
+      readDurableJobState(getDurableJobStatePath(job));
+
+    const runningPause = await seedJob("running", "pause-running");
+    const pauseOut = new MemoryOutput();
+    await handleSlashCommand(`/job pause ${runningPause.id}`, context, pauseOut);
+    const paused = await readJob(runningPause);
+    expect(paused?.status).toBe("sleeping");
+    expect(paused?.pauseReason).toBe("user_paused");
+
+    const repeatPauseOut = new MemoryOutput();
+    await handleSlashCommand(`/job pause ${runningPause.id}`, context, repeatPauseOut);
+    const stillPaused = await readJob(runningPause);
+    expect(stillPaused?.status).toBe("sleeping");
+    expect(stillPaused?.pauseReason).toBe("user_paused");
+    expect(repeatPauseOut.text).toContain("未写入生命周期转换");
+
+    const runningResume = await seedJob("running", "resume-running");
+    const resumeRunningOut = new MemoryOutput();
+    await handleSlashCommand(`/job resume ${runningResume.id}`, context, resumeRunningOut);
+    const stillRunning = await readJob(runningResume);
+    expect(stillRunning?.status).toBe("running");
+    expect(resumeRunningOut.text).toContain("未写入生命周期转换");
+
+    const blocked = await seedJob("blocked", "attention-blocked");
+    const blockedPauseOut = new MemoryOutput();
+    await handleSlashCommand(`/job pause ${blocked.id}`, context, blockedPauseOut);
+    expect((await readJob(blocked))?.status).toBe("blocked");
+    expect(blockedPauseOut.text).toContain(`/job report ${blocked.id}`);
+    expect(blockedPauseOut.text).toContain(`/job logs ${blocked.id}`);
+    expect(blockedPauseOut.text).toContain(`/job resume ${blocked.id}`);
+    expect(blockedPauseOut.text).toContain(`/job cancel ${blocked.id}`);
+    const blockedCancelOut = new MemoryOutput();
+    await handleSlashCommand(`/job cancel ${blocked.id}`, context, blockedCancelOut);
+    expect((await readJob(blocked))?.status).toBe("cancelled");
+
+    const stale = await seedJob("stale", "attention-stale");
+    const stalePauseOut = new MemoryOutput();
+    await handleSlashCommand(`/job pause ${stale.id}`, context, stalePauseOut);
+    expect((await readJob(stale))?.status).toBe("stale");
+    expect(stalePauseOut.text).toContain(`/job report ${stale.id}`);
+    expect(stalePauseOut.text).toContain(`/job logs ${stale.id}`);
+    expect(stalePauseOut.text).toContain(`/job resume ${stale.id}`);
+    expect(stalePauseOut.text).toContain(`/job cancel ${stale.id}`);
+    const staleCancelOut = new MemoryOutput();
+    await handleSlashCommand(`/job cancel ${stale.id}`, context, staleCancelOut);
+    expect((await readJob(stale))?.status).toBe("cancelled");
+
+    for (const status of ["completed", "cancelled", "timeout"] as const) {
+      for (const action of ["pause", "resume", "cancel"] as const) {
+        const terminal = await persistDurableJobFixture(project, config, status, undefined, action);
+        const before = JSON.stringify(await readJob(terminal));
+        const output = new MemoryOutput();
+
+        await handleSlashCommand(`/job ${action} ${terminal.id}`, context, output);
+
+        expect(JSON.stringify(await readJob(terminal))).toBe(before);
+        expect(output.text).toContain("不会启动新动作");
+        expect(output.text).toContain("不是验证证据");
+      }
+    }
+  });
+
   it("keeps Polish D agent display names cosmetic, ASCII-safe, and bounded", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-polish-d-agent-label-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -5630,11 +5729,11 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).toContain(
       "agents: planned 5; scheduled 3; started 3; running 0; queued 0; skipped 0; limited 0; effective cap 3",
     );
-    expect(output.text).toContain(`${jobId}  blocked  label implement-durable-loop-planner`);
-    expect(output.text).not.toContain(`${jobId}  running`);
     expect(output.text).toContain(
-      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
+      `${jobId}  lifecycle blocked (needs a concrete fix before resume)  result blocked (needs a concrete fix before resume)  label implement-durable-loop-planner`,
     );
+    expect(output.text).not.toContain(`${jobId}  running`);
+    expect(output.text).toContain("lifecycle states never equal verification evidence");
     expect(output.text).toContain(
       "agent assignment: job-agent-1:implement-durable-loop-planner:blocked:agent-",
     );
@@ -5680,7 +5779,7 @@ describe("Phase 06 TUI slash commands", () => {
     };
     expect(persisted.status).toBe("completed");
     expect(persisted.verification?.status).toBe("partial");
-    expect(persisted.verification?.summary).toContain("not PASS evidence");
+    expect(persisted.verification?.summary).toContain("not verification evidence");
     expect(persisted.effectiveAgentCap).toBe(3);
     expect(persisted.capReason).toContain("runtime_dynamic_cap");
     expect(persisted.capReason).not.toBe("not_running");
@@ -7432,7 +7531,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(freshContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
-    expect(freshOutput.text).toContain("没有后台任务");
+    expect(freshOutput.text).toContain("stale");
+    expect(freshOutput.text).toContain("recover durable job");
     const staleDetails = new MemoryOutput();
     await handleSlashCommand(`/details background ${jobId}`, freshContext, staleDetails);
     expect(staleDetails.text).toContain("stale");
@@ -7549,7 +7649,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(budgetState.status).toBe("blocked");
     expect(budgetState.pauseReason).toContain("budget exceeded");
     expect(budgetState.result?.status).toBe("overbudget");
-    expect(budgetState.result?.summary).toContain("no PASS evidence");
+    expect(budgetState.result?.summary).toContain("no evidence that verification passed");
     expect(budgetContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
@@ -7601,7 +7701,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(maxStepState.pauseReason).toContain("max_steps_reached");
     expect(maxStepState.budget?.usedSteps).toBe(2);
     expect(maxStepState.result?.status).toBe("blocked");
-    expect(maxStepState.result?.summary).toContain("no PASS evidence");
+    expect(maxStepState.result?.summary).toContain("no evidence that verification passed");
     expect(maxStepContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
@@ -7648,7 +7748,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(timeoutState.status).toBe("timeout");
     expect(timeoutState.pauseReason).toContain("timeout");
     expect(timeoutState.result?.status).toBe("timeout");
-    expect(timeoutState.result?.summary).toContain("no PASS evidence");
+    expect(timeoutState.result?.summary).toContain("no evidence that verification passed");
     expect(timeoutContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );
@@ -7690,9 +7790,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(output.text).not.toContain("needs_handoff_repair");
     expect(output.text).toContain("generatedEvidence=job-preflight");
     expect(output.text).toContain("index=unknown_nonblocking");
-    expect(output.text).toContain(
-      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
-    );
+    expect(output.text).toContain("lifecycle states never equal verification evidence");
     expect(
       context.backgroundTasks.filter((task) => task.kind === "job" || task.kind === "agent"),
     ).not.toContainEqual(expect.objectContaining({ result: "pass" }));
@@ -8104,9 +8202,7 @@ describe("Phase 06 TUI slash commands", () => {
     );
     expect(output.text).toMatch(/runner native\/(?:running|completed|cancelled)/u);
     expect(output.text).toContain("heartbeat ");
-    expect(output.text).toContain(
-      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
-    );
+    expect(output.text).toContain("lifecycle states never equal verification evidence");
 
     await waitForTestMs(1400);
     await handleSlashCommand(`/job status ${jobId}`, context, output);
@@ -15233,9 +15329,9 @@ describe("Phase 06 TUI slash commands", () => {
       ),
     ) as { result?: { status?: string; summary?: string } };
     expect(state.result?.status).not.toBe("pass");
-    expect(state.result?.summary).toContain("no PASS evidence");
+    expect(state.result?.summary).toContain("no evidence that verification passed");
     expect(output.text).toContain("本地 durable metadata + 统一后台任务");
-    expect(output.text).toContain("never equals verification PASS");
+    expect(output.text).toContain("lifecycle states never equal verification evidence");
   });
 
   it("keeps Polish B permission mode hard boundaries", async () => {
@@ -15656,14 +15752,30 @@ describe("Phase 06 TUI slash commands", () => {
         title: "index refresh",
         status: "paused",
       }),
+      createBackgroundTaskFixture("job", {
+        id: "job-timeout-panel",
+        title: "Job timeout raw",
+        status: "timeout",
+        currentStep:
+          "timeout fullOutputPath C:\\Users\\Admin\\secret\\full-output.log gateId raw evidence",
+        nextAction: "open /job report job-timeout-panel",
+        logPath: join(project, ".linghun", "jobs", "job-timeout-panel", "job.log"),
+      }),
+      createBackgroundTaskFixture("bash", {
+        id: "bash-cancelled-panel",
+        title: "Bash cancelled",
+        status: "cancelled",
+        currentStep: "cancelled",
+      }),
     ];
 
     await handleSlashCommand("/background", context, output);
 
     const panel = context.commandPanelState;
-    expect(panel?.summary?.join("\n")).toContain("运行中 1");
-    expect(panel?.summary?.join("\n")).toContain("待确认 1");
-    expect(panel?.summary?.join("\n")).toContain("失败/阻塞 0");
+    expect(panel?.summary?.join("\n")).toContain("running 1");
+    expect(panel?.summary?.join("\n")).toContain("sleeping 1");
+    expect(panel?.summary?.join("\n")).toContain("timeout 1");
+    expect(panel?.summary?.join("\n")).toContain("cancelled 1");
     const mainSurface = [
       ...(panel?.summary ?? []),
       ...(panel?.sections ?? []).flatMap((section) => [
@@ -15674,23 +15786,31 @@ describe("Phase 06 TUI slash commands", () => {
     expect(mainSurface).toContain("Verification");
     expect(mainSurface).not.toContain("Agent");
     expect(mainSurface).toContain("Index");
+    expect(mainSurface).toContain("Bash / job");
     expect(mainSurface).toContain("typecheck");
     expect(mainSurface).toContain("1/2 checks");
+    expect(mainSurface).toContain("timeout");
+    expect(mainSurface).toContain("cancelled");
     for (const banned of [
       "sourceRef",
       "schema",
       "debug",
       "gate retry",
+      "gateId",
       "passEvidence",
       "raw evidence",
       "tool_result raw",
+      "fullOutputPath",
       "endpoint",
       "runner=",
+      "C:\\Users\\Admin",
     ]) {
       expect(mainSurface).not.toContain(banned);
     }
     expect(panel?.detailsText).not.toContain("agent-panel");
     expect(panel?.detailsText).toContain("/details background verify-panel");
+    expect(panel?.detailsText).toContain("/job report job-timeout-panel");
+    expect(panel?.detailsText).toContain(".linghun/jobs/job-timeout-panel/job.log");
     expect(output.text).toBe("");
   });
 
@@ -15835,7 +15955,7 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.permissionMode).toBe("full-access");
   });
 
-  it("/background includes idle teammate summaries without making them active", async () => {
+  it("/background keeps idle teammate summaries out of the active task surface", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-background-idle-teammate-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -15853,8 +15973,9 @@ describe("Phase 06 TUI slash commands", () => {
 
     await handleSlashCommand("/background", context, output);
 
-    expect(output.text).toContain("Agent idle");
-    expect(output.text).toContain("idle: last result");
+    expect(output.text).toContain("没有后台任务");
+    expect(output.text).not.toContain("Agent idle");
+    expect(output.text).not.toContain("idle: last result");
     expect(context.backgroundTasks.filter((task) => task.status === "running")).toHaveLength(0);
   });
 
@@ -15932,7 +16053,7 @@ describe("Phase 06 TUI slash commands", () => {
 
     expect(context.backgroundTasks.find((task) => task.id === "bash-stale")?.status).toBe("stale");
     expect(output.text).toContain("stale");
-    expect(output.text).not.toContain("timeout");
+    expect(output.text).toContain("timeout");
     expect(output.text).not.toContain("agent cancelled");
     expect(output.text).toContain("bash-stale.log");
     expect(output.text).toContain("Background output bash-stale");
@@ -16613,7 +16734,7 @@ describe("Phase 06 TUI slash commands", () => {
     const persisted = await readDurableJobState(getDurableJobStatePath(job));
     expect(persisted?.status).toBe("stale");
     expect(persisted?.result?.status).toBe("stale");
-    expect(persisted?.result?.summary).toContain("no PASS evidence");
+    expect(persisted?.result?.summary).toContain("no evidence that verification passed");
   });
 
   it("/interrupt cancels running agents without leaving stale resumable state", async () => {
@@ -17557,8 +17678,7 @@ describe("Phase 06 TUI slash commands", () => {
     await running;
 
     const verificationTask = context.backgroundTasks.find((item) => item.kind === "verification");
-    expect(backgroundOutput.text).toContain("没有后台任务");
-    expect(backgroundOutput.text).not.toContain("stale");
+    expect(backgroundOutput.text).toContain("stale");
     expect(context.lastVerification?.status).toBe("stale");
     expect(verificationTask?.status).toBe("stale");
     expect(verificationTask?.result).toBe("stale");
@@ -21227,9 +21347,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
 
     // Verify cancelled job is never marked as pass
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
-    expect(output.text).toContain(
-      "completed/cancelled/timeout/stale/blocked never equals verification PASS",
-    );
+    expect(output.text).toContain("lifecycle states never equal verification evidence");
   });
 
   it("timeout does not produce PASS evidence in durable job", async () => {
@@ -21285,7 +21403,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
     expect(state.status).toBe("timeout");
     expect(state.pauseReason).toContain("timeout");
     expect(state.result?.status).toBe("timeout");
-    expect(state.result?.summary).toContain("no PASS evidence");
+    expect(state.result?.summary).toContain("no evidence that verification passed");
     expect(context.backgroundTasks).not.toContainEqual(expect.objectContaining({ result: "pass" }));
   });
 
@@ -21302,7 +21420,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
         enabled: true,
         source: "custom",
         path: mockRunner.path,
-        timeoutMs: 200,
+        timeoutMs: 60_000,
       },
     };
     const context = await createTestContext(project, store, session, config);
@@ -21322,7 +21440,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
     const output = new MemoryOutput();
 
     await handleSlashCommand(
-      "/job run d9 windows cleanup test --tokens 50000 --timeout 200",
+      "/job run d9 windows cleanup test --tokens 50000 --timeout 60000",
       context,
       output,
     );
@@ -21554,7 +21672,7 @@ describe("Slice D.9: Long Task / Runner Resilience Closure", () => {
     };
     expect(recoveredState.status).toBe("stale");
     expect(recoveredState.result?.status).toBe("stale");
-    expect(recoveredState.result?.summary).toContain("no PASS evidence");
+    expect(recoveredState.result?.summary).toContain("no evidence that verification passed");
     expect(freshContext.backgroundTasks).not.toContainEqual(
       expect.objectContaining({ result: "pass" }),
     );

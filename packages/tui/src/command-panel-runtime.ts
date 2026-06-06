@@ -46,7 +46,10 @@ export function buildExplicitDetailsCommandPanel(
   // source）只进 detailsText，由 Ctrl+O 展开后才可见、可滚动。分区：最近输出 /
   // 证据 / 后台 / 诊断。
   const sections: { title?: string; rows: string[] }[] = [];
-  const detailsParts: string[] = [];
+  const detailsParts: string[] = [
+    "Linghun details",
+    "- full output: /details evidence <id> | /details background <id> | /details output <id>",
+  ];
 
   // ── 分区 1：最近输出（完整正文只进 detailsText）──────────────────────────
   if (context.lastFullOutput) {
@@ -60,7 +63,7 @@ export function buildExplicitDetailsCommandPanel(
       ],
     });
     detailsParts.push(isEn ? "## Last output (full body)" : "## 最近输出（完整正文）");
-    detailsParts.push(sanitizeDisplayPaths(context.lastFullOutput, context.projectPath));
+    detailsParts.push(sanitizePanelDetailsText(context.lastFullOutput, context.projectPath));
   }
 
   // ── 分区 2：证据（主屏只给人话计数；id/kind/source 进 detailsText）──────────
@@ -77,7 +80,7 @@ export function buildExplicitDetailsCommandPanel(
     detailsParts.push(isEn ? "## Evidence" : "## 证据");
     for (const e of context.evidence.slice(0, 8)) {
       detailsParts.push(
-        `- ${e.id} · ${e.kind} · ${sanitizeDisplayPaths(e.source, context.projectPath)}: ${sanitizeDisplayPaths(e.summary, context.projectPath)}`,
+        `- ${e.id} ${e.kind} ${sanitizePanelDetailsText(e.source, context.projectPath)}: ${sanitizePanelDetailsText(e.summary, context.projectPath)}`,
       );
     }
     if (evidenceCount > 8) {
@@ -104,7 +107,7 @@ export function buildExplicitDetailsCommandPanel(
     detailsParts.push(isEn ? "## Background tasks" : "## 后台任务");
     for (const t of context.backgroundTasks.slice(0, 8)) {
       detailsParts.push(
-        `- ${t.id} · ${t.kind} · ${t.status}: ${sanitizeDisplayPaths(t.userVisibleSummary, context.projectPath)}`,
+        `- ${t.id} ${t.kind} ${t.status}: ${sanitizePanelDetailsText(t.userVisibleSummary, context.projectPath)}`,
       );
     }
     if (backgroundCount > 8) {
@@ -233,6 +236,16 @@ export function buildExplicitDetailsCommandPanel(
     // detailsText（含 id/source）。避免一上来就把内部 id / 完整正文糊一屏。
     expanded: false,
   };
+}
+
+function sanitizePanelDetailsText(value: string, projectPath: string): string {
+  return sanitizeDiagnosticText(sanitizeDisplayPaths(value, projectPath))
+    .replace(
+      /\bno PASS evidence generated\b/giu,
+      "no evidence that verification passed was generated",
+    )
+    .replace(/\bPASS evidence\b/giu, "evidence that verification passed")
+    .replace(/\bpassEvidence\b/gu, "pass evidence");
 }
 
 function sanitizeCompactDetailsText(value: string, projectPath: string): string {

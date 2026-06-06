@@ -65,9 +65,9 @@ const baseBackground: BackgroundTaskState = {
   outputPath: "full-output.log",
   hasOutput: true,
   result: "timeout",
-  userVisibleSummary: "Job timeout; no PASS evidence generated.",
+  userVisibleSummary: "Job timeout; no evidence that verification passed was generated.",
   nextAction:
-    "Inspect /job report job-test; completed/cancelled/timeout/stale/blocked never count as verification PASS.",
+    "Inspect /job report job-test; lifecycle states never count as evidence that verification passed.",
 };
 
 describe("job runner presenters", () => {
@@ -136,7 +136,7 @@ describe("job runner presenters", () => {
     );
     expect(ready).toContain("Native Runner Doctor：available");
     expect(ready).toContain("fallback reason: none");
-    expect(ready).toContain("cannot decide verification PASS");
+    expect(ready).toContain("cannot decide whether verification passed");
   });
 
   it("formats fallback and placeholder runner summaries without full native-benefit claims", () => {
@@ -169,6 +169,8 @@ describe("job runner presenters", () => {
 
   it("formats durable job background status summaries with status, next action, and artifact refs only", () => {
     expect(mapDurableJobToBackgroundStatus("running")).toBe("running");
+    expect(mapDurableJobToBackgroundStatus("created")).toBe("paused");
+    expect(mapDurableJobToBackgroundStatus("sleeping")).toBe("paused");
     expect(mapDurableJobToBackgroundStatus("blocked")).toBe("blocked");
     expect(mapDurableJobToBackgroundResult("completed")).toBe("partial");
     expect(mapDurableJobToBackgroundResult("timeout")).toBe("timeout");
@@ -185,6 +187,16 @@ describe("job runner presenters", () => {
         "en-US",
       ),
     ).toContain("blocked child agent cause");
+    expect(formatJobNextAction({ ...baseJob, status: "sleeping" }, "en-US")).toContain(
+      "/job resume job-test",
+    );
+    expect(formatJobNextAction({ ...baseJob, status: "stale" }, "en-US")).toContain(
+      "owner/heartbeat",
+    );
+    expect(formatJobNextAction({ ...baseJob, status: "completed" }, "en-US")).toContain(
+      "run verification before treating the work as passed",
+    );
+    expect(formatJobNextAction({ ...baseJob, status: "completed" }, "en-US")).not.toContain("PASS");
 
     const rendered = formatBackgroundTask(baseBackground, "en-US");
     expect(rendered).toContain("[background] Job: safe · timeout · timeout 1/4");
@@ -224,7 +236,7 @@ describe("job runner presenters", () => {
     const details = formatBackgroundTaskPanelDetails(task, "en-US", "C:\\redacted\\project");
 
     expect(row).toContain("Verification gate");
-    expect(row).toContain("blocked");
+    expect(row).toContain("stale");
     expect(row).toContain("2/5 checks");
     expect(row).toContain("/details background job-test");
     expect(row).not.toContain("sourceRef");
@@ -299,7 +311,7 @@ describe("job runner presenters", () => {
         "- path: full-output.log",
         "- hasOutput: true",
         "- status: timeout",
-        "- summary: Job timeout; no PASS evidence generated.",
+        "- summary: Job timeout; no evidence that verification passed was generated.",
         "- slices: /details output job-test --tail 40 | --grep <pattern> --context 2 | --errors",
       ].join("\n"),
     );
@@ -322,5 +334,14 @@ describe("job runner presenters", () => {
     expect(output).not.toContain("C:\\Users\\Admin");
     expect(row).not.toContain("C:\\Users\\Admin");
     expect(details).toContain("[user-home]/.../transcript.jsonl");
+  });
+
+  it("keeps job lifecycle wording in details without verification-pass claims", () => {
+    const rendered = formatBackgroundDetails(baseBackground, "en-US");
+
+    expect(rendered).toContain("no evidence that verification passed was generated");
+    expect(rendered).toContain("never count as evidence");
+    expect(rendered).not.toContain("PASS evidence");
+    expect(rendered).not.toContain("verification PASS");
   });
 });

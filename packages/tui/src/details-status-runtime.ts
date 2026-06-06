@@ -2,32 +2,17 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
-import { buildExplicitDetailsCommandPanel } from "./command-panel-runtime.js";
+import { buildExplicitDetailsCommandPanel, showCommandPanel } from "./command-panel-runtime.js";
 import { formatBackgroundDetails, formatBackgroundOutputDetails } from "./job-runner-presenter.js";
-import { MAX_AGENTS } from "./job-runtime.js";
 import { formatLogArtifactSlice, readLogArtifactSlice } from "./log-artifact.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import type { BackgroundTaskSummary, ProductBlockViewModel } from "./shell/types.js";
 import { formatModeBehavior } from "./slash-dispatch.js";
-import {
-  formatDisplayPath,
-  formatError,
-  sanitizeDisplayPaths,
-  writeLine,
-} from "./startup-runtime.js";
+import { formatError, writeLine } from "./startup-runtime.js";
 import type { TerminalReadinessView } from "./terminal-readiness-presenter.js";
 import { createVerificationLevelForReadiness } from "./terminal-readiness-runtime.js";
-import {
-  findBackgroundTask,
-  isRuntimeActiveBackgroundTask,
-  listCancellableAgents,
-} from "./tui-agent-job-runtime.js";
+import { findBackgroundTask, isRuntimeActiveBackgroundTask } from "./tui-agent-job-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
-import {
-  MAX_BACKGROUND_TASKS,
-  MAX_CHECKPOINTS,
-  MAX_EVIDENCE_RECORDS,
-} from "./tui-context-runtime.js";
 import {
   createLogArtifactRegistry,
   findEvidence,
@@ -130,58 +115,15 @@ async function runDetailsCommandBody(
     return;
   }
 
-  // 默认分支：先展开最近一次完整正文（lastFullOutput），让 /model doctor →
-  // /details 这种链路可以看到 provider.env merge / providers / endpointPath
-  // 等被 summary 行截断的内容。再附上 evidence/background 的简短摘要。
-  // D.13L Block C — 没有可展开内容时（lastFullOutput 空 + 没有 evidence /
-  // background），主屏说人话："当前没有可展开的完整内容。" 不再 dump
-  // "Linghun details / evidence: 0/16 / background: 0/16" 这种内部计数。
-  const sections: string[] = [];
-  if (context.lastFullOutput) {
-    sections.push(
-      context.language === "en-US" ? "Latest output (full body):" : "最近一次输出（完整正文）：",
-    );
-    sections.push(context.lastFullOutput);
-    sections.push("");
-  }
-  const hasAnyDetail =
-    Boolean(context.lastFullOutput) ||
-    context.evidence.length > 0 ||
-    context.backgroundTasks.length > 0;
-  if (!hasAnyDetail) {
+  const panel = buildExplicitDetailsCommandPanel(context);
+  if (!panel) {
     writeLine(
       output,
       context.language === "en-US" ? "Nothing to expand right now." : "当前没有可展开的完整内容。",
     );
     return;
   }
-  const summary = [
-    "Linghun details",
-    `- evidence: ${context.evidence.length}/${MAX_EVIDENCE_RECORDS}`,
-    `- background: ${context.backgroundTasks.filter(isRuntimeActiveBackgroundTask).length}/${MAX_BACKGROUND_TASKS}`,
-    `- agents: ${listCancellableAgents(context).length}/${MAX_AGENTS}`,
-    `- checkpoints: ${context.checkpoints.length}/${MAX_CHECKPOINTS}`,
-    "- full output: /details evidence <id> | /details background <id> | /details output <id>",
-  ];
-  if (context.evidence.length > 0) {
-    summary.push("- recent evidence:");
-    for (const evidence of context.evidence.slice(0, 5)) {
-      summary.push(
-        `  - ${evidence.id} ${evidence.kind} ${formatDisplayPath(
-          evidence.source,
-          context.projectPath,
-        )}: ${sanitizeDisplayPaths(evidence.summary, context.projectPath)}`,
-      );
-    }
-  }
-  if (context.backgroundTasks.length > 0) {
-    summary.push("- recent background:");
-    for (const task of context.backgroundTasks.slice(0, 5)) {
-      summary.push(`  - ${task.id} ${task.kind} ${task.status}: ${task.userVisibleSummary}`);
-    }
-  }
-  sections.push(summary.join("\n"));
-  writeLine(output, sections.join("\n"));
+  showCommandPanel(context, output, panel);
 }
 
 export function formatHomeScreen(context: TuiContext): string {

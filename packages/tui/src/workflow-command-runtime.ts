@@ -457,16 +457,20 @@ function selectActiveWorkflowRun(
     background: BackgroundTaskState;
   }>,
 ): (typeof candidates)[0] {
-  const nonTerminal = candidates.filter((c) =>
-    ACTIVE_RUN_PREFERRED_STATUSES.has(c.run.status),
-  );
+  if (candidates.length === 0) {
+    throw new Error("selectActiveWorkflowRun requires at least one candidate");
+  }
+  const nonTerminal = candidates.filter((c) => ACTIVE_RUN_PREFERRED_STATUSES.has(c.run.status));
   const pool = nonTerminal.length > 0 ? nonTerminal : candidates;
-  return pool
+  const selected = pool
     .slice()
     .sort(
-      (a, b) =>
-        new Date(b.state.updatedAt).getTime() - new Date(a.state.updatedAt).getTime(),
-    )[0]!;
+      (a, b) => new Date(b.state.updatedAt).getTime() - new Date(a.state.updatedAt).getTime(),
+    )[0];
+  if (!selected) {
+    throw new Error("selectActiveWorkflowRun requires at least one selectable candidate");
+  }
+  return selected;
 }
 
 async function readWorkflowRunState(path: string): Promise<DurableWorkflowRunState | null> {
@@ -614,7 +618,7 @@ export function formatWorkflowStatus(context: TuiContext): string {
     `- planId: ${run.planId}`,
     `- steps: queued ${counts.queued}; running ${counts.running}; completed ${counts.completed}; partial ${counts.partial}; blocked ${counts.blocked}; failed ${counts.failed}; cancelled ${counts.cancelled}; stale ${counts.stale}`,
     `- evidenceRefs: ${run.steps.flatMap((step) => step.evidenceRefs).join(", ") || "none"}`,
-    "- completion is PARTIAL only; blocked/stale/cancelled/failed steps never claim PASS.",
+    "- completion is PARTIAL only; blocked/stale/cancelled/failed steps are not verification evidence.",
     "- background: /background; details: /details background <id>",
   ].join("\n");
 }
@@ -975,7 +979,7 @@ async function runWorkflowPlanSteps(
   await finishWorkflowRun(
     runId,
     "completed",
-    "Workflow steps completed; result remains PARTIAL until verification/final gate evidence proves PASS.",
+    "Workflow steps completed; result remains PARTIAL until verification/final gate evidence proves the work passed.",
     context,
     sessionId,
     workflowTask,
@@ -983,8 +987,8 @@ async function runWorkflowPlanSteps(
   writeLine(
     output,
     context.language === "en-US"
-      ? "Workflow completed with PARTIAL result; no PASS evidence generated. Use /workflows status for details."
-      : "workflow 已完成，结果仍为 PARTIAL；未生成 PASS 证据。可用 /workflows status 查看详情。",
+      ? "Workflow completed with PARTIAL result; no evidence that verification passed was generated. Use /workflows status for details."
+      : "workflow 已完成，结果仍为 PARTIAL；未生成验证已通过的证据。可用 /workflows status 查看详情。",
   );
 }
 
@@ -1245,7 +1249,7 @@ async function executeRegistryWorkflowRun(
   await finishWorkflowRun(
     runId,
     "completed",
-    "Registry workflow completed; result remains PARTIAL until verification/final gate evidence proves PASS.",
+    "Registry workflow completed; result remains PARTIAL until verification/final gate evidence proves the work passed.",
     context,
     sessionId,
     task,
@@ -2174,7 +2178,7 @@ export async function finishWorkflowRun(
   task.userVisibleSummary = task.userVisibleSummary || summary;
   task.nextAction =
     status === "completed" || status === "partial"
-      ? "Review verification evidence; do not treat workflow completion as PASS."
+      ? "Review verification evidence; workflow completion is lifecycle only."
       : "Inspect /failures and rerun after fixing the failed step.";
   if (context.workflows.activeRun?.id === runId) {
     await persistWorkflowRunState(context, context.workflows.activeRun, task);
