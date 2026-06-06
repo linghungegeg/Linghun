@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig, resolveStoragePaths } from "@linghun/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { recordVerificationEvidence } from "./evidence-runtime.js";
 import type { TuiContext } from "./index.js";
 import { createCacheState, createHookState } from "./index.js";
+import type { VerificationReport, VerificationStepKind } from "./tui-data-types.js";
 import { createVerificationPlan, runVerificationPlan } from "./verification-command-runtime.js";
 
 describe("verification-command-runtime", () => {
@@ -64,10 +66,75 @@ describe("verification-command-runtime", () => {
     expect(files.some((file) => file.endsWith("-smoke.log"))).toBe(true);
     await expect(readdir(join(projectPath, ".linghun", "logs", "verification"))).rejects.toThrow();
   });
+
+  it("records scoped verification evidence without upgrading synthetic smoke to tests passed", async () => {
+    const context = createEvidenceContext();
+    await recordVerificationEvidence(
+      context,
+      "session-1",
+      makeReport("pass", [{ kind: "smoke", synthetic: true }]),
+    );
+
+    expect(context.evidence[0]?.supportsClaims).toContain("verification_passed");
+    expect(context.evidence[0]?.supportsClaims).toContain("smoke_ran");
+    expect(context.evidence[0]?.supportsClaims).not.toContain("test_passed");
+    expect(context.evidence[0]?.supportsClaims).not.toContain("smoke_passed");
+  });
+
+  it("records typecheck and test pass claims only when those command kinds pass", async () => {
+    const context = createEvidenceContext();
+    await recordVerificationEvidence(
+      context,
+      "session-1",
+      makeReport("pass", [{ kind: "typecheck" }, { kind: "test" }]),
+    );
+
+    expect(context.evidence[0]?.supportsClaims).toEqual(
+      expect.arrayContaining(["verification_passed", "typecheck_passed", "test_passed"]),
+    );
+    expect(context.evidence[0]?.supportsClaims).not.toContain("build_passed");
+  });
 });
 
 class MockWritable extends Writable {
   _write(_chunk: Buffer | string, _encoding: string, callback: () => void): void {
     callback();
   }
+}
+
+function createEvidenceContext(): TuiContext {
+  return {
+    evidence: [],
+    store: {
+      appendEvent: vi.fn(async () => {}),
+    },
+  } as unknown as TuiContext;
+}
+
+function makeReport(
+  status: VerificationReport["status"],
+  commands: Array<{ kind: VerificationStepKind; synthetic?: boolean }>,
+): VerificationReport {
+  const startedAt = new Date(0).toISOString();
+  return {
+    id: "verify-1",
+    status,
+    summary: `${status.toUpperCase()} verification`,
+    commands: commands.map((command) => ({
+      kind: command.kind,
+      synthetic: command.synthetic,
+      command: `run ${command.kind}`,
+      reason: command.kind,
+      status,
+      exitCode: status === "pass" ? 0 : 1,
+      durationMs: 1,
+      summary: `${command.kind} ${status}`,
+    })),
+    unverified: [],
+    risk: [],
+    startedAt,
+    endedAt: startedAt,
+    durationMs: 1,
+    nextAction: "done",
+  };
 }

@@ -312,10 +312,7 @@ export async function recordVerificationEvidence(
   sessionId: string,
   report: VerificationReport,
 ): Promise<void> {
-  const supportsClaims =
-    report.status === "pass"
-      ? ["verification_passed", "test_passed"]
-      : ["verification attempted", `verification:${report.status}`, "未通过验证", "需要复核"];
+  const supportsClaims = deriveVerificationSupportsClaims(report);
   const evidence: EvidenceRecord = {
     id: randomUUID(),
     kind: "test_result",
@@ -346,6 +343,28 @@ export async function recordVerificationEvidence(
       severity: report.status === "fail" ? "high" : "medium",
     });
   }
+}
+
+function deriveVerificationSupportsClaims(report: VerificationReport): string[] {
+  if (report.status !== "pass") {
+    return ["verification attempted", `verification:${report.status}`, "未通过验证", "需要复核"];
+  }
+  const claims = new Set<string>(["verification_passed"]);
+  for (const command of report.commands) {
+    if (command.status !== "pass") continue;
+    if (command.kind === "test") {
+      claims.add("test_passed");
+    } else if (command.kind === "typecheck") {
+      claims.add("typecheck_passed");
+    } else if (command.kind === "build") {
+      claims.add("build_passed");
+    } else if (command.kind === "lint") {
+      claims.add("lint_passed");
+    } else if (command.kind === "smoke") {
+      claims.add(command.synthetic ? "smoke_ran" : "smoke_passed");
+    }
+  }
+  return [...claims];
 }
 
 function formatVerificationEvidenceStatusSummary(report: VerificationReport): string {

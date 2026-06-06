@@ -23985,15 +23985,15 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
+    expect(notifications).toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("策略：参考历史失败，只作为风险提示。");
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);
-    expect(raw).toContain("final_answer_gate_required");
     expect(raw).toContain("source-first");
     expect(raw).toContain("verification-required");
     expect(raw).toContain("failure-learning");
     expect(raw).toContain("strategy: 策略：源码优先");
+    expect(raw).not.toContain("MetaSchedulerForModel");
   });
 
   it("Policy: context pressure and blocked workflow emit typed strategy hints", async () => {

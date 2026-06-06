@@ -129,6 +129,7 @@ const INTERNAL_PROMPT_TOKENS = [
   "budgetSignal",
   "runtimeSignal",
   "Typed policy route",
+  "Verification route",
   "policy_decision",
   "RuntimeStatus",
   "RuntimeStatusForModel",

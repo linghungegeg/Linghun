@@ -13,6 +13,31 @@ import type {
 
 type ActiveWorkflowRun = NonNullable<WorkflowState["activeRun"]>;
 
+export type VerificationRouteDomain =
+  | "code_change"
+  | "documentation"
+  | "tui_interactive"
+  | "provider_model_config"
+  | "agent_job_workflow"
+  | "general";
+
+export type VerificationRoute = {
+  domain: VerificationRouteDomain;
+  commands: string[];
+  evidenceFreshness: "fresh" | "stale" | "missing";
+  conservativeNoPass: boolean;
+  noPassReasons: string[];
+};
+
+type RuntimeStateCounts = {
+  running: number;
+  completed: number;
+  blocked: number;
+  stale: number;
+  cancelled: number;
+  timeout: number;
+};
+
 export type MetaSchedulerInput = {
   language: Language;
   userText: string;
@@ -60,6 +85,7 @@ export type MetaSchedulerInput = {
   usageSampleCount?: number;
   roleBudgetStop?: boolean;
   toolResultBudgetPersistedCount?: number;
+  nowMs?: number;
 };
 
 export type PolicyDecision = {
@@ -87,6 +113,7 @@ export type PolicyDecision = {
     recommendedLevel: "focused" | "basic" | "full";
     reason: "mutating" | "high_risk_claim" | "requested" | "normal";
     lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
+    route: VerificationRoute;
   };
   memorySignal: {
     accepted: boolean;
@@ -109,6 +136,10 @@ export type PolicyDecision = {
     runningAgents: number;
     runningJobs: number;
     workflowStatus?: "running" | "blocked" | "stale" | "paused";
+    agentStates: RuntimeStateCounts;
+    jobStates: RuntimeStateCounts;
+    completedWithoutFreshVerification: boolean;
+    noPassStates: string[];
     resourceCapPressure: boolean;
   };
   platformSignal: {
@@ -169,7 +200,6 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const toolFailure = Boolean(input.lastToolFailure);
   const providerFailure = Boolean(input.providerFailure);
   const blockedRuntime = hasBlockedAgentOrWorkflow(input.backgroundTasks, input.workflow);
-  const runtimeSignal = summarizeRuntimeSignal(input);
   const pressure = computeContextPressure(
     input.messages,
     input.estimatedContextChars,
@@ -179,6 +209,9 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   const indexStrategy = classifyIndexStrategy(input.index);
   const taskKind = classifyTaskKind(input.userText);
   const expectedMutating = expectsMutatingAction(input.userText, taskKind);
+  const verificationDomain = classifyVerificationDomain(input.userText, taskKind, expectedMutating);
+  const evidenceFreshness = classifyVerificationEvidenceFreshness(input.evidence, input.nowMs);
+  const runtimeSignal = summarizeRuntimeSignal(input, evidenceFreshness);
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
   const failureSignal = summarizeFailureSignal(input.failureLearning);
   const preferSourceFirst = shouldPreferSourceFirst(taskKind, indexStrategy);
@@ -233,6 +266,16 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     internalEvents.push("meta_scheduler:blocked_runtime_stop");
   }
   directives.push(formatIndexStrategyDirective(indexStrategy, input.index));
+  const verificationRoute = createVerificationRoute({
+    domain: verificationDomain,
+    evidenceFreshness,
+    lastStatus: input.lastVerificationStatus,
+    blockedRuntime,
+    runtimeSignal,
+    failureSignal,
+    resourceCapPressure: runtimeSignal.resourceCapPressure,
+  });
+  directives.push(formatVerificationRouteDirective(verificationRoute));
 
   const policyDecision = createPolicyDecision({
     taskKind,
@@ -289,6 +332,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
         blockedRuntime,
         lastStatus: input.lastVerificationStatus,
       }),
+      route: verificationRoute,
       reason: highRiskClaim
         ? "high_risk_claim"
         : taskKind === "verification"
@@ -328,7 +372,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     directives,
     policyDecision,
     shouldRunFinalAnswerGate: highRiskClaim,
-    shouldPreferVerifier: highRiskClaim && lacksVerificationEvidence(input.evidence),
+    shouldPreferVerifier: highRiskClaim && evidenceFreshness !== "fresh",
     shouldCaptureFailureLearning: toolFailure || providerFailure,
     shouldUseRetryGuard: toolFailure || providerFailure,
     shouldCompactBeforeProvider: pressure.shouldCompact,
@@ -464,6 +508,49 @@ function expectsMutatingAction(userText: string, taskKind: PolicyDecision["taskK
   );
 }
 
+function classifyVerificationDomain(
+  userText: string,
+  taskKind: PolicyDecision["taskKind"],
+  expectedMutating: boolean,
+): VerificationRouteDomain {
+  if (
+    /(?:provider|model|模型|供应商|baseUrl|api[_-]?key|\bkey\b|env|环境变量|config|配置|doctor|route|路由)/iu.test(
+      userText,
+    )
+  ) {
+    return "provider_model_config";
+  }
+  if (
+    /(?:文档|markdown|frontmatter|link|链接|README|docs?\/|\.md\b|交付文档|delivery)/iu.test(
+      userText,
+    )
+  ) {
+    return "documentation";
+  }
+  if (
+    /(?:\btui\b.*(?:交互|ui|render|renderer|keyboard|hotkey|面板)|terminal|终端|交互|\bink\b|render|renderer|keyboard|hotkey|快捷键|面板)/iu.test(
+      userText,
+    )
+  ) {
+    return "tui_interactive";
+  }
+  if (
+    /(?:智能体|子智能体|\bagent\b|\bfork\b|\bjob\b|workflow|工作流|后台|background|scheduler|调度)/iu.test(
+      userText,
+    )
+  ) {
+    return "agent_job_workflow";
+  }
+  if (
+    taskKind === "edit" ||
+    expectedMutating ||
+    /(?:代码|源码|ts|tsx|js|jsx|test|typecheck|lint|build|diff|实现|修复)/iu.test(userText)
+  ) {
+    return "code_change";
+  }
+  return "general";
+}
+
 function shouldSurfaceWindowsSafeHint(input: {
   userText: string;
   taskKind: PolicyDecision["taskKind"];
@@ -524,6 +611,89 @@ function summarizeFailureSignal(state: FailureLearningState): PolicyDecision["fa
   };
 }
 
+function createVerificationRoute(input: {
+  domain: VerificationRouteDomain;
+  evidenceFreshness: VerificationRoute["evidenceFreshness"];
+  lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
+  blockedRuntime: boolean;
+  runtimeSignal: PolicyDecision["runtimeSignal"];
+  failureSignal: PolicyDecision["failureSignal"];
+  resourceCapPressure: boolean;
+}): VerificationRoute {
+  const commands = verificationCommandsForDomain(input.domain);
+  const noPassReasons = collectNoPassReasons(input);
+  return {
+    domain: input.domain,
+    commands,
+    evidenceFreshness: input.evidenceFreshness,
+    conservativeNoPass: noPassReasons.length > 0,
+    noPassReasons,
+  };
+}
+
+function verificationCommandsForDomain(domain: VerificationRouteDomain): string[] {
+  if (domain === "documentation") {
+    return ["markdown", "link", "frontmatter", "sensitive-path", "consistency"];
+  }
+  if (domain === "tui_interactive") {
+    return ["focused-tui-tests", "build", "cli-smoke"];
+  }
+  if (domain === "provider_model_config") {
+    return ["doctor", "provider-smoke", "config-isolation"];
+  }
+  if (domain === "agent_job_workflow") {
+    return [
+      "background-state",
+      "job-state",
+      "agent-state",
+      "workflow-state",
+      "no-pass-without-verification",
+    ];
+  }
+  if (domain === "code_change") {
+    return ["typecheck", "test", "lint", "build", "diff"];
+  }
+  return ["focused-verification"];
+}
+
+function collectNoPassReasons(input: {
+  domain: VerificationRouteDomain;
+  evidenceFreshness: VerificationRoute["evidenceFreshness"];
+  lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
+  blockedRuntime: boolean;
+  runtimeSignal: PolicyDecision["runtimeSignal"];
+  failureSignal: PolicyDecision["failureSignal"];
+  resourceCapPressure: boolean;
+}): string[] {
+  const reasons: string[] = [];
+  if (input.domain !== "general" && input.evidenceFreshness !== "fresh") {
+    reasons.push(`evidence:${input.evidenceFreshness}`);
+  }
+  if (input.lastStatus && input.lastStatus !== "pass") {
+    reasons.push(`verification:${input.lastStatus}`);
+  }
+  if (input.blockedRuntime || input.runtimeSignal.noPassStates.length > 0) {
+    reasons.push(...input.runtimeSignal.noPassStates);
+  }
+  if (input.runtimeSignal.completedWithoutFreshVerification) {
+    reasons.push("completed_without_fresh_verification");
+  }
+  if (input.failureSignal.activeCount > 0) {
+    reasons.push("active_failure_learning");
+  }
+  if (input.resourceCapPressure) {
+    reasons.push("resource_guard_pressure");
+  }
+  return [...new Set(reasons)];
+}
+
+function formatVerificationRouteDirective(route: VerificationRoute): string {
+  const noPass = route.conservativeNoPass
+    ? ` conservative-no-pass=${route.noPassReasons.join(",")}`
+    : " conservative-no-pass=no";
+  return `Verification route: domain=${route.domain}; commands=${route.commands.join("+")}; evidence=${route.evidenceFreshness};${noPass}.`;
+}
+
 function classifyVerificationLevel(input: {
   highRiskClaim: boolean;
   expectedMutating: boolean;
@@ -560,13 +730,16 @@ function isRiskyVerificationStatus(status: MetaSchedulerInput["lastVerificationS
   );
 }
 
-function summarizeRuntimeSignal(input: {
-  backgroundTasks: BackgroundTaskState[];
-  workflow?: ActiveWorkflowRun;
-  activeAgentCount?: number;
-  activeJobCount?: number;
-  activeWorkflowStatus?: MetaSchedulerInput["activeWorkflowStatus"];
-}): PolicyDecision["runtimeSignal"] {
+function summarizeRuntimeSignal(
+  input: {
+    backgroundTasks: BackgroundTaskState[];
+    workflow?: ActiveWorkflowRun;
+    activeAgentCount?: number;
+    activeJobCount?: number;
+    activeWorkflowStatus?: MetaSchedulerInput["activeWorkflowStatus"];
+  },
+  evidenceFreshness: VerificationRoute["evidenceFreshness"],
+): PolicyDecision["runtimeSignal"] {
   const runningAgents =
     input.activeAgentCount ??
     input.backgroundTasks.filter((task) => task.kind === "agent" && task.status === "running")
@@ -577,12 +750,85 @@ function summarizeRuntimeSignal(input: {
   const workflowStatus =
     input.activeWorkflowStatus ??
     normalizeWorkflowRuntimeStatus(input.workflow?.status, input.workflow?.steps);
+  const agentStates = countRuntimeStates(input.backgroundTasks, "agent");
+  const jobStates = countRuntimeStates(input.backgroundTasks, "job");
+  const noPassStates = collectRuntimeNoPassStates(input.backgroundTasks, input.workflow);
+  const completedWithoutFreshVerification =
+    evidenceFreshness !== "fresh" &&
+    (agentStates.completed > 0 ||
+      jobStates.completed > 0 ||
+      input.workflow?.status === "completed");
   return {
     runningAgents,
     runningJobs,
     ...(workflowStatus ? { workflowStatus } : {}),
+    agentStates,
+    jobStates,
+    completedWithoutFreshVerification,
+    noPassStates,
     resourceCapPressure: runningAgents > 0 || runningJobs > 0,
   };
+}
+
+function countRuntimeStates(
+  tasks: BackgroundTaskState[],
+  kind: "agent" | "job",
+): RuntimeStateCounts {
+  const counts: RuntimeStateCounts = {
+    running: 0,
+    completed: 0,
+    blocked: 0,
+    stale: 0,
+    cancelled: 0,
+    timeout: 0,
+  };
+  for (const task of tasks) {
+    if (task.kind !== kind) continue;
+    if (task.status in counts) {
+      counts[task.status as keyof RuntimeStateCounts] += 1;
+    }
+  }
+  return counts;
+}
+
+function collectRuntimeNoPassStates(
+  tasks: BackgroundTaskState[],
+  workflow: WorkflowState["activeRun"] | undefined,
+): string[] {
+  const reasons: string[] = [];
+  for (const task of tasks) {
+    if (task.kind !== "agent" && task.kind !== "job") continue;
+    if (
+      task.status === "blocked" ||
+      task.status === "stale" ||
+      task.status === "cancelled" ||
+      task.status === "timeout"
+    ) {
+      reasons.push(`${task.kind}:${task.status}`);
+    }
+    if (task.result === "stale" || task.result === "cancelled" || task.result === "timeout") {
+      reasons.push(`${task.kind}:${task.result}`);
+    }
+    if (task.status === "completed" && task.result !== "pass") {
+      reasons.push(`${task.kind}:completed_not_pass`);
+    }
+  }
+  if (
+    workflow?.status === "blocked" ||
+    workflow?.status === "stale" ||
+    workflow?.status === "cancelled"
+  ) {
+    reasons.push(`workflow:${workflow.status}`);
+  }
+  if (workflow?.status === "completed") {
+    reasons.push("workflow:completed_not_pass");
+  }
+  for (const step of workflow?.steps ?? []) {
+    if (step.status === "blocked" || step.status === "stale" || step.status === "cancelled") {
+      reasons.push(`workflow_step:${step.status}`);
+    }
+  }
+  return [...new Set(reasons)];
 }
 
 function normalizeWorkflowRuntimeStatus(
@@ -784,15 +1030,25 @@ function createPolicyDecision(input: {
   };
 }
 
-function lacksVerificationEvidence(evidence: EvidenceRecord[]): boolean {
-  return !evidence.some(
-    (item) =>
-      item.kind === "test_result" ||
-      (item.kind === "command_output" &&
-        /test|typecheck|build|lint|smoke|verification|验证|测试/iu.test(
-          [item.source, item.summary, ...item.supportsClaims].join(" "),
-        )),
+function classifyVerificationEvidenceFreshness(
+  evidence: EvidenceRecord[],
+  nowMs = Date.now(),
+): VerificationRoute["evidenceFreshness"] {
+  const passEvidence = evidence.filter((item) =>
+    item.supportsClaims.some((claim) =>
+      /^(?:verification_passed|test_passed|typecheck_passed|build_passed|lint_passed|diff_check_passed|smoke_passed)$/u.test(
+        claim,
+      ),
+    ),
   );
+  if (passEvidence.length === 0) return "missing";
+  const freshWindowMs = 30 * 60 * 1000;
+  return passEvidence.some((item) => {
+    const createdAt = Date.parse(item.createdAt);
+    return Number.isFinite(createdAt) && nowMs - createdAt <= freshWindowMs;
+  })
+    ? "fresh"
+    : "stale";
 }
 
 function computeContextPressure(
@@ -850,6 +1106,13 @@ function hasBlockedAgentOrWorkflow(
   return backgroundTasks.some(
     (task) =>
       (task.kind === "agent" || task.kind === "job") &&
-      (task.status === "paused" || task.status === "stale" || task.result === "stale"),
+      (task.status === "blocked" ||
+        task.status === "paused" ||
+        task.status === "stale" ||
+        task.status === "cancelled" ||
+        task.status === "timeout" ||
+        task.result === "stale" ||
+        task.result === "cancelled" ||
+        task.result === "timeout"),
   );
 }

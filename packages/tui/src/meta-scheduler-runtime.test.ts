@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import type { IndexState } from "./index-runtime.js";
@@ -283,6 +285,157 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("background-occupancy");
   });
 
+  it("routes different task domains to domain-aware verification commands", () => {
+    const cases = [
+      {
+        userText: "修改 packages/tui/src/index.ts 并跑测试",
+        domain: "code_change",
+        command: "typecheck",
+      },
+      {
+        userText: "更新 docs/delivery/README.md 的 markdown link 和 frontmatter",
+        domain: "documentation",
+        command: "frontmatter",
+      },
+      {
+        userText: "修复 TUI 交互面板的 keyboard render 问题",
+        domain: "tui_interactive",
+        command: "focused-tui-tests",
+      },
+      {
+        userText: "检查 provider model config route doctor",
+        domain: "provider_model_config",
+        command: "config-isolation",
+      },
+      {
+        userText: "收口 agent job workflow 调度状态",
+        domain: "agent_job_workflow",
+        command: "no-pass-without-verification",
+      },
+    ] as const;
+
+    for (const item of cases) {
+      const decision = evaluateMetaScheduler({ ...baseInput(), userText: item.userText });
+
+      expect(decision.policyDecision.verificationSignal.route.domain).toBe(item.domain);
+      expect(decision.policyDecision.verificationSignal.route.commands).toContain(item.command);
+    }
+  });
+
+  it("consumes job workflow agent verification failure and evidence freshness signals", () => {
+    const nowMs = Date.parse("2026-06-05T00:00:00.000Z");
+    const stalePassEvidence = makeEvidence({
+      createdAt: new Date(nowMs - 31 * 60 * 1000).toISOString(),
+      kind: "test_result",
+      supportsClaims: ["verification_passed", "typecheck_passed"],
+    });
+    const failureLearning = baseFailureLearning();
+    failureLearning.records.push({
+      id: "failure-1",
+      createdAt: new Date(0).toISOString(),
+      lastSeen: new Date(0).toISOString(),
+      projectScope: failureLearning.projectScope,
+      sourceRef: "evidence:abc",
+      category: "verification_failure",
+      failureSummary: "verification timed out",
+      rootCauseGuess: "timeout",
+      inferred: true,
+      avoidNextTime: "rerun focused verification",
+      severity: "high",
+      dedupeHash: "hash",
+      count: 1,
+      status: "active",
+    });
+    const backgroundTasks: BackgroundTaskState[] = [
+      makeBackgroundTask("agent-done", "agent", "completed", "partial"),
+      makeBackgroundTask("job-timeout", "job", "timeout", "timeout"),
+    ];
+    const workflow: NonNullable<WorkflowState["activeRun"]> = {
+      id: "wf-done",
+      goal: "ship",
+      planId: "plan-1",
+      status: "completed",
+      steps: [],
+      startedAt: new Date(0).toISOString(),
+      result: "partial",
+    };
+
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "agent job workflow completed 后准备发布",
+      nowMs,
+      evidence: [stalePassEvidence],
+      lastVerificationStatus: "timeout",
+      failureLearning,
+      backgroundTasks,
+      workflow,
+    });
+
+    expect(decision.policyDecision.runtimeSignal.agentStates.completed).toBe(1);
+    expect(decision.policyDecision.runtimeSignal.jobStates.timeout).toBe(1);
+    expect(decision.policyDecision.runtimeSignal.completedWithoutFreshVerification).toBe(true);
+    expect(decision.policyDecision.verificationSignal.route).toMatchObject({
+      domain: "agent_job_workflow",
+      evidenceFreshness: "stale",
+      conservativeNoPass: true,
+    });
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).toEqual(
+      expect.arrayContaining([
+        "verification:timeout",
+        "job:timeout",
+        "agent:completed_not_pass",
+        "workflow:completed_not_pass",
+        "completed_without_fresh_verification",
+        "active_failure_learning",
+      ]),
+    );
+  });
+
+  it("keeps completed lifecycle states conservative until fresh verification evidence exists", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "agent completed, workflow completed, job completed，可以 PASS 吗",
+      backgroundTasks: [
+        makeBackgroundTask("agent-done", "agent", "completed", "partial"),
+        makeBackgroundTask("job-done", "job", "completed", "partial"),
+      ],
+      workflow: {
+        id: "wf-done",
+        goal: "ship",
+        planId: "plan-1",
+        status: "completed",
+        steps: [],
+        startedAt: new Date(0).toISOString(),
+        result: "partial",
+      },
+    });
+
+    expect(decision.policyDecision.verificationSignal.route.conservativeNoPass).toBe(true);
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).toEqual(
+      expect.arrayContaining([
+        "agent:completed_not_pass",
+        "job:completed_not_pass",
+        "workflow:completed_not_pass",
+        "completed_without_fresh_verification",
+      ]),
+    );
+  });
+
+  it("documents Phase 17A durable jobs as completed while Phase 7.11 is runtime closure", () => {
+    const readme = readFileSync(resolve(process.cwd(), "docs/delivery/README.md"), "utf8");
+    const phase711 = readme
+      .split("\n")
+      .find((line) => line.startsWith("| Phase 7.11 Task / Job Verification Routing Closure |"));
+    const phase17a = readme
+      .split("\n")
+      .find((line) => line.startsWith("| Phase 17A local durable jobs |"));
+
+    expect(phase711).toContain("done; focused/local validation only");
+    expect(phase711).not.toContain("docs-only");
+    expect(phase711).not.toContain("PENDING");
+    expect(phase17a).toContain("done; focused/local validation only");
+  });
+
   it("shows Windows-safe hint for Windows edit and verification requests", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),
@@ -408,13 +561,14 @@ describe("Meta scheduler runtime", () => {
 
   it("keeps policy internals off the main screen while preserving light hint wording", () => {
     const sanitized = sanitizeMainScreenLeakage(
-      'PolicyDecision={"taskKind":"edit"}\npolicy_decision: {"risk":"high"}\nTyped policy route: task edit\nStrategy: source-first; reading key files before answering.',
+      'PolicyDecision={"taskKind":"edit"}\npolicy_decision: {"risk":"high"}\nTyped policy route: task edit\nVerification route: domain=code_change\nStrategy: source-first; reading key files before answering.',
       "en-US",
     );
 
     expect(sanitized).not.toContain("PolicyDecision");
     expect(sanitized).not.toContain("policy_decision");
     expect(sanitized).not.toContain("Typed policy route");
+    expect(sanitized).not.toContain("Verification route");
     expect(sanitized).toContain("Internal runtime context was omitted");
   });
 
@@ -499,5 +653,38 @@ function baseFailureLearning(): FailureLearningState {
     projectScope: "F-Linghun",
     records: [],
     degradedWarnings: [],
+  };
+}
+
+function makeEvidence(overrides: Partial<EvidenceRecord> = {}): EvidenceRecord {
+  return {
+    id: "evidence-1",
+    kind: "test_result",
+    summary: "verification passed",
+    source: "verification",
+    supportsClaims: ["verification_passed"],
+    createdAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+function makeBackgroundTask(
+  id: string,
+  kind: "agent" | "job",
+  status: BackgroundTaskState["status"],
+  result?: BackgroundTaskState["result"],
+): BackgroundTaskState {
+  return {
+    id,
+    kind,
+    title: id,
+    status,
+    startedAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    heartbeatIntervalMs: 1000,
+    staleAfterMs: 1000,
+    hasOutput: false,
+    ...(result ? { result } : {}),
+    userVisibleSummary: id,
   };
 }

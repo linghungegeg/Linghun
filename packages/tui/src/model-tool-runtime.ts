@@ -1603,7 +1603,7 @@ function controlToolEvidenceSpec(
       source: "verification-result",
       supportsClaims: isError
         ? ["tool_failure", "verification_result"]
-        : ["verification_result", "verified", "已验证"],
+        : ["verification_result", "verification_attempted"],
     };
   }
   if (toolName === WRITE_REPORT_TOOL_NAME) {
