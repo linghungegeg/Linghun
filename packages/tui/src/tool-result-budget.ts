@@ -72,9 +72,7 @@ export async function applyToolResultBudgetToMessages(
   const cachedReplacements = new Map<string, string>();
   const freshCandidates: Candidate[] = [];
   for (const candidate of candidates) {
-    const stateKey = options.state
-      ? getCandidateStateKey(candidate, options.sessionId)
-      : undefined;
+    const stateKey = options.state ? getCandidateStateKey(candidate, options.sessionId) : undefined;
     const existing = stateKey ? options.state?.replacements.get(stateKey) : undefined;
     if (existing) {
       cachedReplacements.set(candidate.toolUseId, existing.summary);

@@ -12457,20 +12457,53 @@ describe("Phase 06 TUI slash commands", () => {
       stderr: new MemoryOutput(),
     });
 
-    expect(requests).toHaveLength(2);
-    const childBlocks = (requests[1]?.body.messages ?? [])
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.url).toBe("https://relay.example.com/v1/messages");
+      expect(request.url.endsWith("/chat/completions")).toBe(false);
+    }
+    const childRequest = requests[1];
+    const childRequestText = JSON.stringify(childRequest?.body ?? {});
+    expect(childRequestText).toContain("child agent running in an isolated sidechain transcript");
+    expect(childRequestText).not.toContain("toolu_start_budget_1");
+    expect(childRequestText).not.toContain('"type":"tool_result"');
+
+    const mainContinuation = requests[2];
+    const mainContinuationText = JSON.stringify(mainContinuation?.body ?? {});
+    expect(mainContinuationText).not.toContain(
+      "child agent running in an isolated sidechain transcript",
+    );
+    expect(mainContinuationText).not.toContain("<persisted-tool-result>");
+    expect(mainContinuationText).not.toContain("AGENT_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
+    const mainContinuationBlocks = (mainContinuation?.body.messages ?? [])
       .filter((message) => Array.isArray(message.content))
       .flatMap(
         (message) =>
-          message.content as Array<{ type?: string; tool_use_id?: string; content?: string }>,
+          message.content as Array<{
+            type?: string;
+            id?: string;
+            tool_use_id?: string;
+            name?: string;
+            content?: string;
+          }>,
       );
-    const toolResult = childBlocks.find(
+    expect(
+      mainContinuationBlocks.some(
+        (block) =>
+          block.type === "tool_use" &&
+          block.id === "toolu_start_budget_1" &&
+          block.name === "StartAgent",
+      ),
+    ).toBe(true);
+    const toolResult = mainContinuationBlocks.find(
       (block) => block.type === "tool_result" && block.tool_use_id === "toolu_start_budget_1",
     );
     expect(toolResult).toBeTruthy();
     expect(toolResult?.content).not.toContain("<persisted-tool-result>");
     expect(toolResult?.content).not.toContain("AGENT_BUDGET_END_SHOULD_NOT_REACH_PROVIDER");
     expect(output.text).not.toContain("raw budget");
+    expect(output.text).not.toContain("tool_result");
+    expect(output.text).not.toContain("endpointProfile");
   });
 
   it("StartAgent child rate limit uses fallback model and succeeds", async () => {
