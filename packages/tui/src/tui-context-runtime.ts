@@ -471,6 +471,8 @@ export type TuiContext = {
    * 模式默认为 { scrollOffset: 0, stickToBottom: true }。
    */
   transcriptScrollState?: import("./shell/types.js").TranscriptScrollView;
+  /** Phase 7.18 — visible-only transcript virtualization row-height cache. */
+  transcriptBlockHeightCache?: Record<string, { height: number; width: number; textHash: string }>;
 };
 
 export const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;

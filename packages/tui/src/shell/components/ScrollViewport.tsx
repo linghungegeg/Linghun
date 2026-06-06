@@ -2,7 +2,11 @@ import { Box, type DOMElement } from "ink";
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import { computeScrollViewportOffset } from "../models/transcript-scroll-state.js";
-import type { TranscriptScrollView, TranscriptViewportGeometryView } from "../types.js";
+import type {
+  TranscriptScrollView,
+  TranscriptViewportGeometryView,
+  TranscriptVirtualRangeView,
+} from "../types.js";
 
 /**
  * D.14D-C2 — Measured, clamped scroll viewport (standard ink).
@@ -11,12 +15,11 @@ import type { TranscriptScrollView, TranscriptViewportGeometryView } from "../ty
  * 没有上界，用户可以一直向上滚动，把全部内容推出可视区域进入空白（"滚进虚空"）。
  *
  * 标准 ink 能做什么 / 不能做什么（诚实记录）：
- * - 标准 ink **没有** @anthropic/ink 那种行级裁剪的 ScrollBox；它把整棵
- *   React 树都渲染成行，再由 Output 按 overflow="hidden" 的 clip 矩形丢弃
- *   落在可视矩形外的写入（见 ink/build/output.js 的 clip / unclip）。
- *   也就是说：ink 会按内容算出真实高度，然后**在输出阶段裁掉超出矩形的行**，
- *   并不会在 reconcile 阶段做"行级 culling"少渲染节点。对我们这种规模
- *   （主屏 transcript 最多几十块）这点开销可接受，正确性才是关键。
+ * - 标准 ink **没有** @anthropic/ink 那种行级裁剪的 ScrollBox；早期实现只能
+ *   把整棵 React 树渲染成行，再由 Output 按 overflow="hidden" 的 clip 矩形
+ *   丢弃不可见行。Phase 7.18 在现有 viewport 上增加 block-level
+ *   virtualization：view-model 只传入可见窗口附近的 blocks，并用 virtualRange
+ *   的总高度/top spacer 保持完整滚动语义。
  * - 因此正确的"测量视口"方案是：测出内容高度与可视高度 → 夹紧偏移
  *   → 用一个**有界的** translate（marginTop = -clampedOffset）把内容上移，
  *   外层 overflow="hidden" + minHeight=0 负责把溢出行裁掉。这与旧实现形似，
@@ -36,12 +39,14 @@ import type { TranscriptScrollView, TranscriptViewportGeometryView } from "../ty
  */
 export function TranscriptViewport({
   scroll,
+  virtualRange,
   onOverflowChange,
   onMeasure,
   onGeometry,
   children,
 }: {
   scroll: TranscriptScrollView | undefined;
+  virtualRange?: TranscriptVirtualRangeView;
   onOverflowChange?: (hasOverflow: boolean) => void;
   onMeasure?: (measurement: { viewportHeight: number; contentHeight: number }) => void;
   onGeometry?: (geometry: TranscriptViewportGeometryView) => void;
@@ -65,7 +70,8 @@ export function TranscriptViewport({
     if (!viewportNode || !contentNode) return;
     const viewportHeight = viewportNode.getComputedHeight();
     const viewportWidth = viewportNode.getComputedWidth();
-    const contentHeight = contentNode.getComputedHeight();
+    const measuredContentHeight = contentNode.getComputedHeight();
+    const contentHeight = virtualRange?.estimatedContentHeight ?? measuredContentHeight;
     const nextMax = Math.max(0, Math.floor(contentHeight - viewportHeight));
     const nextOffset = computeScrollViewportOffset(nextMax, scroll);
     const measureKey = `${viewportHeight}:${contentHeight}`;
@@ -98,10 +104,14 @@ export function TranscriptViewport({
   });
 
   const { marginTop } = computeScrollViewportOffset(maxOffset, scroll);
+  const contentMarginTop =
+    virtualRange && virtualRange.estimatedContentHeight > 0
+      ? marginTop + virtualRange.topSpacer
+      : marginTop;
 
   return (
     <Box ref={viewportRef} flexDirection="column" flexGrow={1} minHeight={0} overflow="hidden">
-      <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={marginTop}>
+      <Box ref={contentRef} flexDirection="column" flexShrink={0} marginTop={contentMarginTop}>
         {children}
       </Box>
     </Box>

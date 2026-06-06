@@ -7544,7 +7544,9 @@ describe("Phase 06 TUI slash commands", () => {
     ) as { model?: string; tools?: Array<{ function?: { name?: string } }> } | undefined;
     expect(childRequest?.model).toBe("custom-child-model");
     expect(childRequest?.tools?.map((tool) => tool.function?.name)).toEqual(["Read"]);
-    expect(output.text).toContain("custom child completed");
+    expect(output.text).toContain("智能体已完成本次处理。");
+    expect(output.text).toContain("custom StartAgent final");
+    expect(output.text).not.toContain("custom child completed");
     const config = await loadConfig(project);
     const agentRunsDir = resolveStoragePaths(config, project).agentRuns;
     const persistedAgent = JSON.parse(
@@ -7562,6 +7564,9 @@ describe("Phase 06 TUI slash commands", () => {
       allowedTools?: string[];
       maxTurns?: number;
       task?: string;
+      status?: string;
+      summary?: string;
+      lastResultSummary?: string;
     };
     expect(persistedAgent).toMatchObject({
       registryAgentId: "reviewer",
@@ -7570,6 +7575,9 @@ describe("Phase 06 TUI slash commands", () => {
       allowedTools: ["Read"],
       maxTurns: 2,
     });
+    expect(persistedAgent.status).toBe("idle");
+    expect(persistedAgent.summary).toContain("custom child completed");
+    expect(persistedAgent.lastResultSummary).toContain("custom child completed");
     expect(persistedAgent.task).toContain("Review through the custom registry prompt.");
     expect(persistedAgent.task).toContain("inspect custom runtime");
   });
@@ -12350,10 +12358,27 @@ describe("Phase 06 TUI slash commands", () => {
     });
 
     expect(requests.length).toBeGreaterThanOrEqual(43);
-    expect(output.text).toContain("worker completed");
-    expect(output.text).toContain("子 agent 已完成 41 轮读取并总结。");
+    expect(output.text).toContain("智能体已完成本次处理。");
+    expect(output.text).toContain("主 agent 续轮完成。");
+    expect(output.text).not.toContain("worker completed");
+    expect(output.text).not.toContain("子 agent 已完成 41 轮读取并总结。");
     expect(output.text).not.toContain("agent child tool/evidence budget exhausted");
     expect(output.text).not.toContain("工具调用上限");
+    const config = await loadConfig(project);
+    const agentRunsDir = resolveStoragePaths(config, project).agentRuns;
+    const persistedAgent = JSON.parse(
+      await readFile(
+        join(
+          agentRunsDir,
+          (await readdir(agentRunsDir)).find((file) => file.endsWith(".json")) ?? "",
+        ),
+        "utf8",
+      ),
+    ) as { status?: string; summary?: string; lastResultSummary?: string };
+    expect(persistedAgent.status).toBe("idle");
+    expect(persistedAgent.summary).toContain("worker completed");
+    expect(persistedAgent.summary).toContain("子 agent 已完成 41 轮读取并总结。");
+    expect(persistedAgent.lastResultSummary).toContain("子 agent 已完成 41 轮读取并总结。");
   });
 
   it("StartAgent child loop blocks at the 100-turn execution budget", async () => {
@@ -17364,7 +17389,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.agents[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
-    expect(output.text).toContain("Agent cancelled");
+    expect(output.text).toContain("已更新后台智能体状态。");
+    expect(output.text).not.toContain("Agent cancelled");
     expect(output.text).not.toContain("Agent agent-control-cancel cancelled");
   });
 
@@ -17411,9 +17437,16 @@ describe("Phase 06 TUI slash commands", () => {
 
     await __testSendMessage("列出可取消智能体", context, gateway, output);
 
-    expect(output.text).toContain("Agent list inspected: 2 agent(s); cancellable 1");
-    expect(output.text).toContain("agent-list-running:running");
+    expect(output.text).toContain("已检查后台智能体：共 2 个，可取消 1 个。");
+    expect(output.text).not.toContain("Agent list inspected");
+    expect(output.text).not.toContain("agent-list-running:running");
     expect(output.text).not.toContain("agent-list-stale:stale");
+    const transcript = (await store.resume(session.id)).transcript;
+    const toolResult = transcript.find(
+      (event) => event.type === "tool_result" && event.toolName === "AgentControl",
+    );
+    expect(JSON.stringify(toolResult)).toContain("Agent list inspected");
+    expect(JSON.stringify(toolResult)).toContain("agent-list-running");
   });
 
   it("model-facing SendMessage assigns shared task to one idle teammate", async () => {
@@ -17640,7 +17673,13 @@ describe("Phase 06 TUI slash commands", () => {
     expect(firstController.signal.aborted).toBe(true);
     expect(secondController.signal.aborted).toBe(true);
     expect(context.agents.map((agent) => agent.status)).toEqual(["cancelled", "cancelled"]);
-    expect(output.text).toContain("AgentControl cancel_all: cancelled 2 agent");
+    expect(output.text).toContain("已停止后台智能体 2 个。");
+    expect(output.text).not.toContain("AgentControl cancel_all");
+    const transcript = (await store.resume(session.id)).transcript;
+    const rawToolResult = transcript.find(
+      (event) => event.type === "tool_result" && event.toolName === "AgentControl",
+    );
+    expect(JSON.stringify(rawToolResult)).toContain("AgentControl cancel_all");
   });
 
   it("model-facing AgentControl stop_all is an alias for cancelling every running agent", async () => {
@@ -17693,7 +17732,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.agents[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.status).toBe("cancelled");
     expect(context.backgroundTasks[0]?.result).toBe("cancelled");
-    expect(output.text).toContain("AgentControl stop_all: cancelled 1 agent");
+    expect(output.text).toContain("已停止后台智能体 1 个。");
+    expect(output.text).not.toContain("AgentControl stop_all");
   });
 
   it("verification cancel uses process guard and remains non-PASS", async () => {

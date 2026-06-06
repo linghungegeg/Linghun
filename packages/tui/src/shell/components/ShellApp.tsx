@@ -1,5 +1,6 @@
-import { Box, Text } from "ink";
+import { Box, type DOMElement, Text } from "ink";
 import type React from "react";
+import { useEffect, useRef } from "react";
 import type { TerminalCapability } from "../terminal-capability.js";
 import {
   brandWordmark,
@@ -10,6 +11,7 @@ import {
 } from "../text-utils.js";
 import { createShellTheme, getStatusMarker } from "../theme.js";
 import type { ShellController, ShellViewModel, TaskActivityView } from "../types.js";
+import type { ProductBlockViewModel } from "../types.js";
 import { BtwPanel } from "./BtwPanel.js";
 import { CommandPanel } from "./CommandPanel.js";
 import { Composer } from "./Composer.js";
@@ -18,6 +20,7 @@ import { HelpPanel } from "./HelpPanel.js";
 import { StreamingMarkdown } from "./MessageMarkdown.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
+import { TranscriptViewport } from "./ScrollViewport.js";
 import { SessionsPanel } from "./SessionsPanel.js";
 import { StatusFooter } from "./StatusFooter.js";
 import { StatusTray } from "./StatusTray.js";
@@ -156,64 +159,80 @@ function TaskLayout({
   const noColor = view.themeMode === "no-color";
   const cw = taskComposerMaxWidth(view.width);
   const composerRule = lineChar(noColor, capability).repeat(cw);
-  // Main transcript output：普通任务页直接渲染 block，保留终端原生 scrollback/selection。
-  // C1：原来在 output 区与 composer 之间常驻的滚动提示行已删除（噪音），
-  // footer 已承载状态；如需 hint 只在 footer/help 区，不在主流。
   return (
     <Box flexDirection="column" width={view.width} height={view.height}>
-      {/* Output region: top-left, fills remaining vertical space. Phase 7.10
-          keeps the ordinary main screen un-captured so terminal-native
-          scrollback and selection remain available. */}
       <Box flexDirection="column" flexGrow={1} minHeight={0} paddingX={2} paddingTop={1}>
-        {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
-          ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
-          blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
-        {view.blocks.length > 0 ? (
-          <Box flexDirection="column">
-            {view.blocks.map((block) => (
-              <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
-            ))}
-          </Box>
-        ) : null}
+        <TranscriptViewport
+          scroll={view.transcriptScroll}
+          virtualRange={view.transcriptVirtualRange}
+          onMeasure={(measurement) => {
+            void controller.onInput({ type: "transcript-scroll-measure", ...measurement });
+          }}
+          onGeometry={(geometry) => {
+            void controller.onInput({ type: "transcript-viewport-geometry", geometry });
+          }}
+        >
+          {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，
+            ShellApp 不再按 activity/permission 双加 marginTop（activity 已移到
+            blocks 下方，旧的 view.activity 顶部间距已失效且会双重计入）。 */}
+          {view.blocks.length > 0 ? (
+            <Box flexDirection="column">
+              {view.blocks.map((block) => (
+                <MeasuredTranscriptBlock
+                  key={block.id}
+                  block={block}
+                  controller={controller}
+                  theme={theme}
+                  cacheWidth={view.width}
+                  width={view.width - 4}
+                />
+              ))}
+            </Box>
+          ) : null}
 
-        {view.streamingAssistantText ? (
-          <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-            <StreamingMarkdown
-              text={view.streamingAssistantText}
-              theme={theme}
-              wrapWidth={Math.max(8, view.width - 4)}
+          {view.transcriptVirtualRange && view.transcriptVirtualRange.bottomSpacer > 0 ? (
+            <Box height={view.transcriptVirtualRange.bottomSpacer} flexShrink={0} />
+          ) : null}
+
+          {view.streamingAssistantText ? (
+            <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
+              <StreamingMarkdown
+                text={view.streamingAssistantText}
+                theme={theme}
+                wrapWidth={Math.max(8, view.width - 4)}
+              />
+            </Box>
+          ) : null}
+
+          {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
+            用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
+            压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
+          {view.activity ? (
+            <Box marginTop={view.blocks.length > 0 || view.streamingAssistantText ? 1 : 0}>
+              <ActivityIndicator activity={view.activity} theme={theme} />
+            </Box>
+          ) : null}
+
+          {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
+          {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
+            <TaskSuggestionBar
+              suggestions={view.taskSuggestions}
+              cursor={view.taskSuggestionCursor ?? 0}
+              width={view.width}
+              noColor={noColor}
             />
-          </Box>
-        ) : null}
+          ) : null}
 
-        {/* C3：activity / "thinking" 指示器渲染在 transcript 块**之后**（最新
-          用户消息下方），与 CCB 行为一致（spinner 位于对话流底部），而不是
-          压在更早的消息上方。blocks 存在时留 1 行间隔；首帧无 block 时贴顶。 */}
-        {view.activity ? (
-          <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
-            <ActivityIndicator activity={view.activity} theme={theme} />
-          </Box>
-        ) : null}
-
-        {/* TaskSuggestionBar — 空输入时可用 ↑/↓/Enter 或数字选择。 */}
-        {view.taskSuggestions && view.taskSuggestions.length > 0 ? (
-          <TaskSuggestionBar
-            suggestions={view.taskSuggestions}
-            cursor={view.taskSuggestionCursor ?? 0}
-            width={view.width}
-            noColor={noColor}
-          />
-        ) : null}
-
-        {view.limitations.length > 0 ? (
-          <Box flexDirection="column" marginTop={1}>
-            {view.limitations.map((item) => (
-              <Text key={item} color={theme.muted}>
-                {item}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
+          {view.limitations.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              {view.limitations.map((item) => (
+                <Text key={item} color={theme.muted}>
+                  {item}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
+        </TranscriptViewport>
         <PanelLayer view={view} controller={controller} width={view.width - 4} noColor={noColor} />
       </Box>
 
@@ -266,6 +285,43 @@ function TaskLayout({
 }
 
 // D.13Q-UX: 旧的 TaskFooter 组件已迁到 packages/tui/src/shell/components/StatusFooter.tsx。
+
+function MeasuredTranscriptBlock({
+  block,
+  controller,
+  theme,
+  cacheWidth,
+  width,
+}: {
+  block: ProductBlockViewModel;
+  controller: ShellController;
+  theme: ReturnType<typeof createShellTheme>;
+  cacheWidth: number;
+  width: number;
+}): React.ReactNode {
+  const ref = useRef<DOMElement | null>(null);
+  const last = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const node = ref.current?.yogaNode;
+    if (!node) return;
+    const measuredWidth = Math.floor(node.getComputedWidth());
+    const measuredHeight = Math.max(1, Math.floor(node.getComputedHeight()));
+    const key = `${block.id}:${measuredWidth}:${measuredHeight}`;
+    if (last.current === key) return;
+    last.current = key;
+    void controller.onInput({
+      type: "transcript-block-measure",
+      id: block.id,
+      width: cacheWidth,
+      height: measuredHeight,
+    });
+  });
+  return (
+    <Box ref={ref} flexDirection="column">
+      <ProductBlock block={block} theme={theme} width={width} />
+    </Box>
+  );
+}
 
 function PanelLayer({
   view,

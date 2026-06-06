@@ -1770,6 +1770,26 @@ async function runInkShell(
         await shell?.waitUntilRenderFlush();
         return;
       }
+      if (event.type === "transcript-block-measure") {
+        context.transcriptBlockHeightCache ??= {};
+        const existing = context.transcriptBlockHeightCache[event.id];
+        const next = {
+          height: event.height,
+          width: event.width,
+          textHash: existing?.textHash ?? "measured",
+        };
+        if (
+          !existing ||
+          existing.height !== next.height ||
+          existing.width !== next.width ||
+          existing.textHash !== next.textHash
+        ) {
+          context.transcriptBlockHeightCache[event.id] = next;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
+        return;
+      }
       if (event.type === "transcript-viewport-geometry") {
         context.transcriptViewportGeometry = event.geometry;
         shell?.rerender();

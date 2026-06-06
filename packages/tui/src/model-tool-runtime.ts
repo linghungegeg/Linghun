@@ -1008,7 +1008,11 @@ export async function executeLinghunControlToolUse(
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       const before = new Set(context.agents.map((agent) => agent.id));
-      await handleForkCommand(buildForkArgsFromStartAgentInput(input, context), context, output);
+      await handleForkCommand(
+        buildForkArgsFromStartAgentInput(input, context),
+        context,
+        createSilentOutput(),
+      );
       const agent = context.agents.find((item) => !before.has(item.id));
       const ok =
         agent?.status === "completed" || agent?.status === "idle" || agent?.status === "running";
@@ -1025,7 +1029,7 @@ export async function executeLinghunControlToolUse(
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       if (input.action === "list") {
-        await handleAgentsCommand(["list"], context, output);
+        await handleAgentsCommand(["list"], context, createSilentOutput());
         const cancellable = listCancellableAgents(context);
         return await finishControlToolResult(
           toolCall,
@@ -1055,7 +1059,7 @@ export async function executeLinghunControlToolUse(
         );
       }
       if (input.action === "cancel_all" || input.action === "stop_all") {
-        const agents = await cancelAllAgents(context, output);
+        const agents = await cancelAllAgents(context, createSilentOutput());
         return await finishControlToolResult(
           toolCall,
           context,
@@ -1069,7 +1073,11 @@ export async function executeLinghunControlToolUse(
         );
       }
       if (input.action === "show") {
-        await handleAgentsCommand(["show", input.agentRef ?? ""].filter(Boolean), context, output);
+        await handleAgentsCommand(
+          ["show", input.agentRef ?? ""].filter(Boolean),
+          context,
+          createSilentOutput(),
+        );
         const agent = findAgent(context, input.agentRef);
         return await finishControlToolResult(
           toolCall,
@@ -1131,18 +1139,24 @@ export async function executeLinghunControlToolUse(
         }
         const workflowGoal = input.goal ?? (input.inputs ? JSON.stringify(input.inputs) : "");
         if (registry) {
-          await runRegistryWorkflow(registry, workflowGoal, input.runInBackground, context, output);
+          await runRegistryWorkflow(
+            registry,
+            workflowGoal,
+            input.runInBackground,
+            context,
+            createSilentOutput(),
+          );
         } else if (registryAgent) {
           await runRegistryAgentWorkflow(
             registryAgent,
             workflowGoal,
             input.runInBackground,
             context,
-            output,
+            createSilentOutput(),
           );
         }
       } else {
-        await runWorkflowSteps(input.goal ?? "", context, output, input);
+        await runWorkflowSteps(input.goal ?? "", context, createSilentOutput(), input);
       }
       const run = context.workflows.activeRun;
       const ok =
@@ -1196,7 +1210,7 @@ export async function executeLinghunControlToolUse(
       const input = parseVerificationToolInput(toolCall.input);
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
-      await runWorkflowVerificationStep(input.level, context, output);
+      await runWorkflowVerificationStep(input.level, context, createSilentOutput());
       const report = context.lastVerification;
       const ok = report?.status === "pass";
       const text = report
@@ -1666,8 +1680,84 @@ async function finishControlToolResult(
     isError,
     evidence?.id,
   );
-  writeLine(output, text);
+  writeLine(output, formatControlToolPrimaryText(toolCall.name, text, isError, data, context));
   return { ok: !isError, tool: toolCall.name, text, data, evidenceId: evidence?.id };
+}
+
+function formatControlToolPrimaryText(
+  toolName: string,
+  text: string,
+  isError: boolean,
+  data: unknown,
+  context: TuiContext,
+): string {
+  if (isError) return sanitizeControlToolError(text, context.language);
+  const zh = context.language === "zh-CN";
+  if (toolName === AGENT_CONTROL_TOOL_NAME) {
+    const record = isRecord(data) ? data : {};
+    if (Array.isArray(record.cancelled)) {
+      return record.cancelled.length > 0
+        ? zh
+          ? `已停止后台智能体 ${record.cancelled.length} 个。`
+          : `Stopped ${record.cancelled.length} background agent(s).`
+        : zh
+          ? "已检查后台智能体，没有可取消项。"
+          : "Checked background agents; nothing to cancel.";
+    }
+    if (typeof record.total === "number") {
+      const cancellable = Array.isArray(record.cancellable) ? record.cancellable.length : 0;
+      return zh
+        ? `已检查后台智能体：共 ${record.total} 个，可取消 ${cancellable} 个。`
+        : `Checked background agents: ${record.total} total, ${cancellable} cancellable.`;
+    }
+    if (typeof record.status === "string") {
+      if (record.status === "not_found") {
+        return zh ? "未找到指定后台智能体。" : "The requested background agent was not found.";
+      }
+      return zh ? "已更新后台智能体状态。" : "Updated background agent status.";
+    }
+  }
+  if (toolName === START_AGENT_TOOL_NAME) {
+    const status = isRecord(data) && typeof data.status === "string" ? data.status : "";
+    if (status === "running") return zh ? "已启动后台智能体。" : "Started a background agent.";
+    if (status === "idle" || status === "completed") {
+      return zh ? "智能体已完成本次处理。" : "The agent completed this run.";
+    }
+    return zh ? "智能体启动结果已记录。" : "Recorded the agent start result.";
+  }
+  if (toolName === RUN_WORKFLOW_TOOL_NAME) {
+    const status = isRecord(data) && typeof data.status === "string" ? data.status : "";
+    if (status === "running") return zh ? "已启动后台工作流。" : "Started a background workflow.";
+    if (status === "completed") return zh ? "工作流已完成。" : "Workflow completed.";
+    return zh ? "工作流结果已记录。" : "Recorded the workflow result.";
+  }
+  if (toolName === RUN_VERIFICATION_TOOL_NAME) {
+    const status = isRecord(data) && typeof data.status === "string" ? data.status : "";
+    return zh
+      ? `验证已结束：${status || "partial"}。`
+      : `Verification finished: ${status || "partial"}.`;
+  }
+  return text;
+}
+
+function sanitizeControlToolError(text: string, language: Language): string {
+  const internalTerms = [
+    "AgentControl",
+    "StartAgent",
+    "RunWorkflow",
+    "RunVerification",
+    "WriteReport",
+    "IndexOperation",
+  ];
+  const hasInternalTerm = internalTerms.some((term) => text.includes(term));
+  if (!hasInternalTerm) return text;
+  return language === "en-US"
+    ? "The control action failed. Use /details for the diagnostic record."
+    : "控制操作失败。诊断记录可在 /details 查看。";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 async function executeWriteReportToolUse(

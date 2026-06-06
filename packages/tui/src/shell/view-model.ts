@@ -35,7 +35,13 @@ import type {
   TaskFooterView,
   TaskPermissionView,
   TranscriptScrollView,
+  TranscriptVirtualRangeView,
 } from "./types.js";
+
+type TranscriptBlockHeightCache = Record<
+  string,
+  { height: number; width: number; textHash: string }
+>;
 
 const shellText = {
   "zh-CN": {
@@ -293,8 +299,9 @@ export function createShellViewModel(
       if (dropEphemeralIndices.has(i)) return false;
       return true;
     });
+    const groupedBlocks = groupTranscriptToolBlocks(selectedBlocks, language);
     // Add /details hint only to error/blocked blocks (avoid noise on info rows).
-    const outputWithHints = selectedBlocks.map((b) =>
+    const outputWithHints = groupedBlocks.map((b) =>
       applyCtrlOExpandState(addDetailsHint(b, language), ctrlOExpandState),
     );
     blocks.push(...outputWithHints);
@@ -318,7 +325,7 @@ export function createShellViewModel(
   // Phase 7.10: ordinary main-screen transcript no longer renders app-owned
   // blue selection. Native terminal selection/copy is the default surface.
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
-  const streamingAssistantText = selectStreamingAssistantText(context, fittedBlocks);
+  const fullFittedBlocks = fittedBlocks;
 
   const viewMode = effectiveViewMode;
 
@@ -388,7 +395,7 @@ export function createShellViewModel(
 
   // D.13E Step 2 — TaskSuggestionBar 数据。
   // 仅在 task / pending 模式渲染，避免 home 首屏被 suggestion 噪音污染。
-  const failBlocksForSuggestions = fittedBlocks.filter(
+  const failBlocksForSuggestions = fullFittedBlocks.filter(
     (b) => b.status === "fail" || b.status === "blocked",
   );
   const taskSuggestions: TaskSuggestion[] | undefined =
@@ -430,6 +437,23 @@ export function createShellViewModel(
           scrollOffset: 0,
           stickToBottom: true,
         });
+  const streamingAssistantText = selectStreamingAssistantText(context, fullFittedBlocks);
+  const tailHeight = estimateTranscriptTailHeight({
+    streamingAssistantText,
+    activity: effectiveActivity,
+    suggestions: taskSuggestions,
+    limitations: options.limitations ?? [],
+    width,
+  });
+  const virtualized = buildTranscriptVirtualWindow({
+    context,
+    blocks: fullFittedBlocks,
+    width,
+    height,
+    scroll: transcriptScroll,
+    tailHeight,
+    enabled: effectiveViewMode !== "home",
+  });
 
   return {
     language,
@@ -481,7 +505,8 @@ export function createShellViewModel(
           : "正在处理上一条，按 Ctrl+C 可中断，稍后再发。"
         : undefined,
     },
-    blocks: fittedBlocks,
+    blocks: virtualized.blocks,
+    transcriptVirtualRange: virtualized.range,
     streamingAssistantText,
     ctrlOExpand: ctrlOExpandState?.active
       ? { active: true, ...(ctrlOExpandState.blockId ? { blockId: ctrlOExpandState.blockId } : {}) }
@@ -540,6 +565,282 @@ function selectStreamingAssistantText(
   );
   if ((matchingFinalBlock?.fullText ?? "").trimEnd() === text) return undefined;
   return streaming.text;
+}
+
+function groupTranscriptToolBlocks(
+  blocks: ProductBlockViewModel[],
+  language: Language,
+): ProductBlockViewModel[] {
+  const result: ProductBlockViewModel[] = [];
+  let group: ProductBlockViewModel[] = [];
+
+  const flush = () => {
+    if (group.length >= 2) {
+      result.push(createGroupedToolBlock(group, language));
+    } else {
+      result.push(...group);
+    }
+    group = [];
+  };
+
+  for (const block of blocks) {
+    if (classifyToolGroupingBlock(block)) {
+      group.push(block);
+      continue;
+    }
+    flush();
+    result.push(block);
+  }
+  flush();
+  return result;
+}
+
+type ToolGroupingKind = "read" | "search" | "extension" | "agent" | "workflow" | "verification";
+
+function classifyToolGroupingBlock(block: ProductBlockViewModel): ToolGroupingKind | undefined {
+  if (block.status === "fail" || block.status === "blocked") return undefined;
+  const text = `${block.title}\n${block.summary}\n${block.fullText ?? ""}`.trim();
+  if (/^(?:Read\(|读取摘要|Read summary)/iu.test(text)) return "read";
+  if (/^(?:Grep\(|Glob\(|搜索摘要|文件搜索摘要|Search summary|File search summary)/iu.test(text)) {
+    return "search";
+  }
+  if (
+    /(?:已发现\s+\d+\s+个扩展工具|扩展工具调用(?:完成|失败)|Found\s+\d+\s+extension tool|Extension tool (?:finished|call failed))/iu.test(
+      text,
+    )
+  ) {
+    return "extension";
+  }
+  if (
+    /(?:已(?:启动|停止|检查|更新)后台智能体|智能体已完成|background agent|agent completed|Checked background agents|Stopped \d+ background agent)/iu.test(
+      text,
+    )
+  ) {
+    return "agent";
+  }
+  if (
+    /(?:工作流已完成|已启动后台工作流|工作流结果已记录|Workflow completed|Started a background workflow|Recorded the workflow result)/iu.test(
+      text,
+    )
+  ) {
+    return "workflow";
+  }
+  if (/(?:验证已结束|Verification finished)/iu.test(text)) return "verification";
+  return undefined;
+}
+
+function createGroupedToolBlock(
+  blocks: ProductBlockViewModel[],
+  language: Language,
+): ProductBlockViewModel {
+  const counts = new Map<ToolGroupingKind, number>();
+  for (const block of blocks) {
+    const kind = classifyToolGroupingBlock(block);
+    if (!kind) continue;
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  const summary = formatToolGroupSummary(counts, blocks.length, language);
+  const details = blocks
+    .map((block, index) => {
+      const body = (block.fullText ?? block.summary ?? block.title).trim();
+      return `${index + 1}. ${body}`;
+    })
+    .join("\n\n");
+  return {
+    id: `tool-group-${blocks[0]?.id ?? Date.now()}-${blocks.length}`,
+    kind: "tool",
+    status: blocks.some((block) => block.status === "partial") ? "partial" : "info",
+    title: "",
+    summary,
+    fullText: details,
+    nextAction: shellText[language].detailsHint,
+    ctrlOCollapsed: true,
+    messageKind: "tool_result_success",
+  };
+}
+
+function formatToolGroupSummary(
+  counts: Map<ToolGroupingKind, number>,
+  fallbackCount: number,
+  language: Language,
+): string {
+  const ordered: ToolGroupingKind[] = [
+    "read",
+    "search",
+    "extension",
+    "agent",
+    "workflow",
+    "verification",
+  ];
+  const zhLabels: Record<ToolGroupingKind, string> = {
+    read: "读取",
+    search: "搜索",
+    extension: "扩展工具",
+    agent: "后台智能体",
+    workflow: "工作流",
+    verification: "验证",
+  };
+  const enLabels: Record<ToolGroupingKind, string> = {
+    read: "read",
+    search: "search",
+    extension: "extension",
+    agent: "agent",
+    workflow: "workflow",
+    verification: "verification",
+  };
+  const parts = ordered.flatMap((kind) => {
+    const count = counts.get(kind) ?? 0;
+    if (count <= 0) return [];
+    return language === "en-US"
+      ? [`${enLabels[kind]} ${count}`]
+      : [`${zhLabels[kind]} ${count} 项`];
+  });
+  if (language === "en-US") {
+    return `Tool activity grouped: ${parts.join(", ") || `${fallbackCount} item(s)`}.`;
+  }
+  return `工具活动已分组：${parts.join("，") || `${fallbackCount} 项`}。`;
+}
+
+function estimateTranscriptTailHeight({
+  streamingAssistantText,
+  activity,
+  suggestions,
+  limitations,
+  width,
+}: {
+  streamingAssistantText?: string;
+  activity?: TaskActivityView;
+  suggestions?: TaskSuggestion[];
+  limitations: string[];
+  width: number;
+}): number {
+  let height = 0;
+  if (streamingAssistantText)
+    height += 1 + estimateWrappedTextHeight(streamingAssistantText, width);
+  if (activity) height += 2;
+  if (suggestions && suggestions.length > 0) height += 1;
+  if (limitations.length > 0) height += 1 + limitations.length;
+  return height;
+}
+
+function buildTranscriptVirtualWindow({
+  context,
+  blocks,
+  width,
+  height,
+  scroll,
+  tailHeight,
+  enabled,
+}: {
+  context: TuiContext;
+  blocks: ProductBlockViewModel[];
+  width: number;
+  height: number;
+  scroll: TranscriptScrollView | undefined;
+  tailHeight: number;
+  enabled: boolean;
+}): { blocks: ProductBlockViewModel[]; range?: TranscriptVirtualRangeView } {
+  if (!enabled || blocks.length === 0) {
+    return { blocks };
+  }
+
+  const cacheOwner = context as { transcriptBlockHeightCache?: TranscriptBlockHeightCache };
+  cacheOwner.transcriptBlockHeightCache ??= {};
+  const cache = cacheOwner.transcriptBlockHeightCache;
+  const heights = blocks.map((block) => estimateBlockHeight(block, width, cache));
+  const blockContentHeight = heights.reduce((sum, value) => sum + value, 0);
+  const estimatedContentHeight = blockContentHeight + tailHeight;
+  const viewportHeight = scroll?.viewportHeight ?? Math.max(1, height - 8);
+  const maxOffset = Math.max(0, estimatedContentHeight - viewportHeight);
+  const bottomOffset =
+    (scroll?.stickToBottom ?? true) ? 0 : Math.min(scroll?.scrollOffset ?? 0, maxOffset);
+  const topOffset = Math.max(0, maxOffset - bottomOffset);
+  const overscan = Math.max(8, Math.ceil(viewportHeight * 0.75));
+  const windowTop = Math.max(0, topOffset - overscan);
+  const windowBottom = Math.min(estimatedContentHeight, topOffset + viewportHeight + overscan);
+
+  let startIndex = 0;
+  let cursor = 0;
+  while (startIndex < blocks.length) {
+    const currentHeight = heights[startIndex] ?? 1;
+    if (cursor + currentHeight > windowTop) break;
+    cursor += currentHeight;
+    startIndex += 1;
+  }
+  let endIndex = startIndex;
+  let endCursor = cursor;
+  while (endIndex < blocks.length && endCursor < windowBottom) {
+    endCursor += heights[endIndex] ?? 1;
+    endIndex += 1;
+  }
+
+  if (startIndex >= blocks.length && blocks.length > 0) {
+    startIndex = Math.max(0, blocks.length - 1);
+    endIndex = blocks.length;
+    cursor = blockContentHeight - (heights[startIndex] ?? 1);
+    endCursor = blockContentHeight;
+  }
+
+  const rendered = blocks.slice(startIndex, endIndex);
+  const range: TranscriptVirtualRangeView = {
+    startIndex,
+    endIndex,
+    topSpacer: cursor,
+    bottomSpacer: Math.max(0, blockContentHeight - endCursor),
+    estimatedContentHeight,
+    renderedBlockCount: rendered.length,
+    totalBlockCount: blocks.length,
+  };
+  return { blocks: rendered, range };
+}
+
+function estimateBlockHeight(
+  block: ProductBlockViewModel,
+  width: number,
+  cache: TranscriptBlockHeightCache,
+): number {
+  const textHash = blockTextHash(block);
+  const cached = cache[block.id];
+  if (
+    cached &&
+    cached.width === width &&
+    (cached.textHash === textHash || cached.textHash === "measured")
+  ) {
+    return cached.height;
+  }
+  const estimated = estimateBlockHeightUncached(block, width);
+  cache[block.id] = { height: estimated, width, textHash };
+  return estimated;
+}
+
+function estimateBlockHeightUncached(block: ProductBlockViewModel, width: number): number {
+  const contentWidth = Math.max(8, width - 4);
+  const body = (block.fullText ?? block.summary ?? block.title ?? "").trim();
+  let lines = estimateWrappedTextHeight(body || block.summary || block.title || "", contentWidth);
+  if (block.title && !body.includes(block.title)) lines += 1;
+  if (block.detail) lines += estimateWrappedTextHeight(block.detail, contentWidth);
+  if (block.nextAction) lines += 1;
+  if (block.kind === "command" || block.messageKind === "user_text") lines += 1;
+  if (block.messageKind === "assistant_text") lines += 1;
+  if (block.messageKind === "assistant_thinking") lines += 1;
+  if (block.kind === "permission" || block.kind === "error" || block.status === "fail") lines += 2;
+  return Math.max(1, lines);
+}
+
+function estimateWrappedTextHeight(text: string, width: number): number {
+  const normalized = text.replace(/\r/g, "").trim();
+  if (!normalized) return 1;
+  const wrapWidth = Math.max(8, width);
+  return normalized.split("\n").reduce((total, line) => {
+    const lineWidth = displayWidth(line || " ");
+    return total + Math.max(1, Math.ceil(lineWidth / wrapWidth));
+  }, 0);
+}
+
+function blockTextHash(block: ProductBlockViewModel): string {
+  const text = `${block.kind}\n${block.status}\n${block.messageKind ?? ""}\n${block.title}\n${block.summary}\n${block.detail ?? ""}\n${block.nextAction ?? ""}\n${block.fullText ?? ""}`;
+  if (text.length <= 160) return `${text.length}:${text}`;
+  return `${text.length}:${text.slice(0, 80)}:${text.slice(-80)}`;
 }
 
 /**

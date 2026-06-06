@@ -318,6 +318,16 @@ export type TranscriptScrollView = {
   wheelStep?: number;
 };
 
+export type TranscriptVirtualRangeView = {
+  startIndex: number;
+  endIndex: number;
+  topSpacer: number;
+  bottomSpacer: number;
+  estimatedContentHeight: number;
+  renderedBlockCount: number;
+  totalBlockCount: number;
+};
+
 export type TranscriptViewportGeometryView = {
   x: number;
   y: number;
@@ -366,6 +376,7 @@ export type ShellViewModel = {
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
+  transcriptVirtualRange?: TranscriptVirtualRangeView;
   /** Live assistant preview rendered outside the historical ProductBlock list. */
   streamingAssistantText?: string;
   ctrlOExpand?: CtrlOExpandView;
@@ -494,6 +505,7 @@ export type ShellInputEvent =
     }
   | { type: "transcript-scroll"; delta: number }
   | { type: "transcript-scroll-measure"; viewportHeight: number; contentHeight: number }
+  | { type: "transcript-block-measure"; id: string; width: number; height: number }
   | { type: "transcript-viewport-geometry"; geometry: TranscriptViewportGeometryView }
   | { type: "transcript-mouse"; event: TranscriptMouseEventView }
   | { type: "transcript-scroll-end" }

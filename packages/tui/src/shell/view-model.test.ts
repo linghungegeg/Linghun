@@ -4020,7 +4020,7 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(body).not.toMatch(/^\s*writeStatus\(output, context\);\s*$/m);
   });
 
-  it("ShellApp TaskLayout uses full-page top-left layout (no alignItems=center)", async () => {
+  it("ShellApp TaskLayout uses scrollable transcript surface with top-left layout", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
     // The TaskLayout outer Box must not center the whole region.
@@ -4029,10 +4029,15 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const nextFn = source.indexOf("function ", taskLayoutStart + 20);
     const body = source.slice(taskLayoutStart, nextFn);
     // Output region uses flexGrow=1; the composer band uses flexShrink=0.
-    // Phase 7.10: the ordinary main screen does not mount TranscriptViewport,
-    // so terminal-native scrollback and selection remain available.
+    // Phase 7.17.1: ordinary task transcript uses the measured viewport path,
+    // while composer/footer stay outside the scrollable transcript surface.
     expect(body).toContain("flexGrow={1}");
-    expect(body).not.toContain("<TranscriptViewport");
+    expect(body).toContain("<TranscriptViewport");
+    expect(body).toContain("virtualRange={view.transcriptVirtualRange}");
+    expect(body).toContain("view.transcriptVirtualRange.bottomSpacer");
+    expect(body).toContain("<MeasuredTranscriptBlock");
+    expect(body).toContain('type: "transcript-scroll-measure"');
+    expect(body).toContain('type: "transcript-viewport-geometry"');
     expect(body).toContain("flexShrink={0}");
     // The original `alignItems="center"` on the outer wrapper is gone.
     const outerWrapper = body.split("\n").slice(0, 4).join("\n");
@@ -4066,9 +4071,22 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
   it("D.14D-C2: TranscriptViewport owns the measured overflow=hidden culling", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ScrollViewport.tsx"), "utf8");
+    expect(source).toContain("virtualRange?: TranscriptVirtualRangeView");
+    expect(source).toContain("virtualRange?.estimatedContentHeight");
+    expect(source).toContain("marginTop + virtualRange.topSpacer");
     expect(source).toContain('overflow="hidden"');
     expect(source).toContain("clampTranscriptScroll");
     expect(source).toContain("getComputedHeight");
+  });
+
+  it("Phase 7.18 source: controller records measured block heights into the same cache", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const shellSource = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    expect(shellSource).toContain('type: "transcript-block-measure"');
+    expect(source).toContain('event.type === "transcript-block-measure"');
+    expect(source).toContain("context.transcriptBlockHeightCache ??= {}");
+    expect(source).toContain("context.transcriptBlockHeightCache[event.id]");
   });
 });
 
@@ -4330,6 +4348,34 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(visible).toBeDefined();
     expect(visible?.nextAction).toBeUndefined();
     expect(visible?.fullText).toContain("第三行");
+  });
+
+  it("Phase 7.17.1: 200+ line assistant output stays in transcript body, not Ctrl+O substitute", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+    const longText = Array.from({ length: 220 }, (_, index) => `assistant line ${index + 1}`).join(
+      "\n",
+    );
+
+    output.beginAssistantStream("assistant-long-transcript");
+    output.appendAssistantDelta(longText);
+    output.endAssistantStream();
+
+    const view = createShellViewModel(ctx, {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+    const block = view.blocks.find((item) => item.id === "assistant-long-transcript");
+    expect(block?.messageKind).toBe("assistant_text");
+    expect(block?.keep).toBe(true);
+    expect(block?.fullText?.split("\n")).toHaveLength(220);
+    expect(block?.fullText).toContain("assistant line 220");
+    expect(block?.nextAction).toBeUndefined();
+    expect(view.transcriptScroll).toMatchObject({ scrollOffset: 0, stickToBottom: true });
+    expect(ctx.lastFullOutput).toContain("assistant line 220");
   });
 
   it("output memory compact 保留 keep/fail/blocked 与最近普通输出", async () => {
@@ -5877,6 +5923,205 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.transcriptScroll).toBeDefined();
     expect(view.transcriptScroll?.scrollOffset).toBe(0);
     expect(view.transcriptScroll?.stickToBottom).toBe(true);
+  });
+
+  it("Phase 7.18: 1000+ transcript blocks only project the viewport window", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 1200 }, (_, index) => ({
+      id: `block-${index}`,
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: `assistant block ${index}`,
+      fullText: `assistant block ${index}\nbody line ${index}`,
+      messageKind: "assistant_text",
+      keep: true,
+    }));
+    const ctx = createContext({
+      transcriptScrollState: {
+        scrollOffset: 0,
+        stickToBottom: true,
+        viewportHeight: 20,
+        contentHeight: 2400,
+      },
+    });
+
+    const view = createShellViewModel(ctx, {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.transcriptVirtualRange?.totalBlockCount).toBe(1200);
+    expect(view.transcriptVirtualRange?.renderedBlockCount).toBeLessThan(80);
+    expect(view.blocks.length).toBe(view.transcriptVirtualRange?.renderedBlockCount);
+    expect(view.blocks.some((block) => block.id === "block-0")).toBe(false);
+    expect(view.blocks.some((block) => block.id === "block-1199")).toBe(true);
+    expect(JSON.stringify(ctx.transcriptBlockHeightCache)).toContain("block-1199");
+  });
+
+  it("Phase 7.18: user scrolled-up window stays detached from bottom", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 240 }, (_, index) => ({
+      id: `scroll-block-${index}`,
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: `scroll block ${index}`,
+      fullText: `scroll block ${index}\nline`,
+      messageKind: "assistant_text",
+      keep: true,
+    }));
+    const ctx = createContext({
+      transcriptScrollState: {
+        scrollOffset: 260,
+        stickToBottom: false,
+        viewportHeight: 18,
+        contentHeight: 480,
+      },
+    });
+
+    const view = createShellViewModel(ctx, {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.transcriptScroll?.stickToBottom).toBe(false);
+    expect(view.transcriptVirtualRange?.startIndex).toBeGreaterThan(0);
+    expect(view.transcriptVirtualRange?.endIndex).toBeLessThan(240);
+    expect(view.blocks.some((block) => block.id === "scroll-block-239")).toBe(false);
+  });
+
+  it("Phase 7.18: streaming sibling dedupe uses full history, not the virtual window", () => {
+    const blocks: ProductBlockViewModel[] = Array.from({ length: 260 }, (_, index) => ({
+      id: `history-${index}`,
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: `history ${index}`,
+      fullText: `history ${index}\nline`,
+      messageKind: "assistant_text",
+      keep: true,
+    }));
+    blocks.push({
+      id: "assistant-final-dedupe-window",
+      kind: "details",
+      status: "info",
+      title: "",
+      summary: "final",
+      fullText: "final assistant text\n",
+      messageKind: "assistant_text",
+      keep: true,
+    });
+    const ctx = createContext({
+      streamingAssistant: {
+        id: "assistant-final-dedupe-window",
+        text: "final assistant text\n",
+      },
+      transcriptScrollState: {
+        scrollOffset: 220,
+        stickToBottom: false,
+        viewportHeight: 18,
+        contentHeight: 540,
+      },
+    });
+
+    const view = createShellViewModel(ctx, {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.blocks.some((block) => block.id === "assistant-final-dedupe-window")).toBe(false);
+    expect(view.streamingAssistantText).toBeUndefined();
+  });
+
+  it("Phase 7.18: adjacent read/search/deferred tool outputs collapse into one low-noise block", () => {
+    const blocks: ProductBlockViewModel[] = [
+      createOutputBlock("Read(package.json)", "zh-CN", "read-start"),
+      createOutputBlock("读取摘要：12 行。\npackage content raw diagnostic", "zh-CN", "read-end"),
+      createOutputBlock("搜索摘要：3 处。\nraw grep result line", "zh-CN", "grep-end"),
+      createOutputBlock(
+        "已发现 2 个扩展工具。\nSearchExtraTools matched raw list",
+        "zh-CN",
+        "search-extra",
+      ),
+      {
+        id: "assistant-after-tools",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "后续 assistant 正文",
+        fullText: "后续 assistant 正文",
+        messageKind: "assistant_text",
+        keep: true,
+      },
+    ];
+
+    const view = createShellViewModel(createContext(), {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    const group = view.blocks.find((block) => block.id.startsWith("tool-group-"));
+    expect(group?.summary).toContain("工具活动已分组");
+    expect(group?.summary).toContain("读取");
+    expect(group?.summary).toContain("搜索");
+    expect(group?.summary).toContain("扩展工具");
+    expect(group?.fullText).toContain("SearchExtraTools matched raw list");
+    const primaryText = view.blocks.map((block) => `${block.title}\n${block.summary}`).join("\n");
+    expect(primaryText).not.toContain("SearchExtraTools matched raw list");
+    expect(view.blocks.some((block) => block.id === "assistant-after-tools")).toBe(true);
+  });
+
+  it("Phase 7.18: tool grouping does not cross assistant text or hide failed tool diagnostics", () => {
+    const failedTool: ProductBlockViewModel = {
+      id: "grep-failed",
+      kind: "tool",
+      status: "fail",
+      title: "Grep failed",
+      summary: "Grep failed: permission denied",
+      fullText: "Grep failed: raw diagnostic stack",
+      messageKind: "tool_result_error",
+      keep: true,
+    };
+    const blocks: ProductBlockViewModel[] = [
+      createOutputBlock("Read(src/a.ts)", "en-US", "read-a"),
+      {
+        id: "assistant-break",
+        kind: "details",
+        status: "info",
+        title: "",
+        summary: "I will inspect the next file separately.",
+        fullText: "I will inspect the next file separately.",
+        messageKind: "assistant_text",
+        keep: true,
+      },
+      createOutputBlock("Glob(src/**/*.ts)\nraw glob diagnostic", "en-US", "glob-b"),
+      failedTool,
+    ];
+
+    const view = createShellViewModel(createContext({ language: "en-US" }), {
+      width: 100,
+      height: 24,
+      viewMode: "task",
+      outputBlocks: blocks,
+    });
+
+    expect(view.blocks.some((block) => block.id.startsWith("tool-group-"))).toBe(false);
+    expect(view.blocks.map((block) => block.id)).toEqual([
+      "read-a",
+      "assistant-break",
+      "glob-b",
+      "grep-failed",
+    ]);
+    const failed = view.blocks.find((block) => block.id === "grep-failed");
+    expect(failed?.status).toBe("fail");
+    expect(`${failed?.summary}\n${failed?.fullText}`).toContain("raw diagnostic stack");
   });
 
   it("transcriptSelectionState 不再给普通主屏 block 挂蓝底 selectionLineIndexes", () => {
