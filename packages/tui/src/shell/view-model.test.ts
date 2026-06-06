@@ -389,7 +389,7 @@ describe("Ink shell selection", () => {
     expect(output.text.indexOf("\x1B[>4;2m")).toBeLessThan(output.text.lastIndexOf("\x1B[>4m"));
   });
 
-  it("does not enable SGR mouse tracking in ordinary main-screen Ink", async () => {
+  it("enables SGR mouse tracking so transcript wheel reaches the scroll reducer", async () => {
     vi.unstubAllEnvs();
     vi.stubEnv("TERM", "xterm-256color");
     vi.stubEnv("LINGHUN_TERMINAL_TIER", "modern");
@@ -409,8 +409,11 @@ describe("Ink shell selection", () => {
     shell.unmount();
     await shell.waitUntilExit();
 
-    expect(output.text).not.toContain("\x1B[?1002h\x1B[?1006h");
-    expect(output.text).not.toContain("\x1B[?1002l\x1B[?1006l");
+    expect(output.text).toContain("\x1B[?1000h\x1B[?1002h\x1B[?1006h");
+    expect(output.text).toContain("\x1B[?1006l\x1B[?1002l\x1B[?1000l");
+    expect(output.text.indexOf("\x1B[?1000h\x1B[?1002h\x1B[?1006h")).toBeLessThan(
+      output.text.lastIndexOf("\x1B[?1006l\x1B[?1002l\x1B[?1000l"),
+    );
   });
 
   it("does not add beforeExit listener when waiting after unmount", async () => {
@@ -4044,6 +4047,35 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     expect(outerWrapper).not.toContain('alignItems="center"');
   });
 
+  it("Composer routes SGR wheel events to transcript scroll without treating them as text", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "shell/components/Composer.tsx"), "utf8");
+    expect(source).toContain("parseSgrMouseEvent(input)");
+    expect(source).toContain("isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)");
+    expect(source).toContain('mouse.action !== "wheel"');
+    expect(source).toContain('mouse?.button === "wheel-up"');
+    expect(source).toContain('type: "transcript-scroll", action: "wheelUp"');
+    expect(source).toContain('mouse?.button === "wheel-down"');
+    expect(source).toContain('type: "transcript-scroll", action: "wheelDown"');
+    expect(source).not.toContain("if (isSgrMouseInput(input)) return;");
+  });
+
+  it("transcript measurement and geometry events only rerender on actual state changes", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "index.ts"), "utf8");
+    expect(source).toContain("isSameTranscriptScrollState(previous, next)");
+    expect(source).toContain("isSameTranscriptViewportGeometry");
+    expect(source).toContain("context.transcriptViewportGeometry, event.geometry");
+    expect(source).toContain("context.transcriptScrollState = next");
+  });
+
+  it("model-facing control tools restore any existing command panel after internal runtime calls", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(join(SRC_ROOT, "model-tool-runtime.ts"), "utf8");
+    expect(source).toContain("const previousCommandPanelState = context.commandPanelState");
+    expect(source).toContain("context.commandPanelState = previousCommandPanelState");
+  });
+
   it("TaskLayout renders a task composer separator and keeps footer surfaces separated", async () => {
     const { readFile } = await import("node:fs/promises");
     const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
@@ -5913,6 +5945,16 @@ describe("D.13Q-UX Task Surface — transcriptScroll 状态", () => {
     expect(view.transcriptScroll).toBeDefined();
     expect(view.transcriptScroll?.scrollOffset).toBe(4);
     expect(view.transcriptScroll?.stickToBottom).toBe(false);
+  });
+
+  it("transcriptViewportGeometry 从 context 透传给 Composer 用于真实 wheel 命中判断", () => {
+    const geometry = { x: 1, y: 2, width: 80, height: 10, contentHeight: 40, topOffset: 20 };
+    const ctx = createContext() as TuiContext & {
+      transcriptViewportGeometry?: typeof geometry;
+    };
+    ctx.transcriptViewportGeometry = geometry;
+    const view = createShellViewModel(ctx, { width: 80, viewMode: "task" });
+    expect(view.transcriptViewportGeometry).toEqual(geometry);
   });
 
   it("无 transcriptScrollState 时 view.transcriptScroll 为默认 stickToBottom=true / offset=0", () => {

@@ -411,6 +411,8 @@ export type ShellViewModel = {
    * 模式始终存在，默认 scrollOffset=0 / stickToBottom=true。
    */
   transcriptScroll?: TranscriptScrollView;
+  /** Measured transcript viewport bounds used to route app-owned mouse wheel events. */
+  transcriptViewportGeometry?: TranscriptViewportGeometryView;
   /**
    * D.13Q-UX Closure — HelpPanel UI 状态。打开时显示三组 Tab + 命令列表，
    * Enter dispatch slash，Esc 关闭。

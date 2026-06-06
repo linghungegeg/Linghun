@@ -55,6 +55,7 @@ export function TranscriptViewport({
   const viewportRef = useRef<DOMElement | null>(null);
   const contentRef = useRef<DOMElement | null>(null);
   const [maxOffset, setMaxOffset] = useState(0);
+  const maxOffsetRef = useRef(0);
   const lastReportedOverflow = useRef<boolean | undefined>(undefined);
   const lastReportedMeasure = useRef<string | undefined>(undefined);
   const lastReportedGeometry = useRef<string | undefined>(undefined);
@@ -95,7 +96,10 @@ export function TranscriptViewport({
         onGeometry(geometry);
       }
     }
-    setMaxOffset((prev) => (prev === nextMax ? prev : nextMax));
+    if (maxOffsetRef.current !== nextMax) {
+      maxOffsetRef.current = nextMax;
+      setMaxOffset(nextMax);
+    }
     const hasOverflow = nextMax > 0;
     if (onOverflowChange && lastReportedOverflow.current !== hasOverflow) {
       lastReportedOverflow.current = hasOverflow;

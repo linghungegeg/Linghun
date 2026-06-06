@@ -7,7 +7,7 @@ import {
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
-import { isSgrMouseInput } from "../models/transcript-selection-state.js";
+import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
 import { charWidth, composerMaxWidth, fitText, taskComposerMaxWidth } from "../text-utils.js";
 import { createShellTheme } from "../theme.js";
@@ -17,6 +17,8 @@ import type {
   ShellInputEvent,
   ShellViewModel,
   TaskPermissionView,
+  TranscriptMouseEventView,
+  TranscriptViewportGeometryView,
 } from "../types.js";
 import { SlashSuggestions } from "./SlashSuggestions.js";
 import { useAnchoredCursor } from "./useAnchoredCursor.js";
@@ -26,6 +28,20 @@ type ComposerProps = {
   onInput: (event: ShellInputEvent) => void | Promise<void>;
   capability: TerminalCapability;
 };
+
+function isTranscriptWheelTarget(
+  mouse: TranscriptMouseEventView | undefined,
+  geometry: TranscriptViewportGeometryView | undefined,
+): boolean {
+  if (!mouse || mouse.action !== "wheel") return false;
+  if (!geometry) return true;
+  return (
+    mouse.x >= geometry.x &&
+    mouse.x < geometry.x + geometry.width &&
+    mouse.y >= geometry.y &&
+    mouse.y < geometry.y + geometry.height
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Edit buffer — the core editing model
@@ -640,7 +656,18 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
 
   useInput(
     (input, key) => {
-      if (isSgrMouseInput(input)) return;
+      if (isSgrMouseInput(input)) {
+        const mouse = parseSgrMouseEvent(input);
+        if (!isTranscriptWheelTarget(mouse, view.transcriptViewportGeometry)) return;
+        if (mouse?.button === "wheel-up") {
+          void onInput({ type: "transcript-scroll", action: "wheelUp" });
+        } else if (mouse?.button === "wheel-down") {
+          void onInput({ type: "transcript-scroll", action: "wheelDown" });
+        }
+        return;
+      }
+      const buffer = bufferRef.current;
+      const text = bufferToString(buffer);
       // D.13E Step 2 — Owner-priority dispatcher 显式化：
       // 用 selectInputOwner 决定本次事件归属，permission > panel > paste > slash > composer。
       const owner = selectInputOwner(input, key, {

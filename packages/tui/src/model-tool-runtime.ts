@@ -63,7 +63,6 @@ import {
 import {
   cancelAgentByRef,
   cancelAllAgents,
-  handleAgentsCommand,
   handleBackgroundCommand,
   handleForkCommand,
   handleJobCommand,
@@ -995,6 +994,7 @@ export async function executeLinghunControlToolUse(
   pendingApproval?: boolean;
 }> {
   startRequestActivity(output, context, "tool_running", { toolName: toolCall.name });
+  const previousCommandPanelState = context.commandPanelState;
   await context.store.appendEvent(sessionId, {
     type: "tool_call_start",
     id: toolCall.id,
@@ -1029,7 +1029,6 @@ export async function executeLinghunControlToolUse(
       if (!input.ok)
         return await finishControlToolFailure(toolCall, context, sessionId, output, input.text);
       if (input.action === "list") {
-        await handleAgentsCommand(["list"], context, createSilentOutput());
         const cancellable = listCancellableAgents(context);
         return await finishControlToolResult(
           toolCall,
@@ -1073,11 +1072,6 @@ export async function executeLinghunControlToolUse(
         );
       }
       if (input.action === "show") {
-        await handleAgentsCommand(
-          ["show", input.agentRef ?? ""].filter(Boolean),
-          context,
-          createSilentOutput(),
-        );
         const agent = findAgent(context, input.agentRef);
         return await finishControlToolResult(
           toolCall,
@@ -1238,6 +1232,7 @@ export async function executeLinghunControlToolUse(
       `Unknown Linghun control tool: ${toolCall.name}`,
     );
   } finally {
+    context.commandPanelState = previousCommandPanelState;
     clearRequestActivity(context);
   }
 }

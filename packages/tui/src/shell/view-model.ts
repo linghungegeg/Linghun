@@ -519,6 +519,9 @@ export function createShellViewModel(
     configPanel,
     commandPanel,
     transcriptScroll,
+    transcriptViewportGeometry: (
+      context as { transcriptViewportGeometry?: ShellViewModel["transcriptViewportGeometry"] }
+    ).transcriptViewportGeometry,
     helpPanel: (() => {
       const state = (
         context as { helpPanelState?: { group: "core" | "advanced" | "details"; cursor: number } }

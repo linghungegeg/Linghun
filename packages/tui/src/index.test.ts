@@ -17449,6 +17449,102 @@ describe("Phase 06 TUI slash commands", () => {
     expect(JSON.stringify(toolResult)).toContain("agent-list-running");
   });
 
+  it("model-facing AgentControl list does not open the /agents command panel in Ink", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agentcontrol-list-panel-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    context.isInkSession = true;
+    const startedAt = new Date().toISOString();
+    context.agents = [
+      {
+        id: "agent-list-panel",
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        parentSessionId: session.id,
+        task: "list panel guard",
+        model: "route-model",
+        permissionMode: "default",
+        status: "running",
+        transcriptPath: join(project, "agent-list-panel.jsonl"),
+        transcriptSessionId: session.id,
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "agent context",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt,
+        updatedAt: startedAt,
+      },
+    ];
+    mockOpenAiToolFetch("AgentControl", { action: "list" }, "已列出智能体。");
+
+    await __testSendMessage("列出后台智能体", context, gateway, output);
+
+    expect(context.commandPanelState).toBeUndefined();
+    expect(output.text).toContain("已检查后台智能体：共 1 个，可取消 1 个。");
+  });
+
+  it("model-facing AgentControl show does not open the /agents show command panel in Ink", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-agentcontrol-show-panel-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const config = createOpenAiRegistryAgentConfig("route-model");
+    const session = await store.create({ model: "route-model" });
+    const output = new MemoryOutput();
+    const context = await createTestContext(project, store, session, config);
+    const gateway = createModelGateway(config);
+    context.modelGateway = gateway;
+    context.isInkSession = true;
+    const startedAt = new Date().toISOString();
+    context.agents = [
+      {
+        id: "agent-show-panel",
+        type: "worker",
+        role: "executor",
+        provider: "openai-compatible",
+        parentSessionId: session.id,
+        task: "show panel guard",
+        model: "route-model",
+        permissionMode: "default",
+        status: "running",
+        transcriptPath: join(project, "agent-show-panel.jsonl"),
+        transcriptSessionId: session.id,
+        mailbox: [],
+        summary: "agent running",
+        contextSummary: "agent context",
+        cost: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          estimatedCny: 0,
+        },
+        startedAt,
+        updatedAt: startedAt,
+      },
+    ];
+    mockOpenAiToolFetch(
+      "AgentControl",
+      { action: "show", agentId: "agent-show-panel" },
+      "已查看智能体。",
+    );
+
+    await __testSendMessage("查看后台智能体", context, gateway, output);
+
+    expect(context.commandPanelState).toBeUndefined();
+    expect(output.text).toContain("已更新后台智能体状态。");
+  });
+
   it("model-facing SendMessage assigns shared task to one idle teammate", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-sendmessage-task-tool-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });

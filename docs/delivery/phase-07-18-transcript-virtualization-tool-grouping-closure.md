@@ -69,6 +69,8 @@ Forbidden duplicate systems / NOT-DO:
 - `ShellViewModel.blocks` 现在只包含可视范围附近的 transcript blocks；1000+ blocks 测试确认不会全量投影给 `ShellApp`。
 - 新增 `TranscriptVirtualRangeView`，包含 `startIndex`、`endIndex`、`topSpacer`、`bottomSpacer`、`estimatedContentHeight`、`renderedBlockCount`、`totalBlockCount`。
 - `TranscriptViewport` 使用 `virtualRange.estimatedContentHeight` 参与 scroll clamp 和 geometry，使用 `marginTop + virtualRange.topSpacer` 把 window 放回完整 transcript 坐标。
+- 7.18 runtime repair：真实 SGR wheel input 已从 terminal mouse tracking 接到 `transcript-scroll` reducer，不再只依赖测试里的 ↑/↓ fallback；mouse tracking 同时启用 DEC 1000/1002/1006，避免部分终端只开 1002/1006 时不报告 wheel。
+- 7.18 runtime repair：`transcript-scroll-measure` / `transcript-viewport-geometry` 只有值实际变化时才 rerender；viewport `maxOffset` 也只在数值变化时 setState，避免 `Maximum update depth exceeded`。
 - `ShellApp` 只 mount virtual window 内的 `MeasuredTranscriptBlock`，并把可见 block 的 Yoga measured height 回写 `transcriptBlockHeightCache`。
 - Height cache visible-only 存在 `TuiContext.transcriptBlockHeightCache`，按 block id / width / textHash 复用；内容或宽度变化时回退估算再由测量修正。
 - streaming assistant preview 继续作为历史列表后的独立 sibling；dedupe 使用完整 fitted history，而不是 virtual window，避免 final assistant block 不在窗口内时重复显示。
@@ -78,6 +80,7 @@ Forbidden duplicate systems / NOT-DO:
 - 失败或 blocked tool 不参与分组；assistant 正文会打断分组，避免跨用户可读段落吞内容。
 - 复用既有 `/details`、Ctrl+O、transcript `tool_result` 和 evidence 路径保留 raw diagnostic。
 - AgentControl `cancel_all` / `stop_all` 停止后继续复用既有 background/footer/status 清理路径，不留下 running agent。
+- 7.18 runtime repair：model-facing control tool 执行期间会恢复原有 `commandPanelState`；`AgentControl list/show` 不再通过 `/agents` slash handler 拉起高级面板。
 
 ## 使用方式
 
@@ -94,9 +97,14 @@ Forbidden duplicate systems / NOT-DO:
 - `packages/tui/src/shell/types.ts`
 - `packages/tui/src/shell/components/ScrollViewport.tsx`
 - `packages/tui/src/shell/components/ShellApp.tsx`
+- `packages/tui/src/shell/components/Composer.tsx`
+- `packages/tui/src/shell/ink-renderer.tsx`
 - `packages/tui/src/shell/view-model.ts`
 - `packages/tui/src/tui-context-runtime.ts`
 - `packages/tui/src/index.ts`
+- `packages/tui/src/model-tool-runtime.ts`
+- `packages/tui/src/shell/ink-interaction-smoke.test.ts`
+- `packages/tui/src/index.test.ts`
 - `packages/tui/src/shell/view-model.test.ts`
 - `docs/delivery/README.md`
 - `docs/delivery/phase-07-18-transcript-virtualization-tool-grouping-closure.md`
@@ -109,8 +117,11 @@ Forbidden duplicate systems / NOT-DO:
 - `topSpacer` 通过 viewport content margin 放回完整坐标，`bottomSpacer` 作为实际 Box 放在 rendered blocks 后，保证后续 streaming/activity/suggestions 仍处在 transcript 尾部。
 - `tailHeight` 把 streaming sibling、activity、suggestions、limitations 计入 estimated content height，让 scroll clamp 不只看历史 blocks。
 - `streamingAssistantText` dedupe 在 virtual slicing 前用完整 fitted blocks 判断，避免“final block 被虚拟窗口裁掉后 preview 重复出现”。
+- 真鼠标滚轮只消费 transcript viewport 内的 SGR wheel-up / wheel-down，并派发到既有 `transcript-scroll-state.ts`；未恢复主屏拖选复制系统，未新增第二套 renderer。
+- 测量上报采用“值变化才触发 shell rerender”的 guard，避免 React passive effect 与 Ink rerender 形成嵌套更新循环。
 - Tool grouping 是保守分组：只合并相邻、成功/partial 的 read/search/extension/agent/workflow/verification 类输出；失败、blocked、assistant 文本、用户消息、权限卡都会打断分组。
 - 分组块使用 `ctrlOCollapsed` + `fullText` 保留 raw details，主屏渲染只走 summary。
+- Model-facing control tool 只恢复调用前的 panel state；用户显式 slash/details 打开的 panel 不受影响，内部 runtime 不得默认替换为 `/agents` / `/workflows` 高级面板。
 
 ## 配置项
 
@@ -130,6 +141,11 @@ Forbidden duplicate systems / NOT-DO:
 - `Phase 7.18: adjacent read/search/deferred tool outputs collapse into one low-noise block`
 - `Phase 7.18: tool grouping does not cross assistant text or hide failed tool diagnostics`
 - `Phase 7.18 source: controller records measured block heights into the same cache`
+- `Composer routes SGR wheel events to transcript scroll without treating them as text`
+- `transcript measurement and geometry events only rerender on actual state changes`
+- `model-facing AgentControl list/show does not open the /agents command panel in Ink`
+- `model-facing control tools restore any existing command panel after internal runtime calls`
+- Ink TTY smoke 覆盖真实 SGR mouse tracking 开关、PgUp/PgDn/Home/End、wheel fallback、SGR wheel viewport 命中、普通 Enter 与 multiline fallback。
 
 复用既有 regressions 覆盖：
 
@@ -151,19 +167,25 @@ corepack pnpm --filter @linghun/tui typecheck
 corepack pnpm exec vitest run packages/tui/src/shell/view-model.test.ts packages/tui/src/shell/models/tui-interaction-contract.test.ts --no-color
 ```
 
-结果：PASS，368 passed。
+结果：PASS，370 passed。
 
 ```powershell
-corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "transcript|virtual|scroll|streaming|tool grouping|Read|Grep|Glob|SearchExtraTools|ExecuteExtraTool|AgentControl|StartAgent|workflow|job|background|footer|status" --no-color
+corepack pnpm exec vitest run packages/tui/src/index.test.ts -t "transcript|virtual|scroll|streaming|tool grouping|Read|Grep|Glob|SearchExtraTools|ExecuteExtraTool|AgentControl|StartAgent|workflow|job|background|footer|status|command panel|advanced panel" --no-color
 ```
 
-结果：PASS，182 passed / 476 skipped。
+结果：PASS，185 passed / 475 skipped。
 
 ```powershell
-corepack pnpm exec biome check packages/tui/src/shell/components/ShellApp.tsx packages/tui/src/shell/components/ScrollViewport.tsx packages/tui/src/shell/types.ts packages/tui/src/shell/view-model.ts packages/tui/src/tui-context-runtime.ts packages/tui/src/index.ts packages/tui/src/shell/view-model.test.ts docs/delivery/README.md docs/delivery/phase-07-18-transcript-virtualization-tool-grouping-closure.md
+corepack pnpm exec vitest run packages/tui/src/shell/ink-interaction-smoke.test.ts --no-color
 ```
 
-结果：PASS。Biome 当前配置实际检查 7 个匹配源码文件，Markdown 路径随命令传入但未被规则处理。
+结果：PASS，6 passed。
+
+```powershell
+corepack pnpm exec biome check packages/tui/src/shell/types.ts packages/tui/src/shell/ink-interaction-smoke.test.ts packages/tui/src/shell/components/Composer.tsx packages/tui/src/shell/components/ShellApp.tsx packages/tui/src/shell/components/ScrollViewport.tsx packages/tui/src/shell/ink-renderer.tsx packages/tui/src/shell/view-model.ts packages/tui/src/index.ts packages/tui/src/model-tool-runtime.ts packages/tui/src/index.test.ts packages/tui/src/shell/view-model.test.ts docs/delivery/README.md docs/delivery/phase-07-18-transcript-virtualization-tool-grouping-closure.md
+```
+
+结果：PASS。Biome 当前配置实际检查匹配源码文件，Markdown 路径随命令传入但未被规则处理。
 
 ```powershell
 corepack pnpm --filter @linghun/tui build
@@ -200,6 +222,8 @@ git diff --check
 - 1200 个 transcript blocks 的 view-model projection 只返回可视窗口附近 blocks，`renderedBlockCount < 80`。
 - ShellApp 不再对完整历史 `view.blocks.map(ProductBlock)`；只 mount virtual window 中的 `MeasuredTranscriptBlock`。
 - 可见 block 高度在首次 mount 后写入 cache，后续同宽度/同内容复用 measured height。
+- 真滚轮现在走 SGR mouse tracking + transcript reducer；不再依赖终端原生 scrollback 或 ↑/↓ 伪 wheel。
+- 测量/geometry 稳定值不会重复触发 shell rerender，降低长 transcript 下 Ink nested update 风险。
 - 不新增 provider 调用，不增加模型 token，不新增后台扫描，不改变 session 文件结构。
 
 ## 已知问题
@@ -207,6 +231,7 @@ git diff --check
 - 当前是 Linghun 自研 block-level virtualization，不是 CCB row-level / renderer-level `VirtualMessageList` 完全等价。
 - 标准 Ink 仍没有 CCB 自定义 `ScrollBox` 的 imperative scroll clamp、fast-scroll coverage span、pending delta subscription 等能力；Linghun 用 existing viewport + estimated height + measured visible cache 保守闭环。
 - 首次进入未测量过的长 Markdown 或宽度变化场景时，height estimate 可能与真实 Yoga height 有轻微误差；可见块测量回写后会修正。
+- 本轮修复已覆盖真实 SGR wheel 输入，但未重新实现 CCB 的 wheel acceleration / pending delta drain；滚动速度仍按 Linghun `wheelStep` / reducer 语义执行。
 - Tool grouping 目前按 Linghun 主屏摘要文本分类，覆盖 Read/Grep/Glob/SearchExtraTools/ExecuteExtraTool/AgentControl/StartAgent/RunWorkflow/RunVerification 的常见主屏输出；未知第三方工具仍保持原样显示，不强行吞并。
 - 本阶段未执行真实 full smoke，不声明 Beta PASS / smoke-ready / open-source-ready。
 

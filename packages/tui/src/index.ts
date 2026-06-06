@@ -1531,6 +1531,34 @@ async function runPlainTui(
   return 0;
 }
 
+function isSameTranscriptScrollState(
+  previous: TuiContext["transcriptScrollState"],
+  next: TuiContext["transcriptScrollState"],
+): boolean {
+  return (
+    previous?.scrollOffset === next?.scrollOffset &&
+    previous?.stickToBottom === next?.stickToBottom &&
+    previous?.hasOverflow === next?.hasOverflow &&
+    previous?.viewportHeight === next?.viewportHeight &&
+    previous?.contentHeight === next?.contentHeight &&
+    previous?.wheelStep === next?.wheelStep
+  );
+}
+
+function isSameTranscriptViewportGeometry(
+  previous: TuiContext["transcriptViewportGeometry"],
+  next: TuiContext["transcriptViewportGeometry"],
+): boolean {
+  return (
+    previous?.x === next?.x &&
+    previous?.y === next?.y &&
+    previous?.width === next?.width &&
+    previous?.height === next?.height &&
+    previous?.contentHeight === next?.contentHeight &&
+    previous?.topOffset === next?.topOffset
+  );
+}
+
 async function runInkShell(
   input: Readable,
   output: Writable,
@@ -1746,7 +1774,8 @@ async function runInkShell(
       }
       // ─── Main transcript scroll ─────────────────────────────────────────────
       if (event.type === "transcript-scroll") {
-        context.transcriptScrollState =
+        const previous = context.transcriptScrollState;
+        const next =
           "action" in event
             ? reduceTranscriptScroll(context.transcriptScrollState, {
                 type: "scroll",
@@ -1756,18 +1785,25 @@ async function runInkShell(
                 type: "scroll",
                 delta: event.delta,
               });
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        if (!isSameTranscriptScrollState(previous, next)) {
+          context.transcriptScrollState = next;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
         return;
       }
       if (event.type === "transcript-scroll-measure") {
-        context.transcriptScrollState = reduceTranscriptScroll(context.transcriptScrollState, {
+        const previous = context.transcriptScrollState;
+        const next = reduceTranscriptScroll(context.transcriptScrollState, {
           type: "measure",
           viewportHeight: event.viewportHeight,
           contentHeight: event.contentHeight,
         });
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        if (!isSameTranscriptScrollState(previous, next)) {
+          context.transcriptScrollState = next;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
         return;
       }
       if (event.type === "transcript-block-measure") {
@@ -1791,9 +1827,11 @@ async function runInkShell(
         return;
       }
       if (event.type === "transcript-viewport-geometry") {
-        context.transcriptViewportGeometry = event.geometry;
-        shell?.rerender();
-        await shell?.waitUntilRenderFlush();
+        if (!isSameTranscriptViewportGeometry(context.transcriptViewportGeometry, event.geometry)) {
+          context.transcriptViewportGeometry = event.geometry;
+          shell?.rerender();
+          await shell?.waitUntilRenderFlush();
+        }
         return;
       }
       if (event.type === "transcript-mouse") return;

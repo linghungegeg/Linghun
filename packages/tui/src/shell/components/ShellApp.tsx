@@ -166,10 +166,14 @@ function TaskLayout({
           scroll={view.transcriptScroll}
           virtualRange={view.transcriptVirtualRange}
           onMeasure={(measurement) => {
-            void controller.onInput({ type: "transcript-scroll-measure", ...measurement });
+            queueMicrotask(() => {
+              void controller.onInput({ type: "transcript-scroll-measure", ...measurement });
+            });
           }}
           onGeometry={(geometry) => {
-            void controller.onInput({ type: "transcript-viewport-geometry", geometry });
+            queueMicrotask(() => {
+              void controller.onInput({ type: "transcript-viewport-geometry", geometry });
+            });
           }}
         >
           {/* C4：transcript 块区间距由 ProductBlock 自身的 marginBottom 统一负责，

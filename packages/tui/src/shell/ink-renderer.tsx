@@ -7,8 +7,8 @@ import type { ShellController, ShellRenderOptions } from "./types.js";
 
 const ENABLE_MODIFY_OTHER_KEYS = "\x1B[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS = "\x1B[>4m";
-export const ENABLE_SGR_MOUSE = "\x1B[?1002h\x1B[?1006h";
-export const DISABLE_SGR_MOUSE = "\x1B[?1002l\x1B[?1006l";
+export const ENABLE_SGR_MOUSE = "\x1B[?1000h\x1B[?1002h\x1B[?1006h";
+export const DISABLE_SGR_MOUSE = "\x1B[?1006l\x1B[?1002l\x1B[?1000l";
 
 export type InkShellInstance = {
   rerender: () => void;
@@ -41,10 +41,10 @@ export function renderInkShell(
   const enableModifyOtherKeys = capability.keyboardProtocols.includes("modifyOtherKeys");
   const enableKittyKeyboard =
     capability.kittyKeyboard || capability.keyboardProtocols.includes("csi-u");
-  // Phase 7.10: the ordinary main screen must leave selection/copy and
-  // scrollback to the terminal. App-owned SGR mouse tracking is reserved for
-  // future explicit transcript/detail views, not enabled by default.
-  const enableMouseTracking = false;
+  // Phase 7.18 repair: transcript virtualization uses an app-owned clipped
+  // viewport, so real wheel events must enter the transcript scroll reducer.
+  // Alternate screen stays disabled; selection/copy is still not reintroduced.
+  const enableMouseTracking = true;
   const useAlternateScreen = false;
   let instance: ReturnType<typeof render>;
 

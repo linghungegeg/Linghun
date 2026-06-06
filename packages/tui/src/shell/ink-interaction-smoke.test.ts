@@ -92,6 +92,14 @@ function baseTaskView(): ShellViewModel {
       detailsText: "Index status\n- status: ready",
     },
     transcriptScroll: { scrollOffset: 0, stickToBottom: true, hasOverflow: true },
+    transcriptViewportGeometry: {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 20,
+      contentHeight: 40,
+      topOffset: 20,
+    },
   };
 }
 
@@ -119,6 +127,16 @@ async function renderWithEvents(getViewModel: () => ShellViewModel): Promise<{
   });
   await shell.waitUntilRenderFlush();
   return { input, output, events, shell };
+}
+
+async function writeInput(
+  input: ReturnType<typeof createTtyInput>,
+  shell: ReturnType<typeof renderInkShell>,
+  value: string,
+): Promise<void> {
+  input.write(value);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await shell.waitUntilRenderFlush();
 }
 
 describe("Ink TTY interaction smoke", () => {
@@ -272,6 +290,37 @@ describe("Ink TTY interaction smoke", () => {
     shell.unmount();
   });
 
+  it("routes SGR wheel only when the pointer is inside the transcript viewport", async () => {
+    const view = {
+      ...baseTaskView(),
+      commandPanel: undefined,
+      transcriptViewportGeometry: {
+        x: 0,
+        y: 2,
+        width: 80,
+        height: 8,
+        contentHeight: 40,
+        topOffset: 20,
+      },
+    };
+    const { input, events, shell } = await renderWithEvents(() => view);
+
+    await writeInput(input, shell, "\x1b[<64;10;5M");
+    await writeInput(input, shell, "\x1b[<65;10;5M");
+    await writeInput(input, shell, "\x1b[<65;10;20M");
+
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelUp" });
+    expect(events).toContainEqual({ type: "transcript-scroll", action: "wheelDown" });
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "transcript-scroll" && "action" in event && event.action === "wheelDown",
+      ),
+    ).toHaveLength(1);
+
+    shell.unmount();
+  });
+
   it("renders selected background row details only when expanded", async () => {
     let view = {
       ...baseTaskView(),
@@ -375,61 +424,19 @@ describe("Ink TTY interaction smoke", () => {
       blocks: [],
       taskSuggestions: undefined,
     };
-    const { input, events, shell } = await renderWithEvents(() => view);
 
-    for (const ch of "plain") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
+    async function expectSubmit(values: string[], expected: string): Promise<void> {
+      const { input, events, shell } = await renderWithEvents(() => view);
+      for (const value of values) {
+        await writeInput(input, shell, value);
+      }
+      expect(events).toContainEqual({ type: "submit", text: expected });
+      shell.unmount();
     }
-    input.write("\r");
-    await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({ type: "submit", text: "plain" });
 
-    events.length = 0;
-    for (const ch of "foo\\") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\r");
-    await shell.waitUntilRenderFlush();
-    for (const ch of "bar") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\r");
-    await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({ type: "submit", text: "foo\nbar" });
-
-    events.length = 0;
-    for (const ch of "baz") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\x0a");
-    await shell.waitUntilRenderFlush();
-    for (const ch of "qux") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\r");
-    await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({ type: "submit", text: "baz\nqux" });
-
-    events.length = 0;
-    for (const ch of "csi") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\x1b[13;2u");
-    await shell.waitUntilRenderFlush();
-    for (const ch of "enter") {
-      input.write(ch);
-      await shell.waitUntilRenderFlush();
-    }
-    input.write("\r");
-    await shell.waitUntilRenderFlush();
-    expect(events).toContainEqual({ type: "submit", text: "csi\nenter" });
-
-    shell.unmount();
+    await expectSubmit([..."plain", "\r"], "plain");
+    await expectSubmit([..."foo\\", "\r", ..."bar", "\r"], "foo\nbar");
+    await expectSubmit([..."baz", "\x0a", ..."qux", "\r"], "baz\nqux");
+    await expectSubmit([..."csi", "\x1b[13;2u", ..."enter", "\r"], "csi\nenter");
   });
 });
