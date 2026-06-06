@@ -118,6 +118,18 @@ function isAbsoluteDisplayPath(path: string): boolean {
 
 export function sanitizeDisplayPaths(text: string, projectPath?: string): string {
   let output = text;
+  const protectedSegments: string[] = [];
+  const protectSegment = (match: string): string => {
+    const token = `__LINGHUN_DISPLAY_PATH_PROTECTED_${protectedSegments.length}__`;
+    protectedSegments.push(match);
+    return token;
+  };
+
+  output = output
+    .replace(/\bhttps?:\/\/[^\r\n\s"'<>{}]+/giu, protectSegment)
+    .replace(/\bendpointPath=\/[^\r\n\s"'<>{}]+/giu, protectSegment)
+    .replace(/\bendpoint\s+path\s+\/[^\r\n\s"'<>{}]+/giu, protectSegment);
+
   if (projectPath) {
     const normalizedProject = createFlexiblePathPattern(projectPath);
     output = output.replace(new RegExp(`${normalizedProject}[^\r\n\\s"'<>{}]*`, "giu"), (match) =>
@@ -135,6 +147,9 @@ export function sanitizeDisplayPaths(text: string, projectPath?: string): string
     /(^|[\s([{:=,])((?:\/[^\r\n\s"'<>{}/]+){2,})/gu,
     (_match, prefix: string, path: string) => `${prefix}${formatDisplayPath(path, projectPath)}`,
   );
+  protectedSegments.forEach((segment, index) => {
+    output = output.replaceAll(`__LINGHUN_DISPLAY_PATH_PROTECTED_${index}__`, segment);
+  });
   return output;
 }
 

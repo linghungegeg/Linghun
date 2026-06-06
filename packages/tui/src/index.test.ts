@@ -23443,10 +23443,11 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     const output = new MemoryOutput();
     await handleSlashCommand("/details", context, output);
 
-    expect(output.text).toContain("最近一次输出（完整正文）");
+    expect(output.text).toContain("## 最近输出（完整正文）");
     expect(output.text).toMatch(/Model route doctor|模型路由诊断/u);
     expect(output.text).toContain("provider.env merge");
     expect(output.text).toContain("endpointPath=/v1/messages");
+    expect(output.text).not.toContain("endpointPath=[local-path]/messages");
     expect(output.text).toContain("providers: openai-compatible");
   });
 
@@ -23462,6 +23463,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     const out1 = new MemoryOutput();
     await handleSlashCommand("/details", context, out1);
     expect(out1.text).toContain("endpointPath=/v1/messages");
+    expect(out1.text).not.toContain("endpointPath=[local-path]/messages");
     // 关键不变量：/details 没把"上一次 /details 的总览"写进 lastFullOutput
     expect(context.lastFullOutput).toBe(original);
 
@@ -23469,6 +23471,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     await handleSlashCommand("/details", context, out2);
     // 连续 /details 仍然展开同一条原始正文，没出现套娃（不会出现"最近一次输出"两次嵌套）。
     expect(out2.text).toContain("endpointPath=/v1/messages");
+    expect(out2.text).not.toContain("endpointPath=[local-path]/messages");
     expect(out2.text).not.toContain("Linghun details\n- evidence:" + "\nLinghun details");
     expect(context.lastFullOutput).toBe(original);
   });
@@ -23549,6 +23552,7 @@ describe("P0-A /details full output + P0-B control-plane intercept", () => {
     expect(output.text).toContain("Provider request failed");
     expect(output.text).toContain("ECONNRESET while streaming");
     expect(output.text).toContain("endpointPath=/v1/messages");
+    expect(output.text).not.toContain("endpointPath=[local-path]/messages");
   });
 });
 
@@ -24089,6 +24093,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     expect(output.text).toContain("Model route doctor");
     expect(output.text).toContain("provider.env merge");
     expect(output.text).toContain("endpoint path /v1/messages");
+    expect(output.text).not.toContain("endpoint path [local-path]/messages");
     expect(output.text).toContain("openai-compatible");
   });
 
@@ -24107,6 +24112,7 @@ describe("natural control routing — ordinary prompts must reach gateway.stream
     const out2 = new MemoryOutput();
     await handleSlashCommand("/details", context, out2);
     expect(out2.text).toContain("endpointPath=/v1/messages");
+    expect(out2.text).not.toContain("endpointPath=[local-path]/messages");
     expect(context.lastFullOutput).toBe(original);
   });
 });
@@ -24173,7 +24179,7 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
     const detailsOut = new MemoryOutput();
     await handleSlashCommand("/details", context, detailsOut);
 
-    expect(detailsOut.text).toContain("最近一次输出（完整正文）：");
+    expect(detailsOut.text).toContain("## 最近输出（完整正文）");
     expect(detailsOut.text).toContain("关键证据 X");
     expect(detailsOut.text).toContain("关键证据 Y");
     // /details 默认分支当然也不能把 lastFullOutput 改写

@@ -155,6 +155,41 @@ describe("startup-runtime", () => {
       expect(sanitized).toContain("rel=.linghun/logs/evidence.log");
       expect(sanitized).not.toContain(".linghun[local-path]");
     });
+
+    it("Phase 7.16.2: keeps provider endpoint paths and URL paths visible", () => {
+      const raw = [
+        "endpointPath=/v1/messages",
+        "endpoint path /v1/messages",
+        "endpointPath=/chat/completions",
+        "endpoint path /responses",
+        "baseUrl=https://relay.example.com/v1",
+      ].join(" ");
+
+      const sanitized = sanitizeDisplayPaths(raw);
+
+      expect(sanitized).toContain("endpointPath=/v1/messages");
+      expect(sanitized).toContain("endpoint path /v1/messages");
+      expect(sanitized).toContain("endpointPath=/chat/completions");
+      expect(sanitized).toContain("endpoint path /responses");
+      expect(sanitized).toContain("https://relay.example.com/v1");
+      expect(sanitized).not.toContain("http[local-path]/v1");
+      expect(sanitized).not.toContain("endpointPath=[local-path]/messages");
+      expect(sanitized).not.toContain("endpoint path [local-path]/messages");
+    });
+
+    it("Phase 7.16.2: still redacts Windows and Unix local absolute paths", () => {
+      const raw =
+        "win=C:\\Users\\Admin\\secret.txt unix=/home/admin/project/secret.txt mac=/Users/admin/project/secret.txt";
+
+      const sanitized = sanitizeDisplayPaths(raw);
+
+      expect(sanitized).not.toContain("C:\\Users\\Admin\\secret.txt");
+      expect(sanitized).not.toContain("/home/admin/project/secret.txt");
+      expect(sanitized).not.toContain("/Users/admin/project/secret.txt");
+      expect(sanitized).toMatch(/win=\[(?:user-home|local-path)\]\/.*secret\.txt/u);
+      expect(sanitized).toContain("unix=[local-path]/secret.txt");
+      expect(sanitized).toContain("mac=[local-path]/secret.txt");
+    });
   });
 
   describe("sanitizeUserFacingError", () => {
