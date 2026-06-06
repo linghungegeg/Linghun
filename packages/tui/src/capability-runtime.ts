@@ -11,7 +11,7 @@ import {
   createEvidenceRecord,
   rememberEvidence,
 } from "./evidence-runtime.js";
-import { truncateDisplay, writeLine } from "./startup-runtime.js";
+import { sanitizeDiagnosticText, truncateDisplay, writeLine } from "./startup-runtime.js";
 import type { TuiContext } from "./tui-context-runtime.js";
 import { decidePermission } from "./tui-permission-runtime.js";
 
@@ -296,7 +296,9 @@ export function formatCapabilityDoctor(language: Language = "zh-CN", context?: T
   for (const item of listCapabilities(context)) {
     const connection = resolveCapabilityConnection(item, context);
     lines.push(
-      `- ${item.id}: ${connection.status}; transport=${item.transport}; auth=${item.auth}; permission=${item.permission}; ${connection.summary}`,
+      sanitizeCapabilityDisplayText(
+        `- ${item.id}: ${connection.status}; transport=${item.transport}; auth=${item.auth}; permission=${item.permission}; ${connection.summary}`,
+      ),
     );
   }
   return lines.join("\n");
@@ -319,7 +321,7 @@ export function formatCapabilityList(language: Language = "zh-CN", context?: Tui
   const isEn = language === "en-US";
   const lines = [isEn ? "Capabilities" : "Capabilities"];
   for (const item of listCapabilities(context)) {
-    lines.push(`- ${item.title}: ${item.description}`);
+    lines.push(sanitizeCapabilityDisplayText(`- ${item.title}: ${item.description}`));
   }
   lines.push(isEn ? "Details: /capabilities doctor" : "详情：/capabilities doctor");
   return lines.join("\n");
@@ -331,7 +333,7 @@ export function formatCapabilityResult(
 ): { summary: string[]; detailsText: string } {
   const isEn = language === "en-US";
   const summary = [
-    result.summary,
+    sanitizeCapabilityDisplayText(result.summary),
     result.artifactRef
       ? isEn
         ? "Artifact ref recorded; use details to inspect it."
@@ -360,7 +362,7 @@ export function formatCapabilityResult(
     result.previewRef ? `previewRef: ${result.previewRef}` : undefined,
     result.details,
   ].filter((line): line is string => Boolean(line));
-  return { summary, detailsText: details.join("\n") };
+  return { summary, detailsText: sanitizeCapabilityDisplayText(details.join("\n")) };
 }
 
 export async function handleCapabilitiesCommand(
@@ -376,9 +378,10 @@ export async function handleCapabilitiesCommand(
       summary: formatCapabilityList(context.language, context).split("\n"),
       actions: ["/capabilities doctor", "/capabilities run <capabilityId> <json>"],
       detailsText: listCapabilities(context)
-        .map(
-          (item) =>
+        .map((item) =>
+          sanitizeCapabilityDisplayText(
             `${item.id}\n- app: ${item.appId}\n- transport: ${item.transport}\n- auth: ${item.auth}\n- permission: ${item.permission}\n- risk: ${item.riskLevel}`,
+          ),
         )
         .join("\n\n"),
     });
@@ -424,6 +427,15 @@ export async function handleCapabilitiesCommand(
     output,
     "用法：/capabilities list | /capabilities doctor | /capabilities run <capabilityId> <json>",
   );
+}
+
+function sanitizeCapabilityDisplayText(text: string): string {
+  return sanitizeDiagnosticText(text)
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      "$1$2***",
+    )
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }
 
 function parseCapabilityInput(

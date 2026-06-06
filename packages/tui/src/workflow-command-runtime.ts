@@ -1451,6 +1451,7 @@ function workflowStepStatusFromNestedJob(job: DurableJobState): WorkflowStepTerm
   if (resultStatus === "failed" || resultStatus === "timeout" || resultStatus === "overbudget") {
     return "failed";
   }
+  if (resultStatus === "partial") return "partial";
   if (resultStatus === "cancelled") return "cancelled";
   if (resultStatus === "blocked" || resultStatus === "stale") return "blocked";
   return "completed";

@@ -606,9 +606,7 @@ describe("model-loop-runtime", () => {
 
     it("flags only model-declared structured completion / PASS claims", () => {
       const matches = detectHighRiskClaims(
-        withClaims("已完成，测试通过，PASS。", [
-          { kind: "completion_pass", phrase: "测试通过" },
-        ]),
+        withClaims("已完成，测试通过，PASS。", [{ kind: "completion_pass", phrase: "测试通过" }]),
       );
       expect(matches).toEqual([{ kind: "completion_pass", phrase: "测试通过" }]);
     });
@@ -619,9 +617,7 @@ describe("model-loop-runtime", () => {
           { kind: "external_current_fact", phrase: "今天 OpenAI 最新模型" },
         ]),
       );
-      expect(matches).toEqual([
-        { kind: "external_current_fact", phrase: "今天 OpenAI 最新模型" },
-      ]);
+      expect(matches).toEqual([{ kind: "external_current_fact", phrase: "今天 OpenAI 最新模型" }]);
     });
 
     it("does NOT flag local current branch / dir as external_current_fact", () => {
@@ -704,9 +700,7 @@ describe("model-loop-runtime", () => {
         }),
       ];
       const verdict = evaluateFinalAnswerClaims(
-        withClaims("已完成，测试通过，PASS。", [
-          { kind: "completion_pass", phrase: "测试通过" },
-        ]),
+        withClaims("已完成，测试通过，PASS。", [{ kind: "completion_pass", phrase: "测试通过" }]),
         evidence,
       );
       expect(verdict.status).toBe("needs_disclaimer");
@@ -1126,6 +1120,68 @@ describe("model-loop-runtime", () => {
       );
       expect(denied.status).toBe("needs_disclaimer");
       expect(denied.unsupportedKinds).toContain("action_executed");
+    });
+
+    it("requires terminal agent evidence for agent status claims", () => {
+      const running = evaluateFinalAnswerClaims(
+        withClaims("Agent 已完成。", [{ kind: "agent_status_claim", phrase: "Agent 已完成" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "agent-execution",
+            summary: "Agent running: background task started",
+            supportsClaims: ["agent_execution", "action_executed"],
+          }),
+        ],
+      );
+      expect(running.status).toBe("needs_disclaimer");
+      expect(running.unsupportedKinds).toContain("agent_status_claim");
+
+      const terminal = evaluateFinalAnswerClaims(
+        withClaims("Agent 已完成。", [{ kind: "agent_status_claim", phrase: "Agent 已完成" }]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "agent-execution",
+            summary: "Agent idle: completed task",
+            supportsClaims: ["agent_execution", "action_executed", "agent_terminal_status"],
+          }),
+        ],
+      );
+      expect(terminal.status).toBe("passed");
+    });
+
+    it("requires terminal workflow evidence for workflow status claims", () => {
+      const running = evaluateFinalAnswerClaims(
+        withClaims("Workflow 已完成。", [
+          { kind: "workflow_status_claim", phrase: "Workflow 已完成" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "workflow-execution",
+            summary: "Workflow started in background",
+            supportsClaims: ["workflow_execution", "action_executed"],
+          }),
+        ],
+      );
+      expect(running.status).toBe("needs_disclaimer");
+      expect(running.unsupportedKinds).toContain("workflow_status_claim");
+
+      const terminal = evaluateFinalAnswerClaims(
+        withClaims("Workflow 已完成。", [
+          { kind: "workflow_status_claim", phrase: "Workflow 已完成" },
+        ]),
+        [
+          makeEvidence({
+            kind: "command_output",
+            source: "workflow-execution",
+            summary: "Workflow completed",
+            supportsClaims: ["workflow_execution", "action_executed", "workflow_terminal_status"],
+          }),
+        ],
+      );
+      expect(terminal.status).toBe("passed");
     });
   });
 
@@ -1581,9 +1637,7 @@ describe("model-loop-runtime", () => {
     it("结构化声称没有遗漏 + classificationRequired + 未给分类 → needs_disclaimer", async () => {
       const { evaluateArchitectureAndCompletenessClaims } = await import("./model-loop-runtime.js");
       const v = evaluateArchitectureAndCompletenessClaims(
-        withClaims("所有任务完整完成，没有遗漏。", [
-          { kind: "completeness", phrase: "没有遗漏" },
-        ]),
+        withClaims("所有任务完整完成，没有遗漏。", [{ kind: "completeness", phrase: "没有遗漏" }]),
         { hasActiveCard: false },
         {
           classificationRequired: true,

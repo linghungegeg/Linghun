@@ -1008,7 +1008,7 @@ function evidenceSupportsWorkflowStatusClaim(record: EvidenceRecord): boolean {
   if (record.supportsClaims.includes("tool_failure")) return false;
   return (
     record.supportsClaims.includes("workflow_execution") &&
-    record.supportsClaims.includes("action_executed")
+    record.supportsClaims.includes("workflow_terminal_status")
   );
 }
 
@@ -1017,7 +1017,7 @@ function evidenceSupportsAgentStatusClaim(record: EvidenceRecord): boolean {
   if (record.supportsClaims.includes("tool_failure")) return false;
   return (
     record.supportsClaims.includes("agent_execution") &&
-    record.supportsClaims.includes("action_executed")
+    record.supportsClaims.includes("agent_terminal_status")
   );
 }
 
@@ -1309,21 +1309,21 @@ export function buildDowngradedFinalAnswer(
 ): string {
   void originalText;
   const missing =
-    Array.from(new Set(verdict.missingEvidenceKinds)).join(', ') || 'matching evidence';
-  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(', ') || 'claim';
-  return language === 'en-US'
+    Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
+  const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
+  return language === "en-US"
     ? [
-        'I cannot provide a verified final claim from the current evidence.',
+        "I cannot provide a verified final claim from the current evidence.",
         `Missing evidence: ${missing}.`,
         `Blocked claim types: ${kinds}.`,
-        'I can continue by gathering evidence with tools, or give a limited answer that avoids verified-completion claims.',
-      ].join('\n')
+        "I can continue by gathering evidence with tools, or give a limited answer that avoids verified-completion claims.",
+      ].join("\n")
     : [
-        '当前证据不足，不能给出已验证的最终结论。',
+        "当前证据不足，不能给出已验证的最终结论。",
         `缺少证据：${missing}。`,
         `被拦截的声明类型：${kinds}。`,
-        '我可以继续调用工具补齐证据，或只给出不包含已验证完成声明的有限结论。',
-      ].join('\n');
+        "我可以继续调用工具补齐证据，或只给出不包含已验证完成声明的有限结论。",
+      ].join("\n");
 }
 
 // ---------------------------------------------------------------------------

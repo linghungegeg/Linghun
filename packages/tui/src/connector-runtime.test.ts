@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { defaultConfig, getSessionRootDir } from "@linghun/config";
 import { SessionStore } from "@linghun/core";
@@ -283,6 +283,71 @@ describe("Connector Runtime Local HTTP", () => {
     }
   });
 
+  it("rejects manifests outside the current project", async () => {
+    const context = await createConnectorTestContext("default");
+    const outsidePath = join(tmpdir(), `linghun-outside-connector-${Date.now()}.json`);
+    await writeFile(
+      outsidePath,
+      JSON.stringify({
+        appId: "outside.demo",
+        name: "Outside Demo",
+        version: "0.1.0",
+        transport: "http",
+        baseUrl: "http://127.0.0.1:9",
+        auth: { type: "none" },
+        capabilities: connectorCapabilities(),
+      }),
+      "utf8",
+    );
+
+    const result = await connectAppConnector(outsidePath, context);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.error).toContain("inside the current project");
+  });
+
+  it("rejects Local HTTP baseUrl userinfo before connecting", async () => {
+    const context = await createConnectorTestContext("default");
+    const manifestPath = await writeManifest(context.projectPath, "http://user:pass@127.0.0.1:9");
+
+    const result = await connectAppConnector(manifestPath, context);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.error).toContain("username/password");
+    expect(result.ok ? "" : result.error).not.toContain("user:pass");
+  });
+
+  it("sanitizes app display metadata and keeps doctor summary out of details", async () => {
+    const context = await createConnectorTestContext("default");
+    const output = new MemoryOutput();
+    const server = await startMockConnector();
+    try {
+      const manifestPath = await writeManifest(context.projectPath, server.baseUrl, {
+        name: "Demo sk-app-secret Authorization: Bearer raw-token",
+      });
+
+      await handleAppsCommand(["connect", manifestPath], context, output);
+      await handleAppsCommand(["list"], context, output);
+      await handleAppsCommand(["doctor"], context, output);
+
+      expect(output.text).toContain("sk-***");
+      expect(output.text).toContain("Authorization: ***");
+      expect(output.text).not.toContain("sk-app-secret");
+      expect(output.text).not.toContain("raw-token");
+      expect(formatAppConnectorList(context)).not.toContain("sk-app-secret");
+      expect(formatAppConnectorDoctor(context)).not.toContain("raw-token");
+
+      context.isInkSession = true;
+      await handleAppsCommand(["doctor"], context, new MemoryOutput());
+      const summary = context.commandPanelState?.summary?.join("\n") ?? "";
+      expect(summary).not.toContain("Details");
+      expect(summary).not.toContain("appId=demo.drawing");
+    } finally {
+      await server.close();
+      disconnectAppConnector("demo.drawing", context);
+    }
+  });
+
   it("keeps HTTP capabilities isolated by project context", async () => {
     const contextA = await createConnectorTestContext("default");
     const contextB = await createConnectorTestContext("default");
@@ -432,7 +497,7 @@ async function writeManifest(
   };
   const path = join(projectPath, `connector-${Math.random().toString(16).slice(2)}.json`);
   await writeFile(path, JSON.stringify(manifest), "utf8");
-  return path;
+  return resolve(path);
 }
 
 function connectorCapabilities() {

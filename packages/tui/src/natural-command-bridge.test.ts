@@ -227,6 +227,17 @@ describe("Phase 15 Natural Intent Router", () => {
     }
   });
 
+  it.each(["停止所有智能体", "stop all agents"])(
+    "keeps natural agent cancellation behind Start Gate for %s",
+    (phrase) => {
+      const intent = routeNaturalIntent(phrase);
+
+      expect(intent.capability?.id).toBe("agents");
+      expect(intent.command).toBe("/agents cancel all");
+      expect(intent.action).toBe("start_gate");
+    },
+  );
+
   it.each([
     ["怎么搜索代码里的 TODO", "grep"],
     ["how do I read a file", "read"],

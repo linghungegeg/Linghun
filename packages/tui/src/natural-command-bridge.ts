@@ -1371,6 +1371,18 @@ export function routeNaturalIntent(
       normalized,
     );
   }
+  if (!explicit && capability.id === "agents" && isAgentCancelIntent(normalized)) {
+    return createIntent(
+      "start_gate",
+      capability,
+      Math.min(1, Math.max(0.85, topScore / 5)),
+      "agent cancel requires confirmation",
+      candidates,
+      language,
+      "execute",
+      normalized,
+    );
+  }
   if (!explicit && !isNaturalControlPlaneIntent(capability.id, normalized, inquiry)) {
     return {
       action: "model",
@@ -2141,6 +2153,10 @@ function isStatusLike(text: string, capability: CommandCapability): boolean {
     capability.readonly ||
     /状态|status|当前|enabled|开了吗|命中|hit rate|list|有哪些|what model/u.test(text)
   );
+}
+
+function isAgentCancelIntent(text: string): boolean {
+  return /停止|停掉|取消|interrupt|cancel|stop|kill/u.test(text);
 }
 
 function createNaturalEquivalentCommand(capability: CommandCapability, normalized: string): string {

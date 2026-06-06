@@ -7031,6 +7031,7 @@ describe("Phase 06 TUI slash commands", () => {
     ["timeout", "timeout", undefined],
     ["blocked", "blocked", undefined],
     ["result-blocked", "completed", "blocked"],
+    ["result-partial", "completed", "partial"],
     ["result-overbudget", "completed", "overbudget"],
     ["result-stale", "completed", "stale"],
   ] as const)(
@@ -7066,10 +7067,16 @@ describe("Phase 06 TUI slash commands", () => {
         resultStatus === "overbudget"
       ) {
         expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("failed");
+      } else if (resultStatus === "partial") {
+        expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("partial");
       } else {
         expect(stepStatus, context.workflows.activeRun?.steps[0]?.summary).toBe("blocked");
       }
-      expect(context.workflows.activeRun?.result).not.toBe("partial");
+      if (resultStatus === "partial") {
+        expect(context.workflows.activeRun?.result).toBe("partial");
+      } else {
+        expect(context.workflows.activeRun?.result).not.toBe("partial");
+      }
       const transcript = (await store.resume(session.id)).transcript;
       expect(
         transcript.some(
@@ -7079,12 +7086,23 @@ describe("Phase 06 TUI slash commands", () => {
             String(event.summary).includes(job.id),
         ),
       ).toBe(true);
-      expect(
-        transcript.some((event) => event.type === "workflow_end" && event.status !== "completed"),
-      ).toBe(true);
-      expect(
-        context.failureLearning.records.some((record) => record.relatedTarget === "workflow"),
-      ).toBe(true);
+      if (resultStatus === "partial") {
+        expect(
+          transcript.some(
+            (event) =>
+              event.type === "workflow_end" &&
+              event.status === "completed" &&
+              String(event.summary).includes("result remains PARTIAL"),
+          ),
+        ).toBe(true);
+      } else {
+        expect(
+          transcript.some((event) => event.type === "workflow_end" && event.status !== "completed"),
+        ).toBe(true);
+        expect(
+          context.failureLearning.records.some((record) => record.relatedTarget === "workflow"),
+        ).toBe(true);
+      }
       expect(output.text).not.toContain("PASS：");
     },
   );

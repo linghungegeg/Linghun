@@ -9,6 +9,8 @@ import {
   executeCapability,
   findCapability,
   formatCapabilityDoctor,
+  formatCapabilityList,
+  formatCapabilityResult,
   listCapabilities,
   registerCapability,
   resolveCapabilityConnection,
@@ -172,6 +174,50 @@ describe("Capability Runtime MVP", () => {
     expect(resolveCapabilityConnection(definition).status).toBe("needs_configuration");
     expect(formatCapabilityDoctor("zh-CN")).toContain("test.http.pending");
     expect(formatCapabilityDoctor("zh-CN")).toContain("needs_configuration");
+  });
+
+  it("sanitizes capability metadata in list, doctor, and result details", () => {
+    registerCapability({
+      id: "test.secret.read",
+      appId: "test.secret",
+      title: "Secret sk-title-token",
+      description: "Authorization: Bearer raw-display-token api_key=raw-key",
+      category: "test",
+      intents: ["secret"],
+      keywords: ["secret"],
+      transport: "mock",
+      auth: "none",
+      permission: "read",
+      riskLevel: "low",
+      inputSchema: { type: "object" },
+      outputSchema: { type: "object" },
+      supportsRollback: false,
+      supportsPreview: false,
+    });
+
+    const list = formatCapabilityList("zh-CN");
+    const doctor = formatCapabilityDoctor("zh-CN");
+    const formatted = formatCapabilityResult({
+      ok: true,
+      capabilityId: "test.secret.read",
+      summary: "summary sk-result-secret",
+      details: "details token=raw-token Authorization: Bearer raw-auth",
+      metadata: {
+        transport: "mock",
+        auth: "none",
+        permission: "read",
+        riskLevel: "low",
+        connectionStatus: "connected",
+      },
+    });
+
+    const visible = [list, doctor, ...formatted.summary, formatted.detailsText].join("\n");
+    expect(visible).toContain("sk-***");
+    expect(visible).toContain("Authorization: ***");
+    expect(visible).not.toContain("sk-title-token");
+    expect(visible).not.toContain("raw-display-token");
+    expect(visible).not.toContain("raw-result-secret");
+    expect(visible).not.toContain("raw-auth");
   });
 });
 

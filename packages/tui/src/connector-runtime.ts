@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
 import {
@@ -100,7 +100,9 @@ export async function connectAppConnector(
   manifestPath: string,
   context: TuiContext,
 ): Promise<AppConnectorConnectionResult> {
-  const manifest = await readConnectorManifest(manifestPath);
+  const localManifestPath = resolveProjectLocalManifestPath(manifestPath, context);
+  if (!localManifestPath.ok) return localManifestPath;
+  const manifest = await readConnectorManifest(localManifestPath.value);
   if (!manifest.ok) return manifest;
   const auth = resolveConnectorAuth(manifest.value.auth, context);
   if (auth.type !== "none" && !auth.value) {
@@ -130,7 +132,7 @@ export async function connectAppConnector(
     appId: manifest.value.appId,
     name: manifest.value.name,
     version: manifest.value.version,
-    manifestPath,
+    manifestPath: localManifestPath.value,
     transport: manifest.value.transport,
     baseUrl: manifest.value.baseUrl,
     auth: { type: auth.type, source: auth.source },
@@ -183,13 +185,13 @@ export function formatAppConnectorDoctor(
     "Apps doctor",
     ...apps.map(
       (app) =>
-        `- ${app.name}: ${app.status}; transport=${app.transport}; auth=${app.auth.type}; authSource=${app.auth.source}; capabilities=${app.capabilityIds.length}`,
+        `- ${sanitizeConnectorText(app.name)}: ${app.status}; transport=${app.transport}; auth=${app.auth.type}; authSource=${app.auth.source}; capabilities=${app.capabilityIds.length}`,
     ),
     "",
     "Details",
     ...apps.map(
       (app) =>
-        `- appId=${app.appId}; baseUrl=${redactBaseUrl(app.baseUrl)}; capabilities=${app.capabilityIds.join(", ")}`,
+        `- appId=${sanitizeConnectorText(app.appId)}; baseUrl=${redactBaseUrl(app.baseUrl)}; capabilities=${sanitizeConnectorText(app.capabilityIds.join(", "))}`,
     ),
   ].join("\n");
 }
@@ -215,7 +217,9 @@ export async function handleAppsCommand(
     showCommandPanel(context, output, {
       title: "/apps doctor",
       tone: "neutral",
-      summary: body.split("\n").slice(0, 6),
+      summary: body
+        .split("\n")
+        .filter((line) => line && line !== "Details" && !line.startsWith("- appId=")),
       actions: ["/apps list", "/apps disconnect <appId>"],
       detailsText: body,
     });
@@ -234,7 +238,7 @@ export async function handleAppsCommand(
     }
     writeLine(
       output,
-      `已连接 ${result.state.name}；注册 capability ${result.capabilityCount} 个；写入/外部 app 操作会走权限确认。`,
+      `已连接 ${sanitizeConnectorText(result.state.name)}；注册 capability ${result.capabilityCount} 个；写入/外部 app 操作会走权限确认。`,
     );
     return;
   }
@@ -252,6 +256,19 @@ export async function handleAppsCommand(
     output,
     "用法：/apps list | /apps connect <manifestPath> | /apps doctor | /apps disconnect <appId>",
   );
+}
+
+function resolveProjectLocalManifestPath(
+  manifestPath: string,
+  context: TuiContext,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const projectRoot = resolve(context.projectPath);
+  const resolved = resolve(projectRoot, manifestPath);
+  const rel = relative(projectRoot, resolved);
+  if (rel === "" || rel.startsWith("..") || resolve(rel) === rel) {
+    return { ok: false, error: "connector manifest must be inside the current project." };
+  }
+  return { ok: true, value: resolved };
 }
 
 async function readConnectorManifest(
@@ -480,6 +497,9 @@ function buildConnectorUrl(
   if (url.protocol !== "http:") {
     return { ok: false, error: "Phase 7.15 Local HTTP connector only supports http:// baseUrl." };
   }
+  if (url.username || url.password) {
+    return { ok: false, error: "baseUrl must not contain username/password." };
+  }
   if (!isLocalHost(url.hostname)) {
     return { ok: false, error: "Local HTTP connector requires localhost/127.0.0.1/[::1]." };
   }
@@ -642,7 +662,7 @@ function buildConnectorExecutionResult(
 }
 
 function formatAppSummary(app: AppConnectorState): string {
-  return `- ${app.name}: ${app.status}; transport=${app.transport}; capabilities=${app.capabilityIds.length}`;
+  return `- ${sanitizeConnectorText(app.name)}: ${app.status}; transport=${app.transport}; capabilities=${app.capabilityIds.length}`;
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {

@@ -1573,21 +1573,28 @@ async function finishControlToolFailure(
 function controlToolEvidenceSpec(
   toolName: string,
   isError: boolean,
+  data?: unknown,
 ): { source: string; supportsClaims: string[] } {
   if (toolName === START_AGENT_TOOL_NAME) {
+    const terminal = isTerminalAgentToolResult(data);
     return {
       source: "agent-execution",
       supportsClaims: isError
         ? ["tool_failure", "agent_execution"]
-        : ["agent_execution", "action_executed"],
+        : ["agent_execution", "action_executed", ...(terminal ? ["agent_terminal_status"] : [])],
     };
   }
   if (toolName === RUN_WORKFLOW_TOOL_NAME) {
+    const terminal = isTerminalWorkflowToolResult(data);
     return {
       source: "workflow-execution",
       supportsClaims: isError
         ? ["tool_failure", "workflow_execution"]
-        : ["workflow_execution", "action_executed"],
+        : [
+            "workflow_execution",
+            "action_executed",
+            ...(terminal ? ["workflow_terminal_status"] : []),
+          ],
     };
   }
   if (toolName === INDEX_OPERATION_TOOL_NAME) {
@@ -1620,6 +1627,18 @@ function controlToolEvidenceSpec(
   };
 }
 
+function isTerminalAgentToolResult(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const status = (data as { status?: unknown }).status;
+  return status === "completed" || status === "idle";
+}
+
+function isTerminalWorkflowToolResult(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const status = (data as { status?: unknown }).status;
+  return status === "completed";
+}
+
 async function finishControlToolResult(
   toolCall: ModelToolCall,
   context: TuiContext,
@@ -1629,7 +1648,7 @@ async function finishControlToolResult(
   isError: boolean,
   data?: unknown,
 ) {
-  const spec = controlToolEvidenceSpec(toolCall.name, isError);
+  const spec = controlToolEvidenceSpec(toolCall.name, isError, data);
   const evidence = createEvidenceRecord(
     "command_output",
     `${toolCall.name}: ${truncateDisplay(text, 160)}`,
