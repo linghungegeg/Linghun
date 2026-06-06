@@ -391,6 +391,27 @@ async function expectBudgetArtifact(project: string, transcript: string): Promis
   return artifact;
 }
 
+function parseTranscriptJsonl(transcript: string): Array<{
+  type?: string;
+  toolName?: string;
+  content?: unknown;
+  output?: ToolOutput;
+}> {
+  return transcript
+    .trim()
+    .split(/\n/u)
+    .filter(Boolean)
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          type?: string;
+          toolName?: string;
+          content?: unknown;
+          output?: ToolOutput;
+        },
+    );
+}
+
 function mockOpenAiRawToolProtocolThenFinal(
   rawText: string,
   finalText = "已改用普通正文回答。",
@@ -12811,6 +12832,115 @@ describe("Phase 06 TUI slash commands", () => {
     expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
   });
 
+  it.each([
+    {
+      toolName: "Grep",
+      input: { pattern: "GREP_DUP_MATCH", path: ".", limit: 200 },
+      sentinel: "GREP_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
+      budgeted: true,
+      setup: async (project: string, sentinel: string) => {
+        const lines = Array.from({ length: 200 }, (_, index) => {
+          const tail = index === 199 ? sentinel : `line-${index}`;
+          return `GREP_DUP_MATCH_${index}_${"g".repeat(320)}_${tail}`;
+        });
+        await writeFile(join(project, "grep-large.txt"), lines.join("\n"), "utf8");
+      },
+    },
+    {
+      toolName: "Glob",
+      input: { pattern: "*.txt", path: "glob-large", limit: 400 },
+      sentinel: "GLOB_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
+      budgeted: true,
+      setup: async (project: string, sentinel: string) => {
+        const root = join(project, "glob-large");
+        await mkdir(root, { recursive: true });
+        for (let index = 0; index < 300; index += 1) {
+          const name =
+            index === 299
+              ? `glob-${index}-${sentinel}.txt`
+              : `glob-${index}-${"p".repeat(120)}.txt`;
+          await writeFile(join(root, name), "x", "utf8");
+        }
+      },
+    },
+    {
+      toolName: "Bash",
+      input: {
+        command:
+          "node -e \"for (let i = 0; i < 220; i++) console.log('BASH_DUP_MATCH_' + i + '_' + 'b'.repeat(320)); console.log(['BASH','DUP','END','SHOULD','ONLY','BE','IN','ARTIFACT'].join('_'))\"",
+      },
+      sentinel: "BASH_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT",
+      budgeted: false,
+      setup: async () => undefined,
+    },
+  ])(
+    "keeps $toolName large output out of duplicated tool_call_end/tool_result transcript payloads",
+    async ({ toolName, input, sentinel, budgeted, setup }) => {
+      const project = await mkdtemp(join(tmpdir(), "linghun-tui-tool-budget-"));
+      await mkdir(join(project, ".linghun"), { recursive: true });
+      await setup(project, sentinel);
+      await writeFile(
+        join(project, ".linghun", "settings.json"),
+        JSON.stringify({
+          defaultModel: `tool-budget-${toolName.toLowerCase()}-model`,
+          permission: { ...defaultConfig.permission, defaultMode: "full-access" },
+          providers: {
+            deepseek: { model: "different-model" },
+            "openai-compatible": {
+              baseUrl: "https://example.test/v1",
+              apiKey: "sk-test",
+              model: `tool-budget-${toolName.toLowerCase()}-model`,
+            },
+          },
+        }),
+        "utf8",
+      );
+      const requests = mockOpenAiToolFetch(toolName, input, `${toolName} 完成。`);
+      const output = new MemoryOutput();
+
+      await runTui({
+        projectPath: project,
+        stdin: Readable.from([`运行 ${toolName} 大输出检查\n/exit\n`]),
+        stdout: output,
+        stderr: new MemoryOutput(),
+      });
+
+      expect(requests).toHaveLength(2);
+      const providerToolPayload = toolMessageContents(requests[1]);
+      expect(providerToolPayload.join("\n")).not.toContain(sentinel);
+      const session = (
+        await new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project }).list()
+      ).at(0);
+      const transcript = await readFile(session?.transcriptPath ?? "", "utf8");
+      expect(transcript).toContain('"type":"tool_result"');
+      expect(transcript).toContain('"type":"tool_call_end"');
+      const events = parseTranscriptJsonl(transcript);
+      const toolResultEvent = events.find(
+        (event) => event.type === "tool_result" && event.toolName === toolName,
+      );
+      const toolEndEvent = events.find((event) => event.type === "tool_call_end");
+
+      expect(JSON.stringify(toolResultEvent?.content)).not.toContain(sentinel);
+      expect(JSON.stringify(toolEndEvent?.output)).not.toContain(sentinel);
+      expect(JSON.stringify(toolEndEvent?.output)).not.toContain("<persisted-tool-result>");
+      expect((toolEndEvent?.output as ToolOutput | undefined)?.data).toBeUndefined();
+      expect((toolEndEvent?.output as ToolOutput | undefined)?.details).toBeUndefined();
+      if (budgeted) {
+        expect(transcript).toContain("<persisted-tool-result>");
+        expect(transcript).toContain("tool_result_budget_persisted");
+        expect(JSON.stringify(toolResultEvent?.content)).toContain("<persisted-tool-result>");
+        const artifact = await expectBudgetArtifact(project, transcript);
+        expect(artifact).toContain(sentinel);
+      } else {
+        const ref = (toolResultEvent?.content as { fullOutputPath?: string } | undefined)
+          ?.fullOutputPath;
+        expect(ref).toBeTruthy();
+        await expect(readFile(ref ?? "", "utf8")).resolves.toContain(sentinel);
+      }
+    },
+    15_000,
+  );
+
   it("keeps StartAgent child Read large output budgeted without duplicating tool_call_end and tool_result", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-agent-tool-observation-"));
     await mkdir(join(project, ".linghun"), { recursive: true });
@@ -24245,7 +24375,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(JSON.stringify(transcript)).toContain("hints=source-first");
   });
 
-  it("Policy: high-risk completion and historical failure produce verification/failure hints", async () => {
+  it("Policy: high-risk completion and historical failure stay in system_event without heavy main hints", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-risk-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -24268,7 +24398,8 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("策略：高风险结论需要验证后再说通过。");
     expect(notifications).not.toContain("策略：参考历史失败，只作为风险提示。");
     const transcript = (await store.resume(session.id)).transcript;
     const raw = JSON.stringify(transcript);
@@ -24334,13 +24465,14 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：高风险结论需要验证后再说通过。");
-    expect(notifications).toContain("策略：已有后台 agent/job 占用，先避免重复启动。");
+    expect(notifications).not.toContain("策略：高风险结论需要验证后再说通过。");
+    expect(notifications).not.toContain("策略：已有后台 agent/job 占用，先避免重复启动。");
+    expect(notifications).not.toContain("PolicyDecision");
     const transcript = (await store.resume(session.id)).transcript;
     expect(JSON.stringify(transcript)).toContain("verification=full");
   });
 
-  it("Policy: edit request emits permission risk, Windows-safe, and focused verification hints", async () => {
+  it("Policy: edit request keeps permission, Windows-safe, and verification hints out of the main screen", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-policy-77-hints-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
     const session = await store.create({ model: "deepseek-v4-flash" });
@@ -24355,9 +24487,9 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain("策略：检测到权限风险，写入前会请求确认。");
+    expect(notifications).not.toContain("策略：检测到权限风险，写入前会请求确认。");
     expect(notifications).not.toContain("策略：Windows 环境，优先使用兼容命令。");
-    expect(notifications).toContain("策略：建议先做 focused verification。");
+    expect(notifications).not.toContain("策略：建议先做 focused verification。");
     expect(notifications).not.toContain("PolicyDecision");
     expect(notifications).not.toContain("MetaSchedulerForModel");
     const transcript = (await store.resume(session.id)).transcript;
@@ -24383,13 +24515,13 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     );
 
     const notifications = context.notifications?.map((item) => item.text).join("\n") ?? "";
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: permission risk detected; write actions will ask before running.",
     );
     expect(notifications).not.toContain(
       "Strategy: Windows environment; using compatible commands first.",
     );
-    expect(notifications).toContain(
+    expect(notifications).not.toContain(
       "Strategy: focused verification is recommended before completion.",
     );
     expect(notifications).not.toContain("policy_decision");
@@ -24413,7 +24545,7 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
 
     const notifications = context.notifications?.map((item) => item.text) ?? [];
     expect(notifications.length).toBeLessThanOrEqual(2);
-    expect(notifications.join("\n")).toContain("策略：先核对源码事实，再给结论。");
+    expect(notifications.join("\n")).not.toContain("策略：先核对源码事实，再给结论。");
     expect(notifications.join("\n")).not.toContain("PolicyDecision");
     expect(notifications.join("\n")).not.toContain("UserStateDecision");
     const transcript = (await store.resume(session.id)).transcript;
@@ -24618,16 +24750,19 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const id = "assistant-stream-test-1";
     output.beginAssistantStream(id);
     output.appendAssistantDelta("已完成所有测试，PASS。\n半截");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]?.fullText).toContain("已完成");
-    expect(ctx.lastFullOutput).toContain("已完成");
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant?.text).toContain("已完成");
+    expect(ctx.lastFullOutput).toBeUndefined();
 
     output.discardAssistantBlock(id);
-    expect(blocks[0]?.fullText).toBe("");
-    expect(blocks[0]?.summary).toBe("");
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant).toBeUndefined();
     expect(ctx.lastFullOutput).toBeUndefined();
 
     output.appendAssistantDelta("我没有跑测试，无法确认。\n");
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant?.text).toBe("我没有跑测试，无法确认。\n");
+    output.endAssistantStream();
     expect(blocks[0]?.fullText).toBe("我没有跑测试，无法确认。\n");
     expect(ctx.lastFullOutput).toBe("我没有跑测试，无法确认。\n");
   });
@@ -24639,8 +24774,9 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     const id = "assistant-stream-test-2";
     output.beginAssistantStream(id);
     output.appendAssistantDelta("测试已通过，可以发布。\n半截");
-    expect(blocks[0]?.fullText).toContain("测试已通过");
-    expect(ctx.lastFullOutput).toContain("测试已通过");
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant?.text).toContain("测试已通过");
+    expect(ctx.lastFullOutput).toBeUndefined();
 
     const downgraded =
       "当前证据不足，不能给出已验证的最终结论。\n缺少证据：test/build/typecheck/diff-check/smoke。";
@@ -24659,6 +24795,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     output.appendAssistantDelta("已完成，所有 build/test 已通过。\n半截");
     output.discardAssistantBlock(id);
     output.appendAssistantDelta("我没有调用任何工具，无法确认 build/test 状态。\n");
+    output.endAssistantStream();
 
     expect(blocks).toHaveLength(1);
     const fullText = blocks[0]?.fullText ?? "";
@@ -24713,26 +24850,25 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(downgrade?.length).toBeGreaterThanOrEqual(2);
   });
 
-  // Phase 6.5 — 长上下文/长输出 Streaming Memory Guard 测试
-  it("Phase 6.5: appendAssistantDelta 触发流式 compaction（block.fullText 超阈值时写 artifact）", async () => {
+  // Phase 7.17 — streaming preview 不写 block；长 final assistant block 在 commit 后仍可 compact。
+  it("Phase 7.17: appendAssistantDelta 不触发历史 block，final commit 后可 compact", async () => {
     const fs = await import("node:fs/promises");
     const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
     const blocks: ProductBlockViewModel[] = [];
     const id = "streaming-burst-test";
-    const output = createShellBlockOutputForTest(makeFakeContext(), blocks);
+    const ctx = makeFakeContext();
+    const output = createShellBlockOutputForTest(ctx, blocks);
     output.beginAssistantStream(id);
 
-    // 模拟 35K 字符的大量输出（超 MAX_STREAMING_FULL_TEXT_CHARS=32_000）
     const largeText = `${"x".repeat(35_000)}\n`;
     output.appendAssistantDelta(largeText);
 
-    // block 应存在且 fullText 保持为完整文本（compaction 异步触发）
-    const block = blocks.find((b) => b.id === id);
-    expect(block).toBeTruthy();
-    if (!block) throw new Error("missing streaming block");
-    expect(block.fullText?.length).toBe(35_001);
+    expect(blocks.find((b) => b.id === id)).toBeUndefined();
+    expect(ctx.streamingAssistant?.text.length).toBe(35_001);
 
-    // compaction 完成后，block.fullText 应为 bounded preview
+    output.endAssistantStream();
+    const block = blocks.find((b) => b.id === id);
+    expect(block?.fullText?.length).toBe(35_001);
     await output.compactOutputMemory();
     const compacted = blocks.find((b) => b.id === id);
     expect(compacted).toBeTruthy();
@@ -24741,7 +24877,7 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     expect(compacted.fullText).toMatch(/compacted-tui-block-output|persisted-tui-block-output/);
   });
 
-  it("Phase 6.5: summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {
+  it("Phase 7.17: final assistant summary 首行超过 MAX_STREAMING_SUMMARY_CHARS 时被截断", async () => {
     const { createShellBlockOutputForTest } = await import("../src/tui-output-surface.js");
     const blocks: ProductBlockViewModel[] = [];
     const id = "long-summary-test";
@@ -24751,6 +24887,8 @@ describe("D.13V-A item 1: streaming residue cleanup on retry/downgrade", () => {
     // 写一个超长单行（600 chars，超 MAX_STREAMING_SUMMARY_CHARS=500）
     const longLine = `${"L".repeat(600)}\n`;
     output.appendAssistantDelta(longLine);
+    expect(blocks).toHaveLength(0);
+    output.endAssistantStream();
 
     const block = blocks.find((b) => b.id === id);
     expect(block).toBeTruthy();

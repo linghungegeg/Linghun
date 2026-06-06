@@ -366,6 +366,8 @@ export type ShellViewModel = {
   status: StatusTrayViewModel;
   composer: ComposerViewModel;
   blocks: ProductBlockViewModel[];
+  /** Live assistant preview rendered outside the historical ProductBlock list. */
+  streamingAssistantText?: string;
   ctrlOExpand?: CtrlOExpandView;
   limitations: string[];
   /** Compact task-mode footer. Present in task/pending viewMode; absent in home. */

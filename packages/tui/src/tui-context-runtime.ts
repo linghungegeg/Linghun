@@ -394,6 +394,12 @@ export type TuiContext = {
    * 单条主显，绝不进 transcript（与 ShellBlockOutput 隔离）。
    */
   notifications?: import("./shell/types.js").NotificationView[];
+  /**
+   * Phase 7.17 — live assistant streaming preview. This is a visible-only
+   * state owned by ShellBlockOutput and rendered outside historical blocks;
+   * it is not transcript input and is cleared before final block commit.
+   */
+  streamingAssistant?: { id: string; text: string };
   /** Phase 7.9 — app-owned transcript mouse selection state for alt-screen TUI. */
   transcriptSelectionState?: TranscriptSelectionState;
   /** Phase 7.9 — measured transcript viewport geometry used by mouse selection. */

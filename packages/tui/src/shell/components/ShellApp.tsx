@@ -15,6 +15,7 @@ import { CommandPanel } from "./CommandPanel.js";
 import { Composer } from "./Composer.js";
 import { ConfigPanel } from "./ConfigPanel.js";
 import { HelpPanel } from "./HelpPanel.js";
+import { StreamingMarkdown } from "./MessageMarkdown.js";
 import { NotificationStack } from "./NotificationStack.js";
 import { ProductBlock } from "./ProductBlock.js";
 import { SessionsPanel } from "./SessionsPanel.js";
@@ -172,6 +173,16 @@ function TaskLayout({
             {view.blocks.map((block) => (
               <ProductBlock key={block.id} block={block} theme={theme} width={view.width - 4} />
             ))}
+          </Box>
+        ) : null}
+
+        {view.streamingAssistantText ? (
+          <Box marginTop={view.blocks.length > 0 ? 1 : 0}>
+            <StreamingMarkdown
+              text={view.streamingAssistantText}
+              theme={theme}
+              wrapWidth={Math.max(8, view.width - 4)}
+            />
           </Box>
         ) : null}
 

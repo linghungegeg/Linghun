@@ -318,6 +318,7 @@ export function createShellViewModel(
   // Phase 7.10: ordinary main-screen transcript no longer renders app-owned
   // blue selection. Native terminal selection/copy is the default surface.
   const fittedBlocks = blocks.map((block) => fitBlockToWidth(block, width));
+  const streamingAssistantText = selectStreamingAssistantText(context, fittedBlocks);
 
   const viewMode = effectiveViewMode;
 
@@ -481,6 +482,7 @@ export function createShellViewModel(
         : undefined,
     },
     blocks: fittedBlocks,
+    streamingAssistantText,
     ctrlOExpand: ctrlOExpandState?.active
       ? { active: true, ...(ctrlOExpandState.blockId ? { blockId: ctrlOExpandState.blockId } : {}) }
       : { active: false },
@@ -522,6 +524,22 @@ export function createShellViewModel(
       return live.length > 0 ? [...live] : undefined;
     })(),
   };
+}
+
+function selectStreamingAssistantText(
+  context: TuiContext,
+  blocks: ProductBlockViewModel[],
+): string | undefined {
+  const streaming = (context as { streamingAssistant?: { id: string; text: string } })
+    .streamingAssistant;
+  if (!streaming) return undefined;
+  const text = streaming.text.trimEnd();
+  if (!text) return undefined;
+  const matchingFinalBlock = blocks.find(
+    (block) => block.id === streaming.id && block.messageKind === "assistant_text",
+  );
+  if ((matchingFinalBlock?.fullText ?? "").trimEnd() === text) return undefined;
+  return streaming.text;
 }
 
 /**

@@ -454,16 +454,40 @@ export function createToolEndEvent(id: string, output: ToolOutput): TranscriptEv
 }
 
 function summarizeToolEndOutputForTranscript(output: ToolOutput): ToolOutput {
-  const text = output.summary || output.preview || output.text || "tool call completed";
+  const text = compactToolEndTextForTranscript(
+    output.summary || output.preview || output.text || "tool call completed",
+    output.fullOutputPath,
+  );
   return {
     text,
-    summary: output.summary,
-    preview: output.preview,
+    summary:
+      output.summary === undefined
+        ? undefined
+        : compactToolEndTextForTranscript(output.summary, output.fullOutputPath),
+    preview:
+      output.preview === undefined
+        ? undefined
+        : compactToolEndTextForTranscript(output.preview, output.fullOutputPath),
     truncated: output.truncated,
     fullOutputPath: output.fullOutputPath,
     evidenceId: output.evidenceId,
     changedFiles: output.changedFiles,
   };
+}
+
+function compactToolEndTextForTranscript(text: string, fullOutputPath?: string): string {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (
+    text.length <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS &&
+    bytes <= TRANSCRIPT_TOOL_OUTPUT_MAX_CHARS
+  ) {
+    return text;
+  }
+  return [
+    text.slice(0, TRANSCRIPT_TOOL_OUTPUT_PREVIEW_CHARS),
+    "",
+    `<transcript-tool-end-output-truncated originalChars=${text.length} originalBytes=${bytes}${fullOutputPath ? ` fullOutputPath=${fullOutputPath}` : ""}>`,
+  ].join("\n");
 }
 
 export function compactToolOutputForTranscript(output: ToolOutput): ToolOutput {

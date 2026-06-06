@@ -147,7 +147,13 @@ describe("Capability Runtime MVP", () => {
     const raw = JSON.stringify(transcript);
     expect(raw).toContain("tool_result_budget_persisted");
     expect(raw).toContain("artifact=");
+    expect(raw).toMatch(/sha256=[a-f0-9]{64}/u);
     expect(raw).not.toContain("x".repeat(30_000));
+    const artifactPath = context.evidence.find((item) =>
+      item.supportsClaims.includes("tool_result_budget"),
+    )?.fullOutputPath;
+    expect(artifactPath).toBeTruthy();
+    await expect(readFile(artifactPath ?? "", "utf8")).resolves.toContain("mock canvas export");
   });
 
   it("resolves transports on demand and reports unsupported connectors in doctor", () => {

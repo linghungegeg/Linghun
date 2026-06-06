@@ -532,6 +532,32 @@ describe("read/write roundtrip", () => {
     expect(fullContent).toContain("test message");
   });
 
+  it("keeps large job payload in fullOutput while status/report/log views stay bounded", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
+    const job = createMinimalJob({
+      projectPath: tempDir,
+      logPath: join(tempDir, "job.log"),
+      reportPath: join(tempDir, "report.md"),
+      fullOutputPath: join(tempDir, "full-output.log"),
+    });
+    const sentinel = "JOB_DUP_END_SHOULD_ONLY_BE_IN_FULL_OUTPUT";
+    for (let index = 0; index < 45; index += 1) {
+      const tail = index === 0 ? sentinel : `line-${index}`;
+      await appendJobLog(job, `job payload ${index} ${"j".repeat(1200)} ${tail}`);
+    }
+
+    const status = formatJobStatus(job);
+    const report = formatJobReport(job);
+    const logs = await formatJobLogs(job);
+    const fullOutput = await readFile(job.fullOutputPath, "utf8");
+
+    expect(status).not.toContain(sentinel);
+    expect(report).not.toContain(sentinel);
+    expect(logs).not.toContain(sentinel);
+    expect(logs).toContain("- tail: bounded last 40/40 lines");
+    expect(fullOutput).toContain(sentinel);
+  });
+
   it("writeDurableJobReport creates report file", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "job-rt-test-"));
     const job = createMinimalJob({

@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import { createContext, useContext } from "react";
 import type React from "react";
+import { memo, useRef } from "react";
 import { wrapText } from "../text-utils.js";
 import type { ShellTheme } from "../theme.js";
 
@@ -315,4 +316,104 @@ export function MessageMarkdown({
   if (inCode) flushCode();
 
   return <Box flexDirection="column">{rendered}</Box>;
+}
+
+const MemoMessageMarkdown = memo(MessageMarkdown);
+
+export type StreamingMarkdownState = {
+  stablePrefix: string;
+};
+
+export function splitStreamingMarkdownForRender(
+  text: string,
+  state: StreamingMarkdownState,
+): { stablePrefix: string; unstableSuffix: string; parsedSuffixInput: string } {
+  const normalized = text.replace(/\r/g, "");
+  if (!normalized.startsWith(state.stablePrefix)) {
+    state.stablePrefix = "";
+  }
+  const boundary = state.stablePrefix.length;
+  const suffixInput = normalized.slice(boundary);
+  const advance = findStablePrefixAdvance(suffixInput);
+  if (advance > 0) {
+    state.stablePrefix = normalized.slice(0, boundary + advance);
+  }
+  return {
+    stablePrefix: state.stablePrefix,
+    unstableSuffix: normalized.slice(state.stablePrefix.length),
+    parsedSuffixInput: suffixInput,
+  };
+}
+
+function findStablePrefixAdvance(text: string): number {
+  let offset = 0;
+  let boundary = 0;
+  let inCode = false;
+  for (const match of text.matchAll(/[^\n]*(?:\n|$)/gu)) {
+    const segment = match[0];
+    if (!segment) break;
+    if (!segment.endsWith("\n")) break;
+    const line = segment.slice(0, -1);
+    const fence = /^\s*```\s*[A-Za-z0-9_+-]*\s*$/u.test(line);
+    if (fence) {
+      inCode = !inCode;
+      offset += segment.length;
+      if (!inCode) boundary = offset;
+      continue;
+    }
+    offset += segment.length;
+    if (!inCode && line.trim().length === 0) boundary = offset;
+  }
+  if (!inCode && text.endsWith("\n") && hasBalancedInlineMarkdown(text)) return text.length;
+  return boundary;
+}
+
+function hasBalancedInlineMarkdown(text: string): boolean {
+  let inInlineCode = false;
+  let boldOpen = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "`") {
+      inInlineCode = !inInlineCode;
+      continue;
+    }
+    if (!inInlineCode && char === "*" && text[index + 1] === "*") {
+      boldOpen = !boldOpen;
+      index += 1;
+    }
+  }
+  return !inInlineCode && !boldOpen;
+}
+
+export function StreamingMarkdown({
+  text,
+  theme,
+  dim = false,
+  tone = "default",
+  wrapWidth,
+}: MessageMarkdownProps): React.ReactNode {
+  const stateRef = useRef<StreamingMarkdownState>({ stablePrefix: "" });
+  const { stablePrefix, unstableSuffix } = splitStreamingMarkdownForRender(text, stateRef.current);
+  return (
+    <Box flexDirection="column">
+      {stablePrefix ? (
+        <MemoMessageMarkdown
+          text={stablePrefix}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+          wrapWidth={wrapWidth}
+        />
+      ) : null}
+      {unstableSuffix ? (
+        <MessageMarkdown
+          text={unstableSuffix}
+          theme={theme}
+          dim={dim}
+          tone={tone}
+          wrapWidth={wrapWidth}
+        />
+      ) : null}
+    </Box>
+  );
 }

@@ -13,8 +13,6 @@ const MAX_LAST_FULL_OUTPUT_CHARS = 12_000;
 const MAX_BLOCK_FULL_TEXT_CHARS = 12_000;
 const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
 const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
-// Phase 6.5: 流式累积超此阈值时立即触发 artifact 落盘，避免 block.fullText 在主内存无限膨胀。
-const MAX_STREAMING_FULL_TEXT_CHARS = 32_000;
 // Phase 6.5: summary 首行超长时截断，避免单行渲染撑爆 TUI。
 const MAX_STREAMING_SUMMARY_CHARS = 500;
 
@@ -86,9 +84,9 @@ export class ShellBlockOutput extends Writable {
   }
 
   /**
-   * 注册一条 assistant streaming block id，但 **不立即** 推入 blocks 数组。
-   * 真正的 keep:true block 在第一次 appendAssistantDelta 收到非空文本时才创建
-   * （ensureAssistantBlock）。这样在 thinking-only / 空响应 / 慢请求等场景下，
+   * 注册一条 assistant streaming preview id，但 **不立即** 推入 blocks 数组。
+   * 真正的 keep:true block 只在 end/replace 时提交。这样在
+   * thinking-only / 空响应 / 慢请求等场景下，
    * 主屏不会出现一条空 block 渲染成"没有可见输出。"占位行 —— 等待态由
    * requestActivityPhase / mapRequestActivityToView 驱动的 ActivityIndicator
    * 单独负责（"正在思考…" / "Thinking…"）。
@@ -97,7 +95,14 @@ export class ShellBlockOutput extends Writable {
    * 独立 block，互不覆盖。
    */
   beginAssistantStream(id: string): void {
+    if (this.assistantBlockId && this.assistantBlockId !== id) {
+      this.clearStreamingPreview(this.assistantBlockId);
+    }
     this.assistantBlockId = id;
+    this.assistantStreamText = "";
+    this.assistantPreviewText = "";
+    this.context.streamingAssistant = undefined;
+    this.setStreamingPreview(id, "");
     // 不再 push 初始空 block；只通知一次 rerender（让 ActivityIndicator 起来）。
     this.onWrite();
   }
@@ -117,8 +122,7 @@ export class ShellBlockOutput extends Writable {
 
   /**
    * 将一段 assistant_text_delta 追加到当前 streaming preview。
-   * - 第一次出现完整换行文本时才创建 keep:true preview block
-   * - 流式期间只展示完整行，不把半行/逐字 delta 写入正式 assistant block
+   * - 流式期间只更新 visible-only streaming state，不写历史 ProductBlock
    * - 正式 assistant block 在 end/replace 时一次性接管，避免重复显示
    * - 找不到 active id 时静默 fallback 到 _write，保持非交互回退
    */
@@ -130,16 +134,8 @@ export class ShellBlockOutput extends Writable {
       return;
     }
     this.assistantStreamText += text;
-    const visiblePreview = completeLinePrefix(this.assistantStreamText);
-    if (!visiblePreview) return;
-    this.assistantPreviewText = visiblePreview;
-    this.commitAssistantBlock(id, visiblePreview);
-    trimOutputBlocks(this.blocks);
-    // Phase 6.5: 流式累积超过阈值时立即触发 artifact 落盘，不等流结束。
-    // 这里仍按完整累计文本判断；可见 preview 只显示完整行。
-    if (this.assistantStreamText.length >= MAX_STREAMING_FULL_TEXT_CHARS) {
-      void this.compactOutputMemory();
-    }
+    this.assistantPreviewText = this.assistantStreamText;
+    this.setStreamingPreview(id, this.assistantPreviewText);
     this.onWrite();
   }
 
@@ -151,8 +147,11 @@ export class ShellBlockOutput extends Writable {
   endAssistantStream(): void {
     const id = this.assistantBlockId;
     if (id) {
-      const visibleText = this.assistantPreviewText;
-      this.commitAssistantBlock(id, visibleText);
+      const visibleText = this.assistantStreamText || this.assistantPreviewText;
+      if (visibleText) {
+        this.commitAssistantBlock(id, visibleText);
+      }
+      this.clearStreamingPreview(id);
     }
     this.assistantBlockId = undefined;
     this.assistantStreamText = "";
@@ -171,6 +170,7 @@ export class ShellBlockOutput extends Writable {
       this.assistantStreamText = "";
       this.assistantPreviewText = "";
     }
+    this.clearStreamingPreview(id);
     const block = this.blocks.find((b) => b.id === id);
     if (block) {
       block.fullText = "";
@@ -192,6 +192,7 @@ export class ShellBlockOutput extends Writable {
       this.assistantStreamText = "";
       this.assistantPreviewText = "";
     }
+    this.clearStreamingPreview(id);
     this.commitAssistantBlock(id, text);
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
@@ -320,6 +321,22 @@ export class ShellBlockOutput extends Writable {
     return block;
   }
 
+  private setStreamingPreview(id: string, text: string): void {
+    if (!text) {
+      if (this.context.streamingAssistant?.id === id) {
+        this.context.streamingAssistant = undefined;
+      }
+      return;
+    }
+    this.context.streamingAssistant = { id, text };
+  }
+
+  private clearStreamingPreview(id: string): void {
+    if (this.context.streamingAssistant?.id === id) {
+      this.context.streamingAssistant = undefined;
+    }
+  }
+
   private async compactOutputMemoryOnce(): Promise<void> {
     trimOutputBlocks(this.blocks);
     try {
@@ -330,12 +347,6 @@ export class ShellBlockOutput extends Writable {
       compactLastFullOutputInMemory(this.context, error);
     }
   }
-}
-
-function completeLinePrefix(text: string): string {
-  const lastNewline = text.lastIndexOf("\n");
-  if (lastNewline < 0) return "";
-  return text.slice(0, lastNewline + 1);
 }
 
 function trimOutputBlocks(blocks: ProductBlockViewModel[]): void {

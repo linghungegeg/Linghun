@@ -18,6 +18,7 @@ import {
   formatComposerRenderLines,
   handleComposerInput,
 } from "./components/Composer.js";
+import { splitStreamingMarkdownForRender } from "./components/MessageMarkdown.js";
 import { renderInkShell, shouldUseInkShell } from "./ink-renderer.js";
 import { renderPlainShell } from "./plain-renderer.js";
 import { detectTerminalCapability, resetTerminalCapabilityCache } from "./terminal-capability.js";
@@ -4077,20 +4078,20 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
 // continueModelAfterToolResults 三处 gateway.stream 循环。
 describe("ShellBlockOutput — assistant streaming block", () => {
   function makeFakeContext(): TuiContext {
-    // 测试只用到 language / lastFullOutput / suppressLastFullOutputCapture 三个字段。
-    return {
+    return createContext({
       language: "zh-CN",
       projectPath: "/tmp",
       sessionId: "test-session",
       lastFullOutput: undefined,
       suppressLastFullOutputCapture: false,
-    } as unknown as TuiContext;
+    } as Partial<TuiContext>);
   }
 
-  it("appendAssistantDelta 只预览完整行，完成后 replace 由正式 block 接管", () => {
+  it("appendAssistantDelta 不创建 ProductBlock，只更新独立 streaming state", () => {
     const blocks: ProductBlockViewModel[] = [];
     let renderCount = 0;
-    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
+    const ctx = makeFakeContext();
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => {
       renderCount += 1;
     });
 
@@ -4098,9 +4099,15 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("连");
     expect(blocks.find((b) => b.id === "assistant-stream-test-1")).toBeUndefined();
     output.appendAssistantDelta("接成功\n尾");
-    expect(blocks.find((b) => b.id === "assistant-stream-test-1")?.fullText).toBe("连接成功\n");
-    output.endAssistantStream();
+    expect(blocks.find((b) => b.id === "assistant-stream-test-1")).toBeUndefined();
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-test-1",
+      text: "连接成功\n尾",
+    });
+    const streamingView = createShellViewModel(ctx, { outputBlocks: blocks, viewMode: "task" });
+    expect(streamingView.streamingAssistantText).toBe("连接成功\n尾");
     output.replaceAssistantBlockContent("assistant-stream-test-1", "连接成功\n尾部完成");
+    output.endAssistantStream();
 
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-test-1");
     expect(streamingBlock).toBeDefined();
@@ -4108,13 +4115,15 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     expect(streamingBlock?.fullText).toBe("连接成功\n尾部完成");
     expect(streamingBlock?.summary).toBe("连接成功");
     expect(blocks.filter((b) => b.id === "assistant-stream-test-1")).toHaveLength(1);
+    expect(ctx.streamingAssistant).toBeUndefined();
     expect(renderCount).toBeGreaterThanOrEqual(4);
   });
 
-  it("appendAssistantDelta 不做 16ms 合帧；只在完整行可见时触发渲染", () => {
+  it("appendAssistantDelta 每次只刷新独立 preview，不走 ProductBlock/MessageMarkdown 历史路径", () => {
     const blocks: ProductBlockViewModel[] = [];
     let renderCount = 0;
-    const output = __testCreateShellBlockOutput(makeFakeContext(), blocks, () => {
+    const ctx = makeFakeContext();
+    const output = __testCreateShellBlockOutput(ctx, blocks, () => {
       renderCount += 1;
     });
 
@@ -4122,30 +4131,37 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("A");
     output.appendAssistantDelta("B");
     expect(blocks.find((b) => b.id === "assistant-stream-complete-line")).toBeUndefined();
-    expect(renderCount).toBe(1);
+    expect(ctx.streamingAssistant?.text).toBe("AB");
+    expect(renderCount).toBe(3);
 
     output.appendAssistantDelta("\nC");
-    expect(blocks[0]?.fullText).toBe("AB\n");
-    expect(renderCount).toBe(2);
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant?.text).toBe("AB\nC");
+    expect(renderCount).toBe(4);
 
     output.endAssistantStream();
-    expect(blocks[0]?.fullText).toBe("AB\n");
-    expect(renderCount).toBe(3);
+    expect(blocks[0]?.fullText).toBe("AB\nC");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(renderCount).toBe(5);
   });
 
-  it("endAssistantStream 模拟中断时只保留已可见完整行，不补出半行", () => {
+  it("endAssistantStream 只 commit 一条正式 assistant block，并清空 streaming preview", () => {
     const ctx = makeFakeContext();
     const blocks: ProductBlockViewModel[] = [];
     const output = __testCreateShellBlockOutput(ctx, blocks);
 
     output.beginAssistantStream("assistant-stream-interrupt");
     output.appendAssistantDelta("第一行可见\n第二行半截");
+    expect(blocks).toHaveLength(0);
+    expect(ctx.streamingAssistant?.text).toBe("第一行可见\n第二行半截");
     output.endAssistantStream();
 
     const streamingBlock = blocks.find((b) => b.id === "assistant-stream-interrupt");
-    expect(streamingBlock?.fullText).toBe("第一行可见\n");
-    expect(streamingBlock?.fullText).not.toContain("第二行半截");
-    expect(ctx.lastFullOutput).toBe("第一行可见\n");
+    expect(blocks.filter((b) => b.id === "assistant-stream-interrupt")).toHaveLength(1);
+    expect(streamingBlock?.messageKind).toBe("assistant_text");
+    expect(streamingBlock?.fullText).toBe("第一行可见\n第二行半截");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(ctx.lastFullOutput).toBe("第一行可见\n第二行半截");
   });
 
   it("普通 writeLine 后再开 streaming block，writeLine 不再被 ephemeral splice 淘汰；keep streaming block 保留", () => {
@@ -4194,13 +4210,83 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.appendAssistantDelta("连");
     expect(ctx.lastFullOutput).toBeUndefined();
     output.appendAssistantDelta("接成功\n");
-    expect(ctx.lastFullOutput).toBe("连接成功\n");
+    expect(ctx.lastFullOutput).toBeUndefined();
+    expect(ctx.streamingAssistant?.text).toBe("连接成功\n");
 
     // 切换到 suppress 模式后，新的 delta 不能再覆盖 lastFullOutput。
     ctx.suppressLastFullOutputCapture = true;
     output.appendAssistantDelta("后续\n");
-    expect(ctx.lastFullOutput).toBe("连接成功\n");
+    expect(ctx.lastFullOutput).toBeUndefined();
     output.endAssistantStream();
+    expect(ctx.lastFullOutput).toBeUndefined();
+  });
+
+  it("final gate discard/replace clears old streaming preview without leaking discarded text", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-gate");
+    output.appendAssistantDelta("违规旧文本 PASS\n");
+    output.discardAssistantBlock("assistant-stream-gate");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    expect(blocks.find((b) => b.id === "assistant-stream-gate")?.fullText).toBeUndefined();
+
+    output.appendAssistantDelta("安全新文本\n");
+    expect(ctx.streamingAssistant?.text).toBe("安全新文本\n");
+    output.replaceAssistantBlockContent("assistant-stream-gate", "最终安全文本");
+    expect(ctx.streamingAssistant).toBeUndefined();
+
+    const committed = blocks.find((b) => b.id === "assistant-stream-gate");
+    expect(committed?.fullText).toBe("最终安全文本");
+    expect(JSON.stringify(blocks)).not.toContain("违规旧文本");
+  });
+
+  it("beginAssistantStream starts a fresh preview so continuation rounds do not glue together", () => {
+    const ctx = makeFakeContext();
+    const blocks: ProductBlockViewModel[] = [];
+    const output = __testCreateShellBlockOutput(ctx, blocks);
+
+    output.beginAssistantStream("assistant-stream-round-1");
+    output.appendAssistantDelta("第一轮 preview\n");
+    expect(ctx.streamingAssistant?.text).toBe("第一轮 preview\n");
+
+    output.beginAssistantStream("assistant-stream-round-2");
+    expect(ctx.streamingAssistant).toBeUndefined();
+    output.appendAssistantDelta("第二轮 preview");
+    expect(ctx.streamingAssistant).toEqual({
+      id: "assistant-stream-round-2",
+      text: "第二轮 preview",
+    });
+    expect(blocks.find((b) => b.id === "assistant-stream-round-1")).toBeUndefined();
+    expect(ctx.streamingAssistant?.text).not.toContain("第一轮");
+  });
+
+  it("view-model dedupes streaming preview when final assistant block already has same text", () => {
+    const ctx = createContext({
+      streamingAssistant: { id: "assistant-stream-dedupe", text: "完成\n" },
+    } as Partial<TuiContext>);
+    const finalBlock = createOutputBlock("完成\n", "zh-CN", "assistant-stream-dedupe");
+    finalBlock.keep = true;
+
+    const view = createShellViewModel(ctx, {
+      outputBlocks: [finalBlock],
+      viewMode: "task",
+    });
+
+    expect(view.blocks.find((b) => b.id === "assistant-stream-dedupe")).toBeDefined();
+    expect(view.streamingAssistantText).toBeUndefined();
+  });
+
+  it("ShellApp renders streaming preview as a sibling after blocks and before activity", async () => {
+    const source = await readFile(join(SRC_ROOT, "shell/components/ShellApp.tsx"), "utf8");
+    const blocksIndex = source.indexOf("view.blocks.map");
+    const previewIndex = source.indexOf("view.streamingAssistantText");
+    const activityIndex = source.indexOf("view.activity ?");
+    expect(blocksIndex).toBeGreaterThan(0);
+    expect(previewIndex).toBeGreaterThan(blocksIndex);
+    expect(activityIndex).toBeGreaterThan(previewIndex);
+    expect(source).toContain("<StreamingMarkdown");
   });
 
   // D.13M-B：beginAssistantStream 不得制造用户可见的空 block。
@@ -4233,8 +4319,8 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     output.beginAssistantStream("assistant-stream-ctrl-o");
     // 普通 assistant 多行正文直接展示，不再自动折成 Ctrl+O。
     output.appendAssistantDelta("第一行\n第二行\n第三行");
-    output.endAssistantStream();
     output.replaceAssistantBlockContent("assistant-stream-ctrl-o", "第一行\n第二行\n第三行");
+    output.endAssistantStream();
 
     const streaming = blocks.find((b) => b.id === "assistant-stream-ctrl-o");
     expect(streaming).toBeDefined();
@@ -4336,6 +4422,43 @@ describe("ShellBlockOutput — assistant streaming block", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("StreamingMarkdown stable prefix", () => {
+  it("only reparses the growing suffix after stable block boundaries", () => {
+    const state = { stablePrefix: "" };
+
+    const first = splitStreamingMarkdownForRender("第一段\n\n- 粗体 **还", state);
+    expect(first.stablePrefix).toBe("第一段\n\n");
+    expect(first.unstableSuffix).toBe("- 粗体 **还");
+    expect(first.parsedSuffixInput).toBe("第一段\n\n- 粗体 **还");
+
+    const second = splitStreamingMarkdownForRender("第一段\n\n- 粗体 **还在增长**\n`code`", state);
+    expect(second.stablePrefix).toBe("第一段\n\n");
+    expect(second.parsedSuffixInput).toBe("- 粗体 **还在增长**\n`code`");
+    expect(second.parsedSuffixInput).not.toContain("第一段");
+
+    const third = splitStreamingMarkdownForRender("第一段\n\n- 粗体 **还在增长**\n`code`\n", state);
+    expect(third.stablePrefix).toBe("第一段\n\n- 粗体 **还在增长**\n`code`\n");
+    expect(third.unstableSuffix).toBe("");
+  });
+
+  it("does not freeze newline-ended suffix while inline markdown is still open", () => {
+    const state = { stablePrefix: "" };
+
+    const first = splitStreamingMarkdownForRender("第一段\n\n**粗体还没闭合\n", state);
+    expect(first.stablePrefix).toBe("第一段\n\n");
+    expect(first.unstableSuffix).toBe("**粗体还没闭合\n");
+
+    const second = splitStreamingMarkdownForRender("第一段\n\n**粗体已经闭合**\n", state);
+    expect(second.stablePrefix).toBe("第一段\n\n**粗体已经闭合**\n");
+    expect(second.unstableSuffix).toBe("");
+
+    const codeState = { stablePrefix: "" };
+    const openCode = splitStreamingMarkdownForRender("段落\n\n`code 还没闭合\n", codeState);
+    expect(openCode.stablePrefix).toBe("段落\n\n");
+    expect(openCode.unstableSuffix).toBe("`code 还没闭合\n");
   });
 });
 

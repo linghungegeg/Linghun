@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createToolEndEvent } from "./evidence-runtime.js";
 import {
   type ToolResultBudgetState,
   applyToolResultBudgetToMessages,
@@ -280,8 +281,60 @@ describe("tool_result budget", () => {
     const tools = second.messages.filter((message) => message.role === "tool");
     expect(tools[0]?.role === "tool" ? tools[0].content : "").toBe(small);
     expect(
-      tools.slice(1).some((tool) => tool.role === "tool" && tool.content.includes("<persisted-tool-result>")),
+      tools
+        .slice(1)
+        .some((tool) => tool.role === "tool" && tool.content.includes("<persisted-tool-result>")),
     ).toBe(true);
     expect(second.records.map((record) => record.toolUseId)).not.toContain("call-small");
+  });
+
+  it("does not duplicate the same 100KB output through tool_call_end.output and tool_result.content", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-tool-budget-dup-"));
+    const toolNames = ["Read", "Grep", "Glob", "Bash", "Capability", "Agent", "Job"];
+
+    for (const toolName of toolNames) {
+      const tail = `${toolName.toUpperCase()}_DUP_END_SHOULD_ONLY_BE_IN_ARTIFACT`;
+      const large = `${toolName}_DUP_START\n${"x".repeat(100_000)}\n${tail}`;
+      const callId = `call-${toolName.toLowerCase()}`;
+      const toolEnd = createToolEndEvent(callId, {
+        text: large,
+        summary: large,
+        preview: large,
+        details: large,
+        data: { nested: large },
+        fullOutputPath: join(project, `${toolName}.log`),
+      }) as Extract<ReturnType<typeof createToolEndEvent>, { type: "tool_call_end" }>;
+      const budgeted = await applyToolResultBudgetToMessages(
+        [
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: callId, name: toolName, input: { query: toolName } }],
+          },
+          {
+            role: "tool" as const,
+            tool_call_id: callId,
+            content: JSON.stringify({ tool: toolName, content: large }),
+          },
+        ],
+        { projectPath: project, sessionId: `session-${toolName.toLowerCase()}` },
+      );
+      const toolResult = budgeted.messages.find((message) => message.role === "tool");
+
+      expect(JSON.stringify(toolEnd.output)).not.toContain(tail);
+      expect(JSON.stringify(toolEnd.output)).not.toContain("<persisted-tool-result>");
+      expect((toolEnd.output as { summary?: string }).summary).not.toContain(tail);
+      expect((toolEnd.output as { preview?: string }).preview).not.toContain(tail);
+      expect((toolEnd.output as { details?: unknown }).details).toBeUndefined();
+      expect((toolEnd.output as { data?: unknown }).data).toBeUndefined();
+      expect(toolResult?.role === "tool" ? toolResult.content : "").toContain(
+        "<persisted-tool-result>",
+      );
+      expect(toolResult?.role === "tool" ? toolResult.content : "").not.toContain(tail);
+      expect(budgeted.records).toHaveLength(1);
+      await expect(readFile(budgeted.records[0]?.artifact.path ?? "", "utf8")).resolves.toContain(
+        tail,
+      );
+    }
   });
 });

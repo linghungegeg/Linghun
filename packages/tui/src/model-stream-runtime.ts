@@ -406,10 +406,11 @@ export async function sendMessage(
   // streaming block id，让 assistant_text_delta 累计写入同一条 keep:true block，
   // 避免被 _write 的 ephemeral splice 淘汰为最后一片 chunk。plain TUI / 测试
   // MemoryOutput 上没有 beginAssistantStream，writeAssistantDelta 会回退到 write。
-  const assistantStreamBlockId = `assistant-stream-${assistantEventId}`;
+  let assistantStreamBlockId = `assistant-stream-${assistantEventId}-0`;
   beginAssistantStream(output, assistantStreamBlockId);
   let assistantText = "";
   let finalAnswerClaimRetried = false;
+  let modelLoopCompleted = false;
   const controller = new AbortController();
   context.activeAbortController = controller;
   context.tools.abortSignal = controller.signal;
@@ -534,6 +535,10 @@ export async function sendMessage(
     let todoOnlyHintSent = false;
     let rawToolProtocolTextRetries = 0;
     modelRoundLoop: for (let round = 0; round < MAX_MODEL_TOTAL_TOOL_ROUNDS; round += 1) {
+      if (round > 0) {
+        assistantStreamBlockId = `assistant-stream-${assistantEventId}-${round}`;
+        beginAssistantStream(output, assistantStreamBlockId);
+      }
       const toolCalls: ModelToolCall[] = [];
       let roundAssistantText = "";
       const textSanitizer = createAssistantPrimaryTextSanitizer(context.language);
@@ -621,7 +626,7 @@ export async function sendMessage(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           if (visibleText) {
-            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
           }
           continue;
         }
@@ -630,7 +635,7 @@ export async function sendMessage(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           if (visibleText) {
-            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
           }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
@@ -708,7 +713,7 @@ export async function sendMessage(
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
       if (finalVisibleText) {
-        writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
       }
 
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
@@ -909,8 +914,11 @@ export async function sendMessage(
         break;
       }
     }
+    modelLoopCompleted = true;
   } finally {
-    endAssistantStream(output);
+    if (!modelLoopCompleted || !assistantText) {
+      endAssistantStream(output);
+    }
     clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
@@ -984,10 +992,6 @@ export async function sendMessage(
         );
         assistantText = coherentAssistantText;
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-        if (!(output instanceof ShellBlockOutput)) {
-          output.write("\n");
-          writeLine(output, assistantText);
-        }
       }
     }
     // D.14D — main-screen prompt hygiene：模型若把内部 system-prompt 字段
@@ -1003,6 +1007,8 @@ export async function sendMessage(
       }
     }
     replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+    endAssistantStream(output);
+    writeFinalAssistantText(output, assistantText);
     output.write("\n");
     await context.store.appendEvent(sessionId, {
       type: "assistant_text_delta",
@@ -1105,6 +1111,17 @@ function detectShellFamily(
   return process.platform === "win32" ? "powershell" : "unknown";
 }
 
+function writeAssistantPreviewDelta(output: Writable, id: string, text: string): void {
+  if (output instanceof ShellBlockOutput) {
+    writeAssistantDelta(output, id, text);
+  }
+}
+
+function writeFinalAssistantText(output: Writable, text: string): void {
+  if (!text || output instanceof ShellBlockOutput) return;
+  writeLine(output, text);
+}
+
 function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void {
   if (decision.hints.length === 0) return;
   const now = Date.now();
@@ -1112,7 +1129,7 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   const existing = new Set(context.notifications.map((item) => item.key));
   const maxHints = decision.userState.notificationPlan.maxHints;
   const visibleHints = decision.hints
-    .filter((hint) => shouldSurfacePolicyHint(hint.id))
+    .filter((hint) => shouldSurfacePolicyHint(hint.id, decision))
     .slice()
     .sort((a, b) => policyHintPriority(b) - policyHintPriority(a))
     .slice(0, maxHints);
@@ -1131,19 +1148,25 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   }
 }
 
-function shouldSurfacePolicyHint(id: string): boolean {
+function shouldSurfacePolicyHint(id: string, decision: PolicyDecision): boolean {
   return (
-    id === "user-state-frustrated" ||
     id === "user-state-trust_repair" ||
     id === "user-state-high_stakes_release" ||
-    id === "permission-risk" ||
-    id === "blocked-runtime" ||
     id === "provider-cooldown" ||
+    (id === "blocked-runtime" && hasRealBlockedRuntime(decision)) ||
     id === "compact-before-provider" ||
-    id === "verification-required" ||
-    id === "provider-fallback" ||
-    id === "background-occupancy"
+    id === "provider-fallback"
   );
+}
+
+function hasRealBlockedRuntime(decision: PolicyDecision): boolean {
+  const runtime = decision.runtimeSignal;
+  if (runtime.workflowStatus === "blocked" || runtime.workflowStatus === "stale") return true;
+  if (runtime.agentStates.blocked + runtime.jobStates.blocked > 0) return true;
+  if (runtime.agentStates.stale + runtime.jobStates.stale > 0) return true;
+  if (runtime.agentStates.cancelled + runtime.jobStates.cancelled > 0) return true;
+  if (runtime.agentStates.timeout + runtime.jobStates.timeout > 0) return true;
+  return runtime.noPassStates.some((state) => /(?:blocked|stale|cancelled|timeout)/iu.test(state));
 }
 
 function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
@@ -1510,6 +1533,9 @@ async function streamFinalModelAnswerWithoutTools(
       clearRequestActivity(context);
       const visibleText = textSanitizer.push(event.text);
       assistantText += visibleText;
+      if (visibleText) {
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
+      }
       continue;
     }
     if (event.type === "assistant_thinking_delta") {
@@ -1531,6 +1557,9 @@ async function streamFinalModelAnswerWithoutTools(
     if (event.type === "tool_use") {
       const visibleText = textSanitizer.flush();
       assistantText += visibleText;
+      if (visibleText) {
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
+      }
       await appendSystemEvent(
         context,
         sessionId,
@@ -1597,6 +1626,9 @@ async function streamFinalModelAnswerWithoutTools(
   }
   const finalVisibleText = textSanitizer.flush();
   assistantText += finalVisibleText;
+  if (finalVisibleText) {
+    writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
+  }
   if (textSanitizer.hadRawToolProtocol()) {
     ignoredRawToolProtocolText = true;
     assistantText = "";
@@ -1663,13 +1695,11 @@ async function streamFinalModelAnswerWithoutTools(
   }
   if (assistantText) {
     replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-    if (!(output instanceof ShellBlockOutput)) {
-      writeAssistantDelta(output, assistantStreamBlockId, assistantText);
-    }
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
     endAssistantStream(output);
+    writeFinalAssistantText(output, assistantText);
   }
   clearProviderBreaker(context.providerBreaker, continuation.provider, continuation.model);
   if (
@@ -1841,6 +1871,7 @@ export async function continueModelAfterToolResults(
   startRequestActivity(output, context, "continuing_after_tool");
   let assistantText = "";
   let finalAnswerClaimRetried = false;
+  let continuationLoopCompleted = false;
   const assistantEventId = randomUUID();
   // 每轮 round 都会开新的 streaming block，避免不同轮的输出粘到同一行。
   let assistantStreamBlockId = `assistant-stream-cont-${assistantEventId}-0`;
@@ -1912,7 +1943,7 @@ export async function continueModelAfterToolResults(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           if (visibleText) {
-            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
           }
           continue;
         }
@@ -1921,7 +1952,7 @@ export async function continueModelAfterToolResults(
           assistantText += visibleText;
           roundAssistantText += visibleText;
           if (visibleText) {
-            writeAssistantDelta(output, assistantStreamBlockId, visibleText);
+            writeAssistantPreviewDelta(output, assistantStreamBlockId, visibleText);
           }
           clearRequestActivity(context);
           toolCalls.push({ id: event.id, name: event.name, input: event.input });
@@ -1982,7 +2013,7 @@ export async function continueModelAfterToolResults(
       assistantText += finalVisibleText;
       roundAssistantText += finalVisibleText;
       if (finalVisibleText) {
-        writeAssistantDelta(output, assistantStreamBlockId, finalVisibleText);
+        writeAssistantPreviewDelta(output, assistantStreamBlockId, finalVisibleText);
       }
       if (textSanitizer.hadRawToolProtocol() && toolCalls.length === 0) {
         await appendSystemEvent(
@@ -2157,6 +2188,7 @@ export async function continueModelAfterToolResults(
         break;
       }
     }
+    continuationLoopCompleted = true;
     if (assistantText) {
       // D.13U — 最后一道关卡：所有 final answer（含预算耗尽后的 no-tool summary）
       // 入 transcript 前都必须 gate；没有 retry 机会时直接降级，原文不入 transcript。
@@ -2202,10 +2234,6 @@ export async function continueModelAfterToolResults(
           );
           assistantText = coherentAssistantText;
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
-          if (!(output instanceof ShellBlockOutput)) {
-            output.write("\n");
-            writeLine(output, assistantText);
-          }
         }
       }
       // D.14D — main-screen prompt hygiene（与 sendMessage 同款），continuation 路径
@@ -2219,6 +2247,8 @@ export async function continueModelAfterToolResults(
         }
       }
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
+      endAssistantStream(output);
+      writeFinalAssistantText(output, assistantText);
       output.write("\n");
       await context.store.appendEvent(sessionId, {
         type: "assistant_text_delta",
@@ -2242,8 +2272,10 @@ export async function continueModelAfterToolResults(
         "info",
       );
     }
-    endAssistantStream(output);
   } finally {
+    if (!continuationLoopCompleted || !assistantText) {
+      endAssistantStream(output);
+    }
     clearRequestActivity(context);
     context.activeAbortController = undefined;
     context.tools.abortSignal = undefined;
