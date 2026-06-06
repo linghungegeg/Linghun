@@ -121,6 +121,7 @@ import {
   persistDurableJob,
   readDurableJobState,
 } from "./job-runtime.js";
+import { evaluateMetaScheduler } from "./meta-scheduler-runtime.js";
 import { validateCommandCapabilityCoverage } from "./natural-command-bridge.js";
 import { formatModelToolPermissionPrompt } from "./permission-presenter.js";
 import { consumeProcessGuardStopResultsForTest } from "./process-guard.js";
@@ -1626,6 +1627,7 @@ describe("Phase 06 TUI slash commands", () => {
       [],
     );
     expect(USER_VISIBLE_DISPATCH_SLASH_COMMANDS).toContain("/capabilities");
+    expect(USER_VISIBLE_DISPATCH_SLASH_COMMANDS).toContain("/apps");
     expect(
       validateCommandCapabilityCoverage([
         ...USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
@@ -1656,13 +1658,87 @@ describe("Phase 06 TUI slash commands", () => {
       "Echo ready: hello capability",
     );
     expect(context.commandPanelState?.summary?.join("\n")).toContain(
-      "Capability completed 不等于验证通过。",
+      "Capability execution 不等于验证通过。",
     );
     expect(output.text).not.toContain("rawPayload");
     expect(output.text).not.toContain("CapabilityExecutionRequest");
     expect(
       context.evidence.some((item) => item.supportsClaims.includes("capability_execution")),
     ).toBe(true);
+  });
+
+  it("App Bridge /apps list and doctor stay local and low-noise", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-apps-slash-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/apps list", context, output);
+    expect(context.commandPanelState?.title).toBe("/apps");
+    expect(context.commandPanelState?.summary?.join("\n")).toContain("尚未连接 app");
+
+    await handleSlashCommand("/apps doctor", context, output);
+    expect(context.commandPanelState?.title).toBe("/apps doctor");
+    expect(context.commandPanelState?.summary?.join("\n")).toContain("Apps doctor");
+    expect(output.text).not.toContain("raw key");
+  });
+
+  it("Policy route recognizes app bridge language without stealing workflow/job/agent", () => {
+    const appRoute = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "连接 app bridge 到本地画图应用，运行 external app capability",
+      index: createIndexState(defaultConfig),
+      evidence: [],
+      failureLearning: createFailureLearningState("F-Linghun"),
+      backgroundTasks: [],
+    });
+    expect(appRoute.policyDecision.taskKind).toBe("capability");
+    expect(appRoute.policyDecision.capabilitySignal.active).toBe(true);
+    expect(appRoute.policyDecision.executionPlan.preferWorkflow).toBe(false);
+    expect(appRoute.policyDecision.executionPlan.preferAgent).toBe(false);
+
+    const workflowRoute = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "用 workflow 规划连接 app bridge 的后续工作",
+      index: createIndexState(defaultConfig),
+      evidence: [],
+      failureLearning: createFailureLearningState("F-Linghun"),
+      backgroundTasks: [],
+    });
+    expect(workflowRoute.policyDecision.taskKind).toBe("workflow");
+    expect(workflowRoute.policyDecision.capabilitySignal.active).toBe(false);
+
+    const agentRoute = evaluateMetaScheduler({
+      language: "zh-CN",
+      userText: "多开 agent 继续处理 connector 边界，不要直接运行 app capability",
+      index: createIndexState(defaultConfig),
+      evidence: [],
+      failureLearning: createFailureLearningState("F-Linghun"),
+      backgroundTasks: [],
+    });
+    expect(agentRoute.policyDecision.taskKind).toBe("agent");
+    expect(agentRoute.policyDecision.capabilitySignal.active).toBe(false);
+  });
+
+  it("sanitizes capability raw payload and key-like echoes from main-screen text", () => {
+    const cleaned = sanitizeMainScreenLeakage(
+      [
+        'CapabilityExecutionRequest={"capabilityId":"mock.canvas.export","rawPayload":"sk-phase715-secret api_key=raw-key"}',
+        'CapabilityExecutionResult={"rawPayload":"sk-phase715-secret","artifactRef":"ref"}',
+        "raw capability payload: sk-phase715-secret api_key=raw-key",
+        "结论：只保留摘要和 artifact/ref。",
+      ].join("\n"),
+      "zh-CN",
+    );
+
+    expect(cleaned).not.toContain("CapabilityExecutionRequest");
+    expect(cleaned).not.toContain("CapabilityExecutionResult");
+    expect(cleaned).not.toContain("rawPayload");
+    expect(cleaned).not.toContain("sk-phase715-secret");
+    expect(cleaned).not.toContain("api_key=raw-key");
+    expect(cleaned).toContain("只保留摘要和 artifact/ref");
   });
 
   it("shows a non-misleading TUI title on startup", async () => {

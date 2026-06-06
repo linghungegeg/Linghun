@@ -67,6 +67,7 @@ export const USER_VISIBLE_DISPATCH_SLASH_COMMANDS = [
   "/help",
   "/features",
   "/capabilities",
+  "/apps",
   "/model",
   "/language",
   "/mode",

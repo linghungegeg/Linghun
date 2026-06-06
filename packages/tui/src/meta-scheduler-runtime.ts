@@ -786,11 +786,11 @@ function createCapabilityPlan(userText: string): CapabilityPlan {
     );
   if (mentionsWorkflowAgentOrJob) return createEmptyCapabilityPlan();
   const explicitCapability =
-    /(?:\bcapabilit(?:y|ies)\b|能力运行时|外部能力|app bridge|应用桥|插件能力|plugin capability)/iu.test(
+    /(?:\bcapabilit(?:y|ies)\b|能力运行时|外部能力|app bridge|应用桥|应用连接|connector|插件能力|plugin capability)/iu.test(
       text,
     );
   const externalApp =
-    /(?:外部软件|外部应用|连接应用|连接软件|第三方软件|第三方应用|desktop bridge|本地应用|画布|画图|表格|spreadsheet|canvas|external app|connect app|plugin|插件|mcp|http connector|websocket)/iu.test(
+    /(?:外部软件|外部应用|连接应用|连接软件|第三方软件|第三方应用|desktop bridge|本地应用|画布|画图|表格|spreadsheet|canvas|external app|connect app|app connector|plugin|插件|mcp|http connector|websocket)/iu.test(
       text,
     );
   if (!explicitCapability && !externalApp) return createEmptyCapabilityPlan();

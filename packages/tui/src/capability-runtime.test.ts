@@ -63,8 +63,28 @@ describe("Capability Runtime MVP", () => {
     expect(result.ok).toBe(true);
     expect(result.summary).toContain("hello");
     expect(result.evidenceId).toBeTruthy();
-    expect(context.evidence[0]?.summary).toContain("mock.echo.read");
+    expect(context.evidence[0]?.summary).toContain("capability succeeded mock.echo.read");
+    expect(context.evidence[0]?.supportsClaims).toContain("capability_success");
     expect(context.evidence[0]?.supportsClaims).toContain("not_verification_pass");
+  });
+
+  it("records succeeded capability evidence without verification pass support", async () => {
+    const context = await createCapabilityTestContext("full-access");
+    const result = await executeCapability(
+      { capabilityId: "mock.canvas.create", input: { title: "Draft" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.summary).toContain("Canvas created");
+    expect(result.evidenceId).toBeTruthy();
+    const evidence = context.evidence.find((item) => item.id === result.evidenceId);
+    expect(evidence?.summary).toContain("capability succeeded mock.canvas.create");
+    expect(evidence?.supportsClaims).toContain("capability_execution");
+    expect(evidence?.supportsClaims).toContain("capability_success");
+    expect(evidence?.supportsClaims).toContain("not_verification_pass");
+    expect(evidence?.supportsClaims).not.toContain("capability_failure");
+    expect(evidence?.supportsClaims).not.toContain("verification_passed");
   });
 
   it("does not bypass permission for external_app/write capability", async () => {
@@ -77,6 +97,18 @@ describe("Capability Runtime MVP", () => {
     expect(result.ok).toBe(false);
     expect(result.summary).toContain("Permission denied");
     expect(context.permissions.recentDenied.some((item) => item.toolName === "Write")).toBe(true);
+  });
+
+  it("allows external_app/write capability in full-access mode through the same permission path", async () => {
+    const context = await createCapabilityTestContext("full-access");
+    const result = await executeCapability(
+      { capabilityId: "mock.canvas.create", input: { title: "Allowed" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.metadata.permission).toBe("external_app");
+    expect(context.permissions.recentDenied).toEqual([]);
   });
 
   it("stores large mock output as artifact ref without returning raw payload", async () => {
@@ -97,6 +129,23 @@ describe("Capability Runtime MVP", () => {
     expect(artifactPath).toBeTruthy();
     const artifact = await readFile(artifactPath ?? "", "utf8");
     expect(artifact).toContain("mock canvas export");
+  });
+
+  it("keeps large capability payload out of transcript events while preserving an artifact ref", async () => {
+    const context = await createCapabilityTestContext("full-access");
+    const result = await executeCapability(
+      { capabilityId: "mock.canvas.export", input: { format: "png" }, source: "slash" },
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.artifactRef).toBeTruthy();
+    expect(context.sessionId).toBeTruthy();
+    const transcript = (await context.store.resume(context.sessionId ?? "")).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("tool_result_budget_persisted");
+    expect(raw).toContain("artifact=");
+    expect(raw).not.toContain("x".repeat(30_000));
   });
 
   it("resolves transports on demand and reports unsupported connectors in doctor", () => {

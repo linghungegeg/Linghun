@@ -116,6 +116,23 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).toContain("结论：已生成 capability 摘要。");
   });
 
+  it("strips Phase 7.15 app connector internals and raw response echoes", () => {
+    const text = [
+      'AppConnectorManifest={"appId":"demo.drawing","auth":{"value":"sk-connector-secret"}}',
+      'AppConnectorState={"baseUrl":"http://127.0.0.1:47831","capabilityIds":["demo.drawing.paint"]}',
+      "raw connector response: sk-connector-secret 60000 raw chars",
+      "结论：已连接 Demo Drawing。",
+    ].join("\n");
+    const result = sanitizeMainScreenLeakage(text, "zh-CN");
+
+    expect(result).not.toContain("AppConnectorManifest");
+    expect(result).not.toContain("AppConnectorState");
+    expect(result).not.toContain("raw connector response");
+    expect(result).not.toContain("sk-connector-secret");
+    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).toContain("结论：已连接 Demo Drawing。");
+  });
+
   it("does not strip ordinary confidence prose without an internal assignment", () => {
     const text = "我对这个判断的 confidence 还不高，需要先看代码。";
     expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);

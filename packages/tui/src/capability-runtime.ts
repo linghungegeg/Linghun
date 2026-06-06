@@ -94,24 +94,65 @@ const TRANSPORT_PRIORITY: CapabilityTransport[] = [
   "mock",
 ];
 
-const registry = new Map<string, CapabilityDefinition>();
+type CapabilityRegistryEntry = {
+  definition: CapabilityDefinition;
+  projectPath?: string;
+};
+
+const registry = new Map<string, CapabilityRegistryEntry[]>();
 const providers = new Map<CapabilityTransport, CapabilityProvider>();
+let externalConnectionResolver:
+  | ((definition: CapabilityDefinition, context?: TuiContext) => CapabilityConnection | undefined)
+  | undefined;
 
-export function registerCapability(definition: CapabilityDefinition): void {
-  registry.set(definition.id, definition);
+export function registerCapability(
+  definition: CapabilityDefinition,
+  options: { projectPath?: string } = {},
+): void {
+  const entries = registry.get(definition.id) ?? [];
+  const next = entries.filter((entry) => entry.projectPath !== options.projectPath);
+  next.push({ definition, projectPath: options.projectPath });
+  registry.set(definition.id, next);
 }
 
-export function listCapabilities(): CapabilityDefinition[] {
-  return [...registry.values()].sort((a, b) => a.id.localeCompare(b.id));
+export function unregisterCapabilitiesByApp(
+  appId: string,
+  options: { projectPath?: string } = {},
+): void {
+  for (const [id, entries] of registry.entries()) {
+    const next = entries.filter((entry) => {
+      if (entry.definition.appId !== appId) return true;
+      return options.projectPath !== undefined && entry.projectPath !== options.projectPath;
+    });
+    if (next.length === 0) {
+      registry.delete(id);
+    } else {
+      registry.set(id, next);
+    }
+  }
 }
 
-export function findCapability(id: string): CapabilityDefinition | undefined {
-  return registry.get(id);
+export function listCapabilities(context?: TuiContext): CapabilityDefinition[] {
+  return [...registry.values()]
+    .map((entries) => selectCapabilityEntry(entries, context))
+    .filter((entry): entry is CapabilityRegistryEntry => Boolean(entry))
+    .map((entry) => entry.definition)
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function findCapability(id: string, context?: TuiContext): CapabilityDefinition | undefined {
+  const entries = registry.get(id);
+  const entry = entries ? selectCapabilityEntry(entries, context) : undefined;
+  if (!entry) return undefined;
+  return entry.definition;
 }
 
 export function resolveCapabilityConnection(
   definition: CapabilityDefinition,
+  context?: TuiContext,
 ): CapabilityConnection {
+  const external = externalConnectionResolver?.(definition, context);
+  if (external) return external;
   const transport = TRANSPORT_PRIORITY.includes(definition.transport)
     ? definition.transport
     : definition.transport;
@@ -138,7 +179,7 @@ export async function executeCapability(
   request: CapabilityExecutionRequest,
   context: TuiContext,
 ): Promise<CapabilityExecutionResult> {
-  const definition = findCapability(request.capabilityId);
+  const definition = findCapability(request.capabilityId, context);
   if (!definition) {
     return {
       ok: false,
@@ -157,7 +198,7 @@ export async function executeCapability(
   if (schemaError) {
     return buildFailedCapabilityResult(definition, schemaError, "unsupported");
   }
-  const connection = resolveCapabilityConnection(definition);
+  const connection = resolveCapabilityConnection(definition, context);
   if (connection.status !== "connected") {
     return buildFailedCapabilityResult(definition, connection.summary, connection.status);
   }
@@ -181,9 +222,10 @@ export async function executeCapability(
   }
   const result = await provider.execute(definition, request, context);
   const sessionId = await ensureSession(context);
+  const outcome = result.ok ? "succeeded" : "failed";
   const evidence = createEvidenceRecord(
     "command_output",
-    `capability ${definition.id}: ${truncateDisplay(result.summary, 120)}`,
+    `capability ${outcome} ${definition.id}: ${truncateDisplay(result.summary, 120)}`,
     `capability:${definition.id}`,
     [
       "capability_execution",
@@ -191,6 +233,7 @@ export async function executeCapability(
       definition.permission,
       definition.transport,
       "not_verification_pass",
+      result.ok ? "capability_success" : "capability_failure",
     ],
   );
   if (result.artifactRef) {
@@ -206,7 +249,7 @@ export async function executeCapability(
     context,
     sessionId,
     [
-      `capability completed id=${definition.id}`,
+      `capability ${outcome} id=${definition.id}`,
       `transport=${definition.transport}`,
       `permission=${definition.permission}`,
       `risk=${definition.riskLevel}`,
@@ -214,7 +257,7 @@ export async function executeCapability(
       result.artifactRef ? `artifact=${basename(result.artifactRef)}` : "artifact=none",
       "verification=not_pass",
     ].join(" "),
-    "info",
+    result.ok ? "info" : "warning",
   );
   return {
     ...result,
@@ -226,16 +269,32 @@ export async function executeCapability(
   };
 }
 
-export function formatCapabilityDoctor(language: Language = "zh-CN"): string {
+function capabilityEntryVisible(entry: CapabilityRegistryEntry, context?: TuiContext): boolean {
+  if (!entry.projectPath) return true;
+  return context?.projectPath === entry.projectPath;
+}
+
+function selectCapabilityEntry(
+  entries: CapabilityRegistryEntry[],
+  context?: TuiContext,
+): CapabilityRegistryEntry | undefined {
+  const projectEntry = context
+    ? entries.find((entry) => entry.projectPath === context.projectPath)
+    : undefined;
+  if (projectEntry) return projectEntry;
+  return entries.find((entry) => capabilityEntryVisible(entry, context));
+}
+
+export function formatCapabilityDoctor(language: Language = "zh-CN", context?: TuiContext): string {
   const isEn = language === "en-US";
   const lines = [
     isEn ? "Capability doctor" : "Capability doctor",
     isEn
-      ? "- Runtime: MVP thin bridge; live external app connectors are reserved."
-      : "- 运行时：MVP 薄桥；真实外部 app 连接器仅预留。",
+      ? "- Runtime: Capability Runtime with mock provider and project-scoped Local HTTP connectors."
+      : "- 运行时：Capability Runtime；mock provider 全局可用，Local HTTP connector 按项目隔离。",
   ];
-  for (const item of listCapabilities()) {
-    const connection = resolveCapabilityConnection(item);
+  for (const item of listCapabilities(context)) {
+    const connection = resolveCapabilityConnection(item, context);
     lines.push(
       `- ${item.id}: ${connection.status}; transport=${item.transport}; auth=${item.auth}; permission=${item.permission}; ${connection.summary}`,
     );
@@ -243,10 +302,23 @@ export function formatCapabilityDoctor(language: Language = "zh-CN"): string {
   return lines.join("\n");
 }
 
-export function formatCapabilityList(language: Language = "zh-CN"): string {
+export function registerCapabilityProvider(provider: CapabilityProvider): void {
+  providers.set(provider.transport, provider);
+}
+
+export function setCapabilityConnectionResolver(
+  resolver: (
+    definition: CapabilityDefinition,
+    context?: TuiContext,
+  ) => CapabilityConnection | undefined,
+): void {
+  externalConnectionResolver = resolver;
+}
+
+export function formatCapabilityList(language: Language = "zh-CN", context?: TuiContext): string {
   const isEn = language === "en-US";
   const lines = [isEn ? "Capabilities" : "Capabilities"];
-  for (const item of listCapabilities()) {
+  for (const item of listCapabilities(context)) {
     lines.push(`- ${item.title}: ${item.description}`);
   }
   lines.push(isEn ? "Details: /capabilities doctor" : "详情：/capabilities doctor");
@@ -267,9 +339,13 @@ export function formatCapabilityResult(
       : isEn
         ? "No artifact was created."
         : "未创建 artifact。",
-    isEn
-      ? "Capability completion is not verification PASS."
-      : "Capability completed 不等于验证通过。",
+    result.ok
+      ? isEn
+        ? "Capability execution is not verification PASS."
+        : "Capability execution 不等于验证通过。"
+      : isEn
+        ? "Capability failed; failure is not verification PASS."
+        : "Capability failed；失败不等于验证通过。",
   ];
   const details = [
     `capability: ${result.capabilityId}`,
@@ -297,9 +373,9 @@ export async function handleCapabilitiesCommand(
     showCommandPanel(context, output, {
       title: "/capabilities",
       tone: "neutral",
-      summary: formatCapabilityList(context.language).split("\n"),
+      summary: formatCapabilityList(context.language, context).split("\n"),
       actions: ["/capabilities doctor", "/capabilities run <capabilityId> <json>"],
-      detailsText: listCapabilities()
+      detailsText: listCapabilities(context)
         .map(
           (item) =>
             `${item.id}\n- app: ${item.appId}\n- transport: ${item.transport}\n- auth: ${item.auth}\n- permission: ${item.permission}\n- risk: ${item.riskLevel}`,
@@ -312,9 +388,9 @@ export async function handleCapabilitiesCommand(
     showCommandPanel(context, output, {
       title: "/capabilities doctor",
       tone: "neutral",
-      summary: formatCapabilityDoctor(context.language).split("\n").slice(0, 6),
+      summary: formatCapabilityDoctor(context.language, context).split("\n").slice(0, 6),
       actions: ["/capabilities list", "/capabilities run <capabilityId> <json>"],
-      detailsText: formatCapabilityDoctor(context.language),
+      detailsText: formatCapabilityDoctor(context.language, context),
     });
     return;
   }
@@ -439,10 +515,6 @@ function buildFailedCapabilityResult(
       connectionStatus: status,
     },
   };
-}
-
-function registerCapabilityProvider(provider: CapabilityProvider): void {
-  providers.set(provider.transport, provider);
 }
 
 registerCapabilityProvider({
