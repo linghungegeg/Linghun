@@ -579,20 +579,24 @@ function hasHighRiskCompletionClaim(text: string): boolean {
 function classifyUserStateDecision(userText: string): UserStateDecision {
   const text = userText.trim();
   if (!text) return createUserStateDecision("neutral", 0.35);
+  const commandFirst = matchesDecisiveCommand(text);
   if (matchesHighStakesRelease(text)) {
     return createUserStateDecision("high_stakes_release", 0.88, {
+      commandFirst,
       memorySummary:
         "User treats release/deploy/open-source readiness as high stakes; require dirty tree/build/focused verification/stability boundary.",
     });
   }
   if (matchesTrustRepair(text)) {
     return createUserStateDecision("trust_repair", 0.86, {
+      commandFirst,
       memorySummary:
         "User is repairing trust after prior mismatch; require source facts before delivery summaries.",
     });
   }
   if (matchesFrustrated(text)) {
     return createUserStateDecision("frustrated", 0.78, {
+      commandFirst,
       memorySummary:
         "User is frustrated by repeated shallow work; reduce generic hints and strengthen source-first verification.",
     });
@@ -603,7 +607,7 @@ function classifyUserStateDecision(userText: string): UserStateDecision {
   if (matchesStrategicExploration(text)) {
     return createUserStateDecision("strategic_exploration", 0.72);
   }
-  if (matchesDecisiveCommand(text)) {
+  if (commandFirst) {
     return createUserStateDecision("decisive_command", 0.7);
   }
   return createUserStateDecision("neutral", 0.5);
@@ -612,13 +616,13 @@ function classifyUserStateDecision(userText: string): UserStateDecision {
 function createUserStateDecision(
   kind: UserStateKind,
   confidence: number,
-  options: { memorySummary?: string } = {},
+  options: { memorySummary?: string; commandFirst?: boolean } = {},
 ): UserStateDecision {
   const sourceFactFirst = kind === "frustrated" || kind === "trust_repair";
   const highStakes = kind === "high_stakes_release";
   const confused = kind === "confused";
   const strategic = kind === "strategic_exploration";
-  const decisive = kind === "decisive_command";
+  const decisive = kind === "decisive_command" || options.commandFirst === true;
   const strengthened = sourceFactFirst || highStakes;
   const route =
     kind === "trust_repair" || kind === "frustrated"
@@ -679,7 +683,7 @@ function createUserStateDecision(
 }
 
 function matchesHighStakesRelease(text: string): boolean {
-  return /(?:发布|上线|发版|开源发布|release|deploy|deployment|production|prod|open-?source|上线前|发布前|release readiness|smoke-ready|beta pass)/iu.test(
+  return /(?:发布|上线|发版|开源发布|稳定点|提交稳定点|建立稳定点|release|deploy|deployment|production|prod|open-?source|上线前|发布前|release readiness|smoke-ready|beta pass|stable point|checkpoint|commit point)/iu.test(
     text,
   );
 }
@@ -709,7 +713,7 @@ function matchesStrategicExploration(text: string): boolean {
 }
 
 function matchesDecisiveCommand(text: string): boolean {
-  return /(?:直接给(?:我)?命令|只给命令|给命令|命令即可|不用解释|不要解释|只要命令|command only|just commands|give me the command|no explanation|直接执行|立刻执行|马上执行|do it now|run it now)/iu.test(
+  return /(?:直接给(?:我)?命令|只给命令|给(?:我)?命令|命令即可|不用解释|不要解释|只要命令|command only|just commands|give me the command|no explanation|直接执行|立刻执行|马上执行|do it now|run it now)/iu.test(
     text,
   );
 }

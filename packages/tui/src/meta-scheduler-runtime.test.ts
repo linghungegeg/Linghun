@@ -295,6 +295,110 @@ describe("Meta scheduler runtime", () => {
     expect(decision.shouldPreferVerifier).toBe(true);
   });
 
+  it("UserState hotfix: frustrated command request keeps strengthened verification and becomes command-first", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "少说多做，给我命令。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("frustrated");
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
+    expect(decision.policyDecision.userState.detailPlan.style).toBe("command_first");
+    expect(decision.policyDecision.userState.detailPlan.background).toBe("minimal");
+    expect(decision.policyDecision.userState.verificationPlan.strength).toBe("strengthened");
+    expect(decision.policyDecision.userState.verificationPlan.requireSourceFacts).toBe(true);
+    expect(decision.policyDecision.userState.verificationPlan.forbidEarlyPass).toBe(true);
+    expect(decision.policyDecision.userState.notificationPlan.maxHints).toBeLessThanOrEqual(2);
+    expect(decision.policyDecision.verificationSignal.route.commands).toEqual(
+      expect.arrayContaining(["source-facts", "focused-test"]),
+    );
+  });
+
+  it("UserState hotfix: no-fluff command request remains command-first", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "别废话，直接给我命令。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("frustrated");
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
+    expect(decision.policyDecision.userState.detailPlan.style).toBe("command_first");
+    expect(decision.policyDecision.userState.detailPlan.background).toBe("minimal");
+    expect(decision.policyDecision.userState.notificationPlan.maxHints).toBeLessThanOrEqual(2);
+  });
+
+  it("UserState hotfix: trust repair command request keeps source facts and becomes command-first", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "不要再复述摘要，给我命令。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("trust_repair");
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
+    expect(decision.policyDecision.userState.detailPlan.style).toBe("command_first");
+    expect(decision.policyDecision.userState.detailPlan.background).toBe("minimal");
+    expect(decision.policyDecision.userState.verificationPlan.strength).toBe("strengthened");
+    expect(decision.policyDecision.userState.verificationPlan.requireSourceFacts).toBe(true);
+    expect(decision.policyDecision.userState.verificationPlan.forbidEarlyPass).toBe(true);
+    expect(decision.policyDecision.verificationSignal.route.commands).toContain("source-facts");
+  });
+
+  it("UserState hotfix: stability point command request is high-stakes release and command-first", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "准备稳定点，给我命令。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("high_stakes_release");
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
+    expect(decision.policyDecision.userState.detailPlan).toMatchObject({
+      style: "command_first",
+      background: "minimal",
+    });
+    expect(decision.policyDecision.userState.verificationPlan).toMatchObject({
+      strength: "release",
+      requireDirtyTreeCheck: true,
+      requireBuild: true,
+      requireFocusedTests: true,
+      requireStabilityBoundary: true,
+    });
+    expect(decision.policyDecision.verificationSignal.route.commands).toEqual(
+      expect.arrayContaining([
+        "dirty-tree",
+        "untracked-files",
+        "build",
+        "focused-test",
+        "stability-boundary",
+      ]),
+    );
+  });
+
+  it("UserState hotfix: direct command request still classifies as decisive_command", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "直接给我命令，不用解释。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("decisive_command");
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(true);
+    expect(decision.policyDecision.userState.detailPlan).toMatchObject({
+      style: "command_first",
+      background: "minimal",
+    });
+  });
+
+  it("UserState hotfix: strategic exploration remains discussion-only without command-first", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "先讨论架构取舍，不要实现代码。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("strategic_exploration");
+    expect(decision.policyDecision.userState.interactionPlan.allowImplementationPush).toBe(false);
+    expect(decision.policyDecision.userState.interactionPlan.commandFirst).toBe(false);
+    expect(decision.policyDecision.taskKind).toBe("chat");
+  });
+
   it("uses accepted memory and active failure lessons as context policy only", () => {
     const failureLearning = baseFailureLearning();
     failureLearning.records.push({
