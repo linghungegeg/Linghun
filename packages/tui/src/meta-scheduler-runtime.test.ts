@@ -121,6 +121,143 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("permission-risk");
   });
 
+  it("UserState: frustrated input triggers source-first strengthened verification and quiet notification", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "又错了，别空泛，先读源码事实再说。",
+    });
+
+    expect(decision.policyDecision.userState).toMatchObject({
+      kind: "frustrated",
+      interactionPlan: {
+        route: "source_fact_first",
+        sourceFactsFirst: true,
+        allowImplementationPush: true,
+      },
+      verificationPlan: {
+        strength: "strengthened",
+        requireSourceFacts: true,
+        forbidEarlyPass: true,
+        requireFocusedTests: true,
+      },
+      notificationPlan: {
+        quiet: true,
+        suppressGenericHints: true,
+        maxHints: 2,
+      },
+    });
+    expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+    expect(decision.policyDecision.verificationSignal.recommendedLevel).toBe("full");
+    expect(decision.policyDecision.verificationSignal.route.commands).toEqual(
+      expect.arrayContaining(["source-facts", "focused-test"]),
+    );
+    expect(decision.policyDecision.verificationSignal.route.conservativeNoPass).toBe(true);
+    expect(decision.policyDecision.verificationSignal.route.noPassReasons).toContain(
+      "user_state:frustrated",
+    );
+  });
+
+  it("UserState: trust repair requires source facts and cannot only summarize delivery", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "不要只复述交付摘要，上次你没看代码，这次以代码事实为主。",
+    });
+
+    expect(decision.policyDecision.userState.kind).toBe("trust_repair");
+    expect(decision.policyDecision.userState.memoryCandidate).toMatchObject({
+      shouldCreate: true,
+      scope: "session",
+      autoAccept: false,
+    });
+    expect(decision.policyDecision.executionPlan.preferSourceFirst).toBe(true);
+    expect(decision.policyDecision.verificationSignal.route.commands).toContain("source-facts");
+    expect(decision.shouldRunFinalAnswerGate).toBe(true);
+  });
+
+  it("UserState: decisive command goes command-first without long explanation mode", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "直接给我命令，不用解释。",
+    });
+
+    expect(decision.policyDecision.userState).toMatchObject({
+      kind: "decisive_command",
+      interactionPlan: { route: "command_first", commandFirst: true },
+      detailPlan: { style: "command_first", background: "minimal" },
+    });
+    expect(decision.policyDecision.userState.notificationPlan.maxHints).toBe(2);
+  });
+
+  it("UserState: confused input stays explain-first and does not push implementation", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "我没懂这个模块为什么要这么改，先解释一下。",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("chat");
+    expect(decision.policyDecision.permissionPlan.expectedMutating).toBe(false);
+    expect(decision.policyDecision.userState).toMatchObject({
+      kind: "confused",
+      interactionPlan: {
+        route: "explain_first",
+        explainFirst: true,
+        allowImplementationPush: false,
+      },
+    });
+  });
+
+  it("UserState: strategic exploration stays discussion-only and avoids code execution scheduling", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "先讨论架构取舍，不要实现代码。",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("chat");
+    expect(decision.policyDecision.executionPlan.preferAgent).toBe(false);
+    expect(decision.policyDecision.executionPlan.preferWorkflow).toBe(false);
+    expect(decision.policyDecision.permissionPlan.expectedMutating).toBe(false);
+    expect(decision.policyDecision.userState).toMatchObject({
+      kind: "strategic_exploration",
+      interactionPlan: {
+        route: "discussion_only",
+        discussionOnly: true,
+        allowImplementationPush: false,
+      },
+    });
+  });
+
+  it("UserState: high-stakes release triggers release gate dirty tree build focused test boundary", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "准备开源发布前复检，必须确认 dirty tree、build、focused tests 和稳定点。",
+    });
+
+    expect(decision.policyDecision.riskLevel).toBe("high");
+    expect(decision.policyDecision.userState).toMatchObject({
+      kind: "high_stakes_release",
+      interactionPlan: { route: "release_gate", sourceFactsFirst: false },
+      verificationPlan: {
+        strength: "release",
+        requireDirtyTreeCheck: true,
+        requireBuild: true,
+        requireFocusedTests: true,
+        requireStabilityBoundary: true,
+      },
+    });
+    expect(decision.policyDecision.verificationSignal.route.commands).toEqual(
+      expect.arrayContaining([
+        "source-facts",
+        "dirty-tree",
+        "untracked-files",
+        "build",
+        "focused-test",
+        "stability-boundary",
+      ]),
+    );
+    expect(decision.shouldRunFinalAnswerGate).toBe(true);
+    expect(decision.shouldPreferVerifier).toBe(true);
+  });
+
   it("uses accepted memory and active failure lessons as context policy only", () => {
     const failureLearning = baseFailureLearning();
     failureLearning.records.push({

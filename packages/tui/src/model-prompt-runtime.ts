@@ -119,6 +119,14 @@ const INTERNAL_PROMPT_TOKENS = [
   "MetaSchedulerForModel",
   "PolicyDecision",
   "PolicyHint",
+  "UserStateDecision",
+  "userState",
+  "user_state",
+  "interactionPlan",
+  "verificationPlan",
+  "detailPlan",
+  "notificationPlan",
+  "memoryCandidate",
   "permissionSignal",
   "modelRouteSignal",
   "verificationSignal",
@@ -146,6 +154,8 @@ const INTERNAL_PROMPT_TOKENS = [
   "doNotWriteLongTermMemoryWithoutExplicitMemoryAccept",
 ] as const;
 
+const INTERNAL_ASSIGNMENT_ONLY_TOKENS = ["confidence"] as const;
+
 const INTERNAL_TOOL_LABEL_REPLACEMENTS = [
   ["RunVerification", { "zh-CN": "验证命令", "en-US": "verification command" }],
 ] as const;
@@ -171,8 +181,12 @@ export function sanitizeMainScreenLeakage(
 ): string {
   if (!text) return text;
   const tokenAlternation = INTERNAL_PROMPT_TOKENS.join("|");
+  const assignmentOnlyAlternation = INTERNAL_ASSIGNMENT_ONLY_TOKENS.join("|");
   // 命中 "Token=..." 或 "Token: ..."（行内或多行 JSON dump 的起始行）。
-  const lineRe = new RegExp(`^\\s*(?:${tokenAlternation})\\s*[=:].*$`, "u");
+  const lineRe = new RegExp(
+    `^\\s*(?:${tokenAlternation}|${assignmentOnlyAlternation})\\s*[=:].*$`,
+    "u",
+  );
   const naturalLanguageLeakRe = new RegExp(`\\b(?:${tokenAlternation})\\b`, "u");
   const lines = text.split("\n");
   let redacted = false;

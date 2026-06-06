@@ -38,6 +38,58 @@ type RuntimeStateCounts = {
   timeout: number;
 };
 
+export type UserStateKind =
+  | "neutral"
+  | "frustrated"
+  | "trust_repair"
+  | "confused"
+  | "decisive_command"
+  | "strategic_exploration"
+  | "high_stakes_release";
+
+export type UserStateDecision = {
+  kind: UserStateKind;
+  confidence: number;
+  interactionPlan: {
+    route:
+      | "normal"
+      | "source_fact_first"
+      | "command_first"
+      | "explain_first"
+      | "discussion_only"
+      | "release_gate";
+    sourceFactsFirst: boolean;
+    commandFirst: boolean;
+    explainFirst: boolean;
+    discussionOnly: boolean;
+    allowImplementationPush: boolean;
+  };
+  verificationPlan: {
+    strength: "normal" | "focused" | "strengthened" | "release";
+    requireSourceFacts: boolean;
+    forbidEarlyPass: boolean;
+    requireDirtyTreeCheck: boolean;
+    requireBuild: boolean;
+    requireFocusedTests: boolean;
+    requireStabilityBoundary: boolean;
+  };
+  detailPlan: {
+    style: "normal" | "concise" | "command_first" | "explain_first" | "discussion";
+    background: "minimal" | "normal" | "expanded";
+  };
+  notificationPlan: {
+    quiet: boolean;
+    suppressGenericHints: boolean;
+    maxHints: number;
+  };
+  memoryCandidate: {
+    shouldCreate: boolean;
+    scope: "session";
+    summary?: string;
+    autoAccept: false;
+  };
+};
+
 export type MetaSchedulerInput = {
   language: Language;
   userText: string;
@@ -85,6 +137,7 @@ export type MetaSchedulerInput = {
   usageSampleCount?: number;
   roleBudgetStop?: boolean;
   toolResultBudgetPersistedCount?: number;
+  userStateDecision?: UserStateDecision;
   nowMs?: number;
 };
 
@@ -153,6 +206,7 @@ export type PolicyDecision = {
     usageNearLimit: boolean;
     toolResultBudgetPressure: boolean;
   };
+  userState: UserStateDecision;
   contextPlan: {
     includeMemory: boolean;
     includeFailureLearning: boolean;
@@ -195,6 +249,7 @@ export type MetaSchedulerDecision = {
 export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerDecision {
   const internalEvents: string[] = [];
   const directives: string[] = [];
+  const userStateDecision = input.userStateDecision ?? classifyUserStateDecision(input.userText);
   const highRiskClaim =
     typeof input.assistantText === "string" && hasHighRiskCompletionClaim(input.assistantText);
   const toolFailure = Boolean(input.lastToolFailure);
@@ -207,19 +262,25 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     input.triggerChars,
   );
   const indexStrategy = classifyIndexStrategy(input.index);
-  const taskKind = classifyTaskKind(input.userText);
-  const expectedMutating = expectsMutatingAction(input.userText, taskKind);
+  const taskKind = adjustTaskKindForUserState(classifyTaskKind(input.userText), userStateDecision);
+  const expectedMutating =
+    userStateDecision.interactionPlan.allowImplementationPush &&
+    expectsMutatingAction(input.userText, taskKind);
   const verificationDomain = classifyVerificationDomain(input.userText, taskKind, expectedMutating);
   const evidenceFreshness = classifyVerificationEvidenceFreshness(input.evidence, input.nowMs);
   const runtimeSignal = summarizeRuntimeSignal(input, evidenceFreshness);
   const includeFailureLearning = hasActiveFailureLearning(input.failureLearning);
   const failureSignal = summarizeFailureSignal(input.failureLearning);
-  const preferSourceFirst = shouldPreferSourceFirst(taskKind, indexStrategy);
+  const preferSourceFirst =
+    shouldPreferSourceFirst(taskKind, indexStrategy) ||
+    userStateDecision.interactionPlan.sourceFactsFirst;
   const requireVerification =
     highRiskClaim ||
     taskKind === "verification" ||
     expectedMutating ||
-    isRiskyVerificationStatus(input.lastVerificationStatus);
+    isRiskyVerificationStatus(input.lastVerificationStatus) ||
+    userStateDecision.verificationPlan.strength === "strengthened" ||
+    userStateDecision.verificationPlan.strength === "release";
   const surfaceWindowsSafeHint = shouldSurfaceWindowsSafeHint({
     userText: input.userText,
     taskKind,
@@ -274,8 +335,11 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     runtimeSignal,
     failureSignal,
     resourceCapPressure: runtimeSignal.resourceCapPressure,
+    userStateDecision,
   });
   directives.push(formatVerificationRouteDirective(verificationRoute));
+  directives.push(formatUserStateDirective(userStateDecision));
+  appendUserStateInternalEvents(internalEvents, userStateDecision);
 
   const policyDecision = createPolicyDecision({
     taskKind,
@@ -286,15 +350,17 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
       providerFailure,
       toolFailure,
       pressure: pressure.shouldCompact,
+      userStateDecision,
     }),
     includeMemory: (input.memoryAcceptedCount ?? 0) > 0,
     includeFailureLearning,
     compactBeforeProvider: pressure.shouldCompact,
     preferSourceFirst,
-    preferWorkflow: taskKind === "workflow",
-    preferAgent: taskKind === "agent",
+    preferWorkflow:
+      taskKind === "workflow" && userStateDecision.interactionPlan.allowImplementationPush,
+    preferAgent: taskKind === "agent" && userStateDecision.interactionPlan.allowImplementationPush,
     requireVerification,
-    requireFinalGate: highRiskClaim,
+    requireFinalGate: highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass,
     expectedMutating,
     requireExplicitGate: expectedMutating || blockedRuntime || Boolean(input.pendingApproval),
     providerPlan,
@@ -302,6 +368,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     toolFailure,
     providerFailure,
     surfaceWindowsSafeHint,
+    userState: userStateDecision,
     permissionSignal: {
       permissionMode: input.permissionMode ?? "default",
       recentDenied: recentDeniedCount > 0,
@@ -331,6 +398,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
         taskKind,
         blockedRuntime,
         lastStatus: input.lastVerificationStatus,
+        userStateDecision,
       }),
       route: verificationRoute,
       reason: highRiskClaim
@@ -371,8 +439,10 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
   return {
     directives,
     policyDecision,
-    shouldRunFinalAnswerGate: highRiskClaim,
-    shouldPreferVerifier: highRiskClaim && evidenceFreshness !== "fresh",
+    shouldRunFinalAnswerGate: highRiskClaim || userStateDecision.verificationPlan.forbidEarlyPass,
+    shouldPreferVerifier:
+      (highRiskClaim || userStateDecision.verificationPlan.strength === "release") &&
+      evidenceFreshness !== "fresh",
     shouldCaptureFailureLearning: toolFailure || providerFailure,
     shouldUseRetryGuard: toolFailure || providerFailure,
     shouldCompactBeforeProvider: pressure.shouldCompact,
@@ -386,8 +456,8 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
   return [
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
-    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}.`,
-    "- Keep RuntimeStatusForModel, gateId, raw evidence, raw tool_result, and internal scheduler labels out of the user-visible final answer.",
+    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}.`,
+    "- Keep RuntimeStatusForModel, UserStateDecision, interactionPlan, verificationPlan, notificationPlan, confidence, gateId, raw evidence, raw tool_result, and internal scheduler labels out of the user-visible final answer.",
   ].join("\n");
 }
 
@@ -398,6 +468,18 @@ export function formatPolicyDecisionSummary(decision: PolicyDecision, language: 
   }
   if (decision.executionPlan.requireVerification) {
     parts.push(language === "en-US" ? "verification required" : "需要验证");
+  }
+  if (decision.userState.interactionPlan.explainFirst) {
+    parts.push(language === "en-US" ? "explain-first" : "先解释");
+  }
+  if (decision.userState.interactionPlan.discussionOnly) {
+    parts.push(language === "en-US" ? "discussion-only" : "仅讨论判断");
+  }
+  if (decision.userState.interactionPlan.commandFirst) {
+    parts.push(language === "en-US" ? "command-first" : "命令优先");
+  }
+  if (decision.userState.verificationPlan.strength === "release") {
+    parts.push(language === "en-US" ? "release gate" : "发布闸门");
   }
   if (decision.contextPlan.compactBeforeProvider) {
     parts.push(language === "en-US" ? "compact before provider" : "先压缩上下文");
@@ -468,6 +550,154 @@ function hasHighRiskCompletionClaim(text: string): boolean {
   return /(?:\bPASS\b|\bpassed\b|\bverified\b|\btests?\s+pass(?:ed)?\b|\bfixed\b|\bcompleted\b|已完成|已修复|已验证|验证通过|测试通过|可以进入下一阶段|ready\s+for|可进入)/iu.test(
     text,
   );
+}
+
+function classifyUserStateDecision(userText: string): UserStateDecision {
+  const text = userText.trim();
+  if (!text) return createUserStateDecision("neutral", 0.35);
+  if (matchesHighStakesRelease(text)) {
+    return createUserStateDecision("high_stakes_release", 0.88, {
+      memorySummary:
+        "User treats release/deploy/open-source readiness as high stakes; require dirty tree/build/focused verification/stability boundary.",
+    });
+  }
+  if (matchesTrustRepair(text)) {
+    return createUserStateDecision("trust_repair", 0.86, {
+      memorySummary:
+        "User is repairing trust after prior mismatch; require source facts before delivery summaries.",
+    });
+  }
+  if (matchesFrustrated(text)) {
+    return createUserStateDecision("frustrated", 0.78, {
+      memorySummary:
+        "User is frustrated by repeated shallow work; reduce generic hints and strengthen source-first verification.",
+    });
+  }
+  if (matchesConfused(text)) {
+    return createUserStateDecision("confused", 0.74);
+  }
+  if (matchesStrategicExploration(text)) {
+    return createUserStateDecision("strategic_exploration", 0.72);
+  }
+  if (matchesDecisiveCommand(text)) {
+    return createUserStateDecision("decisive_command", 0.7);
+  }
+  return createUserStateDecision("neutral", 0.5);
+}
+
+function createUserStateDecision(
+  kind: UserStateKind,
+  confidence: number,
+  options: { memorySummary?: string } = {},
+): UserStateDecision {
+  const sourceFactFirst = kind === "frustrated" || kind === "trust_repair";
+  const highStakes = kind === "high_stakes_release";
+  const confused = kind === "confused";
+  const strategic = kind === "strategic_exploration";
+  const decisive = kind === "decisive_command";
+  const strengthened = sourceFactFirst || highStakes;
+  const route =
+    kind === "trust_repair" || kind === "frustrated"
+      ? "source_fact_first"
+      : highStakes
+        ? "release_gate"
+        : confused
+          ? "explain_first"
+          : strategic
+            ? "discussion_only"
+            : decisive
+              ? "command_first"
+              : "normal";
+  return {
+    kind,
+    confidence,
+    interactionPlan: {
+      route,
+      sourceFactsFirst: sourceFactFirst,
+      commandFirst: decisive,
+      explainFirst: confused,
+      discussionOnly: strategic,
+      allowImplementationPush: !(confused || strategic),
+    },
+    verificationPlan: {
+      strength: highStakes ? "release" : strengthened ? "strengthened" : "normal",
+      requireSourceFacts: sourceFactFirst || highStakes,
+      forbidEarlyPass: sourceFactFirst || highStakes,
+      requireDirtyTreeCheck: highStakes,
+      requireBuild: highStakes,
+      requireFocusedTests: strengthened || highStakes,
+      requireStabilityBoundary: highStakes,
+    },
+    detailPlan: {
+      style: decisive
+        ? "command_first"
+        : confused
+          ? "explain_first"
+          : strategic
+            ? "discussion"
+            : kind === "neutral"
+              ? "normal"
+              : "concise",
+      background: decisive ? "minimal" : confused || strategic ? "expanded" : "normal",
+    },
+    notificationPlan: {
+      quiet: kind === "frustrated" || kind === "trust_repair" || decisive,
+      suppressGenericHints: kind !== "neutral",
+      maxHints: kind === "neutral" ? 3 : 2,
+    },
+    memoryCandidate: {
+      shouldCreate: Boolean(options.memorySummary),
+      scope: "session",
+      ...(options.memorySummary ? { summary: options.memorySummary } : {}),
+      autoAccept: false,
+    },
+  };
+}
+
+function matchesHighStakesRelease(text: string): boolean {
+  return /(?:发布|上线|发版|开源发布|release|deploy|deployment|production|prod|open-?source|上线前|发布前|release readiness|smoke-ready|beta pass)/iu.test(
+    text,
+  );
+}
+
+function matchesTrustRepair(text: string): boolean {
+  return /(?:别再|不要再|上次|之前.*(?:错|漏|幻觉|没看|没读|误判)|信任|可信|别复述|不要只复述|不要.*(?:复述|摘要)|trust repair|regain trust|don't just summarize|do not just summarize|you missed|you were wrong)/iu.test(
+    text,
+  );
+}
+
+function matchesFrustrated(text: string): boolean {
+  return /(?:烦|崩溃|离谱|又错|还错|怎么又|别糊弄|少废话|少说多做|别废话|别绕|不要绕|别空泛|别瞎猜|frustrated|annoyed|again\?|stop guessing|stop hand-?waving|less talk|no fluff|too noisy)/iu.test(
+    text,
+  );
+}
+
+function matchesConfused(text: string): boolean {
+  return /(?:不懂|没懂|看不懂|为什么|啥意思|什么意思|解释一下|先解释|讲清楚|怎么理解|我困惑|confused|don't understand|do not understand|explain|what does .* mean|why\b|how should i understand)/iu.test(
+    text,
+  );
+}
+
+function matchesStrategicExploration(text: string): boolean {
+  return /(?:讨论|分析方案|架构判断|战略|路线|取舍|探索|先别写|不要写代码|不要实现|先聊|评估一下|brainstorm|strategy|strategic|explore|discuss|architecture decision|trade-?off|do not implement|don't implement|no code changes)/iu.test(
+    text,
+  );
+}
+
+function matchesDecisiveCommand(text: string): boolean {
+  return /(?:直接给(?:我)?命令|只给命令|给命令|命令即可|不用解释|不要解释|只要命令|command only|just commands|give me the command|no explanation|直接执行|立刻执行|马上执行|do it now|run it now)/iu.test(
+    text,
+  );
+}
+
+function adjustTaskKindForUserState(
+  taskKind: PolicyDecision["taskKind"],
+  decision: UserStateDecision,
+): PolicyDecision["taskKind"] {
+  if (decision.kind === "confused" || decision.kind === "strategic_exploration") {
+    return "chat";
+  }
+  return taskKind;
 }
 
 function classifyTaskKind(userText: string): PolicyDecision["taskKind"] {
@@ -590,9 +820,22 @@ function classifyRiskLevel(input: {
   providerFailure: boolean;
   toolFailure: boolean;
   pressure: boolean;
+  userStateDecision: UserStateDecision;
 }): PolicyDecision["riskLevel"] {
-  if (input.highRiskClaim || input.blockedRuntime) return "high";
+  if (
+    input.highRiskClaim ||
+    input.blockedRuntime ||
+    input.userStateDecision.kind === "high_stakes_release"
+  ) {
+    return "high";
+  }
   if (input.expectedMutating || input.providerFailure || input.toolFailure || input.pressure) {
+    return "medium";
+  }
+  if (
+    input.userStateDecision.kind === "frustrated" ||
+    input.userStateDecision.kind === "trust_repair"
+  ) {
     return "medium";
   }
   return "low";
@@ -619,8 +862,12 @@ function createVerificationRoute(input: {
   runtimeSignal: PolicyDecision["runtimeSignal"];
   failureSignal: PolicyDecision["failureSignal"];
   resourceCapPressure: boolean;
+  userStateDecision: UserStateDecision;
 }): VerificationRoute {
-  const commands = verificationCommandsForDomain(input.domain);
+  const commands = applyUserStateVerificationCommands(
+    verificationCommandsForDomain(input.domain),
+    input.userStateDecision,
+  );
   const noPassReasons = collectNoPassReasons(input);
   return {
     domain: input.domain,
@@ -656,6 +903,30 @@ function verificationCommandsForDomain(domain: VerificationRouteDomain): string[
   return ["focused-verification"];
 }
 
+function applyUserStateVerificationCommands(
+  commands: string[],
+  decision: UserStateDecision,
+): string[] {
+  const next = [...commands];
+  if (decision.verificationPlan.requireSourceFacts) {
+    next.unshift("source-facts");
+  }
+  if (decision.verificationPlan.requireDirtyTreeCheck) {
+    next.push("dirty-tree");
+    next.push("untracked-files");
+  }
+  if (decision.verificationPlan.requireFocusedTests) {
+    next.push("focused-test");
+  }
+  if (decision.verificationPlan.requireBuild) {
+    next.push("build");
+  }
+  if (decision.verificationPlan.requireStabilityBoundary) {
+    next.push("stability-boundary");
+  }
+  return [...new Set(next)];
+}
+
 function collectNoPassReasons(input: {
   domain: VerificationRouteDomain;
   evidenceFreshness: VerificationRoute["evidenceFreshness"];
@@ -664,10 +935,14 @@ function collectNoPassReasons(input: {
   runtimeSignal: PolicyDecision["runtimeSignal"];
   failureSignal: PolicyDecision["failureSignal"];
   resourceCapPressure: boolean;
+  userStateDecision: UserStateDecision;
 }): string[] {
   const reasons: string[] = [];
   if (input.domain !== "general" && input.evidenceFreshness !== "fresh") {
     reasons.push(`evidence:${input.evidenceFreshness}`);
+  }
+  if (input.userStateDecision.verificationPlan.forbidEarlyPass) {
+    reasons.push(`user_state:${input.userStateDecision.kind}`);
   }
   if (input.lastStatus && input.lastStatus !== "pass") {
     reasons.push(`verification:${input.lastStatus}`);
@@ -694,13 +969,31 @@ function formatVerificationRouteDirective(route: VerificationRoute): string {
   return `Verification route: domain=${route.domain}; commands=${route.commands.join("+")}; evidence=${route.evidenceFreshness};${noPass}.`;
 }
 
+function formatUserStateDirective(decision: UserStateDecision): string {
+  return `UserStateDecision: kind=${decision.kind}; confidence=${decision.confidence.toFixed(2)}; interaction=${decision.interactionPlan.route}; verification=${decision.verificationPlan.strength}; detail=${decision.detailPlan.style}; notification=${decision.notificationPlan.quiet ? "quiet" : "normal"}; memoryCandidate=${decision.memoryCandidate.shouldCreate ? "candidate_only" : "none"}.`;
+}
+
+function appendUserStateInternalEvents(events: string[], decision: UserStateDecision): void {
+  if (decision.kind === "neutral") return;
+  events.push(`user_state_decision:${decision.kind}`);
+  if (decision.verificationPlan.forbidEarlyPass) {
+    events.push("user_state:forbid_early_pass");
+  }
+  if (!decision.interactionPlan.allowImplementationPush) {
+    events.push("user_state:no_implementation_push");
+  }
+}
+
 function classifyVerificationLevel(input: {
   highRiskClaim: boolean;
   expectedMutating: boolean;
   taskKind: PolicyDecision["taskKind"];
   blockedRuntime: boolean;
   lastStatus?: MetaSchedulerInput["lastVerificationStatus"];
+  userStateDecision: UserStateDecision;
 }): PolicyDecision["verificationSignal"]["recommendedLevel"] {
+  if (input.userStateDecision.verificationPlan.strength === "release") return "full";
+  if (input.userStateDecision.verificationPlan.strength === "strengthened") return "full";
   if (input.highRiskClaim || input.blockedRuntime) return "full";
   if (
     input.lastStatus === "fail" ||
@@ -860,6 +1153,7 @@ function createPolicyDecision(input: {
   toolFailure: boolean;
   providerFailure: boolean;
   surfaceWindowsSafeHint: boolean;
+  userState: UserStateDecision;
   permissionSignal: PolicyDecision["permissionSignal"];
   modelRouteSignal: PolicyDecision["modelRouteSignal"];
   verificationSignal: PolicyDecision["verificationSignal"];
@@ -871,6 +1165,56 @@ function createPolicyDecision(input: {
   runtimeSignal: PolicyDecision["runtimeSignal"];
 }): PolicyDecision {
   const hints: PolicyHint[] = [];
+  if (
+    input.userState.kind === "frustrated" ||
+    input.userState.kind === "trust_repair" ||
+    input.userState.kind === "high_stakes_release"
+  ) {
+    hints.push({
+      id: `user-state-${input.userState.kind}`,
+      severity: input.userState.kind === "high_stakes_release" ? "warning" : "info",
+      text: {
+        "zh-CN":
+          input.userState.kind === "high_stakes_release"
+            ? "策略：发布风险较高，先做工作树、构建和验证边界检查。"
+            : "策略：先核对源码事实，再给结论。",
+        "en-US":
+          input.userState.kind === "high_stakes_release"
+            ? "Strategy: release risk is high; checking worktree, build, and verification boundaries first."
+            : "Strategy: checking source facts before conclusions.",
+      },
+    });
+  }
+  if (input.userState.kind === "decisive_command") {
+    hints.push({
+      id: "user-state-command-first",
+      severity: "info",
+      text: {
+        "zh-CN": "策略：命令优先，减少背景解释。",
+        "en-US": "Strategy: command-first; reducing background explanation.",
+      },
+    });
+  }
+  if (input.userState.kind === "confused") {
+    hints.push({
+      id: "user-state-explain-first",
+      severity: "info",
+      text: {
+        "zh-CN": "策略：先解释，不直接推进实现。",
+        "en-US": "Strategy: explain-first; not pushing implementation yet.",
+      },
+    });
+  }
+  if (input.userState.kind === "strategic_exploration") {
+    hints.push({
+      id: "user-state-discussion-only",
+      severity: "info",
+      text: {
+        "zh-CN": "策略：保持讨论和架构判断，不启动代码执行。",
+        "en-US": "Strategy: staying in discussion/architecture judgment; no code execution route.",
+      },
+    });
+  }
   if (input.permissionSignal.requireExplicitGate) {
     hints.push({
       id: "permission-risk",
@@ -1009,6 +1353,7 @@ function createPolicyDecision(input: {
     platformSignal: input.platformSignal,
     budgetSignal: input.budgetSignal,
     runtimeSignal: input.runtimeSignal,
+    userState: input.userState,
     contextPlan: {
       includeMemory: input.includeMemory,
       includeFailureLearning: input.includeFailureLearning,

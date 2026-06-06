@@ -1110,11 +1110,12 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
   const now = Date.now();
   context.notifications ??= [];
   const existing = new Set(context.notifications.map((item) => item.key));
+  const maxHints = decision.userState.notificationPlan.maxHints;
   const visibleHints = decision.hints
     .filter((hint) => shouldSurfacePolicyHint(hint.id))
     .slice()
     .sort((a, b) => policyHintPriority(b) - policyHintPriority(a))
-    .slice(0, 3);
+    .slice(0, maxHints);
   for (const hint of visibleHints) {
     const key = `policy:${hint.id}`;
     if (existing.has(key)) continue;
@@ -1132,6 +1133,9 @@ function enqueuePolicyHints(context: TuiContext, decision: PolicyDecision): void
 
 function shouldSurfacePolicyHint(id: string): boolean {
   return (
+    id === "user-state-frustrated" ||
+    id === "user-state-trust_repair" ||
+    id === "user-state-high_stakes_release" ||
     id === "permission-risk" ||
     id === "blocked-runtime" ||
     id === "provider-cooldown" ||
@@ -1160,6 +1164,9 @@ function enqueueMemoryCandidateHint(context: TuiContext, count: number): void {
 }
 
 function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
+  if (hint.id === "user-state-high_stakes_release") return 120;
+  if (hint.id === "user-state-trust_repair") return 118;
+  if (hint.id === "user-state-frustrated") return 116;
   if (hint.id === "permission-risk") return 105;
   if (hint.id === "blocked-runtime") return 100;
   if (hint.id === "provider-cooldown") return 95;
@@ -1171,6 +1178,7 @@ function policyHintPriority(hint: PolicyDecision["hints"][number]): number {
   if (hint.id === "provider-fallback") return 70;
   if (hint.id === "source-first") return 60;
   if (hint.id === "background-occupancy") return 50;
+  if (hint.id.startsWith("user-state-")) return 40;
   return 10;
 }
 
@@ -1182,7 +1190,7 @@ async function appendPolicyDecisionEvent(
   await appendSystemEvent(
     context,
     sessionId,
-    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; hints=${decision.hints.map((hint) => hint.id).join(",") || "none"}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}`,
+    `strategy: ${formatPolicyDecisionSummary(decision, context.language)}; hints=${decision.hints.map((hint) => hint.id).join(",") || "none"}; role_suggestion=${decision.modelRouteSignal.suggestedRole ?? "none"}; verification=${decision.verificationSignal.recommendedLevel}; route_commands=${decision.verificationSignal.route.commands.join("+")}; permission_gate=${decision.permissionSignal.requireExplicitGate ? "yes" : "no"}; windows_safe=${decision.platformSignal.windowsSafeHint ? "yes" : "no"}; user_state=${decision.userState.kind}; detail=${decision.userState.detailPlan.style}; notification=${decision.userState.notificationPlan.quiet ? "quiet" : "normal"}; memory_candidate=${decision.userState.memoryCandidate.shouldCreate ? "candidate_only" : "none"}`,
     decision.riskLevel === "high" || decision.providerPlan === "cooldownBlocked"
       ? "warning"
       : "info",

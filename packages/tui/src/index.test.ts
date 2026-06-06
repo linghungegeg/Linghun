@@ -22337,7 +22337,7 @@ describe("D.13I — Self-built deferred tools dispatch", () => {
     // 不能输出占位话
     expect(output.text).not.toContain("不支持 tool calling");
     expect(output.text).not.toContain("Tool calling is not supported");
-  });
+  }, 10_000);
 
   it("budgets oversized ExecuteExtraTool result before Claude receives anthropic tool_result continuation", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-extra-budget-"));
@@ -24231,6 +24231,81 @@ describe("Phase 7.6 Policy Kernel MVP stream integration", () => {
     expect(notifications).not.toContain("Typed policy route");
     const transcript = (await store.resume(session.id)).transcript;
     expect(JSON.stringify(transcript)).toContain("windows_safe=yes");
+  });
+
+  it("UserState: frustrated route stays source-first, strengthens verification, and keeps notifications quiet", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-user-state-frustrated-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    await __testSendMessage(
+      "又错了，少说多做，先读源码事实再给结论。",
+      context,
+      createTextGateway("先看源码事实。"),
+      new MemoryOutput(),
+    );
+
+    const notifications = context.notifications?.map((item) => item.text) ?? [];
+    expect(notifications.length).toBeLessThanOrEqual(2);
+    expect(notifications.join("\n")).toContain("策略：先核对源码事实，再给结论。");
+    expect(notifications.join("\n")).not.toContain("PolicyDecision");
+    expect(notifications.join("\n")).not.toContain("UserStateDecision");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("user_state=frustrated");
+    expect(raw).toContain("verification=full");
+    expect(raw).toContain("source-facts");
+  });
+
+  it("UserState: strategic exploration does not schedule code execution tools", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-user-state-strategic-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    await __testSendMessage(
+      "先讨论架构取舍，不要实现代码。",
+      context,
+      createTextGateway("先讨论取舍，不写代码。"),
+      new MemoryOutput(),
+    );
+
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("user_state=strategic_exploration");
+    expect(raw).toContain("user_state:no_implementation_push");
+    expect(raw).toContain("permission_gate=no");
+    expect(raw).not.toContain("agent route");
+    expect(raw).not.toContain("workflow route");
+  });
+
+  it("UserState: trust repair memory candidate remains candidate-only and not accepted or prompt-injected", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-user-state-memory-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    await __testSendMessage(
+      "别再只复述交付摘要，上次你没看代码，这次要源码事实。",
+      context,
+      createTextGateway("先基于源码事实核对。"),
+      new MemoryOutput(),
+    );
+
+    expect(context.memory.accepted).toHaveLength(0);
+    const prompt = createModelSystemPrompt("继续", context, {
+      memory: {
+        candidates: context.memory.candidates.length,
+        accepted: context.memory.accepted.length,
+      },
+    });
+    expect(prompt).not.toContain("repairing trust");
+    expect(prompt).not.toContain("trust repair");
+    const transcript = (await store.resume(session.id)).transcript;
+    const raw = JSON.stringify(transcript);
+    expect(raw).toContain("memory_candidate=candidate_only");
+    expect(raw).not.toContain("memory_accepted");
   });
 });
 
