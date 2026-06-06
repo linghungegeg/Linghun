@@ -1,5 +1,36 @@
+import { extname } from "node:path";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
+
+const DEFAULT_BYTES_PER_TOKEN = 4;
+
+const FILE_TYPE_BYTES_PER_TOKEN: Record<string, number> = {
+  ".json": 2,
+  ".jsonl": 2,
+};
+
+export function bytesPerTokenForFileType(fileExt: string | undefined): number {
+  const normalized = normalizeFileExt(fileExt);
+  return FILE_TYPE_BYTES_PER_TOKEN[normalized] ?? DEFAULT_BYTES_PER_TOKEN;
+}
+
+export function estimateTokensFromBytesForFileType(
+  bytes: number,
+  fileExt: string | undefined,
+): number {
+  const safeBytes = Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+  return Math.max(1, Math.ceil(safeBytes / bytesPerTokenForFileType(fileExt)));
+}
+
+export function estimateFileTokens(filePath: string, bytes: number): number {
+  return estimateTokensFromBytesForFileType(bytes, extname(filePath));
+}
+
+function normalizeFileExt(fileExt: string | undefined): string {
+  const trimmed = (fileExt ?? "").trim().toLowerCase();
+  if (!trimmed) return "";
+  return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+}
 
 /**
  * Lightweight character count estimator for arbitrary values.

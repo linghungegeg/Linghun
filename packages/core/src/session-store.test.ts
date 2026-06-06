@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -67,6 +67,20 @@ describe("SessionStore", () => {
 
     expect(updated.id).toBe(session.id);
     expect(resumed.session.summary).toBe("已发送 3 条消息");
+  });
+
+  it("records a warning when metadata cannot be parsed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "linghun-sessions-"));
+    const project = await mkdtemp(join(tmpdir(), "linghun-project-"));
+    const store = new SessionStore({ sessionRootDir: root, projectPath: project });
+    const session = await store.create();
+    await writeFile(join(session.transcriptPath, "..", "session.json"), "{broken", "utf8");
+
+    await expect(store.resume(session.id)).rejects.toThrow(/未找到会话/);
+
+    const transcript = await readFile(session.transcriptPath, "utf8");
+    expect(transcript).toContain("session_metadata_read_failed");
+    expect(transcript).toContain("system_event");
   });
 });
 

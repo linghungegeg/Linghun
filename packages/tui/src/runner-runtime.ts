@@ -15,6 +15,8 @@ import type {
   NativeRunnerResolutionStatus,
 } from "./index.js";
 import { formatJobRunnerInline } from "./job-runner-presenter.js";
+import { redactedPath } from "./process-command-runtime.js";
+import { sanitizeDiagnosticText } from "./startup-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
 
 // ---------------------------------------------------------------------------
@@ -120,21 +122,6 @@ export type RunnerRuntimeDeps = {
 // ---------------------------------------------------------------------------
 // Private utility duplicates (avoid circular import from index.ts)
 // ---------------------------------------------------------------------------
-
-function sanitizeDiagnosticText(text: string): string {
-  return text
-    .replace(/prompt=[^\s&]+/giu, "prompt=***")
-    .replace(/api[_-]?key=[^\s&]+/giu, "api_key=***")
-    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
-    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
-}
-
-function redactedPath(path: string | undefined): string {
-  if (!path) {
-    return "-";
-  }
-  return `present:${sanitizeDiagnosticText(basename(path))}`;
-}
 
 function stringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;

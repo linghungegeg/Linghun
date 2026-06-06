@@ -1,5 +1,6 @@
 import type { McpServerConfig } from "@linghun/config";
 import type { Language } from "@linghun/shared";
+import { isFeatureEnabled } from "./feature-flag-runtime.js";
 import type { TuiContext } from "./index.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import type { McpToolState, PluginSummary, SkillSummary } from "./tui-data-types.js";
@@ -47,7 +48,32 @@ export function validateCodebaseMemoryToolExecution(
       summary: `MCP deferred tool guard: ${tool} 缺少 required args：${missing.join(", ")}。已拒绝盲执行。`,
     };
   }
+  const schemaProblem = validateCodebaseMemoryToolSchema(tool, input);
+  if (schemaProblem) {
+    return { ok: false, summary: schemaProblem };
+  }
   return { ok: true };
+}
+
+function validateCodebaseMemoryToolSchema(
+  tool: string,
+  input: Record<string, unknown>,
+): string | undefined {
+  const stringArgs = new Set(["project", "projectName", "query", "path", "symbol", "from", "to", "repo_path"]);
+  const booleanArgs = new Set(["force"]);
+  const numberArgs = new Set(["limit", "max_depth"]);
+  for (const [key, value] of Object.entries(input)) {
+    if (stringArgs.has(key) && typeof value !== "string") {
+      return `MCP deferred tool guard: ${tool}.${key} 必须是 string，已拒绝执行。`;
+    }
+    if (booleanArgs.has(key) && typeof value !== "boolean") {
+      return `MCP deferred tool guard: ${tool}.${key} 必须是 boolean，已拒绝执行。`;
+    }
+    if (numberArgs.has(key) && typeof value !== "number") {
+      return `MCP deferred tool guard: ${tool}.${key} 必须是 number，已拒绝执行。`;
+    }
+  }
+  return undefined;
 }
 
 // ===========================================================================
@@ -129,16 +155,19 @@ function listMcpDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
       // 远程/HTTP MCP 仍保持 executable=false：这是 D.13J Block 4 的明确范围边界。
       const serverConfig = context.config.mcp.servers[tool.server];
       const localStdio = isLocalStdioMcpServer(serverConfig);
+      const sse = serverConfig?.transport === "sse" && typeof serverConfig.url === "string" && serverConfig.url.trim();
       return {
         name: `mcp:${tool.server}:${tool.name}`,
         kind: "mcp" as const,
         // truncate is already enforced by stabilizeMcpToolList; do not echo raw schema
         description: tool.description || `MCP tool ${tool.server}:${tool.name}`,
         requiredArgs: [],
-        executable: localStdio,
+        executable: Boolean(localStdio || sse),
         reason: localStdio
           ? "MCP server tool discovered (local stdio); JSON-RPC tools/call adapter available. Mutating use needs session permission."
-          : "MCP server tool discovered with schema and trusted, but server is not local stdio (no command); Linghun has no remote MCP transport adapter yet.",
+          : sse
+            ? "MCP server tool discovered (SSE/HTTP endpoint); JSON-RPC tools/list and tools/call adapter available. Mutating use needs session permission."
+            : "MCP server tool discovered with schema and trusted, but server is not local stdio or SSE.",
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -169,9 +198,11 @@ function listSkillDeferredTools(context: TuiContext): DeferredToolDescriptor[] {
         160,
       ),
       requiredArgs: [],
-      executable: false,
+      executable: isFeatureEnabled("experimentalDeferredSkillExecution", context),
       reason: skillManifestHasContribution(skill)
-        ? "Skill manifest contributes commands/tools (enabled+trusted), but Linghun has no safe skill execution adapter yet; review manifest manually or run /skills status."
+        ? isFeatureEnabled("experimentalDeferredSkillExecution", context)
+          ? "Experimental skill deferred execution feature flag is enabled; execution still needs discovery/trust/schema and permission gates."
+          : "Skill manifest contributes commands/tools (enabled+trusted), but experimental skill execution is disabled by feature flag; review manifest manually or run /skills status."
         : "Skill manifest is metadata-only (no command/tool contribution); not executable. Run /skills status for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -205,9 +236,11 @@ function listPluginDeferredTools(context: TuiContext): DeferredToolDescriptor[] 
         160,
       ),
       requiredArgs: [],
-      executable: false,
+      executable: isFeatureEnabled("experimentalDeferredPluginExecution", context),
       reason: pluginManifestHasContribution(plugin)
-        ? "Plugin manifest contributes commands/tools (enabled+trusted), but Linghun has no safe plugin execution adapter yet; review contributions manually or run /plugins doctor."
+        ? isFeatureEnabled("experimentalDeferredPluginExecution", context)
+          ? "Experimental plugin deferred execution feature flag is enabled; execution still needs discovery/trust/schema and permission gates."
+          : "Plugin manifest contributes commands/tools (enabled+trusted), but experimental plugin execution is disabled by feature flag; review contributions manually or run /plugins doctor."
         : "Plugin manifest is metadata-only (no command/tool contribution); not executable. Run /plugins doctor for details.",
     }))
     .sort((a, b) => a.name.localeCompare(b.name));

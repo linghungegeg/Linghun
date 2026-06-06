@@ -1,4 +1,4 @@
-import type { Language } from "@linghun/shared";
+import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
 import type { ToolName, ToolOutput } from "@linghun/tools";
 
 export type TuiOutputLayer = "primary" | "details" | "debug";
@@ -338,8 +338,8 @@ function formatDetailsHint(language: Language): string {
   // `/details output <id>`。完整结果仍保存在 fullText / fullOutputPath 中，
   // 由 /details 命令或 Ctrl+O 展开访问。
   return language === "en-US"
-    ? "Output folded. Press Ctrl+O to expand."
-    : "输出已折叠，按 Ctrl+O 展开。";
+    ? `Output folded. Press ${TOGGLE_DETAILS_KEYBIND} to expand.`
+    : `输出已折叠，按 ${TOGGLE_DETAILS_KEYBIND} 展开。`;
 }
 
 function createToolSummary(name: ToolName, output: ToolOutput, language: Language): string {

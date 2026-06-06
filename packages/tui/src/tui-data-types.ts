@@ -793,6 +793,8 @@ export type RemoteState = {
   sessionDisabledChannelIds: string[];
   pairings: RemotePairingState[];
   inbox: RemoteInboxItem[];
+  localReplBridge?: import("./remote-repl-bridge-runtime.js").ReplBridgeState;
+  localReplBridgeSocket?: import("./remote-repl-bridge-runtime.js").ReplBridgeSocketServer;
   lastDoctor?: string;
   lastApproval?: RemoteApprovalDecision;
 };
@@ -833,6 +835,9 @@ export type MemoryState = {
   projectRulesExists: boolean;
   projectRulesSummary: string;
   projectRulesError?: string;
+  projectRulesIncludedPaths?: string[];
+  projectRulesWarnings?: string[];
+  projectRulesTruncated?: boolean;
   projectDir: string;
   userDir: string;
   sessionDir: string;

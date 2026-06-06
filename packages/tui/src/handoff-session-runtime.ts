@@ -17,6 +17,13 @@ import { getRuntimeStatusProvider } from "./tui-model-runtime.js";
 import { isRecord } from "./tui-state-runtime.js";
 
 const COMPACT_PROJECTION_EVENT_PREFIX = "compact_projection:";
+const HANDOFF_KEY_FILE_LIMIT = 12;
+const DEFAULT_HANDOFF_KEY_FILES = [
+  "LINGHUN_DEVELOPMENT_ROADMAP.md",
+  "docs/delivery/README.md",
+  "package.json",
+  "tsconfig.json",
+] as const;
 
 export function hydrateResumeContext(context: TuiContext, transcript: TranscriptEvent[]): void {
   const latestTodo = [...transcript].reverse().find((event) => event.type === "todo_update");
@@ -324,14 +331,7 @@ export function createHandoffPacket(
     pending: [],
     mustNotDo: ["Do not claim completion, PASS, or verified results without recorded evidence."],
     todos,
-    keyFiles: [
-      "packages/tui/src/index.ts",
-      "packages/config/src/index.ts",
-      "packages/tui/src/index.test.ts",
-      "packages/config/src/index.test.ts",
-      "apps/cli/src/cli.ts",
-      "docs/delivery/phase-14-skills-workflow.md",
-    ],
+    keyFiles: buildHandoffKeyFiles(context, latestEvidence),
     changedFiles: [...new Set(context.tools.changedFiles)],
     evidenceRefs: latestEvidence,
     verdictEvidence: createEmptyVerdictEvidenceScope(),
@@ -350,6 +350,36 @@ export function createHandoffPacket(
       ? { currentArchitectureCard: summarizeArchitectureCard(context.currentArchitectureCard) }
       : {}),
   };
+}
+
+function buildHandoffKeyFiles(
+  context: TuiContext,
+  latestEvidence: Array<{ source: string }>,
+): string[] {
+  const candidates = [
+    ...context.tools.changedFiles,
+    ...latestEvidence.map((item) => item.source),
+    ...DEFAULT_HANDOFF_KEY_FILES,
+  ];
+  const keyFiles: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const normalized = normalizeHandoffFileRef(candidate);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    keyFiles.push(normalized);
+    if (keyFiles.length >= HANDOFF_KEY_FILE_LIMIT) break;
+  }
+  return keyFiles;
+}
+
+function normalizeHandoffFileRef(value: string): string | undefined {
+  const trimmed = value.trim().replaceAll("\\", "/");
+  if (!trimmed || trimmed.startsWith("[") || /^[a-z]+:/iu.test(trimmed)) return undefined;
+  if (trimmed.includes("\n") || trimmed.includes("\0")) return undefined;
+  const withoutLine = trimmed.replace(/:\d+(?::\d+)?$/u, "");
+  if (!withoutLine.includes("/") && !withoutLine.includes(".")) return undefined;
+  return withoutLine;
 }
 
 function sanitizeHandoffPacket(packet: HandoffPacket): HandoffPacket {

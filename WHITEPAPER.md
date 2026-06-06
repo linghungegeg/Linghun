@@ -1127,6 +1127,89 @@ App Bridge 的连接模型是：
 
 当前成品边界以 Local HTTP connector 为主：外部应用在本机暴露 `GET /linghun/capabilities` 供 Linghun handshake，并在 capability 执行端接收受控请求。manifest 必须在当前项目边界内，baseUrl 仅允许本地 HTTP，auth 信息只记录 source/ref，不把 raw secret 写进主屏或 transcript。连接状态按项目隔离，断开连接只影响当前项目对应 app 的 capability。
 
+开发者最小接入示例可以非常薄。第一步是在当前项目内放一个 manifest：
+
+```json
+{
+  "appId": "demo.drawing",
+  "name": "Demo Drawing",
+  "version": "0.1.0",
+  "transport": "http",
+  "baseUrl": "http://127.0.0.1:47831",
+  "auth": { "type": "none" },
+  "capabilities": [
+    {
+      "id": "demo.drawing.describe",
+      "appId": "demo.drawing",
+      "title": "Describe Drawing",
+      "description": "Describes a local drawing.",
+      "category": "drawing",
+      "intents": ["describe drawing"],
+      "keywords": ["drawing", "describe"],
+      "transport": "http",
+      "auth": "none",
+      "permission": "read",
+      "riskLevel": "low",
+      "inputSchema": { "type": "object", "required": ["subject"] },
+      "outputSchema": { "type": "object", "required": ["summary"] },
+      "supportsRollback": false,
+      "supportsPreview": false
+    }
+  ]
+}
+```
+
+第二步是让本地应用实现两个 HTTP 端点：
+
+```http
+GET /linghun/capabilities
+```
+
+返回 `{ "capabilities": [...] }` 或 capability 数组。Linghun 会把远端返回的同 id capability metadata 与 manifest 合并。
+
+```http
+POST /linghun/execute
+```
+
+请求体由 Linghun 生成：
+
+```json
+{
+  "capabilityId": "demo.drawing.describe",
+  "input": { "subject": "circle" },
+  "metadata": {
+    "requestId": "generated-uuid",
+    "source": "slash",
+    "appId": "demo.drawing"
+  }
+}
+```
+
+应用只需要返回有界结果：
+
+```json
+{
+  "ok": true,
+  "summary": "Described circle.",
+  "details": "Bounded details for humans.",
+  "artifactRef": "optional-ref",
+  "previewRef": "optional-preview-ref",
+  "rollbackRef": "optional-rollback-ref"
+}
+```
+
+用户侧连接命令是：
+
+```text
+/apps connect .\demo-connector.json
+/apps list
+/apps doctor
+/capabilities run demo.drawing.describe {"subject":"circle"}
+/apps disconnect demo.drawing
+```
+
+当前 HTTP 执行端点是统一的 `/linghun/execute`，不是每个 capability 一个 URL。Auth 可以使用 `env`、`projectConfigRef`、`userConfigRef` 或 `valueRef`，不能在 manifest 中写 raw secret。详细开发者指南在 `docs/developers/capability-runtime-app-bridge.md`。
+
 开发者接入时，不需要理解 Linghun 的全部内部系统。一个应用只需要提供：
 
 - 应用身份：app id、name、version。
@@ -1217,6 +1300,48 @@ D.14E/D.14F 之后，远程通道分成两层能力：
 - failure_summary。
 - stable_point_result。
 - index_result。
+
+钉钉的接入边界按当前代码事实拆成两条路径：
+
+```text
+钉钉自定义机器人 webhook
+-> 只做 notification-only 出站摘要
+-> Linghun POST msgtype/text payload
+-> 成功发送不等于手机接管，也不等于任务验证通过
+```
+
+钉钉 webhook payload 形态是：
+
+```json
+{
+  "msgtype": "text",
+  "text": {
+    "content": "redacted summary from Linghun"
+  }
+}
+```
+
+如果配置了 signing secret 引用，Linghun 会按钉钉机器人加签规则把 `timestamp` 和 `sign` 追加到 webhook URL；secret 只通过环境变量引用解析，不进入主屏、transcript 或 deliveryDetail。用户侧检查路径是 `/remote setup dingtalk`、`/remote test dingtalk`、`/remote status` 和 `/remote events`。这条 webhook 路径只能用于发送脱敏摘要、审批请求摘要、job 状态和验证结果摘要，不能接收手机消息。
+
+要让钉钉消息回到 Linghun，需要官方应用、Stream 或等价 bridge daemon。当前适配层识别的钉钉 Stream frame 关键字段是：
+
+```json
+{
+  "headers": {
+    "topic": "/v1.0/im/bot/messages/get",
+    "messageId": "msg-1"
+  },
+  "data": {
+    "msgId": "msg-1",
+    "senderId": "ding-user-1",
+    "text": {
+      "content": "继续检查失败测试"
+    }
+  }
+}
+```
+
+这个 frame 会被转成 `RemoteInboundMessage`，再进入本地 remote inbox / active-turn guard / permission pipeline。审批类文本也只能恢复本地已有的 `pendingLocalApproval`，不能凭手机消息新造一个写操作。开发者要接钉钉入站时，本质是把钉钉官方应用或 Stream 收到的事件转换成 Linghun 认可的入站消息，并保留 messageId、source、expiry、signature/source proof 和绑定用户信息。
 
 Linghun 按平台真实能力分级，而不是把“webhook 发出成功”包装成完整手机控制：
 

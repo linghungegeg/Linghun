@@ -48,7 +48,14 @@ async function fileExists(filePath: string): Promise<boolean> {
   try {
     await stat(filePath);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
   }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }

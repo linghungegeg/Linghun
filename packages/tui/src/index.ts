@@ -479,6 +479,7 @@ import {
   formatPendingNaturalCommandDetails,
   formatWorkspaceTrustStatus,
 } from "./pending-details-presenter.js";
+import { buildPromptCommandUserText, findPromptCommand } from "./prompt-command-runtime.js";
 import {
   type ProviderFailureKind,
   type RequestActivityPhase,
@@ -518,6 +519,7 @@ import {
   LINGHUN_TASK_MAX_OUTPUT_UPPER_LIMIT,
 } from "./runtime-budget.js";
 import { classifyRuntimePath, classifyStartupPath } from "./runtime-path-marker.js";
+import { loadProjectKeybindings } from "./keybinding-runtime.js";
 import { formatPermissionModeLabel, formatRuntimeStatusLine } from "./runtime-status-presenter.js";
 import {
   createCommandBlock,
@@ -1324,6 +1326,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     mcp: createMcpState(config),
     index: createIndexState(config),
     memory: await createMemoryState(config, projectPath),
+    keybindings: await loadProjectKeybindings(projectPath),
     failureLearning: createFailureLearningState(projectPath, config),
     skills: await createSkillState(config, projectPath),
     workflows: createWorkflowState(config),
@@ -1683,8 +1686,10 @@ async function runInkShell(
             `permission mode change: ${previousMode} -> ${nextMode}; reason ink shift-tab quiet cycle; boundary Start Gate and permission pipeline remain active`,
             "info",
           );
-        } catch {
-          // 会话/事件写入失败不阻断 UI 切换；底层日志路径不应把用户输入区拖死。
+        } catch (error) {
+          process.stderr.write(
+            `[linghun] permission_mode_system_event_failed reason=${formatError(error, context.language).replace(/\s+/g, " ")}\n`,
+          );
         }
         const continued = await reevaluatePendingLocalApprovalAfterModeChange(
           context,
@@ -2343,14 +2348,19 @@ async function processTuiLine(
     return "exit";
   }
   if (commandResult === "message") {
+    const promptCommand = context.pendingPromptCommand;
+    context.pendingPromptCommand = undefined;
+    const messageText = promptCommand?.prompt ?? text;
     context.commandPanelState = undefined;
     context.helpPanelState = undefined;
     context.configPanelState = undefined;
     context.btwPanelState = undefined;
     context.sessionsPanelState = undefined;
-    const naturalResult = await handleNaturalInput(text, context, gateway, output);
+    const naturalResult = promptCommand
+      ? "message"
+      : await handleNaturalInput(text, context, gateway, output);
     if (naturalResult === "message") {
-      await sendMessage(text, context, gateway, output);
+      await sendMessage(messageText, context, gateway, output);
     }
   }
   return "continue";
@@ -2390,6 +2400,13 @@ export async function handleSlashCommand(
     writeLine(output, workspaceGuard);
     writeStatus(output, context);
     return "handled";
+  }
+  if (findPromptCommand(command)) {
+    const promptText = buildPromptCommandUserText(command, rest, context.language);
+    if (promptText) {
+      context.pendingPromptCommand = { command, prompt: promptText };
+      return "message";
+    }
   }
   if (command === "/help") {
     const variantArg = (rest[0] ?? "").toLowerCase();

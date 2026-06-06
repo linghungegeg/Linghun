@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Writable } from "node:stream";
 import type { TranscriptEvent } from "@linghun/core";
+import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
   createHandoffPacket,
@@ -133,8 +134,8 @@ export async function handleMemoryCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Memory storage paths — Ctrl+O for details."
-          : "记忆存储路径 — Ctrl+O 查看详情。",
+          ? `Memory storage paths — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `记忆存储路径 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: formatMemoryStorage(context),
     });
@@ -147,8 +148,8 @@ export async function handleMemoryCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Memory review — Ctrl+O for details."
-          : "记忆复核 — Ctrl+O 查看详情。",
+          ? `Memory review — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `记忆复核 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: formatMemoryReview(context),
     });
@@ -161,8 +162,8 @@ export async function handleMemoryCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Memory stats — Ctrl+O for details."
-          : "记忆统计 — Ctrl+O 查看详情。",
+          ? `Memory stats — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `记忆统计 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: formatMemoryStats(context),
     });
@@ -212,8 +213,8 @@ export async function handleMemoryCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? `Memory learn — ${result.candidatesCreated} candidate(s); Ctrl+O for details.`
-          : `记忆学习 — 新候选 ${result.candidatesCreated} 条；Ctrl+O 查看详情。`,
+          ? `Memory learn — ${result.candidatesCreated} candidate(s); ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `记忆学习 — 新候选 ${result.candidatesCreated} 条；${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: formatMemoryLearningRun(result, context.language),
     });

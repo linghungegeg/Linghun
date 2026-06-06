@@ -5,6 +5,7 @@ export const CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions";
 
 export function formatUsage(context: TuiContext): string {
   const totals = sumCacheHistory(context.cache.history);
+  const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
   return [
     "Usage（本会话原始 token/cache usage）",
@@ -17,6 +18,7 @@ export function formatUsage(context: TuiContext): string {
     `- endpoint: ${latest?.endpoint ?? CHAT_COMPLETIONS_ENDPOINT}`,
     `- compact: ${context.cache.compacted ? "yes" : "no"}`,
     `- raw usage records: ${context.cache.history.filter((item) => item.rawUsage !== undefined).length}`,
+    `- estimated cost: ${formatEstimatedCny(totalEstimatedCny)}（packaged model pricing estimate）`,
     "- role usage (estimated):",
     ...formatRoleUsageLines(context),
     "- billing: 未记录真实账单字段；任何金额只能标记 estimated。",
@@ -38,6 +40,7 @@ export function formatStats(args: string[], context: TuiContext): string {
     return formatEndpointStats(context.cache.history);
   }
   const totals = sumCacheHistory(context.cache.history);
+  const totalEstimatedCny = sumRoleUsageEstimatedCny(context);
   const latest = context.cache.history.at(-1);
   const provider = latest?.provider ?? "unknown";
   const hitRate = computePromptCacheHitRate({
@@ -56,10 +59,22 @@ export function formatStats(args: string[], context: TuiContext): string {
     `- provider: ${provider}`,
     `- hit rate: ${formatPercent(hitRate)}`,
     `- tokens: input ${totals.inputTokens}; output ${totals.outputTokens}; cache read ${totals.cacheReadTokens}; cache write ${totals.cacheWriteTokens}`,
+    `- cost: estimated ${formatEstimatedCny(totalEstimatedCny)}（packaged model pricing estimate; not billing）`,
     "- role/model/provider usage (estimated):",
     ...formatRoleUsageLines(context),
-    "- cost: estimated unavailable（未配置价格；不伪装成真实账单；状态栏不显示金额）",
   ].join("\n");
+}
+
+export function sumRoleUsageEstimatedCny(context: TuiContext): number {
+  const values = context.roleUsage
+    .map((usage) => usage.estimatedCny)
+    .filter((value) => Number.isFinite(value));
+  if (values.length === 0) return Number.NaN;
+  return values.reduce((total, value) => total + value, 0);
+}
+
+export function formatEstimatedCny(value: number): string {
+  return Number.isFinite(value) ? `CNY ${value.toFixed(4)}` : "估算中";
 }
 
 export function formatEndpointStats(history: CacheTurnStats[]): string {

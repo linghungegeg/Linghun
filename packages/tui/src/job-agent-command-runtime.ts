@@ -23,6 +23,7 @@ import { summarizeWorktreeCreateOutcome } from "./git-tool-runtime.js";
 import { loadOrCreateHandoffPacket, validateHandoffPacket } from "./handoff-session-runtime.js";
 import { createIndexStatusSnapshot, formatIndexRuntimeRef } from "./index-runtime.js";
 import type { TuiContext } from "./index.js";
+import { createSilentOutput } from "./details-status-runtime.js";
 import {
   formatBackgroundTask,
   formatBackgroundTaskPanelDetails,
@@ -41,7 +42,6 @@ import {
   createDurableJobAgents,
   deriveAgentDisplayName,
   estimateJobTokens,
-  formatJobAgentLabels,
   formatJobStatus,
   getDurableJobMaxSteps,
   getEffectiveAgentCap,
@@ -92,7 +92,6 @@ import {
   getAgentPermissionMode,
   getAgentRole,
   getDurableJobPaths,
-  isActiveBackgroundStatus,
   isAgentCancellable,
   isAgentType,
   isRuntimeActiveBackgroundTask,
@@ -101,7 +100,6 @@ import {
   mapAgentBackgroundResult,
   registerBackgroundAbortController,
   rememberBackgroundTask,
-  toJobContext,
   upsertJobBackgroundTask,
 } from "./tui-agent-job-runtime.js";
 import type {
@@ -1825,14 +1823,6 @@ export async function runDurableJobLiteTick(
   );
 }
 
-function createSilentOutput(): Writable {
-  return new Writable({
-    write(_chunk, _encoding, callback) {
-      callback();
-    },
-  });
-}
-
 export async function persistDurableJobProgress(
   context: TuiContext,
   job: DurableJobState,
@@ -3041,7 +3031,7 @@ export async function denyAgentToolUse(
   outcomeText: string,
 ): Promise<{ ok: false; tool: string; text: string; evidenceId?: string }> {
   const text =
-    toolName === "Bash" || toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit"
+    AGENT_PERMISSION_BRIDGE_TOOLS.has(toolName)
       ? `${outcomeText}; ${toolName} was NOT executed / NOT written.`
       : outcomeText;
   const evidenceId = await deps().recordAgentToolFailureEvidence(
@@ -3474,7 +3464,13 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
   let files: string[];
   try {
     files = await readdir(getAgentRunsDir(context));
-  } catch {
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      await appendAgentHydrateWarning(
+        context,
+        `agent_hydrate_readdir_failed reason=${formatDiagnosticError(error)}`,
+      );
+    }
     return;
   }
   const existing = new Set(context.agents.map((agent) => agent.id));
@@ -3520,8 +3516,41 @@ export async function hydratePersistentAgents(context: TuiContext): Promise<void
       if (parsed.status === "running") {
         await persistAgentRun(context, agent);
       }
-    } catch {}
+    } catch (error) {
+      await appendAgentHydrateWarning(
+        context,
+        `agent_hydrate_read_failed file=${file} reason=${formatDiagnosticError(error)}`,
+      );
+    }
   }
+}
+
+async function appendAgentHydrateWarning(context: TuiContext, message: string): Promise<void> {
+  if (!context.sessionId) {
+    process.stderr.write(`[linghun] ${message}\n`);
+    return;
+  }
+  try {
+    await context.store.appendEvent(context.sessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    process.stderr.write(
+      `[linghun] ${message}; warning_write_failed=${formatDiagnosticError(error)}\n`,
+    );
+  }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 function isDefaultBackgroundListTask(task: BackgroundTaskState): boolean {

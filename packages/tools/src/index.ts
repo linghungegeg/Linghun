@@ -2,6 +2,23 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  createTool,
+  type ToolDefinition,
+  type ToolFactoryDefinition,
+  type ToolLifecycleMetadata,
+} from "./tool-runtime.js";
+import { toolPrompts } from "./tools/prompts.js";
+import { toolUserFacingNames } from "./tools/ui.js";
+
+export type {
+  ToolDefinition,
+  ToolFactoryDefinition,
+  ToolInterruptBehavior,
+  ToolLifecycleMetadata,
+  ToolPermissionDecision,
+} from "./tool-runtime.js";
+export { createTool } from "./tool-runtime.js";
 
 export type ToolRisk = "low" | "medium" | "high";
 
@@ -22,28 +39,6 @@ export type ToolOutput = {
   fullOutputPath?: string;
   evidenceId?: string;
   changedFiles?: string[];
-};
-
-export type ToolInterruptBehavior = "abortable" | "best-effort" | "not-supported";
-
-export type ToolLifecycleMetadata = {
-  enabled: boolean;
-  destructive: boolean;
-  interruptBehavior: ToolInterruptBehavior;
-  maxResultSizeChars: number;
-};
-
-export type ToolDefinition<Input = unknown> = {
-  name: ToolName;
-  title: string;
-  description: string;
-  permission: ToolPermissionSpec;
-  isReadOnly: boolean;
-  isConcurrencySafe: boolean;
-  isLongRunning?: boolean;
-  lifecycle: ToolLifecycleMetadata;
-  validateInput(input: unknown): Input;
-  call(input: Input, context: ToolContext): Promise<ToolOutput>;
 };
 
 export type ToolProgressEvent = {
@@ -185,8 +180,8 @@ export async function runTool(
   };
 }
 
-function defineTool<Input>(definition: ToolDefinition<Input>): ToolDefinition<Input> {
-  return definition;
+function defineTool<Input>(definition: ToolFactoryDefinition<Input>): ToolDefinition<Input> {
+  return createTool(definition);
 }
 
 const toolDefinitions = {
@@ -205,6 +200,10 @@ const toolDefinitions = {
     lifecycle: readOnlyLifecycle(),
     validateInput: validateReadInput,
     call: readTool,
+    prompt: () => toolPrompts.Read,
+    userFacingName: () => toolUserFacingNames.Read,
+    getToolUseSummary: (input) => `Read ${input.path}`,
+    getActivityDescription: (input) => `Reading ${input.path}`,
   }),
   Write: defineTool<WriteInput>({
     name: "Write",
@@ -221,6 +220,10 @@ const toolDefinitions = {
     lifecycle: writeLifecycle(),
     validateInput: validateWriteInput,
     call: writeTool,
+    prompt: () => toolPrompts.Write,
+    userFacingName: () => toolUserFacingNames.Write,
+    getToolUseSummary: (input) => `Write ${input.path}`,
+    getActivityDescription: (input) => `Writing ${input.path}`,
   }),
   Edit: defineTool<EditInput>({
     name: "Edit",
@@ -237,6 +240,10 @@ const toolDefinitions = {
     lifecycle: writeLifecycle(),
     validateInput: validateEditInput,
     call: editTool,
+    prompt: () => toolPrompts.Edit,
+    userFacingName: () => toolUserFacingNames.Edit,
+    getToolUseSummary: (input) => `Edit ${input.path}`,
+    getActivityDescription: (input) => `Editing ${input.path}`,
   }),
   MultiEdit: defineTool<MultiEditInput>({
     name: "MultiEdit",
@@ -253,6 +260,10 @@ const toolDefinitions = {
     lifecycle: writeLifecycle(),
     validateInput: validateMultiEditInput,
     call: multiEditTool,
+    prompt: () => toolPrompts.MultiEdit,
+    userFacingName: () => toolUserFacingNames.MultiEdit,
+    getToolUseSummary: (input) => `MultiEdit ${input.path} (${input.edits.length} edits)`,
+    getActivityDescription: (input) => `Editing ${input.path}`,
   }),
   Grep: defineTool<GrepInput>({
     name: "Grep",
@@ -269,6 +280,10 @@ const toolDefinitions = {
     lifecycle: readOnlyLifecycle(),
     validateInput: validateGrepInput,
     call: grepTool,
+    prompt: () => toolPrompts.Grep,
+    userFacingName: () => toolUserFacingNames.Grep,
+    getToolUseSummary: (input) => `Grep ${input.pattern}`,
+    getActivityDescription: (input) => `Searching ${input.path ?? "."}`,
   }),
   Glob: defineTool<GlobInput>({
     name: "Glob",
@@ -285,6 +300,10 @@ const toolDefinitions = {
     lifecycle: readOnlyLifecycle(),
     validateInput: validateGlobInput,
     call: globTool,
+    prompt: () => toolPrompts.Glob,
+    userFacingName: () => toolUserFacingNames.Glob,
+    getToolUseSummary: (input) => `Glob ${input.pattern}`,
+    getActivityDescription: (input) => `Matching ${input.path ?? "."}`,
   }),
   Bash: defineTool<BashInput>({
     name: "Bash",
@@ -302,6 +321,10 @@ const toolDefinitions = {
     lifecycle: bashLifecycle(),
     validateInput: validateBashInput,
     call: bashTool,
+    prompt: () => toolPrompts.Bash,
+    userFacingName: () => toolUserFacingNames.Bash,
+    getToolUseSummary: (input) => `Bash ${input.command}`,
+    getActivityDescription: () => "Running command",
   }),
   Todo: defineTool<TodoInput>({
     name: "Todo",
@@ -318,6 +341,10 @@ const toolDefinitions = {
     lifecycle: sessionLifecycle(),
     validateInput: validateTodoInput,
     call: todoTool,
+    prompt: () => toolPrompts.Todo,
+    userFacingName: () => toolUserFacingNames.Todo,
+    getToolUseSummary: (input) => `Todo ${input.action}`,
+    getActivityDescription: (input) => `Updating todo ${input.action}`,
   }),
   Diff: defineTool<DiffInput>({
     name: "Diff",
@@ -334,6 +361,10 @@ const toolDefinitions = {
     lifecycle: readOnlyLifecycle(),
     validateInput: validateDiffInput,
     call: diffTool,
+    prompt: () => toolPrompts.Diff,
+    userFacingName: () => toolUserFacingNames.Diff,
+    getToolUseSummary: () => "Diff summary",
+    getActivityDescription: () => "Summarizing changes",
   }),
 } satisfies Record<ToolName, ToolDefinition>;
 
@@ -675,7 +706,7 @@ async function grepTool(input: GrepInput, context: ToolContext): Promise<ToolOut
   const matches: string[] = [];
 
   for await (const filePath of listFiles(root, () => matches.length >= limit)) {
-    const content = await safeReadText(filePath);
+    const content = await safeReadText(filePath, context);
     if (content === null) {
       continue;
     }
@@ -1417,12 +1448,21 @@ function isDefaultSearchExcludedPath(
   );
 }
 
-async function safeReadText(filePath: string): Promise<string | null> {
+async function safeReadText(filePath: string, context: ToolContext): Promise<string | null> {
   try {
     return await readFile(filePath, "utf8");
-  } catch {
+  } catch (error) {
+    await context.onProgress?.({
+      toolName: "Grep",
+      stream: "system",
+      text: `read skipped: ${relativePath(context.workspaceRoot, filePath)} (${formatDiagnosticError(error)})`,
+    });
     return null;
   }
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 type SearchBackendResult = {

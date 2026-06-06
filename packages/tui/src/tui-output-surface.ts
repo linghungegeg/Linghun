@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { Writable } from "node:stream";
+import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import type { TuiContext } from "./index.js";
 import type { ProductBlockViewModel } from "./shell/types.js";
 import { createOutputBlock } from "./shell/view-model.js";
@@ -15,6 +16,10 @@ const LAST_FULL_OUTPUT_PREVIEW_CHARS = 2_000;
 const OUTPUT_MEMORY_ARTIFACT_DIR = "tui-output";
 // Phase 6.5: summary 首行超长时截断，避免单行渲染撑爆 TUI。
 const MAX_STREAMING_SUMMARY_CHARS = 500;
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
+}
 
 function isRuntimeStatusDump(line: string): boolean {
   if (line.startsWith("[Linghun] 会话 ")) return true;
@@ -71,7 +76,9 @@ export class ShellBlockOutput extends Writable {
       if (!this.context.suppressLastFullOutputCapture) {
         this.context.lastFullOutput = normalized;
       }
-      void this.compactOutputMemory();
+      this.compactOutputMemory().catch((error) => {
+        void this.appendCompactOutputMemoryWarning(error);
+      });
       // D.13Q-UX Real Smoke Fix v3 — 不再在 ShellBlockOutput 内做 ephemeral
       // splice 重排（旧实现 keep+lastEphemeral 会破坏 user → assistant →
       // diagnostic → user → assistant 的真实时间线，并且与 view-model 的
@@ -156,7 +163,9 @@ export class ShellBlockOutput extends Writable {
     this.assistantBlockId = undefined;
     this.assistantStreamText = "";
     this.assistantPreviewText = "";
-    void this.compactOutputMemory();
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
     this.onWrite();
   }
 
@@ -197,7 +206,9 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = text;
     }
-    void this.compactOutputMemory();
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
     this.onWrite();
   }
 
@@ -217,7 +228,9 @@ export class ShellBlockOutput extends Writable {
     const hasMore =
       normalized.length > 0 && (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
     const detailsHint =
-      this.context.language === "en-US" ? "Ctrl+O for details" : "Ctrl+O 查看完整内容";
+      this.context.language === "en-US"
+        ? `${TOGGLE_DETAILS_KEYBIND} for details`
+        : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
     this.blocks.push({
       id: `diag-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "details",
@@ -231,7 +244,9 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
-    void this.compactOutputMemory();
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
     this.onWrite();
   }
 
@@ -254,7 +269,9 @@ export class ShellBlockOutput extends Writable {
     const hasMore =
       normalized.length > 0 && (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
     const errorHint =
-      this.context.language === "en-US" ? "Ctrl+O for full error" : "Ctrl+O 查看完整错误";
+      this.context.language === "en-US"
+        ? `${TOGGLE_DETAILS_KEYBIND} for full error`
+        : `${TOGGLE_DETAILS_KEYBIND} 查看完整错误`;
     this.blocks.push({
       id: `err-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "error",
@@ -268,7 +285,9 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
-    void this.compactOutputMemory();
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
     this.onWrite();
   }
 
@@ -280,7 +299,9 @@ export class ShellBlockOutput extends Writable {
     const hasMore =
       normalized.length > 0 && (nonEmptyLines >= 2 || normalized.length > firstLine.length + 16);
     const detailsHint =
-      this.context.language === "en-US" ? "Ctrl+O for details" : "Ctrl+O 查看完整内容";
+      this.context.language === "en-US"
+        ? `${TOGGLE_DETAILS_KEYBIND} for details`
+        : `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`;
     this.blocks.push({
       id: `local-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       kind: "tool",
@@ -294,7 +315,9 @@ export class ShellBlockOutput extends Writable {
     if (!this.context.suppressLastFullOutputCapture) {
       this.context.lastFullOutput = normalized;
     }
-    void this.compactOutputMemory();
+    this.compactOutputMemory().catch((error) => {
+      void this.appendCompactOutputMemoryWarning(error);
+    });
     this.onWrite();
   }
 
@@ -303,6 +326,28 @@ export class ShellBlockOutput extends Writable {
       this.compactOutputMemoryOnce(),
     );
     return this.compactOutputMemoryQueue;
+  }
+
+  private async appendCompactOutputMemoryWarning(error: unknown): Promise<void> {
+    if (!this.context.sessionId) {
+      process.stderr.write(
+        `[linghun] compact_output_memory_failed reason=${formatDiagnosticError(error)}\n`,
+      );
+      return;
+    }
+    try {
+      await this.context.store.appendEvent(this.context.sessionId, {
+        type: "system_event",
+        id: randomUUID(),
+        level: "warning",
+        message: `compact_output_memory_failed reason=${formatDiagnosticError(error)}`,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (writeError) {
+      process.stderr.write(
+        `[linghun] compact_output_memory_failed reason=${formatDiagnosticError(error)}; warning_write_failed=${formatDiagnosticError(writeError)}\n`,
+      );
+    }
   }
 
   private commitAssistantBlock(id: string, text: string): ProductBlockViewModel | undefined {

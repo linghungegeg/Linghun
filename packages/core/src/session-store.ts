@@ -109,7 +109,7 @@ export class SessionStore {
   async list(): Promise<SessionListItem[]> {
     const project = identifyProject(this.projectPath);
     const projectDir = this.getProjectDir(project.projectId);
-    const entries = await safeReadDir(projectDir);
+    const entries = await safeReadDir(projectDir, "session project directory");
     const sessions = await Promise.all(
       entries.map(async (entry) => this.readMetadata(project.projectId, entry)),
     );
@@ -193,11 +193,39 @@ export class SessionStore {
   }
 
   private async readMetadata(projectId: string, sessionId: string): Promise<Session | null> {
+    const metadataPath = this.getMetadataPath(projectId, sessionId);
     try {
-      const text = await readFile(this.getMetadataPath(projectId, sessionId), "utf8");
+      const text = await readFile(metadataPath, "utf8");
       return JSON.parse(text) as Session;
-    } catch {
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT")) {
+        return null;
+      }
+      await this.appendMetadataReadWarning(projectId, sessionId, metadataPath, error);
       return null;
+    }
+  }
+
+  private async appendMetadataReadWarning(
+    projectId: string,
+    sessionId: string,
+    metadataPath: string,
+    error: unknown,
+  ): Promise<void> {
+    const transcriptPath = join(this.getSessionDir(projectId, sessionId), "transcript.jsonl");
+    const message = `session_metadata_read_failed path=${metadataPath} reason=${formatError(error)}`;
+    try {
+      await appendJsonl(transcriptPath, {
+        type: "system_event",
+        id: randomUUID(),
+        level: "warning",
+        message,
+        createdAt: this.now().toISOString(),
+      } satisfies TranscriptEvent);
+    } catch (writeError) {
+      process.stderr.write(
+        `[linghun] ${message}; warning_write_failed=${formatError(writeError)}\n`,
+      );
     }
   }
 
@@ -208,10 +236,24 @@ export class SessionStore {
   }
 }
 
-async function safeReadDir(dir: string): Promise<string[]> {
+async function safeReadDir(dir: string, label: string): Promise<string[]> {
   try {
     return await readdir(dir);
-  } catch {
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return [];
+    }
+    process.stderr.write(
+      `[linghun] readdir_failed label=${label} path=${dir} reason=${formatError(error)}\n`,
+    );
     return [];
   }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }

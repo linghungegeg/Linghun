@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -328,8 +328,32 @@ export async function refreshCompactPressureSnapshot(context: TuiContext): Promi
       toolPairingSafe: inspectToolPairingSafety(messages).safe,
       updatedAt: new Date().toISOString(),
     };
-  } catch {
+  } catch (error) {
+    await appendCompactPressureWarning(
+      context,
+      `compact_pressure_snapshot_failed reason=${formatError(error, context.language).replace(/\s+/g, " ")}`,
+    );
     context.cache.compactPressure = undefined;
+  }
+}
+
+async function appendCompactPressureWarning(context: TuiContext, message: string): Promise<void> {
+  if (!context.sessionId) {
+    process.stderr.write(`[linghun] ${message}\n`);
+    return;
+  }
+  try {
+    await context.store.appendEvent(context.sessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    process.stderr.write(
+      `[linghun] ${message}; warning_write_failed=${formatError(error, context.language).replace(/\s+/g, " ")}\n`,
+    );
   }
 }
 
@@ -525,7 +549,7 @@ export function recordModelUsage(context: TuiContext, usage: ModelUsage): CacheT
     provider,
     endpoint: usage.endpoint ?? CHAT_COMPLETIONS_ENDPOINT,
     source:
-      usage.cacheReadTokens === undefined && usage.cacheWriteTokensRaw === undefined
+      usage.cacheReadTokens === undefined && usage.cacheWriteTokens === undefined
         ? "estimated"
         : "api_usage",
     compacted: context.cache.compacted,
@@ -702,17 +726,7 @@ function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
 }
 
-function hashFileContent(content: string): string {
-  return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
 function classifyCacheWriteTokensSource(usage: ModelUsage): CacheWriteTokensSource {
-  if (usage.cacheWriteTokensRaw === null) {
-    return "missing";
-  }
-  if (typeof usage.cacheWriteTokensRaw === "number") {
-    return usage.cacheWriteTokensRaw === 0 ? "zero_reported" : "reported";
-  }
   if (usage.cacheWriteTokensEstimated && typeof usage.cacheWriteTokens === "number") {
     return "estimated";
   }

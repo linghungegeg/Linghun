@@ -3963,26 +3963,33 @@ describe("D.13D rework — TaskWorkspace footer + bare slash + Shift+Tab + permi
     const source = await readFile(join(SRC_ROOT, "shell/view-model.ts"), "utf8");
     // 主屏 latestOutput next-action：Ctrl+O 必须出现在 /details 之前，且 /details 仍保留为备用。
     const zhMatch = source.match(
-      /latestOutputNext:\s*"按 Ctrl\+O 查看完整运行时输出（或 \/details）。"/,
+      /latestOutputNext:\s*`按 \$\{TOGGLE_DETAILS_KEYBIND\} 查看完整运行时输出（或 \/details）。`/,
     );
     expect(zhMatch).not.toBeNull();
     const enMatch = source.match(
-      /latestOutputNext:\s*"Press Ctrl\+O for full runtime output \(or \/details\)\."/,
+      /latestOutputNext:\s*`Press \$\{TOGGLE_DETAILS_KEYBIND\} for full runtime output \(or \/details\)\.`/,
     );
     expect(enMatch).not.toBeNull();
   });
 
   it("D.13P-S toolErrorRetryHint promotes Ctrl+O over /details in zh-CN and en-US", async () => {
-    const { readFile } = await import("node:fs/promises");
-    const source = await readFile(join(SRC_ROOT, "shell/models/task-suggestion.ts"), "utf8");
-    const zhMatch = source.match(
-      /toolErrorRetryHint:\s*"按 Ctrl\+O 查看最近一次失败输出（或 \/details）"/,
-    );
-    expect(zhMatch).not.toBeNull();
-    const enMatch = source.match(
-      /toolErrorRetryHint:\s*"Press Ctrl\+O for the latest failure output \(or \/details\)"/,
-    );
-    expect(enMatch).not.toBeNull();
+    const { buildTaskSuggestions } = await import("./models/task-suggestion.js");
+    const failBlocks = [
+      {
+        id: "fail-1",
+        kind: "error",
+        title: "Bash",
+        summary: "failed",
+        body: "failed",
+        status: "fail",
+      },
+    ] as const;
+    const zh = buildTaskSuggestions({ language: "zh-CN", failBlocks: [...failBlocks] });
+    expect(zh[0]?.hint).toBe("按 Ctrl+O 查看最近一次失败输出（或 /details）");
+    expect(zh[0]?.hint?.indexOf("Ctrl+O")).toBeLessThan(zh[0]?.hint?.indexOf("/details") ?? 0);
+    const en = buildTaskSuggestions({ language: "en-US", failBlocks: [...failBlocks] });
+    expect(en[0]?.hint).toBe("Press Ctrl+O for the latest failure output (or /details)");
+    expect(en[0]?.hint?.indexOf("Ctrl+O")).toBeLessThan(en[0]?.hint?.indexOf("/details") ?? 0);
   });
 
   it("ShellInputEvent type union includes cycle-permission-mode for Shift+Tab", async () => {

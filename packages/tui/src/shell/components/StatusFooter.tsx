@@ -49,6 +49,9 @@ export function StatusFooter({
     { key: "index", text: footer.index, tone: "default" },
   ];
   if (footer.reasoning) rightSegments.push({ key: "reasoning", text: footer.reasoning });
+  if (footer.contextUsage)
+    rightSegments.push({ key: "contextUsage", text: footer.contextUsage, tone: "dim" });
+  if (footer.cost) rightSegments.push({ key: "cost", text: footer.cost, tone: "dim" });
   if (footer.hint) rightSegments.push({ key: "hint", text: footer.hint, tone: "dim" });
 
   // 窄屏列向布局：左行（mode + cyclePermHint）一行，右栏分两行展示，避免挤压。

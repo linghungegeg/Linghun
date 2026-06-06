@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFooterView,
   formatFooterCacheLabel,
+  formatFooterCostLabel,
   formatFooterIndexLabel,
   formatFooterModelLabel,
   formatFooterReasoningLabel,
@@ -71,6 +72,18 @@ describe("footer-view: reasoning level only when sent", () => {
   });
 });
 
+describe("footer-view: estimated cost label", () => {
+  it("finite estimated cost is shown as a short est segment", () => {
+    expect(formatFooterCostLabel("zh-CN", 0.12345)).toBe("费用 ¥0.1235 est");
+    expect(formatFooterCostLabel("en-US", 0.1)).toBe("cost ¥0.1000 est");
+  });
+
+  it("unknown cost is hidden", () => {
+    expect(formatFooterCostLabel("zh-CN", Number.NaN)).toBeUndefined();
+    expect(formatFooterCostLabel("zh-CN", undefined)).toBeUndefined();
+  });
+});
+
 describe("buildFooterView: 整合", () => {
   it("setupNeeded + cache 低命中 + index unknown 共同生效", () => {
     const result = buildFooterView({
@@ -82,9 +95,13 @@ describe("buildFooterView: 整合", () => {
       setupNeeded: true,
       cacheHitRate: 0.3,
       indexStatus: "unknown",
+      estimatedCostCny: 0.1,
+      contextUsageLabel: "上下文 10.0% (10k/100k)",
     });
     expect(result.modelDim).toBe(true);
     expect(result.cacheTone).toBe("warning");
     expect(result.view.index).toContain("?");
+    expect(result.view.cost).toContain("0.1000");
+    expect(result.view.contextUsage).toContain("10.0%");
   });
 });

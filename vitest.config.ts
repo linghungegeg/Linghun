@@ -8,6 +8,7 @@ export default defineConfig({
       "@linghun/core": resolve(__dirname, "packages/core/src/index.ts"),
       "@linghun/providers": resolve(__dirname, "packages/providers/src/index.ts"),
       "@linghun/shared": resolve(__dirname, "packages/shared/src/index.ts"),
+      "@linghun/tools": resolve(__dirname, "packages/tools/src/index.ts"),
     },
   },
   test: {

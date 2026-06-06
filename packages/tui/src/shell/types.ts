@@ -1,5 +1,6 @@
 import type { Readable, Writable } from "node:stream";
 import type { Language } from "@linghun/shared";
+import type { Keybinding } from "../keybinding-runtime.js";
 
 export type ShellRuntimeMode = "ink" | "plain";
 
@@ -223,6 +224,8 @@ export type TaskFooterView = {
    * a reasoning level or when the value is empty/未生效.
    */
   reasoning?: string;
+  cost?: string;
+  contextUsage?: string;
   hint?: string;
   /**
    * D.13Q-UX — model 段是否染 dim。setup-needed / "unknown" / "openai-compatible-model"
@@ -363,6 +366,7 @@ export type ShellViewModel = {
   language: Language;
   projectName: string;
   projectPath: string;
+  keybindings?: Keybinding[];
   width: number;
   height: number;
   mode: ShellRuntimeMode;

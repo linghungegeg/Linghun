@@ -27,7 +27,14 @@ export type ProviderCircuitBreakerState = {
 };
 
 const BREAKER_FAILURE_THRESHOLD = 2;
-const BREAKER_COOLDOWN_MS = 45_000; // 45 seconds — conservative middle ground
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+const BREAKER_COOLDOWN_MS = readPositiveIntEnv("LINGHUN_PROVIDER_BREAKER_COOLDOWN_MS", 45_000);
 
 /** Recoverable error codes that trigger the breaker. */
 const RECOVERABLE_CODES = new Set([

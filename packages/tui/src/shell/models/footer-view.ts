@@ -1,5 +1,5 @@
 import type { Language } from "@linghun/shared";
-import { charWidth, displayWidth } from "../text-utils.js";
+import { truncateMiddle } from "../text-utils.js";
 import type { TaskFooterView } from "../types.js";
 
 /**
@@ -39,6 +39,10 @@ export type FooterViewInput = {
   reasoningLevel?: string;
   /** reasoning 是否真的发送给 provider；false 时不在 footer 露出。 */
   reasoningSent?: boolean;
+  /** 本会话累计估算费用；NaN/undefined 表示未知，不显示。 */
+  estimatedCostCny?: number;
+  /** 上下文利用率短标签，例如 "上下文 15.0% (12k/80k)"。 */
+  contextUsageLabel?: string;
   /** 可选短 hint。 */
   hint?: string;
 };
@@ -106,6 +110,15 @@ export function formatFooterReasoningLabel(
   return `${label} ${truncateMiddle(trimmed, 12)}`;
 }
 
+export function formatFooterCostLabel(
+  language: Language,
+  estimatedCostCny: number | undefined,
+): string | undefined {
+  if (!Number.isFinite(estimatedCostCny)) return undefined;
+  const label = language === "en-US" ? "cost" : "费用";
+  return `${label} ¥${Math.max(0, estimatedCostCny ?? 0).toFixed(4)} est`;
+}
+
 /**
  * 主入口：把所有 footer 字段算出来。返回 TaskFooterView 与 model placeholder
  * 标志（用来让 StatusFooter 把 model 段染 dim）。
@@ -128,6 +141,7 @@ export function buildFooterView(input: FooterViewInput): {
     input.reasoningLevel,
     input.reasoningSent,
   );
+  const costLabel = formatFooterCostLabel(input.language, input.estimatedCostCny);
   return {
     view: {
       permissionMode: input.permissionModeLabel,
@@ -136,6 +150,8 @@ export function buildFooterView(input: FooterViewInput): {
       index: indexLabel,
       cyclePermHint: input.cyclePermHint,
       reasoning: reasoningLabel,
+      cost: costLabel,
+      contextUsage: input.contextUsageLabel,
       hint: input.hint,
       modelDim: modelInfo.dim,
       cacheTone: cacheInfo.tone,
@@ -143,41 +159,4 @@ export function buildFooterView(input: FooterViewInput): {
     modelDim: modelInfo.dim,
     cacheTone: cacheInfo.tone,
   };
-}
-
-function truncateMiddle(value: string, max: number): string {
-  const normalized = String(value || "")
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (displayWidth(normalized) <= max) return normalized;
-  if (max <= 1) return "…";
-  const head = Math.max(1, Math.floor((max - 1) / 2));
-  const tail = Math.max(1, max - head - 1);
-  return `${sliceFront(normalized, head)}…${sliceBack(normalized, tail)}`;
-}
-
-function sliceFront(value: string, max: number): string {
-  let width = 0;
-  let result = "";
-  for (const char of value) {
-    const next = width + charWidth(char);
-    if (next > max) break;
-    result += char;
-    width = next;
-  }
-  return result;
-}
-
-function sliceBack(value: string, max: number): string {
-  const chars = Array.from(value);
-  let width = 0;
-  let result = "";
-  for (let i = chars.length - 1; i >= 0; i--) {
-    const char = chars[i] ?? "";
-    const next = width + charWidth(char);
-    if (next > max) break;
-    result = `${char}${result}`;
-    width = next;
-  }
-  return result;
 }

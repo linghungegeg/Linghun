@@ -1,0 +1,819 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { Writable } from "node:stream";
+import { defaultConfig } from "@linghun/config";
+import { SessionStore } from "@linghun/core";
+import type {
+  ModelGateway,
+  ModelMessage,
+  ModelToolCall,
+} from "@linghun/providers";
+import { createToolContext } from "@linghun/tools";
+import { describe, expect, it } from "vitest";
+import { createFailureLearningState } from "./failure-learning-runtime.js";
+import { INDEX_STATUS_INSPECT } from "./index-tool-runtime.js";
+import { createIndexState } from "./index-runtime.js";
+import { configureJobAgentCommandRuntime, runModelBackedAgent } from "./job-agent-command-runtime.js";
+import {
+  AGENT_CONTROL_TOOL_NAME,
+  COMMAND_PROPOSAL_TOOL_NAME,
+  EXECUTE_EXTRA_TOOL_NAME,
+  INDEX_OPERATION_TOOL_NAME,
+  RUN_VERIFICATION_TOOL_NAME,
+  RUN_WORKFLOW_TOOL_NAME,
+  SEARCH_EXTRA_TOOLS_NAME,
+  SEND_MESSAGE_TOOL_NAME,
+  START_AGENT_TOOL_NAME,
+  WRITE_REPORT_TOOL_NAME,
+  createSolutionCompletenessStatus,
+} from "./model-loop-runtime.js";
+import { __testSendMessage } from "./model-stream-runtime.js";
+import {
+  executeDeferredDispatchToolUse,
+  executeLinghunControlToolUse,
+  executeModelToolUse,
+} from "./model-tool-runtime.js";
+import { routeNaturalIntent } from "./natural-command-bridge.js";
+import { executePermissionApprove } from "./permission-approval-runtime.js";
+import { classifyToolRequest } from "./permission-policy-engine.js";
+import { createProviderCircuitBreakerState } from "./provider-circuit-breaker.js";
+import { configureSlashCommandRuntime, handleSlashCommand } from "./slash-command-runtime.js";
+import {
+  createCacheState,
+  createMemoryState,
+  createMcpState,
+  createRemoteState,
+} from "./tui-state-runtime.js";
+import { decidePermission } from "./tui-permission-runtime.js";
+import type { PendingLocalApproval, TuiContext } from "./tui-context-runtime.js";
+import type {
+  AgentRun,
+  BackgroundTaskState,
+  MemoryCandidate,
+  VerificationReport,
+} from "./tui-data-types.js";
+import type {
+  WorkflowBridgeContextRefs,
+  WorkflowBridgeRequestProposal,
+} from "./workflow-agent-runtime-bridge.js";
+import {
+  __testExecuteRegistryWorkflowStep,
+  __testExecuteWorkflowStep,
+} from "./workflow-command-runtime.js";
+
+type TestStreamEvent =
+  | { type: "assistant_thinking_delta"; text: string }
+  | { type: "assistant_text_delta"; text: string; id?: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | {
+      type: "usage";
+      usage: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+      };
+    }
+  | { type: "message_stop"; chunkCount: number; hadUsage: boolean; finishReason?: string }
+  | { type: "error"; error: { code?: string; message: string } };
+
+describe("Phase E model stream and tool dispatch main-chain coverage", () => {
+  it("sendMessage handles stream deltas, thinking, usage, stop, tool_use, error, and abort paths", async () => {
+    const textContext = await createTestContext();
+    const textOutput = new MemoryOutput();
+    await __testSendMessage(
+      "hello",
+      textContext,
+      gateway([
+        { type: "assistant_thinking_delta", text: "thinking" },
+        { type: "assistant_text_delta", text: "answer" },
+        {
+          type: "usage",
+          usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 1, cacheWriteTokens: 0 },
+        },
+        { type: "message_stop", chunkCount: 3, hadUsage: true, finishReason: "stop" },
+      ]),
+      textOutput,
+    );
+    expect(textOutput.text).toContain("answer");
+    expect(textContext.roleUsage[0]?.inputTokens).toBe(10);
+
+    const toolContext = await createTestContext();
+    const toolOutput = new MemoryOutput();
+    await __testSendMessage(
+      "todo",
+      toolContext,
+      gateway([
+        { type: "tool_use", id: "tc-todo", name: "Todo", input: { items: [] } },
+        { type: "assistant_text_delta", text: "done" },
+      ]),
+      toolOutput,
+    );
+    expect(toolContext.tools.todos).toEqual([]);
+
+    const errorContext = await createTestContext();
+    const errorOutput = new MemoryOutput();
+    await __testSendMessage(
+      "error",
+      errorContext,
+      gateway([{ type: "error", error: { code: "PROVIDER_AUTH_ERROR", message: "unauthorized" } }]),
+      errorOutput,
+    );
+    expect(errorContext.lastProviderFailure?.kind).toBe("auth");
+
+    const abortContext = await createTestContext();
+    const abortOutput = new MemoryOutput();
+    await __testSendMessage(
+      "abort",
+      abortContext,
+      abortingGateway(abortContext, [
+        { type: "assistant_text_delta", text: "partial" },
+        { type: "assistant_text_delta", text: "ignored" },
+      ]),
+      abortOutput,
+    );
+    expect(abortOutput.text).toContain("已取消");
+  });
+
+  it("routes deferred, builtin, index, and seven Linghun control tool branches", async () => {
+    const context = await createTestContext();
+    const output = new MemoryOutput();
+    const sessionId = context.sessionId ?? "session";
+    const controlResults = [];
+
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(START_AGENT_TOOL_NAME, { role: "planner", task: "inspect", runInBackground: false }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    const agent = createAgentRun(context, { id: "agent-main", status: "idle" });
+    context.agents.push(agent);
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(AGENT_CONTROL_TOOL_NAME, { action: "list" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(SEND_MESSAGE_TOOL_NAME, { agentRef: "agent-main", message: "mail" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(RUN_WORKFLOW_TOOL_NAME, { workflowId: "missing-workflow", goal: "x" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(INDEX_OPERATION_TOOL_NAME, { action: "unknown" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(RUN_VERIFICATION_TOOL_NAME, { level: "unknown" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+    controlResults.push(
+      await executeLinghunControlToolUse(
+        call(WRITE_REPORT_TOOL_NAME, { path: "phase-e-report.md", content: "ok" }),
+        context,
+        sessionId,
+        output,
+      ),
+    );
+
+    expect(controlResults.map((result) => result.tool)).toEqual(
+      expect.arrayContaining([
+        START_AGENT_TOOL_NAME,
+        AGENT_CONTROL_TOOL_NAME,
+        SEND_MESSAGE_TOOL_NAME,
+        RUN_WORKFLOW_TOOL_NAME,
+        INDEX_OPERATION_TOOL_NAME,
+        RUN_VERIFICATION_TOOL_NAME,
+        WRITE_REPORT_TOOL_NAME,
+      ]),
+    );
+    expect(controlResults.some((result) => result.pendingApproval || result.ok)).toBe(true);
+
+    const search = await executeDeferredDispatchToolUse(
+      call(SEARCH_EXTRA_TOOLS_NAME, { query: "codebase memory", limit: 2 }),
+      context,
+      sessionId,
+      output,
+    );
+    expect(search.tool).toBe(SEARCH_EXTRA_TOOLS_NAME);
+    const proposal = await executeDeferredDispatchToolUse(
+      call(COMMAND_PROPOSAL_TOOL_NAME, { command: "/doctor", reason: "status" }),
+      context,
+      sessionId,
+      output,
+    );
+    expect(proposal.ok).toBe(true);
+    const extra = await executeDeferredDispatchToolUse(
+      call(EXECUTE_EXTRA_TOOL_NAME, { tool_name: "missing_tool", params: {} }),
+      context,
+      sessionId,
+      output,
+    );
+    expect(extra.ok).toBe(false);
+
+    const builtin = await executeModelToolUse(call("Todo", { items: [] }), context, sessionId, output);
+    expect(builtin.tool).toBe("Todo");
+    const index = await executeModelToolUse(call(INDEX_STATUS_INSPECT, {}), context, sessionId, output);
+    expect(index.tool).toBe(INDEX_STATUS_INSPECT);
+  });
+});
+
+describe("Phase E agent, slash, workflow, permission, and natural intent coverage", () => {
+  it("runModelBackedAgent completes final answer, consumes mailbox, and blocks on failing tool_use", async () => {
+    const context = await createTestContext();
+    const agent = createAgentRun(context, { id: "agent-loop", maxTurns: 2 });
+    agent.mailbox.push({
+      id: "mail-1",
+      from: "user",
+      to: agent.id,
+      text: "extra instruction",
+      createdAt: new Date().toISOString(),
+      status: "pending",
+      summary: "extra instruction",
+    });
+    const completed = await runModelBackedAgent(
+      agent,
+      context,
+      new MemoryOutput(),
+    );
+    expect(completed.status).toBe("completed");
+    expect(agent.mailbox[0]?.status).toBe("consumed");
+
+    const blockedContext = await createTestContext([
+      { type: "tool_use", id: "tc-unknown", name: "UnknownTool", input: {} },
+    ]);
+    const blocked = await runModelBackedAgent(
+      createAgentRun(blockedContext, { id: "agent-blocked", maxTurns: 1 }),
+      blockedContext,
+      new MemoryOutput(),
+    );
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.summary).toContain("UnknownTool");
+  });
+
+  it("covers slash command runtime routing for ten common commands", async () => {
+    const context = await createTestContext();
+    const output = new MemoryOutput();
+    const seen: string[] = [];
+    configureSlashCommandRuntime({
+      handleSlashCommand: async (text, _context, out) => {
+        seen.push(text);
+        out.write(`handled:${text}\n`);
+        return text === "/exit" ? "exit" : "handled";
+      },
+    });
+
+    const commands = [
+      "/help",
+      "/model",
+      "/usage",
+      "/context",
+      "/permissions",
+      "/memory",
+      "/agents",
+      "/workflows",
+      "/index",
+      "/details",
+    ];
+    for (const command of commands) {
+      await expect(handleSlashCommand(command, context, output)).resolves.toBe("handled");
+    }
+    expect(seen).toEqual(commands);
+  });
+
+  it("covers workflow main-chain branches and registry unknown action", async () => {
+    const context = await createTestContext();
+    context.workflows.activeRun = {
+      id: "wf-run",
+      goal: "goal",
+      planId: "wf",
+      status: "running",
+      result: "partial",
+      phaseGateConfirmed: true,
+      steps: [],
+      startedAt: new Date().toISOString(),
+    };
+    const output = new MemoryOutput();
+    const branches: WorkflowBridgeRequestProposal[] = [
+      workflowRequest("details", {
+        mainChain: "details",
+        view: "evidence",
+        refs: ["ev-1"],
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "details",
+      }),
+      workflowRequest("agents", {
+        mainChain: "agents",
+        action: "list",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "agents",
+      }),
+      workflowRequest("workflows", {
+        mainChain: "workflows",
+        action: "list",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "workflows",
+      }),
+      workflowRequest("verification", {
+        mainChain: "verification",
+        level: "focused",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "verification",
+        evidenceRefs: [],
+      }),
+      workflowRequest("job", {
+        mainChain: "job",
+        action: "list",
+        phase: "phase-e",
+        target: "tests",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "job",
+      }),
+      workflowRequest("unsupported", null),
+    ];
+
+    const results = [];
+    for (const request of branches) {
+      results.push(await __testExecuteWorkflowStep(request, context, output));
+    }
+    expect(results.map((result) => result.status)).toEqual(
+      expect.arrayContaining(["completed", "blocked"]),
+    );
+
+    const runningTask = createBackgroundTask("agent-task", "agent", "running");
+    runningTask.workflowRunId = "wf-run";
+    context.backgroundTasks.push(runningTask);
+    const forkBlocked = await __testExecuteWorkflowStep(
+      workflowRequest("fork", {
+        mainChain: "fork",
+        role: "planner",
+        task: "fork task",
+        workflowId: "wf",
+        phaseId: "phase-e",
+        sliceId: "fork",
+        contextRefs: emptyWorkflowContextRefs(),
+      }),
+      context,
+      output,
+      "wf-run",
+      1,
+    );
+    expect(forkBlocked.status).toBe("blocked");
+
+    const registryUnknown = await __testExecuteRegistryWorkflowStep(
+      { id: "reg", name: "Registry", description: "", path: "registry.yml", steps: [] },
+      { id: "s1", title: "Unknown", action: "unknown-action" } as never,
+      "goal",
+      context,
+      output,
+    );
+    expect(registryUnknown.status).toBe("blocked");
+  });
+
+  it("covers executePermissionApprove across all pending approval kinds", async () => {
+    const base = await createTestContext();
+    const sessionId = base.sessionId ?? "session";
+    const approvals: PendingLocalApproval[] = [
+      {
+        kind: "agent_tool_use",
+        agentId: "missing-agent",
+        agentTranscriptSessionId: "missing-session",
+        toolCall: call("Bash", { command: "echo ok" }),
+        toolName: "Bash",
+        sessionId,
+      },
+      {
+        kind: "index_ignore_write",
+        plan: { path: ".linghunignore", content: "dist/\n", missingEntries: ["dist/"] },
+      },
+      {
+        kind: "architecture_drift",
+        toolCall: call("Todo", { items: [] }),
+        toolName: "Todo",
+        sessionId,
+        warnings: ["scope drift"],
+      },
+      { kind: "model_tool_use", toolCall: call("Todo", { items: [] }), toolName: "Todo", sessionId },
+      {
+        kind: "git_worktree_remove",
+        sessionId,
+        name: "missing-worktree",
+        path: join(base.projectPath, ".linghun", "worktrees", "missing-worktree"),
+        force: false,
+        strong: false,
+      },
+      {
+        kind: "git_stable_point",
+        sessionId,
+        message: "phase e stable point",
+        includeUntracked: false,
+        toolCall: call("GitStablePointCreate", { message: "phase e stable point" }),
+      },
+      {
+        kind: "index_tool",
+        indexAction: "refresh",
+        toolCall: call("IndexRefresh", { force: false }),
+        sessionId,
+      },
+      {
+        kind: "report_write_tool",
+        toolCall: call("WriteReport", { path: "report.md", content: "ok" }),
+        sessionId,
+      },
+      {
+        kind: "memory_mutation",
+        sessionId,
+        mutation: { action: "reject", candidate: memoryCandidate("mem-1") },
+      },
+      { kind: "break_cache_mutation", sessionId, action: "once" },
+      {
+        kind: "image_generation",
+        sessionId,
+        prompt: "phase e image",
+        id: "image-phase-e",
+        assetPath: join(base.projectPath, ".linghun", "assets", "image-phase-e.json"),
+        provider: "local",
+        model: "metadata",
+      },
+    ];
+
+    for (const approval of approvals) {
+      const context = await cloneContextForApproval(base, approval.kind);
+      await expect(
+        executePermissionApprove(rewriteApprovalSession(approval, context), context, undefined, new MemoryOutput()),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it("covers permission policy auto-allow, require-permission, hard-deny, and natural intent branches", async () => {
+    const context = await createTestContext();
+    expect(
+      classifyToolRequest({
+        toolName: "Bash",
+        input: { command: "git status --short" },
+        workspaceRoot: context.projectPath,
+      }).decision,
+    ).toBe("auto_allow_readonly");
+    expect(
+      classifyToolRequest({
+        toolName: "Bash",
+        input: { command: "npm install" },
+        workspaceRoot: context.projectPath,
+      }).decision,
+    ).toBe("require_permission");
+    const denied = await decidePermission(
+      "Bash",
+      { command: "rm -rf /" },
+      context,
+      context.sessionId ?? "session",
+    );
+    expect(denied.decision).toBe("deny");
+
+    const actions = [
+      routeNaturalIntent("当前状态").capability?.id,
+      routeNaturalIntent("查看模型").capability?.id,
+      routeNaturalIntent("帮我重建索引").capability?.id,
+      routeNaturalIntent("后台任务状态").capability?.id,
+      routeNaturalIntent("任务报告").capability?.id,
+      routeNaturalIntent("切到自动审查").capability?.id,
+      routeNaturalIntent("持续推进这个任务").capability?.id,
+      routeNaturalIntent("解释 /doctor").capability?.id,
+    ];
+    expect(new Set(actions.filter(Boolean)).size).toBeGreaterThanOrEqual(6);
+  });
+});
+
+function call(name: string, input: unknown): ModelToolCall {
+  return { id: `tc-${name}-${Math.random().toString(16).slice(2)}`, name, input };
+}
+
+function gateway(events: TestStreamEvent[]): ModelGateway {
+  return {
+    async *stream() {
+      for (const event of events) yield event;
+    },
+    async countMessagesTokensWithAPI() {
+      return { source: "unavailable", reason: "test" };
+    },
+  } as unknown as ModelGateway;
+}
+
+function abortingGateway(context: TuiContext, events: TestStreamEvent[]): ModelGateway {
+  return {
+    async *stream() {
+      for (const [index, event] of events.entries()) {
+        yield event;
+        if (index === 0) {
+          context.activeAbortController?.abort();
+        }
+      }
+    },
+    async countMessagesTokensWithAPI() {
+      return { source: "unavailable", reason: "test" };
+    },
+  } as unknown as ModelGateway;
+}
+
+function workflowRequest(
+  sliceId: string,
+  request: WorkflowBridgeRequestProposal["request"],
+): WorkflowBridgeRequestProposal {
+  return {
+    id: `proposal-${sliceId}`,
+    proposalOnly: true,
+    workflowId: "wf",
+    phaseId: "phase-e",
+    sliceId,
+    status: request ? "runnable" : "blocked",
+    reason: request ? "test" : "unsupported nested job request",
+    executable: Boolean(request),
+    request,
+    safety: {
+      readonly: !request || request.mainChain === "details" || request.mainChain === "agents" || request.mainChain === "workflows",
+      mutating: request?.mainChain === "fork" || request?.mainChain === "job",
+      requiresStartGate: false,
+      requiresPermissionPipeline: false,
+      requiredPermissionAction: "none",
+      evidencePolicy: "neverTreatCompletionAsPass",
+    },
+    handoffProposal: emptyWorkflowContextRefs(),
+    backgroundProjection: {
+      source: "background-task-projection",
+      kind: "agent",
+      userVisibleSummary: "test",
+      nextAction: "none",
+    },
+    taskSurfaceInput: {
+      phaseId: "phase-e",
+      sliceId,
+      requestStatus: request ? "runnable" : "blocked",
+      evidenceRefs: [],
+      nextAction: "none",
+    },
+  } satisfies WorkflowBridgeRequestProposal;
+}
+
+function emptyWorkflowContextRefs(): WorkflowBridgeContextRefs {
+  return {
+    boundedRefs: [],
+    workspaceCacheRefs: [],
+    evidenceRefs: [],
+    keyFilesSummary: [],
+    droppedRefKinds: [],
+    notIncluded: [],
+  };
+}
+
+function createBackgroundTask(
+  id: string,
+  kind: BackgroundTaskState["kind"],
+  status: BackgroundTaskState["status"],
+): BackgroundTaskState {
+  return {
+    id,
+    kind,
+    title: id,
+    status,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    heartbeatIntervalMs: 30_000,
+    staleAfterMs: 120_000,
+    hasOutput: false,
+    userVisibleSummary: id,
+  };
+}
+
+function createAgentRun(
+  context: TuiContext,
+  overrides: Partial<AgentRun> = {},
+): AgentRun {
+  const id = overrides.id ?? "agent-test";
+  return {
+    id,
+    type: "planner",
+    role: "planner",
+    provider: "deepseek",
+    parentSessionId: context.sessionId,
+    task: "inspect",
+    model: "deepseek-chat",
+    allowedTools: ["Read", "Todo"],
+    maxTurns: 1,
+    permissionMode: "default",
+    status: "running",
+    activityStatus: "processing",
+    transcriptPath: join(context.projectPath, ".sessions", `${id}.jsonl`),
+    transcriptSessionId: context.sessionId ?? "session",
+    mailbox: [],
+    summary: "agent summary",
+    contextSummary: "context",
+    cost: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCny: 0,
+    },
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function memoryCandidate(id: string): MemoryCandidate {
+  return {
+    id,
+    scope: "project",
+    summary: "candidate memory",
+    source: "test",
+    sourceRefs: [],
+    risk: "low",
+    inferred: false,
+    status: "candidate",
+    createdAt: new Date().toISOString(),
+  };
+}
+
+async function cloneContextForApproval(
+  base: TuiContext,
+  kind: PendingLocalApproval["kind"],
+): Promise<TuiContext> {
+  const context = await createTestContext();
+  if (kind === "report_write_tool" || kind === "index_ignore_write") {
+    context.permissionMode = "full-access";
+  }
+  context.memory.candidates = [memoryCandidate("mem-1")];
+  return { ...context, config: base.config };
+}
+
+function rewriteApprovalSession(
+  approval: PendingLocalApproval,
+  context: TuiContext,
+): PendingLocalApproval {
+  const sessionId = context.sessionId ?? "session";
+  if (approval.kind === "index_ignore_write") {
+    return {
+      ...approval,
+      plan: { ...approval.plan, path: ".linghunignore" },
+    };
+  }
+  if (approval.kind === "image_generation") {
+    return {
+      ...approval,
+      sessionId,
+      assetPath: join(context.projectPath, ".linghun", "assets", `${approval.id}.json`),
+    };
+  }
+  if (approval.kind === "git_worktree_remove") {
+    return {
+      ...approval,
+      sessionId,
+      path: join(context.projectPath, ".linghun", "worktrees", approval.name),
+    };
+  }
+  if ("sessionId" in approval) {
+    return { ...approval, sessionId } as PendingLocalApproval;
+  }
+  return approval;
+}
+
+async function createTestContext(agentEvents?: TestStreamEvent[]): Promise<TuiContext> {
+  const projectPath = await mkdtemp(join(tmpdir(), "linghun-phase-e-main-"));
+  await mkdir(resolve(projectPath, ".linghun"), { recursive: true });
+  const store = new SessionStore({ projectPath, sessionRootDir: join(projectPath, ".sessions") });
+  const session = await store.create({ model: "deepseek-chat" });
+  const memory = await createMemoryState(defaultConfig, projectPath);
+  const context = {
+    store,
+    sessionId: session.id,
+    model: "deepseek-chat",
+    permissionMode: "default",
+    projectPath,
+    tools: createToolContext(projectPath),
+    permissions: { rules: [], recentDenied: [] },
+    language: "zh-CN",
+    config: defaultConfig,
+    backgroundTasks: [],
+    backgroundAbortControllers: new Map(),
+    providerBreaker: createProviderCircuitBreakerState(),
+    checkpoints: [],
+    evidence: [],
+    cache: createCacheState(projectPath, "deepseek-chat", [], defaultConfig),
+    mcp: createMcpState(defaultConfig),
+    index: createIndexState(defaultConfig),
+    memory,
+    failureLearning: createFailureLearningState(projectPath, defaultConfig),
+    skills: { enabled: false, skills: [], errors: [] },
+    workflows: { templates: [], activeRun: undefined, history: [] },
+    agentRegistry: { agents: [], errors: [] },
+    workflowRegistry: { workflows: [], errors: [] },
+    hooks: { enabled: false, hooks: [], errors: [] },
+    plugins: { enabled: false, plugins: [], errors: [] },
+    remote: createRemoteState(defaultConfig),
+    agents: [],
+    roleUsage: [],
+    routeDecisions: [],
+    roleHandoffs: [],
+    visionObservations: [],
+    imageResults: [],
+    interrupt: { type: "idle" },
+    recentlyMentionedFiles: [],
+    solutionCompleteness: createSolutionCompletenessStatus(),
+    discoveredDeferredToolNames: new Set<string>(),
+  } as unknown as TuiContext;
+  configureJobAgentCommandRuntime({
+    addRoleUsage: () => undefined,
+    ensureSession: async (ctx) => ctx.sessionId ?? session.id,
+    appendBackgroundTaskEvent: async () => undefined,
+    appendRouteDecisionEvent: async () => undefined,
+    checkBackgroundStartGuard: () => null,
+    checkResourceGuard: () => null,
+    createRoleHandoff: (from, to, source, summary) => ({
+      from,
+      to,
+      taskId: source,
+      summary,
+      evidence: [],
+      changedFiles: [],
+      keyFiles: [],
+      notIncluded: [],
+    }),
+    refreshBackgroundLifecycle: () => undefined,
+    writeStatus: () => undefined,
+    captureFailureLearning: async () => undefined,
+    recordVerificationEvidence: async (ctx, _sessionId, report) => {
+      ctx.lastVerification = report;
+    },
+    recordAgentExecutionEvidence: async () => "evidence-agent-execution",
+    recordAgentMailboxEvidence: async () => "evidence-agent-mailbox",
+    recordAgentToolEvidence: async () => undefined,
+    recordAgentToolFailureEvidence: async () => "evidence-agent-failure",
+    recordToolResultBudgetEvidence: async () => undefined,
+    createAgentGatewayContinuation: () => ({
+      gateway: gateway(agentEvents ?? [{ type: "assistant_text_delta", text: "agent final" }]),
+      provider: "deepseek",
+      model: "deepseek-chat",
+      endpointProfile: "chat_completions",
+      reasoningSent: false,
+    }),
+    prepareProviderPreflight: async (_ctx, _sessionId, messages) => ({
+      blocked: false,
+      messages: messages as ModelMessage[],
+    }),
+    createAgentToolApproval: () => false,
+  });
+  return context;
+}
+
+function verificationReport(status: VerificationReport["status"]): VerificationReport {
+  return {
+    id: `verify-${status}`,
+    status,
+    summary: `${status} summary`,
+    commands: [],
+    unverified: [],
+    risk: [],
+    startedAt: new Date().toISOString(),
+    endedAt: new Date().toISOString(),
+    durationMs: 1,
+    nextAction: "none",
+  };
+}
+
+class MemoryOutput extends Writable {
+  text = "";
+
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: () => void): void {
+    this.text += chunk.toString();
+    callback();
+  }
+}

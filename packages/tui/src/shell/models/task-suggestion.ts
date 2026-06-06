@@ -1,4 +1,4 @@
-import type { Language } from "@linghun/shared";
+import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
 import { SLASH_COMMAND_REGISTRY } from "../../natural-command-bridge.js";
 import type { ProductBlockViewModel, TaskPermissionView } from "../types.js";
 
@@ -56,7 +56,7 @@ const TEXT = {
     permissionDetailsLabel: "",
     permissionDetailsHint: "",
     toolErrorRetryLabel: "查看完整错误",
-    toolErrorRetryHint: "按 Ctrl+O 查看最近一次失败输出（或 /details）",
+    toolErrorRetryHint: `按 ${TOGGLE_DETAILS_KEYBIND} 查看最近一次失败输出（或 /details）`,
     setupLabel: "继续模型配置",
     setupHint: "回到 setup 流，按 Enter 进入下一步",
   },
@@ -64,7 +64,7 @@ const TEXT = {
     permissionDetailsLabel: "",
     permissionDetailsHint: "",
     toolErrorRetryLabel: "Show full error output",
-    toolErrorRetryHint: "Press Ctrl+O for the latest failure output (or /details)",
+    toolErrorRetryHint: `Press ${TOGGLE_DETAILS_KEYBIND} for the latest failure output (or /details)`,
     setupLabel: "Continue model setup",
     setupHint: "Re-enter the setup flow; press Enter to advance",
   },

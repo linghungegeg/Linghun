@@ -1,4 +1,8 @@
 import type { LinghunConfig } from "@linghun/config";
+import {
+  CODEBASE_MEMORY_COMMAND as SHARED_CODEBASE_MEMORY_COMMAND,
+  CODEBASE_MEMORY_ENV as SHARED_CODEBASE_MEMORY_ENV,
+} from "@linghun/shared";
 import type { SessionStore } from "@linghun/core";
 import type { ModelGateway, ModelMessage, ModelToolCall } from "@linghun/providers";
 import type { Language, PermissionMode } from "@linghun/shared";
@@ -10,6 +14,7 @@ import type {
 import type { BoundaryEditPreflightResult } from "./architecture-boundary.js";
 import type { ArchitectureCard } from "./architecture-runtime.js";
 import type { IndexState } from "./index-runtime.js";
+import type { Keybinding } from "./keybinding-runtime.js";
 import type { MemoryMutation } from "./memory-command-runtime.js";
 import type { SolutionCompletenessStatus } from "./model-loop-runtime.js";
 import type { PendingModelSetup } from "./model-setup-runtime.js";
@@ -22,6 +27,7 @@ import {
   LINGHUN_MAX_AGENTIC_TURNS,
   LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES,
   LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS,
+  LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS,
 } from "./runtime-budget.js";
 import type { ConfigPanelId } from "./shell/models/config-control-plane.js";
 import type { TranscriptSelectionState } from "./shell/models/transcript-selection-state.js";
@@ -305,6 +311,7 @@ export type TuiContext = {
   mcp: McpState;
   index: IndexState;
   memory: MemoryState;
+  keybindings?: Keybinding[];
   failureLearning: FailureLearningState;
   skills: SkillState;
   workflows: WorkflowState;
@@ -328,6 +335,7 @@ export type TuiContext = {
   pendingLocalApproval?: PendingLocalApproval;
   pendingAutopilot?: PendingAutopilotRequest;
   pendingModelSetup?: PendingModelSetup;
+  pendingPromptCommand?: { command: string; prompt: string };
   taskSuggestionCursor?: number;
   handledTaskSuggestionIds?: Set<string>;
   // D.13E Step 2 — ConfigPanel 当前状态。undefined = 未打开。
@@ -358,6 +366,14 @@ export type TuiContext = {
     toolName?: string;
     startedAt?: string;
     endedAt: string;
+  };
+  lastApiTokenCount?: {
+    provider: string;
+    model: string;
+    source: "api" | "unavailable";
+    inputTokens?: number;
+    reason?: string;
+    createdAt: string;
   };
   // D.13I tail fix — 记录本 session 通过 SearchExtraTools 真正发现过的 deferred 工具名。
   // ExecuteExtraTool 必须先看 Set，命中后再走白名单/适配器/必填参数检查。
@@ -475,7 +491,14 @@ export type TuiContext = {
   transcriptBlockHeightCache?: Record<string, { height: number; width: number; textHash: string }>;
 };
 
-export const VERIFICATION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+export const VERIFICATION_COMMAND_TIMEOUT_MS = LINGHUN_VERIFICATION_COMMAND_TIMEOUT_MS;
 
 export const MIN_CACHE_HISTORY_SIZE = 1;
 export const MAX_CACHE_HISTORY_SIZE = 200;
@@ -484,18 +507,21 @@ export const MAX_LIGHT_HINTS_PER_TURN = 1;
 export const MAX_TODO_ONLY_CONSECUTIVE_ROUNDS = LINGHUN_MAX_TODO_ONLY_CONSECUTIVE_ROUNDS;
 export const MAX_MODEL_TOTAL_TOOL_ROUNDS = LINGHUN_MAX_AGENTIC_TURNS;
 export const MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES = LINGHUN_MAX_RAW_TOOL_PROTOCOL_TEXT_RETRIES;
-export const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
-export const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
+export const CODEBASE_MEMORY_COMMAND = SHARED_CODEBASE_MEMORY_COMMAND;
+export const CODEBASE_MEMORY_ENV = SHARED_CODEBASE_MEMORY_ENV;
 export const PROJECT_RULES_STATUS_WIDTH = 160;
 export const MEMORY_PROMPT_TOP_K = 3;
 export const MEMORY_PROMPT_ITEM_WIDTH = 180;
 export const MEMORY_PROMPT_TOTAL_WIDTH = 720;
 export const MAX_CONTEXT_MESSAGES = 12;
-export const REQUEST_SLOW_HINT_MS = 20_000;
-export const MAX_EVIDENCE_RECORDS = 50;
+export const REQUEST_SLOW_HINT_MS = readPositiveIntEnv("LINGHUN_REQUEST_SLOW_HINT_MS", 20_000);
+export const MAX_EVIDENCE_RECORDS = readPositiveIntEnv("LINGHUN_MAX_EVIDENCE_RECORDS", 50);
 export const MAX_BACKGROUND_TASKS = 50;
 export const WORKFLOW_ARCHITECTURE_REVIEW_FILE_LIMIT = 8;
-export const BACKGROUND_RUNNING_GLOBAL_CAP = 4;
+export const BACKGROUND_RUNNING_GLOBAL_CAP = readPositiveIntEnv(
+  "LINGHUN_BACKGROUND_RUNNING_GLOBAL_CAP",
+  4,
+);
 export const BACKGROUND_KIND_CAPS: Partial<Record<BackgroundTaskState["kind"], number>> = {
   bash: 1,
   verification: 1,

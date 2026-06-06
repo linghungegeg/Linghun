@@ -96,6 +96,15 @@ describe("model-loop-runtime", () => {
       };
       expect(schema.required).toContain("pattern");
     });
+
+    it("Phase D returns explicit Diff schema with files array and no fallback requirements", () => {
+      const schema = createToolInputSchema("Diff") as {
+        required?: string[];
+        properties: Record<string, unknown>;
+      };
+      expect(schema.required).toBeUndefined();
+      expect(schema.properties).toHaveProperty("files");
+    });
   });
 
   describe("createModelToolDefinitions", () => {
@@ -114,6 +123,7 @@ describe("model-loop-runtime", () => {
         expect(def.description).toBeTruthy();
         expect(def.inputSchema).toBeDefined();
       }
+      expect(defs.find((def) => def.name === "Read")?.description).toContain("Use Read");
     });
 
     it("D.14G: exposes structured Git tools to the model (full-tool mode)", () => {
@@ -1293,7 +1303,7 @@ describe("model-loop-runtime", () => {
         withClaims("已完成，测试通过。", [{ kind: "completion_pass", phrase: "测试通过" }]),
         [],
       );
-      const downgraded = buildDowngradedFinalAnswer("已完成，测试通过。", verdict, "zh-CN");
+      const downgraded = buildDowngradedFinalAnswer(verdict, "zh-CN");
       expect(downgraded).toContain("当前证据不足");
       expect(downgraded).toContain("缺少证据");
       expect(downgraded).toContain("被拦截的声明类型");
@@ -1312,7 +1322,7 @@ describe("model-loop-runtime", () => {
         withClaims("Done, tests passed.", [{ kind: "completion_pass", phrase: "tests passed" }]),
         [],
       );
-      const downgraded = buildDowngradedFinalAnswer("Done, tests passed.", verdict, "en-US");
+      const downgraded = buildDowngradedFinalAnswer(verdict, "en-US");
       expect(downgraded).toContain("I cannot provide a verified final claim");
       expect(downgraded).toContain("Missing evidence");
       expect(downgraded).toContain("Blocked claim types");
@@ -1713,7 +1723,6 @@ describe("model-loop-runtime", () => {
     it("buildExtendedDowngradedFinalAnswer 丢弃原草稿并返回安全边界答案", async () => {
       const { buildExtendedDowngradedFinalAnswer } = await import("./model-loop-runtime.js");
       const out = buildExtendedDowngradedFinalAnswer(
-        "本次改动符合架构边界，没有架构漂移。",
         {
           status: "needs_disclaimer",
           matchedClaims: [

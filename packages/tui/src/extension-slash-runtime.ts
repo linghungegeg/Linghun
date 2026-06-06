@@ -1,5 +1,6 @@
 import type { Writable } from "node:stream";
 import { saveExtensionEnablement } from "@linghun/config";
+import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
   createSkillEvolutionCandidate,
@@ -17,7 +18,10 @@ import {
 } from "./extension-command-runtime.js";
 import type { TuiContext } from "./index.js";
 import { writeLine } from "./startup-runtime.js";
+import type { PluginSummary, SkillSummary } from "./tui-data-types.js";
 import { createHookState, createPluginState, createSkillState } from "./tui-state-runtime.js";
+
+type ExtensionKind = "skills" | "plugins";
 
 export type ExtensionSlashRuntimeDeps = {
   appendSystemEvent: (
@@ -43,76 +47,153 @@ function deps(): ExtensionSlashRuntimeDeps {
   return runtimeDeps;
 }
 
-export async function handleSkillsCommand(
+type ExtensionCommandDefinition = {
+  kind: ExtensionKind;
+  title: string;
+  projectDir: (context: TuiContext) => string;
+  userDir: (context: TuiContext) => string;
+  total: (context: TuiContext) => number;
+  enabled: (context: TuiContext) => number;
+  listDetails: (context: TuiContext) => string;
+  doctorDetails: (context: TuiContext) => string;
+  installIntro: (context: TuiContext) => string[];
+  reload: (context: TuiContext) => Promise<void>;
+  trustItem: (context: TuiContext, id: string) => SkillSummary | PluginSummary | undefined;
+  trustKind: "skill" | "plugin";
+  unknownEnableMessage: (id: string) => string;
+  failedEnableMessage?: (id: string) => string;
+  usage: string;
+  updateUsage: string;
+  enabledLabel: string;
+  disabledLabel: string;
+};
+
+const SKILLS_COMMAND: ExtensionCommandDefinition = {
+  kind: "skills",
+  title: "/skills",
+  projectDir: (context) => context.skills.projectDir,
+  userDir: (context) => context.skills.userDir,
+  total: (context) => context.skills.skills.length,
+  enabled: (context) => context.skills.skills.filter((item) => item.enabled).length,
+  listDetails: formatSkills,
+  doctorDetails: (context) => validateExtensionItems("skills", context),
+  installIntro: (context) => [
+    "Skills install（Connect Lite）",
+    `- project: ${context.skills.projectDir}`,
+    `- user: ${context.skills.userDir}`,
+    "- usage: /skills install local <path> [--scope project|user]",
+    "- usage: /skills install git <url> [--ref <ref>] --confirm-network",
+    "- usage: /skills install github <owner/repo> [--ref <ref>] --confirm-network",
+    "- install 前只读取 manifest / SKILL.md / metadata；不执行第三方代码。",
+  ],
+  reload: async (context) => {
+    context.skills = await createSkillState(context.config, context.projectPath);
+  },
+  trustItem: (context, id) => context.skills.skills.find((item) => item.id === id),
+  trustKind: "skill",
+  unknownEnableMessage: (id) => `未知 skill：${id}。请先在本地 manifest 注册后再启用。`,
+  failedEnableMessage: (id) => `skill manifest 加载失败，不能启用：${id}。请先修复 manifest。`,
+  usage:
+    "用法：/skills | /skills status|doctor|validate [id] | /skills install local|git|github ... | /skills enable|disable <id> | /skills remove <id> | /skills update <id>",
+  updateUsage: "用法：/skills update <id> [--ref <ref>] [--confirm-network]",
+  enabledLabel: "skill",
+  disabledLabel: "skill",
+};
+
+const PLUGINS_COMMAND: ExtensionCommandDefinition = {
+  kind: "plugins",
+  title: "/plugins",
+  projectDir: (context) => context.plugins.projectDir,
+  userDir: (context) => context.plugins.userDir,
+  total: (context) => context.plugins.plugins.length,
+  enabled: (context) => context.plugins.plugins.filter((item) => item.enabled).length,
+  listDetails: formatPlugins,
+  doctorDetails: formatPluginsDoctor,
+  installIntro: (context) => [
+    "Plugins install（Connect Lite）",
+    `- project: ${context.plugins.projectDir}`,
+    `- user: ${context.plugins.userDir}`,
+    "- usage: /plugins install local <path> [--scope project|user]",
+    "- usage: /plugins install git <url> [--ref <ref>] --confirm-network",
+    "- usage: /plugins install github <owner/repo> [--ref <ref>] --confirm-network",
+    "- install 前只读取 manifest / metadata；不执行仓库脚本、postinstall、hook 或第三方代码。",
+  ],
+  reload: async (context) => {
+    context.plugins = await createPluginState(context.config, context.projectPath);
+    context.hooks = await createHookState(context.config, context.projectPath);
+  },
+  trustItem: (context, id) => context.plugins.plugins.find((item) => item.id === id),
+  trustKind: "plugin",
+  unknownEnableMessage: (id) => `未知 plugin：${id}。请先在本地 manifest 注册后再启用。`,
+  usage:
+    "用法：/plugins | /plugins status|doctor|validate [id] | /plugins install local|git|github ... | /plugins enable|disable <id> | /plugins remove <id> | /plugins update <id>",
+  updateUsage: "用法：/plugins update <id> [--ref <ref>] [--confirm-network]",
+  enabledLabel: "plugin",
+  disabledLabel: "plugin",
+};
+
+async function handleExtensionCommonCommand(
+  definition: ExtensionCommandDefinition,
   args: string[],
   context: TuiContext,
   output: Writable,
-): Promise<void> {
+): Promise<boolean> {
   const action = args[0];
   if (!action) {
-    // D.13Q-UX Task Surface — /skills 默认走降噪 CommandPanel。
     const isEn = context.language === "en-US";
-    const total = context.skills.skills.length;
-    const enabled = context.skills.skills.filter((s) => s.enabled).length;
+    const total = definition.total(context);
+    const enabled = definition.enabled(context);
     showCommandPanel(context, output, {
-      title: "/skills",
+      title: definition.title,
       tone: "neutral",
       summary: [
         isEn
-          ? `Skills · ${total} total · ${enabled} enabled`
-          : `技能 · 共 ${total} · 启用 ${enabled}`,
+          ? `${definition.title.slice(1, 2).toUpperCase()}${definition.title.slice(2)} · ${total} total · ${enabled} enabled`
+          : `${definition.kind === "skills" ? "技能" : "插件"} · 共 ${total} · 启用 ${enabled}`,
       ],
-      actions: ["/skills status", "/skills doctor"],
-      detailsText: formatSkills(context),
+      actions: [`${definition.title} status`, `${definition.title} doctor`],
+      detailsText: definition.listDetails(context),
     });
-    return;
+    return true;
   }
   if (action === "status") {
     showCommandPanel(context, output, {
-      title: "/skills status",
+      title: `${definition.title} status`,
       tone: "neutral",
       summary: [],
-      detailsText: formatExtensionStatus("skills", context),
+      detailsText: formatExtensionStatus(definition.kind, context),
     });
-    return;
+    return true;
   }
-  if (action === "doctor") {
-    // D.14D-E — /skills doctor 走降噪 CommandPanel：完整校验进 detailsText。
+  if (action === "doctor" || action === "validate") {
+    const label = action === "doctor" ? "doctor" : "validate";
     showCommandPanel(context, output, {
-      title: "/skills doctor",
+      title: `${definition.title} ${label}`,
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Skills doctor — Ctrl+O for details."
-          : "技能诊断 — Ctrl+O 查看详情。",
+          ? `${definition.kind === "skills" ? "Skills" : "Plugins"} ${label} — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `${definition.kind === "skills" ? "技能" : "插件"}${label === "doctor" ? "诊断" : "校验"} — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
-      detailsText: validateExtensionItems("skills", context),
+      detailsText:
+        action === "doctor"
+          ? definition.doctorDetails(context)
+          : validateExtensionItems(definition.kind, context, args[1]),
     });
-    return;
+    return true;
   }
   if (action === "add" || action === "install") {
     const request = parseExtensionInstallRequest(args.slice(1));
     if (!request) {
-      writeLine(
-        output,
-        [
-          "Skills install（Connect Lite）",
-          `- project: ${context.skills.projectDir}`,
-          `- user: ${context.skills.userDir}`,
-          "- usage: /skills install local <path> [--scope project|user]",
-          "- usage: /skills install git <url> [--ref <ref>] --confirm-network",
-          "- usage: /skills install github <owner/repo> [--ref <ref>] --confirm-network",
-          "- install 前只读取 manifest / SKILL.md / metadata；不执行第三方代码。",
-        ].join("\n"),
-      );
-      return;
+      writeLine(output, definition.installIntro(context).join("\n"));
+      return true;
     }
     if (request.source !== "local" && !request.confirmNetwork) {
-      writeLine(output, formatExtensionInstallGate("skills", request, "/skills install"));
-      return;
+      writeLine(output, formatExtensionInstallGate(definition.kind, request, `${definition.title} install`));
+      return true;
     }
     const result = await installExtensionFromRequest(
-      "skills",
+      definition.kind,
       request,
       context,
       async (summary) => {
@@ -124,23 +205,85 @@ export async function handleSkillsCommand(
         );
       },
     );
-    context.skills = await createSkillState(context.config, context.projectPath);
+    await definition.reload(context);
     deps().refreshCacheFreshness(context);
     writeLine(output, result.summary);
-    return;
+    return true;
   }
-  if (action === "validate") {
-    // D.14D-E — /skills validate 走降噪 CommandPanel：完整校验进 detailsText。
-    showCommandPanel(context, output, {
-      title: "/skills validate",
-      tone: "neutral",
-      summary: [
-        context.language === "en-US"
-          ? "Skills validate — Ctrl+O for details."
-          : "技能校验 — Ctrl+O 查看详情。",
-      ],
-      detailsText: validateExtensionItems("skills", context, args[1]),
-    });
+  if (action === "remove") {
+    const id = args[1];
+    writeLine(
+      output,
+      id
+        ? await removeExtension(definition.kind, id, context).then((summary) => {
+            deps().refreshCacheFreshness(context);
+            return summary;
+          })
+        : `用法：${definition.title} remove <id>`,
+    );
+    return true;
+  }
+  if (action === "update") {
+    const id = args[1];
+    writeLine(
+      output,
+      id
+        ? await updateExtension(definition.kind, id, context, args.slice(2), async (summary) => {
+            await deps().appendSystemEvent(
+              context,
+              await deps().ensureSession(context),
+              summary,
+              "info",
+            );
+          }).then((summary) => {
+            deps().refreshCacheFreshness(context);
+            return summary;
+          })
+        : definition.updateUsage,
+    );
+    return true;
+  }
+  if (action === "enable" || action === "disable") {
+    const id = args[1];
+    if (!id) {
+      writeLine(output, `用法：${definition.title} ${action} <id>`);
+      return true;
+    }
+    const item = definition.trustItem(context, id);
+    if (action === "enable") {
+      if (!item) {
+        writeLine(output, definition.unknownEnableMessage(id));
+        return true;
+      }
+      if (item.lastError && definition.failedEnableMessage) {
+        writeLine(output, definition.failedEnableMessage(id));
+        return true;
+      }
+      writeLine(output, formatTrustNotice(definition.trustKind, item));
+    }
+    context.config = await saveExtensionEnablement(
+      definition.kind,
+      id,
+      action === "enable",
+      context.projectPath,
+    );
+    await definition.reload(context);
+    writeLine(
+      output,
+      `${action === "enable" ? "已启用" : "已禁用"} ${definition.disabledLabel}：${id}（状态写入 .linghun/settings.json，重启后保留）`,
+    );
+    return true;
+  }
+  return false;
+}
+
+export async function handleSkillsCommand(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+): Promise<void> {
+  const action = args[0];
+  if (action !== "evolve" && (await handleExtensionCommonCommand(SKILLS_COMMAND, args, context, output))) {
     return;
   }
   if (action === "evolve") {
@@ -212,74 +355,7 @@ export async function handleSkillsCommand(
     );
     return;
   }
-  if (action === "remove") {
-    const id = args[1];
-    writeLine(
-      output,
-      id
-        ? await removeExtension("skills", id, context).then((summary) => {
-            deps().refreshCacheFreshness(context);
-            return summary;
-          })
-        : "用法：/skills remove <id>",
-    );
-    return;
-  }
-  if (action === "update") {
-    const id = args[1];
-    writeLine(
-      output,
-      id
-        ? await updateExtension("skills", id, context, args.slice(2), async (summary) => {
-            await deps().appendSystemEvent(
-              context,
-              await deps().ensureSession(context),
-              summary,
-              "info",
-            );
-          }).then((summary) => {
-            deps().refreshCacheFreshness(context);
-            return summary;
-          })
-        : "用法：/skills update <id> [--ref <ref>] [--confirm-network]",
-    );
-    return;
-  }
-  if (action === "enable" || action === "disable") {
-    const id = args[1];
-    if (!id) {
-      writeLine(output, `用法：/skills ${action} <id>`);
-      return;
-    }
-    const skill = context.skills.skills.find((item) => item.id === id);
-    if (action === "enable") {
-      if (!skill) {
-        writeLine(output, `未知 skill：${id}。请先在本地 manifest 注册后再启用。`);
-        return;
-      }
-      if (skill.lastError) {
-        writeLine(output, `skill manifest 加载失败，不能启用：${id}。请先修复 manifest。`);
-        return;
-      }
-      writeLine(output, formatTrustNotice("skill", skill));
-    }
-    context.config = await saveExtensionEnablement(
-      "skills",
-      id,
-      action === "enable",
-      context.projectPath,
-    );
-    context.skills = await createSkillState(context.config, context.projectPath);
-    writeLine(
-      output,
-      `${action === "enable" ? "已启用" : "已禁用"} skill：${id}（状态写入 .linghun/settings.json，重启后保留）`,
-    );
-    return;
-  }
-  writeLine(
-    output,
-    "用法：/skills | /skills status|doctor|validate [id] | /skills install local|git|github ... | /skills enable|disable <id> | /skills remove <id> | /skills update <id>",
-  );
+  writeLine(output, SKILLS_COMMAND.usage);
 }
 
 export async function handlePluginsCommand(
@@ -287,165 +363,8 @@ export async function handlePluginsCommand(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const action = args[0];
-  if (!action) {
-    // D.13Q-UX Task Surface — /plugins 默认走降噪 CommandPanel。
-    const isEn = context.language === "en-US";
-    const total = context.plugins.plugins.length;
-    const enabled = context.plugins.plugins.filter((p) => p.enabled).length;
-    showCommandPanel(context, output, {
-      title: "/plugins",
-      tone: "neutral",
-      summary: [
-        isEn
-          ? `Plugins · ${total} total · ${enabled} enabled`
-          : `插件 · 共 ${total} · 启用 ${enabled}`,
-      ],
-      actions: ["/plugins status", "/plugins doctor"],
-      detailsText: formatPlugins(context),
-    });
+  if (await handleExtensionCommonCommand(PLUGINS_COMMAND, args, context, output)) {
     return;
   }
-  if (action === "status") {
-    showCommandPanel(context, output, {
-      title: "/plugins status",
-      tone: "neutral",
-      summary: [],
-      detailsText: formatExtensionStatus("plugins", context),
-    });
-    return;
-  }
-  if (action === "doctor") {
-    // D.14D-E — /plugins doctor 走降噪 CommandPanel：完整诊断进 detailsText。
-    showCommandPanel(context, output, {
-      title: "/plugins doctor",
-      tone: "neutral",
-      summary: [
-        context.language === "en-US"
-          ? "Plugins doctor — Ctrl+O for details."
-          : "插件诊断 — Ctrl+O 查看详情。",
-      ],
-      detailsText: formatPluginsDoctor(context),
-    });
-    return;
-  }
-  if (action === "add" || action === "install") {
-    const request = parseExtensionInstallRequest(args.slice(1));
-    if (!request) {
-      writeLine(
-        output,
-        [
-          "Plugins install（Connect Lite）",
-          `- project: ${context.plugins.projectDir}`,
-          `- user: ${context.plugins.userDir}`,
-          "- usage: /plugins install local <path> [--scope project|user]",
-          "- usage: /plugins install git <url> [--ref <ref>] --confirm-network",
-          "- usage: /plugins install github <owner/repo> [--ref <ref>] --confirm-network",
-          "- install 前只读取 manifest / metadata；不执行仓库脚本、postinstall、hook 或第三方代码。",
-        ].join("\n"),
-      );
-      return;
-    }
-    if (request.source !== "local" && !request.confirmNetwork) {
-      writeLine(output, formatExtensionInstallGate("plugins", request, "/plugins install"));
-      return;
-    }
-    const result = await installExtensionFromRequest(
-      "plugins",
-      request,
-      context,
-      async (summary) => {
-        await deps().appendSystemEvent(
-          context,
-          await deps().ensureSession(context),
-          summary,
-          "info",
-        );
-      },
-    );
-    context.plugins = await createPluginState(context.config, context.projectPath);
-    context.hooks = await createHookState(context.config, context.projectPath);
-    deps().refreshCacheFreshness(context);
-    writeLine(output, result.summary);
-    return;
-  }
-  if (action === "validate") {
-    // D.14D-E — /plugins validate 走降噪 CommandPanel：完整校验进 detailsText。
-    showCommandPanel(context, output, {
-      title: "/plugins validate",
-      tone: "neutral",
-      summary: [
-        context.language === "en-US"
-          ? "Plugins validate — Ctrl+O for details."
-          : "插件校验 — Ctrl+O 查看详情。",
-      ],
-      detailsText: validateExtensionItems("plugins", context, args[1]),
-    });
-    return;
-  }
-  if (action === "remove") {
-    const id = args[1];
-    writeLine(
-      output,
-      id
-        ? await removeExtension("plugins", id, context).then((summary) => {
-            deps().refreshCacheFreshness(context);
-            return summary;
-          })
-        : "用法：/plugins remove <id>",
-    );
-    return;
-  }
-  if (action === "update") {
-    const id = args[1];
-    writeLine(
-      output,
-      id
-        ? await updateExtension("plugins", id, context, args.slice(2), async (summary) => {
-            await deps().appendSystemEvent(
-              context,
-              await deps().ensureSession(context),
-              summary,
-              "info",
-            );
-          }).then((summary) => {
-            deps().refreshCacheFreshness(context);
-            return summary;
-          })
-        : "用法：/plugins update <id> [--ref <ref>] [--confirm-network]",
-    );
-    return;
-  }
-  if (action === "enable" || action === "disable") {
-    const id = args[1];
-    if (!id) {
-      writeLine(output, `用法：/plugins ${action} <id>`);
-      return;
-    }
-    const plugin = context.plugins.plugins.find((item) => item.id === id);
-    if (action === "enable") {
-      if (!plugin) {
-        writeLine(output, `未知 plugin：${id}。请先在本地 manifest 注册后再启用。`);
-        return;
-      }
-      writeLine(output, formatTrustNotice("plugin", plugin));
-    }
-    context.config = await saveExtensionEnablement(
-      "plugins",
-      id,
-      action === "enable",
-      context.projectPath,
-    );
-    context.plugins = await createPluginState(context.config, context.projectPath);
-    context.hooks = await createHookState(context.config, context.projectPath);
-    writeLine(
-      output,
-      `${action === "enable" ? "已启用" : "已禁用"} plugin：${id}（状态写入 .linghun/settings.json，重启后保留）`,
-    );
-    return;
-  }
-  writeLine(
-    output,
-    "用法：/plugins | /plugins status|doctor|validate [id] | /plugins install local|git|github ... | /plugins enable|disable <id> | /plugins remove <id> | /plugins update <id>",
-  );
+  writeLine(output, PLUGINS_COMMAND.usage);
 }

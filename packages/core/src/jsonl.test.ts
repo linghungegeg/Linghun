@@ -28,6 +28,10 @@ describe("jsonl transcript", () => {
     expect(result.diagnostics).toEqual([]);
   });
 
+  it("does not treat non-ENOENT stat errors as a missing file", async () => {
+    await expect(readJsonl<TestRecord>("\0")).rejects.toThrow();
+  });
+
   it("skips broken lines with diagnostics", async () => {
     const dir = await mkdtemp(join(tmpdir(), "linghun-jsonl-"));
     const file = join(dir, "transcript.jsonl");

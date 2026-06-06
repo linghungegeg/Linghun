@@ -139,6 +139,16 @@ export async function decidePermission(
 ): Promise<PermissionCheck> {
   const tool = builtInTools[name];
   const files = collectInputFiles(input);
+  const toolPermission = (() => {
+    try {
+      return tool.checkPermissions(tool.validateInput(input), context.tools);
+    } catch {
+      return {
+        behavior: "passthrough" as const,
+        reason: "tool input validation is handled by the tool runtime",
+      };
+    }
+  })();
   const hardDeny = getHardDenyReason(name, input, files, context.projectPath);
   const request = {
     id: randomUUID(),
@@ -152,6 +162,13 @@ export async function decidePermission(
   if (hardDeny) {
     await recordPermissionDenied(context, name, hardDeny);
     return { request, decision: "deny", reason: hardDeny };
+  }
+  if (toolPermission.behavior === "deny") {
+    await recordPermissionDenied(context, name, toolPermission.reason);
+    return { request, decision: "deny", reason: toolPermission.reason };
+  }
+  if (toolPermission.behavior === "allow") {
+    return { request, decision: "allow", reason: toolPermission.reason };
   }
 
   // D.13Q-UX Closure: 始终算一次 verdict 用于 UI 解释行（即使 auto-allow 不命中）。

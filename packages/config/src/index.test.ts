@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  MODEL_PRICING,
+  calculateEstimatedCny,
   createProjectDataNamespace,
   defaultConfig,
   ensureConfigDirs,
@@ -15,6 +17,7 @@ import {
   lastConfigRecoveryWarning,
   lastProviderEnvWarning,
   loadConfig,
+  findModelPricing,
   providerEnvExists,
   readProviderEnvValues,
   removeMcpServerConfig,
@@ -31,6 +34,21 @@ import {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
+});
+
+describe("model pricing estimates", () => {
+  it("contains packaged DeepSeek/OpenAI pricing and normalizes common model names", () => {
+    expect(MODEL_PRICING["deepseek-chat"]?.currency).toBe("CNY");
+    expect(MODEL_PRICING["gpt-4o"]?.source).toBe("packaged_estimate");
+    expect(findModelPricing("openai-compatible/gpt-4o-2024-08-06")).toEqual(
+      MODEL_PRICING["gpt-4o"],
+    );
+  });
+
+  it("calculates estimated CNY by input/output tokens and returns NaN for unknown models", () => {
+    expect(calculateEstimatedCny("deepseek-chat", 1000, 1000)).toBeCloseTo(0.01);
+    expect(Number.isNaN(calculateEstimatedCny("unknown-model", 1000, 1000))).toBe(true);
+  });
 });
 
 describe("config directories", () => {
@@ -925,6 +943,15 @@ describe("config directories", () => {
     ]);
     expect(config.remote.channels.wecom?.enabled).toBe(false);
     expect(config.remote.channels.dingtalk?.cliPath).toBe("dws");
+  });
+
+  it("allows Feishu official CLI path to be overridden by env", async () => {
+    vi.unstubAllEnvs();
+    vi.stubEnv("LINGHUN_FEISHU_CLI", "custom-feishu");
+    vi.resetModules();
+    const indexModule = await import("./index.js");
+
+    expect(indexModule.defaultConfig.remote.channels.feishu?.cliPath).toBe("custom-feishu");
   });
 
   it("accepts D.14F remote bridge app refs without storing secret values", async () => {

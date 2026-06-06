@@ -128,6 +128,7 @@ export type SlashCommandRegistryEntry = {
   slash: string;
   capabilityId: string;
   userVisible: boolean;
+  promptCommand?: boolean;
   hiddenReason?: string;
 };
 
@@ -174,6 +175,26 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/claim-check", capabilityId: "claim-check", userVisible: true },
   { slash: "/verify", capabilityId: "verify", userVisible: true },
   { slash: "/review", capabilityId: "review", userVisible: true },
+  { slash: "/commit", capabilityId: "commit", userVisible: true, promptCommand: true },
+  { slash: "/init", capabilityId: "init", userVisible: true, promptCommand: true },
+  {
+    slash: "/security-review",
+    capabilityId: "security-review",
+    userVisible: true,
+    promptCommand: true,
+  },
+  {
+    slash: "/commit-push-pr",
+    capabilityId: "commit-push-pr",
+    userVisible: true,
+    promptCommand: true,
+  },
+  {
+    slash: "/init-verifiers",
+    capabilityId: "init-verifiers",
+    userVisible: true,
+    promptCommand: true,
+  },
   { slash: "/cache-log", capabilityId: "cache-log", userVisible: true },
   { slash: "/cache", capabilityId: "cache", userVisible: true },
   { slash: "/compact", capabilityId: "compact", userVisible: true },
@@ -205,6 +226,12 @@ export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
 const USER_VISIBLE_SLASH_COMMANDS = SLASH_COMMAND_REGISTRY.filter((item) => item.userVisible).map(
   (item) => item.slash,
 );
+
+export function findSlashCommandRegistryEntry(
+  slash: string,
+): SlashCommandRegistryEntry | undefined {
+  return SLASH_COMMAND_REGISTRY.find((item) => item.slash === slash);
+}
 
 const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
   cap(
@@ -779,6 +806,71 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "想做一次 review 或看风险。",
     "Use for review or risk inspection.",
     "start_gate",
+  ),
+  cap(
+    "commit",
+    "/commit",
+    ["commit", "git commit", "提交"],
+    "提交助手",
+    "Commit assistant",
+    "模型驱动检查 diff 并准备提交计划。",
+    "Model-driven diff review and commit planning.",
+    "想检查当前改动并准备提交。",
+    "Use to inspect current changes and prepare a commit.",
+    "start_gate",
+    { modelInvocable: true },
+  ),
+  cap(
+    "init",
+    "/init",
+    ["init", "初始化", "项目说明"],
+    "初始化项目说明",
+    "Init project instructions",
+    "模型驱动探索项目并草拟 Linghun 项目说明。",
+    "Model-driven project exploration and instruction drafting.",
+    "需要初始化项目规则或说明文件。",
+    "Use to initialize project rules or instruction files.",
+    "start_gate",
+    { modelInvocable: true },
+  ),
+  cap(
+    "security-review",
+    "/security-review",
+    ["security review", "安全审查", "安全"],
+    "安全审查",
+    "Security review",
+    "模型驱动审查 diff 中的安全风险。",
+    "Model-driven security review of the current diff.",
+    "需要检查注入、XSS、RCE、鉴权或密钥泄漏风险。",
+    "Use to check injection, XSS, RCE, auth, or secret leakage risks.",
+    "start_gate",
+    { modelInvocable: true },
+  ),
+  cap(
+    "commit-push-pr",
+    "/commit-push-pr",
+    ["commit push pr", "pr", "pull request"],
+    "提交推送 PR",
+    "Commit, push, PR",
+    "模型驱动分支、提交、推送与 PR 创建流程。",
+    "Model-driven branch, commit, push, and PR flow.",
+    "需要把当前改动整理成 PR。",
+    "Use to package current changes into a PR.",
+    "start_gate",
+    { modelInvocable: true },
+  ),
+  cap(
+    "init-verifiers",
+    "/init-verifiers",
+    ["init verifiers", "验证器", "verification setup"],
+    "初始化验证器",
+    "Init verifiers",
+    "模型驱动发现项目验证命令并草拟验证器说明。",
+    "Model-driven verifier discovery and instruction drafting.",
+    "需要建立项目验证入口或 verifier 说明。",
+    "Use to set up project verification entries or verifier instructions.",
+    "start_gate",
+    { modelInvocable: true },
   ),
   cap(
     "cache-log",
@@ -2011,10 +2103,6 @@ function isActionRequest(text: string): boolean {
   return /帮我|请|直接|打开|建立|恢复|停止|停掉|取消|build|start|create|run|enable|accept|force|switch|set|resume|stop|cancel|kill|interrupt/u.test(
     text,
   );
-}
-
-function isOrdinaryDevelopmentRequest(text: string): boolean {
-  return /分析|部署|报告|输出|inspect|understand|deploy|report/u.test(text);
 }
 
 function scoreCapability(

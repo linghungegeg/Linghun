@@ -4606,6 +4606,45 @@ describe("Phase 06 TUI slash commands", () => {
     expect(cleaned).toContain("内部运行时上下文已从主屏省略");
   });
 
+  it("injects bounded GitStatus into system prompt and sanitizes its label", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-git-prompt-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+
+    const prompt = createModelSystemPrompt(
+      "继续",
+      context,
+      { runtime: "test" },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "branch=main; user=dev; changed=1; status=unstaged packages/tui/src/index.ts; recent=abc123 test",
+    );
+
+    expect(prompt).toContain("GitStatus=branch=main");
+    expect(prompt).toContain("recent=abc123 test");
+    const cleaned = sanitizeMainScreenLeakage("GitStatus=branch=main; user=dev", "zh-CN");
+    expect(cleaned).not.toContain("GitStatus");
+    expect(cleaned).toContain("内部运行时上下文已从主屏省略");
+  });
+
+  it("Phase D PromptCommand slash handlers route into the model loop instead of local execution", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-prompt-command-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    const output = new MemoryOutput();
+
+    const result = await handleSlashCommand("/security-review --changed", context, output);
+
+    expect(result).toBe("message");
+    expect(context.pendingPromptCommand?.command).toBe("/security-review");
+    expect(context.pendingPromptCommand?.prompt).toContain("PromptCommand /security-review");
+    expect(context.pendingPromptCommand?.prompt).toContain("CommandArgs=--changed");
+  });
+
   it("includes engineering structure constraints in en-US system prompt", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tui-project-"));
     const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
@@ -8673,6 +8712,8 @@ describe("Phase 06 TUI slash commands", () => {
     expect(context.roleUsage.some((usage) => usage.role === "verifier")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "vision")).toBe(true);
     expect(context.roleUsage.some((usage) => usage.role === "image")).toBe(true);
+    expect(context.roleUsage.some((usage) => Number.isFinite(usage.estimatedCny))).toBe(true);
+    expect(output.text).toContain("estimated cost: CNY");
     expect(context.routeDecisions.some((decision) => decision.role === "planner")).toBe(true);
     expect(output.text).toContain("fallback used ");
     expect(output.text).not.toContain("¥--");
@@ -18349,7 +18390,6 @@ describe("Phase 06 TUI slash commands", () => {
       totalTokens: 1000,
       cacheReadTokens: 50,
       cacheWriteTokens: 50,
-      cacheWriteTokensRaw: 50,
       endpoint: "/v1/messages",
     });
     const zeroReported = recordModelUsage(context, {
@@ -18358,7 +18398,6 @@ describe("Phase 06 TUI slash commands", () => {
       totalTokens: 110,
       cacheReadTokens: 80,
       cacheWriteTokens: 0,
-      cacheWriteTokensRaw: 0,
       endpoint: "/v1/responses",
     });
     const missing = recordModelUsage(context, {
@@ -18422,7 +18461,6 @@ describe("Phase 06 TUI slash commands", () => {
       totalTokens: 110,
       cacheReadTokens: 80,
       cacheWriteTokens: 0,
-      cacheWriteTokensRaw: 0,
       endpoint: "/v1/responses",
       rawUsage: { prompt_tokens: 100, cache_creation_tokens: 0 },
     });
@@ -18435,7 +18473,6 @@ describe("Phase 06 TUI slash commands", () => {
       totalTokens: 25,
       cacheReadTokens: 5,
       cacheWriteTokens: 5,
-      cacheWriteTokensRaw: 5,
       endpoint: "/v1/messages",
     });
     await handleSlashCommand("/break-cache status", context, output);
@@ -18737,7 +18774,6 @@ describe("Phase 06 TUI slash commands", () => {
       totalTokens: 110,
       cacheReadTokens: 1,
       cacheWriteTokens: 0,
-      cacheWriteTokensRaw: 0,
     });
     await handleSlashCommand("/cache status", context, output);
     await handleSlashCommand("/status", context, output);
@@ -24409,7 +24445,6 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
       totalTokens: 110,
       cacheReadTokens: 1,
       cacheWriteTokens: 0,
-      cacheWriteTokensRaw: 0,
     });
 
     const output = new MemoryOutput();
@@ -24440,7 +24475,6 @@ describe("D.13M-B light hint × /details lastFullOutput", () => {
       totalTokens: 110,
       cacheReadTokens: 1,
       cacheWriteTokens: 0,
-      cacheWriteTokensRaw: 0,
     });
 
     const hintOut = new MemoryOutput();

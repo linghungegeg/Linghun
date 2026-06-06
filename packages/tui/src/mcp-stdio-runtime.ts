@@ -55,25 +55,46 @@ const MCP_STDIO_CALL_TIMEOUT_MS = 15_000;
 
 const MCP_STDIO_PROTOCOL_VERSION = "2025-06-18";
 
-export async function runMcpStdioToolCall(
-  server: McpServerConfig,
-  toolName: string,
-  params: Record<string, unknown>,
-  cwd: string,
-  timeoutMs: number = MCP_STDIO_CALL_TIMEOUT_MS,
-): Promise<McpStdioResult> {
+type McpStdioRequestSender = (method: string, params?: unknown) => Promise<unknown>;
+
+type McpStdioRunnerResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; summary: string; errorCode?: string };
+
+type McpStdioRunnerOptions<T> = {
+  server: McpServerConfig;
+  cwd: string;
+  timeoutMs: number;
+  label: string;
+  timeoutSummary: string;
+  captureStderr: boolean;
+  run: (sendRequest: McpStdioRequestSender) => Promise<T>;
+};
+
+class McpStdioStructuredError extends Error {
+  constructor(
+    message: string,
+    readonly errorCode?: string,
+  ) {
+    super(message);
+  }
+}
+
+export async function createMcpStdioRunner<T>(
+  options: McpStdioRunnerOptions<T>,
+): Promise<McpStdioRunnerResult<T>> {
   return new Promise((resolvePromise) => {
     let child: ReturnType<typeof spawn>;
     const guard = createProcessGuard();
     try {
-      child = spawn(server.command, server.args ?? [], {
-        cwd,
+      child = spawn(options.server.command, options.server.args ?? [], {
+        cwd: options.cwd,
         shell: false,
         windowsHide: true,
-        env: server.env ? { ...process.env, ...server.env } : process.env,
+        env: options.server.env ? { ...process.env, ...options.server.env } : process.env,
         stdio: ["pipe", "pipe", "pipe"],
       });
-      guard.track(child, { label: `mcp-stdio:${server.command}` });
+      guard.track(child, { label: options.label });
     } catch (error) {
       const nodeError = error as NodeJS.ErrnoException;
       resolvePromise({
@@ -85,9 +106,11 @@ export async function runMcpStdioToolCall(
     }
 
     let settled = false;
-    const settle = (result: McpStdioResult): void => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (result: McpStdioRunnerResult<T>): void => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       try {
         guard.requestStop(false);
       } catch {
@@ -106,13 +129,13 @@ export async function runMcpStdioToolCall(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       settle({
         ok: false,
-        summary: `MCP stdio timeout after ${timeoutMs}ms (no result for tools/call ${toolName})`,
+        summary: options.timeoutSummary,
         errorCode: "ETIMEDOUT",
       });
-    }, timeoutMs);
+    }, options.timeoutMs);
 
     type Pending = {
       resolve: (value: unknown) => void;
@@ -147,8 +170,10 @@ export async function runMcpStdioToolCall(
           let frame: unknown;
           try {
             frame = JSON.parse(line);
-          } catch {
-            // ignore non-JSON noise (some MCP servers print banners on first line)
+          } catch (error) {
+            process.stderr.write(
+              `[linghun] mcp_stdio_non_json_frame line=${sanitizeDiagnosticText(line.slice(0, 240))} reason=${sanitizeDiagnosticText(error instanceof Error ? error.message : String(error))}\n`,
+            );
             newlineIdx = stdoutBuffer.indexOf("\n");
             continue;
           }
@@ -177,11 +202,12 @@ export async function runMcpStdioToolCall(
       }
     });
     stderr.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk);
+      if (options.captureStderr) {
+        stderrChunks.push(chunk);
+      }
     });
     child.on("error", (error: Error) => {
       const nodeError = error as NodeJS.ErrnoException;
-      clearTimeout(timer);
       settle({
         ok: false,
         summary: `MCP stdio error: ${sanitizeDiagnosticText(nodeError.message)}`,
@@ -191,7 +217,6 @@ export async function runMcpStdioToolCall(
     child.on("exit", (code, signal) => {
       // 让 settle 决定 outcome：如果 tools/call 已经 resolve 过，settle 会被忽略。
       if (!settled) {
-        clearTimeout(timer);
         const stderrText = sanitizeDiagnosticText(
           Buffer.concat(stderrChunks).toString("utf8").slice(0, 400),
         );
@@ -204,36 +229,17 @@ export async function runMcpStdioToolCall(
 
     (async () => {
       try {
-        await sendRequest("initialize", {
-          protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: "linghun-tui", version: "0.0.0" },
-        });
-        // D.13J tail fix（Block A）：tools/list 校验目标 tool 在 server 公布的列表内。
-        // 防御 server 静默接受 tools/call 但工具名不存在 / 拼写错误 / server 已下线该工具。
-        const listResult = await sendRequest("tools/list", {});
-        const toolNames = extractMcpToolNames(listResult);
-        if (!toolNames.includes(toolName)) {
-          clearTimeout(timer);
+        const result = await options.run(sendRequest);
+        settle({ ok: true, value: result });
+      } catch (error) {
+        if (error instanceof McpStdioStructuredError) {
           settle({
             ok: false,
-            summary: `tools/list does not contain ${toolName} (server published ${toolNames.length} tools); refusing tools/call`,
-            errorCode: "MCP_TOOL_NOT_FOUND",
+            summary: sanitizeDiagnosticText(error.message),
+            errorCode: error.errorCode,
           });
           return;
         }
-        const result = await sendRequest("tools/call", {
-          name: toolName,
-          arguments: params,
-        });
-        clearTimeout(timer);
-        settle({
-          ok: true,
-          summary: `tools/call ${toolName} ok`,
-          data: result,
-        });
-      } catch (error) {
-        clearTimeout(timer);
         settle({
           ok: false,
           summary: sanitizeDiagnosticText((error as Error).message),
@@ -241,6 +247,48 @@ export async function runMcpStdioToolCall(
       }
     })();
   });
+}
+
+export async function runMcpStdioToolCall(
+  server: McpServerConfig,
+  toolName: string,
+  params: Record<string, unknown>,
+  cwd: string,
+  timeoutMs: number = MCP_STDIO_CALL_TIMEOUT_MS,
+): Promise<McpStdioResult> {
+  const result = await createMcpStdioRunner({
+    server,
+    cwd,
+    timeoutMs,
+    label: `mcp-stdio:${server.command}`,
+    timeoutSummary: `MCP stdio timeout after ${timeoutMs}ms (no result for tools/call ${toolName})`,
+    captureStderr: true,
+    run: async (sendRequest) => {
+      await sendRequest("initialize", {
+        protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "linghun-tui", version: "0.0.0" },
+      });
+      // D.13J tail fix（Block A）：tools/list 校验目标 tool 在 server 公布的列表内。
+      // 防御 server 静默接受 tools/call 但工具名不存在 / 拼写错误 / server 已下线该工具。
+      const listResult = await sendRequest("tools/list", {});
+      const toolNames = extractMcpToolNames(listResult);
+      if (!toolNames.includes(toolName)) {
+        throw new McpStdioStructuredError(
+          `tools/list does not contain ${toolName} (server published ${toolNames.length} tools); refusing tools/call`,
+          "MCP_TOOL_NOT_FOUND",
+        );
+      }
+      return await sendRequest("tools/call", {
+        name: toolName,
+        arguments: params,
+      });
+    },
+  });
+  if (!result.ok) {
+    return { ok: false, summary: result.summary, errorCode: result.errorCode };
+  }
+  return { ok: true, summary: `tools/call ${toolName} ok`, data: result.value };
 }
 
 // D.13J tail fix（Block A）：从 MCP `tools/list` result 中提取工具名集合。
@@ -269,166 +317,28 @@ export async function runMcpStdioToolList(
   cwd: string,
   timeoutMs = 5_000,
 ): Promise<McpStdioToolListResult> {
-  return new Promise((resolvePromise) => {
-    let child: ReturnType<typeof spawn>;
-    const guard = createProcessGuard();
-    try {
-      child = spawn(server.command, server.args ?? [], {
-        cwd,
-        shell: false,
-        windowsHide: true,
-        env: server.env ? { ...process.env, ...server.env } : process.env,
-        stdio: ["pipe", "pipe", "pipe"],
+  const result = await createMcpStdioRunner({
+    server,
+    cwd,
+    timeoutMs,
+    label: `mcp-stdio-list:${server.command}`,
+    timeoutSummary: `MCP stdio tools/list timeout after ${timeoutMs}ms`,
+    captureStderr: false,
+    run: async (sendRequest) => {
+      await sendRequest("initialize", {
+        protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "linghun-tui", version: "0.0.0" },
       });
-      guard.track(child, { label: `mcp-stdio-list:${server.command}` });
-    } catch (error) {
-      const nodeError = error as NodeJS.ErrnoException;
-      resolvePromise({
-        ok: false,
-        toolNames: [],
-        summary: `spawn failed: ${sanitizeDiagnosticText(nodeError.message)}`,
-        errorCode: nodeError.code,
-      });
-      return;
-    }
-
-    let settled = false;
-    const settle = (result: McpStdioToolListResult): void => {
-      if (settled) return;
-      settled = true;
-      try {
-        guard.requestStop(false);
-      } catch {
-        // ignore
-      }
-      resolvePromise(result);
-    };
-
-    let stdoutBuffer = "";
-    const stdin = child.stdin;
-    const stdout = child.stdout;
-    const stderr = child.stderr;
-    if (!stdin || !stdout || !stderr) {
-      settle({ ok: false, toolNames: [], summary: "MCP stdio streams unavailable" });
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      settle({
-        ok: false,
-        toolNames: [],
-        summary: `MCP stdio tools/list timeout after ${timeoutMs}ms`,
-        errorCode: "ETIMEDOUT",
-      });
-    }, timeoutMs);
-
-    type Pending = {
-      resolve: (value: unknown) => void;
-      reject: (error: Error) => void;
-    };
-    const pending = new Map<number, Pending>();
-    let nextId = 1;
-
-    const sendRequest = (method: string, params2?: unknown): Promise<unknown> => {
-      return new Promise((resolveReq, rejectReq) => {
-        const id = nextId++;
-        pending.set(id, { resolve: resolveReq, reject: rejectReq });
-        const message = JSON.stringify({ jsonrpc: "2.0", id, method, params: params2 });
-        try {
-          stdin.write(`${message}\n`);
-        } catch (error) {
-          pending.delete(id);
-          rejectReq(error as Error);
-        }
-      });
-    };
-
-    stdout.setEncoding("utf8");
-    stdout.on("data", (chunk: string) => {
-      stdoutBuffer += chunk;
-      let newlineIdx = stdoutBuffer.indexOf("\n");
-      while (newlineIdx >= 0) {
-        const line = stdoutBuffer.slice(0, newlineIdx).trim();
-        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
-        if (line !== "") {
-          let frame: unknown;
-          try {
-            frame = JSON.parse(line);
-          } catch {
-            newlineIdx = stdoutBuffer.indexOf("\n");
-            continue;
-          }
-          const obj = frame as {
-            id?: number;
-            result?: unknown;
-            error?: { message?: string; code?: number | string };
-          };
-          if (typeof obj.id === "number") {
-            const handler = pending.get(obj.id);
-            if (handler) {
-              pending.delete(obj.id);
-              if (obj.error) {
-                handler.reject(
-                  new Error(
-                    `MCP error id=${obj.id}: ${sanitizeDiagnosticText(obj.error.message ?? "unknown")}`,
-                  ),
-                );
-              } else {
-                handler.resolve(obj.result);
-              }
-            }
-          }
-        }
-        newlineIdx = stdoutBuffer.indexOf("\n");
-      }
-    });
-    stderr.on("data", () => {
-      // discard noise; tools/list discovery prefers silent failure over noisy summaries
-    });
-    child.on("error", (error: Error) => {
-      const nodeError = error as NodeJS.ErrnoException;
-      clearTimeout(timer);
-      settle({
-        ok: false,
-        toolNames: [],
-        summary: `MCP stdio error: ${sanitizeDiagnosticText(nodeError.message)}`,
-        errorCode: nodeError.code,
-      });
-    });
-    child.on("exit", (code, signal) => {
-      if (!settled) {
-        clearTimeout(timer);
-        settle({
-          ok: false,
-          toolNames: [],
-          summary: `MCP stdio child exited prematurely (code=${code ?? "?"} signal=${signal ?? "-"})`,
-        });
-      }
-    });
-
-    (async () => {
-      try {
-        await sendRequest("initialize", {
-          protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: "linghun-tui", version: "0.0.0" },
-        });
-        const listResult = await sendRequest("tools/list", {});
-        const toolNames = extractMcpToolNames(listResult);
-        clearTimeout(timer);
-        settle({
-          ok: true,
-          toolNames,
-          summary: `tools/list ok (${toolNames.length} tools)`,
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        settle({
-          ok: false,
-          toolNames: [],
-          summary: sanitizeDiagnosticText((error as Error).message),
-        });
-      }
-    })();
+      return extractMcpToolNames(await sendRequest("tools/list", {}));
+    },
   });
+  if (!result.ok) {
+    return { ok: false, toolNames: [], summary: result.summary, errorCode: result.errorCode };
+  }
+  return {
+    ok: true,
+    toolNames: result.value,
+    summary: `tools/list ok (${result.value.length} tools)`,
+  };
 }

@@ -6,6 +6,7 @@ import {
   getCoreSlashCandidates,
   getSlashPrefixCandidates,
 } from "../../slash-dispatch.js";
+import { resolveKeybinding } from "../../keybinding-runtime.js";
 import { selectInputOwner } from "../models/input-owner-controller.js";
 import { isSgrMouseInput, parseSgrMouseEvent } from "../models/transcript-selection-state.js";
 import type { TerminalCapability } from "../terminal-capability.js";
@@ -491,6 +492,7 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
   const lastEscAtRef = useRef(0);
   const lastCtrlCAtRef = useRef(0);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chordBufferRef = useRef<string[]>([]);
   // D.13Q-UX Real Smoke Fix v2 — B. task/pending 模式必须用 taskComposerMaxWidth，
   // 与 ShellApp.TaskLayout 的 cw 对齐；否则 useAnchoredCursor 的父链 Yoga 计算
   // 出来的 cursor 锚是 80-col 居中容器，而真正的 Composer 容器是 view.width-4，
@@ -677,6 +679,41 @@ export function Composer({ view, onInput, capability }: ComposerProps): React.Re
         pastePending: pastePendingRef.current,
         slashVisible: slashCandidates.length > 0 && !slashHidden,
       });
+      if (!permissionActive) {
+        const binding = resolveKeybinding(
+          view.keybindings ?? [],
+          "chat",
+          {
+            input,
+            ctrl: key.ctrl,
+            meta: key.meta,
+            shift: key.shift,
+            tab: key.tab,
+            escape: key.escape,
+            return: key.return,
+          },
+          chordBufferRef.current,
+        );
+        chordBufferRef.current = binding.chordBuffer;
+        if (binding.pending) return;
+        if (binding.action === "toggle-details") {
+          clearHintNotice();
+          void onInput({ type: "toggle-details" });
+          return;
+        }
+        if (binding.action === "cycle-permission-mode") {
+          void onInput({ type: "cycle-permission-mode" });
+          return;
+        }
+        if (binding.action === "clear-line") {
+          setBufferAndResetSelection(bufferClearLine(buffer));
+          return;
+        }
+        if (binding.action === "delete-word-left") {
+          setBufferAndResetSelection(bufferDeleteWordLeft(buffer));
+          return;
+        }
+      }
 
       // ─── 1. Permission selector mode（最高优先级）────────────────────────
       if (owner === "permission") {

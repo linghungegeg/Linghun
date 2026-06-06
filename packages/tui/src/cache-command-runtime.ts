@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import type { CacheFreshness } from "@linghun/core";
+import { redactCommonSecrets } from "@linghun/shared";
 import { diffFreshness } from "./cache-freshness.js";
+import { calculateContextPercentages, getContextWindowForModel } from "./context-window-runtime.js";
 import type { TuiContext } from "./index.js";
 import type { CommandPanelView } from "./shell/types.js";
 import { sanitizeDiagnosticText } from "./startup-runtime.js";
 import type { LightHint } from "./tui-data-types.js";
+import { getSelectedModelRuntime } from "./tui-model-runtime.js";
 import { formatPercent } from "./usage-stats-presenter.js";
 const DEFAULT_LIGHT_HINT_COOLDOWN_MS = 5 * 60 * 1000;
 const MAX_LIGHT_HINTS_PER_TURN = 1;
@@ -108,6 +111,13 @@ export function formatWorkspaceSnapshotLiteStatus(context: TuiContext): string {
 export function formatCompactStatus(context: TuiContext): string {
   const latest = context.cache.compactBoundaries.at(-1);
   const pressure = context.cache.compactPressure;
+  const runtime = getSelectedModelRuntime(context);
+  const contextUsage = pressure
+    ? calculateContextPercentages(
+        Math.ceil(pressure.estimatedChars / 4),
+        Math.ceil(pressure.maxChars / 4) || getContextWindowForModel(runtime.model),
+      )
+    : undefined;
   const projection = context.cache.compactProjection;
   const deep = context.cache.deepCompact;
   const failure = context.cache.compactFailure;
@@ -116,6 +126,7 @@ export function formatCompactStatus(context: TuiContext): string {
     "- deep scope: full transcript semantic compact",
     "- projection scope: provider-visible recent context projection",
     `- pressure: ${pressure ? `${formatPercent(pressure.ratio)} (${pressure.estimatedChars}/${pressure.maxChars} chars; trigger ${pressure.triggerChars})` : "unknown"}`,
+    `- context usage: ${contextUsage?.label ?? "unknown"}`,
     `- compacted: ${context.cache.compacted ? "yes" : "no"}`,
     `- boundaries: ${context.cache.compactBoundaries.length}`,
     `- latest: ${latest ? `${latest.kind}/${latest.id}` : "none"}`,
@@ -134,13 +145,7 @@ export function formatCompactStatus(context: TuiContext): string {
 }
 
 function sanitizeCompactStatusText(value: string): string {
-  return sanitizeDiagnosticText(value)
-    .replace(
-      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
-      (_match, key: string, sep: string) => `${key}${sep}***`,
-    )
-    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
-    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
+  return sanitizeDiagnosticText(redactCommonSecrets(value));
 }
 
 export function collectLightHints(context: TuiContext): LightHint[] {

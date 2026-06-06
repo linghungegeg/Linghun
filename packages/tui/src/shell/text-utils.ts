@@ -74,6 +74,43 @@ export function truncateDisplay(value: string, max: number): string {
   return result;
 }
 
+export function truncateMiddle(value: string, max: number, fallback = ""): string {
+  const normalized = String(value || fallback)
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (displayWidth(normalized) <= max) return normalized;
+  if (max <= 1) return "\u2026";
+  const head = Math.max(1, Math.floor((max - 1) / 2));
+  const tail = Math.max(1, max - head - 1);
+  return `${sliceDisplayFront(normalized, head)}\u2026${sliceDisplayBack(normalized, tail)}`;
+}
+
+function sliceDisplayFront(value: string, max: number): string {
+  let width = 0;
+  let result = "";
+  for (const char of value) {
+    const next = width + charWidth(char);
+    if (next > max) break;
+    result += char;
+    width = next;
+  }
+  return result;
+}
+
+function sliceDisplayBack(value: string, max: number): string {
+  const chars = Array.from(value);
+  let width = 0;
+  let result = "";
+  for (let i = chars.length - 1; i >= 0; i -= 1) {
+    const char = chars[i] ?? "";
+    const next = width + charWidth(char);
+    if (next > max) break;
+    result = `${char}${result}`;
+    width = next;
+  }
+  return result;
+}
+
 /** Shared composer width formula, kept consistent across Ink and plain renderer. */
 export function composerMaxWidth(viewWidth: number): number {
   return Math.min(80, Math.max(40, viewWidth - 6));

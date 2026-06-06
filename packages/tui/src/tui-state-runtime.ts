@@ -29,6 +29,8 @@ import {
 import { builtInTools } from "@linghun/tools";
 import { createCacheFreshness } from "./cache-freshness.js";
 import { formatError, truncateDisplay } from "./startup-runtime.js";
+import { loadMemoryRulesFile, parseMemoryRuleFrontmatter } from "./memory-rules-runtime.js";
+import { createReplBridgeState } from "./remote-repl-bridge-runtime.js";
 import type {
   CacheState,
   ExtensionLifecycleRecord,
@@ -120,6 +122,7 @@ export function createRemoteState(config: LinghunConfig): RemoteState {
     sessionDisabledChannelIds: [],
     pairings: [],
     inbox: [],
+    localReplBridge: createReplBridgeState(),
   };
 }
 
@@ -295,6 +298,9 @@ export async function createMemoryState(
     projectRulesExists: projectRules.exists,
     projectRulesSummary: projectRules.summary,
     ...(projectRules.error ? { projectRulesError: projectRules.error } : {}),
+    ...(projectRules.includedPaths ? { projectRulesIncludedPaths: projectRules.includedPaths } : {}),
+    ...(projectRules.warnings ? { projectRulesWarnings: projectRules.warnings } : {}),
+    ...(projectRules.truncated ? { projectRulesTruncated: projectRules.truncated } : {}),
     projectDir: paths.memoryProject,
     userDir: paths.memoryUser,
     sessionDir: paths.memorySession,
@@ -312,10 +318,24 @@ export async function createMemoryState(
 
 async function loadProjectRulesSummary(
   path: string,
-): Promise<{ exists: boolean; summary: string; error?: string }> {
+): Promise<{
+  exists: boolean;
+  summary: string;
+  error?: string;
+  includedPaths?: string[];
+  warnings?: string[];
+  truncated?: boolean;
+}> {
   try {
-    const content = await readFile(path, "utf8");
-    return { exists: true, summary: summarizeProjectRules(content) };
+    const loaded = await loadMemoryRulesFile(path);
+    const parsed = parseMemoryRuleFrontmatter(loaded.content);
+    return {
+      exists: true,
+      summary: summarizeProjectRules(parsed.body),
+      includedPaths: loaded.includedPaths,
+      warnings: loaded.warnings,
+      truncated: loaded.truncated,
+    };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {

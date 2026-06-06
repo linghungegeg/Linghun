@@ -1,6 +1,10 @@
 export const LINGHUN_NAME = "Linghun";
 export const LINGHUN_CLI_NAME = "linghun";
 export const LINGHUN_VERSION = "0.1.0";
+export const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
+export const CODEBASE_MEMORY_COMMAND = "codebase-memory-mcp";
+export const CODEBASE_MEMORY_ENV = "LINGHUN_CODEBASE_MEMORY_MCP";
+export const TOGGLE_DETAILS_KEYBIND = "Ctrl+O";
 
 export const DEEPSEEK_API_MODELS = ["deepseek-chat", "deepseek-reasoner"] as const;
 export type DeepSeekApiModel = (typeof DEEPSEEK_API_MODELS)[number];
@@ -66,4 +70,14 @@ export function isPathInside(
   if (candidate === root) return true;
   const rootWithSlash = root.endsWith("/") ? root : `${root}/`;
   return candidate.startsWith(rootWithSlash);
+}
+
+export function redactCommonSecrets(value: string): string {
+  return value
+    .replace(
+      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
+      (_match, key: string, sep: string) => `${key}${sep}***`,
+    )
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
+    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***");
 }

@@ -21,6 +21,13 @@ import {
   getRemoteBridgeDoctor,
   rejectRemoteInboxItem,
 } from "./remote-inbound-bridge-runtime.js";
+import {
+  createDefaultReplBridgeSocketPath,
+  createReplBridgeState,
+  handleReplBridgeMessage,
+  maybeRefreshJwtToken,
+  startReplBridgeSocketServer,
+} from "./remote-repl-bridge-runtime.js";
 import { formatRemoteStatus, formatRemoteTestResult } from "./remote-mcp-presenter.js";
 import {
   type RemoteTransportDeps,
@@ -87,6 +94,8 @@ export function refreshRemoteState(context: TuiContext): void {
   context.remote.events = previous.events;
   context.remote.processedMessageIds = previous.processedMessageIds;
   context.remote.sessionDisabledChannelIds = previous.sessionDisabledChannelIds;
+  context.remote.localReplBridge = previous.localReplBridge;
+  context.remote.localReplBridgeSocket = previous.localReplBridgeSocket;
   context.remote.lastDoctor = previous.lastDoctor;
   context.remote.lastApproval = previous.lastApproval;
   applyRemoteSessionDisables(context.remote);
@@ -476,6 +485,239 @@ async function handleRemoteBridgeCommand(
     });
     return;
   }
+  if (action === "local-register") {
+    const clientId = args[1] ?? "local";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "register",
+      clientId,
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-register",
+      tone: "neutral",
+      summary: [`Local REPL bridge ${decision.status}: ${clientId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-listen") {
+    const socketPath = args[1] ?? createDefaultReplBridgeSocketPath(context.projectPath);
+    if (context.remote.localReplBridgeSocket) {
+      showCommandPanel(context, output, {
+        title: "/remote bridge local-listen",
+        tone: "neutral",
+        summary: [`Local REPL bridge socket already listening: ${context.remote.localReplBridgeSocket.socketPath}`],
+        detailsText: "Existing local REPL bridge socket is active in this process.",
+      });
+      return;
+    }
+    const handle = await startReplBridgeSocketServer({
+      socketPath,
+      bridge: () => ensureLocalReplBridge(context),
+      remote: () => context.remote,
+    });
+    context.remote.localReplBridgeSocket = handle;
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-listen",
+      tone: "neutral",
+      summary: [`Local REPL bridge socket listening: ${handle.socketPath}`],
+      detailsText: [
+        `socketPath: ${handle.socketPath}`,
+        "Protocol: JSONL ReplBridgeMessage in, ReplBridgeDecision out.",
+        "Messages still require /remote bridge local-route or an existing inbound handler path; no second executor was created.",
+      ].join("\n"),
+    });
+    return;
+  }
+  if (action === "local-close") {
+    const handle = context.remote.localReplBridgeSocket;
+    if (!handle) {
+      showCommandPanel(context, output, {
+        title: "/remote bridge local-close",
+        tone: "neutral",
+        summary: ["Local REPL bridge socket is not listening."],
+        detailsText: "No active local REPL bridge socket exists in this process.",
+      });
+      return;
+    }
+    await handle.close();
+    context.remote.localReplBridgeSocket = undefined;
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-close",
+      tone: "neutral",
+      summary: [`Local REPL bridge socket closed: ${handle.socketPath}`],
+      detailsText: "Local REPL bridge socket closed; queued bridge state remains in this session.",
+    });
+    return;
+  }
+  if (action === "local-inbound") {
+    const clientId = args[1] ?? "local";
+    const text = args.slice(2).join(" ").trim();
+    if (!text) {
+      writeLine(output, "用法：/remote bridge local-inbound <clientId> <text>");
+      return;
+    }
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "inbound",
+      clientId,
+      text,
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-inbound",
+      tone: decision.status === "accepted" ? "neutral" : "warning",
+      summary: [`Local REPL bridge ${decision.status}: ${clientId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-poll") {
+    const clientId = args[1] ?? "local";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "poll",
+      clientId,
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-poll",
+      tone: decision.status === "polled" ? "neutral" : "warning",
+      summary: [
+        decision.status === "polled"
+          ? `Local REPL bridge polled: ${(decision.messages ?? []).length} message(s)`
+          : `Local REPL bridge ${decision.status}`,
+      ],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-route") {
+    const clientId = args[1] ?? "local";
+    const inbound = deps().handleRemoteInboundMessage;
+    if (!inbound) {
+      showCommandPanel(context, output, {
+        title: "/remote bridge local-route",
+        tone: "warning",
+        summary: ["Local REPL bridge route blocked: inbound handler unavailable."],
+        detailsText: "Local bridge messages must route through handleRemoteInboundMessage; no fallback executor was used.",
+      });
+      return;
+    }
+    const poll = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "poll",
+      clientId,
+    });
+    if (poll.status !== "polled") {
+      showCommandPanel(context, output, {
+        title: "/remote bridge local-route",
+        tone: "warning",
+        summary: [`Local REPL bridge ${poll.status}: ${clientId}`],
+        detailsText: JSON.stringify(poll, null, 2),
+      });
+      return;
+    }
+    let routed = 0;
+    const decisions: string[] = [];
+    for (const message of poll.messages) {
+      const decision = await inbound(message, context, undefined, output);
+      decisions.push(`${message.messageId}: ${decision.status}`);
+      if (decision.status === "accepted" || decision.status === "approved") {
+        routed += 1;
+        handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+          type: "acknowledge",
+          clientId,
+          messageId: message.messageId,
+        });
+      }
+    }
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-route",
+      tone: "neutral",
+      summary: [`Local REPL bridge routed: ${routed}/${poll.messages.length} message(s)`],
+      detailsText: [
+        "Messages were routed through handleRemoteInboundMessage; no second executor was used.",
+        ...decisions,
+      ].join("\n"),
+    });
+    return;
+  }
+  if (action === "local-ack") {
+    const clientId = args[1] ?? "local";
+    const messageId = args[2] ?? "";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "acknowledge",
+      clientId,
+      messageId,
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-ack",
+      tone: decision.status === "acknowledged" ? "neutral" : "warning",
+      summary: [`Local REPL bridge ${decision.status}: ${messageId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-heartbeat") {
+    const clientId = args[1] ?? "local";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "heartbeat",
+      clientId,
+      now: new Date().toISOString(),
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-heartbeat",
+      tone: decision.status === "heartbeat" ? "neutral" : "warning",
+      summary: [`Local REPL bridge ${decision.status}: ${clientId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-stop") {
+    const clientId = args[1] ?? "local";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "stop",
+      clientId,
+      reason: "user requested stop",
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-stop",
+      tone: "neutral",
+      summary: [`Local REPL bridge ${decision.status}: ${clientId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "local-deregister") {
+    const clientId = args[1] ?? "local";
+    const decision = handleReplBridgeMessage(ensureLocalReplBridge(context), context.remote, {
+      type: "deregister",
+      clientId,
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge local-deregister",
+      tone: decision.status === "deregistered" ? "neutral" : "warning",
+      summary: [`Local REPL bridge ${decision.status}: ${clientId}`],
+      detailsText: JSON.stringify(decision, null, 2),
+    });
+    return;
+  }
+  if (action === "jwt-refresh-check") {
+    const result = await maybeRefreshJwtToken({
+      token: args[1],
+      expiresAt: args[2],
+      refresh: async () => ({
+        token: "refreshed-token-redacted",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    });
+    showCommandPanel(context, output, {
+      title: "/remote bridge jwt-refresh-check",
+      tone: "neutral",
+      summary: [`JWT refresh: ${result.refreshed ? "refreshed" : result.reason}`],
+      detailsText: JSON.stringify(
+        result.refreshed ? { ...result, token: "[REDACTED]" } : result,
+        null,
+        2,
+      ),
+    });
+    return;
+  }
   const channel = findRemoteChannel(context, args[1]);
   if (!channel) {
     writeLine(
@@ -599,8 +841,15 @@ async function handleRemoteBridgeCommand(
   }
   writeLine(
     output,
-    "用法：/remote bridge doctor|pair|start|test-inbound|test-approval|test-status feishu|dingtalk|wecom",
+    "用法：/remote bridge doctor|pair|start|test-inbound|test-approval|test-status feishu|dingtalk|wecom | local-listen|local-close|local-register|local-inbound|local-poll|local-route|local-ack|local-heartbeat|local-stop|local-deregister",
   );
+}
+
+function ensureLocalReplBridge(context: TuiContext) {
+  if (!context.remote.localReplBridge) {
+    context.remote.localReplBridge = createReplBridgeState();
+  }
+  return context.remote.localReplBridge;
 }
 
 async function startRemoteFeishuBridge(
@@ -1515,6 +1764,24 @@ export function validateRemoteInboundEnvelope(
     status: RemoteInboundDecision["status"],
     summary: string,
   ): RemoteInboundDecision => ({ kind: message.kind, status, summary, evidenceCreated: false });
+  if (message.channel === "local-repl") {
+    if (message.origin !== "adapter" || message.source !== "local-repl") {
+      return reject("bad_signature", "local REPL bridge proof is invalid");
+    }
+    if (Date.parse(message.expiresAt) <= Date.now()) {
+      return reject("expired", "local REPL bridge message expired");
+    }
+    if (context.remote.processedMessageIds.includes(message.messageId)) {
+      return reject("replayed", "local REPL bridge message replayed");
+    }
+    const client = context.remote.localReplBridge?.clients.find(
+      (item) => item.active && item.clientId === message.bindingUserId,
+    );
+    if (!client || !client.queue.some((item) => item.messageId === message.messageId)) {
+      return reject("wrong_binding", "local REPL bridge client/message mismatch");
+    }
+    return { status: "envelope_accepted", channel: createLocalReplBridgeChannel() };
+  }
   if (!channel || !canValidateRemoteInboundEnvelope(channel)) {
     return reject("channel_not_ready", "remote channel is not ready");
   }
@@ -1546,6 +1813,26 @@ export function validateRemoteInboundEnvelope(
     return reject("bad_signature", "remote inbound signature check failed");
   }
   return { status: "envelope_accepted", channel };
+}
+
+function createLocalReplBridgeChannel(): RemoteChannelState {
+  return {
+    id: "local-repl",
+    config: {
+      enabled: true,
+      type: "lark",
+      transport: "official_cli",
+      redactionPolicy: "summary_only",
+      allowedEventTypes: [],
+      trustedSources: ["local-repl"],
+      inboundMode: "callback",
+      bindingUserId: "local-repl",
+    },
+    runtimeStatus: "ready",
+    bindingStatus: "bound",
+    transportStatus: "ready",
+    nextAction: "/remote bridge local-route",
+  };
 }
 
 export function validateRemotePairingEnvelope(

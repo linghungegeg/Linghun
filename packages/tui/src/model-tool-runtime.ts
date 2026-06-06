@@ -19,7 +19,6 @@ import {
   checkBackgroundStartGuard,
   finishBackgroundTaskFromToolOutput,
 } from "./background-control-runtime.js";
-import { writeLightHints } from "./cache-command-runtime.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
   findDeferredTool,
@@ -46,8 +45,6 @@ import {
   rememberEvidence,
 } from "./evidence-runtime.js";
 import { validateExtensionContributionExecution } from "./extension-command-runtime.js";
-import { formatWorkflows } from "./extension-command-runtime.js";
-import { checkClaimSupport, formatClaimCheck } from "./final-answer-gate.js";
 import { executeGitToolUse } from "./git-tool-dispatch-runtime.js";
 import { isGitToolName } from "./git-tool-runtime.js";
 import {
@@ -76,12 +73,7 @@ import {
   refreshIndexStatus,
   runIndexRepository,
 } from "./mcp-index-runtime.js";
-import {
-  isPotentiallyMutatingMcpTool,
-  runMcpStdioToolCall,
-  runMcpStdioToolList,
-} from "./mcp-stdio-runtime.js";
-import { evaluateMetaScheduler, formatMetaSchedulerDirective } from "./meta-scheduler-runtime.js";
+import { formatMetaSchedulerDirective } from "./meta-scheduler-runtime.js";
 import {
   AGENT_CONTROL_TOOL_NAME,
   COMMAND_PROPOSAL_TOOL_NAME,
@@ -93,7 +85,6 @@ import {
   SEND_MESSAGE_TOOL_NAME,
   START_AGENT_TOOL_NAME,
   WRITE_REPORT_TOOL_NAME,
-  createToolInputSchema,
   createToolUseDriftSummary,
   extractFileMentions,
   extractFileSearchKeywords,
@@ -108,13 +99,9 @@ import {
   sanitizeDeferredToolPrimaryText,
 } from "./model-loop-runtime.js";
 import { clearRequestActivity, startRequestActivity } from "./model-stream-runtime.js";
-import { routeNaturalIntent } from "./natural-command-bridge.js";
-import { buildRuntimeStatusForModel } from "./natural-command-bridge.js";
-import { formatPendingApprovalDetails } from "./pending-details-presenter.js";
 import {
   type ReportWriteGuard,
   collectInputFiles,
-  createReportFinalReferenceReminder,
   createReportTaskGuard,
   createReportWriteGuard,
   createReportWriteReminder,
@@ -521,9 +508,34 @@ async function runBoundaryBashPreflight(
         reportArtifact: false,
       });
       if (result.decision === "confirm") return result;
-    } catch {}
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT")) {
+        await appendBoundaryPreflightWarning(
+          context,
+          `boundary_bash_preflight_read_failed path=${target} reason=${formatError(error, context.language).replace(/\s+/g, " ")}`,
+        );
+      }
+    }
   }
   return { decision: "allow", reason: "no target matched large-file thresholds" };
+}
+
+async function appendBoundaryPreflightWarning(context: TuiContext, message: string): Promise<void> {
+  if (!context.sessionId) {
+    process.stderr.write(`[linghun] ${message}\n`);
+    return;
+  }
+  try {
+    await appendSystemEvent(context, context.sessionId, message, "warning");
+  } catch (error) {
+    process.stderr.write(
+      `[linghun] ${message}; warning_write_failed=${formatError(error, context.language).replace(/\s+/g, " ")}\n`,
+    );
+  }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function extractBashCommand(input: unknown): string | undefined {
@@ -1508,21 +1520,6 @@ function normalizePositiveToolInt(value: unknown): number | undefined {
     return undefined;
   }
   return Math.max(1, Math.floor(value));
-}
-
-function parseStringFieldToolInput(
-  input: unknown,
-  field: string,
-): { ok: true; value: string } | { ok: false; text: string } {
-  const obj =
-    input && typeof input === "object" && !Array.isArray(input)
-      ? (input as Record<string, unknown>)
-      : {};
-  const value = obj[field];
-  if (typeof value !== "string" || !value.trim()) {
-    return { ok: false, text: `${field} must be a non-empty string.` };
-  }
-  return { ok: true, value: value.trim() };
 }
 
 function parseIndexOperationToolInput(

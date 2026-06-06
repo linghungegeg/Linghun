@@ -21,6 +21,7 @@ import {
   type RemoteEventType,
   type RoleModelRoute,
   type WorkspaceTrustLevel,
+  calculateEstimatedCny,
   defaultConfig,
   ensureProviderEnvTemplate,
   getProjectSettingsPath,
@@ -2121,9 +2122,6 @@ configureJobAgentCommandRuntime({
     }),
 });
 
-// Static hash: builtInTools never changes at runtime; avoid recomputing on every probe
-let _builtInToolsHashCache: string | undefined;
-
 export async function handleVerifyCommand(
   args: string[],
   context: TuiContext,
@@ -2607,111 +2605,14 @@ export async function requestIndexRefreshApproval(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
-  const sessionId = await ensureSession(context);
-  const toolCall: ModelToolCall = {
-    id: `slash-index-refresh-${randomUUID().slice(0, 8)}`,
-    name: INDEX_REFRESH,
-    input: {
-      force: args.includes("--force"),
-      reason: "explicit /index refresh slash command",
-    },
-  };
-  const permission = await decidePermission(
-    "Write",
-    { path: ".linghun/index" },
-    context,
-    sessionId,
-  );
-  await context.store.appendEvent(sessionId, {
-    type: "tool_call_start",
-    id: toolCall.id,
-    name: toolCall.name,
-    input: toolCall.input,
-    createdAt: new Date().toISOString(),
-  });
-  await context.store.appendEvent(sessionId, {
-    type: "permission_request",
-    request: { ...permission.request, toolName: INDEX_REFRESH as unknown as ToolName },
-    createdAt: new Date().toISOString(),
-  });
-  await context.store.appendEvent(sessionId, {
-    type: "permission_result",
-    requestId: permission.request.id,
-    decision: permission.decision,
-    reason: permission.reason,
-    createdAt: new Date().toISOString(),
-  });
-
-  if (context.permissionMode === "auto-review" && permission.decision === "ask") {
-    await appendSystemEvent(
-      context,
-      sessionId,
+  await requestIndexActionApproval(args, context, output, {
+    action: "refresh",
+    idPrefix: "slash-index-refresh",
+    reason: "explicit /index refresh slash command",
+    autoReviewMessage:
       "slash_index_refresh_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated",
-      "info",
-    );
-    await executeApprovedIndexToolUse(
-      toolCall,
-      "refresh",
-      args.includes("--force"),
-      context,
-      sessionId,
-      output,
-    );
-    if (!context.isInkSession) writeStatus(output, context);
-    return;
-  }
-  if (permission.decision === "deny") {
-    const evidence = await recordToolFailureEvidence(
-      context,
-      sessionId,
-      "Write",
-      `index refresh deny: ${permission.reason}`,
-    );
-    await appendToolResultEvent(
-      context,
-      sessionId,
-      toolCall.id,
-      "Write",
-      `deny: ${permission.reason}`,
-      true,
-      evidence.id,
-    );
-    if (!context.isInkSession) {
-      writeLine(
-        output,
-        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
-      );
-      writeStatus(output, context);
-    }
-    return;
-  }
-  if (permission.decision === "ask") {
-    context.pendingLocalApproval = {
-      kind: "index_tool",
-      indexAction: "refresh",
-      toolCall,
-      sessionId,
-      force: args.includes("--force"),
-    };
-    if (!context.isInkSession) {
-      writeLine(
-        output,
-        formatModelToolPermissionPrompt(toPermissionPromptView(permission), context.language),
-      );
-      writeStatus(output, context);
-    }
-    return;
-  }
-
-  await executeApprovedIndexToolUse(
-    toolCall,
-    "refresh",
-    args.includes("--force"),
-    context,
-    sessionId,
-    output,
-  );
-  if (!context.isInkSession) writeStatus(output, context);
+    denySummary: "index refresh deny",
+  });
 }
 
 export async function requestIndexInitFastApproval(
@@ -2719,13 +2620,37 @@ export async function requestIndexInitFastApproval(
   context: TuiContext,
   output: Writable,
 ): Promise<void> {
+  await requestIndexActionApproval(args, context, output, {
+    action: "init fast",
+    idPrefix: "slash-index-init-fast",
+    reason: "explicit /index init fast slash command",
+    autoReviewMessage:
+      "slash_index_init_fast_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated",
+    denySummary: "index init fast deny",
+  });
+}
+
+type IndexApprovalOptions = {
+  action: "refresh" | "init fast";
+  idPrefix: string;
+  reason: string;
+  autoReviewMessage: string;
+  denySummary: string;
+};
+
+async function requestIndexActionApproval(
+  args: string[],
+  context: TuiContext,
+  output: Writable,
+  options: IndexApprovalOptions,
+): Promise<void> {
   const sessionId = await ensureSession(context);
   const toolCall: ModelToolCall = {
-    id: `slash-index-init-fast-${randomUUID().slice(0, 8)}`,
+    id: `${options.idPrefix}-${randomUUID().slice(0, 8)}`,
     name: INDEX_REFRESH,
     input: {
       force: args.includes("--force"),
-      reason: "explicit /index init fast slash command",
+      reason: options.reason,
     },
   };
   const permission = await decidePermission(
@@ -2755,15 +2680,10 @@ export async function requestIndexInitFastApproval(
   });
 
   if (context.permissionMode === "auto-review" && permission.decision === "ask") {
-    await appendSystemEvent(
-      context,
-      sessionId,
-      "slash_index_init_fast_auto_review_allowed: ordinary workspace index write uses existing permission pipeline; dangerous shell/network/install/delete remain gated",
-      "info",
-    );
+    await appendSystemEvent(context, sessionId, options.autoReviewMessage, "info");
     await executeApprovedIndexToolUse(
       toolCall,
-      "init fast",
+      options.action,
       args.includes("--force"),
       context,
       sessionId,
@@ -2777,7 +2697,7 @@ export async function requestIndexInitFastApproval(
       context,
       sessionId,
       "Write",
-      `index init fast deny: ${permission.reason}`,
+      `${options.denySummary}: ${permission.reason}`,
     );
     await appendToolResultEvent(
       context,
@@ -2800,7 +2720,7 @@ export async function requestIndexInitFastApproval(
   if (permission.decision === "ask") {
     context.pendingLocalApproval = {
       kind: "index_tool",
-      indexAction: "init fast",
+      indexAction: options.action,
       toolCall,
       sessionId,
       force: args.includes("--force"),
@@ -2817,7 +2737,7 @@ export async function requestIndexInitFastApproval(
 
   await executeApprovedIndexToolUse(
     toolCall,
-    "init fast",
+    options.action,
     args.includes("--force"),
     context,
     sessionId,
@@ -2842,7 +2762,10 @@ async function createIndexSafetyRepairPlan(
   let currentExists = true;
   try {
     current = await readFile(join(context.projectPath, path), "utf8");
-  } catch {
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      throw error;
+    }
     current = "";
     currentExists = false;
   }
@@ -2872,6 +2795,10 @@ function normalizePath(path: string): string {
 
 function hashFileContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 async function chooseIndexIgnoreFile(
@@ -3050,9 +2977,11 @@ export function addRoleUsage(
       usage.provider === (route.provider || "unconfigured") &&
       usage.model === (route.primaryModel || "unconfigured"),
   );
+  const estimatedCny = calculateEstimatedCny(route.primaryModel, inputTokens, outputTokens);
   if (existing) {
     existing.inputTokens += inputTokens;
     existing.outputTokens += outputTokens;
+    existing.estimatedCny = sumEstimatedCny(existing.estimatedCny, estimatedCny);
     existing.fallbackUsed = existing.fallbackUsed || Boolean(latestDecision?.fallbackUsed);
     existing.budgetStop = existing.budgetStop || Boolean(latestDecision?.budgetStop);
     existing.contributionSummary = contributionSummary;
@@ -3066,10 +2995,16 @@ export function addRoleUsage(
     outputTokens,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
-    estimatedCny: 0,
+    estimatedCny,
     createdAt: new Date().toISOString(),
     fallbackUsed: Boolean(latestDecision?.fallbackUsed),
     budgetStop: Boolean(latestDecision?.budgetStop),
     contributionSummary,
   });
+}
+
+function sumEstimatedCny(current: number, increment: number): number {
+  if (!Number.isFinite(increment)) return current;
+  if (!Number.isFinite(current)) return increment;
+  return current + increment;
 }

@@ -1,5 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { ModelMessage } from "@linghun/providers";
+import { stableHash } from "./cache-freshness.js";
+import {
+  bytesPerTokenForFileType,
+  estimateToolCallsCharsLocal,
+  estimateValueChars,
+} from "./context-estimator.js";
 
 export type CompactKind = "micro" | "manual" | "auto-suggested";
 
@@ -151,58 +157,10 @@ export function compactBoundaryHash(boundaries: CompactBoundary[]): string {
 export function estimateModelMessagesChars(messages: ModelMessage[]): number {
   return messages.reduce((total, message) => {
     if (message.role === "assistant") {
-      return total + message.content.length + estimateToolCallsChars(message.toolCalls);
+      return total + message.content.length + estimateToolCallsCharsLocal(message.toolCalls);
     }
     return total + message.content.length;
   }, 0);
-}
-
-/** Lightweight size estimate for toolCalls array without full JSON.stringify allocation. */
-function estimateToolCallsChars(
-  toolCalls: Array<{ id: string; name: string; input: unknown }> | undefined,
-): number {
-  if (!toolCalls || toolCalls.length === 0) return 2; // "[]"
-  let size = 2; // brackets
-  for (const call of toolCalls) {
-    // {"id":"...","name":"...","input":...} + comma
-    size += call.id.length + call.name.length + 24; // fixed overhead: keys, quotes, braces, colons
-    size += estimateInputChars(call.input);
-  }
-  return size;
-}
-
-const DEEP_INPUT_ESTIMATE_BOUND = 2_000;
-
-function estimateInputChars(value: unknown, depth = 0): number {
-  if (value === null || value === undefined) return 4;
-  if (typeof value === "string") return value.length + 2;
-  if (typeof value === "number" || typeof value === "boolean") return String(value).length;
-  if (depth > 6) return boundedJsonEstimate(value);
-  if (Array.isArray(value)) {
-    let s = 2;
-    for (const item of value) {
-      s += estimateInputChars(item, depth + 1) + 1;
-    }
-    return s;
-  }
-  if (typeof value === "object") {
-    let s = 2;
-    for (const key of Object.keys(value as Record<string, unknown>)) {
-      s +=
-        key.length + 3 + estimateInputChars((value as Record<string, unknown>)[key], depth + 1) + 1;
-    }
-    return s;
-  }
-  return 8;
-}
-
-function boundedJsonEstimate(value: unknown): number {
-  try {
-    const json = JSON.stringify(value);
-    return Math.min(json.length, DEEP_INPUT_ESTIMATE_BOUND);
-  } catch {
-    return DEEP_INPUT_ESTIMATE_BOUND;
-  }
 }
 
 type MessageGroup = { messages: ModelMessage[] };
@@ -276,27 +234,10 @@ function sanitizeRefs(refs: string[]): string[] {
 }
 
 function estimateTokensFromChars(chars: number): number {
-  return Math.ceil(chars / 4);
+  return Math.ceil(chars / bytesPerTokenForFileType(""));
 }
 
 function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function stableHash(value: unknown): string {
-  return createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 12);
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, item]) => `${key}:${stableStringify(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? String(value);
 }

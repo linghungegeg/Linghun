@@ -46,6 +46,7 @@ describe("DeepSeek model capabilities", () => {
 
     expect(request.model).toBe("deepseek-reasoner");
   });
+
 });
 
 describe("OpenAI compatible provider", () => {
@@ -847,7 +848,6 @@ describe("OpenAI stream parser", () => {
           totalTokens: 6,
           cacheReadTokens: undefined,
           cacheWriteTokens: undefined,
-          cacheWriteTokensRaw: null,
           rawUsage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
           endpoint: "/v1/chat/completions",
         },
@@ -995,7 +995,6 @@ describe("OpenAI stream parser", () => {
           totalTokens: 5,
           cacheReadTokens: 1,
           cacheWriteTokens: undefined,
-          cacheWriteTokensRaw: null,
           rawUsage: {
             input_tokens: 3,
             output_tokens: 2,
@@ -1107,7 +1106,6 @@ describe("OpenAI stream parser", () => {
           totalTokens: 3,
           cacheReadTokens: undefined,
           cacheWriteTokens: undefined,
-          cacheWriteTokensRaw: null,
           rawUsage: { prompt_tokens: 3, completion_tokens: 0, total_tokens: 3 },
           endpoint: "/v1/chat/completions",
         },

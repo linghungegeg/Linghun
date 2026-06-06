@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TranscriptEvent } from "@linghun/core";
 import type { ModelGateway, ModelMessage } from "@linghun/providers";
+import { redactCommonSecrets } from "@linghun/shared";
 import { type CompactBoundary, createManualCompactBoundary } from "./compact-context.js";
 import type { CompactPreflightRuntime } from "./compact-preflight-runtime.js";
 import { estimateTranscriptContextChars } from "./context-estimator.js";
@@ -582,14 +583,10 @@ export function sanitizeDeepCompactText(
   maxChars: number,
 ): string {
   const singleLine = value.replace(/\s+/g, " ");
-  const redacted = singleLine
-    .replace(
-      /(api[_-]?key|apiKey|token|Authorization)(\s*[:=]\s*)(Bearer\s+)?[^\s;&,)}\]]+/giu,
-      (_match, key: string, sep: string) => `${key}${sep}***`,
-    )
-    .replace(/Bearer\s+[A-Za-z0-9._~-]+/giu, "Bearer ***")
-    .replace(/sk-[A-Za-z0-9_-]+/gu, "sk-***")
-    .replace(/[A-Z]:[\\/][^\s"')\]}]+/gu, "[local-path]");
+  const redacted = redactCommonSecrets(singleLine).replace(
+    /[A-Z]:[\\/][^\s"')\]}]+/gu,
+    "[local-path]",
+  );
   return truncateDisplay(
     sanitizeDisplayPaths(sanitizeDiagnosticText(redacted), context.projectPath),
     maxChars,

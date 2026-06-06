@@ -174,9 +174,15 @@ export function createToolInputSchema(name: ToolName): unknown {
       required: ["action"],
     };
   }
+  if (name === "Diff") {
+    return {
+      ...base,
+      properties: { files: { type: "array", items: { type: "string" } } },
+    };
+  }
   return {
     ...base,
-    properties: { files: { type: "array", items: { type: "string" } } },
+    properties: {},
   };
 }
 
@@ -454,7 +460,10 @@ export function createModelToolDefinitionsForTools(
 ): ModelToolDefinition[] {
   return tools.map((tool) => ({
     name: tool.name,
-    description: tool.description,
+    description:
+      typeof tool.prompt === "function"
+        ? `${tool.description}\n${tool.prompt()}`
+        : tool.description,
     inputSchema: createToolInputSchema(tool.name),
   }));
 }
@@ -815,9 +824,7 @@ export function extractStructuredFinalAnswerClaims(text: string): FinalAnswerCla
   return parseStructuredFinalAnswerClaims(text);
 }
 
-export function detectHighRiskClaims(text: string): FinalAnswerClaimMatch[] {
-  return extractStructuredFinalAnswerClaims(text);
-}
+export { extractStructuredFinalAnswerClaims as detectHighRiskClaims };
 
 function parseStructuredFinalAnswerClaims(text: string): FinalAnswerClaimMatch[] {
   if (!text) return [];
@@ -1303,11 +1310,9 @@ export function createFinalAnswerClaimReminder(
 // 修正失败后本地生成安全边界答案：丢弃未通过 gate 的 draft，不再做用户正文字符串替换。
 // 用户看到的是底层 evidence verdict 生成的 answer，而不是补丁化的原文。
 export function buildDowngradedFinalAnswer(
-  originalText: string,
   verdict: FinalAnswerClaimVerdict,
   language: Language,
 ): string {
-  void originalText;
   const missing =
     Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching evidence";
   const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";
@@ -1433,11 +1438,9 @@ export function createExtendedFinalAnswerReminder(
 }
 
 export function buildExtendedDowngradedFinalAnswer(
-  originalText: string,
   verdict: FinalAnswerExtendedVerdict,
   language: Language,
 ): string {
-  void originalText;
   const missing =
     Array.from(new Set(verdict.missingEvidenceKinds)).join(", ") || "matching support";
   const kinds = Array.from(new Set(verdict.unsupportedKinds)).join(", ") || "claim";

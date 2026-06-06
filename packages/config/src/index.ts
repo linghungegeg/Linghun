@@ -3,7 +3,10 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
+  CODEBASE_MEMORY_COMMAND,
+  CODEBASE_MEMORY_ENV,
   DEEPSEEK_API_MODELS,
+  DEFAULT_DEEPSEEK_BASE_URL,
   type Language,
   type PermissionMode,
   canonicalPathForCompare,
@@ -69,10 +72,111 @@ export type ModelRouteConfig = {
   routes: RoleModelRoute[];
 };
 
+export type ModelPricing = {
+  inputPer1K: number;
+  outputPer1K: number;
+  currency: "CNY";
+  source: "packaged_estimate";
+};
+
+export const MODEL_PRICING: Record<string, ModelPricing> = {
+  "deepseek-chat": {
+    inputPer1K: 0.002,
+    outputPer1K: 0.008,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "deepseek-reasoner": {
+    inputPer1K: 0.004,
+    outputPer1K: 0.016,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-4.1": {
+    inputPer1K: 0.0146,
+    outputPer1K: 0.0584,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-4.1-mini": {
+    inputPer1K: 0.0029,
+    outputPer1K: 0.0117,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-4o": {
+    inputPer1K: 0.0183,
+    outputPer1K: 0.073,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-4o-mini": {
+    inputPer1K: 0.0011,
+    outputPer1K: 0.0044,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-5.5": {
+    inputPer1K: 0.0091,
+    outputPer1K: 0.073,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-5.4": {
+    inputPer1K: 0.0091,
+    outputPer1K: 0.073,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+  "gpt-5.4-mini": {
+    inputPer1K: 0.0018,
+    outputPer1K: 0.0146,
+    currency: "CNY",
+    source: "packaged_estimate",
+  },
+};
+
+export function findModelPricing(modelName: string | undefined): ModelPricing | undefined {
+  const normalized = normalizePricingModelName(modelName);
+  if (!normalized) return undefined;
+  return MODEL_PRICING[normalized];
+}
+
+export function calculateEstimatedCny(
+  modelName: string | undefined,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const pricing = findModelPricing(modelName);
+  if (!pricing) return Number.NaN;
+  const safeInput = Number.isFinite(inputTokens) ? Math.max(0, inputTokens) : 0;
+  const safeOutput = Number.isFinite(outputTokens) ? Math.max(0, outputTokens) : 0;
+  return (safeInput / 1000) * pricing.inputPer1K + (safeOutput / 1000) * pricing.outputPer1K;
+}
+
+function normalizePricingModelName(modelName: string | undefined): string {
+  const trimmed = (modelName ?? "").trim().toLowerCase();
+  if (!trimmed) return "";
+  const withoutProvider = trimmed.includes("/") ? (trimmed.split("/").at(-1) ?? trimmed) : trimmed;
+  const withoutSnapshot = withoutProvider.replace(/-\d{4}-\d{2}-\d{2}$/u, "");
+  if (withoutSnapshot.startsWith("gpt-4.1-mini")) return "gpt-4.1-mini";
+  if (withoutSnapshot.startsWith("gpt-4.1")) return "gpt-4.1";
+  if (withoutSnapshot.startsWith("gpt-4o-mini")) return "gpt-4o-mini";
+  if (withoutSnapshot.startsWith("gpt-4o")) return "gpt-4o";
+  if (withoutSnapshot.startsWith("gpt-5.5")) return "gpt-5.5";
+  if (withoutSnapshot.startsWith("gpt-5.4-mini")) return "gpt-5.4-mini";
+  if (withoutSnapshot.startsWith("gpt-5.4")) return "gpt-5.4";
+  if (withoutSnapshot.startsWith("deepseek-chat")) return "deepseek-chat";
+  if (withoutSnapshot.startsWith("deepseek-reasoner")) return "deepseek-reasoner";
+  return withoutSnapshot;
+}
+
 export type McpServerConfig = {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  url?: string;
+  transport?: "stdio" | "sse";
   disabled?: boolean;
   sourceUrl?: string;
   localPath?: string;
@@ -399,6 +503,7 @@ LINGHUN_AUX_MODEL=
 
 export const defaultModelRoutes: ModelRouteConfig = {
   defaultModel: defaultLinghunModel,
+  // These DeepSeek routes are only packaged defaults; env/project settings can override them.
   routes: [
     {
       role: "planner",
@@ -488,7 +593,7 @@ export const defaultConfig: LinghunConfig = {
   providers: {
     deepseek: {
       type: "deepseek",
-      baseUrl: process.env.LINGHUN_DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1",
+      baseUrl: process.env.LINGHUN_DEEPSEEK_BASE_URL ?? DEFAULT_DEEPSEEK_BASE_URL,
       apiKey: process.env.LINGHUN_DEEPSEEK_API_KEY,
       model: defaultDeepSeekModel,
     },
@@ -511,7 +616,7 @@ export const defaultConfig: LinghunConfig = {
     enabledServers: ["codebase-memory"],
     servers: {
       "codebase-memory": {
-        command: process.env.LINGHUN_CODEBASE_MEMORY_MCP ?? "codebase-memory-mcp",
+        command: process.env[CODEBASE_MEMORY_ENV] ?? CODEBASE_MEMORY_COMMAND,
         args: [],
       },
     },
@@ -572,7 +677,7 @@ export const defaultConfig: LinghunConfig = {
         enabled: false,
         type: "feishu",
         transport: "official_cli",
-        cliPath: "feishu-cli",
+        cliPath: process.env.LINGHUN_FEISHU_CLI ?? "feishu-cli",
         redactionPolicy: "summary_only",
         allowedEventTypes: [
           "approval_request",
@@ -826,9 +931,12 @@ async function replaceProviderEnvFile(tempPath: string, path: string): Promise<v
   } catch (error) {
     try {
       await copyFile(backupPath, path);
-    } catch {
-      // If the backup was never created or was already restored, keep reporting
-      // the original replace failure; callers need the write to be clearly failed.
+    } catch (restoreError) {
+      lastConfigRecoveryWarning = {
+        path,
+        reason: `provider.env backup restore failed after replace error: ${formatDiagnosticError(restoreError)}`,
+        recoveredAt: new Date().toISOString(),
+      };
     }
     await rm(tempPath, { force: true });
     await rm(backupPath, { force: true });
@@ -841,6 +949,10 @@ async function replaceProviderEnvFile(tempPath: string, path: string): Promise<v
 function isAtomicReplaceConflict(error: unknown): boolean {
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
   return code === "EEXIST" || code === "EPERM";
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 export async function readProviderEnvValues(home = homedir()): Promise<Record<string, string>> {
@@ -1309,6 +1421,16 @@ export async function saveMcpServerConfig(
   projectPath = process.cwd(),
 ): Promise<LinghunConfig> {
   const current = await loadConfig(projectPath);
+  const signature = mcpServerSignature(server);
+  const duplicate = Object.entries(current.mcp.servers).find(
+    ([existingId, existing]) =>
+      existingId !== id && mcpServerSignature(existing) === signature,
+  );
+  if (duplicate) {
+    throw new Error(
+      `MCP server duplicate: ${id} has the same transport signature as ${duplicate[0]}. Use the existing MCP server id or change command/url before adding a second entry.`,
+    );
+  }
   const enabledServers = enabled
     ? stableUnique([...current.mcp.enabledServers, id])
     : current.mcp.enabledServers.filter((item) => item !== id);
@@ -1325,6 +1447,13 @@ export async function saveMcpServerConfig(
   };
   await writeConfig(projectPath, next);
   return next;
+}
+
+export function mcpServerSignature(server: McpServerConfig): string {
+  if (server.transport === "sse" || server.url) {
+    return `url:${(server.url ?? "").trim().replace(/\/+$/u, "")}`;
+  }
+  return `stdio:${server.command.trim()} ${(server.args ?? []).join(" ")}`.trim();
 }
 
 export async function removeMcpServerConfig(
@@ -1595,7 +1724,18 @@ function validateMcp(mcp: LinghunConfig["mcp"]): void {
   for (const [serverId, server] of Object.entries(mcp.servers)) {
     const path = `settings.mcp.servers.${serverId}`;
     assertRecord(server, path);
-    assertNonEmptyString(server.command, `${path}.command`);
+    if (server.transport === "sse" || server.url !== undefined) {
+      assertOptionalString(server.command, `${path}.command`);
+      assertNonEmptyString(server.url, `${path}.url`);
+      if (server.transport !== undefined && server.transport !== "sse") {
+        throw new Error(`${path}.transport is invalid`);
+      }
+    } else {
+      assertNonEmptyString(server.command, `${path}.command`);
+      if (server.transport !== undefined && server.transport !== "stdio") {
+        throw new Error(`${path}.transport is invalid`);
+      }
+    }
     if (server.args !== undefined) {
       assertStringArray(server.args, `${path}.args`);
     }
@@ -1603,6 +1743,7 @@ function validateMcp(mcp: LinghunConfig["mcp"]): void {
       assertStringRecord(server.env, `${path}.env`);
     }
     assertOptionalBoolean(server.disabled, `${path}.disabled`);
+    assertOptionalString(server.url, `${path}.url`);
     assertOptionalString(server.sourceUrl, `${path}.sourceUrl`);
     assertOptionalString(server.localPath, `${path}.localPath`);
     assertOptionalString(server.ref, `${path}.ref`);
@@ -1874,15 +2015,6 @@ function assertCapability(value: unknown, path: string): asserts value is ModelC
   ) {
     throw new Error(`${path} is invalid`);
   }
-}
-
-function inferProviderForModel(model: string, providers: Record<string, ProviderConfig>): string {
-  for (const [providerId, provider] of Object.entries(providers)) {
-    if (provider.model === model) {
-      return providerId;
-    }
-  }
-  return isDeepSeekApiModel(normalizeDeepSeekModelName(model)) ? "deepseek" : "openai-compatible";
 }
 
 export async function ensureConfigDirs(projectPath = process.cwd()): Promise<string[]> {

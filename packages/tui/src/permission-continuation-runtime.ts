@@ -25,6 +25,7 @@ import { relative, resolve } from "node:path";
 import type { Language, PermissionMode } from "@linghun/shared";
 import { isRawPermissionMode, normalizePermissionMode } from "@linghun/shared";
 import { type ToolName, type ToolOutput, builtInTools } from "@linghun/tools";
+import { getPlatformPathDenyReason } from "./platform-security.js";
 import { truncateDisplay } from "./startup-runtime.js";
 import { formatToolOutput } from "./tool-output-presenter.js";
 
@@ -142,6 +143,8 @@ export function getHardDenyReason(
     if (rel.startsWith("..") || (rel === "" && !builtInTools[name].isReadOnly)) {
       return `路径越界或指向工作区根：${file}。只允许操作当前工作区内明确文件。`;
     }
+    const platformDeny = getPlatformPathDenyReason(file, workspaceRoot);
+    if (platformDeny) return platformDeny;
     const normalized = rel.replaceAll("\\", "/");
     if (normalized.startsWith(".git/") || normalized.includes("/.git/")) {
       return "安全保护：禁止修改 .git 目录。";
@@ -216,6 +219,7 @@ export function formatRecentDenied(state: PermissionState): string {
 }
 
 export function hasRepeatedPermissionDenial(recentDenied: RecentPermissionRejection[]): boolean {
+  if (recentDenied.length >= 20) return true;
   const latest = recentDenied.slice(0, 5);
   const counts = new Map<string, number>();
   for (const item of latest) {

@@ -199,7 +199,7 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
   const code = readStringField(error, "code");
   const name = readStringField(error, "name");
   const status = readNumberField(error, "status") ?? readNumberField(error, "statusCode");
-  const message = error instanceof Error ? error.message : String(error ?? "");
+  const message = error instanceof Error ? error.message : (readStringField(error, "message") ?? String(error ?? ""));
   const text = `${code ?? ""} ${name ?? ""} ${status ?? ""} ${message}`;
   // Decode / malformed transport envelopes are transit failures. Plain provider
   // SSE `error` events may carry quota, schema, or gateway text, so classify
@@ -233,6 +233,21 @@ export function classifyProviderFailure(error: unknown): ProviderFailureKind {
     /thinking|extended_thinking|reasoning|unsupported_param|不支持.*推理|推理.*不支持/iu.test(text)
   ) {
     return "reasoning_unsupported";
+  }
+  if (/prompt[_\s-]?too[_\s-]?long|context[_\s-]?length|maximum context|input too large|上下文.*过长|提示词.*过长/iu.test(text)) {
+    return "schema";
+  }
+  if (/pdf[_\s-]?too[_\s-]?large|file too large|payload too large|request entity too large/iu.test(text)) {
+    return "schema";
+  }
+  if (/tool[_\s-]?use[_\s-]?mismatch|duplicate[_\s-]?tool[_\s-]?use[_\s-]?id|duplicate[_\s-]?tool[_\s-]?call|tool result.*mismatch|invalid tool_call_id/iu.test(text)) {
+    return "schema";
+  }
+  if (/overload|overloaded|server overloaded|capacity|temporarily overloaded|服务器.*过载/iu.test(text)) {
+    return "gateway";
+  }
+  if (/ssl|certificate|cert[_\s-]?error|tls handshake|self signed|证书/iu.test(text)) {
+    return "transit";
   }
   // D.14D-R2 P2-1 — provider/transit 层失败：eventstream/SSE 流解码失败、CRC
   // 校验不一致、流提前中断、重试耗尽。这些是 provider 与网络传输问题，不是

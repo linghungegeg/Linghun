@@ -4,9 +4,64 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { __testDecodeShellChunk, __testGlobToRegExp, adaptShellCommandForPlatform, createToolContext, runTool } from "./index.js";
+import {
+  __testDecodeShellChunk,
+  __testGlobToRegExp,
+  adaptShellCommandForPlatform,
+  builtInTools,
+  createTool,
+  createToolContext,
+  runTool,
+  type ToolPermissionSpec,
+} from "./index.js";
 
 describe("Phase 05 core tools", () => {
+  it("Phase D createTool adds fail-closed defaults and CoreTool methods", () => {
+    const permission: ToolPermissionSpec = {
+      risk: "medium",
+      scope: "workspace",
+      reason: "test permission",
+      phase06Mode: "metadata-only",
+    };
+    const tool = createTool({
+      name: "Write",
+      title: "Test Tool",
+      description: "test description",
+      permission,
+      validateInput: (input) => input as { path: string },
+      call: async () => ({ text: "ok" }),
+    });
+
+    expect(tool.isReadOnly).toBe(false);
+    expect(tool.isConcurrencySafe).toBe(false);
+    expect(tool.lifecycle.destructive).toBe(false);
+    expect(tool.isReadOnlyTool()).toBe(false);
+    expect(tool.isDestructive()).toBe(false);
+    expect(tool.checkPermissions({ path: "a" }, createToolContext()).behavior).toBe(
+      "passthrough",
+    );
+    expect(tool.userFacingName()).toBe("Test Tool");
+    expect(tool.prompt()).toContain("test description");
+  });
+
+  it("Phase D built-in tools expose prompt, summary, activity, and permission decisions", () => {
+    expect(builtInTools.Read.prompt()).toContain("Use Read");
+    expect(builtInTools.Read.userFacingName()).toBe("读取文件");
+    expect(builtInTools.Read.getToolUseSummary({ path: "a.ts" })).toContain("a.ts");
+    expect(builtInTools.Read.checkPermissions({ path: "a.ts" }, createToolContext()).behavior).toBe(
+      "allow",
+    );
+    expect(
+      builtInTools.Write.checkPermissions(
+        { path: "a.ts", content: "x" },
+        createToolContext(),
+      ).behavior,
+    ).toBe("passthrough");
+    expect(builtInTools.Bash.getActivityDescription({ command: "node --version" })).toContain(
+      "Running",
+    );
+  });
+
   it("reads, searches, edits, tracks todo, runs bash, and summarizes diff", async () => {
     const project = await mkdtemp(join(tmpdir(), "linghun-tools-project-"));
     const filePath = join(project, "sample.txt");

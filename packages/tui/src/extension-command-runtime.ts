@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { resetExtensionTrustForInstall, saveExtensionEnablement } from "@linghun/config";
 import { stableHash } from "./cache-freshness.js";
+import { formatFeatureFlags, getFeatureFlags } from "./feature-flag-runtime.js";
 import type { TuiContext } from "./index.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import { formatError, sanitizeDiagnosticText, truncateDisplay } from "./startup-runtime.js";
@@ -122,6 +123,8 @@ export function formatFeaturePolicy(context: TuiContext): string {
     `- hooks: enabled ${context.hooks.enabled ? "yes" : "no"}; project trusted ${context.hooks.projectTrusted ? "yes" : "no"}; auto execution no`,
     "- auto accept all edits no; auto dependency install no; auto networking no; delete/rename/restore auto execution no",
     "- plugin marketplace auto install/update no; remote bridge/control auto connect no; continuous phase progression no",
+    "Runtime feature flags（local, not remote GrowthBook）",
+    ...formatFeatureFlags(getFeatureFlags(context)),
     "Unsupported / pending",
     "- remote channels, voice, computer-use/browser control, daemon jobs, plugin marketplace, and AI sessions auto injection are not default features.",
   ].join("\n");

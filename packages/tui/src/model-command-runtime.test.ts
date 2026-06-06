@@ -184,6 +184,13 @@ describe("/model set command", () => {
     const executorRoute = context.config.modelRoutes.routes.find((r) => r.role === "executor");
     expect(executorRoute?.primaryModel).toBe("gpt-4");
   });
+
+  it("shows context window and alias hints in the default model panel", async () => {
+    await handleModelCommand([], context, output);
+
+    expect(output.lines.join("\n")).toContain("contextWindow 128000");
+    expect(output.lines.join("\n")).toContain("deepseek-v4-flash -> deepseek-chat");
+  });
 });
 
 class MockWritable extends Writable {

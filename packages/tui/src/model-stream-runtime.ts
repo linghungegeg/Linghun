@@ -41,6 +41,7 @@ import {
   recordFailureLearningDegradedWarning,
 } from "./failure-learning-runtime.js";
 import { runArchitectureAndCompletenessFinalGate } from "./final-answer-gate.js";
+import { createGitRunner, readGitStatus } from "./git-runtime.js";
 import { computeWorktreeContext } from "./git-operation-runtime.js";
 import { summarizeWorktreeContextForPrompt } from "./git-tool-runtime.js";
 import { runAutoLearningOnTurnEnd } from "./memory-command-runtime.js";
@@ -97,7 +98,6 @@ import {
   recordProviderFallbackAttempt,
   resolveRuntimeFallback,
 } from "./provider-loop-runtime.js";
-import { checkAndWriteProviderCooldown as _cooldown } from "./provider-loop-runtime.js";
 import {
   consumeRemoteInboundMessage,
   processRemoteInbound,
@@ -497,6 +497,7 @@ export async function sendMessage(
   }
   enqueuePolicyHints(context, metaSchedulerDecision.policyDecision);
   await appendPolicyDecisionEvent(context, sessionId, metaSchedulerDecision.policyDecision);
+  const gitStatusSummary = await buildGitStatusSummary(context.projectPath);
   const systemPrompt = createModelSystemPrompt(
     text,
     context,
@@ -505,6 +506,7 @@ export async function sendMessage(
     summarizeWorktreeContextForPrompt(worktreeContext),
     buildFailureLearningSummaryForPrompt(context.failureLearning),
     formatMetaSchedulerDirective(metaSchedulerDecision),
+    gitStatusSummary,
   );
   if (context.solutionCompleteness.triggered) {
     await appendSystemEvent(
@@ -649,6 +651,13 @@ export async function sendMessage(
           roundHadUsage = true;
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
+          await recordApiTokenCountIfAvailable(
+            context,
+            gateway,
+            selectedRuntime,
+            requestMessages,
+            controller.signal,
+          );
           continue;
         }
         if (event.type === "message_stop") {
@@ -970,11 +979,7 @@ export async function sendMessage(
           `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
           "warning",
         );
-        assistantText = buildExtendedDowngradedFinalAnswer(
-          assistantText,
-          extended.verdict,
-          context.language,
-        );
+        assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
         replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
       }
       const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -1546,6 +1551,13 @@ async function streamFinalModelAnswerWithoutTools(
       hadUsage = true;
       const stats = recordModelUsage(context, event.usage);
       await appendUsageEvents(context, sessionId, stats);
+      await recordApiTokenCountIfAvailable(
+        context,
+        gateway,
+        runtimeFromContinuation(continuation),
+        preflight.messages,
+        signal,
+      );
       continue;
     }
     if (event.type === "message_stop") {
@@ -1680,11 +1692,7 @@ async function streamFinalModelAnswerWithoutTools(
         `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
         "warning",
       );
-      assistantText = buildExtendedDowngradedFinalAnswer(
-        assistantText,
-        extended.verdict,
-        context.language,
-      );
+      assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
     const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -1692,9 +1700,6 @@ async function streamFinalModelAnswerWithoutTools(
       assistantText = visibleAssistantText;
       replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
     }
-  }
-  if (assistantText) {
-    replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
   }
   // D.13V — 仅当我们自己 begin 的 stream 才负责 end；复用外层 id 时由外层 end。
   if (!reuseAssistantStreamBlockId) {
@@ -1733,7 +1738,7 @@ async function downgradeUnsupportedFinalAnswer(
     `final_answer_claim_gate downgrade kinds=${verdict.unsupportedKinds.join(",")}`,
     "warning",
   );
-  const downgraded = buildDowngradedFinalAnswer(assistantText, verdict, context.language);
+  const downgraded = buildDowngradedFinalAnswer(verdict, context.language);
   replaceAssistantBlockContent(output, assistantStreamBlockId, downgraded);
   const isBenignSecretSafety =
     (/secret|api[_\s-]?key|密钥|安全|不应|不能|建议|避免|谨慎/iu.test(assistantText) &&
@@ -1961,6 +1966,13 @@ export async function continueModelAfterToolResults(
         if (event.type === "usage") {
           const stats = recordModelUsage(context, event.usage);
           await appendUsageEvents(context, sessionId, stats);
+          await recordApiTokenCountIfAvailable(
+            context,
+            gateway,
+            runtimeFromContinuation(continuation),
+            preflight.messages,
+            controller.signal,
+          );
           continue;
         }
         if (event.type === "error") {
@@ -2212,11 +2224,7 @@ export async function continueModelAfterToolResults(
             `final_answer_extended_gate downgrade kinds=${extended.verdict.unsupportedKinds.join(",")}`,
             "warning",
           );
-          assistantText = buildExtendedDowngradedFinalAnswer(
-            assistantText,
-            extended.verdict,
-            context.language,
-          );
+          assistantText = buildExtendedDowngradedFinalAnswer(extended.verdict, context.language);
           replaceAssistantBlockContent(output, assistantStreamBlockId, assistantText);
         }
         const visibleAssistantText = stripStructuredFinalAnswerClaims(assistantText);
@@ -2344,6 +2352,88 @@ function currentModelSupportsTools(
   }
   const known = findKnownModel(runtime.model);
   return known?.supportsTools !== false;
+}
+
+const GIT_PROMPT_MAX_CHARS = 1000;
+const gitPromptRunner = createGitRunner(2500);
+
+async function buildGitStatusSummary(cwd: string): Promise<string | undefined> {
+  const status = await readGitStatus(cwd, gitPromptRunner);
+  if (status.kind !== "ok") return undefined;
+  const [recentCommits, userName] = await Promise.all([
+    readGitPromptValue(cwd, ["log", "-5", "--format=%h %s"]),
+    readGitPromptValue(cwd, ["config", "user.name"]),
+  ]);
+  const statusItems = [
+    ...status.staged.map((path) => `staged ${path}`),
+    ...status.unstaged.map((path) => `unstaged ${path}`),
+    ...status.untracked.map((path) => `untracked ${path}`),
+  ].slice(0, 20);
+  const lines = [
+    `branch=${status.branch ?? "(detached)"}`,
+    `user=${sanitizeGitPromptLine(userName) || "unknown"}`,
+    `changed=${status.changedCount}; untracked=${status.untrackedCount}`,
+    status.upstream ? `upstream=${status.upstream}; ahead=${status.ahead}; behind=${status.behind}` : "",
+    statusItems.length > 0 ? `status=${statusItems.map(sanitizeGitPromptLine).join(" | ")}` : "status=clean",
+    recentCommits ? `recent=${recentCommits.split("\n").map(sanitizeGitPromptLine).join(" | ")}` : "",
+  ].filter(Boolean);
+  return truncateForGitPrompt(lines.join("; "), GIT_PROMPT_MAX_CHARS);
+}
+
+async function recordApiTokenCountIfAvailable(
+  context: TuiContext,
+  gateway: ModelGateway,
+  runtime: { provider: string; model: string; endpointProfile?: string },
+  messages: ModelMessage[],
+  signal: AbortSignal,
+): Promise<void> {
+  const result = await gateway
+    .countMessagesTokensWithAPI(
+      runtime.provider,
+      {
+        messages,
+        model: runtime.model,
+        endpointProfile:
+          runtime.endpointProfile === "responses" || runtime.endpointProfile === "chat_completions"
+            ? runtime.endpointProfile
+            : undefined,
+      },
+      signal,
+    )
+    .catch((error: unknown) => ({
+      source: "unavailable" as const,
+      reason: error instanceof Error ? error.message : "count_tokens_failed",
+    }));
+  context.lastApiTokenCount =
+    result.source === "api"
+      ? {
+          provider: runtime.provider,
+          model: runtime.model,
+          source: "api",
+          inputTokens: result.inputTokens,
+          createdAt: new Date().toISOString(),
+        }
+      : {
+          provider: runtime.provider,
+          model: runtime.model,
+          source: "unavailable",
+          reason: result.reason,
+          createdAt: new Date().toISOString(),
+        };
+}
+
+async function readGitPromptValue(cwd: string, args: string[]): Promise<string> {
+  const result = await gitPromptRunner(cwd, args);
+  return result.ok ? result.stdout.trim() : "";
+}
+
+function sanitizeGitPromptLine(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function truncateForGitPrompt(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
 function createRawToolProtocolReminder(language: Language): string {

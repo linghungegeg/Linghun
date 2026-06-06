@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { resolveStoragePaths } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
-import type { Language } from "@linghun/shared";
+import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
 import type {
   RegistryAgentDefinition,
@@ -179,8 +179,8 @@ export async function handleWorkflowsCommand(
       tone: "neutral",
       summary: [
         isEn
-          ? `Workflows · ${context.workflows.templates.length} template${context.workflows.templates.length === 1 ? "" : "s"} — Ctrl+O for details.`
-          : `Workflows · ${context.workflows.templates.length} 个模板 — Ctrl+O 查看详情。`,
+          ? `Workflows · ${context.workflows.templates.length} template${context.workflows.templates.length === 1 ? "" : "s"} — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `Workflows · ${context.workflows.templates.length} 个模板 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       actions: [
         "/workflows plan <goal>",
@@ -201,13 +201,13 @@ export async function handleWorkflowsCommand(
       summary: run
         ? [
             isEn
-              ? `Workflow ${run.id} · ${run.status} · ${run.result} — Ctrl+O for details.`
-              : `Workflow ${run.id} · ${run.status} · ${run.result} — Ctrl+O 查看详情。`,
+              ? `Workflow ${run.id} · ${run.status} · ${run.result} — ${TOGGLE_DETAILS_KEYBIND} for details.`
+              : `Workflow ${run.id} · ${run.status} · ${run.result} — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
           ]
         : [
             isEn
-              ? "No active workflow run — Ctrl+O for details."
-              : "没有 active workflow run — Ctrl+O 查看详情。",
+              ? `No active workflow run — ${TOGGLE_DETAILS_KEYBIND} for details.`
+              : `没有 active workflow run — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
           ],
       actions: run
         ? ["/workflows status", "/background", "/details background <id>"]
@@ -226,8 +226,8 @@ export async function handleWorkflowsCommand(
       tone: errorCount > 0 ? "warning" : "neutral",
       summary: [
         isEn
-          ? `Registry · ${agentCount} agent${agentCount === 1 ? "" : "s"}, ${workflowCount} workflow${workflowCount === 1 ? "" : "s"}${errorCount > 0 ? ` · ${errorCount} schema error${errorCount === 1 ? "" : "s"}` : ""} — Ctrl+O for details.`
-          : `Registry · ${agentCount} 个 agent、${workflowCount} 个 workflow${errorCount > 0 ? ` · ${errorCount} 个 schema 错误` : ""} — Ctrl+O 查看详情。`,
+          ? `Registry · ${agentCount} agent${agentCount === 1 ? "" : "s"}, ${workflowCount} workflow${workflowCount === 1 ? "" : "s"}${errorCount > 0 ? ` · ${errorCount} schema error${errorCount === 1 ? "" : "s"}` : ""} — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `Registry · ${agentCount} 个 agent、${workflowCount} 个 workflow${errorCount > 0 ? ` · ${errorCount} 个 schema 错误` : ""} — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       actions: ["/workflows plan <goal>", "/workflows run <id>", "/workflows status"],
       detailsText: formatWorkflowRegistryList(context),
@@ -260,11 +260,11 @@ export async function handleWorkflowsCommand(
       summary: [
         result.ok
           ? isEn
-            ? `Plan for "${goal}" generated — Ctrl+O for details.`
-            : `已为 "${goal}" 生成计划 — Ctrl+O 查看详情。`
+            ? `Plan for "${goal}" generated — ${TOGGLE_DETAILS_KEYBIND} for details.`
+            : `已为 "${goal}" 生成计划 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`
           : isEn
-            ? `Plan for "${goal}" has warnings — Ctrl+O for details.`
-            : `"${goal}" 的计划存在警告 — Ctrl+O 查看详情。`,
+            ? `Plan for "${goal}" has warnings — ${TOGGLE_DETAILS_KEYBIND} for details.`
+            : `"${goal}" 的计划存在警告 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       actions: result.ok
         ? ["/workflows run <goal>", "/workflows status", "/workflows registry"]
@@ -415,7 +415,15 @@ async function persistWorkflowRunState(
 
 export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
   const root = getWorkflowRunsRoot(context);
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(root, { withFileTypes: true }).catch(async (error) => {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      await appendWorkflowHydrateWarning(
+        context,
+        `workflow_hydrate_readdir_failed reason=${formatDiagnosticError(error)}`,
+      );
+    }
+    return [];
+  });
   const candidates: Array<{
     run: NonNullable<WorkflowState["activeRun"]>;
     state: DurableWorkflowRunState;
@@ -423,7 +431,7 @@ export async function hydrateWorkflowRuns(context: TuiContext): Promise<void> {
   }> = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const state = await readWorkflowRunState(join(root, entry.name, "state.json"));
+    const state = await readWorkflowRunState(context, join(root, entry.name, "state.json"));
     if (
       !state ||
       resolve(state.projectPath).toLowerCase() !== resolve(context.projectPath).toLowerCase()
@@ -473,7 +481,10 @@ function selectActiveWorkflowRun(
   return selected;
 }
 
-async function readWorkflowRunState(path: string): Promise<DurableWorkflowRunState | null> {
+async function readWorkflowRunState(
+  context: TuiContext,
+  path: string,
+): Promise<DurableWorkflowRunState | null> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<DurableWorkflowRunState>;
     if (
@@ -487,9 +498,37 @@ async function readWorkflowRunState(path: string): Promise<DurableWorkflowRunSta
       return null;
     }
     return parsed as DurableWorkflowRunState;
-  } catch {
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      await appendWorkflowHydrateWarning(
+        context,
+        `workflow_state_read_failed path=${path} reason=${formatDiagnosticError(error)}`,
+      );
+    }
     return null;
   }
+}
+
+async function appendWorkflowHydrateWarning(context: TuiContext, message: string): Promise<void> {
+  if (!context.sessionId) {
+    process.stderr.write(`[linghun] ${message}\n`);
+    return;
+  }
+  try {
+    await appendSystemEvent(context, context.sessionId, message, "warning");
+  } catch (error) {
+    process.stderr.write(
+      `[linghun] ${message}; warning_write_failed=${formatDiagnosticError(error)}\n`,
+    );
+  }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 function recoverWorkflowRunState(
@@ -1423,6 +1462,16 @@ async function executeRegistryWorkflowStep(
   };
 }
 
+export async function __testExecuteRegistryWorkflowStep(
+  workflow: RegistryWorkflowDefinition,
+  step: RegistryWorkflowDefinition["steps"][number],
+  goal: string,
+  context: TuiContext,
+  output: Writable,
+): ReturnType<typeof executeRegistryWorkflowStep> {
+  return executeRegistryWorkflowStep(workflow, step, goal, context, output);
+}
+
 function formatWorkflowStepSummary(
   stepId: string,
   status: WorkflowStepState["status"],
@@ -1776,6 +1825,16 @@ async function executeWorkflowStep(
     ),
     evidenceRefs: newWorkflowEvidenceRefs(beforeEvidence, context),
   };
+}
+
+export async function __testExecuteWorkflowStep(
+  request: WorkflowBridgeRequestProposal,
+  context: TuiContext,
+  output: Writable,
+  workflowRunId?: string,
+  workflowRunningCap?: number,
+): ReturnType<typeof executeWorkflowStep> {
+  return executeWorkflowStep(request, context, output, workflowRunId, workflowRunningCap);
 }
 
 function formatWorkflowDetailsSlashCommand(
@@ -2258,13 +2317,6 @@ function workflowRuntimeKind(request: WorkflowBridgeRequestProposal): WorkflowSt
   if (request.request?.mainChain === "agents") return "agent";
   if (request.request?.mainChain === "fork") return "agent";
   return "agent";
-}
-
-function findWorkflowSliceTitle(plan: NormalizedWorkflowPlan, sliceId: string): string {
-  return (
-    plan.phases.flatMap((phase) => phase.slices).find((slice) => slice.id === sliceId)?.title ??
-    sliceId
-  );
 }
 
 function newWorkflowEvidenceRefs(before: string[], context: TuiContext): string[] {

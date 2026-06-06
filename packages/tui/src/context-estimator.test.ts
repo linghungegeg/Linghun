@@ -2,13 +2,30 @@ import type { TranscriptEvent } from "@linghun/core";
 import type { ModelMessage } from "@linghun/providers";
 import { describe, expect, it } from "vitest";
 import {
+  bytesPerTokenForFileType,
+  estimateFileTokens,
   estimateModelMessageChars,
   estimateToolCallsCharsLocal,
   estimateTranscriptContextChars,
+  estimateTokensFromBytesForFileType,
   estimateValueChars,
 } from "./context-estimator.js";
 
 describe("context-estimator", () => {
+  describe("bytesPerTokenForFileType", () => {
+    it("uses a tighter JSON estimate and default estimate for other files", () => {
+      expect(bytesPerTokenForFileType(".json")).toBe(2);
+      expect(bytesPerTokenForFileType("jsonl")).toBe(2);
+      expect(bytesPerTokenForFileType(".ts")).toBe(4);
+    });
+
+    it("estimates JSON file tokens from extension", () => {
+      expect(estimateTokensFromBytesForFileType(100, ".json")).toBe(50);
+      expect(estimateTokensFromBytesForFileType(100, ".ts")).toBe(25);
+      expect(estimateFileTokens("settings.json", 100)).toBe(50);
+    });
+  });
+
   describe("estimateValueChars", () => {
     it("returns 4 for null", () => {
       expect(estimateValueChars(null)).toBe(4);

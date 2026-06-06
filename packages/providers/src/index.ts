@@ -1,10 +1,17 @@
 import { LinghunError } from "@linghun/core";
 import {
+  DEFAULT_DEEPSEEK_BASE_URL,
   LINGHUN_CLI_NAME,
   LINGHUN_NAME,
   LINGHUN_VERSION,
   normalizeDeepSeekModelName,
 } from "@linghun/shared";
+import {
+  getRegisteredClientFactories,
+  getRegisteredHooks,
+  registerClientFactories,
+} from "./provider-client-runtime.js";
+export { registerClientFactories, registerHooks } from "./provider-client-runtime.js";
 
 export type ModelUsage = {
   inputTokens: number;
@@ -12,7 +19,6 @@ export type ModelUsage = {
   totalTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
-  cacheWriteTokensRaw?: number | null;
   cacheWriteTokensEstimated?: boolean;
   // D.13F：Anthropic prompt cache 显式 cache_control 时，message_start/message_delta 的
   // usage.cache_creation 会带上 ephemeral_5m_input_tokens / ephemeral_1h_input_tokens；
@@ -135,6 +141,10 @@ export type ModelRequest = {
   cacheBreakNonce?: string;
 };
 
+export type TokenCountResult =
+  | { source: "api"; inputTokens: number; outputTokens?: number; raw?: unknown }
+  | { source: "unavailable"; reason: string };
+
 export type ToolMessagePairingIssue =
   | "missing_tool_result"
   | "orphan_tool_result"
@@ -153,6 +163,7 @@ export type Provider = {
   displayName: string;
   supports: ProviderCapabilities;
   listModels(): Promise<ModelInfo[]>;
+  countTokens?(request: ModelRequest, signal?: AbortSignal): Promise<TokenCountResult>;
   stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent>;
 };
 
@@ -364,8 +375,21 @@ export type ProviderBaseUrlDiagnostic = {
 const PROVIDER_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const PROVIDER_MAX_ATTEMPTS = 3;
 const PROVIDER_BASE_RETRY_MS = 500;
-const PROVIDER_STREAM_IDLE_TIMEOUT_MS = 30_000;
-const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+const PROVIDER_STREAM_IDLE_TIMEOUT_MS = readPositiveIntEnv(
+  "LINGHUN_PROVIDER_STREAM_IDLE_TIMEOUT_MS",
+  30_000,
+);
+const PROVIDER_REQUEST_TIMEOUT_MS = readPositiveIntEnv(
+  "LINGHUN_PROVIDER_TIMEOUT_MS",
+  30_000,
+);
 const LINGHUN_REQUEST_PACKAGE_NAME = `@linghun/${LINGHUN_CLI_NAME}`;
 const LINGHUN_REQUEST_IDENTITY_HEADERS = {
   "User-Agent": `${LINGHUN_NAME}/${LINGHUN_VERSION} (${LINGHUN_REQUEST_PACKAGE_NAME})`,
@@ -449,6 +473,18 @@ export class ModelGateway {
       const linghunError = normalizeProviderError(error);
       yield { type: "error", error: linghunError };
     }
+  }
+
+  async countMessagesTokensWithAPI(
+    providerId: string,
+    request: ModelRequest,
+    signal?: AbortSignal,
+  ): Promise<TokenCountResult> {
+    const provider = this.findProvider(providerId);
+    if (!provider.countTokens) {
+      return { source: "unavailable", reason: "provider_count_tokens_not_supported" };
+    }
+    return provider.countTokens(request, signal);
   }
 
   private async withSupportedTools(
@@ -661,26 +697,45 @@ export class OpenAiCompatibleProvider implements Provider {
   }
 
   createChatRequest(request: ModelRequest): OpenAiChatRequest {
-    return createChatProfileRequest(request, this.config);
+    return getRegisteredClientFactories().chat({
+      config: this.config,
+      request,
+      contract: resolveProviderRuntimeContract(this.config, request),
+    });
   }
 
   createResponsesRequest(request: ModelRequest): OpenAiResponsesRequest {
-    return createResponsesProfileRequest(request, this.config);
+    return getRegisteredClientFactories().responses({
+      config: this.config,
+      request,
+      contract: resolveProviderRuntimeContract(this.config, request),
+    });
   }
 
   createAnthropicMessagesRequest(request: ModelRequest): AnthropicMessagesRequest {
-    return createAnthropicMessagesProfileRequest(request, this.config);
+    return getRegisteredClientFactories().anthropicMessages({
+      config: this.config,
+      request,
+      contract: resolveProviderRuntimeContract(this.config, request),
+    });
   }
 
   async *stream(request: ModelRequest, signal?: AbortSignal): AsyncGenerator<LinghunEvent> {
     this.assertReady();
-    const requestSignal = signal ?? new AbortController().signal;
+    const requestController = new AbortController();
+    if (signal?.aborted) {
+      requestController.abort(signal.reason);
+    } else {
+      signal?.addEventListener("abort", () => requestController.abort(signal.reason), { once: true });
+    }
+    const requestSignal = requestController.signal;
     const contract = resolveProviderRuntimeContract(this.config, request);
     const baseUrlDiagnostic = resolveProviderBaseUrlDiagnostic(
       this.config.baseUrl,
       contract.endpointProfile,
     );
     const url = joinBaseUrlAndEndpoint(baseUrlDiagnostic.normalizedBaseUrl, contract.endpoint);
+    await getRegisteredHooks().beforeRequest?.({ config: this.config, request, contract, url });
 
     if (contract.endpointProfile === "anthropic_messages") {
       const body = this.createAnthropicMessagesRequest(request);
@@ -721,6 +776,25 @@ export class OpenAiCompatibleProvider implements Provider {
 
       if (!response.ok) {
         const responseText = await safeReadResponseText(response);
+        const fallback = await tryNonStreamingFallback({
+          providerConfig: this.config,
+          request,
+          contract,
+          baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+          status: response.status,
+          responseText,
+          requestSignal,
+        });
+        if (fallback) {
+          await getRegisteredHooks().afterFallback?.({
+            config: this.config,
+            request,
+            contract,
+            reason: `stream_http_${response.status}`,
+          });
+          yield* fallback;
+          return;
+        }
         if (response.status === 401 || response.status === 403) {
           throw createApiKeyError(response.status, undefined, {
             endpointProfile: contract.endpointProfile,
@@ -746,7 +820,12 @@ export class OpenAiCompatibleProvider implements Provider {
       await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
       yield* parseAnthropicMessagesStream(
-        withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, requestSignal),
+        withStreamIdleTimeout(
+          response.body,
+          PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+          requestSignal,
+          requestController,
+        ),
         contract.endpoint,
       );
       return;
@@ -769,6 +848,25 @@ export class OpenAiCompatibleProvider implements Provider {
 
     if (!response.ok) {
       const responseText = await safeReadResponseText(response);
+      const fallback = await tryNonStreamingFallback({
+        providerConfig: this.config,
+        request,
+        contract,
+        baseUrl: baseUrlDiagnostic.normalizedBaseUrl,
+        status: response.status,
+        responseText,
+        requestSignal,
+      });
+      if (fallback) {
+        await getRegisteredHooks().afterFallback?.({
+          config: this.config,
+          request,
+          contract,
+          reason: `stream_http_${response.status}`,
+        });
+        yield* fallback;
+        return;
+      }
       if (response.status === 401 || response.status === 403) {
         throw createApiKeyError(response.status, undefined, {
           endpointProfile: contract.endpointProfile,
@@ -794,7 +892,12 @@ export class OpenAiCompatibleProvider implements Provider {
     await assertSseContentType(response, contract.endpointProfile, contract.endpoint);
 
     yield* parseOpenAiStream(
-      withStreamIdleTimeout(response.body, PROVIDER_STREAM_IDLE_TIMEOUT_MS, requestSignal),
+      withStreamIdleTimeout(
+        response.body,
+        PROVIDER_STREAM_IDLE_TIMEOUT_MS,
+        requestSignal,
+        requestController,
+      ),
       contract.endpointProfile === "responses" ? "/v1/responses" : "/v1/chat/completions",
     );
   }
@@ -1098,7 +1201,7 @@ async function fetchWithProviderRetry(url: string, init: RequestInit): Promise<R
       await sleep(PROVIDER_BASE_RETRY_MS * 2 ** (attempt - 1));
     }
   }
-  throw lastError;
+  throw new Error("Provider retry loop exhausted without returning a response.");
 }
 
 async function fetchWithRequestTimeout(
@@ -1171,9 +1274,16 @@ function sleep(ms: number): Promise<void> {
 async function safeReadResponseText(response: Response): Promise<string | undefined> {
   try {
     return await response.text();
-  } catch {
+  } catch (error) {
+    process.stderr.write(
+      `[linghun] provider_response_text_read_failed status=${response.status} reason=${formatDiagnosticError(error)}\n`,
+    );
     return undefined;
   }
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 const NON_SSE_BODY_PREVIEW_LIMIT = 480;
@@ -1218,10 +1328,155 @@ async function assertSseContentType(
   });
 }
 
+async function tryNonStreamingFallback(input: {
+  providerConfig: ProviderConfig;
+  request: ModelRequest;
+  contract: ProviderRuntimeContract;
+  baseUrl: string;
+  status: number;
+  responseText?: string;
+  requestSignal: AbortSignal;
+}): Promise<LinghunEvent[] | undefined> {
+  if (!shouldAttemptNonStreamingFallback(input.request, input.status)) {
+    return undefined;
+  }
+  const endpoint =
+    input.contract.endpointProfile === "responses"
+      ? "/responses"
+      : input.contract.endpointProfile === "anthropic_messages"
+        ? "/v1/messages"
+        : "/chat/completions";
+  const body = createNonStreamingFallbackBody(input.request, input.providerConfig, input.contract);
+  const response = await fetchWithProviderRetry(joinBaseUrlAndEndpoint(input.baseUrl, endpoint), {
+    method: "POST",
+    headers: createProviderRequestHeaders(input.providerConfig, input.contract),
+    body: JSON.stringify(body),
+    signal: input.requestSignal,
+  });
+  if (!response.ok) {
+    return undefined;
+  }
+  const parsed = await safeReadJson(response);
+  const text = extractNonStreamingText(parsed, input.contract.endpointProfile);
+  if (!text) {
+    return undefined;
+  }
+  return [
+    { type: "assistant_text_delta", id: "non-streaming-fallback", text },
+    {
+      type: "message_stop",
+      id: "non-streaming-fallback",
+      finishReason: "non_streaming_fallback",
+      chunkCount: 1,
+      hadUsage: false,
+    },
+  ];
+}
+
+function shouldAttemptNonStreamingFallback(request: ModelRequest, status: number): boolean {
+  if (request.tools?.length || request.toolChoice === "auto") return false;
+  return status === 400 || status === 408 || status >= 500;
+}
+
+function createProviderRequestHeaders(
+  config: ProviderConfig,
+  contract: ProviderRuntimeContract,
+): Record<string, string> {
+  if (contract.endpointProfile === "anthropic_messages") {
+    return {
+      "content-type": "application/json",
+      ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+      "x-api-key": config.apiKey ?? "",
+      "anthropic-version": "2023-06-01",
+      authorization: `Bearer ${config.apiKey ?? ""}`,
+    };
+  }
+  return {
+    "content-type": "application/json",
+    ...LINGHUN_REQUEST_IDENTITY_HEADERS,
+    authorization: `Bearer ${config.apiKey}`,
+  };
+}
+
+function createNonStreamingFallbackBody(
+  request: ModelRequest,
+  config: ProviderConfig,
+  contract: ProviderRuntimeContract,
+): unknown {
+  if (contract.endpointProfile === "responses") {
+    const body = createResponsesProfileRequest(request, config);
+    return { ...body, stream: false };
+  }
+  if (contract.endpointProfile === "anthropic_messages") {
+    const body = createAnthropicMessagesProfileRequest(request, config);
+    return { ...body, stream: false };
+  }
+  const body = createChatProfileRequest(request, config);
+  return { ...body, stream: false, stream_options: undefined };
+}
+
+async function safeReadJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractNonStreamingText(parsed: unknown, endpointProfile: EndpointProfile): string {
+  if (!parsed || typeof parsed !== "object") return "";
+  const obj = parsed as Record<string, unknown>;
+  if (endpointProfile === "responses") {
+    const outputText = obj.output_text;
+    if (typeof outputText === "string") return outputText;
+    const output = obj.output;
+    if (Array.isArray(output)) {
+      return output
+        .flatMap((item) =>
+          item && typeof item === "object" && Array.isArray((item as { content?: unknown }).content)
+            ? ((item as { content: unknown[] }).content)
+            : [],
+        )
+        .map((item) =>
+          item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+            ? (item as { text: string }).text
+            : "",
+        )
+        .join("");
+    }
+  }
+  if (endpointProfile === "anthropic_messages") {
+    const content = obj.content;
+    if (Array.isArray(content)) {
+      return content
+        .map((item) =>
+          item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string"
+            ? (item as { text: string }).text
+            : "",
+        )
+        .join("");
+    }
+  }
+  const choices = obj.choices;
+  if (Array.isArray(choices)) {
+    return choices
+      .map((choice) => {
+        if (!choice || typeof choice !== "object") return "";
+        const message = (choice as { message?: unknown }).message;
+        if (!message || typeof message !== "object") return "";
+        const content = (message as { content?: unknown }).content;
+        return typeof content === "string" ? content : "";
+      })
+      .join("");
+  }
+  return "";
+}
+
 function withStreamIdleTimeout(
   body: ReadableStream<Uint8Array>,
   timeoutMs: number,
   signal: AbortSignal,
+  requestController?: AbortController,
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   return new ReadableStream<Uint8Array>({
@@ -1229,15 +1484,16 @@ function withStreamIdleTimeout(
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          reject(
-            new LinghunError({
-              code: "PROVIDER_STREAM_TIMEOUT",
-              message: `模型请求失败：流式响应超过 ${timeoutMs}ms 没有新数据。`,
-              suggestion:
-                "请稍后重试，或运行 /model doctor 检查 provider/model、网络和网关稳定性。",
-              recoverable: true,
-            }),
-          );
+          const error = new LinghunError({
+            code: "PROVIDER_STREAM_TIMEOUT",
+            message: `模型请求失败：流式响应超过 ${timeoutMs}ms 没有新数据。`,
+            suggestion:
+              "请稍后重试，或运行 /model doctor 检查 provider/model、网络和网关稳定性。",
+            recoverable: true,
+          });
+          void reader.cancel(error).catch(() => undefined);
+          requestController?.abort(error);
+          reject(error);
         }, timeoutMs);
         signal.addEventListener(
           "abort",
@@ -1444,6 +1700,8 @@ function createAnthropicMessagesProfileRequest(
   }
   // D.13G：assistant 已经发起 tool_use 但流尾没有配对 tool_result → 注入合成 is_error
   // tool_result，让 Anthropic 在下一轮可以稳定继续；不静默丢弃 tool_use。
+  // Phase B2.16: normal traffic should already be repaired before this builder;
+  // retain this branch as a defense-only protocol guard for truncated/stale history.
   if (pendingToolUseIds.size > 0) {
     const repairBlocks: AnthropicToolResultBlock[] = [];
     for (const toolUseId of pendingToolUseIds) {
@@ -1490,9 +1748,6 @@ function createAnthropicMessagesProfileRequest(
   if (contract.supportsTools && request.tools && request.tools.length > 0) {
     body.tools = createAnthropicTools(request);
     body.tool_choice = request.toolChoice === "none" ? { type: "none" } : { type: "auto" };
-  } else if (contract.supportsTools && request.toolChoice) {
-    // 没有 tools 但显式声明 tool_choice：不附带 tools 字段时 tool_choice 单独发送会被
-    // Anthropic 拒绝；与 OpenAI 路径一致，此处不输出 tool_choice。
   }
   if (systemSegments.length > 0) {
     // D.13F：promptCacheEnabled=true 时，system 写为 block array，并在最后一个 block 上挂
@@ -1528,8 +1783,7 @@ function createAnthropicTools(request: ModelRequest): AnthropicToolDefinition[] 
   // D.13G：tools 数组按 name 字典序稳定排序，与 OpenAI chat/responses 路径一致；
   // 用于稳定 Anthropic prompt cache 的前缀 hash（cache_control 与 tools 共存时，
   // tools 顺序变化会破坏前缀 hash 命中率）。
-  const tools = request.tools;
-  if (!tools || tools.length === 0) return undefined;
+  const tools = request.tools ?? [];
   return [...tools]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((tool) => ({
@@ -2136,7 +2390,7 @@ function parseAnthropicMessagesEventBlock(
     const inputTokens = merged.input_tokens ?? state.inputTokens ?? 0;
     const outputTokens = merged.output_tokens ?? 0;
     const cacheReadTokens = merged.cache_read_input_tokens ?? state.cacheReadTokens;
-    const cacheWriteTokensRaw = merged.cache_creation_input_tokens ?? state.cacheWriteTokens;
+    const cacheWriteTokens = merged.cache_creation_input_tokens ?? state.cacheWriteTokens;
     // D.13F：cache_creation 拆分到 ephemeral_5m / ephemeral_1h，仅作只读统计透出。
     const ephemeral5m = merged.cache_creation?.ephemeral_5m_input_tokens;
     const ephemeral1h = merged.cache_creation?.ephemeral_1h_input_tokens;
@@ -2148,8 +2402,7 @@ function parseAnthropicMessagesEventBlock(
           outputTokens,
           totalTokens: inputTokens + outputTokens,
           cacheReadTokens,
-          cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
-          cacheWriteTokensRaw: cacheWriteTokensRaw ?? null,
+          cacheWriteTokens,
           cacheCreationEphemeral5mTokens: ephemeral5m,
           cacheCreationEphemeral1hTokens: ephemeral1h,
           rawUsage: merged,
@@ -2311,7 +2564,7 @@ function parseOpenAiStreamLine(
   }
   if (parsed.usage) {
     state.hadUsage = true;
-    const cacheWriteTokensRaw = readCacheWriteTokens(parsed.usage);
+    const cacheWriteTokens = readCacheWriteTokens(parsed.usage) ?? undefined;
     events.push({
       type: "usage",
       usage: {
@@ -2320,8 +2573,7 @@ function parseOpenAiStreamLine(
         totalTokens: parsed.usage.total_tokens ?? 0,
         cacheReadTokens:
           parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
-        cacheWriteTokens: cacheWriteTokensRaw ?? undefined,
-        cacheWriteTokensRaw,
+        cacheWriteTokens,
         rawUsage: parsed.usage,
         endpoint,
       },
@@ -2425,7 +2677,6 @@ function parseResponsesEvent(
           totalTokens: usage.total_tokens ?? 0,
           cacheReadTokens: usage.input_tokens_details?.cached_tokens,
           cacheWriteTokens: undefined,
-          cacheWriteTokensRaw: null,
           rawUsage: usage,
           endpoint,
         },
@@ -2511,10 +2762,16 @@ export class DeepSeekProvider extends OpenAiCompatibleProvider {
       id: config.id ?? "deepseek",
       type: "deepseek",
       displayName: config.displayName ?? "DeepSeek",
-      baseUrl: config.baseUrl ?? "https://api.deepseek.com/v1",
+      baseUrl: config.baseUrl ?? DEFAULT_DEEPSEEK_BASE_URL,
     });
   }
 }
+
+registerClientFactories({
+  chat: ({ request, config }) => createChatProfileRequest(request, config),
+  responses: ({ request, config }) => createResponsesProfileRequest(request, config),
+  anthropicMessages: ({ request, config }) => createAnthropicMessagesProfileRequest(request, config),
+});
 
 export function normalizeProviderError(error: unknown): LinghunError {
   if (error instanceof LinghunError) {

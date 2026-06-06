@@ -10,6 +10,7 @@ import {
   saveMcpServerConfig,
 } from "@linghun/config";
 import type { CacheFreshness } from "@linghun/core";
+import { TOGGLE_DETAILS_KEYBIND } from "@linghun/shared";
 import { diffFreshness } from "./cache-freshness.js";
 import { showCommandPanel } from "./command-panel-runtime.js";
 import {
@@ -50,6 +51,7 @@ import {
   runMcpStdioToolCall,
   runMcpStdioToolList,
 } from "./mcp-stdio-runtime.js";
+import { runMcpSseToolCall } from "./mcp-sse-runtime.js";
 import { redactedPath, runCommandCapture } from "./process-command-runtime.js";
 import { formatMcpTools } from "./remote-mcp-presenter.js";
 import {
@@ -155,7 +157,9 @@ export async function handleMcpCommand(
       title: "/mcp doctor",
       tone: "neutral",
       summary: [
-        isEn ? "MCP doctor — Ctrl+O for full diagnostics." : "MCP 诊断 — Ctrl+O 查看完整诊断。",
+        isEn
+          ? `MCP doctor — ${TOGGLE_DETAILS_KEYBIND} for full diagnostics.`
+          : `MCP 诊断 — ${TOGGLE_DETAILS_KEYBIND} 查看完整诊断。`,
       ],
       detailsText: formatMcpStatus(context),
     });
@@ -167,7 +171,11 @@ export async function handleMcpCommand(
     showCommandPanel(context, output, {
       title: "/mcp validate",
       tone: "neutral",
-      summary: [isEn ? "MCP validate — Ctrl+O for details." : "MCP 校验 — Ctrl+O 查看详情。"],
+      summary: [
+        isEn
+          ? `MCP validate — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `MCP 校验 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
+      ],
       detailsText: validateMcpServers(context, args[1]),
     });
     return;
@@ -286,8 +294,8 @@ export async function handleIndexCommand(
           : "neutral",
       summary: [
         context.language === "en-US"
-          ? "Index search result — Ctrl+O for details."
-          : "索引搜索结果 — Ctrl+O 查看详情。",
+          ? `Index search result — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `索引搜索结果 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: result.summary,
     });
@@ -303,8 +311,8 @@ export async function handleIndexCommand(
       tone: "neutral",
       summary: [
         context.language === "en-US"
-          ? "Index architecture summary — Ctrl+O for details."
-          : "索引架构摘要 — Ctrl+O 查看详情。",
+          ? `Index architecture summary — ${TOGGLE_DETAILS_KEYBIND} for details.`
+          : `索引架构摘要 — ${TOGGLE_DETAILS_KEYBIND} 查看详情。`,
       ],
       detailsText: result.summary,
     });
@@ -730,11 +738,29 @@ export function validateMcpServers(context: TuiContext, id?: string): string {
 
 export async function addMcpServer(args: string[], context: TuiContext): Promise<string> {
   const [source, id, command, ...commandArgs] = args;
+  if (source === "sse" && id && command) {
+    const server: McpServerConfig = {
+      command: "",
+      url: command,
+      transport: "sse",
+      sourceUrl: command,
+      scope: "project",
+      installedAt: new Date().toISOString(),
+      disabled: true,
+      trustLevel: "untrusted",
+      permissionSummary: "tool-discovery",
+    };
+    context.config = await saveMcpServerConfig(id, server, false, context.projectPath);
+    context.mcp = createMcpState(context.config);
+    refreshCacheFreshness(context);
+    return `已添加 MCP SSE server：${id}；默认 untrusted/disabled，未连接远程 endpoint。下一步运行 /mcp validate ${id}；确认信任后再运行 /mcp enable ${id}。`;
+  }
   if (source !== "local" || !id || !command) {
     return [
       "MCP add（Connect Lite）",
       "- usage: /mcp add local <server-id> <command> [args...]",
-      "- 本阶段 MCP 只支持本地 command 注册；Git/GitHub install 只用于 skills/plugins。",
+      "- usage: /mcp add sse <server-id> <url>",
+      "- 本阶段 MCP 支持本地 command 与 SSE endpoint metadata；Git/GitHub install 只用于 skills/plugins。",
       "- add 只写来源/权限记录，不执行 server；运行 /mcp doctor 才做受控 --version 诊断。",
     ].join("\n");
   }
@@ -786,11 +812,29 @@ export async function setMcpServerEnabled(
 export async function updateMcpServer(args: string[], context: TuiContext): Promise<string> {
   const [id, source, command, ...commandArgs] = args;
   const current = id ? context.config.mcp.servers[id] : undefined;
-  if (!id || source !== "local" || !command) {
-    return "用法：/mcp update <server-id> local <command> [args...]；Connect Lite 不执行 server，只更新 metadata。";
+  if (!id || (source !== "local" && source !== "sse") || !command) {
+    return "用法：/mcp update <server-id> local <command> [args...] 或 /mcp update <server-id> sse <url>；Connect Lite 不执行 server，只更新 metadata。";
   }
   if (!current) {
     return `未找到 MCP server：${id}`;
+  }
+  if (source === "sse") {
+    const server: McpServerConfig = {
+      ...current,
+      command: "",
+      args: [],
+      url: command,
+      transport: "sse",
+      sourceUrl: command,
+      installedAt: new Date().toISOString(),
+      disabled: current.disabled ?? !context.config.mcp.enabledServers.includes(id),
+      trustLevel: current.trustLevel ?? (current.disabled ? "disabled" : "untrusted"),
+      permissionSummary: current.permissionSummary ?? "tool-discovery",
+    };
+    context.config = await saveMcpServerConfig(id, server, !server.disabled, context.projectPath);
+    context.mcp = createMcpState(context.config);
+    refreshCacheFreshness(context);
+    return `已更新 MCP SSE server：${id}；只更新 endpoint metadata，未连接远程 server。下一步运行 /mcp validate ${id} 或 /mcp doctor。`;
   }
   const server: McpServerConfig = {
     ...current,
@@ -1317,10 +1361,11 @@ export async function executeExtraTool(
       };
     }
     const serverConfig = context.config.mcp.servers[parsed.server];
-    if (!isLocalStdioMcpServer(serverConfig)) {
+    const isSse = serverConfig?.transport === "sse" && typeof serverConfig.url === "string";
+    if (!isLocalStdioMcpServer(serverConfig) && !isSse) {
       return {
         ok: false,
-        text: `ExecuteExtraTool: MCP server ${parsed.server} 不是本地 stdio（缺少 command 或已禁用），当前没有远程 MCP 传输适配器。`,
+        text: `ExecuteExtraTool: MCP server ${parsed.server} 不是本地 stdio 或 SSE（缺少 command/url 或已禁用）。`,
       };
     }
     if (!context.mcpStdioMutatingGranted && isPotentiallyMutatingMcpTool(parsed.tool)) {
@@ -1329,22 +1374,24 @@ export async function executeExtraTool(
         text: "该 MCP 工具看起来会修改工作区，不能通过通用工具入口直接执行。请改用明确的受控命令或让模型发起对应结构化工具；执行时仍会走 Linghun 权限边界。",
       };
     }
-    const stdio = await runMcpStdioToolCall(
-      serverConfig as McpServerConfig,
-      parsed.tool,
-      params,
-      context.projectPath,
-    );
-    if (!stdio.ok) {
+    const result = isSse
+      ? await runMcpSseToolCall(serverConfig as McpServerConfig, parsed.tool, params)
+      : await runMcpStdioToolCall(
+          serverConfig as McpServerConfig,
+          parsed.tool,
+          params,
+          context.projectPath,
+        );
+    if (!result.ok) {
       return {
         ok: false,
-        text: `ExecuteExtraTool(${target.name}) 失败：${stdio.summary}${stdio.errorCode ? ` [${stdio.errorCode}]` : ""}`,
+        text: `ExecuteExtraTool(${target.name}) 失败：${result.summary}${result.errorCode ? ` [${result.errorCode}]` : ""}`,
       };
     }
     return {
       ok: true,
       text: `ExecuteExtraTool(${target.name}) 完成。`,
-      data: stdio.data,
+      data: result.data,
     };
   }
   return {

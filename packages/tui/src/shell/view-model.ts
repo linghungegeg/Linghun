@@ -1,7 +1,9 @@
 import { basename } from "node:path";
-import type { Language } from "@linghun/shared";
+import { TOGGLE_DETAILS_KEYBIND, type Language } from "@linghun/shared";
 import type { ToolName } from "@linghun/tools";
+import { calculateContextPercentages } from "../context-window-runtime.js";
 import type { TuiContext } from "../index.js";
+import { DEFAULT_KEYBINDINGS } from "../keybinding-runtime.js";
 import { formatElapsedSince } from "../job-runner-presenter.js";
 import { formatPermissionModeLabel } from "../runtime-status-presenter.js";
 import {
@@ -21,7 +23,7 @@ import {
   explainSemantic,
 } from "./models/permission-explanation.js";
 import { type TaskSuggestion, buildTaskSuggestions } from "./models/task-suggestion.js";
-import { charWidth, displayWidth } from "./text-utils.js";
+import { charWidth, displayWidth, truncateMiddle } from "./text-utils.js";
 import type {
   BackgroundTaskSummary,
   CommandPanelView,
@@ -86,10 +88,10 @@ const shellText = {
     backgroundShort: (count: number) => `后台:${count}`,
     latestOutputTitle: "最近输出",
     noVisibleOutput: "没有可见输出。",
-    latestOutputNext: "按 Ctrl+O 查看完整运行时输出（或 /details）。",
-    detailsHint: "Ctrl+O 查看完整内容",
+    latestOutputNext: `按 ${TOGGLE_DETAILS_KEYBIND} 查看完整运行时输出（或 /details）。`,
+    detailsHint: `${TOGGLE_DETAILS_KEYBIND} 查看完整内容`,
     errorTitle: (tool: string) => `${tool} 失败`,
-    errorDetailsHint: "Ctrl+O 查看完整错误",
+    errorDetailsHint: `${TOGGLE_DETAILS_KEYBIND} 查看完整错误`,
     activityError: "请求失败，可重试或用 /model doctor 排查。",
     activityCompleted: "已完成。",
     denied: (tool: string) => `已拒绝 ${tool}，工具未执行。`,
@@ -137,10 +139,10 @@ const shellText = {
     backgroundShort: (count: number) => `BG:${count}`,
     latestOutputTitle: "Latest output",
     noVisibleOutput: "No visible output.",
-    latestOutputNext: "Press Ctrl+O for full runtime output (or /details).",
-    detailsHint: "Ctrl+O for details",
+    latestOutputNext: `Press ${TOGGLE_DETAILS_KEYBIND} for full runtime output (or /details).`,
+    detailsHint: `${TOGGLE_DETAILS_KEYBIND} for details`,
     errorTitle: (tool: string) => `${tool} failed`,
-    errorDetailsHint: "Ctrl+O for full error",
+    errorDetailsHint: `${TOGGLE_DETAILS_KEYBIND} for full error`,
     activityError: "Request failed. Retry or use /model doctor.",
     activityCompleted: "Completed.",
     denied: (tool: string) => `Denied ${tool}; tool was not executed.`,
@@ -386,6 +388,15 @@ export function createShellViewModel(
             indexStatus: context.index.status,
             reasoningLevel: options.reasoningLevel,
             reasoningSent: options.reasoningSent,
+            estimatedCostCny: sumFiniteNumbers(
+              context.roleUsage.map((usage) => usage.estimatedCny),
+            ),
+            contextUsageLabel: context.cache.compactPressure
+              ? calculateContextPercentages(
+                  Math.ceil(context.cache.compactPressure.estimatedChars / 4),
+                  Math.ceil(context.cache.compactPressure.maxChars / 4),
+                ).label
+              : undefined,
           }).view,
           // Phase 6.6: workspaceStatus / runtimeStatus are no longer default
           // in the footer. They surface via /details, /status, /doctor or
@@ -459,6 +470,9 @@ export function createShellViewModel(
     language,
     projectName,
     projectPath: context.projectPath,
+    keybindings:
+      (context as { keybindings?: ShellViewModel["keybindings"] }).keybindings ??
+      DEFAULT_KEYBINDINGS,
     width,
     height,
     mode: "ink",
@@ -552,6 +566,12 @@ export function createShellViewModel(
       return live.length > 0 ? [...live] : undefined;
     })(),
   };
+}
+
+function sumFiniteNumbers(values: number[]): number | undefined {
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (finite.length === 0) return undefined;
+  return finite.reduce((total, value) => total + value, 0);
 }
 
 function selectStreamingAssistantText(
@@ -1836,41 +1856,4 @@ function redactSensitiveText(value: string): string {
     .replace(/(api[_-]?key\s*[=:]\s*)\S+/giu, "$1[masked-key]")
     .replace(/(authorization\s*:\s*bearer\s+)\S+/giu, "$1[masked-key]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/giu, "Bearer [masked-key]");
-}
-
-function truncateMiddle(value: string, max: number): string {
-  const normalized = String(value || "unknown")
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (displayWidth(normalized) <= max) return normalized;
-  if (max <= 1) return "…";
-  const head = Math.max(1, Math.floor((max - 1) / 2));
-  const tail = Math.max(1, max - head - 1);
-  return `${sliceDisplay(normalized, head)}…${sliceDisplayEnd(normalized, tail)}`;
-}
-
-function sliceDisplay(value: string, max: number): string {
-  let width = 0;
-  let result = "";
-  for (const char of value) {
-    const next = width + charWidth(char);
-    if (next > max) break;
-    result += char;
-    width = next;
-  }
-  return result;
-}
-
-function sliceDisplayEnd(value: string, max: number): string {
-  const chars = Array.from(value);
-  let width = 0;
-  let result = "";
-  for (let index = chars.length - 1; index >= 0; index -= 1) {
-    const char = chars[index] ?? "";
-    const next = width + charWidth(char);
-    if (next > max) break;
-    result = `${char}${result}`;
-    width = next;
-  }
-  return result;
 }

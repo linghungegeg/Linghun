@@ -46,8 +46,8 @@ function readBreakCacheMarkerSync(context: TuiContext): BreakCacheMarker {
       const nonce = readFileSync(oncePath, "utf8").trim();
       return { mode: "once", nonce: nonce || undefined };
     }
-  } catch {
-    // 静默降级到 off；marker 不可读不应阻断主流程。
+  } catch (error) {
+    logBreakCacheWarning(context, `read_marker_failed reason=${formatDiagnosticError(error)}`);
   }
   return { mode: "off" };
 }
@@ -66,12 +66,15 @@ function readRecentBreakCacheEventsSync(context: TuiContext, limit: number): Bre
         if (typeof parsed.action === "string" && typeof parsed.createdAt === "string") {
           events.push({ action: parsed.action, createdAt: parsed.createdAt });
         }
-      } catch {
-        // 跳过损坏行，不抛
+      } catch (error) {
+        logBreakCacheWarning(context, `read_events_parse_failed reason=${formatDiagnosticError(error)}`);
       }
     }
     return events;
-  } catch {
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      logBreakCacheWarning(context, `read_events_failed reason=${formatDiagnosticError(error)}`);
+    }
     return [];
   }
 }
@@ -86,8 +89,8 @@ export async function appendBreakCacheEvent(context: TuiContext, action: string)
     await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
     breakCacheEventLineCounts.set(path, currentCount + 1);
     await truncateBreakCacheEventsIfNeeded(path);
-  } catch {
-    // ignore
+  } catch (error) {
+    await appendRuntimeWarning(context, `break_cache_event_write_failed reason=${formatDiagnosticError(error)}`);
   }
 }
 
@@ -96,7 +99,14 @@ async function getBreakCacheEventLineCount(path: string): Promise<number> {
   if (typeof cached === "number") {
     return cached;
   }
-  const raw = await readFile(path, "utf8").catch(() => "");
+  const raw = await readFile(path, "utf8").catch((error) => {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      process.stderr.write(
+        `[linghun] break_cache_event_count_read_failed path=${path} reason=${formatDiagnosticError(error)}\n`,
+      );
+    }
+    return "";
+  });
   const count = raw.split(/\r?\n/).filter((line) => line.length > 0).length;
   breakCacheEventLineCounts.set(path, count);
   return count;
@@ -107,7 +117,12 @@ async function truncateBreakCacheEventsIfNeeded(path: string): Promise<void> {
   if (currentCount < BREAK_CACHE_EVENTS_MAX_LINES + BREAK_CACHE_EVENTS_TRIM_BATCH) {
     return;
   }
-  const raw = await readFile(path, "utf8").catch(() => "");
+  const raw = await readFile(path, "utf8").catch((error) => {
+    process.stderr.write(
+      `[linghun] break_cache_event_truncate_read_failed path=${path} reason=${formatDiagnosticError(error)}\n`,
+    );
+    return "";
+  });
   const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
   if (lines.length <= BREAK_CACHE_EVENTS_MAX_LINES) {
     breakCacheEventLineCounts.set(path, lines.length);
@@ -140,8 +155,11 @@ export async function clearBreakCacheMarker(
       if (existsSync(target)) {
         await rm(target, { force: true });
       }
-    } catch {
-      // ignore；下次状态读取仍能反映真实文件状态
+    } catch (error) {
+      await appendRuntimeWarning(
+        context,
+        `break_cache_marker_clear_failed path=${target} reason=${formatDiagnosticError(error)}`,
+      );
     }
   }
 }
@@ -222,12 +240,48 @@ async function consumeBreakCacheNonceForRequest(context: TuiContext): Promise<st
   if (marker.mode === "once") {
     try {
       await rm(getBreakCacheOncePath(context), { force: true });
-    } catch {
-      // ignore
+    } catch (error) {
+      await appendRuntimeWarning(
+        context,
+        `break_cache_once_consume_failed reason=${formatDiagnosticError(error)}`,
+      );
     }
     await appendBreakCacheEvent(context, "once_consumed");
   }
   return nonce;
+}
+
+function logBreakCacheWarning(context: TuiContext, message: string): void {
+  process.stderr.write(`[linghun] break_cache_warning project=${context.projectPath} ${message}\n`);
+}
+
+async function appendRuntimeWarning(context: TuiContext, message: string): Promise<void> {
+  if (!context.sessionId) {
+    logBreakCacheWarning(context, message);
+    return;
+  }
+  try {
+    await context.store.appendEvent(context.sessionId, {
+      type: "system_event",
+      id: randomUUID(),
+      level: "warning",
+      message,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    logBreakCacheWarning(
+      context,
+      `${message}; warning_write_failed=${formatDiagnosticError(error)}`,
+    );
+  }
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function formatDiagnosticError(error: unknown): string {
+  return error instanceof Error ? error.message.replace(/\s+/g, " ").trim() : String(error);
 }
 
 // D.13F：把 promptCache 配置 + 当轮 nonce 折叠成 ModelRequest 片段。

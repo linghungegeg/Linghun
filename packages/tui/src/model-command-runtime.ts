@@ -11,6 +11,7 @@ import {
   saveProviderEnvSetup,
 } from "@linghun/config";
 import { showCommandPanel } from "./command-panel-runtime.js";
+import { getContextWindowForModel } from "./context-window-runtime.js";
 import {
   snapshotDeferredToolsSummary,
   snapshotDiscoveredDeferredToolsSummary,
@@ -132,6 +133,9 @@ export async function handleModelCommand(
   // detailsText（Ctrl+O 展开）里看到运行时决策。
   const isEn = context.language === "en-US";
   const reasoningSegment = `reasoning ${runtime.reasoningStatus}`;
+  const contextWindow = getContextWindowForModel(runtime.model, {
+    maxInputTokens: getRoleRoute(context.config, runtime.role).maxInputTokens,
+  });
   const summary: string[] = [
     isEn
       ? `Model · ${runtime.provider}/${runtime.model}`
@@ -139,6 +143,9 @@ export async function handleModelCommand(
     isEn
       ? `Role: ${runtime.role} · ${reasoningSegment}`
       : `角色：${runtime.role} · ${reasoningSegment}`,
+    isEn
+      ? `Context window: ${formatModelWindow(contextWindow)}`
+      : `上下文窗口：${formatModelWindow(contextWindow)}`,
   ];
   if (context.config.defaultModel && context.config.defaultModel !== runtime.model) {
     summary.push(
@@ -152,11 +159,15 @@ export async function handleModelCommand(
     tone: "neutral",
     summary,
     actions: ["/model doctor", "/model route", "/model setup"],
-    detailsText: `${deps().currentModelText(context)}：role ${runtime.role} provider ${runtime.provider} model ${runtime.model} ${reasoningSegment}\n\n${formatModelRouteSummary(context.config)}`,
+    detailsText: `${deps().currentModelText(context)}：role ${runtime.role} provider ${runtime.provider} model ${runtime.model} ${reasoningSegment}; contextWindow ${contextWindow}\n\nAliases: deepseek-v4-flash -> deepseek-chat; deepseek-v4-pro -> deepseek-reasoner\n\n${formatModelRouteSummary(context.config)}`,
   });
   // Task-mode denoise: previously this called writeStatus(output, context),
   // which emits the full `[Linghun] 会话 …` line and is the dominant noise
   // source above the composer.
+}
+
+function formatModelWindow(tokens: number): string {
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k tokens` : `${tokens} tokens`;
 }
 
 export async function startModelSetup(
