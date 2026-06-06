@@ -121,6 +121,43 @@ describe("Meta scheduler runtime", () => {
     expect(decision.policyDecision.hints.map((hint) => hint.id)).toContain("permission-risk");
   });
 
+  it("routes explicit external app capability mentions without stealing workflow or agent routes", () => {
+    const capability = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "连接外部画图 app 创建一个画布",
+    });
+    expect(capability.policyDecision.taskKind).toBe("capability");
+    expect(capability.policyDecision.capabilitySignal).toMatchObject({
+      active: true,
+      reason: "external_app",
+      permission: "external_app",
+      riskLevel: "medium",
+    });
+    expect(capability.policyDecision.capabilitySignal.candidateIds).toContain("mock.canvas.create");
+    expect(capability.policyDecision.executionPlan.preferAgent).toBe(false);
+    expect(capability.policyDecision.executionPlan.preferWorkflow).toBe(false);
+
+    const agent = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "多开 agent 继续工作，不要走外部 app capability",
+    });
+    expect(agent.policyDecision.taskKind).toBe("agent");
+    expect(agent.policyDecision.capabilitySignal.active).toBe(false);
+  });
+
+  it("keeps strategic exploration in chat even when capability is mentioned", () => {
+    const decision = evaluateMetaScheduler({
+      ...baseInput(),
+      userText: "先讨论 capability runtime 和 app bridge 的架构取舍，不要实现",
+    });
+
+    expect(decision.policyDecision.taskKind).toBe("chat");
+    expect(decision.policyDecision.capabilitySignal.active).toBe(true);
+    expect(decision.policyDecision.executionPlan.preferAgent).toBe(false);
+    expect(decision.policyDecision.executionPlan.preferWorkflow).toBe(false);
+    expect(decision.policyDecision.permissionPlan.expectedMutating).toBe(false);
+  });
+
   it("UserState: frustrated input triggers source-first strengthened verification and quiet notification", () => {
     const decision = evaluateMetaScheduler({
       ...baseInput(),

@@ -101,6 +101,7 @@ import {
   writeBreakCacheMarker,
 } from "./break-cache-runtime.js";
 import { classifyBtwIntent, runBtwSideQuestion } from "./btw-runtime.js";
+import { handleCapabilitiesCommand } from "./capability-runtime.js";
 // D.14A-2 — break-cache runtime moved to ./break-cache-runtime.ts.
 // Re-export the test hooks to preserve model-doctor-runtime.test.ts imports from "./index.js".
 export { type BreakCacheTestHooks, breakCacheTestHooks } from "./break-cache-runtime.js";
@@ -2317,6 +2318,10 @@ export async function handleSlashCommand(
   }
   if (command === "/features") {
     writeLine(output, formatFeaturePolicy(context));
+    return "handled";
+  }
+  if (command === "/capabilities") {
+    await handleCapabilitiesCommand(rest, context, output);
     return "handled";
   }
   if (command === "/model") {

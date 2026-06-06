@@ -134,6 +134,7 @@ export type SlashCommandRegistryEntry = {
 export const SLASH_COMMAND_REGISTRY: SlashCommandRegistryEntry[] = [
   { slash: "/help", capabilityId: "help", userVisible: true },
   { slash: "/features", capabilityId: "features", userVisible: true },
+  { slash: "/capabilities", capabilityId: "capabilities", userVisible: true },
   { slash: "/language", capabilityId: "language", userVisible: true },
   { slash: "/model", capabilityId: "model", userVisible: true },
   { slash: "/vision", capabilityId: "vision", userVisible: true },
@@ -228,6 +229,19 @@ const COMMAND_CAPABILITY_DATA: CommandCapability[] = [
     "核对默认功能开关、自动执行边界和权限风险。",
     "Use to audit default feature switches, auto-run boundaries, and permission risk.",
     "readonly",
+  ),
+  cap(
+    "capabilities",
+    "/capabilities",
+    ["capabilities", "capability", "app bridge", "外部能力", "应用桥"],
+    "外部能力",
+    "Capabilities",
+    "查看 Capability Runtime 的可用能力、连接状态和 mock 执行入口。",
+    "Shows Capability Runtime entries, connection status, and mock execution entry.",
+    "需要查看外部 app/plugin/MCP 能力桥接、doctor 或 mock capability 时使用。",
+    "Use for external app/plugin/MCP capability bridge discovery, doctor, or mock capability checks.",
+    "readonly",
+    { group: "diagnostics" },
   ),
   cap(
     "language",
@@ -2150,9 +2164,7 @@ function createNaturalEquivalentCommand(capability: CommandCapability, normalize
   }
   if (capability.id === "agents") {
     if (
-      /停止所有|全部停止|停掉所有|取消所有|全部取消|stop all|cancel all|kill all/u.test(
-        normalized,
-      )
+      /停止所有|全部停止|停掉所有|取消所有|全部取消|stop all|cancel all|kill all/u.test(normalized)
     ) {
       return "/agents cancel all";
     }

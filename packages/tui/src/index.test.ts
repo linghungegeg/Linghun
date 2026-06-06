@@ -1625,12 +1625,44 @@ describe("Phase 06 TUI slash commands", () => {
     expect(validateCommandCapabilityCoverage([...USER_VISIBLE_DISPATCH_SLASH_COMMANDS])).toEqual(
       [],
     );
+    expect(USER_VISIBLE_DISPATCH_SLASH_COMMANDS).toContain("/capabilities");
     expect(
       validateCommandCapabilityCoverage([
         ...USER_VISIBLE_DISPATCH_SLASH_COMMANDS,
         "/missing-command",
       ]),
     ).toContain("dispatch missing registry /missing-command");
+  });
+
+  it("Capability Runtime slash list/doctor/run stay local and summary-first", async () => {
+    const project = await mkdtemp(join(tmpdir(), "linghun-capabilities-slash-"));
+    const store = new SessionStore({ sessionRootDir: getSessionRootDir(), projectPath: project });
+    const session = await store.create({ model: "deepseek-v4-flash" });
+    const context = await createTestContext(project, store, session);
+    context.isInkSession = true;
+    const output = new MemoryOutput();
+
+    await handleSlashCommand("/capabilities list", context, output);
+    expect(context.commandPanelState?.summary?.join("\n")).toContain("Mock Echo Read");
+    await handleSlashCommand("/capabilities doctor", context, output);
+    expect(context.commandPanelState?.summary?.join("\n")).toContain("Capability doctor");
+    await handleSlashCommand(
+      '/capabilities run mock.echo.read {"text":"hello capability"}',
+      context,
+      output,
+    );
+
+    expect(context.commandPanelState?.summary?.join("\n")).toContain(
+      "Echo ready: hello capability",
+    );
+    expect(context.commandPanelState?.summary?.join("\n")).toContain(
+      "Capability completed 不等于验证通过。",
+    );
+    expect(output.text).not.toContain("rawPayload");
+    expect(output.text).not.toContain("CapabilityExecutionRequest");
+    expect(
+      context.evidence.some((item) => item.supportsClaims.includes("capability_execution")),
+    ).toBe(true);
   });
 
   it("shows a non-misleading TUI title on startup", async () => {

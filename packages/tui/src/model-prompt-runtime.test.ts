@@ -97,6 +97,25 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
     expect(result).toContain("结论：先看源码事实。");
   });
 
+  it("strips Phase 7.14 capability internals and raw payload echoes", () => {
+    const text = [
+      'CapabilityExecutionRequest={"capabilityId":"mock.canvas.export","rawPayload":"secret-sentinel"}',
+      'capabilityPlan: {"candidateIds":["mock.canvas.export"]}',
+      'CapabilityExecutionResult={"rawPayload":"secret-sentinel","artifactRef":"x"}',
+      "raw capability payload: secret-sentinel",
+      "结论：已生成 capability 摘要。",
+    ].join("\n");
+    const result = sanitizeMainScreenLeakage(text, "zh-CN");
+
+    expect(result).not.toContain("CapabilityExecutionRequest");
+    expect(result).not.toContain("CapabilityExecutionResult");
+    expect(result).not.toContain("capabilityPlan");
+    expect(result).not.toContain("rawPayload");
+    expect(result).not.toContain("secret-sentinel");
+    expect(result).toContain("内部运行时上下文已从主屏省略");
+    expect(result).toContain("结论：已生成 capability 摘要。");
+  });
+
   it("does not strip ordinary confidence prose without an internal assignment", () => {
     const text = "我对这个判断的 confidence 还不高，需要先看代码。";
     expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);
@@ -104,6 +123,11 @@ describe("D.14D sanitizeMainScreenLeakage", () => {
 
   it("does not falsely strip ordinary prose that merely mentions the word model or memory", () => {
     const text = "你的 model 配置看起来正常，memory 也没问题。";
+    expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);
+  });
+
+  it("does not strip ordinary capability prose", () => {
+    const text = "这个 capability 只是一个外部能力桥接说明。";
     expect(sanitizeMainScreenLeakage(text, "zh-CN")).toBe(text);
   });
 });

@@ -141,8 +141,16 @@ export type MetaSchedulerInput = {
   nowMs?: number;
 };
 
+export type CapabilityPlan = {
+  route: "none" | "capability";
+  reason: "none" | "external_app" | "explicit_capability";
+  candidateIds: string[];
+  permission: "read" | "write" | "bash" | "network" | "external_app";
+  riskLevel: "low" | "medium" | "high";
+};
+
 export type PolicyDecision = {
-  taskKind: "chat" | "code_fact" | "edit" | "workflow" | "agent" | "verification";
+  taskKind: "chat" | "code_fact" | "edit" | "workflow" | "agent" | "verification" | "capability";
   riskLevel: "low" | "medium" | "high";
   permissionSignal: {
     permissionMode: PermissionMode;
@@ -206,6 +214,14 @@ export type PolicyDecision = {
     usageNearLimit: boolean;
     toolResultBudgetPressure: boolean;
   };
+  capabilitySignal: {
+    active: boolean;
+    reason: CapabilityPlan["reason"];
+    candidateIds: string[];
+    permission: CapabilityPlan["permission"];
+    riskLevel: CapabilityPlan["riskLevel"];
+  };
+  capabilityPlan: CapabilityPlan;
   userState: UserStateDecision;
   contextPlan: {
     includeMemory: boolean;
@@ -262,10 +278,14 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     input.triggerChars,
   );
   const indexStrategy = classifyIndexStrategy(input.index);
-  const taskKind = adjustTaskKindForUserState(classifyTaskKind(input.userText), userStateDecision);
+  const capabilityPlan = createCapabilityPlan(input.userText);
+  const taskKind = adjustTaskKindForUserState(
+    classifyTaskKind(input.userText, capabilityPlan),
+    userStateDecision,
+  );
   const expectedMutating =
     userStateDecision.interactionPlan.allowImplementationPush &&
-    expectsMutatingAction(input.userText, taskKind);
+    expectsMutatingAction(input.userText, taskKind, capabilityPlan);
   const verificationDomain = classifyVerificationDomain(input.userText, taskKind, expectedMutating);
   const evidenceFreshness = classifyVerificationEvidenceFreshness(input.evidence, input.nowMs);
   const runtimeSignal = summarizeRuntimeSignal(input, evidenceFreshness);
@@ -369,6 +389,7 @@ export function evaluateMetaScheduler(input: MetaSchedulerInput): MetaSchedulerD
     providerFailure,
     surfaceWindowsSafeHint,
     userState: userStateDecision,
+    capabilityPlan,
     permissionSignal: {
       permissionMode: input.permissionMode ?? "default",
       recentDenied: recentDeniedCount > 0,
@@ -456,8 +477,8 @@ export function formatMetaSchedulerDirective(decision: MetaSchedulerDecision): s
   return [
     "MetaSchedulerForModel:",
     ...decision.directives.map((item) => `- ${item}`),
-    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}.`,
-    "- Keep RuntimeStatusForModel, UserStateDecision, interactionPlan, verificationPlan, notificationPlan, confidence, gateId, raw evidence, raw tool_result, and internal scheduler labels out of the user-visible final answer.",
+    `- Typed policy route: task ${decision.policyDecision.taskKind}; risk ${decision.policyDecision.riskLevel}; provider ${decision.policyDecision.providerPlan}; source-first ${decision.policyDecision.executionPlan.preferSourceFirst ? "yes" : "no"}; verification ${decision.policyDecision.executionPlan.requireVerification ? "required" : "normal"}; explicit-gate ${decision.policyDecision.permissionPlan.requireExplicitGate ? "required" : "normal"}; user-state ${decision.policyDecision.userState.kind}; capability ${decision.policyDecision.capabilitySignal.active ? "candidate" : "none"}.`,
+    "- Keep RuntimeStatusForModel, UserStateDecision, capabilitySignal, capabilityPlan, CapabilityExecutionRequest, CapabilityExecutionResult, raw capability payload, interactionPlan, verificationPlan, notificationPlan, confidence, gateId, raw evidence, raw tool_result, and internal scheduler labels out of the user-visible final answer.",
   ].join("\n");
 }
 
@@ -495,6 +516,9 @@ export function formatPolicyDecisionSummary(decision: PolicyDecision, language: 
   }
   if (decision.executionPlan.preferAgent) {
     parts.push(language === "en-US" ? "agent route" : "agent 路线");
+  }
+  if (decision.capabilitySignal.active) {
+    parts.push(language === "en-US" ? "capability route" : "capability 路线");
   }
   if (decision.platformSignal.windowsSafeHint) {
     parts.push(language === "en-US" ? "Windows-safe shell" : "Windows 兼容命令");
@@ -700,7 +724,10 @@ function adjustTaskKindForUserState(
   return taskKind;
 }
 
-function classifyTaskKind(userText: string): PolicyDecision["taskKind"] {
+function classifyTaskKind(
+  userText: string,
+  capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
+): PolicyDecision["taskKind"] {
   if (
     /(?:验证|复检|测试|typecheck|lint|build|test|verify|verification|claim-check)/iu.test(userText)
   ) {
@@ -711,6 +738,9 @@ function classifyTaskKind(userText: string): PolicyDecision["taskKind"] {
   }
   if (/(?:工作流|\bworkflow\b|\bjob\b|流水线)/iu.test(userText)) {
     return "workflow";
+  }
+  if (capabilityPlan.route === "capability") {
+    return "capability";
   }
   if (
     /(?:实现|修复|修改|更新|新增|删除|写入|创建|改动|edit|write|modify|update|fix|implement|create|delete)/iu.test(
@@ -729,13 +759,58 @@ function classifyTaskKind(userText: string): PolicyDecision["taskKind"] {
   return "chat";
 }
 
-function expectsMutatingAction(userText: string, taskKind: PolicyDecision["taskKind"]): boolean {
+function expectsMutatingAction(
+  userText: string,
+  taskKind: PolicyDecision["taskKind"],
+  capabilityPlan: CapabilityPlan = createEmptyCapabilityPlan(),
+): boolean {
   return (
     taskKind === "edit" ||
+    (taskKind === "capability" && capabilityPlan.permission !== "read") ||
     /(?:写入|修改|更新|新增|删除|创建|实现|修复|提交|commit|write|edit|modify|update|delete|create|implement|fix)/iu.test(
       userText,
     )
   );
+}
+
+function createCapabilityPlan(userText: string): CapabilityPlan {
+  const text = userText.trim();
+  if (!text) return createEmptyCapabilityPlan();
+  const mentionsWorkflowAgentOrJob =
+    /(?:智能体|子智能体|\bagent\b|\bfork\b|multi-agent|多开|工作流|\bworkflow\b|\bjob\b|流水线|后台|background|scheduler|调度)/iu.test(
+      text,
+    );
+  if (mentionsWorkflowAgentOrJob) return createEmptyCapabilityPlan();
+  const explicitCapability =
+    /(?:\bcapabilit(?:y|ies)\b|能力运行时|外部能力|app bridge|应用桥|插件能力|plugin capability)/iu.test(
+      text,
+    );
+  const externalApp =
+    /(?:外部软件|外部应用|连接应用|连接软件|第三方软件|第三方应用|desktop bridge|本地应用|画布|画图|表格|spreadsheet|canvas|external app|connect app|plugin|插件|mcp|http connector|websocket)/iu.test(
+      text,
+    );
+  if (!explicitCapability && !externalApp) return createEmptyCapabilityPlan();
+  const readOnly = /(?:列表|查看|读取|查询|list|doctor|status|read|inspect|show)/iu.test(text);
+  const artifact =
+    /(?:导出|export|artifact|文件|保存|save|生成|create|创建|画图|画布|canvas)/iu.test(text);
+  const permission = readOnly && !artifact ? "read" : externalApp ? "external_app" : "write";
+  return {
+    route: "capability",
+    reason: explicitCapability ? "explicit_capability" : "external_app",
+    candidateIds: externalApp ? ["mock.canvas.create", "mock.canvas.export"] : ["mock.echo.read"],
+    permission,
+    riskLevel: permission === "read" ? "low" : "medium",
+  };
+}
+
+function createEmptyCapabilityPlan(): CapabilityPlan {
+  return {
+    route: "none",
+    reason: "none",
+    candidateIds: [],
+    permission: "read",
+    riskLevel: "low",
+  };
 }
 
 function classifyVerificationDomain(
@@ -743,6 +818,9 @@ function classifyVerificationDomain(
   taskKind: PolicyDecision["taskKind"],
   expectedMutating: boolean,
 ): VerificationRouteDomain {
+  if (taskKind === "capability") {
+    return "agent_job_workflow";
+  }
   if (
     /(?:provider|model|模型|供应商|baseUrl|api[_-]?key|\bkey\b|env|环境变量|config|配置|doctor|route|路由)/iu.test(
       userText,
@@ -810,6 +888,7 @@ function shouldPreferSourceFirst(
   indexStrategy: MetaSchedulerDecision["indexStrategy"],
 ): boolean {
   if (taskKind === "code_fact" || taskKind === "edit" || taskKind === "verification") return true;
+  if (taskKind === "capability") return false;
   return indexStrategy !== "ready" && taskKind !== "chat";
 }
 
@@ -1162,6 +1241,7 @@ function createPolicyDecision(input: {
   architectureSignal: PolicyDecision["architectureSignal"];
   platformSignal: PolicyDecision["platformSignal"];
   budgetSignal: PolicyDecision["budgetSignal"];
+  capabilityPlan: CapabilityPlan;
   runtimeSignal: PolicyDecision["runtimeSignal"];
 }): PolicyDecision {
   const hints: PolicyHint[] = [];
@@ -1301,6 +1381,17 @@ function createPolicyDecision(input: {
       },
     });
   }
+  if (input.capabilityPlan.route === "capability") {
+    hints.push({
+      id: "capability-route",
+      severity: input.capabilityPlan.riskLevel === "high" ? "warning" : "info",
+      text: {
+        "zh-CN": "策略：识别为 capability 候选；执行仍走显式命令和权限边界。",
+        "en-US":
+          "Strategy: capability candidate detected; execution still uses explicit commands and permission gates.",
+      },
+    });
+  }
   if (input.providerPlan === "fallbackCandidate") {
     hints.push({
       id: "provider-fallback",
@@ -1352,6 +1443,14 @@ function createPolicyDecision(input: {
     architectureSignal: input.architectureSignal,
     platformSignal: input.platformSignal,
     budgetSignal: input.budgetSignal,
+    capabilitySignal: {
+      active: input.capabilityPlan.route === "capability",
+      reason: input.capabilityPlan.reason,
+      candidateIds: input.capabilityPlan.candidateIds,
+      permission: input.capabilityPlan.permission,
+      riskLevel: input.capabilityPlan.riskLevel,
+    },
+    capabilityPlan: input.capabilityPlan,
     runtimeSignal: input.runtimeSignal,
     userState: input.userState,
     contextPlan: {
